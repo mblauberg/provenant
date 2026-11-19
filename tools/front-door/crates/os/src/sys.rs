@@ -71,6 +71,27 @@ pub fn git_config_file(git: &Path, file: &Path, cwd: &Path) -> io::Result<Vec<Gi
     Ok(parse_git_config_list(&output.stdout))
 }
 
+/// The system configuration file Git reads, as `git var GIT_CONFIG_SYSTEM`
+/// reports it without any host override; `None` when Git names none. The
+/// caller applies the host's `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_NOSYSTEM`.
+#[allow(clippy::disallowed_methods)]
+pub fn git_system_config_path(git: &Path) -> io::Result<Option<PathBuf>> {
+    let output = std::process::Command::new(git)
+        .args(["var", "GIT_CONFIG_SYSTEM"])
+        .env_remove("GIT_CONFIG_SYSTEM")
+        .env_remove("GIT_CONFIG_NOSYSTEM")
+        .stdin(std::process::Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "git var GIT_CONFIG_SYSTEM exited with {}",
+            output.status
+        )));
+    }
+    let path = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+    Ok((!path.is_empty()).then(|| PathBuf::from(OsStr::from_bytes(path))))
+}
+
 /// Parse `git config --list -z`: each entry is the key, then a newline and
 /// the value when it has one, terminated by NUL.
 fn parse_git_config_list(bytes: &[u8]) -> Vec<GitConfigEntry> {

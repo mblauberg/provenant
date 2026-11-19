@@ -1,9 +1,11 @@
-//! The lane's view of the host's global Git configuration. A sandboxed lane
-//! sees host entries only through an allowlist: identity, aliases and
-//! presentation settings. Credentials reach a lane only through its granted
-//! token helper (ADR 0035), so every other key, including any that can carry
-//! a token (`credential.*`, `http.*`, `core.askPass`, `core.sshCommand`) or
-//! name another file (`include`, `includeIf`), is withheld.
+//! The lane's view of the host's system and global Git configuration. A
+//! sandboxed lane sees host entries only through an allowlist: identity,
+//! aliases, presentation settings and the Git LFS filter. Credentials reach a
+//! lane only through its granted token helper (ADR 0035), so every other key,
+//! including any that can carry a token (`credential.*`, `http.*`,
+//! `core.askPass`, `core.sshCommand`) or name another file (`include`,
+//! `includeIf`), is withheld, and so is an allowlisted value that carries a
+//! credential.
 use provenant_os::sys::GitConfigEntry;
 
 /// The setting that lets a person pass further keys deliberately.
@@ -11,8 +13,9 @@ pub const ALLOW_KEY: &str = "domains.lanes.git_config_allow";
 /// Upper bound on configured extra allowlist entries.
 pub const MAX_ALLOW: usize = 64;
 
-/// Keys every sandboxed lane receives from the host. A trailing `.*` matches
-/// any key below that prefix. Matching ignores ASCII case.
+/// Keys every sandboxed lane receives from the host when their value carries
+/// no credential. A trailing `.*` matches any key below that prefix.
+/// Matching ignores ASCII case.
 pub const DEFAULT_ALLOW: &[&str] = &[
     "user.name",
     "user.email",
@@ -50,6 +53,10 @@ pub const DEFAULT_ALLOW: &[&str] = &[
     "diff.submodule",
     "diff.suppressblankempty",
     "diff.wordregex",
+    "filter.lfs.clean",
+    "filter.lfs.process",
+    "filter.lfs.required",
+    "filter.lfs.smudge",
     "merge.conflictstyle",
     "merge.stat",
 ];
@@ -88,11 +95,24 @@ fn matches(pattern: &str, key: &str) -> bool {
     }
 }
 
-/// Whether a URL or URL prefix names a user, and so may carry a password or
-/// token. scp-like `user@host:path` counts as userinfo too.
-fn has_userinfo(url: &str) -> bool {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    rest.split('/').next().unwrap_or_default().contains('@')
+/// Whether text carries a credential by the redactor's shape rules: a known
+/// token shape, URL userinfo with a password component, or a credential
+/// assignment. A bare user (`git@host:`, `ssh://git@host/`) is not one. A
+/// scan that cannot decide counts as a credential.
+fn carries_secret(text: &str) -> bool {
+    !matches!(
+        provenant_redact::known_shape_rule(text.as_bytes()),
+        Ok(None)
+    )
+}
+
+/// Git's reading of a boolean: an implicit value is true.
+pub(crate) fn git_true(value: Option<&str>) -> bool {
+    value.is_none_or(|value| {
+        let value = value.trim().to_ascii_lowercase();
+        matches!(value.as_str(), "true" | "yes" | "on")
+            || value.parse::<i64>().is_ok_and(|number| number != 0)
+    })
 }
 
 /// The key split into section, optional subsection and variable.
@@ -130,19 +150,23 @@ fn admitted(key: &str, value: Option<&str>, extra: &[String]) -> bool {
     if never_passes(&lower) {
         return false;
     }
-    if extra.iter().any(|pattern| matches(pattern, key))
-        || DEFAULT_ALLOW.iter().any(|pattern| matches(pattern, key))
-    {
+    // The person's own grant passes verbatim.
+    if extra.iter().any(|pattern| matches(pattern, key)) {
         return true;
     }
-    // A rewrite passes only when neither its target nor the prefix it
-    // replaces names a user.
+    let clean = value.is_none_or(|value| !carries_secret(value));
+    if DEFAULT_ALLOW.iter().any(|pattern| matches(pattern, key)) {
+        return clean;
+    }
+    // A rewrite passes when neither its target nor the prefix it replaces
+    // carries a credential; a bare user such as `git@` is not one.
     match split(key) {
         Some((section, Some(base), variable)) => {
             section == "url"
                 && variable == "insteadof"
-                && !has_userinfo(base)
-                && value.is_some_and(|value| !has_userinfo(value))
+                && !carries_secret(base)
+                && value.is_some()
+                && clean
         }
         _ => false,
     }
@@ -171,11 +195,31 @@ fn quote_subsection(subsection: &str) -> String {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct InvalidIdentity;
 
-/// The rendered allowlisted entries and the names of every withheld key.
+/// The rendered allowlisted entries, the names of every withheld key, and
+/// the withheld filter drivers the host marks required.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct LaneView {
     pub(crate) text: String,
     pub(crate) dropped: Vec<String>,
+    /// Without its driver Git applies no filter at all, so content the host
+    /// would transform (Git LFS, encryption) is committed raw.
+    pub(crate) required_filters: Vec<String>,
+}
+
+/// The name a warning shows for a withheld required filter driver: the
+/// driver itself when it is a plain name carrying no credential.
+fn required_filter_name(driver: &str) -> String {
+    let plain = !driver.is_empty()
+        && driver.len() <= 64
+        && driver
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        && !carries_secret(driver);
+    if plain {
+        format!("filter.{driver}.required")
+    } else {
+        "filter.*.required".to_owned()
+    }
 }
 
 /// Render host entries, in their order, through the allowlist and the
@@ -209,6 +253,14 @@ pub(crate) fn lane_view(
             }
         };
         if !admitted(key, value, extra) {
+            if let Some(("filter", Some(driver), "required")) = split(key)
+                && git_true(value)
+            {
+                let name = required_filter_name(driver);
+                if !view.required_filters.contains(&name) {
+                    view.required_filters.push(name);
+                }
+            }
             withhold(&entry.key, &mut view);
             continue;
         }
@@ -273,13 +325,28 @@ mod tests {
             entry("user.email", Some("host@example.com")),
             entry("alias.st", Some("status --short")),
             entry("alias.lg", Some("!git log --graph")),
+            entry(
+                "alias.pub",
+                Some(&format!(
+                    "!git push https://x-access-token:{TOKEN}@github.com/o/r"
+                )),
+            ),
+            entry("alias.tok", Some(&format!("!echo {TOKEN}"))),
             entry("core.editor", Some("vim")),
             entry("color.diff.meta", Some("blue")),
             entry("diff.colormoved", Some("zebra")),
             entry("merge.conflictstyle", Some("zdiff3")),
+            entry("filter.lfs.clean", Some("git-lfs clean -- %f")),
+            entry("filter.lfs.smudge", Some("git-lfs smudge -- %f")),
+            entry("filter.lfs.process", Some("git-lfs filter-process")),
+            entry("filter.lfs.required", Some("true")),
+            entry("filter.crypt.clean", Some("git-crypt clean")),
+            entry("filter.crypt.required", None),
+            entry("filter.optional.required", Some("false")),
             entry("http.https://github.com/.extraheader", Some(&header)),
             entry(&rewrite, Some("https://github.com/")),
             entry(&scp, Some("https://github.com/")),
+            entry("url.ssh://git@host.example/.insteadof", Some("host:")),
             entry("url.https://mirror.example/.insteadof", Some("mirror:")),
             entry(
                 "url.https://mirror.example/.insteadof",
@@ -295,6 +362,10 @@ mod tests {
                 Some("/host/work.gitconfig"),
             ),
             entry("diff.secret.textconv", Some(&format!("cat {TOKEN}"))),
+            entry(
+                "http.proxy",
+                Some(&format!("http://proxy:{TOKEN}@proxy.example:8080")),
+            ),
         ]
     }
 
@@ -313,6 +384,12 @@ mod tests {
             "[diff]\n\tcolormoved = \"zebra\"\n",
             "[merge]\n\tconflictstyle = \"zdiff3\"\n",
             "[url \"https://mirror.example/\"]\n\tinsteadof = \"mirror:\"\n",
+            "[url \"git@github.com:\"]\n\tinsteadof = \"https://github.com/\"\n",
+            "[url \"ssh://git@host.example/\"]\n\tinsteadof = \"host:\"\n",
+            "[filter \"lfs\"]\n\tclean = \"git-lfs clean -- %f\"\n",
+            "[filter \"lfs\"]\n\tsmudge = \"git-lfs smudge -- %f\"\n",
+            "[filter \"lfs\"]\n\tprocess = \"git-lfs filter-process\"\n",
+            "[filter \"lfs\"]\n\trequired = \"true\"\n",
         ] {
             assert!(
                 view.text.contains(kept),
@@ -321,10 +398,15 @@ mod tests {
             );
         }
         assert!(!view.text.contains("[include"));
-        assert!(!view.text.contains("git@github.com"));
+        assert!(!view.text.contains("crypt"));
+        assert_eq!(view.required_filters, ["filter.crypt.required"]);
         assert_eq!(
             view.dropped,
             [
+                "alias.pub",
+                "alias.tok",
+                "filter.*.clean",
+                "filter.*.required",
                 "http.*.extraheader",
                 "url.*.insteadof",
                 "credential.helper",
@@ -334,14 +416,24 @@ mod tests {
                 "include.path",
                 "includeif.*.path",
                 "diff.*.textconv",
+                "http.proxy",
             ]
         );
     }
 
     #[test]
     fn extra_patterns_pass_keys_deliberately_but_never_includes() {
-        let extra = vec!["credential.helper".to_owned(), "HTTP.*".to_owned()];
+        let extra = vec![
+            "credential.helper".to_owned(),
+            "HTTP.*".to_owned(),
+            "alias.pub".to_owned(),
+        ];
         let view = lane_view(&host(), &extra).unwrap();
+        // A deliberate grant passes its value verbatim, credential included.
+        assert!(view.text.contains(&format!(
+            "[alias]\n\tpub = \"!git push https://x-access-token:{TOKEN}@github.com/o/r\"\n"
+        )));
+        assert!(view.dropped.contains(&"alias.tok".to_owned()));
         assert!(view.text.contains("[credential]\n\thelper = "));
         assert!(
             view.text

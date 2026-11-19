@@ -1353,6 +1353,7 @@ fn sandboxed_private_git_config_withholds_host_credentials() -> Result<(), Box<d
         &host_config,
         format!(
             "[user]\n name = Host Name\n email = host@example.com\n[alias]\n st = status --short\n\
+             pub = !git push https://x-access-token:{TOKEN}@github.com/o/r\n\
              [http \"https://github.com/\"]\n extraHeader = AUTHORIZATION: bearer {TOKEN}\n\
              [url \"https://x-access-token:{TOKEN}@github.com/\"]\n insteadOf = https://github.com/\n\
              [url \"https://mirror.example/\"]\n insteadOf = mirror:\n\
@@ -1360,6 +1361,17 @@ fn sandboxed_private_git_config_withholds_host_credentials() -> Result<(), Box<d
              [core]\n askPass = /bin/echo-{TOKEN}\n"
         ),
     )?;
+    // The host system file is read through the same allowlist; the lane's
+    // Git never reads it directly.
+    let system_config = home.join("system.gitconfig");
+    std::fs::write(
+        &system_config,
+        "[credential]\n helper = osxkeychain\n[alias]\n sys = log -1\n\
+         [filter \"lfs\"]\n clean = git-lfs clean -- %f\n required = true\n",
+    )?;
+    let host_var = |key: &str| {
+        (key == "GIT_CONFIG_SYSTEM").then(|| system_config.clone().into_os_string())
+    };
     let git = provenant_os::git::git_executable()
         .ok_or("Git unavailable")?
         .canonicalize()?;
@@ -1371,6 +1383,7 @@ fn sandboxed_private_git_config_withholds_host_credentials() -> Result<(), Box<d
     input.home = &home;
     input.provenant.git = &git;
     input.credential_roots = provenant_core::CredentialRoots::for_home(&home);
+    input.host_var = &host_var;
     let spec = codex::Codex.prepare(input)?;
     let config = spec
         .setup
@@ -1390,25 +1403,40 @@ fn sandboxed_private_git_config_withholds_host_credentials() -> Result<(), Box<d
         "[user]\n\temail = \"host@example.com\"\n",
         "[alias]\n\tst = \"status --short\"\n",
         "[url \"https://mirror.example/\"]\n\tinsteadof = \"mirror:\"\n",
+        "[alias]\n\tsys = \"log -1\"\n",
+        "[filter \"lfs\"]\n\tclean = \"git-lfs clean -- %f\"\n",
+        "[filter \"lfs\"]\n\trequired = \"true\"\n",
         "[user]\n\tuseConfigOnly = true\n",
     ] {
         assert!(config.contains(kept), "{kept} missing from {config}");
     }
-    assert!(
-        !spec
-            .profile
-            .spec
-            .runtime_reads
+    assert!(!config.contains("osxkeychain"), "{config}");
+    for host_file in [&host_config, &system_config] {
+        assert!(
+            !spec
+                .profile
+                .spec
+                .runtime_reads
+                .iter()
+                .any(|grant| &grant.path == host_file)
+        );
+    }
+    assert_eq!(
+        spec.env
             .iter()
-            .any(|grant| grant.path == host_config)
+            .filter(|(key, value)| key == "GIT_CONFIG_NOSYSTEM" && value == "1")
+            .count(),
+        1,
+        "the lane's Git never reads the host system file directly"
     );
     assert_eq!(
         spec.git_config_dropped(),
         Some(
             &[
+                "credential.helper".to_owned(),
+                "alias.pub".to_owned(),
                 "http.*.extraheader".to_owned(),
                 "url.*.insteadof".to_owned(),
-                "credential.helper".to_owned(),
                 "core.askpass".to_owned(),
             ][..]
         )

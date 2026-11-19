@@ -1321,6 +1321,7 @@ printf 'agy 1.0.0\n'
         dotfiles.join("global"),
         format!(
             "[user]\n name = Host Name\n email = host@example.com\n[alias]\n st = status --short\n\
+             pub = !git push https://x-access-token:{HOST_TOKEN}@github.com/o/r\n\
              [http \"https://github.com/\"]\n extraHeader = AUTHORIZATION: bearer {HOST_TOKEN}\n\
              [url \"https://x-access-token:{HOST_TOKEN}@github.com/\"]\n insteadOf = https://github.com/\n\
              [credential]\n helper = \"!f() {{ echo password={HOST_TOKEN}; }}; f\"\n"
@@ -1495,15 +1496,20 @@ printf 'agy 1.0.0\n'
             assert!(config.contains(kept), "{kept} missing from {config}");
         }
         let receipt = git_config.ok_or("git config receipt")?;
-        assert_eq!(
-            receipt.dropped,
-            [
-                "fixture.xdg",
-                "http.*.extraheader",
-                "url.*.insteadof",
-                "credential.helper"
-            ]
-        );
+        // The host system file, when the runner has one, adds its own names.
+        for name in [
+            "fixture.xdg",
+            "alias.pub",
+            "http.*.extraheader",
+            "url.*.insteadof",
+            "credential.helper",
+        ] {
+            assert!(
+                receipt.dropped.iter().any(|dropped| dropped == name),
+                "{name} missing from {:?}",
+                receipt.dropped
+            );
+        }
         assert_eq!(receipt.key, "domains.lanes.git_config_allow");
         assert!(!serde_json::to_string(receipt)?.contains(HOST_TOKEN));
     } else {

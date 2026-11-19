@@ -925,9 +925,30 @@ pub(crate) fn private_git_objects(
     if input.sandboxed() {
         // Credentials reach a sandboxed lane only through its token helper:
         // host entries are copied through the allowlist, and the lane gets
-        // neither an include nor a read grant on the host files.
+        // neither an include nor a read grant on the host files. The system
+        // file comes first, as Git reads it; the lane's Git never reads it
+        // directly because `GIT_CONFIG_NOSYSTEM` stays set.
+        let system = if (input.host_var)("GIT_CONFIG_NOSYSTEM")
+            .is_some_and(|value| crate::git_config::git_true(Some(&value.to_string_lossy())))
+        {
+            None
+        } else if let Some(path) = (input.host_var)("GIT_CONFIG_SYSTEM") {
+            Some(PathBuf::from(path))
+        } else {
+            match provenant_os::sys::git_system_config_path(input.provenant.git) {
+                Ok(path) => path,
+                Err(_) => {
+                    policy_warning(
+                        input.policy,
+                        "LAUNCH_PRIVATE_GIT_OBJECTS_NONE_2",
+                        "the host system Git configuration could not be located; the lane receives none of its settings",
+                    )?;
+                    None
+                }
+            }
+        };
         let mut entries = Vec::new();
-        for path in globals.iter().filter(|path| path.is_file()) {
+        for path in system.iter().chain(&globals).filter(|path| path.is_file()) {
             match provenant_os::sys::git_config_file(input.provenant.git, path, input.cwd) {
                 Ok(read) => entries.extend(read),
                 Err(_) => policy_warning(
@@ -948,6 +969,16 @@ pub(crate) fn private_git_objects(
                     ProviderError::InvalidPath,
                 )
             })?;
+        for name in &view.required_filters {
+            policy_warning(
+                input.policy,
+                "LAUNCH_PRIVATE_GIT_OBJECTS_NONE_3",
+                format!(
+                    "the host marks Git filter {name} required, but its driver is withheld from the lane, so Git applies no filter there; pass it with {}",
+                    crate::git_config::ALLOW_KEY
+                ),
+            )?;
+        }
         config_text.push_str(&view.text);
         spec.git_wrapper.host_config_dropped = Some(view.dropped);
     } else {
@@ -976,7 +1007,6 @@ pub(crate) fn private_git_objects(
         bytes: config_text.into_bytes(),
     });
     if input.sandboxed() {
-        spec.env.retain(|(key, _)| key != "GIT_CONFIG_NOSYSTEM");
         crate::lane::install_token_config(&mut spec.env).map_err(|error| {
             input.policy.boundary_error(
                 "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
