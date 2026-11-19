@@ -528,7 +528,10 @@ fn writer_repository_open_failure_hides_unanchored_project_path()
         Ok(_) => return Err("non-repository unexpectedly opened".into()),
         Err(error) => super::run_error(error),
     };
-    assert_eq!(error.code(), "WRITER_SCOPE");
+    // Opening the repository is the first failure now that no repository-lock
+    // probe precedes it, so the typed I/O refusal (not the layout scope code)
+    // reaches the edge. The facade spells it `io`, the run catalogue `IO`.
+    assert!(error.code().eq_ignore_ascii_case("io"), "{}", error.code());
     let wire = serde_json::to_value(&error)?.to_string();
     assert!(!wire.contains("non-repository"), "{wire}");
     assert!(!wire.contains(root.to_string_lossy().as_ref()), "{wire}");
