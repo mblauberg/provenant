@@ -166,6 +166,9 @@ pub struct WorktreeGcReport {
     pub caches: Vec<crate::cache::CacheGcEntry>,
     pub byte_errors: Vec<RetentionIssue>,
     pub cache_errors: Vec<RetentionIssue>,
+    /// In-memory restart point when the caller's sweep deadline expires.
+    #[serde(skip)]
+    pub interrupted_at: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -983,7 +986,28 @@ pub fn collect(
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
 ) -> Result<WorktreeGcReport, WorktreeError> {
-    collect_impl(context, lanes, policy, true, cancel)
+    let mut should_stop = || cancel.is_cancelled();
+    collect_impl(context, lanes, policy, true, cancel, 0, &mut should_stop)
+}
+
+/// Resume a collection from the lane index saved by its host-wide sweep.
+pub fn collect_from(
+    context: &WorktreeContext<'_>,
+    lanes: &[WorktreeInfo],
+    policy: &WorktreeGcPolicy<'_>,
+    cancel: &CancelToken,
+    start_index: usize,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> Result<WorktreeGcReport, WorktreeError> {
+    collect_impl(
+        context,
+        lanes,
+        policy,
+        true,
+        cancel,
+        start_index,
+        should_stop,
+    )
 }
 
 /// Collect lanes the caller named for removal, such as the branch a landing
@@ -995,7 +1019,8 @@ pub fn collect_selected(
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
 ) -> Result<WorktreeGcReport, WorktreeError> {
-    collect_impl(context, lanes, policy, false, cancel)
+    let mut should_stop = || cancel.is_cancelled();
+    collect_impl(context, lanes, policy, false, cancel, 0, &mut should_stop)
 }
 
 /// Revalidate a caller-supplied landing proof against the exact live worktree
@@ -1329,6 +1354,8 @@ fn collect_impl(
     policy: &WorktreeGcPolicy<'_>,
     preview_foreign: bool,
     cancel: &CancelToken,
+    start_index: usize,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> Result<WorktreeGcReport, WorktreeError> {
     validate_binding(context)?;
     // A preview describes the command's inventory snapshot; applied cleanup
@@ -1362,10 +1389,20 @@ fn collect_impl(
                         && known.origin == RefOrigin::Created
                 })
         });
+    let managed_tree = |tree: &VerifiedWorktree| -> Result<bool, WorktreeError> {
+        let owner = load_owner(tree)?;
+        Ok(owner
+            .as_ref()
+            .is_some_and(|owner| owner.origin == WorktreeOrigin::Lane)
+            || owner::was_created(tree)?)
+    };
+    let managed = |lane: &WorktreeInfo| -> Result<bool, WorktreeError> {
+        managed_tree(&verify_worktree(context.repo, &lane.path)?)
+    };
     let foreign_seen = foreign_branch
         || lanes
             .iter()
-            .any(|lane| !lane.primary && matches!(lane.owner, Ok(None)));
+            .any(|lane| !lane.primary && !managed(lane).unwrap_or(false));
     let first_foreign = matches!(
         policy.mode,
         CollectionMode::Worktrees | CollectionMode::LandingCleanup
@@ -1389,7 +1426,10 @@ fn collect_impl(
         keep: policy.keep.to_vec(),
         ..Default::default()
     };
-    let preview_walk = PreviewWalk::new(dry);
+    // Preview shares one bounded walk. Apply bounds each walk separately so
+    // time spent on earlier candidates cannot exhaust a later candidate's
+    // proof; the enclosing sweep still has its own deadline.
+    let preview_walk = PreviewWalk::new(true);
     let integration =
         policy
             .upstream
@@ -1425,15 +1465,83 @@ fn collect_impl(
     } else {
         None
     };
-    for lane in lanes {
+    for (lane_index, lane) in lanes.iter().enumerate().skip(start_index) {
+        if should_stop() || cancel.is_cancelled() {
+            cancel.cancel();
+            report.interrupted_at = Some(lane_index);
+            break;
+        }
         if lane.primary
             || primary
                 .as_ref()
                 .is_some_and(|primary| lane.path == *primary)
         {
+            if policy.mode != CollectionMode::LandingCleanup {
+                let mut row = CandidateReport {
+                    path: lane.path.clone(),
+                    class: "primary",
+                    action: "kept",
+                    tip: lane.head,
+                    detail: None,
+                };
+                let result = (|| -> Result<(), WorktreeError> {
+                    if primary.as_deref() != Some(lane.path.as_path())
+                        || context.repo.root_path() != lane.path
+                        || !(policy.no_live_lanes)(&lane.path)
+                    {
+                        return Err(WorktreeError::UnknownWriter);
+                    }
+                    if policy
+                        .excluded_paths
+                        .iter()
+                        .any(|pattern| matches_pattern(&lane.path.to_string_lossy(), pattern))
+                    {
+                        row.detail = Some("excluded by gc.projects.keep_paths".into());
+                        return Ok(());
+                    }
+                    let _writer = if dry {
+                        cache_writer_probe(context.project_state, &lane.path)
+                            .map_err(custody_refusal)?
+                    } else {
+                        Some(claim_writer_guard(context, &lane.path, cancel)?)
+                    };
+                    context.repo.revalidate()?;
+                    if !(policy.no_live_lanes)(&lane.path) {
+                        return Err(WorktreeError::UnknownWriter);
+                    }
+                    census_free(context, &lane.path, !dry)?;
+                    let protected = output_protection(context, context.repo, policy.keep, cancel)?;
+                    let effective = WorktreeGcPolicy {
+                        dry_run: dry,
+                        ..*policy
+                    };
+                    let apply_walk = PreviewWalk::new(true);
+                    collect_lane_output(
+                        &lane.path,
+                        context.repo,
+                        &effective,
+                        &layout_roots,
+                        &protected,
+                        &mut report,
+                        if dry { &preview_walk } else { &apply_walk },
+                        should_stop,
+                    )?;
+                    row.detail = Some("primary output retention only".into());
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    row.detail = Some(error.to_string());
+                }
+                report.candidates.push(row);
+            }
+            if should_stop() || cancel.is_cancelled() {
+                cancel.cancel();
+                report.interrupted_at = Some(lane_index);
+                break;
+            }
             continue;
         }
-        let class = if matches!(lane.owner, Ok(Some(_))) {
+        let class = if managed(lane).unwrap_or(false) {
             "managed"
         } else {
             "foreign"
@@ -1514,6 +1622,10 @@ fn collect_impl(
                     })?;
             }
             let locked = lock_worktree(context, entry, cancel, dry)?;
+            if !policy.include_foreign && !managed_tree(&locked.verified)? {
+                row.detail = Some("foreign cleanup disabled by repository configuration".into());
+                return Ok(());
+            }
             // A preview shares one census across candidates; applying re-reads.
             census_free(context, &lane.path, !dry)?;
             // Reporting must remain bounded even when apply uses a full proof
@@ -1545,6 +1657,7 @@ fn collect_impl(
                 output_protection(context, locked.verified.repo(), policy.keep, cancel)?;
             let mut output_bytes = 0;
             if policy.mode != CollectionMode::LandingCleanup {
+                let apply_walk = PreviewWalk::new(true);
                 output_bytes = collect_lane_output(
                     &lane.path,
                     locked.verified.repo(),
@@ -1552,7 +1665,8 @@ fn collect_impl(
                     &layout_roots,
                     &protected,
                     &mut report,
-                    &preview_walk,
+                    if dry { &preview_walk } else { &apply_walk },
+                    should_stop,
                 )?;
             }
             if policy.mode == CollectionMode::Outputs {
@@ -1671,8 +1785,9 @@ fn collect_impl(
                         .map_err(|_| WorktreeError::InvalidOutput)?
                         .parse()
                         .map_err(|_| WorktreeError::InvalidOutput)?;
-                    let newest =
-                        preview_walk.newest(locked.verified.repo().root_dir(), 0, false)?;
+                    let apply_walk = PreviewWalk::new(true);
+                    let walk = if dry { &preview_walk } else { &apply_walk };
+                    let newest = walk.newest(locked.verified.repo().root_dir(), 0, false)?;
                     let git_activity = latest_git_activity(
                         locked.verified.repo(),
                         branch.as_ref(),
@@ -1770,6 +1885,7 @@ fn collect_impl(
                         &protected,
                         &mut report,
                         &preview_walk,
+                        should_stop,
                     )?;
                 }
                 drop(locked);
@@ -1794,6 +1910,7 @@ fn collect_impl(
                     .ok_or(WorktreeError::RegistrationUnconfirmed)?;
                 let mut before_output = |verified: &VerifiedWorktree| {
                     precheck(verified)?;
+                    let apply_walk = PreviewWalk::new(true);
                     output_bytes = collect_lane_output(
                         &lane.path,
                         verified.repo(),
@@ -1801,7 +1918,8 @@ fn collect_impl(
                         &layout_roots,
                         &protected,
                         &mut report,
-                        &preview_walk,
+                        &apply_walk,
+                        should_stop,
                     )?;
                     Ok(())
                 };
@@ -1997,13 +2115,21 @@ fn collect_impl(
             }
         }
         report.candidates.push(row);
+        if should_stop() || cancel.is_cancelled() {
+            cancel.cancel();
+            // A cancelled candidate may have stopped before its durable
+            // retirement completed; retry it from its start on the next pass.
+            report.interrupted_at = Some(lane_index);
+            break;
+        }
     }
-    if first_foreign && !policy.dry_run {
+    if first_foreign && !policy.dry_run && report.interrupted_at.is_none() {
         acknowledge_foreign_preview(context)?;
     }
     Ok(report)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_lane_output(
     lane: &Path,
     repo: &VerifiedRepo,
@@ -2012,6 +2138,7 @@ fn collect_lane_output(
     protected: &ProtectedPaths,
     report: &mut WorktreeGcReport,
     preview_walk: &PreviewWalk,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> Result<u64, WorktreeError> {
     let (output_bytes, output_errors) = {
         let output = if (policy.terminal)(lane) {
@@ -2030,6 +2157,7 @@ fn collect_lane_output(
             output,
             0,
             preview_walk,
+            should_stop,
         )?;
 
         let output_bytes = output[output_start..]
@@ -2261,28 +2389,46 @@ fn walk_output(
     report: &mut Vec<OutputEntry>,
     depth: usize,
     preview_walk: &PreviewWalk,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> Result<(), FsError> {
+    if should_stop() {
+        return Err(FsError::Cancelled {
+            path: root.join(relative),
+        });
+    }
     preview_walk.step()?;
     if depth >= 64 {
         return Err(FsError::EntryLimit { limit: 64 });
     }
-    for name in entry_names(
+    for name in entry_names_until(
         directory,
         if preview_walk.enabled {
             20_000
         } else {
             100_000
         },
+        should_stop,
     )? {
+        if should_stop() {
+            return Err(FsError::Cancelled {
+                path: root.join(relative),
+            });
+        }
         preview_walk.step()?;
         if name == ".git" {
             continue;
         }
         let path = relative.join(&name);
+        let full_path = root.join(&path);
+        let excluded_by_keep_paths = policy.excluded_paths.iter().any(|pattern| {
+            matches_pattern(&path.to_string_lossy(), pattern)
+                || matches_pattern(&full_path.to_string_lossy(), pattern)
+        });
         if layout_roots
             .iter()
             .any(|root| path.as_path() == root.as_path())
             || protected.covers(&path)
+            || excluded_by_keep_paths
         {
             continue;
         }
@@ -2297,6 +2443,7 @@ fn walk_output(
             }
             let contains_layout_root = layout_roots.iter().any(|root| root.starts_with(&path));
             if !contains_layout_root
+                && !excluded_by_keep_paths
                 && (policy
                     .regenerable
                     .iter()
@@ -2307,7 +2454,7 @@ fn walk_output(
                     .ancestors()
                     .any(|ancestor| protected.ignored.contains(ancestor))
             {
-                let bytes = prune_output(directory, &name, policy, preview_walk)?;
+                let bytes = prune_output(directory, &name, policy, preview_walk, should_stop)?;
                 Ok(Some(bytes))
             } else {
                 walk_output(
@@ -2320,6 +2467,7 @@ fn walk_output(
                     report,
                     depth + 1,
                     preview_walk,
+                    should_stop,
                 )?;
                 Ok(None)
             }
@@ -2337,6 +2485,7 @@ fn walk_output(
                 .into(),
             }),
             Ok(None) => {}
+            Err(error @ FsError::Cancelled { .. }) => return Err(error),
             Err(error) => report.push(OutputEntry {
                 bytes: 0,
                 path: root.join(path),
@@ -2366,8 +2515,18 @@ fn contains_repository(directory: &Directory) -> Result<bool, FsError> {
 
 // Real time bounds the idle proof; explicit removal needs only repository protection.
 #[allow(clippy::disallowed_methods)]
-fn check_output_before(directory: &Directory, before: i128) -> Result<(), FsError> {
-    check_output_bounded(directory, before, &mut 1_000_000, std::time::Instant::now())
+fn check_output_before(
+    directory: &Directory,
+    before: i128,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> Result<(), FsError> {
+    check_output_bounded(
+        directory,
+        before,
+        &mut 1_000_000,
+        std::time::Instant::now(),
+        should_stop,
+    )
 }
 
 fn check_output_bounded(
@@ -2375,11 +2534,12 @@ fn check_output_bounded(
     before: i128,
     remaining: &mut usize,
     started: std::time::Instant,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> Result<(), FsError> {
     if before == i128::MAX {
-        return protect_repositories(directory, 0);
+        return protect_repositories(directory, 0, should_stop);
     }
-    if newest_bounded(directory, 0, remaining, started)? >= before {
+    if newest_bounded(directory, 0, remaining, started, should_stop)? >= before {
         return Err(FsError::RaceRefused {
             name: "recent output".into(),
         });
@@ -2387,7 +2547,16 @@ fn check_output_bounded(
     Ok(())
 }
 
-fn protect_repositories(directory: &Directory, depth: usize) -> Result<(), FsError> {
+fn protect_repositories(
+    directory: &Directory,
+    depth: usize,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> Result<(), FsError> {
+    if should_stop() {
+        return Err(FsError::Cancelled {
+            path: directory.current_path()?,
+        });
+    }
     if depth >= 64 {
         return Err(FsError::EntryLimit { limit: 64 });
     }
@@ -2396,9 +2565,18 @@ fn protect_repositories(directory: &Directory, depth: usize) -> Result<(), FsErr
             name: ".git".into(),
         });
     }
-    for name in entry_names(directory, 100_000)? {
+    for name in entry_names_until(directory, 100_000, should_stop)? {
+        if should_stop() {
+            return Err(FsError::Cancelled {
+                path: directory.current_path()?,
+            });
+        }
         if directory.metadata_at(&name, false)?.kind == FileKind::Directory {
-            protect_repositories(&directory.open_verified_directory(&name)?, depth + 1)?;
+            protect_repositories(
+                &directory.open_verified_directory(&name)?,
+                depth + 1,
+                should_stop,
+            )?;
         }
     }
     Ok(())
@@ -2409,7 +2587,13 @@ fn newest_bounded(
     depth: usize,
     remaining: &mut usize,
     started: std::time::Instant,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> Result<i128, FsError> {
+    if should_stop() {
+        return Err(FsError::Cancelled {
+            path: directory.current_path()?,
+        });
+    }
     if depth >= 64 {
         return Err(FsError::EntryLimit { limit: 64 });
     }
@@ -2419,7 +2603,12 @@ fn newest_bounded(
         });
     }
     let mut time = directory.metadata()?.modified_ns;
-    for name in entry_names(directory, 100_000)? {
+    for name in entry_names_until(directory, 100_000, should_stop)? {
+        if should_stop() {
+            return Err(FsError::Cancelled {
+                path: directory.current_path()?,
+            });
+        }
         if *remaining == 0 || started.elapsed() >= std::time::Duration::from_secs(5) {
             return Err(FsError::EntryLimit { limit: 1_000_000 });
         }
@@ -2432,6 +2621,7 @@ fn newest_bounded(
                 depth + 1,
                 remaining,
                 started,
+                should_stop,
             )?);
         }
     }
@@ -2443,6 +2633,7 @@ fn prune_output(
     name: &OsStr,
     policy: &WorktreeGcPolicy<'_>,
     preview_walk: &PreviewWalk,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> Result<u64, FsError> {
     let directory = parent.open_verified_directory(name)?;
     let identity = directory.metadata()?;
@@ -2455,7 +2646,12 @@ fn prune_output(
         }
         return allocated_tree(&directory, 0, preview_walk);
     }
-    check_output_before(&directory, policy.written_before_ns)?;
+    check_output_before(&directory, policy.written_before_ns, should_stop)?;
+    if should_stop() {
+        return Err(FsError::Cancelled {
+            path: directory.current_path()?,
+        });
+    }
     let staging_name = temporary_name()?;
     parent.mkdir(&staging_name, 0o700)?;
     let staging = parent.open_verified_directory(&staging_name)?;
@@ -2466,15 +2662,20 @@ fn prune_output(
         parent.rmdir(&staging_name)?;
         return Err(error);
     }
-    let removed = || -> Result<u64, FsError> {
+    let mut removed = || -> Result<u64, FsError> {
         let detached = payload.child(OsStr::new("output"))?;
         if !identity.same_identity(&detached.metadata()?) {
             return Err(FsError::RaceRefused { name: name.into() });
         }
-        check_output_before(detached.directory(), policy.written_before_ns)?;
+        check_output_before(detached.directory(), policy.written_before_ns, should_stop)?;
         let bytes = identity
             .allocated
-            .saturating_add(remove_output(&detached, 0)?);
+            .saturating_add(remove_output(&detached, 0, should_stop)?);
+        if should_stop() {
+            return Err(FsError::Cancelled {
+                path: detached.directory().current_path()?,
+            });
+        }
         payload.rmdir(OsStr::new("output"))?;
         Ok(bytes)
     };
@@ -2506,7 +2707,37 @@ pub(super) fn dispose_archive_tree(tree: &PayloadTree) -> Result<(), FsError> {
     Ok(())
 }
 
-fn remove_output(tree: &PayloadTree, depth: usize) -> Result<u64, FsError> {
+fn entry_names_until(
+    directory: &Directory,
+    limit: usize,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> Result<Vec<OsString>, FsError> {
+    let mut names = Vec::new();
+    for entry in directory.entries()? {
+        if should_stop() {
+            return Err(FsError::Cancelled {
+                path: directory.current_path()?,
+            });
+        }
+        let name = entry?;
+        if names.len() == limit {
+            return Err(FsError::EntryLimit { limit });
+        }
+        names.push(name);
+    }
+    Ok(names)
+}
+
+fn remove_output(
+    tree: &PayloadTree,
+    depth: usize,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> Result<u64, FsError> {
+    if should_stop() {
+        return Err(FsError::Cancelled {
+            path: tree.directory().current_path()?,
+        });
+    }
     if depth >= 64 {
         return Err(FsError::EntryLimit { limit: 64 });
     }
@@ -2517,11 +2748,22 @@ fn remove_output(tree: &PayloadTree, depth: usize) -> Result<u64, FsError> {
     }
     let mut bytes = 0_u64;
     tree.make_writable()?;
-    for name in entry_names(tree.directory(), 100_000)? {
+    for name in entry_names_until(tree.directory(), 100_000, should_stop)? {
+        if should_stop() {
+            return Err(FsError::Cancelled {
+                path: tree.directory().current_path()?,
+            });
+        }
         let metadata = tree.metadata_at(&name)?;
         bytes = bytes.saturating_add(metadata.allocated);
         if metadata.kind == FileKind::Directory {
-            bytes = bytes.saturating_add(remove_output(&tree.child(&name)?, depth + 1)?);
+            bytes =
+                bytes.saturating_add(remove_output(&tree.child(&name)?, depth + 1, should_stop)?);
+            if should_stop() {
+                return Err(FsError::Cancelled {
+                    path: tree.directory().current_path()?,
+                });
+            }
             tree.rmdir(&name)?;
         } else {
             tree.unlink(&name)?;
@@ -2584,7 +2826,8 @@ fn prepare_removal_before(
         excluded_paths: &[],
     };
     let mut output = Vec::new();
-    let preview_walk = PreviewWalk::new(preview_only);
+    let preview_walk = PreviewWalk::new(true);
+    let mut should_stop = || cancel.is_cancelled();
     walk_output(
         repo.root_dir(),
         repo.root_path(),
@@ -2595,6 +2838,7 @@ fn prepare_removal_before(
         &mut output,
         0,
         &preview_walk,
+        &mut should_stop,
     )?;
     if !clean_after_preview(
         context,
@@ -2639,6 +2883,7 @@ fn prepare_removal_before(
         &mut output,
         0,
         &preview_walk,
+        &mut should_stop,
     )?;
     Ok(())
 }

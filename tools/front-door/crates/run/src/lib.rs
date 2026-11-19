@@ -53,6 +53,7 @@ pub use service::{DispatchRequest, DispatchTask, ErrorKind, RefusalContext, Serv
 pub use transcript::locate as locate_transcript;
 pub mod build_dir_gc;
 mod cargo_seed;
+pub use cargo_seed::{WorktreeSeed, seed_worktree_target};
 pub mod target_seed;
 pub mod target_seed_gc;
 mod writer;
@@ -91,8 +92,8 @@ pub use plan::{
 };
 pub use retention::{
     AttemptLogRemoval, AttemptTmpRemoval, PayloadEviction, PayloadReport, ProviderStateGc,
-    ProviderStateIssue, ScratchOwner, ScratchOwnerResolver, ScratchPolicy, TOMBSTONE,
-    payload_totals,
+    ProviderStateIssue, RetentionScan, ScratchOwner, ScratchOwnerResolver, ScratchPolicy,
+    TOMBSTONE, payload_totals,
 };
 pub use writer::{
     BoundSandboxBackend, LaunchConfinement, RepinOutcome, WriterFence, WriterLaunch,

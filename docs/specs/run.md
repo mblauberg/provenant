@@ -41,9 +41,9 @@ shim names the knob, its source and suggests fetching on the host. Cargo credent
 `credentials.toml`) remain mandatory read/write denials, including relocated homes.
 Host `config` and `config.toml` are read-only data; target seeding checks them with
 the same compiler-selection validation as checked-in Cargo configuration.
-Build directories and lane-specific tool configuration default to a shared host
-cache target (`lanes.cargo_target = "shared"`), or remain private to the lane
-cache (or attempt scratch for read-only lanes) when `private` is configured.
+Build directories default to the worktree's own target in its lane cache
+(`lanes.cargo_target = "private"`; attempt scratch for read-only lanes), or the
+writer worktree's own `target/` when `project` is configured.
 No separate lane download store, Cargo home or symlink setup exists.
 The host's own build output supplies target seed generations.
 - Why: Cargo fingerprints dependency source paths; changing the home path defeats reuse even when symlinks reach the same content.
@@ -51,13 +51,16 @@ The host's own build output supplies target seed generations.
 ## Cargo target directory
 
 The `lanes.cargo_target` knob configures how lanes acquire their Cargo target:
-- `shared` (default): one target directory per project under the host cache (`~/Library/Caches/provenant-shared-cargo/<project_key>/target`), avoiding cold builds and skipping seed cloning. Lanes for the same repository share the warm target and Cargo serialises concurrent access with its build lock.
-- `private`: preserves the per-worktree copy-on-write seed clone under `~/Library/Caches/provenant-lane-cargo/<digest>/target`.
-- Absolute path: uses the path directly. It comes only from host or project configuration or the launch knob; a `Cargo target:` line in a brief can pick `shared` or `private` but never a path, because a path grants the lane read, write and exec there and a brief is requester text.
+- `private` (default): the worktree's own target in its lane cache, `~/Library/Caches/provenant-lane-cargo/<digest>/target` (lint-only runs in `target-lint`), seeded warm from the project's host seed generation (below). A clone shares blocks with the seed on APFS. Where the filesystem cannot clone, the target stays unseeded: the outcome is a `clone_failed` fallback, the host warns once and the first build is cold. A copy is never made, because it cannot finish inside the seed budget. Settlement starts a detached lane cleanup that removes the target once writer custody is free (`src/fabric/settlement.rs` → `gc_cleanup::release_settled_cache`); one it misses, worktree removal and lane-cache GC remove later. A continuation reuses a target still present and seeds a new one otherwise. `provenant worktree seed-target PATH` seeds the same directory for a checkout outside a lane and prints it for `CARGO_TARGET_DIR`; an existing target is kept. Outside a lane the command resolves the toolchain as cargo and rustup do, treating an unset or empty `RUSTUP_HOME` as `$HOME/.rustup` and `CARGO_HOME` as `$HOME/.cargo`, then verifies it and the Cargo configuration with the lane rules. An explicit `RUSTUP_HOME` elsewhere is refused. The command reports the source of the Cargo home it verified (`host CARGO_HOME` or `host HOME/.cargo`), because a shell's `CARGO_HOME` can differ from the host a lane runs under; it uses the same resolution as lanes. Every fallback outcome carries `expected` and `found` text for a mismatch (toolchain, host triple, Cargo profile, pin, environment class), free of paths and environment values, and the command prints a repair step.
+- `project`: the writer worktree's own target, `target/` beside the Cargo workspace the verify port selects, with lint-only runs in `target/provenant-lint`. Builds by a person or chair in that checkout share it, and it goes with the worktree, but a new worktree starts cold. The host neither creates it nor grants it separately: it lies in the writer-controlled worktree, which the lane may already write and execute. Read-only lanes and projects without a Cargo manifest use the lane cache.
+- Absolute path: uses the path directly. It comes only from host or project configuration or the launch knob; a `Cargo target:` line in a brief can pick `project` or `private` but never a path, because a path grants the lane read, write and exec there and a brief is requester text.
+
+No mode shares one target between worktrees of a repository. The `shared` value, which gave every worktree one host target, is removed: `provenant config check` reports it and the default applies, and `provenant gc` retires its old directories under `~/Library/Caches/provenant-shared-cargo/` (a preview lists them; `--apply` removes each whose Cargo locks are free and that has no write within the build-directory grace).
+- Why: Cargo hashes a workspace member's units by its workspace-relative path, so every worktree maps to the same units, and it decides their freshness by comparing source mtimes with the last build's dep-info. A worktree whose sources are older than another worktree's build reuses that build's artifacts and reports symbols missing that exist in its source (#3561). Content-hash freshness (`-Zchecksum-freshness`) would remove the mtime dependence but is nightly-only.
+- Why the seed is the host generation, not a settled lane's target: generations already exist per project, are built by the host from the verify base (landed code) rather than from writer-controlled output, and record the compiler, host triple and Cargo profile a clone must match. A lane's target carries none of those guarantees and would need a second store and retention.
 
 The preamble and `provenant config show` report the resolved target directory and its source, e.g. `(source: default; lanes.cargo_target)` or `(source: host; lanes.cargo_target)`.
-Target seeding and clone machinery are skipped when `shared` or an absolute target is selected; seeding is used only for `private`.
-- Why: lanes run as the same user, so a per-lane target guards no real boundary while it costs a cold build and its own disk per lane.
+Target seeding and clone machinery are used only for `private`. A lane's seed outcome is in `cargo-target-setup.json`; a fallback also warns once on the host's stderr.
 
 ## Cargo target seed
 
@@ -76,7 +79,18 @@ project if no own generation exists. The seed builder and writer preparation
 use the same lane profile defaults and preserve explicit environment values;
 incompatible profile generations are skipped. Refresh currentness requires the
 recorded verify-base commit to match; writer selection uses compatible
-generations and Cargo's normal per-unit freshness checks before reusing artifacts. Published generations are
+generations and Cargo's normal per-unit freshness checks before reusing artifacts. A clone ages every
+dep-info file to the epoch before it is published, so each unit that lists source files (workspace
+members) rebuilds once against the worktree's sources while registry packages, which list none, stay
+fresh. Cargo does not promise a build-directory layout (`.fingerprint/<unit>/` before Cargo 1.100,
+`build/<package>/<hash>/fingerprint/` after) or which units keep dep-info, so the pass is driven by the
+fingerprints themselves. Within the clone's depth limit, the seed budget and cancellation, it finds the
+`*.json` fingerprints in `fingerprint` and `.fingerprint` directories, reads each one's `local` entries
+(ignoring unknown fields) and ages exactly the files its `CheckDepInfo` entries name, relative to the target
+root. A fingerprint that cannot be read, a named dep-info that is missing or not a path inside the target, or
+a non-empty clone in which none is named is not published: the outcome is the `seed_layout_unrecognised`
+fallback and the lane builds cold. A unit left un-aged would reintroduce #3561. A test builds with the pinned
+Cargo and checks from its JSON output that a member recompiles and a registry-style dependency stays fresh. Published generations are
 immutable, and collection cannot race an active clone. `max_generations` keeps
 history per project; `max_bytes` is a host-wide allocated-byte collection target.
 Collection always keeps each project's newest complete generation, even when
@@ -121,7 +135,7 @@ unavailable push leaves the committed head and unpushed count visible.
 
 ## Lane verification and build admission
 
-A writer preamble's verification paragraph is `lanes.verification` (`check`, `targeted` or `full`). Unset, the sourced default is targeted: use a shared warm target, run cargo check, clippy on touched crates and targeted tests, and leave the workspace suite to CI. A brief line `Verification scope: targeted` (or `check` or `full`) overrides the knob and the paragraph names source `brief`. When the knob and that line disagree, the paragraph follows the brief and the stop cause names both scopes. Lane Cargo commands share the `build` admission class, configured through `[admission.build].slots`; unset, its count is derived from cores and memory (source `default`), and a configured value names its host or project source. Set it to `0` to disable the cap. Lane Cargo commands, including aliases and nextest, use a PATH shim to acquire a slot. A command that finds every slot busy waits a bounded time, then warns and proceeds; status shows the wait. Direct paths bypass this cooperative throttle.
+A writer preamble's verification paragraph is `lanes.verification` (`check`, `targeted` or `full`). Unset, the sourced default is targeted: build in the worktree's own warm target (`lanes.cargo_target`), run cargo check, clippy on touched crates and targeted tests, and leave the workspace suite to CI. A brief line `Verification scope: targeted` (or `check` or `full`) overrides the knob and the paragraph names source `brief`. When the knob and that line disagree, the paragraph follows the brief and the stop cause names both scopes. Lane Cargo commands share the `build` admission class, configured through `[admission.build].slots`; unset, its count is derived from cores and memory (source `default`), and a configured value names its host or project source. Set it to `0` to disable the cap. Lane Cargo commands, including aliases and nextest, use a PATH shim to acquire a slot. A command that finds every slot busy waits a bounded time, then warns and proceeds; status shows the wait. Direct paths bypass this cooperative throttle.
 - Why: a chair brief must be able to widen what a lane verifies, and parallel lanes must share one host cap instead of each taking the machine.
 
 ## Every limit names the layer that set it

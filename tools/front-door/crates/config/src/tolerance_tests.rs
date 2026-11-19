@@ -355,15 +355,15 @@ fn malformed_authority_knobs_fall_back_to_their_restrictive_value() {
     // A non-authority knob recovers to its default with one warning.
     let config = load(
         &roots,
-        Some(&b"schema_version=1\n[knobs]\n'lanes.silence_seconds'='soon'\n"[..]),
+        Some(&b"schema_version=1\n[knobs]\n'lanes.launch_retry_limit'='soon'\n"[..]),
     )
     .unwrap();
     assert_eq!(
-        config.knobs["lanes.silence_seconds"].value,
-        crate::knobs::registry().unwrap().knobs["lanes.silence_seconds"].default
+        config.knobs["lanes.launch_retry_limit"].value,
+        crate::knobs::registry().unwrap().knobs["lanes.launch_retry_limit"].default
     );
     assert_eq!(
-        config.knobs["lanes.silence_seconds"].source,
+        config.knobs["lanes.launch_retry_limit"].source,
         KnobSource::Default
     );
     assert_eq!(config.warnings.len(), 1);

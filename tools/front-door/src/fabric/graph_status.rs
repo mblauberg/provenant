@@ -36,7 +36,7 @@ fn text(value: &Value, limit: usize) -> Option<String> {
         .map(|s| provenant_fabric_runtime::hosts::plain_text(s, limit))
 }
 
-fn path_text(value: &Value) -> Option<String> {
+pub(super) fn path_text(value: &Value) -> Option<String> {
     value.as_str().map(str::to_owned).or_else(|| {
         let path: provenant_records::StructuredPathWire =
             serde_json::from_value(value.clone()).ok()?;

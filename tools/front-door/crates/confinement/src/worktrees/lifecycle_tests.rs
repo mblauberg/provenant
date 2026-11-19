@@ -729,14 +729,20 @@ pub(super) fn gc_merged_unowned_worktree(
     context: &WorktreeContext<'_>,
     name: &str,
 ) -> Result<WorktreeInfo, Box<dyn Error>> {
-    let created = create(
-        context,
-        WorktreeCreate {
-            branch: name.to_owned(),
-            base: None,
-        },
-        &cancel(),
-    )?;
+    let path = fixture._temp.path().join(format!("foreign-{name}"));
+    fixture.run(&[
+        "worktree",
+        "add",
+        "-b",
+        name,
+        path.to_str().ok_or("path")?,
+        "HEAD",
+    ])?;
+    let path = path.canonicalize()?;
+    let created = list(context, &cancel())?
+        .into_iter()
+        .find(|lane| lane.path == path)
+        .ok_or("missing foreign GC fixture worktree")?;
     merge_lane(fixture, context, &created, name)
 }
 

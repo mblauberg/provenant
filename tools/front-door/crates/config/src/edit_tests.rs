@@ -231,3 +231,39 @@ fn unset_removes_a_misspelt_entry_the_file_already_holds() {
         Err(ConfigError::UnknownKnob { .. })
     ));
 }
+
+#[test]
+fn config_refusal_hints_table_maps_routing_model_exclusions() {
+    use crate::{DEDICATED_COMMANDS, dedicated_command};
+    assert!(
+        DEDICATED_COMMANDS
+            .iter()
+            .any(|(prefix, cmd)| *prefix == "routing.model_exclusions"
+                && cmd.contains("route exclude add"))
+    );
+    assert_eq!(
+        dedicated_command("routing.model_exclusions"),
+        Some("provenant route exclude add")
+    );
+    assert_eq!(
+        dedicated_command("routing.model_exclusions[0]"),
+        Some("provenant route exclude add")
+    );
+}
+
+#[test]
+fn config_apply_on_routing_model_exclusions_refuses_naming_dedicated_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let roots = roots(temp.path());
+    let error = patch(
+        &roots,
+        json!({"routing.model_exclusions": []}),
+        &EditOptions::new("test"),
+    )
+    .err()
+    .unwrap();
+    assert!(
+        matches!(error, ConfigError::Refused(ref msg) if msg.contains("use provenant route exclude add")),
+        "{error:?}"
+    );
+}

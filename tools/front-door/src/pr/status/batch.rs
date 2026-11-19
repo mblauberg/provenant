@@ -447,7 +447,7 @@ pub(crate) fn line_from_entry(entry: &Entry) -> Line {
             excerpt: String::new(),
         })
         .collect();
-    status_line(
+    let mut line = status_line(
         entry.number,
         View {
             state: entry.state.clone(),
@@ -458,7 +458,11 @@ pub(crate) fn line_from_entry(entry: &Entry) -> Line {
             url: entry.url.clone(),
         },
         (!entry.truncated && entry.state != "UNAVAILABLE").then_some(checks.as_slice()),
-    )
+    );
+    if entry.state == "UNAVAILABLE" {
+        line.error = Some("pull request was missing from the batch response".into());
+    }
+    line
 }
 
 #[cfg(test)]
@@ -477,6 +481,13 @@ mod tests {
             "url": "https://github.com/owner/repo/pull/7", "headRefOid": sha,
             "statusCheckRollup": {"contexts": {"totalCount": total, "nodes": checks}}
         })
+    }
+
+    #[test]
+    fn missing_pull_rows_remain_unavailable() {
+        let line = line_from_entry(&entry(7, None));
+        assert_eq!(line.class(), "unavailable");
+        assert_eq!(line.verdict(), None);
     }
 
     // Spec: docs/specs/cli.md#ci-observations

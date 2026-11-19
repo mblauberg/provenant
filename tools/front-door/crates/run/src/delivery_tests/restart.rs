@@ -697,6 +697,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
         collection_time,
         false,
         &call,
+        &crate::RetentionScan::default(),
     )?;
     assert!(gc.errors.is_empty(), "{:?}", gc.errors);
     assert!(
@@ -812,6 +813,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                     .unwrap(),
                 cargo_target_seed: false,
                 state_root: self.state.clone(),
+                roots: None,
                 // The test's fake handoff never starts a provider. Keep the
                 // writer revalidation path independent of native backend
                 // availability on hosts without macOS sandbox support.
@@ -823,6 +825,8 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                 ),
                 backend: None,
                 cargo_target: Default::default(),
+                cargo_cache_budget: None,
+                cargo_target_protection: Default::default(),
             });
             Ok(prepared)
         }

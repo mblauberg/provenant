@@ -1,10 +1,24 @@
 //! Lane Cargo target knob (`lanes.cargo_target`).
 //!
 //! Controls where a lane's Cargo output is directed:
-//! - `shared` (default): one writable warm target per project under the host cache (`~/Library/Caches/provenant-shared-cargo/<project_key>/target`),
-//!   avoiding cold builds across lanes.
-//! - `private`: per-worktree copy-on-write seed clone under `~/Library/Caches/provenant-lane-cargo/<digest>/target`.
+//! - `private` (default): the worktree's own target in its lane cache,
+//!   `~/Library/Caches/provenant-lane-cargo/<digest>/target`, seeded warm by a
+//!   copy-on-write clone of the project's host seed generation with every dep-info
+//!   aged to the epoch under any build layout, as each unit's fingerprint names it (`cargo_seed`). `provenant worktree
+//!   seed-target` seeds the same directory for a checkout outside a lane. Removed with
+//!   the worktree.
+//! - `project`: the writer worktree's own `target/` beside the workspace manifest
+//!   selected by the verify port. Cold unless a person already built there.
+//!   Read-only lanes and non-Cargo projects use the lane cache.
 //! - Absolute path: used as given.
+//!
+//! Every mode keeps one target per worktree unless an operator points several at one
+//! absolute path. Cargo hashes a workspace member's units by its workspace-relative
+//! path and decides freshness by comparing source mtimes with the last build's
+//! dep-info, so a target shared by worktrees of one repository serves one branch's
+//! artifacts to another whose sources are older (#3561). A seed clone is safe
+//! because its aged dep-info makes every member rebuild once from this worktree's
+//! sources, while registry crates, whose dep-info lists no files, stay fresh.
 //!
 //! The value and its source appear in the lane preamble and in `provenant config show`.
 
@@ -15,12 +29,16 @@ use std::path::{Path, PathBuf};
 /// The registry knob.
 pub const KNOB: &str = "lanes.cargo_target";
 
+/// Lint-only target inside the project target. Cargo locks each target
+/// directory, so lints do not queue behind builds; `target/` ignores cover it.
+const PROJECT_LINT_DIR: &str = "provenant-lint";
+
 /// Target location mode configured for a lane.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CargoTargetSetting {
+    Project,
     #[default]
-    Shared,
     Private,
     Custom(PathBuf),
 }
@@ -28,8 +46,8 @@ pub enum CargoTargetSetting {
 impl CargoTargetSetting {
     pub fn parse(text: &str) -> Option<Self> {
         let trimmed = text.trim();
-        if trimmed == "shared" {
-            Some(Self::Shared)
+        if trimmed == "project" {
+            Some(Self::Project)
         } else if trimmed == "private" {
             Some(Self::Private)
         } else if Path::new(trimmed).is_absolute() {
@@ -41,14 +59,14 @@ impl CargoTargetSetting {
 
     pub fn as_str(&self) -> &str {
         match self {
-            Self::Shared => "shared",
+            Self::Project => "project",
             Self::Private => "private",
             Self::Custom(path) => path.to_str().unwrap_or(""),
         }
     }
 
-    pub fn is_shared(&self) -> bool {
-        matches!(self, Self::Shared)
+    pub fn is_project(&self) -> bool {
+        matches!(self, Self::Project)
     }
 
     pub fn is_private(&self) -> bool {
@@ -70,7 +88,7 @@ pub struct ResolvedCargoTarget {
 impl Default for ResolvedCargoTarget {
     fn default() -> Self {
         Self {
-            value: CargoTargetSetting::Shared,
+            value: CargoTargetSetting::Private,
             source: "default".into(),
         }
     }
@@ -99,10 +117,7 @@ impl ResolvedCargoTarget {
                 value,
                 source: display_source(knob_source).into(),
             },
-            None => Self {
-                value: CargoTargetSetting::Shared,
-                source: "default".into(),
-            },
+            None => Self::default(),
         }
     }
 
@@ -115,13 +130,32 @@ impl ResolvedCargoTarget {
         )
     }
 
-    /// Compute the build target and lint target directories.
+    /// The writer worktree's Cargo workspace directory when `project` is selected:
+    /// the verify port's workspace inside `worktree`, read as data only. `None`
+    /// for other modes, read-only lanes and projects without a Cargo manifest.
+    pub fn project_workspace(&self, worktree: Option<&Path>, host_state: &Path) -> Option<PathBuf> {
+        if !self.value.is_project() {
+            return None;
+        }
+        crate::target_seed::cargo_build_directory(worktree?, host_state)
+            .ok()
+            .flatten()
+    }
+
+    /// Compute the build target and lint target directories. `project_workspace`
+    /// comes from [`Self::project_workspace`]; without it `project` falls back to
+    /// the lane cache.
     pub fn target_paths(
         &self,
-        home: &Path,
-        common_git_dir: Option<&Path>,
+        project_workspace: Option<&Path>,
         private_cache: &Path,
     ) -> (PathBuf, PathBuf) {
+        let private = || {
+            (
+                private_cache.join("target"),
+                private_cache.join("target-lint"),
+            )
+        };
         match &self.value {
             CargoTargetSetting::Custom(path) => {
                 let lint = match path.file_name() {
@@ -130,27 +164,20 @@ impl ResolvedCargoTarget {
                 };
                 (path.clone(), lint)
             }
-            CargoTargetSetting::Private => (
-                private_cache.join("target"),
-                private_cache.join("target-lint"),
-            ),
-            CargoTargetSetting::Shared => {
-                if let Some(dir) = common_git_dir {
-                    let key = crate::target_seed::project_key(dir);
-                    let cache = home.join("Library/Caches/provenant-shared-cargo").join(key);
-                    (cache.join("target"), cache.join("target-lint"))
-                } else {
-                    (
-                        private_cache.join("target"),
-                        private_cache.join("target-lint"),
-                    )
+            CargoTargetSetting::Private => private(),
+            CargoTargetSetting::Project => match project_workspace {
+                Some(workspace) => {
+                    let target = workspace.join("target");
+                    let lint = target.join(PROJECT_LINT_DIR);
+                    (target, lint)
                 }
-            }
+                None => private(),
+            },
         }
     }
 }
 
-/// A line `Cargo target: shared|private` in the chair brief. A brief is requester text
+/// A line `Cargo target: project|private` in the chair brief. A brief is requester text
 /// (possibly pasted from an issue, possibly from a sandboxed parent lane), so it can
 /// pick a mode but never name a path: a custom path grants the lane read, write and exec
 /// there, and comes only from host or project configuration or the launch knob.
@@ -173,13 +200,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn knob_default_is_shared() {
+    fn knob_default_is_private() {
         let profile = HarnessProfile::default();
         let resolved = ResolvedCargoTarget::resolve(&profile);
-        assert_eq!(resolved.value, CargoTargetSetting::Shared);
+        assert_eq!(resolved.value, CargoTargetSetting::Private);
         assert_eq!(resolved.source, "default");
-        assert!(resolved.value.is_shared());
-        assert!(!resolved.value.is_private());
+        assert!(resolved.value.is_private());
+        assert!(!resolved.value.is_project());
     }
 
     #[test]
@@ -189,8 +216,8 @@ mod tests {
             Some(CargoTargetSetting::Private)
         );
         assert_eq!(
-            brief_target("intro\nCargo target: shared\n"),
-            Some(CargoTargetSetting::Shared)
+            brief_target("intro\nCargo target: project\n"),
+            Some(CargoTargetSetting::Project)
         );
         assert_eq!(
             brief_target("Cargo target: /Users/someone/Library/LaunchAgents"),
@@ -199,10 +226,10 @@ mod tests {
     }
 
     #[test]
-    fn knob_parsing_handles_shared_private_and_absolute_paths() {
+    fn knob_parsing_handles_project_private_and_absolute_paths() {
         assert_eq!(
-            CargoTargetSetting::parse("shared"),
-            Some(CargoTargetSetting::Shared)
+            CargoTargetSetting::parse("project"),
+            Some(CargoTargetSetting::Project)
         );
         assert_eq!(
             CargoTargetSetting::parse("private"),
@@ -216,6 +243,8 @@ mod tests {
         );
         assert_eq!(CargoTargetSetting::parse("relative/path"), None);
         assert_eq!(CargoTargetSetting::parse("unknown"), None);
+        // One target for every worktree of a project serves stale artifacts (#3561).
+        assert_eq!(CargoTargetSetting::parse("shared"), None);
     }
 
     #[test]
@@ -223,16 +252,16 @@ mod tests {
         let default_target = ResolvedCargoTarget::default();
         assert_eq!(
             default_target.preamble(),
-            "Cargo target: shared (source: default; lanes.cargo_target).\n"
+            "Cargo target: private (source: default; lanes.cargo_target).\n"
         );
 
         let mut profile = HarnessProfile::default();
-        profile.knobs.insert(KNOB.into(), "private".into());
+        profile.knobs.insert(KNOB.into(), "project".into());
         profile.knob_sources.insert(KNOB.into(), LimitSource::Host);
         let resolved = ResolvedCargoTarget::resolve(&profile);
         assert_eq!(
             resolved.preamble(),
-            "Cargo target: private (source: host; lanes.cargo_target).\n"
+            "Cargo target: project (source: host; lanes.cargo_target).\n"
         );
 
         let custom = ResolvedCargoTarget {
@@ -255,36 +284,27 @@ mod tests {
     }
 
     #[test]
-    fn env_paths_for_shared_private_and_custom() {
-        let home = Path::new("/Users/user");
-        let common_git = Path::new("/Users/user/project/.git");
+    fn env_paths_for_project_private_and_custom() {
+        let workspace = Path::new("/Users/user/project/.worktrees/lane/tools/build");
         let private_cache = Path::new("/Users/user/Library/Caches/provenant-lane-cargo/abc");
 
-        let shared = ResolvedCargoTarget {
-            value: CargoTargetSetting::Shared,
-            source: "default".into(),
+        let project = ResolvedCargoTarget {
+            value: CargoTargetSetting::Project,
+            source: "host".into(),
         };
-        let (shared_target, shared_lint) =
-            shared.target_paths(home, Some(common_git), private_cache);
-        let key = crate::target_seed::project_key(common_git);
-        assert_eq!(
-            shared_target,
-            home.join("Library/Caches/provenant-shared-cargo")
-                .join(&key)
-                .join("target")
-        );
-        assert_eq!(
-            shared_lint,
-            home.join("Library/Caches/provenant-shared-cargo")
-                .join(&key)
-                .join("target-lint")
-        );
+        let (target, lint) = project.target_paths(Some(workspace), private_cache);
+        assert_eq!(target, workspace.join("target"));
+        assert_eq!(lint, workspace.join("target/provenant-lint"));
+        // Read-only lanes and non-Cargo projects have no workspace: lane cache.
+        let (target, lint) = project.target_paths(None, private_cache);
+        assert_eq!(target, private_cache.join("target"));
+        assert_eq!(lint, private_cache.join("target-lint"));
 
         let private = ResolvedCargoTarget {
             value: CargoTargetSetting::Private,
             source: "host".into(),
         };
-        let (priv_target, priv_lint) = private.target_paths(home, Some(common_git), private_cache);
+        let (priv_target, priv_lint) = private.target_paths(Some(workspace), private_cache);
         assert_eq!(priv_target, private_cache.join("target"));
         assert_eq!(priv_lint, private_cache.join("target-lint"));
 
@@ -292,22 +312,37 @@ mod tests {
             value: CargoTargetSetting::Custom(PathBuf::from("/opt/target")),
             source: "launch".into(),
         };
-        let (cust_target, cust_lint) = custom.target_paths(home, Some(common_git), private_cache);
+        let (cust_target, cust_lint) = custom.target_paths(Some(workspace), private_cache);
         assert_eq!(cust_target, PathBuf::from("/opt/target"));
         assert_eq!(cust_lint, PathBuf::from("/opt/target-lint"));
     }
 
+    /// The invariant behind #3561: two worktrees of one repository never resolve to
+    /// one target unless an operator names the same absolute path.
     #[test]
-    fn shared_target_is_identical_for_same_project() {
-        let home = Path::new("/Users/user");
-        let common_git = Path::new("/Users/user/project/.git");
-        let priv_cache_1 = Path::new("/Users/user/Library/Caches/provenant-lane-cargo/lane1");
-        let priv_cache_2 = Path::new("/Users/user/Library/Caches/provenant-lane-cargo/lane2");
-
-        let shared = ResolvedCargoTarget::default();
-        let (target_1, _) = shared.target_paths(home, Some(common_git), priv_cache_1);
-        let (target_2, _) = shared.target_paths(home, Some(common_git), priv_cache_2);
-
-        assert_eq!(target_1, target_2);
+    fn worktrees_of_one_project_never_share_a_default_target()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        for worktree in [&first, &second] {
+            std::fs::create_dir_all(worktree)?;
+            std::fs::write(worktree.join("Cargo.toml"), "[workspace]\n")?;
+        }
+        for value in [CargoTargetSetting::default(), CargoTargetSetting::Project] {
+            let setting = ResolvedCargoTarget {
+                value,
+                source: "default".into(),
+            };
+            let resolve = |worktree: &Path, cache: &str| {
+                let workspace = setting.project_workspace(Some(worktree), root.path());
+                setting.target_paths(workspace.as_deref(), &root.path().join(cache))
+            };
+            let (first_target, first_lint) = resolve(&first, "cache-1");
+            let (second_target, second_lint) = resolve(&second, "cache-2");
+            assert_ne!(first_target, second_target, "{:?}", setting.value);
+            assert_ne!(first_lint, second_lint, "{:?}", setting.value);
+        }
+        Ok(())
     }
 }

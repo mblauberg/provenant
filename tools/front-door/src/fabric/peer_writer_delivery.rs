@@ -64,7 +64,14 @@ fn settlement_defers_adopted_writer_cleanup() -> Result<(), Box<dyn std::error::
             .with_borrow(|spawned| spawned.as_ref().map(Vec::len).map_err(Clone::clone))?,
         spawned + 1
     );
-    gc_cleanup::collect_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+    let cancel = provenant_core::CancelToken::new();
+    gc_cleanup::collect_owned_worktree(
+        &fixture.settled,
+        &fixture.roots,
+        &FreeWorkers,
+        None,
+        &cancel,
+    )?;
     assert!(fixture.worktree.exists());
     let retained = fixture
         .store
@@ -104,7 +111,14 @@ fn settlement_defers_tracking_ref_refresh() -> Result<(), Box<dyn std::error::Er
     assert!(receipt["tracking_ref_warning"].is_null(), "{receipt}");
     assert_eq!(receipt["state"], "retained", "{receipt}");
     assert_eq!(receipt["cleanup_deferred"], true);
-    gc_cleanup::collect_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+    let cancel = provenant_core::CancelToken::new();
+    gc_cleanup::collect_owned_worktree(
+        &fixture.settled,
+        &fixture.roots,
+        &FreeWorkers,
+        None,
+        &cancel,
+    )?;
     // An unreachable remote proves nothing: the refresh failure is reported
     // and the worktree stays for a later retry, never removed on it.
     let completed = fixture

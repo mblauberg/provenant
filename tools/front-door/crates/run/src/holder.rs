@@ -4437,6 +4437,7 @@ mod writer_recovery_tests {
                     .checked_add(provenant_core::DurationMicros::from_seconds(2 * 86400)?)?,
                 false,
                 &call,
+                &crate::RetentionScan::default(),
             )?;
             assert_eq!(
                 private_git(&["rev-parse", "HEAD"])?,
@@ -4678,6 +4679,7 @@ mod writer_recovery_tests {
                 true,
                 None,
                 &call,
+                &crate::retention::RetentionScan::default(),
             )?;
             assert!(collection.errors.is_empty(), "{collection:?}");
             assert!(collection.evicted.is_empty(), "{collection:?}");
@@ -8223,6 +8225,7 @@ mod writer_recovery_tests {
                         .checked_add(provenant_core::DurationMicros::from_seconds(90 * 86_400)?)?,
                     false,
                     &call,
+                    &crate::RetentionScan::default(),
                 )?;
                 assert_eq!(
                     &std::fs::read(path).map_err(|error| {

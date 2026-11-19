@@ -87,6 +87,7 @@ detail_codes! {
     COMPILER_HOST_MISSING = "compiler_host_missing",
     TOOLCHAIN_PIN_INVALID = "toolchain_pin_invalid",
     TOOLCHAIN_PIN_CHANNEL_MISSING = "toolchain_pin_channel_missing",
+    CARGO_HOME_UNRESOLVABLE = "cargo_home_unresolvable",
 }
 
 /// Refuse bounded Cargo config input when it can alter the rustc, target, or
@@ -184,6 +185,8 @@ fallback_reasons! {
     TARGET_CONTAINS_UNSUPPORTED_ENTRY = "target_contains_unsupported_entry",
     CLONE_FAILED = "clone_failed",
     TOOLCHAIN_UNVERIFIED = "toolchain_unverified",
+    FRESHNESS_RESET_FAILED = "freshness_reset_failed",
+    SEED_LAYOUT_UNRECOGNISED = "seed_layout_unrecognised",
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -194,11 +197,87 @@ pub(crate) struct Outcome {
     /// an environment value or path.
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    /// What differed when the refusal is a mismatch: the expected fact and the
+    /// one found. Toolchain, triple, profile and variable-class names only, never
+    /// a path or an environment value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    differs: Option<Difference>,
     /// Path-free receipt proving which complete generation supplied a seed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     seed_source: Option<SeedSource>,
     #[serde(flatten)]
     extra: provenant_records::ExtraFields,
+}
+
+/// Expected against found, in words a person can act on. Both sides are bounded
+/// plain text: control characters are dropped and the length is capped, so a
+/// value read from a checkout or a store cannot reshape a terminal line.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Difference {
+    expected: String,
+    found: String,
+}
+
+impl Difference {
+    pub(crate) fn new(expected: impl AsRef<str>, found: impl AsRef<str>) -> Self {
+        let plain = |text: &str| -> String {
+            text.chars()
+                .filter(|character| !character.is_control())
+                .take(120)
+                .collect()
+        };
+        Self {
+            expected: plain(expected.as_ref()),
+            found: plain(found.as_ref()),
+        }
+    }
+
+    /// Distinct values joined for display, at most four named.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn found_among(found: &std::collections::BTreeSet<String>) -> String {
+        const NAMED: usize = 4;
+        let mut text = found
+            .iter()
+            .take(NAMED)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        if found.len() > NAMED {
+            text.push_str(&format!(" and {} more", found.len() - NAMED));
+        }
+        text
+    }
+}
+
+/// A toolchain-verification refusal: a stable snake_case code and, where the
+/// refusal is a mismatch, what was expected and what was found.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Refusal {
+    pub(crate) code: &'static str,
+    pub(crate) differs: Option<Difference>,
+}
+
+impl Refusal {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn differs(
+        code: &'static str,
+        expected: impl AsRef<str>,
+        found: impl AsRef<str>,
+    ) -> Self {
+        Self {
+            code,
+            differs: Some(Difference::new(expected, found)),
+        }
+    }
+}
+
+impl From<&'static str> for Refusal {
+    fn from(code: &'static str) -> Self {
+        Self {
+            code,
+            differs: None,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -230,6 +309,7 @@ impl Outcome {
             status: "skipped".into(),
             reason: reason.into(),
             detail: None,
+            differs: None,
             seed_source: None,
             extra: Default::default(),
         }
@@ -240,36 +320,187 @@ impl Outcome {
             status: "fallback".into(),
             reason: reason.into(),
             detail: None,
+            differs: None,
             seed_source: None,
             extra: Default::default(),
         }
     }
     /// One line for the host's stderr when a seed was wanted and not used, so
-    /// a lane that builds its dependencies from scratch is not a surprise.
-    pub(crate) fn fallback_warning(&self, what: &str) -> Option<String> {
+    /// a target that builds from scratch is not a surprise. A mismatch names
+    /// what was expected and what was found. Where the filesystem cannot clone,
+    /// the reason is `clone_failed`: the target stays unseeded and its first
+    /// build is cold. `consequence` says what the caller gets instead.
+    pub(crate) fn fallback_warning(&self, what: &str, consequence: &str) -> Option<String> {
         (self.status == "fallback").then(|| {
             format!(
-                "warning: {what} not seeded ({}{}); this lane builds without it",
+                "warning: {what} not seeded ({}{}{}); {consequence}",
                 self.reason,
                 self.detail
                     .as_deref()
                     .map(|d| format!(": {d}"))
+                    .unwrap_or_default(),
+                self.differs
+                    .as_ref()
+                    .map(|d| format!("; expected {}, found {}", d.expected, d.found))
                     .unwrap_or_default()
             )
         })
     }
     pub(crate) fn fallback_detail(reason: &'static str, detail: &'static str) -> Self {
+        Self::fallback_refusal(reason, detail.into())
+    }
+    pub(crate) fn fallback_refusal(reason: &'static str, refusal: Refusal) -> Self {
         Self {
             status: "fallback".into(),
             reason: reason.into(),
-            detail: Some(detail.into()),
+            detail: Some(refusal.code.into()),
+            differs: refusal.differs,
             seed_source: None,
             extra: Default::default(),
         }
     }
+    /// A generation mismatch: no complete generation matched what was wanted.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn fallback_differs(reason: &'static str, differs: Difference) -> Self {
+        Self {
+            differs: Some(differs),
+            ..Self::fallback(reason)
+        }
+    }
+    pub(crate) fn is_seeded(&self) -> bool {
+        self.status == "seeded"
+    }
 }
 
-pub(crate) fn seed_target(
+/// What `provenant worktree seed-target` did for one checkout.
+#[derive(Debug, serde::Serialize)]
+pub struct WorktreeSeed {
+    /// The directory to use as `CARGO_TARGET_DIR`.
+    pub target: std::path::PathBuf,
+    pub status: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// What differed, expected against found, when a mismatch kept the seed out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub differs: Option<Difference>,
+    /// The host seed generation cloned, when one was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+    /// Where the Cargo home that was verified came from: the caller's shell can
+    /// differ from the host a lane runs under.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cargo_home: Option<&'static str>,
+    /// How a person gets a seed this checkout can use, when none was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair: Option<&'static str>,
+}
+
+/// Where host seeds come from, for a reason that only a new generation fixes.
+fn seed_repair(reason: &str) -> Option<&'static str> {
+    match reason {
+        fallback_reasons::NO_GENERATIONS
+        | fallback_reasons::STORE_UNAVAILABLE
+        | fallback_reasons::MANIFEST_INVALID
+        | fallback_reasons::TOOLCHAIN_MISMATCH
+        | fallback_reasons::TRIPLE_MISMATCH
+        | fallback_reasons::CARGO_PROFILE_MISMATCH => Some(
+            "host seeds are built from the verify base by `provenant worktree seed-build` and refreshed by tick when it moves; build one with the toolchain and profile above, then run seed-target again",
+        ),
+        fallback_reasons::SEED_LAYOUT_UNRECOGNISED => Some(
+            "this release cannot age the seed's Cargo build layout; upgrade provenant, or rebuild the seed with `provenant worktree seed-build` after upgrading",
+        ),
+        _ => None,
+    }
+}
+
+/// The caller's environment as a lane would see it for the toolchain homes:
+/// rustup keeps its toolchains in `RUSTUP_HOME`, which defaults to
+/// `$HOME/.rustup`, where lanes always set it. Outside a lane nothing sets it,
+/// so an unset or empty value takes the default; any other value is kept, so a
+/// toolchain home that differs from the lane's is refused and named.
+fn outside_lane_environment(
+    home: &Path,
+    environment: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let mut resolved = environment.to_vec();
+    if !resolved
+        .iter()
+        .any(|(key, value)| key == "RUSTUP_HOME" && !value.is_empty())
+    {
+        resolved.retain(|(key, _)| key != "RUSTUP_HOME");
+        resolved.push(("RUSTUP_HOME".into(), home.join(".rustup").into_os_string()));
+    }
+    resolved
+}
+
+/// Seed a checkout's private target, the one a writer lane in that checkout
+/// uses, from the newest compatible host seed generation, with dep-info aged.
+/// An existing target is kept. Runs on the host with the caller's environment,
+/// so the caller's Cargo profile overrides choose the generation. The
+/// toolchain is resolved as cargo and rustup would for the checkout (its
+/// `rust-toolchain.toml`, the default `$HOME/.rustup` and `$HOME/.cargo`) and
+/// verified by the rules lanes use; a refusal names what differed.
+pub fn seed_worktree_target(
+    state: &Path,
+    home: &Path,
+    worktree: &Path,
+    common_git_dir: &Path,
+    cache: &Path,
+    environment: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> WorktreeSeed {
+    let environment = outside_lane_environment(home, environment);
+    let mut cargo_home_source = None;
+    let outcome = match crate::target_seed::cargo_build_directory(worktree, state) {
+        Ok(Some(build)) => match provenant_confinement::cargo::CargoHome::resolve(home, |name| {
+            environment
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        })
+        .map_err(|_| codes::CARGO_HOME_UNRESOLVABLE)
+        .and_then(|cargo_home| {
+            cargo_home_source = Some(cargo_home.source);
+            crate::writer::verified_cargo_config(&build, &cargo_home.path)
+        }) {
+            Err(detail) => Outcome::fallback_detail(fallback_reasons::TOOLCHAIN_UNVERIFIED, detail),
+            Ok(()) => seed_target_with_reservation(
+                state,
+                cache,
+                worktree,
+                &crate::target_seed::project_key(common_git_dir),
+                home,
+                &environment,
+                &provenant_core::CancelToken::new(),
+                |_| {},
+            ),
+        },
+        Ok(None) => Outcome::skipped("non_cargo_project"),
+        Err(_) => Outcome::fallback_detail(
+            fallback_reasons::TOOLCHAIN_UNVERIFIED,
+            codes::CARGO_WORKSPACE_UNREADABLE,
+        ),
+    };
+    WorktreeSeed {
+        target: cache.join("target"),
+        warning: outcome.fallback_warning("the Cargo target", "builds in it start cold"),
+        cargo_home: cargo_home_source,
+        repair: seed_repair(&outcome.reason).filter(|_| outcome.status == "fallback"),
+        differs: outcome.differs.clone(),
+        generation: outcome
+            .seed_source
+            .as_ref()
+            .and_then(|source| source.generation_id.clone()),
+        status: outcome.status,
+        reason: outcome.reason,
+        detail: outcome.detail,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn seed_target_with_reservation(
     state: &Path,
     cache: &Path,
     worktree: &Path,
@@ -277,6 +508,7 @@ pub(crate) fn seed_target(
     home: &Path,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
     cancel: &provenant_core::CancelToken,
+    before_clone: impl FnOnce(Option<u64>),
 ) -> Outcome {
     #[cfg(unix)]
     {
@@ -292,8 +524,8 @@ pub(crate) fn seed_target(
             Some(cancel),
         ) {
             Ok(metadata) => metadata,
-            Err(detail) => {
-                return Outcome::fallback_detail(fallback_reasons::TOOLCHAIN_UNVERIFIED, detail);
+            Err(refusal) => {
+                return Outcome::fallback_refusal(fallback_reasons::TOOLCHAIN_UNVERIFIED, refusal);
             }
         };
         seed_target_cancellable(
@@ -306,6 +538,7 @@ pub(crate) fn seed_target(
                 project_key,
             },
             Some(cancel),
+            before_clone,
             |source, dest, deadline| clone_target_until(source, dest, cancel, deadline),
         )
     }
@@ -319,6 +552,7 @@ pub(crate) fn seed_target(
             home,
             environment,
             cancel,
+            before_clone,
         );
         Outcome::skipped("unsupported_platform")
     }
@@ -345,6 +579,7 @@ fn seed_target_with(
             project_key: "",
         },
         None,
+        |_| {},
         |source, dest, _| clone(source, dest),
     )
 }
@@ -357,12 +592,27 @@ struct SeedCompatibility<'a> {
     project_key: &'a str,
 }
 
+/// The first line of `rustc -vV`, which names the release, commit and date.
+#[cfg(any(unix, test))]
+fn compiler_line(version: &str) -> &str {
+    version.lines().next().unwrap_or(version)
+}
+
+#[cfg(any(unix, test))]
+fn describe_profile(profile: &provenant_config::CargoBuildProfile) -> String {
+    format!(
+        "CARGO_INCREMENTAL={} CARGO_PROFILE_DEV_DEBUG={}",
+        profile.incremental, profile.debug
+    )
+}
+
 #[cfg(any(unix, test))]
 fn seed_target_cancellable(
     state: &Path,
     cache: &Path,
     compatibility: SeedCompatibility<'_>,
     cancel: Option<&provenant_core::CancelToken>,
+    before_clone: impl FnOnce(Option<u64>),
     clone: impl FnOnce(&Path, &provenant_os::fs::Directory, &SeedBudget) -> Result<(), &'static str>,
 ) -> Outcome {
     let budget = SeedBudget::new();
@@ -423,6 +673,10 @@ fn seed_target_cancellable(
     let mut saw_cargo_profile = false;
     let mut saw_manifest = false;
     let mut saw_entry = false;
+    // What the complete generations held, for a refusal that names it.
+    let mut found_versions = std::collections::BTreeSet::new();
+    let mut found_triples = std::collections::BTreeSet::new();
+    let mut found_profiles = std::collections::BTreeSet::new();
     let mut selected_project = None;
     let mut selected_shared = None;
     for entry in entries {
@@ -456,14 +710,17 @@ fn seed_target_cancellable(
         };
         saw_manifest = true;
         if manifest.rustc_vv != compatibility.version {
+            found_versions.insert(compiler_line(&manifest.rustc_vv).to_owned());
             continue;
         }
         saw_version = true;
         if manifest.host_triple != compatibility.triple {
+            found_triples.insert(manifest.host_triple.clone());
             continue;
         }
         saw_triple = true;
         if &manifest.cargo_profile != compatibility.cargo_profile {
+            found_profiles.insert(describe_profile(&manifest.cargo_profile));
             continue;
         }
         saw_cargo_profile = true;
@@ -483,21 +740,46 @@ fn seed_target_cancellable(
         }
     }
     let Some(selected) = selected_project.or(selected_shared) else {
-        return Outcome::fallback(if !saw_entry {
-            fallback_reasons::NO_GENERATIONS
+        return if !saw_entry {
+            Outcome::fallback(fallback_reasons::NO_GENERATIONS)
         } else if !saw_manifest {
-            fallback_reasons::MANIFEST_INVALID
+            Outcome::fallback(fallback_reasons::MANIFEST_INVALID)
         } else if !saw_version {
-            fallback_reasons::TOOLCHAIN_MISMATCH
+            Outcome::fallback_differs(
+                fallback_reasons::TOOLCHAIN_MISMATCH,
+                Difference::new(
+                    compiler_line(compatibility.version),
+                    Difference::found_among(&found_versions),
+                ),
+            )
         } else if !saw_triple {
-            fallback_reasons::TRIPLE_MISMATCH
+            Outcome::fallback_differs(
+                fallback_reasons::TRIPLE_MISMATCH,
+                Difference::new(
+                    compatibility.triple,
+                    Difference::found_among(&found_triples),
+                ),
+            )
         } else if !saw_cargo_profile {
-            fallback_reasons::CARGO_PROFILE_MISMATCH
+            Outcome::fallback_differs(
+                fallback_reasons::CARGO_PROFILE_MISMATCH,
+                Difference::new(
+                    describe_profile(compatibility.cargo_profile),
+                    Difference::found_among(&found_profiles),
+                ),
+            )
         } else {
-            fallback_reasons::MANIFEST_INVALID
-        });
+            Outcome::fallback(fallback_reasons::MANIFEST_INVALID)
+        };
     };
     let source = selected.target;
+    before_clone(allocated_tree_bytes(&source, deadline, cancel));
+    if deadline.expired() {
+        return Outcome::fallback(fallback_reasons::SEED_BUDGET_EXHAUSTED);
+    }
+    if cancel.is_some_and(|token| token.is_cancelled()) {
+        return Outcome::fallback(fallback_reasons::CANCELLED);
+    }
     let Ok(random) = temporary_name() else {
         return Outcome::fallback(fallback_reasons::STAGING_UNAVAILABLE);
     };
@@ -511,6 +793,7 @@ fn seed_target_cancellable(
             .open_verified_directory(&stage)
             .map_err(|_| fallback_reasons::STAGING_UNAVAILABLE)?;
         clone(&source, &staging, deadline)?;
+        age_dep_info(&cache.join(&stage), deadline, cancel)?;
         if deadline.expired() {
             return Err(fallback_reasons::SEED_BUDGET_EXHAUSTED);
         }
@@ -532,6 +815,7 @@ fn seed_target_cancellable(
                 "durability_unconfirmed".into()
             },
             detail: None,
+            differs: None,
             seed_source: Some(SeedSource {
                 generation_id: selected.generation_id,
                 project_match: selected.project_match,
@@ -542,12 +826,18 @@ fn seed_target_cancellable(
             if reason == fallback_reasons::CANCELLED
                 || reason == fallback_reasons::SEED_BUDGET_EXHAUSTED =>
         {
+            // The clone's own budget or token is spent; remove the partial
+            // stage with a fresh bounded budget so it does not linger for the
+            // next seed to spend its budget on. One that does not finish is
+            // retried by the next seed under the store lock.
+            let _ = remove_seed_tree(&cache_dir, &stage, None, &SeedBudget::new());
             Outcome::fallback(reason)
         }
         Err(reason) => {
             match remove_seed_tree(&cache_dir, &stage, cancel, deadline) {
                 Ok(true) => {}
                 Ok(false) => {
+                    let _ = remove_seed_tree(&cache_dir, &stage, None, &SeedBudget::new());
                     return Outcome::fallback(
                         if cancel.is_some_and(|token| token.is_cancelled()) {
                             fallback_reasons::CANCELLED
@@ -561,6 +851,170 @@ fn seed_target_cancellable(
             Outcome::fallback(reason)
         }
     }
+}
+
+/// The deepest directory the seed clone and the aging walk follow, so a tree
+/// one accepts is a tree the other can read.
+#[cfg(any(unix, test))]
+const MAX_TREE_DEPTH: usize = 128;
+
+/// A seed was built from another checkout. Cargo hashes a workspace member's
+/// units by its workspace-relative path and treats them as fresh while every
+/// source listed in their dep-info is older than that dep-info, so a worktree
+/// checked out before the seed was built would reuse the seed's member
+/// artifacts for different sources (#3561). Ageing a unit's dep-info to the
+/// epoch makes it rebuild once in its new worktree.
+///
+/// Cargo does not promise where fingerprints live (build-dir layout v2 puts
+/// them in `<profile>/build/<package>/<hash>/fingerprint/`, the earlier layout
+/// in `<profile>/.fingerprint/<unit>/`), and it does not promise which units
+/// keep dep-info there. So the pass is driven by the fingerprints themselves:
+/// it walks the seed within the depth, budget and cancellation bounds for the
+/// `*.json` fingerprints in a `fingerprint` directory or a unit directory under
+/// `.fingerprint`, reads each one's `local` entries and ages exactly the files
+/// its `CheckDepInfo` entries name, relative to the target root. Unknown fields
+/// are ignored. A fingerprint that cannot be read as that shape, a named
+/// dep-info that is missing or lies outside the target, or a non-empty seed in
+/// which none is named is `seed_layout_unrecognised`: publishing it would
+/// silently skip the protection for some units. Returns how many files were aged.
+#[cfg(any(unix, test))]
+fn age_dep_info(
+    target: &Path,
+    budget: &SeedBudget,
+    cancel: Option<&provenant_core::CancelToken>,
+) -> Result<usize, &'static str> {
+    use std::{collections::BTreeSet, ffi::OsStr, io::Read, path::Component};
+    /// A fingerprint lists a unit's dependencies; none approaches this.
+    const MAX_FINGERPRINT_BYTES: u64 = 1 << 20;
+    fn named(path: &Path, name: &str) -> bool {
+        path.file_name() == Some(OsStr::new(name))
+    }
+    let stop = || {
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            Err(fallback_reasons::CANCELLED)
+        } else if budget.expired() {
+            Err(fallback_reasons::SEED_BUDGET_EXHAUSTED)
+        } else {
+            Ok(())
+        }
+    };
+    let failed = |_: std::io::Error| fallback_reasons::FRESHNESS_RESET_FAILED;
+    fn visit(
+        directory: &Path,
+        depth: usize,
+        stop: &dyn Fn() -> Result<(), &'static str>,
+        fingerprints: &mut Vec<std::path::PathBuf>,
+    ) -> Result<(), &'static str> {
+        if depth > MAX_TREE_DEPTH {
+            return Err(fallback_reasons::TARGET_TOO_DEEP);
+        }
+        let failed = |_: std::io::Error| fallback_reasons::FRESHNESS_RESET_FAILED;
+        let holds_fingerprints = named(directory, "fingerprint")
+            || named(directory, ".fingerprint")
+            || directory
+                .parent()
+                .is_some_and(|parent| named(parent, ".fingerprint"));
+        for entry in std::fs::read_dir(directory).map_err(failed)? {
+            stop()?;
+            let entry = entry.map_err(failed)?;
+            let kind = entry.file_type().map_err(failed)?;
+            if kind.is_dir() {
+                visit(&entry.path(), depth + 1, stop, fingerprints)?;
+            } else if kind.is_file()
+                && holds_fingerprints
+                && entry.path().extension() == Some(OsStr::new("json"))
+            {
+                fingerprints.push(entry.path());
+            }
+        }
+        Ok(())
+    }
+    let mut fingerprints = Vec::new();
+    visit(target, 0, &stop, &mut fingerprints)?;
+
+    let mut dep_infos = BTreeSet::new();
+    for fingerprint in &fingerprints {
+        stop()?;
+        let mut bytes = Vec::new();
+        std::fs::File::open(fingerprint)
+            .map_err(failed)?
+            .take(MAX_FINGERPRINT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(failed)?;
+        let local = (bytes.len() as u64 <= MAX_FINGERPRINT_BYTES)
+            .then(|| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .flatten()
+            .and_then(|value| match value.get("local") {
+                Some(serde_json::Value::Array(local)) => Some(local.clone()),
+                _ => None,
+            })
+            .ok_or(fallback_reasons::SEED_LAYOUT_UNRECOGNISED)?;
+        for entry in local {
+            let Some(check) = entry.get("CheckDepInfo") else {
+                continue;
+            };
+            let relative = check
+                .get("dep_info")
+                .and_then(serde_json::Value::as_str)
+                .map(Path::new)
+                .filter(|path| {
+                    path.components().next().is_some()
+                        && path
+                            .components()
+                            .all(|component| matches!(component, Component::Normal(_)))
+                })
+                .ok_or(fallback_reasons::SEED_LAYOUT_UNRECOGNISED)?;
+            dep_infos.insert(relative.to_path_buf());
+        }
+    }
+    for relative in &dep_infos {
+        stop()?;
+        let path = target.join(relative);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {}
+            _ => return Err(fallback_reasons::SEED_LAYOUT_UNRECOGNISED),
+        }
+        std::fs::File::open(&path)
+            .and_then(|file| file.set_modified(std::time::SystemTime::UNIX_EPOCH))
+            .map_err(failed)?;
+    }
+    let empty = std::fs::read_dir(target).map_err(failed)?.next().is_none();
+    if dep_infos.is_empty() && !empty {
+        return Err(fallback_reasons::SEED_LAYOUT_UNRECOGNISED);
+    }
+    Ok(dep_infos.len())
+}
+
+#[cfg(unix)]
+fn allocated_tree_bytes(
+    path: &Path,
+    deadline: &SeedBudget,
+    cancel: Option<&provenant_core::CancelToken>,
+) -> Option<u64> {
+    use std::{fs, os::unix::fs::MetadataExt};
+    fn walk(
+        path: &Path,
+        depth: usize,
+        deadline: &SeedBudget,
+        cancel: Option<&provenant_core::CancelToken>,
+    ) -> Option<u64> {
+        if depth > 64 || deadline.expired() || cancel.is_some_and(|token| token.is_cancelled()) {
+            return None;
+        }
+        let metadata = fs::symlink_metadata(path).ok()?;
+        let mut bytes = metadata.blocks().saturating_mul(512);
+        if metadata.file_type().is_dir() {
+            for entry in fs::read_dir(path).ok()? {
+                if deadline.expired() || cancel.is_some_and(|token| token.is_cancelled()) {
+                    return None;
+                }
+                bytes =
+                    bytes.saturating_add(walk(&entry.ok()?.path(), depth + 1, deadline, cancel)?);
+            }
+        }
+        Some(bytes)
+    }
+    walk(path, 0, deadline, cancel)
 }
 
 #[cfg(all(target_os = "macos", test))]
@@ -671,7 +1125,7 @@ fn clone_entries(
     if store.deadline.expired() {
         return Err(fallback_reasons::SEED_BUDGET_EXHAUSTED);
     }
-    if depth > 128 {
+    if depth > MAX_TREE_DEPTH {
         return Err(store.too_deep);
     }
     for entry in source.entries().map_err(|_| store.read_failed)? {
@@ -701,6 +1155,8 @@ fn clone_entries(
             }
             FileKind::Regular => {
                 let file = source.open_read(&name).map_err(|_| store.read_failed)?;
+                // Off APFS or a reflink filesystem the clone fails and the
+                // target stays unseeded: a copy cannot fit the seed budget.
                 destination
                     .clone_file_from(&file, &name)
                     .map_err(|_| fallback_reasons::CLONE_FAILED)?;
@@ -723,6 +1179,25 @@ fn clone_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_spent_budget_or_cancelled_clone_removes_its_stage() {
+        for reason in [
+            fallback_reasons::SEED_BUDGET_EXHAUSTED,
+            fallback_reasons::CANCELLED,
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let cache = tmp.path().join("cache");
+            std::fs::create_dir(&cache).unwrap();
+            generation(tmp.path(), "001", "v1", "host");
+            let outcome = seed_target_with(tmp.path(), &cache, "v1", "host", |_, stage| {
+                stage.mkdir(std::ffi::OsStr::new("partial"), 0o700).unwrap();
+                Err(reason)
+            });
+            assert_eq!(outcome, Outcome::fallback(reason));
+            assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
+        }
+    }
 
     fn generation(state: &Path, name: &str, version: &str, triple: &str) {
         generation_for_project(state, name, version, triple, "");
@@ -795,6 +1270,165 @@ mod tests {
             );
             assert!(seen.insert(*code), "{code} is listed twice");
         }
+    }
+
+    /// Write a unit's fingerprint the way Cargo does, naming the dep-info the unit
+    /// checks, and the dep-info itself.
+    fn unit(target: &Path, directory: &str, name: &str, local: &str) -> PathBuf {
+        let directory_path = target.join(directory);
+        std::fs::create_dir_all(&directory_path).unwrap();
+        std::fs::write(
+            directory_path.join(format!("{name}.json")),
+            format!(
+                "{{\"rustc\":1,\"deps\":[],\"local\":[{local}],\"future_field\":{{\"x\":[1]}}}}"
+            ),
+        )
+        .unwrap();
+        directory_path
+    }
+
+    fn check_dep_info(path: &str) -> String {
+        format!("{{\"CheckDepInfo\":{{\"dep_info\":\"{path}\",\"fingerprint\":\"mtime\"}}}}")
+    }
+
+    #[test]
+    fn seeded_dep_info_named_by_fingerprints_is_aged_so_worktree_sources_decide_freshness()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let target = root.path().join("target");
+        // Both Cargo build-dir layouts, host and cross-compiled: fingerprints under
+        // `.fingerprint/<unit>/` and under `build/<package>/<hash>/fingerprint/`.
+        let mut aged = Vec::new();
+        for (directory, name, dep_info) in [
+            (
+                "debug/.fingerprint/member-0123456789abcdef",
+                "lib-member",
+                "debug/.fingerprint/member-0123456789abcdef/dep-lib-member",
+            ),
+            (
+                "aarch64-apple-darwin/debug/.fingerprint/member-fedcba9876543210",
+                "lib-member",
+                "aarch64-apple-darwin/debug/.fingerprint/member-fedcba9876543210/dep-lib-member",
+            ),
+            (
+                "debug/build/member/0123456789abcdef/fingerprint",
+                "lib-member",
+                "debug/build/member/0123456789abcdef/fingerprint/dep-lib-member",
+            ),
+            // A unit kind whose dep-info does not sit in the unit's own directory
+            // is aged all the same, because the fingerprint names it.
+            (
+                "debug/build/member/0123456789abcdef/fingerprint",
+                "test-lib-member",
+                "debug/elsewhere/dep-test-lib-member",
+            ),
+            (
+                "aarch64-apple-darwin/debug/build/member/fedcba9876543210/fingerprint",
+                "build-script-build-script-build",
+                "aarch64-apple-darwin/debug/build/member/fedcba9876543210/fingerprint/dep-build-script-build-script-build",
+            ),
+        ] {
+            unit(&target, directory, name, &check_dep_info(dep_info));
+            let path = target.join(dep_info);
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            std::fs::write(&path, b"x")?;
+            aged.push(path);
+        }
+        // A run unit that only reruns on changes names no dep-info, and a
+        // registry-style unit is Precalculated: neither is touched.
+        let run = unit(
+            &target,
+            "debug/build/member/0123456789abcdef/fingerprint",
+            "run-build-script-build-script-build",
+            "{\"RerunIfChanged\":{\"output\":\"out\",\"paths\":[\"build.rs\"]}},{\"Precalculated\":\"1.0.0\"}",
+        );
+        let kept = [
+            run.join("run-build-script-build-script-build.json"),
+            // A `dep-` file that no fingerprint names is not aged.
+            target.join("debug/deps/dep-unrelated"),
+            target.join("debug/deps/libmember.rmeta"),
+        ];
+        std::fs::create_dir_all(target.join("debug/deps"))?;
+        for path in &kept[1..] {
+            std::fs::write(path, b"x")?;
+        }
+        assert_eq!(
+            age_dep_info(&target, &SeedBudget::new(), None),
+            Ok(aged.len())
+        );
+        for path in &aged {
+            assert_eq!(
+                std::fs::metadata(path)?.modified()?,
+                std::time::UNIX_EPOCH,
+                "{path:?}"
+            );
+        }
+        for path in &kept {
+            assert_ne!(
+                std::fs::metadata(path)?.modified()?,
+                std::time::UNIX_EPOCH,
+                "{path:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Ageing refuses, rather than skipping a unit, whenever a fingerprint cannot
+    /// say which dep-info it checks.
+    #[test]
+    fn a_fingerprint_that_cannot_name_its_dep_info_refuses_the_seed() {
+        let refuse = |prepare: &dyn Fn(&Path)| {
+            let root = tempfile::tempdir().unwrap();
+            let target = root.path().join("target");
+            let good = "debug/build/good/0123456789abcdef/fingerprint";
+            unit(
+                &target,
+                good,
+                "lib-good",
+                &check_dep_info(&format!("{good}/dep-lib-good")),
+            );
+            std::fs::write(target.join(good).join("dep-lib-good"), b"x").unwrap();
+            assert_eq!(age_dep_info(&target, &SeedBudget::new(), None), Ok(1));
+            prepare(&target);
+            assert_eq!(
+                age_dep_info(&target, &SeedBudget::new(), None),
+                Err(fallback_reasons::SEED_LAYOUT_UNRECOGNISED)
+            );
+        };
+        let bad = "debug/build/bad/fedcba9876543210/fingerprint";
+        // The named dep-info is missing.
+        refuse(&|target| {
+            unit(
+                target,
+                bad,
+                "lib-bad",
+                &check_dep_info(&format!("{bad}/dep-lib-bad")),
+            );
+        });
+        // The fingerprint is not JSON, or has no `local` list.
+        refuse(&|target| {
+            std::fs::create_dir_all(target.join(bad)).unwrap();
+            std::fs::write(target.join(bad).join("lib-bad.json"), b"not json").unwrap();
+        });
+        refuse(&|target| {
+            std::fs::create_dir_all(target.join(bad)).unwrap();
+            std::fs::write(target.join(bad).join("lib-bad.json"), b"{\"deps\":[]}").unwrap();
+        });
+        // The named dep-info is not a path inside the target.
+        for escape in ["../outside", "/etc/hosts", "", "a/../b"] {
+            refuse(&|target| {
+                unit(target, bad, "lib-bad", &check_dep_info(escape));
+            });
+        }
+        // A named dep-info that is not a string.
+        refuse(&|target| {
+            unit(
+                target,
+                bad,
+                "lib-bad",
+                "{\"CheckDepInfo\":{\"dep_info\":7}}",
+            );
+        });
     }
 
     #[test]
@@ -903,12 +1537,21 @@ mod tests {
         generation(&state, "001", "v1", "host");
         generation(&state, "002", "v1", "host");
         generation(&state, "003", "v2", "other");
-        for (version, triple, reason) in [
-            ("unknown", "host", fallback_reasons::TOOLCHAIN_MISMATCH),
-            ("v1", "other", fallback_reasons::TRIPLE_MISMATCH),
-        ] {
-            assert_eq!(run(version, triple), Outcome::fallback(reason));
-        }
+        // A mismatch names what was wanted and what the store holds.
+        assert_eq!(
+            run("unknown", "host"),
+            Outcome::fallback_differs(
+                fallback_reasons::TOOLCHAIN_MISMATCH,
+                Difference::new("unknown", "v1, v2")
+            )
+        );
+        assert_eq!(
+            run("v1", "other"),
+            Outcome::fallback_differs(
+                fallback_reasons::TRIPLE_MISMATCH,
+                Difference::new("other", "host")
+            )
+        );
         assert_eq!(run("v1", "host").status, "seeded");
         assert_eq!(run("v1", "host"), Outcome::skipped("existing_target"));
     }
@@ -935,6 +1578,7 @@ mod tests {
                 project_key: "project-a",
             },
             None,
+            |_| {},
             |source, _, _| {
                 assert!(source.ends_with("001/target"));
                 Ok(())
@@ -971,7 +1615,7 @@ mod tests {
             .expect("default Cargo profile is UTF-8");
         let mut different = profile.clone();
         different.debug = "full".into();
-        generation_for_profile(&state, "001", "v1", "host", "project-a", different);
+        generation_for_profile(&state, "001", "v1", "host", "project-a", different.clone());
 
         let outcome = seed_target_cancellable(
             &state,
@@ -983,11 +1627,15 @@ mod tests {
                 project_key: "project-a",
             },
             None,
+            |_| {},
             |_, _, _| panic!("profile-incompatible artifacts are never cloned"),
         );
         assert_eq!(
             outcome,
-            Outcome::fallback(fallback_reasons::CARGO_PROFILE_MISMATCH)
+            Outcome::fallback_differs(
+                fallback_reasons::CARGO_PROFILE_MISMATCH,
+                Difference::new(describe_profile(&profile), describe_profile(&different))
+            )
         );
     }
 
@@ -1012,6 +1660,7 @@ mod tests {
                 project_key: "project-a",
             },
             None,
+            |_| {},
             |source, _, _| {
                 assert!(source.ends_with("001/target"));
                 Ok(())
@@ -1132,7 +1781,7 @@ mod tests {
         provenant_confinement::cargo::CargoHome::resolve(&home, |_| None)
             .unwrap()
             .lane_cargo_environment(&home, &cache, &mut env);
-        let outcome = seed_target(
+        let outcome = seed_target_with_reservation(
             &state,
             &cache,
             &worktree,
@@ -1140,6 +1789,7 @@ mod tests {
             &home,
             &env,
             &provenant_core::CancelToken::new(),
+            |_| {},
         );
         assert_eq!(
             (outcome.status.as_str(), outcome.reason.as_str()),
@@ -1148,7 +1798,7 @@ mod tests {
         assert!(cache.join("target").is_dir());
         // A refusal records its code and nothing from the environment.
         let refused = [("RUSTC".into(), "/secret/rustc".into())];
-        let outcome = seed_target(
+        let outcome = seed_target_with_reservation(
             &state,
             &cache,
             &worktree,
@@ -1156,6 +1806,7 @@ mod tests {
             &home,
             &refused,
             &provenant_core::CancelToken::new(),
+            |_| {},
         );
         assert_eq!(
             outcome,
@@ -1236,5 +1887,433 @@ mod tests {
             Err(fallback_reasons::SEED_BUDGET_EXHAUSTED)
         );
         assert!(std::fs::read_dir(tmp.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn a_non_empty_target_without_dep_info_is_a_layout_refusal_not_a_silent_no_op() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        // Nothing to age in an empty seed, which is not an error.
+        std::fs::create_dir(&target).unwrap();
+        assert_eq!(age_dep_info(&target, &SeedBudget::new(), None), Ok(0));
+        // Artifacts but no fingerprint directory: the layout is not one we can age.
+        std::fs::create_dir_all(target.join("debug/deps")).unwrap();
+        std::fs::write(target.join("debug/deps/libmember.rmeta"), b"x").unwrap();
+        assert_eq!(
+            age_dep_info(&target, &SeedBudget::new(), None),
+            Err(fallback_reasons::SEED_LAYOUT_UNRECOGNISED)
+        );
+        let fingerprint = unit(
+            &target,
+            "debug/build/member/0123456789abcdef/fingerprint",
+            "lib-member",
+            &check_dep_info("debug/build/member/0123456789abcdef/fingerprint/dep-lib-member"),
+        );
+        std::fs::write(fingerprint.join("dep-lib-member"), b"x").unwrap();
+        assert_eq!(
+            age_dep_info(&target, &SeedBudget::exhausted(), None),
+            Err(fallback_reasons::SEED_BUDGET_EXHAUSTED)
+        );
+        let cancel = provenant_core::CancelToken::new();
+        cancel.cancel();
+        assert_eq!(
+            age_dep_info(&target, &SeedBudget::new(), Some(&cancel)),
+            Err(fallback_reasons::CANCELLED)
+        );
+    }
+
+    #[test]
+    fn a_seed_whose_layout_cannot_be_aged_is_not_published() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        generation(tmp.path(), "001", "v1", "host");
+        let outcome = seed_target_with(tmp.path(), &cache, "v1", "host", |_, stage| {
+            stage.mkdir(std::ffi::OsStr::new("debug"), 0o700).unwrap();
+            Ok(())
+        });
+        assert_eq!(
+            outcome,
+            Outcome::fallback(fallback_reasons::SEED_LAYOUT_UNRECOGNISED)
+        );
+        assert!(
+            outcome
+                .fallback_warning("the Cargo target", "builds start cold")
+                .is_some_and(|warning| warning.contains("seed_layout_unrecognised"))
+        );
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
+    }
+
+    /// A checkout that pins a release and a store holding another: the refusal
+    /// names both, for a person who is not in a lane.
+    struct OutsideLane {
+        _root: tempfile::TempDir,
+        home: PathBuf,
+        worktree: PathBuf,
+        cache: PathBuf,
+        state: PathBuf,
+        report: String,
+    }
+
+    fn outside_lane(release: &str) -> OutsideLane {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let worktree = root.path().join("writer");
+        let cache = root.path().join("cache");
+        let state = root.path().join("state");
+        let bin = home.join(format!(".rustup/toolchains/{release}-test-host/bin"));
+        for directory in [&bin, &worktree.join(".git"), &cache] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        std::fs::write(home.join(".rustup/settings.toml"), "[overrides]\n").unwrap();
+        std::fs::write(worktree.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(
+            worktree.join("rust-toolchain.toml"),
+            format!("[toolchain]\nchannel = '{release}'\n"),
+        )
+        .unwrap();
+        let report = format!("rustc {release}\nhost: test-host\nrelease: {release}\n");
+        let rustc = bin.join("rustc");
+        std::fs::write(
+            &rustc,
+            format!("#!/bin/sh\nprintf '{}'\n", report.replace('\n', "\\n")),
+        )
+        .unwrap();
+        std::fs::set_permissions(&rustc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        OutsideLane {
+            _root: root,
+            home,
+            worktree,
+            cache,
+            state,
+            report,
+        }
+    }
+
+    impl OutsideLane {
+        fn seed(&self, environment: &[(&str, &PathBuf)]) -> WorktreeSeed {
+            let environment: Vec<_> = environment
+                .iter()
+                .map(|(key, value)| (OsString::from(key), value.as_os_str().to_owned()))
+                .collect();
+            seed_worktree_target(
+                &self.state,
+                &self.home,
+                &self.worktree,
+                &self.worktree.join(".git"),
+                &self.cache,
+                &environment,
+            )
+        }
+    }
+
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    /// Run outside a lane, as a person's shell is: RUSTUP_HOME and CARGO_HOME
+    /// unset. The toolchain resolves to the defaults under HOME, so the only thing
+    /// left to refuse is a generation built with another compiler, and that
+    /// refusal names both.
+    #[test]
+    fn unset_homes_resolve_to_the_defaults_and_a_mismatch_names_both_toolchains() {
+        let fixture = outside_lane("1.99.1");
+        generation(
+            &fixture.state,
+            "001",
+            "rustc 1.98.0\nhost: test-host\nrelease: 1.98.0\n",
+            "test-host",
+        );
+        let unset = fixture.seed(&[("HOME", &fixture.home)]);
+        assert_eq!(unset.status, "fallback");
+        assert_eq!(unset.reason, "toolchain_mismatch", "{unset:?}");
+        assert_eq!(unset.detail, None);
+        assert_eq!(
+            unset.differs,
+            Some(Difference::new("rustc 1.99.1", "rustc 1.98.0"))
+        );
+        let warning = unset.warning.as_deref().unwrap();
+        assert!(
+            warning.contains("expected rustc 1.99.1, found rustc 1.98.0"),
+            "{warning}"
+        );
+        assert!(unset.repair.is_some_and(|text| text.contains("seed-build")));
+        // Only the injected environment decides the Cargo home, whatever the test
+        // process exports, and the outcome says which source won.
+        assert_eq!(unset.cargo_home, Some("host HOME/.cargo"));
+        // Spelling the defaults out changes nothing but that source: unset means
+        // the defaults.
+        let spelled = fixture.seed(&[
+            ("HOME", &fixture.home),
+            ("RUSTUP_HOME", &fixture.home.join(".rustup")),
+            ("CARGO_HOME", &fixture.home.join(".cargo")),
+        ]);
+        assert_eq!(spelled.cargo_home, Some("host CARGO_HOME"));
+        let without_source = |seed: &WorktreeSeed| {
+            let mut value = serde_json::to_value(seed).unwrap();
+            value.as_object_mut().unwrap().remove("cargo_home");
+            value
+        };
+        assert_eq!(without_source(&spelled), without_source(&unset));
+        assert!(!fixture.cache.join("target").exists());
+    }
+
+    #[test]
+    fn outside_a_lane_a_rustup_home_elsewhere_is_refused_and_named() {
+        let fixture = outside_lane("1.99.1");
+        generation(&fixture.state, "001", &fixture.report, "test-host");
+        let elsewhere = fixture.home.join("elsewhere");
+        let seed = fixture.seed(&[("HOME", &fixture.home), ("RUSTUP_HOME", &elsewhere)]);
+        assert_eq!(seed.reason, "toolchain_unverified");
+        assert_eq!(seed.detail.as_deref(), Some(codes::RUSTUP_HOME_UNEXPECTED));
+        let differs = seed.differs.as_ref().unwrap();
+        assert_eq!(differs.expected, "RUSTUP_HOME unset or $HOME/.rustup");
+        assert_eq!(differs.found, "RUSTUP_HOME set to another directory");
+        // The refusal names the variable, never the directory it was set to.
+        assert!(!serde_json::to_string(&seed).unwrap().contains("elsewhere"));
+    }
+
+    #[test]
+    fn other_generation_mismatches_name_expected_and_found() {
+        let fixture = outside_lane("1.99.1");
+        generation(&fixture.state, "001", &fixture.report, "other-host");
+        let seed = fixture.seed(&[("HOME", &fixture.home)]);
+        assert_eq!(seed.reason, "triple_mismatch");
+        assert_eq!(
+            seed.differs,
+            Some(Difference::new("test-host", "other-host"))
+        );
+
+        let fixture = outside_lane("1.99.1");
+        let profile = provenant_config::LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .expect("default Cargo profile is UTF-8");
+        let mut different = profile.clone();
+        different.debug = "full".into();
+        generation_for_profile(
+            &fixture.state,
+            "001",
+            &fixture.report,
+            "test-host",
+            "",
+            different.clone(),
+        );
+        let seed = fixture.seed(&[("HOME", &fixture.home)]);
+        assert_eq!(seed.reason, "cargo_profile_mismatch");
+        assert_eq!(
+            seed.differs,
+            Some(Difference::new(
+                describe_profile(&profile),
+                describe_profile(&different)
+            ))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn outside_a_lane_with_unset_homes_seeds_from_the_matching_generation() {
+        let fixture = outside_lane("1.99.1");
+        let project_key = crate::target_seed::project_key(&fixture.worktree.join(".git"));
+        generation_for_project(
+            &fixture.state,
+            "001",
+            &fixture.report,
+            "test-host",
+            &project_key,
+        );
+        let seed = fixture.seed(&[("HOME", &fixture.home)]);
+        assert_eq!(
+            (seed.status.as_str(), seed.reason.as_str()),
+            ("seeded", "cloned"),
+            "{seed:?}"
+        );
+        assert_eq!(seed.generation.as_deref(), Some("001"));
+        assert!(seed.warning.is_none() && seed.differs.is_none());
+        assert!(fixture.cache.join("target").is_dir());
+    }
+
+    /// The #3561 protection against the Cargo that is actually pinned, not a tree
+    /// built by hand: a seeded target must rebuild a member whose sources are
+    /// older than the seed's, whatever layout Cargo gives its fingerprints, while
+    /// a registry-style dependency stays fresh. The control shows the same
+    /// target without ageing reuses the stale member, so the test can fail.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Runs the pinned cargo, and reads the real file clock.
+    fn a_seeded_target_rebuilds_members_and_keeps_registry_dependencies_fresh_in_real_cargo() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let write = |path: &str, text: &str| {
+            let path = workspace.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(
+            "rust-toolchain.toml",
+            include_str!("../../../rust-toolchain.toml"),
+        );
+        write(
+            "Cargo.toml",
+            "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nvendored = \"1\"\ninner = { path = \"inner\" }\n\n[workspace]\n",
+        );
+        write(
+            "src/lib.rs",
+            "pub fn value() -> u32 { inner::value() + vendored::value() }\n",
+        );
+        // A member with a build script, that another member depends on: every
+        // unit kind Cargo gives a local package, not only its library.
+        write(
+            "inner/Cargo.toml",
+            "[package]\nname = \"inner\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n\n[dependencies]\nvendored = \"1\"\n",
+        );
+        write(
+            "inner/build.rs",
+            "fn main() { println!(\"cargo:rerun-if-changed=build.rs\"); }\n",
+        );
+        write(
+            "inner/src/lib.rs",
+            "pub fn value() -> u32 { vendored::value() }\n",
+        );
+        // A directory source stands in for the registry offline: like registry
+        // packages its units list no source files in their dep-info.
+        write(
+            ".cargo/config.toml",
+            "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"vendor\"\n",
+        );
+        write(
+            "vendor/vendored/Cargo.toml",
+            "[package]\nname = \"vendored\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            "vendor/vendored/src/lib.rs",
+            "pub fn value() -> u32 { 1 }\n",
+        );
+        write(
+            "vendor/vendored/.cargo-checksum.json",
+            &format!("{{\"files\":{{}},\"package\":\"{}\"}}", "0".repeat(64)),
+        );
+        let build = |target: &Path| -> Vec<(String, bool)> {
+            let output = std::process::Command::new(
+                std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
+            )
+            .args(["build", "--offline", "--message-format=json"])
+            .current_dir(&workspace)
+            .env("CARGO_TARGET_DIR", target)
+            .env("CARGO_INCREMENTAL", "0")
+            .env_remove("CARGO_BUILD_BUILD_DIR")
+            .output()
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|message| message["reason"] == "compiler-artifact")
+                .map(|message| {
+                    (
+                        message["target"]["name"].as_str().unwrap().to_owned(),
+                        message["fresh"].as_bool().unwrap(),
+                    )
+                })
+                .collect()
+        };
+        let fresh = |artifacts: &[(String, bool)], name: &str| {
+            artifacts
+                .iter()
+                .find(|(artifact, _)| artifact == name)
+                .unwrap_or_else(|| panic!("no {name} artifact in {artifacts:?}"))
+                .1
+        };
+
+        let built = tmp.path().join("built");
+        let first = build(&built);
+        for name in ["member", "inner", "build-script-build", "vendored"] {
+            assert!(!fresh(&first, name), "{name}: {first:?}");
+        }
+
+        // Publish it as a host generation.
+        let state = tmp.path().join("state");
+        generation(&state, "001", "v1", "host");
+        let generation_dir = crate::target_seed::store_path(&state).join("generations/001");
+        std::fs::set_permissions(&generation_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::remove_dir(generation_dir.join("target")).unwrap();
+        std::fs::rename(&built, generation_dir.join("target")).unwrap();
+        let cancel = provenant_core::CancelToken::new();
+
+        // The control: a clone whose dep-info keeps the seed's timestamps.
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        clone_target_until(
+            &generation_dir.join("target"),
+            &provenant_os::fs::Directory::open_anchor(&plain).unwrap(),
+            &cancel,
+            &SeedBudget::new(),
+        )
+        .unwrap();
+
+        // The seed's own path.
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        let profile = provenant_config::LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .expect("default Cargo profile is UTF-8");
+        let outcome = seed_target_cancellable(
+            &state,
+            &cache,
+            SeedCompatibility {
+                version: "v1",
+                triple: "host",
+                cargo_profile: &profile,
+                project_key: "",
+            },
+            None,
+            |_| {},
+            |source, destination, budget| clone_target_until(source, destination, &cancel, budget),
+        );
+        assert_eq!(
+            (outcome.status.as_str(), outcome.reason.as_str()),
+            ("seeded", "cloned"),
+            "{outcome:?}"
+        );
+
+        // The member's sources are older than the seed's dep-info, as in a
+        // worktree checked out before the seed was built.
+        let older = std::fs::metadata(workspace.join("src/lib.rs"))
+            .unwrap()
+            .modified()
+            .unwrap()
+            - std::time::Duration::from_secs(3600);
+        for path in [
+            "src/lib.rs",
+            "Cargo.toml",
+            "inner/src/lib.rs",
+            "inner/Cargo.toml",
+            "inner/build.rs",
+        ] {
+            std::fs::File::open(workspace.join(path))
+                .unwrap()
+                .set_modified(older)
+                .unwrap();
+        }
+        let control = build(&plain);
+        for name in ["member", "inner"] {
+            assert!(
+                fresh(&control, name),
+                "without ageing the stale {name} is reused: {control:?}"
+            );
+        }
+        // Every local unit rebuilds, the build script included, and the
+        // registry-style dependency stays fresh.
+        let seeded = build(&cache.join("target"));
+        for name in ["member", "inner", "build-script-build"] {
+            assert!(!fresh(&seeded, name), "{name}: {seeded:?}");
+        }
+        assert!(fresh(&seeded, "vendored"), "{seeded:?}");
+        std::fs::set_permissions(&generation_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 }

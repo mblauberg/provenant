@@ -76,10 +76,8 @@ fn tick_reports_unreadable_each_time_and_advances_another_graph()
         document: document.clone(),
     })?;
     let seed_at = provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?;
-    let seed_clock = provenant_core::TestClock::new(
-        seed_at,
-        provenant_core::MonoTime::from_micros(0),
-    );
+    let seed_clock =
+        provenant_core::TestClock::new(seed_at, provenant_core::MonoTime::from_micros(0));
     let inbox = provenant_fabric_runtime::inbox::InboxService::open(
         &roots.state,
         &context.identity,
@@ -357,10 +355,8 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
     let clock = SystemClock;
     let now = clock.wall_now()?;
     let seed_at = provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?;
-    let seed_clock = provenant_core::TestClock::new(
-        seed_at,
-        provenant_core::MonoTime::from_micros(0),
-    );
+    let seed_clock =
+        provenant_core::TestClock::new(seed_at, provenant_core::MonoTime::from_micros(0));
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 10)?;
     let inbox = provenant_fabric_runtime::inbox::InboxService::open(
@@ -423,7 +419,17 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
     assert!(second.errors.is_empty(), "{:?}", second.errors);
     assert!(second.warnings.is_empty());
     assert_eq!(
-        graph::FileJournal::collect_terminal(&roots.state, project, i128::MAX, &cancel, &clock)?,
+        graph::FileJournal::collect_terminal(
+            &roots.state,
+            project,
+            i128::MAX,
+            &provenant_core::SweepControl {
+                cancel: cancel.clone(),
+                ..Default::default()
+            },
+            &clock,
+        )?
+        .removed,
         1
     );
     assert!(graph::FileJournal::read_checkpoint(&roots.state, project, "a-missing")?.is_some());
@@ -437,7 +443,17 @@ fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
         &cancel,
     )?;
     assert_eq!(
-        graph::FileJournal::collect_terminal(&roots.state, project, i128::MAX, &cancel, &clock)?,
+        graph::FileJournal::collect_terminal(
+            &roots.state,
+            project,
+            i128::MAX,
+            &provenant_core::SweepControl {
+                cancel: cancel.clone(),
+                ..Default::default()
+            },
+            &clock,
+        )?
+        .removed,
         1
     );
     assert!(graph::FileJournal::read_checkpoint(&roots.state, project, "a-missing")?.is_none());

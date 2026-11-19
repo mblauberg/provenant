@@ -962,7 +962,12 @@ pub(crate) fn process_state(pid: i32) -> io::Result<ProcessState> {
             )
         };
         if returned == 0 {
-            return Err(io::Error::other("process status unavailable"));
+            return match darwin_liveness(pid) {
+                DarwinLiveness::Gone => Ok(ProcessState::Gone),
+                DarwinLiveness::Alive | DarwinLiveness::Unknown => {
+                    Err(io::Error::other("process status unavailable"))
+                }
+            };
         }
         if returned != requested {
             return Err(io::Error::other("short process status record"));

@@ -26,10 +26,39 @@ const MAX_ERROR_LINES: usize = 20;
 
 pub(crate) fn run(command: provenant_cli::Ci, globals: &Globals) -> u8 {
     match command {
-        provenant_cli::Ci::Failures { target } => match target {
-            provenant_cli::ci::FailureTarget::Pr { number } => failures_pr(number, globals),
-            provenant_cli::ci::FailureTarget::Run { run } => failures_run(run, globals),
-        },
+        provenant_cli::Ci::Failures { pr, target } => {
+            let target = match (pr.is_empty(), target) {
+                (false, None) => provenant_cli::ci::FailureTarget::Pr { numbers: pr },
+                (true, Some(target)) => target,
+                (false, Some(provenant_cli::ci::FailureTarget::Pr { numbers })) => {
+                    let mut combined = numbers;
+                    combined.extend(pr);
+                    provenant_cli::ci::FailureTarget::Pr { numbers: combined }
+                }
+                (false, Some(provenant_cli::ci::FailureTarget::Run { .. })) => {
+                    return fail(
+                        "ci failures",
+                        Outcome::Error,
+                        "CI_FAILURES",
+                        "cannot specify both --pr and a run subcommand",
+                        globals,
+                    );
+                }
+                (true, None) => {
+                    return fail(
+                        "ci failures",
+                        Outcome::Error,
+                        "CI_FAILURES",
+                        "provide pull request numbers (`pr <N>...` or `--pr <N>`) or an Actions run id (`run <ID>`)",
+                        globals,
+                    );
+                }
+            };
+            match target {
+                provenant_cli::ci::FailureTarget::Pr { numbers } => failures_pr(numbers, globals),
+                provenant_cli::ci::FailureTarget::Run { run } => failures_run(run, globals),
+            }
+        }
     }
 }
 
@@ -102,49 +131,49 @@ pub(crate) struct RunFailures {
     pub error: Option<String>,
 }
 
-fn failures_pr(number: u64, globals: &Globals) -> u8 {
+fn failures_pr(numbers: Vec<u64>, globals: &Globals) -> u8 {
     const LEAF: &str = "ci failures";
-    let result = (|| -> Result<Report, Box<dyn std::error::Error>> {
+    let result = (|| -> Result<Vec<Report>, Box<dyn std::error::Error>> {
         let project = roots::selected_project(globals.project.as_deref(), true)?;
         let state = roots::resolve(globals, roots::Workspace::Project, roots::Product::Optional)?
             .roots
             .state;
         let request = provenant_config::ports::Request::within(READ_BUDGET);
-        // The batched read is also the REST fallback's quota escape: whichever
-        // transport answers first resolves the head and its failed checks.
-        let batch_result = batch::single(state.as_path(), &project, number);
+        let batch_result = batch::snapshot(state.as_path(), &project, &numbers);
         let try_graphql = !matches!(batch_result, batch::Batch::RateLimited(_));
-        let (head, repository, checks) = match batch_result {
-            batch::Batch::Entries(entries)
-                if !entries.is_empty()
-                    && !entries[0].truncated
-                    && entries[0].state != "UNAVAILABLE" =>
-            {
-                let entry = &entries[0];
-                (
+        let entries_by_num: BTreeMap<u64, &batch::Entry> = match &batch_result {
+            batch::Batch::Entries(entries) => entries.iter().map(|e| (e.number, e)).collect(),
+            _ => BTreeMap::new(),
+        };
+
+        let mut reports = Vec::with_capacity(numbers.len());
+        for &number in &numbers {
+            let (head, repository, checks) = match entries_by_num.get(&number) {
+                Some(entry) if !entry.truncated && entry.state != "UNAVAILABLE" => (
                     entry.head.clone(),
                     repository_of(&entry.url),
                     entry.checks.clone(),
-                )
-            }
-            _ => resolve_pr_rest(state.as_path(), &project, number, &request, try_graphql)?,
-        };
-        let Some(repository) = repository else {
-            return Err(
-                format!("pull request {number} names no repository to read logs from").into(),
-            );
-        };
-        report(
-            state.as_path(),
-            &project,
-            &repository,
-            Some(number),
-            Some(head),
-            &checks,
-            &request,
-        )
+                ),
+                _ => resolve_pr_rest(state.as_path(), &project, number, &request, try_graphql)?,
+            };
+            let Some(repository) = repository else {
+                return Err(
+                    format!("pull request {number} names no repository to read logs from").into(),
+                );
+            };
+            reports.push(report(
+                state.as_path(),
+                &project,
+                &repository,
+                Some(number),
+                Some(head),
+                &checks,
+                &request,
+            )?);
+        }
+        Ok(reports)
     })();
-    emit(LEAF, result, globals)
+    emit_reports(LEAF, result, globals)
 }
 
 fn failures_run(run: u64, globals: &Globals) -> u8 {
@@ -466,6 +495,68 @@ fn emit(leaf: &str, result: Result<Report, Box<dyn std::error::Error>>, globals:
             let summary = provenant_cli::Summary::new(headline, rows(&report), next);
             emit_summarised(
                 &CommandResult::new(leaf, outcome, report),
+                globals,
+                &text,
+                true,
+                Some(&summary),
+            )
+        }
+        Err(error) => fail(
+            leaf,
+            Outcome::Error,
+            "CI_FAILURES",
+            &error.to_string(),
+            globals,
+        ),
+    }
+}
+
+fn emit_reports(
+    leaf: &str,
+    result: Result<Vec<Report>, Box<dyn std::error::Error>>,
+    globals: &Globals,
+) -> u8 {
+    match result {
+        Ok(reports) => {
+            let mut text = String::new();
+            let mut all_rows = Vec::new();
+            let mut failing_jobs = 0;
+            let mut tests = 0;
+            let mut first_run = None;
+            for report in &reports {
+                text.push_str(&human(report));
+                all_rows.extend(rows(report));
+                for run in &report.runs {
+                    if first_run.is_none() {
+                        first_run = Some(run.run);
+                    }
+                    failing_jobs += run.jobs.len();
+                    tests += run.jobs.iter().map(|job| job.tests.len()).sum::<usize>();
+                }
+            }
+            let outcome = if reports.iter().any(|r| {
+                r.runs.iter().any(|run| run.error.is_some())
+                    && r.runs.iter().all(|run| run.jobs.is_empty())
+                    && r.unlogged.is_empty()
+            }) {
+                Outcome::Unavailable
+            } else {
+                Outcome::Ok
+            };
+            let subject = if reports.len() == 1 {
+                reports[0]
+                    .pr
+                    .map(|pr| format!("pr {pr}: "))
+                    .unwrap_or_default()
+            } else {
+                format!("{} PRs: ", reports.len())
+            };
+            let headline =
+                format!("{subject}{failing_jobs} failed job(s), {tests} failing test(s)");
+            let next = first_run.map(|run| format!("gh run view {} --log-failed", run));
+            let summary = provenant_cli::Summary::new(headline, all_rows, next);
+            emit_summarised(
+                &CommandResult::new(leaf, outcome, reports),
                 globals,
                 &text,
                 true,

@@ -2444,10 +2444,6 @@ pub struct AttemptRecord {
     /// Most recent supervisor-observed stdout/stderr activity while running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_at: Option<WallTime>,
-    /// Transient guardian observation. It is carried over live peer reads but
-    /// is never stored in the durable attempt record.
-    #[serde(skip)]
-    pub provider_silent_for_ms: Transient<Option<u64>>,
     /// Whether the observation checkpoint was absent or could be read and
     /// identity-checked. Used only for live coverage reporting.
     #[serde(skip)]
@@ -2664,11 +2660,6 @@ impl<T> PartialEq for Transient<T> {
 }
 impl<T> Eq for Transient<T> {}
 
-/// Human-readable, transient explanation for a guardian silence observation.
-pub fn provider_silence_reason(silent_for_ms: u64) -> String {
-    let seconds = silent_for_ms / 1_000;
-    format!("provider silent for {seconds}s; provider still running")
-}
 /// Why a settled attempt is flagged as a partial finish. A flag is advice for
 /// the chair, who decides whether to resume; it never changes the outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -2735,7 +2726,6 @@ pub enum LaneWaitReason {
     HostStalled,
     Children,
     Admission,
-    ProviderSilence { silent_for_ms: u64 },
     LaunchPreparation,
     RecoveryWorkerRefused { used: u64, limit: u64 },
 }
@@ -2746,7 +2736,6 @@ impl LaneWaitReason {
             Self::HostStalled => "host_stalled: supervisor is in uninterruptible sleep".into(),
             Self::Children => "children: host and project admission yielded".into(),
             Self::Admission => "admission: waiting for host or project capacity".into(),
-            Self::ProviderSilence { silent_for_ms } => provider_silence_reason(*silent_for_ms),
             Self::LaunchPreparation => "launch preparation".into(),
             Self::RecoveryWorkerRefused { used, limit } => format!(
                 "launch: last recovery worker refused: user process count {used} of {limit}"
@@ -3504,9 +3493,6 @@ mod tests {
             LaneWaitReason::HostStalled,
             LaneWaitReason::Children,
             LaneWaitReason::Admission,
-            LaneWaitReason::ProviderSilence {
-                silent_for_ms: 5_000,
-            },
             LaneWaitReason::LaunchPreparation,
             LaneWaitReason::RecoveryWorkerRefused { used: 5, limit: 10 },
         ] {
@@ -3523,7 +3509,7 @@ mod tests {
         }
         let malformed = serde_json::to_vec(&serde_json::json!({
             "attempt_id":AttemptId::from_bytes([1; 16]), "lane_class":"writer",
-            "waiting_for":{"kind":"provider_silence", "silent_for_ms":"many"}
+            "waiting_for":{"kind":"recovery_worker_refused", "used":"many", "limit":10}
         }))?;
         assert!(matches!(
             crate::json::decode::<LaneWait, _>(

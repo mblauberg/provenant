@@ -1,5 +1,4 @@
-//! Lane-scoped disk policy, composed into the running guardian only.
-use provenant_supervisor::DiskPressure;
+//! Session disk advisory.
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -66,37 +65,6 @@ pub(crate) fn session_warning(state: &Path, home: &Path, cwd: &Path) -> Option<S
         Ok(warning(&limits, &samples))
     }
     observe(state, home, cwd).ok().flatten()
-}
-
-#[derive(Default)]
-pub(crate) struct LaneDisk {}
-impl DiskPressure for LaneDisk {
-    fn below_floor(&self, raw: &[u8]) -> io::Result<bool> {
-        let context: provenant_run::HolderContext =
-            serde_json::from_slice(raw).map_err(io::Error::other)?;
-        let (state, cwd) = context.disk_roots();
-        // Live policy: changes take effect on the next admission, guardian or
-        // settlement observation, including percentage floor recalculation.
-        let limits = provenant_config::GcSettings::read(state)?.disk_limits(state)?;
-        let free =
-            provenant_confinement::disk::lane_available_bytes(state, &context.roots.home, cwd)?;
-        // The guardian only warns; running builds always continue.
-        let policy = provenant_config::policy::read(
-            state,
-            &context.project_id.to_string(),
-            &Default::default(),
-        );
-        Ok(!matches!(
-            policy.check(
-                "GUARDIAN_DISK",
-                provenant_records::policy::Facts {
-                    violated: limits.level(free) != provenant_config::DiskLevel::Ready,
-                    detail: limits.detail(free),
-                },
-            ),
-            provenant_records::policy::Effect::Proceed
-        ))
-    }
 }
 
 #[cfg(test)]
@@ -168,43 +136,6 @@ mod tests {
         assert_eq!(existing(&alias.join("missing"))?.1, existing(&state)?.1);
         std::fs::write(state.join("config.toml"), "schema_version=1\n[gc")?;
         assert!(session_warning(&alias, temp.path(), temp.path()).is_none());
-        Ok(())
-    }
-    #[test]
-    fn lane_pause_rereads_the_floor_each_observation() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let context = provenant_run::HolderContext {
-            schema_version: 1,
-            roots: provenant_run::RootSeed {
-                home: temp.path().into(),
-                checkout: temp.path().into(),
-                state_root: temp.path().into(),
-            },
-            project_id: provenant_core::ProjectId::from_bytes([1; 16]),
-            actor_id: provenant_core::ActorId::from_bytes([2; 16]),
-            attempt_id: provenant_core::AttemptId::from_bytes([4; 16]),
-            host_delivery: None,
-            launch: None,
-            sealed: None,
-        };
-        let raw = context.encode()?;
-        let disk = LaneDisk::default();
-        let config = temp.path().join("config.toml");
-        std::fs::write(
-            &config,
-            "schema_version=1\n[gc]\nfree_floor='1B'\ncritical_free='0B'\n",
-        )?;
-        assert!(!disk.below_floor(&raw)?);
-        std::fs::write(
-            &config,
-            "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\ncritical_free='0B'\n",
-        )?;
-        assert!(disk.below_floor(&raw)?);
-        std::fs::write(
-            &config,
-            "schema_version=1\n[gc]\nfree_floor='1B'\ncritical_free='0B'\n",
-        )?;
-        assert!(!disk.below_floor(&raw)?);
         Ok(())
     }
 }

@@ -1416,6 +1416,8 @@ pub struct LaunchConfinement {
     pub cargo_home: provenant_confinement::cargo::CargoHome,
     /// Host state root containing target seed generations.
     pub state_root: PathBuf,
+    /// Root context used to refresh live Cargo target custody at eviction.
+    pub roots: Option<provenant_core::Roots>,
     /// Whether the lane runs under the compiled sandbox profile. Without it
     /// the plan still prepares writer directories and records access, but the
     /// provider starts directly, like the same CLI started by hand.
@@ -1425,6 +1427,10 @@ pub struct LaunchConfinement {
     pub backend: Option<BoundSandboxBackend>,
     /// Cargo target resolution mode and source.
     pub cargo_target: crate::ResolvedCargoTarget,
+    /// Host/profile Cargo cache budget resolved before the lane starts.
+    pub cargo_cache_budget: Option<provenant_config::CargoCacheBudget>,
+    /// Live lane target owners observed before launch eviction.
+    pub cargo_target_protection: crate::build_dir_gc::TargetProtection,
 }
 /// A probed backend and the limits whose sources were sealed with it.
 pub struct BoundSandboxBackend {
@@ -1501,6 +1507,85 @@ fn launch_resource_limits(
 }
 
 impl LaunchConfinement {
+    /// Reclaim least-recently-used unheld profiles after target seeding. Failure
+    /// is advisory: a lane starts and the effective limit/source are reported.
+    pub(crate) fn enforce_cargo_cache_budget(&self) {
+        self.enforce_cargo_cache_budget_reserving(0);
+    }
+
+    fn enforce_cargo_cache_budget_reserving(&self, projected_bytes: u64) {
+        let Some(budget) = &self.cargo_cache_budget else {
+            return;
+        };
+        if self.writer.is_none() {
+            return;
+        }
+        let current_worktree = self.writer.as_ref().map(|writer| writer.worktree.path());
+        let current_common_dir = self
+            .writer
+            .as_ref()
+            .map(|writer| writer.worktree.repo().common_git_dir());
+        let mut refresh_protection = || {
+            self.roots.as_ref().map_or_else(
+                || self.cargo_target_protection.clone(),
+                |roots| {
+                    crate::build_dir_gc::target_protection_for_launch(
+                        roots,
+                        current_worktree,
+                        current_common_dir,
+                    )
+                },
+            )
+        };
+        let result = crate::build_dir_gc::collect_with_protection_refresh(
+            &self.state_root,
+            &self.home,
+            crate::build_dir_gc::Limits {
+                max_bytes: budget.bytes.saturating_sub(projected_bytes),
+                free_floor: 0,
+                grace_seconds: 0,
+                idle_seconds: 0,
+            },
+            false,
+            budget,
+            &self.cargo_target_protection,
+            &mut refresh_protection,
+        );
+        let report = match result {
+            Ok(report) => report,
+            Err(error) => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: Cargo cache budget {} bytes (setting {}; source: {}) could not be enforced: {error}; launch continues",
+                    budget.bytes,
+                    budget.setting,
+                    budget.source.as_str(),
+                );
+                return;
+            }
+        };
+        for warning in &report.warnings {
+            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+        }
+        for error in &report.errors {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: Cargo cache collection: {error}"
+            );
+        }
+        if report.cache_bytes.saturating_add(projected_bytes) > budget.bytes {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: Cargo targets remain over budget: {} + {} projected / {} bytes (setting {}; source: {}); launch continues",
+                report.cache_bytes,
+                projected_bytes,
+                budget.bytes,
+                budget.setting,
+                budget.source.as_str(),
+            );
+        }
+    }
+
     /// Resolve backend availability once. The caller must reject an unavailable
     /// backend whenever this launch selected an effective confinement profile;
     /// only an already-selected trusted route bypasses backend binding.
@@ -1577,21 +1662,24 @@ impl LaunchConfinement {
         environment: &mut Vec<(OsString, OsString)>,
         attempt_dir: &Directory,
         cancel: &CancelToken,
-    ) {
+    ) -> bool {
         if cancel.is_cancelled() {
-            return;
+            return false;
         }
-        let common_git_dir = match &self.plan.permissions().mode {
-            AccessMode::WorktreeWrite(authority) => Some(authority.common_git_dir()),
+        let worktree = match &self.plan.permissions().mode {
+            AccessMode::WorktreeWrite(_) => self.writer.as_ref().map(|w| w.worktree.path()),
             AccessMode::ReadOnly => None,
         };
         let private_cache = match &self.plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
             AccessMode::ReadOnly => &self.plan.permissions().scratch.path,
         };
-        let (target, lint_target) =
-            self.cargo_target
-                .target_paths(&self.home, common_git_dir, private_cache);
+        let workspace = self
+            .cargo_target
+            .project_workspace(worktree, &self.state_root);
+        let (target, lint_target) = self
+            .cargo_target
+            .target_paths(workspace.as_deref(), private_cache);
         self.cargo_home
             .lane_cargo_environment_with_target(&self.home, &target, environment);
         if matches!(&self.plan.permissions().mode, AccessMode::WorktreeWrite(_)) {
@@ -1599,7 +1687,7 @@ impl LaunchConfinement {
                 .retain(|(key, _)| key != provenant_core::consumer_env::LANE_CARGO_LINT_TARGET);
             environment.push((
                 provenant_core::consumer_env::LANE_CARGO_LINT_TARGET.into(),
-                lint_target.into_os_string(),
+                lint_target.clone().into_os_string(),
             ));
         }
         self.cargo_home
@@ -1607,13 +1695,13 @@ impl LaunchConfinement {
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
         let target_outcome = match (&self.plan.permissions().mode, writer) {
             (AccessMode::WorktreeWrite(authority), Some((worktree, _))) => {
-                if !self.cargo_target.value.is_private() {
+                if self.cargo_target.value.is_project() {
+                    // The worktree's own target: Cargo creates it inside the
+                    // writer-controlled tree; the host never writes there.
+                    crate::cargo_seed::Outcome::skipped("project_target")
+                } else if self.cargo_target.value.is_custom() {
                     let _ = std::fs::create_dir_all(&target);
-                    if self.cargo_target.value.is_shared() {
-                        crate::cargo_seed::Outcome::skipped("shared_target")
-                    } else {
-                        crate::cargo_seed::Outcome::skipped("custom_target")
-                    }
+                    crate::cargo_seed::Outcome::skipped("custom_target")
                 } else {
                     self.seed_cargo_target(
                         worktree,
@@ -1625,7 +1713,22 @@ impl LaunchConfinement {
             }
             _ => crate::cargo_seed::Outcome::skipped("read_only_lane"),
         };
-        if let Some(warning) = target_outcome.fallback_warning("the Cargo target") {
+        if self.cargo_target.value.is_private() {
+            for managed_target in [&target, &lint_target] {
+                if let Err(error) =
+                    crate::build_dir_gc::mark_managed_target_use(&self.home, managed_target)
+                {
+                    use std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: could not update Cargo target last-use time: {error}"
+                    );
+                }
+            }
+        }
+        if let Some(warning) =
+            target_outcome.fallback_warning("the Cargo target", "this lane builds without it")
+        {
             use std::io::Write;
             let _ = writeln!(std::io::stderr().lock(), "{warning}");
         }
@@ -1638,6 +1741,7 @@ impl LaunchConfinement {
                 "warning: could not record Cargo target setup: {error}"
             );
         }
+        target_outcome.is_seeded()
     }
 
     fn seed_cargo_target(
@@ -1678,7 +1782,7 @@ impl LaunchConfinement {
         {
             return Outcome::fallback_detail("toolchain_unverified", detail);
         }
-        crate::cargo_seed::seed_target(
+        crate::cargo_seed::seed_target_with_reservation(
             &self.state_root,
             cache,
             worktree.path(),
@@ -1686,6 +1790,18 @@ impl LaunchConfinement {
             &self.home,
             environment,
             cancel,
+            |projected_bytes| match projected_bytes {
+                Some(projected_bytes) => {
+                    self.enforce_cargo_cache_budget_reserving(projected_bytes);
+                }
+                None => {
+                    use std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: seed size is unknown; skipping Cargo cache eviction for this launch"
+                    );
+                }
+            },
         )
     }
     /// Run holds writer custody here: create the derived ref parents and the
@@ -1702,13 +1818,15 @@ impl LaunchConfinement {
                 &self.plan.permissions().credential_roots,
             )
             .map_err(RunError::Confinement)?;
-            let (target, lint_target) = self.cargo_target.target_paths(
-                &self.home,
-                Some(authority.common_git_dir()),
-                &authority.cargo_cache().path,
-            );
-            let _ = std::fs::create_dir_all(&target);
-            let _ = std::fs::create_dir_all(&lint_target);
+            // A project target lies in the writer-controlled worktree, where
+            // Cargo creates it; the host creates only targets outside it.
+            if !self.cargo_target.value.is_project() {
+                let (target, lint_target) = self
+                    .cargo_target
+                    .target_paths(None, &authority.cargo_cache().path);
+                let _ = std::fs::create_dir_all(&target);
+                let _ = std::fs::create_dir_all(&lint_target);
+            }
         }
         Ok(())
     }
@@ -2037,7 +2155,10 @@ pub(super) fn verify_writer_git_paths(common: &Path, branch: &GitRefName) -> Res
 // Cargo configuration can override rustc independently of the rustup pin.
 // Refuse ambiguous configurations without executing or interpreting them.
 // Refusals are stable snake_case codes, recorded as the outcome `detail`.
-fn verified_cargo_config(build: &Path, cargo_home: &Path) -> std::result::Result<(), &'static str> {
+pub(crate) fn verified_cargo_config(
+    build: &Path,
+    cargo_home: &Path,
+) -> std::result::Result<(), &'static str> {
     let present = |directory: &Path| {
         provenant_confinement::cargo::CONFIG_FILES
             .iter()

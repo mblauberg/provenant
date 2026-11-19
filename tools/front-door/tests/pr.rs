@@ -1,4 +1,5 @@
 mod support;
+use sha2::Digest;
 use std::{
     fs,
     io::{self, Write},
@@ -38,6 +39,14 @@ fn rig() -> Result<TestRig> {
         "schema_version = 1\n[domains.pr.land]\napproval_tier = 'none'\n",
     )?;
     Ok(rig)
+}
+
+fn write_graphql_response(rig: &TestRig, response: serde_json::Value) -> Result {
+    fs::write(
+        rig.project.join("graphql-response.json"),
+        serde_json::to_vec(&response)?,
+    )?;
+    Ok(())
 }
 fn fixture_git(rig: &TestRig, args: &[&str]) -> Result<String> {
     let git = provenant_os::git::resolve_git_executable(None).ok_or("native Git executable")?;
@@ -84,6 +93,10 @@ fn live_pr_origin(rig: &TestRig) -> Result<String> {
     )?;
     fs::write(rig.project.join("base-sha"), &base)?;
     fs::write(rig.project.join("live-pr"), "")?;
+    fs::write(
+        rig.project.join(".git/info/exclude"),
+        "/head.json\n/checks.json\n/base-sha\n/live-pr\n/gh-calls\n/head-read\n/head-seq\n/merge-args\n/merged\n/merge-*\n/reviews.json\n/.worktrees/\n",
+    )?;
     let refs = fixture_git(rig, &["ls-remote", "--heads", "origin"])?;
     assert!(
         refs.lines()
@@ -96,6 +109,101 @@ fn live_pr_origin(rig: &TestRig) -> Result<String> {
         "{refs}"
     );
     Ok(head)
+}
+
+fn bind_sync_project(rig: &TestRig) -> Result {
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let common = fs::canonicalize(rig.project.join(".git"))?;
+    provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::from_verified_primary_checkout(
+            common,
+            fs::canonicalize(&rig.project)?,
+        )?,
+    )?;
+    Ok(())
+}
+
+fn branch_worktree_path(rig: &TestRig, branch: &str) -> Result<std::path::PathBuf> {
+    let listing = fixture_git(rig, &["worktree", "list", "--porcelain"])?;
+    let target = format!("branch refs/heads/{branch}");
+    let mut current = None;
+    for line in listing.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            current = Some(std::path::PathBuf::from(path));
+        }
+        if line == target {
+            return current.ok_or_else(|| "branch worktree has no path".into());
+        }
+    }
+    Err(format!("branch worktree {branch} was not found").into())
+}
+
+fn prepare_conflicted_sync(
+    rig: &TestRig,
+) -> Result<(String, std::path::PathBuf, provenant_os::exec::ExecOutcome)> {
+    live_pr_origin(rig)?;
+    fixture_git(rig, &["checkout", "main"])?;
+    fs::write(rig.project.join("base.txt"), "base changed upstream\n")?;
+    fixture_git(rig, &["add", "base.txt"])?;
+    fixture_git(rig, &["commit", "-qm", "advance base"])?;
+    fixture_git(rig, &["push", "-q", "origin", "main"])?;
+    let base = fixture_git(rig, &["rev-parse", "HEAD"])?;
+    fs::write(rig.project.join("base-sha"), base)?;
+    fixture_git(rig, &["checkout", "feature"])?;
+    fs::write(rig.project.join("base.txt"), "base changed in PR\n")?;
+    fixture_git(rig, &["add", "base.txt"])?;
+    fixture_git(rig, &["commit", "-qm", "change base file"])?;
+    let head = fixture_git(rig, &["rev-parse", "HEAD"])?;
+    fixture_git(rig, &["push", "-q", "origin", "feature"])?;
+    fs::write(
+        rig.project.join("head.json"),
+        serde_json::to_vec(&serde_json::json!({"headRefOid": head}))?,
+    )?;
+    fixture_git(rig, &["checkout", "main"])?;
+    let worktree = rig.project.join(".worktrees/feature");
+    fs::create_dir_all(worktree.parent().ok_or("worktree parent")?)?;
+    fixture_git(
+        rig,
+        &[
+            "worktree",
+            "add",
+            worktree.to_str().ok_or("worktree path")?,
+            "feature",
+        ],
+    )?;
+    bind_sync_project(rig)?;
+    let output = rig.command(&["pr", "sync", "1668", "--no-lane"])?;
+    assert_ne!(code(&output), 0, "conflict must fail sync");
+    Ok((head, branch_worktree_path(rig, "feature")?, output))
+}
+
+fn resolve_conflicted_sync(rig: &TestRig, worktree: &Path) -> Result<String> {
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("native Git executable")?;
+    let worktree = worktree.to_string_lossy().into_owned();
+    let merge = rig.execute(
+        &git,
+        &[
+            "-C",
+            &worktree,
+            "merge",
+            "--no-edit",
+            "--no-ff",
+            "refs/provenant/pr-sync/1668/base",
+        ],
+        None,
+    )?;
+    assert_ne!(code(&merge), 0, "fixture merge should conflict");
+    let worktree_path = Path::new(&worktree);
+    fs::write(worktree_path.join("base.txt"), "resolved conflict\n")?;
+    fixture_git(rig, &["-C", &worktree, "add", "base.txt"])?;
+    fixture_git(
+        rig,
+        &["-C", &worktree, "commit", "-qm", "resolve sync conflict"],
+    )?;
+    fixture_git(rig, &["-C", &worktree, "rev-parse", "HEAD"])
 }
 
 fn merge(rig: &TestRig) -> Result<provenant_os::exec::ExecOutcome> {
@@ -388,21 +496,7 @@ fn land_refuses_a_draft_pull_request_before_gate_step() -> Result {
 
 fn land_plain_singleton_uses_batch_driver() -> Result {
     let rig = self::rig()?;
-    let git = provenant_os::git::git_executable().ok_or("Git executable")?;
-    let remote = rig.root.join("unused-remote.git");
-    assert_eq!(
-        code(&rig.execute(
-            &git,
-            &[
-                "remote",
-                "add",
-                "origin",
-                remote.to_str().ok_or("remote path")?
-            ],
-            None
-        )?),
-        0
-    );
+    live_pr_origin(&rig)?;
     fs::write(
         rig.state.join("config.toml"),
         "schema_version = 1\n[domains.pr.land]\napproval_tier = 'carry'\nbatch_wait_seconds = 0\n",
@@ -531,6 +625,7 @@ fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
         vec!["pr", "land", "0", "--head", HEAD],
         vec!["land", "0"],
         vec!["land", "1668", "--head"],
+        vec!["pr", "sync", "0"],
     ] {
         assert_eq!(code(&rig.command(&args)?), 2, "{args:?}");
     }
@@ -557,23 +652,260 @@ fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
     Ok(())
 }
 
+fn pr_sync_command_accepts_multiple_numbers_and_no_lane_flag() -> Result {
+    let rig = self::rig()?;
+    let output = rig.command(&["pr", "sync", "1668", "1669", "--no-lane"])?;
+    assert_ne!(
+        code(&output),
+        2,
+        "valid pr sync syntax was rejected: {output:?}"
+    );
+    Ok(())
+}
+
+fn pr_sync_merges_base_pushes_and_records_repository_scoped_carry() -> Result {
+    let rig = self::rig()?;
+    let approved = live_pr_origin(&rig)?;
+    fixture_git(&rig, &["checkout", "main"])?;
+    fs::write(rig.project.join("upstream.txt"), "advance the base\n")?;
+    fixture_git(&rig, &["add", "upstream.txt"])?;
+    fixture_git(&rig, &["commit", "-qm", "advance base"])?;
+    fixture_git(&rig, &["push", "-q", "origin", "main"])?;
+    let base = fixture_git(&rig, &["rev-parse", "HEAD"])?;
+    fs::write(rig.project.join("base-sha"), &base)?;
+    fixture_git(&rig, &["checkout", "feature"])?;
+    fs::write(
+        rig.project.join("reviews.json"),
+        serde_json::to_vec(&serde_json::json!([[{
+            "id": 7,
+            "user": {"login": "reviewer"},
+            "state": "APPROVED",
+            "commit_id": approved.clone()
+        }]]))?,
+    )?;
+    bind_sync_project(&rig)?;
+    let output = rig.command(&["pr", "sync", "1668"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let origin = rig.root.join("origin.git");
+    let pushed = fixture_git(
+        &rig,
+        &[
+            "--git-dir",
+            origin.to_str().ok_or("origin path")?,
+            "rev-parse",
+            "refs/heads/feature",
+        ],
+    )?;
+    assert_ne!(pushed, approved, "sync must push a merge commit");
+    let parents = fixture_git(&rig, &["rev-list", "--parents", "-n", "1", &pushed])?;
+    assert!(parents.split_whitespace().any(|parent| parent == approved));
+    assert!(parents.split_whitespace().any(|parent| parent == base));
+    let receipts = fs::read_dir(rig.state.join("landing/approval-carry"))?;
+    let repo_key = sha2::Sha256::digest(b"owner/repo")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let prefix = format!("{repo_key}-1668-");
+    let receipt = receipts
+        .filter_map(std::result::Result::ok)
+        .find(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+        .ok_or("sync approval carry receipt")?;
+    let receipt: serde_json::Value = serde_json::from_slice(&fs::read(receipt.path())?)?;
+    assert_eq!(receipt["repository"], "owner/repo");
+    assert_eq!(receipt["approved_head"], approved);
+    assert_eq!(receipt["current_head"], pushed);
+    assert_eq!(receipt["base_head"], base);
+    fs::write(
+        rig.project.join("head.json"),
+        serde_json::to_vec(&serde_json::json!({"headRefOid": pushed}))?,
+    )?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.pr.land]\napproval_tier='carry'\napproval_carry=['clean_merge']\npublish='rest_ordered'\n",
+    )?;
+    let landed = rig.command(&["land", "1668", "--json"])?;
+    assert_eq!(
+        code(&landed),
+        0,
+        "{}",
+        String::from_utf8_lossy(&landed.stdout.bytes)
+    );
+    let landed: serde_json::Value = serde_json::from_slice(&landed.stdout.bytes)?;
+    assert_eq!(landed["data"]["merged"], true, "{landed}");
+    assert!(
+        landed["data"]["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .unwrap_or_default()
+                .contains("carried independent approval"))),
+        "{landed}"
+    );
+    Ok(())
+}
+
+fn pr_sync_conflict_aborts_cleanly_and_reports_repair_command() -> Result {
+    let rig = self::rig()?;
+    let (_head, worktree, output_no_lane) = prepare_conflicted_sync(&rig)?;
+    let text_no_lane = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output_no_lane.stdout.bytes),
+        String::from_utf8_lossy(&output_no_lane.stderr.bytes)
+    );
+    assert!(text_no_lane.contains("base.txt"), "{text_no_lane}");
+    assert!(
+        text_no_lane.contains("provenant run implement --worktree"),
+        "{text_no_lane}"
+    );
+
+    let output_default = rig.command(&["pr", "sync", "1668"])?;
+    assert_ne!(code(&output_default), 0, "conflict must fail sync");
+    let text_default = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output_default.stdout.bytes),
+        String::from_utf8_lossy(&output_default.stderr.bytes)
+    );
+    assert!(text_default.contains("base.txt"), "{text_default}");
+    assert!(
+        text_default.contains("implement lane launched for"),
+        "{text_default}"
+    );
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("native Git executable")?;
+    let worktree = worktree.to_string_lossy().into_owned();
+    let merge_head = rig.execute(
+        &git,
+        &["-C", &worktree, "rev-parse", "--verify", "-q", "MERGE_HEAD"],
+        None,
+    )?;
+    assert_ne!(code(&merge_head), 0, "worktree MERGE_HEAD must be absent");
+    assert!(fixture_git(&rig, &["-C", &worktree, "status", "--porcelain"])?.is_empty());
+    Ok(())
+}
+
+fn pr_sync_retry_pushes_the_recorded_merge_and_rejects_later_movement() -> Result {
+    let rig = self::rig()?;
+    let (_head, worktree, _conflict) = prepare_conflicted_sync(&rig)?;
+    let resolution = resolve_conflicted_sync(&rig, &worktree)?;
+    let retried = rig.command(&["pr", "sync", "1668", "--no-lane"])?;
+    assert_eq!(code(&retried), 0, "{retried:?}");
+    let remote = fixture_git(&rig, &["ls-remote", "origin", "refs/heads/feature"])?;
+    assert!(remote.starts_with(&format!("{resolution}\t")), "{remote}");
+    assert!(
+        !rig.state.join("landing/approval-carry").exists(),
+        "a manually resolved conflict must not create clean-merge approval carry"
+    );
+
+    let rig = self::rig()?;
+    let (head, worktree, _conflict) = prepare_conflicted_sync(&rig)?;
+    resolve_conflicted_sync(&rig, &worktree)?;
+    let worktree = worktree.to_string_lossy().into_owned();
+    fs::write(
+        Path::new(&worktree).join("unrelated.txt"),
+        "later movement\n",
+    )?;
+    fixture_git(&rig, &["-C", &worktree, "add", "unrelated.txt"])?;
+    fixture_git(
+        &rig,
+        &[
+            "-C",
+            &worktree,
+            "commit",
+            "-qm",
+            "unrelated movement after repair",
+        ],
+    )?;
+    let refused = rig.command(&["pr", "sync", "1668", "--no-lane"])?;
+    assert_ne!(code(&refused), 0, "later branch movement must fail sync");
+    let message = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout.bytes),
+        String::from_utf8_lossy(&refused.stderr.bytes)
+    );
+    assert!(
+        message.contains("moved outside its recorded conflict repair"),
+        "{message}"
+    );
+    let remote = fixture_git(&rig, &["ls-remote", "origin", "refs/heads/feature"])?;
+    assert!(remote.starts_with(&format!("{head}\t")), "{remote}");
+
+    let mut rig = self::rig()?;
+    let (_head, worktree, _conflict) = prepare_conflicted_sync(&rig)?;
+    resolve_conflicted_sync(&rig, &worktree)?;
+    let ancestor = fixture_git(
+        &rig,
+        &[
+            "-C",
+            worktree.to_str().ok_or("worktree path")?,
+            "rev-parse",
+            "HEAD^1^1",
+        ],
+    )?;
+    let origin = rig.root.join("origin.git");
+    let hooks = rig.root.join("git-hooks");
+    fs::create_dir(&hooks)?;
+    let hook = hooks.join("pre-push");
+    let marker = rig.root.join("pre-push-ran");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\ngit --git-dir='{}' update-ref refs/heads/feature '{}'\nprintf ran > '{}'\n",
+            origin.display(),
+            ancestor,
+            marker.display()
+        ),
+    )?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))?;
+    let (_, hook_path) = rig
+        .env
+        .iter_mut()
+        .find(|(key, _)| key == "GIT_CONFIG_VALUE_1")
+        .ok_or("fixture Git hooks setting")?;
+    *hook_path = hooks.clone().into_os_string();
+    let raced = rig.command(&["pr", "sync", "1668", "--no-lane"])?;
+    assert!(marker.exists(), "pre-push hook did not run: {raced:?}");
+    assert_ne!(code(&raced), 0, "remote movement during push must fail");
+    let message = format!(
+        "{}{}",
+        String::from_utf8_lossy(&raced.stdout.bytes),
+        String::from_utf8_lossy(&raced.stderr.bytes)
+    );
+    assert!(
+        message.contains("push of synchronised pull request branch failed"),
+        "{message}"
+    );
+    let remote = fixture_git(&rig, &["ls-remote", "origin", "refs/heads/feature"])?;
+    assert!(remote.starts_with(&format!("{ancestor}\t")), "{remote}");
+    Ok(())
+}
+
 fn pr_status_prints_one_compact_line_per_pull_request() -> Result {
     let rig = self::rig()?;
-    fs::write(
-        rig.project.join("status-1668.json"),
-        format!(
-            r#"{{"state":"OPEN","headRefOid":"{HEAD}","mergeStateStatus":"CLEAN","reviewDecision":"APPROVED","isDraft":false}}"#
-        ),
-    )?;
-    fs::write(
-        rig.project.join("status-1669.json"),
-        format!(
-            r#"{{"state":"OPEN","headRefOid":"{OTHER}","mergeStateStatus":"BLOCKED","reviewDecision":"","isDraft":true}}"#
-        ),
-    )?;
-    fs::write(
-        rig.project.join("checks-1669.json"),
-        r#"[{"bucket":"pass"},{"bucket":"skipping"},{"bucket":"pending"},{"bucket":"fail"}]"#,
+    let checks = |entries: Vec<serde_json::Value>| serde_json::json!({"contexts":{"totalCount":entries.len(),"nodes":entries}});
+    write_graphql_response(
+        &rig,
+        serde_json::json!({"data":{"repository":{
+            "a00": {
+                "number":1668,"state":"OPEN","headRefOid":HEAD,"isDraft":false,
+                "mergeStateStatus":"CLEAN","reviewDecision":"APPROVED",
+                "url":"https://github.com/owner/repo/pull/1668",
+                "statusCheckRollup":checks(vec![
+                    serde_json::json!({"__typename":"CheckRun","name":"ci-status","status":"COMPLETED","conclusion":"SUCCESS"}),
+                    serde_json::json!({"__typename":"CheckRun","name":"optional","status":"COMPLETED","conclusion":"SKIPPED"})
+                ])
+            },
+            "a01": {
+                "number":1669,"state":"OPEN","headRefOid":OTHER,"isDraft":true,
+                "mergeStateStatus":"BLOCKED","reviewDecision":"",
+                "url":"https://github.com/owner/repo/pull/1669",
+                "statusCheckRollup":checks(vec![
+                    serde_json::json!({"__typename":"CheckRun","name":"pass","status":"COMPLETED","conclusion":"SUCCESS"}),
+                    serde_json::json!({"__typename":"CheckRun","name":"skip","status":"COMPLETED","conclusion":"SKIPPED"}),
+                    serde_json::json!({"__typename":"CheckRun","name":"pending","status":"IN_PROGRESS"}),
+                    serde_json::json!({"__typename":"CheckRun","name":"fail","status":"COMPLETED","conclusion":"FAILURE"})
+                ])
+            }
+        }}}),
     )?;
     let output = rig.command(&["pr", "status", "1668", "1669"])?;
     assert_eq!(code(&output), 0, "{output:?}");
@@ -599,37 +931,102 @@ fn pr_status_prints_one_compact_line_per_pull_request() -> Result {
     }
     let output = rig.command(&["pr", "status", "1668", "1669", "--full"])?;
     assert_eq!(code(&output), 0, "{output:?}");
-    // Empty check data is unavailable, rather than a passing result.
-    fs::write(rig.project.join("checks.json"), "[]")?;
-    let output = rig.command(&["pr", "status", "1668", "--json"])?;
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert!(report["data"][0]["checks_total"].is_null());
-    let output = rig.command(&["pr", "status", "1668"])?;
-    assert!(String::from_utf8(output.stdout.bytes)?.contains("checks=unavailable"));
-    // A failed lookup is distinct and still returns the PR's other facts.
-    fs::write(rig.project.join("checks-fail"), "")?;
-    let output = rig.command(&["pr", "status", "1668", "--json"])?;
-    assert_eq!(code(&output), 0, "{output:?}");
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(report["data"][0]["head"], HEAD);
-    assert!(report["data"][0]["checks_total"].is_null());
-    assert_eq!(report["data"][0]["merge"], "clean");
-    let output = rig.command(&["pr", "status", "1668"])?;
-    assert!(String::from_utf8(output.stdout.bytes)?.contains("checks=unavailable"));
-    no_merge(&rig)
+    Ok(())
+}
+
+fn pr_status_keeps_facts_when_check_data_is_unavailable() -> Result {
+    for fail_checks in [false, true] {
+        let rig = self::rig()?;
+        fs::write(
+            rig.project.join("status-1668.json"),
+            format!(
+                r#"{{"state":"OPEN","headRefOid":"{HEAD}","mergeStateStatus":"CLEAN","reviewDecision":"APPROVED","isDraft":false}}"#
+            ),
+        )?;
+        fs::write(rig.project.join("graphql-fail"), "")?;
+        if fail_checks {
+            fs::write(rig.project.join("checks-fail"), "")?;
+        } else {
+            // Empty check data is unavailable, rather than a passing result.
+            fs::write(rig.project.join("checks.json"), "[]")?;
+        }
+        let output = rig.command(&["pr", "status", "1668", "--json"])?;
+        assert_eq!(code(&output), 0, "{output:?}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(report["data"][0]["head"], HEAD);
+        assert!(report["data"][0]["checks_total"].is_null());
+        assert_eq!(report["data"][0]["merge"], "clean");
+        let output = rig.command(&["pr", "status", "1668"])?;
+        assert!(String::from_utf8(output.stdout.bytes)?.contains("checks=unavailable"));
+        no_merge(&rig)?;
+    }
+    Ok(())
 }
 
 fn pr_status_preserves_partial_results() -> Result {
     let rig = self::rig()?;
-    fs::write(
-        rig.project.join("status-1668.json"),
-        format!(r#"{{"state":"OPEN","headRefOid":"{HEAD}"}}"#),
+    write_graphql_response(
+        &rig,
+        serde_json::json!({"data":{"repository":{
+            "a00": {"number":1668,"state":"OPEN","headRefOid":HEAD,"isDraft":false,
+                "mergeStateStatus":"CLEAN","reviewDecision":"APPROVED",
+                "url":"https://github.com/owner/repo/pull/1668",
+                "statusCheckRollup":{"contexts":{"totalCount":1,"nodes":[
+                    {"__typename":"CheckRun","name":"ci-status","status":"COMPLETED","conclusion":"SUCCESS"}
+                ]}}},
+            "a01": null
+        }}}),
     )?;
     let output = rig.command(&["pr", "status", "1668", "9999", "--json"])?;
     assert_eq!(code(&output), 0, "{output:?}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(report["data"][0]["head"], HEAD);
+    assert_eq!(report["data"][1]["state"], "UNAVAILABLE");
     assert!(report["data"][1]["error"].is_string());
+    Ok(())
+}
+
+fn ci_failures_pr_batch_returns_one_entry_per_pr_with_one_batched_read() -> Result {
+    let rig = self::rig()?;
+    let output = rig.command(&["ci", "failures", "pr", "1", "2", "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let data = report["data"].as_array().ok_or("data array")?;
+    assert_eq!(data.len(), 2);
+    assert_eq!(data[0]["pr"], 1);
+    assert_eq!(data[1]["pr"], 2);
+
+    let gh_calls = fs::read_to_string(rig.project.join("gh-calls"))?;
+    let graphql_calls = gh_calls
+        .lines()
+        .filter(|line| line.contains("graphql"))
+        .count();
+    assert_eq!(
+        graphql_calls, 1,
+        "expected exactly 1 batched GraphQL read, but got:\n{gh_calls}"
+    );
+    Ok(())
+}
+
+fn ci_failures_flag_form_accepts_multiple_prs_with_one_batched_read() -> Result {
+    let rig = self::rig()?;
+    let output = rig.command(&["ci", "failures", "--pr", "1", "--pr", "2", "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let data = report["data"].as_array().ok_or("data array")?;
+    assert_eq!(data.len(), 2);
+    assert_eq!(data[0]["pr"], 1);
+    assert_eq!(data[1]["pr"], 2);
+
+    let gh_calls = fs::read_to_string(rig.project.join("gh-calls"))?;
+    let graphql_calls = gh_calls
+        .lines()
+        .filter(|line| line.contains("graphql"))
+        .count();
+    assert_eq!(
+        graphql_calls, 1,
+        "expected exactly 1 batched GraphQL read, but got:\n{gh_calls}"
+    );
     Ok(())
 }
 
@@ -737,11 +1134,71 @@ fn fake_gh(args: &[String]) -> Result<u8> {
     )?;
     let normalised = normalise_api_call(args)?;
     match normalised.as_str() {
+        "repo view --json nameWithOwner" => {
+            io::stdout().write_all(br#"{"nameWithOwner":"owner/repo"}"#)?;
+        }
+        value if value.starts_with("api graphql -f query=") => {
+            if Path::new("graphql-fail").exists() {
+                writeln!(io::stderr(), "gh: HTTP 500: fixture GraphQL failure")?;
+                return Ok(1);
+            }
+            if Path::new("graphql-response.json").exists() {
+                let response: serde_json::Value =
+                    serde_json::from_slice(&fs::read("graphql-response.json")?)?;
+                let bytes = serde_json::to_vec(&response)?;
+                io::stdout().write_all(b"HTTP/2 200\r\n\r\n")?;
+                io::stdout().write_all(&bytes)?;
+                return Ok(0);
+            }
+            let body = serde_json::json!({
+                "data": {
+                    "repository": {
+                        "a00": {
+                            "number": 1,
+                            "state": "OPEN",
+                            "headRefOid": HEAD,
+                            "isDraft": false,
+                            "mergeStateStatus": "CLEAN",
+                            "reviewDecision": "APPROVED",
+                            "url": "https://github.com/owner/repo/pull/1",
+                            "statusCheckRollup": {
+                                "contexts": {
+                                    "totalCount": 0,
+                                    "nodes": []
+                                }
+                            }
+                        },
+                        "a01": {
+                            "number": 2,
+                            "state": "OPEN",
+                            "headRefOid": OTHER,
+                            "isDraft": false,
+                            "mergeStateStatus": "CLEAN",
+                            "reviewDecision": "APPROVED",
+                            "url": "https://github.com/owner/repo/pull/2",
+                            "statusCheckRollup": {
+                                "contexts": {
+                                    "totalCount": 0,
+                                    "nodes": []
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            let bytes = serde_json::to_vec(&body)?;
+            io::stdout().write_all(b"HTTP/2 200\r\n\r\n")?;
+            io::stdout().write_all(&bytes)?;
+        }
         "api repos/{owner}/{repo}" => {
             io::stdout().write_all(br#"{"default_branch":"main","html_url":"https://github.com/owner/repo","full_name":"owner/repo","owner":{"login":"owner"}}"#)?;
         }
         "api --paginate --slurp repos/{owner}/{repo}/pulls/1668/reviews?per_page=100" => {
-            io::stdout().write_all(b"[[]]")?;
+            if Path::new("reviews.json").exists() {
+                io::stdout().write_all(&fs::read("reviews.json")?)?;
+            } else {
+                io::stdout().write_all(b"[[]]")?;
+            }
         }
         "api repos/{owner}/{repo}/pulls/1668" => {
             if Path::new("read-fail-after-merge").exists() && Path::new("merge-args").exists() {
@@ -1047,9 +1504,16 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 writeln!(io::stderr(), "gh: HTTP 502: Bad Gateway")?;
                 return Ok(1);
             }
+            let sha = if Path::new("head.json").exists() {
+                let head_value: serde_json::Value =
+                    serde_json::from_slice(&fs::read("head.json")?)?;
+                head_value["headRefOid"].as_str().unwrap_or(HEAD).to_owned()
+            } else {
+                HEAD.to_owned()
+            };
             write!(
                 io::stdout(),
-                "{{\"merged\":{}}}",
+                "{{\"merged\":{},\"sha\":\"{sha}\"}}",
                 !Path::new("merge-queue").exists()
             )?;
         }
@@ -1071,7 +1535,7 @@ fn main() -> ExitCode {
     }
     let result = if args
         .first()
-        .is_some_and(|arg| matches!(arg.as_str(), "pr" | "api"))
+        .is_some_and(|arg| matches!(arg.as_str(), "pr" | "api" | "repo"))
     {
         fake_gh(&args)
     } else {
@@ -1126,8 +1590,36 @@ fn main() -> ExitCode {
                 pr_external_failures_and_invalid_arguments_fail_closed,
             ),
             (
+                "pr_sync_command_accepts_multiple_numbers_and_no_lane_flag",
+                pr_sync_command_accepts_multiple_numbers_and_no_lane_flag,
+            ),
+            (
+                "pr_sync_merges_base_pushes_and_records_repository_scoped_carry",
+                pr_sync_merges_base_pushes_and_records_repository_scoped_carry,
+            ),
+            (
+                "pr_sync_conflict_aborts_cleanly_and_reports_repair_command",
+                pr_sync_conflict_aborts_cleanly_and_reports_repair_command,
+            ),
+            (
+                "pr_sync_retry_pushes_the_recorded_merge_and_rejects_later_movement",
+                pr_sync_retry_pushes_the_recorded_merge_and_rejects_later_movement,
+            ),
+            (
                 "pr_status_prints_one_compact_line_per_pull_request",
                 pr_status_prints_one_compact_line_per_pull_request,
+            ),
+            (
+                "pr_status_keeps_facts_when_check_data_is_unavailable",
+                pr_status_keeps_facts_when_check_data_is_unavailable,
+            ),
+            (
+                "ci_failures_pr_batch_returns_one_entry_per_pr_with_one_batched_read",
+                ci_failures_pr_batch_returns_one_entry_per_pr_with_one_batched_read,
+            ),
+            (
+                "ci_failures_flag_form_accepts_multiple_prs_with_one_batched_read",
+                ci_failures_flag_form_accepts_multiple_prs_with_one_batched_read,
             ),
         ];
         provenant_supervisor::fixture::run_libtest(

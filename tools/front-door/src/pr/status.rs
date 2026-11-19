@@ -70,21 +70,28 @@ pub(crate) struct Line {
     number: u64,
     state: String,
     pub(crate) head: String,
+    #[serde(default, deserialize_with = "display_default")]
     draft: bool,
+    #[serde(default, deserialize_with = "display_default")]
     checks_passed: Option<usize>,
+    #[serde(default, deserialize_with = "display_default")]
     checks_total: Option<usize>,
+    #[serde(default)]
     checks_failed: Option<usize>,
+    #[serde(default)]
     checks_pending: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     active_workflows: Option<bool>,
     /// Failed or cancelled check names, when checks were readable.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "display_default")]
     failing_checks: Vec<String>,
     /// Links from the same observation, retained for completion reports.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     failed_check_details: Vec<FailedCheck>,
+    #[serde(default, deserialize_with = "display_default")]
     merge: String,
+    #[serde(default)]
     review: String,
     /// Why no check was reported for this head, when that is known: either
     /// `merge_conflict` or `not_scheduled`.
@@ -98,9 +105,18 @@ pub(crate) struct Line {
     /// be drawn from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) awaiting: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     error: Option<String>,
 }
+fn display_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
 impl Line {
     /// Keep this reading pending until GitHub reports the head being watched.
     pub(crate) fn await_head(&mut self, head: &str) {
@@ -1368,5 +1384,40 @@ mod tests {
                 .summary
                 .contains("policy=configured")
         );
+    }
+
+    #[test]
+    fn display_fields_degrade_gracefully_while_verdict_fields_refuse_malformed_values() {
+        let display_degraded = r#"{
+            "number": 1,
+            "state": "OPEN",
+            "head": "abc",
+            "draft": false,
+            "checks_passed": "invalid",
+            "checks_total": 5,
+            "checks_failed": 0,
+            "checks_pending": 0,
+            "failing_checks": null,
+            "merge": 123,
+            "review": "approved"
+        }"#;
+        let line: super::Line =
+            serde_json::from_str(display_degraded).expect("display fields degrade");
+        assert_eq!(line.number, 1);
+        assert_eq!(line.checks_passed, None);
+        assert_eq!(line.failing_checks, Vec::<String>::new());
+        assert_eq!(line.verdict(), Some(true));
+
+        for malformed_verdict in [
+            r#"{"number":1,"state":"OPEN","head":"a","checks_failed":"bogus"}"#,
+            r#"{"number":1,"state":"OPEN","head":"a","checks_pending":"bogus"}"#,
+            r#"{"number":1,"state":"OPEN","head":"a","error":123}"#,
+            r#"{"number":1,"state":"OPEN","head":"a","review":123}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<super::Line>(malformed_verdict).is_err(),
+                "malformed verdict field must fail deserialization: {malformed_verdict}"
+            );
+        }
     }
 }

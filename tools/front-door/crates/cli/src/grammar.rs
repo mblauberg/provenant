@@ -360,6 +360,14 @@ pub struct Review {
 }
 #[derive(Debug, Subcommand)]
 pub enum Pr {
+    /// Merge each pull request's base into its branch and push the result
+    Sync {
+        #[arg(required = true, catalog_u64_range = 1..)]
+        numbers: Vec<u64>,
+        /// Do not launch an implement lane when a merge conflict occurs
+        #[arg(long)]
+        no_lane: bool,
+    },
     /// List retained local attempt contributions and missing peer coverage
     Contributions {
         #[arg(catalog_u64_range = 1..)]
@@ -464,14 +472,14 @@ pub enum ChairSummary {
 }
 #[derive(Debug, Subcommand)]
 pub enum ChairLog {
-    /// Append an update from a JSON file, or standard input with `-`.
+    /// Append an update from a markdown or JSON file, or standard input with `-`.
     Append {
-        /// Chair session ID
+        /// Chair session ID; defaults to the active host chair session
         #[arg(long)]
-        session: String,
-        /// JSON containing markdown, kind, channel and optional links
+        session: Option<String>,
+        /// Markdown or JSON file; standard input when omitted or `-`
         #[arg(long)]
-        file: String,
+        file: Option<String>,
         /// Stable retry key; generated when omitted
         #[arg(long, catalog_requires = "issued_at", value_parser = explicit_operation_id)]
         operation_id: Option<OperationId>,
@@ -481,9 +489,9 @@ pub enum ChairLog {
     },
     /// List a bounded page of updates in sequence order.
     List {
-        /// Chair session ID
+        /// Chair session ID; defaults to the active host chair session
         #[arg(long)]
-        session: String,
+        session: Option<String>,
         /// Return entries after this sequence
         #[arg(long)]
         after: Option<u64>,
@@ -1005,6 +1013,12 @@ pub struct PipelineOptions {
 pub enum Worktree {
     /// Build and publish a host-owned Cargo target seed from the configured verify base
     SeedBuild,
+    /// Seed a checkout's private Cargo target warm from the host seed and print
+    /// the CARGO_TARGET_DIR to use; an existing target is kept
+    SeedTarget {
+        /// Checkout path, relative to the selected project when not absolute
+        path: std::path::PathBuf,
+    },
     /// Create a worktree on a new branch
     Create {
         /// New branch name

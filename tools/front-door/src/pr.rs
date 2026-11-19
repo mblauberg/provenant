@@ -16,6 +16,7 @@ pub(crate) mod landing;
 pub(crate) mod observer;
 mod open;
 pub(crate) mod status;
+mod sync;
 mod wait;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -562,6 +563,7 @@ fn merge_with(
 }
 pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 {
     match command {
+        Pr::Sync { numbers, no_lane } => sync::run(numbers, no_lane, globals),
         Pr::Open(command) => open::run(*command, globals),
         Pr::Status { numbers } => status::run(numbers, globals),
         Pr::Contributions { number, bind } => contributions::run(number, bind, globals),
