@@ -754,7 +754,7 @@ jobs:
           | test(=read_only_dispatch_applies_bound_git_and_project_writes)
           | test(=writer_dispatch_uses_lane_cache_and_narrow_provider_state)
           | test(=writer_dispatch_edits_a_linked_worktree)
-          | test(=second_writer_is_refused_while_first_holds_the_worktree)
+          | test(=shared_holders_both_launch_and_removal_refused_while_holder_is_live)
           | test(=writer_terminal_refuses_sequencer_state)
           | test(=writer_production_plan_denies_outside_writes)
           | test(=writer_reconcile_refuses_unfinished_cherry_pick_and_releases))
