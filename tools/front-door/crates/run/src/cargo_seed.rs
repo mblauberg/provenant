@@ -1230,28 +1230,72 @@ mod tests {
         project_key: &str,
         cargo_profile: provenant_config::CargoBuildProfile,
     ) {
+        publish_generation(
+            state,
+            name,
+            &crate::target_seed::Manifest {
+                project_key: project_key.into(),
+                rustc_vv: version.into(),
+                host_triple: triple.into(),
+                commit: "abc".into(),
+                profile: "dev".into(),
+                cargo_profile,
+                features: vec![],
+                flags: vec![],
+            },
+            None,
+        );
+    }
+
+    /// Publish a generation as `provenant worktree seed-build` does: its target
+    /// and manifest, the complete marker, then the generation directory made
+    /// read-only, which is what tells a reader the generation is complete. A
+    /// built target is frozen read-only like the one seed-build publishes;
+    /// without one the target is an empty, writable directory to fill in.
+    fn publish_generation(
+        state: &Path,
+        name: &str,
+        manifest: &crate::target_seed::Manifest,
+        built: Option<&Path>,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
         let dir = crate::target_seed::store_path(state)
             .join("generations")
             .join(name);
-        std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        match built {
+            Some(built) => {
+                std::fs::rename(built, dir.join("target")).unwrap();
+                freeze(&dir.join("target"));
+            }
+            None => std::fs::create_dir(dir.join("target")).unwrap(),
+        }
         std::fs::write(dir.join("complete"), b"complete\n").unwrap();
-        let manifest = crate::target_seed::Manifest {
-            project_key: project_key.into(),
-            rustc_vv: version.into(),
-            host_triple: triple.into(),
-            commit: "abc".into(),
-            profile: "dev".into(),
-            cargo_profile,
-            features: vec![],
-            flags: vec![],
-        };
         std::fs::write(
             dir.join("manifest.json"),
-            serde_json::to_vec(&manifest).unwrap(),
+            serde_json::to_vec(manifest).unwrap(),
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    }
+
+    /// Clear every write bit in a tree, as seed-build freezes a generation.
+    fn freeze(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::symlink_metadata(path).unwrap();
+        if metadata.file_type().is_symlink() {
+            return;
+        }
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(path).unwrap() {
+                freeze(&entry.unwrap().path());
+            }
+        }
+        std::fs::set_permissions(
+            path,
+            std::fs::Permissions::from_mode(metadata.permissions().mode() & !0o222),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1796,25 +1840,48 @@ mod tests {
             ("seeded", "cloned")
         );
         assert!(cache.join("target").is_dir());
-        // A refusal records its code and nothing from the environment.
+    }
+
+    /// A toolchain override is refused before any seed is read: the outcome
+    /// records the refusal code and names the variable that differed, never
+    /// the value the environment gave it.
+    #[cfg(unix)]
+    #[test]
+    fn a_toolchain_override_refusal_names_the_variable_never_its_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
         let refused = [("RUSTC".into(), "/secret/rustc".into())];
         let outcome = seed_target_with_reservation(
-            &state,
+            &tmp.path().join("state"),
             &cache,
-            &worktree,
-            &project_key,
-            &home,
+            &tmp.path().join("writer"),
+            "",
+            &tmp.path().join("home"),
             &refused,
             &provenant_core::CancelToken::new(),
-            |_| {},
+            |_: Option<u64>| panic!("a refused seed must not clone"),
         );
         assert_eq!(
             outcome,
-            Outcome::fallback_detail(
+            Outcome::fallback_refusal(
                 fallback_reasons::TOOLCHAIN_UNVERIFIED,
-                codes::TOOLCHAIN_ENV_OVERRIDE,
+                Refusal::differs(
+                    codes::TOOLCHAIN_ENV_OVERRIDE,
+                    "no compiler, target or build-flag override",
+                    "RUSTC is set",
+                ),
             )
         );
+        assert!(!serde_json::to_string(&outcome).unwrap().contains("secret"));
+        let warning = outcome
+            .fallback_warning("the Cargo target", "builds in it start cold")
+            .unwrap();
+        assert!(
+            warning.contains("found RUSTC is set") && !warning.contains("secret"),
+            "{warning}"
+        );
+        assert!(!cache.join("target").exists());
     }
 
     #[cfg(target_os = "macos")]
@@ -1836,6 +1903,24 @@ mod tests {
             let seed = seed_directory.join("artifact");
             std::fs::write(&seed, b"seed").unwrap();
             std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o444)).unwrap();
+            // A seed Cargo built names its dep-info from a fingerprint; one that
+            // names none is refused as `seed_layout_unrecognised`.
+            let unit_directory = if nested_tree {
+                "debug/.fingerprint/member-0123456789abcdef"
+            } else {
+                ".fingerprint/member-0123456789abcdef"
+            };
+            let dep_info = format!("{unit_directory}/dep-lib-member");
+            unit(
+                &target,
+                unit_directory,
+                "lib-member",
+                &check_dep_info(&dep_info),
+            );
+            let seed_dep_info = target.join(&dep_info);
+            std::fs::write(&seed_dep_info, b"dep-info").unwrap();
+            std::fs::set_permissions(&seed_dep_info, std::fs::Permissions::from_mode(0o444))
+                .unwrap();
             if nested_tree {
                 std::fs::set_permissions(
                     target.join("debug"),
@@ -1849,7 +1934,19 @@ mod tests {
             let outcome = seed_target_with(tmp.path(), &cache, "v1", "host", |src, dst| {
                 clone_target(src, dst, &provenant_core::CancelToken::new())
             });
-            assert_eq!(outcome.status, "seeded");
+            assert_eq!(
+                (outcome.status.as_str(), outcome.reason.as_str()),
+                ("seeded", "cloned"),
+                "{outcome:?}"
+            );
+            // Ageing reaches the private clone and never the seed it shares
+            // blocks with.
+            let modified = |path: &Path| std::fs::metadata(path).unwrap().modified().unwrap();
+            assert_eq!(
+                modified(&cache.join("target").join(&dep_info)),
+                std::time::UNIX_EPOCH
+            );
+            assert_ne!(modified(&seed_dep_info), std::time::UNIX_EPOCH);
             let lane_directory = if nested_tree {
                 cache.join("target/debug/deps")
             } else {
@@ -2141,7 +2238,6 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods)] // Runs the pinned cargo, and reads the real file clock.
     fn a_seeded_target_rebuilds_members_and_keeps_registry_dependencies_fresh_in_real_cargo() {
-        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let workspace = tmp.path().join("workspace");
         let write = |path: &str, text: &str| {
@@ -2236,13 +2332,28 @@ mod tests {
             assert!(!fresh(&first, name), "{name}: {first:?}");
         }
 
-        // Publish it as a host generation.
+        // Publish it as a host generation, sealed as seed-build seals one.
         let state = tmp.path().join("state");
-        generation(&state, "001", "v1", "host");
-        let generation_dir = crate::target_seed::store_path(&state).join("generations/001");
-        std::fs::set_permissions(&generation_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::remove_dir(generation_dir.join("target")).unwrap();
-        std::fs::rename(&built, generation_dir.join("target")).unwrap();
+        let profile = provenant_config::LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .expect("default Cargo profile is UTF-8");
+        publish_generation(
+            &state,
+            "001",
+            &crate::target_seed::Manifest {
+                project_key: String::new(),
+                rustc_vv: "v1".into(),
+                host_triple: "host".into(),
+                commit: "abc".into(),
+                profile: "dev".into(),
+                cargo_profile: profile.clone(),
+                features: vec![],
+                flags: vec![],
+            },
+            Some(&built),
+        );
+        let generations = crate::target_seed::store_path(&state).join("generations");
+        let generation_dir = generations.join("001");
         let cancel = provenant_core::CancelToken::new();
 
         // The control: a clone whose dep-info keeps the seed's timestamps.
@@ -2259,9 +2370,6 @@ mod tests {
         // The seed's own path.
         let cache = tmp.path().join("cache");
         std::fs::create_dir(&cache).unwrap();
-        let profile = provenant_config::LaneBuildSettings::default()
-            .cargo_build_profile(&[])
-            .expect("default Cargo profile is UTF-8");
         let outcome = seed_target_cancellable(
             &state,
             &cache,
@@ -2314,6 +2422,15 @@ mod tests {
             assert!(!fresh(&seeded, name), "{name}: {seeded:?}");
         }
         assert!(fresh(&seeded, "vendored"), "{seeded:?}");
-        std::fs::set_permissions(&generation_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Remove the frozen generation as collection does.
+        assert!(
+            remove_seed_tree(
+                &provenant_os::fs::Directory::open_anchor(&generations).unwrap(),
+                std::ffi::OsStr::new("001"),
+                None,
+                &SeedBudget::new(),
+            )
+            .unwrap()
+        );
     }
 }
