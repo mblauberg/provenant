@@ -107,11 +107,6 @@ impl Driver<'_> {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    pub(super) fn holder_reports_no_live_children(&self) -> bool {
-        host_allows_escapee_stop(self.holder, &self.holder_context)
-    }
-
     pub(super) fn persist_tracking(&mut self, warnings: &mut Vec<String>, omitted: &mut u64) {
         self.reservation.descendants = self.tracked.iter().take(128).cloned().collect();
         self.reservation.omitted_descendants = self.tracked.len().saturating_sub(128) as u64;
@@ -589,9 +584,7 @@ impl Driver<'_> {
         {
             return false;
         }
-        let mut spared: std::collections::BTreeSet<_> =
-            self.spared.spared_identities().cloned().collect();
-        spared.extend(self.protected.iter().cloned());
+        let spared = self.cleanup_spared();
         self.marked_escapees(census, child.id(), &spared).is_empty()
     }
 
@@ -640,51 +633,8 @@ impl Driver<'_> {
                 continue;
             };
             census_warning_active = false;
-            let mut spared: std::collections::BTreeSet<_> =
-                self.spared.spared_identities().cloned().collect();
-            spared.extend(self.protected.iter().cloned());
-            // A descendant that detached before the census saw it stays in the
-            // attempt's sandbox; it is tracked here and ended below.
-            #[cfg(target_os = "macos")]
-            let marked = self.marked_escapees(&census, child.id(), &spared);
-            // Reaping sends no signal, so an adopted zombie is reaped even when
-            // descendant stops are not allowed; otherwise a fenced guardian
-            // would pin it indefinitely.
-            let reaped = child.reap_adopted(&census, &spared)?;
-            #[cfg(target_os = "macos")]
-            let mut reaped = reaped;
-            #[cfg(target_os = "macos")]
-            if !self.descendant_stop_allowed {
-                reaped.unresolved = !self
-                    .tracked
-                    .iter()
-                    .all(|identity| reaped.reaped.contains(identity));
-            }
-            for identity in reaped.reaped {
-                self.tracked.remove(&identity);
-                if self.reaped.len() < 16 {
-                    self.reaped.push(identity);
-                } else {
-                    self.omitted_reaped = self.omitted_reaped.saturating_add(1);
-                }
-            }
-            #[cfg(target_os = "macos")]
-            let outstanding =
-                self.tracked
-                    .iter()
-                    .any(|identity| match census.process(identity.pid) {
-                        crate::census::ProcessLookup::Absent => false,
-                        crate::census::ProcessLookup::Present(fact) => {
-                            fact.identity == *identity && !fact.zombie
-                        }
-                        crate::census::ProcessLookup::Unknown => true,
-                    });
-            #[cfg(target_os = "macos")]
-            let census_clear = census.is_complete() && !reaped.unresolved && !outstanding;
-            #[cfg(target_os = "macos")]
-            let complete = census_clear && self.darwin_quiescent(child, &census)?;
-            #[cfg(not(target_os = "macos"))]
-            let complete = false;
+            let spared = self.cleanup_spared();
+            let (complete, marked) = self.observe_settlement(child, &census, &spared)?;
             if complete {
                 let _ = child.cleanup(true)?;
                 self.persist_tracking(warnings, omitted);
@@ -714,8 +664,8 @@ impl Driver<'_> {
                 }
             }
             #[cfg(target_os = "macos")]
-            if self.holder_reports_no_live_children() {
-                let mut targets = std::collections::BTreeSet::new();
+            {
+                let mut candidates = std::collections::BTreeSet::new();
                 // Native descendants require a requested provider stop, not
                 // merely its ordinary exit. Without a native child registry,
                 // an actual host holder must affirm that no graph child remains;
@@ -734,12 +684,13 @@ impl Driver<'_> {
                     && (self.descendant_stop_allowed
                         || (self.registry.is_none() && self.holder.is_some()))
                 {
-                    targets.extend(child.owned_cleanup_targets(&census, &spared));
+                    candidates.extend(child.owned_cleanup_targets(&census, &spared));
                 }
                 if self.escapee_stop_allowed {
-                    targets.extend(marked);
+                    candidates.extend(marked);
                 }
-                let targets: Vec<_> = targets.into_iter().collect();
+                let targets =
+                    host_authorised_targets(self.holder, &self.holder_context, candidates);
                 for delivery in child.stop_owned_targets(escalation, &targets) {
                     self.record_delivery(
                         Some(delivery.identity),
@@ -749,6 +700,8 @@ impl Driver<'_> {
                     );
                 }
             }
+            #[cfg(not(target_os = "macos"))]
+            drop(marked);
             self.persist_tracking(warnings, omitted);
             if Instant::now() >= deadline {
                 self.warn_cleanup_holders(Some(&census), warnings, omitted);
@@ -760,6 +713,107 @@ impl Driver<'_> {
             );
         }
     }
+
+    /// Spared and protected owners: never signalled, never reaped as ours.
+    fn cleanup_spared(&self) -> std::collections::BTreeSet<ProcessIdentity> {
+        let mut spared: std::collections::BTreeSet<_> =
+            self.spared.spared_identities().cloned().collect();
+        spared.extend(self.protected.iter().cloned());
+        spared
+    }
+
+    /// One signal-free settlement observation over a complete-or-not census:
+    /// track sandboxed escapees, reap adopted zombies and prove quiescence.
+    /// Returns whether the group settled and the escapees marked this pass.
+    fn observe_settlement(
+        &mut self,
+        child: &mut crate::process_os::provider::ProviderGroup,
+        census: &crate::census::Census,
+        spared: &std::collections::BTreeSet<ProcessIdentity>,
+    ) -> Result<(bool, Vec<ProcessIdentity>)> {
+        // A descendant that detached before the census saw it stays in the
+        // attempt's sandbox; it is tracked here and ended by the caller.
+        #[cfg(target_os = "macos")]
+        let marked = self.marked_escapees(census, child.id(), spared);
+        #[cfg(not(target_os = "macos"))]
+        let marked = Vec::new();
+        // Reaping sends no signal, so an adopted zombie is reaped even when
+        // descendant stops are not allowed; otherwise a fenced guardian
+        // would pin it indefinitely.
+        let reaped = child.reap_adopted(census, spared)?;
+        #[cfg(target_os = "macos")]
+        let mut reaped = reaped;
+        #[cfg(target_os = "macos")]
+        if !self.descendant_stop_allowed {
+            reaped.unresolved = !self
+                .tracked
+                .iter()
+                .all(|identity| reaped.reaped.contains(identity));
+        }
+        for identity in reaped.reaped {
+            self.tracked.remove(&identity);
+            if self.reaped.len() < 16 {
+                self.reaped.push(identity);
+            } else {
+                self.omitted_reaped = self.omitted_reaped.saturating_add(1);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        let outstanding = self
+            .tracked
+            .iter()
+            .any(|identity| match census.process(identity.pid) {
+                crate::census::ProcessLookup::Absent => false,
+                crate::census::ProcessLookup::Present(fact) => {
+                    fact.identity == *identity && !fact.zombie
+                }
+                crate::census::ProcessLookup::Unknown => true,
+            });
+        #[cfg(target_os = "macos")]
+        let complete = census.is_complete()
+            && !reaped.unresolved
+            && !outstanding
+            && self.darwin_quiescent(child, census)?;
+        #[cfg(not(target_os = "macos"))]
+        let complete = false;
+        Ok((complete, marked))
+    }
+
+    /// Retained custody's check between stop passes: one full census and the
+    /// same settlement proof as cleanup. It sends no signal and never reads
+    /// host graph evidence, so an idle retained guardian costs one census.
+    pub(super) fn settle_without_signals(
+        &mut self,
+        child: &mut crate::process_os::provider::ProviderGroup,
+        warnings: &mut Vec<String>,
+        omitted: &mut u64,
+    ) -> Result<bool> {
+        let Some(census) = self.refresh_census(child) else {
+            return Ok(false);
+        };
+        let spared = self.cleanup_spared();
+        let (complete, _) = self.observe_settlement(child, &census, &spared)?;
+        if complete {
+            let _ = child.cleanup(true)?;
+        }
+        self.persist_tracking(warnings, omitted);
+        Ok(complete)
+    }
+
+    /// Exit and fork filters for every identity that can still block
+    /// settlement. Returns whether all of them are watched; dead identities
+    /// need no filter.
+    pub(super) fn watch_retained_processes(&mut self) -> bool {
+        let pids: std::collections::BTreeSet<i64> = self
+            .tracked
+            .iter()
+            .chain(self.history.iter())
+            .chain(self.protected.iter())
+            .chain(self.spared.spared_identities())
+            .map(|identity| identity.pid)
+            .collect();
+        matches!(self.reactor.watch_processes(&pids), Ok((_, 0)))
+    }
 }
 
 /// Unknown host graph state refuses escapee signals. This is intentionally
@@ -767,6 +821,22 @@ impl Driver<'_> {
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn host_allows_escapee_stop(holder: Option<&dyn Holder>, context: &[u8]) -> bool {
     holder.is_none_or(|holder| matches!(holder.has_live_children(context), Ok(false)))
+}
+
+/// Graph evidence is read only at a signalling decision that has candidates,
+/// so a cleanup pass with nothing to signal never reopens host graph state.
+/// Each read decodes every pending graph checkpoint; at the 20 ms cleanup
+/// tick that decode dominated retained guardians (#3560).
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn host_authorised_targets(
+    holder: Option<&dyn Holder>,
+    context: &[u8],
+    candidates: std::collections::BTreeSet<ProcessIdentity>,
+) -> Vec<ProcessIdentity> {
+    if candidates.is_empty() || !host_allows_escapee_stop(holder, context) {
+        return Vec::new();
+    }
+    candidates.into_iter().collect()
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -903,6 +973,38 @@ mod live_census_tests {
                 live == Some(false)
             );
             assert_eq!(holder.reads.get(), 1);
+        }
+    }
+
+    #[test]
+    fn cleanup_reads_graph_evidence_only_for_a_signalling_decision() {
+        let candidate = ProcessIdentity {
+            boot: "boot".into(),
+            pid: 20,
+            native_start: 2,
+            group_id: 20,
+            session_id: 20,
+        };
+        for live in [Some(false), Some(true), None] {
+            let holder = GraphHolder {
+                live,
+                reads: Cell::new(0),
+            };
+            // Nothing to signal: retained cleanup passes never decode graphs.
+            for _ in 0..100 {
+                assert!(
+                    host_authorised_targets(Some(&holder), b"attempt", Default::default())
+                        .is_empty()
+                );
+            }
+            assert_eq!(holder.reads.get(), 0);
+            let targets = host_authorised_targets(
+                Some(&holder),
+                b"attempt",
+                std::collections::BTreeSet::from([candidate.clone()]),
+            );
+            assert_eq!(holder.reads.get(), 1);
+            assert_eq!(targets.is_empty(), live != Some(false));
         }
     }
 
