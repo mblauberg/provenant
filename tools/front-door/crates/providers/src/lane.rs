@@ -13,6 +13,9 @@ use std::{
 pub(crate) struct GitWrapper {
     pub(crate) scrub: bool,
     pub(crate) identity_config: Option<PathBuf>,
+    /// Names of host Git configuration keys withheld from the private config
+    /// (never values); `None` when no allowlist applied.
+    pub(crate) host_config_dropped: Option<Vec<String>>,
     include: Option<String>,
     git: Option<PathBuf>,
     pub(crate) bound: Option<BoundGit>,

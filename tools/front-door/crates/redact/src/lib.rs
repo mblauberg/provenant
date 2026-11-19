@@ -136,6 +136,8 @@ impl LiteralAutomaton {
 enum TokenKind {
     Bearer,
     Generic,
+    /// A base62 body: an underscore ends it, so `npm_config_*` names stay.
+    Alphanumeric,
     AwsAccessKey,
 }
 
@@ -148,6 +150,15 @@ const TOKEN_MARKERS: &[(&[u8], TokenKind)] = &[
     (b"ghr_\0", TokenKind::Generic),
     (b"github_pat_\0", TokenKind::Generic),
     (b"sk-\0", TokenKind::Generic),
+    (b"sk_live_\0", TokenKind::Generic),
+    (b"rk_live_\0", TokenKind::Generic),
+    (b"glpat-\0", TokenKind::Generic),
+    (b"xoxa-\0", TokenKind::Generic),
+    (b"xoxb-\0", TokenKind::Generic),
+    (b"xoxp-\0", TokenKind::Generic),
+    (b"AIza\0", TokenKind::Generic),
+    (b"npm_\0", TokenKind::Alphanumeric),
+    (b"hf_\0", TokenKind::Alphanumeric),
     (b"AKIA\0", TokenKind::AwsAccessKey),
 ];
 const MAX_MARKER_LENGTH: usize = 11;
@@ -429,7 +440,7 @@ impl TokenScanner {
 
 fn minimum_token_length(kind: TokenKind) -> usize {
     match kind {
-        TokenKind::Bearer | TokenKind::Generic => 20,
+        TokenKind::Bearer | TokenKind::Generic | TokenKind::Alphanumeric => 20,
         TokenKind::AwsAccessKey => 16,
     }
 }
@@ -439,6 +450,7 @@ fn token_byte(kind: TokenKind, byte: u8) -> bool {
         TokenKind::Bearer | TokenKind::Generic => {
             byte.is_ascii_alphanumeric() || b"._~+/-=_".contains(&byte)
         }
+        TokenKind::Alphanumeric => byte.is_ascii_alphanumeric(),
         TokenKind::AwsAccessKey => byte.is_ascii_uppercase() || byte.is_ascii_digit(),
     }
 }
@@ -2502,6 +2514,46 @@ mod tests {
                 .any(|window| window == b"alice:password@example.invalid")
         );
         assert!(output.ends_with(b"/path"));
+    }
+
+    #[test]
+    fn provider_token_shapes_are_known() {
+        for token in [
+            "glpat-abcdefghij0123456789",
+            "npm_abcdefghijklmnopqrstuvwxyz0123456789",
+            "xoxa-1234567890-abcdefghijklmn",
+            "xoxb-1234567890-1234567890-abcdefghijkl",
+            "xoxp-1234567890-1234567890-abcdefghijkl",
+            "hf_abcdefghijklmnopqrstuvwxyz01234567",
+            "AIzaSyAbcdefghijklmnopqrstuvwxyz012345",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        // Built at run time so a secret scanner does not read the fixtures as
+        // live Stripe keys.
+        .chain(["sk", "rk"].map(|kind| format!("{kind}_live_abcdefghijklmnopqrstuvwx")))
+        {
+            let token = token.as_str();
+            assert_eq!(
+                known_shape_rule(format!("value {token} end").as_bytes()).ok(),
+                Some(Some("credential token or URL userinfo")),
+                "{token}"
+            );
+            let mut redactor = Redactor::new([]).expect("empty secret set");
+            assert_eq!(
+                joined(&mut redactor, &[format!("{token}!").as_bytes()]),
+                b"[REDACTED]!",
+                "{token}"
+            );
+        }
+        // Configuration names sharing a prefix are not tokens.
+        for text in [
+            "npm_config_manage_package_manager_versions",
+            "npm_package_dependencies_example_package",
+            "hf_hub_enable_hf_transfer_download_value",
+        ] {
+            assert_eq!(known_shape_rule(text.as_bytes()).ok(), Some(None), "{text}");
+        }
     }
 
     #[test]

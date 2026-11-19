@@ -843,6 +843,22 @@ knob = "policy.LAUNCH_PRIVATE_GIT_OBJECTS_NONE"
 justification = "A read-only Git launcher whose directory cannot be encoded in PATH is omitted with a warning; the selected Git executable remains explicitly granted."
 
 [[rule]]
+code = "LAUNCH_PRIVATE_GIT_OBJECTS_NONE_2"
+site = "providers/src/launch.rs#private_git_objects"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_PRIVATE_GIT_OBJECTS_NONE_2"
+justification = "A host Git configuration file that cannot be located or read contributes no settings to a sandboxed lane's private Git configuration; the lane launches with a warning."
+
+[[rule]]
+code = "LAUNCH_PRIVATE_GIT_OBJECTS_NONE_3"
+site = "providers/src/launch.rs#private_git_objects"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_PRIVATE_GIT_OBJECTS_NONE_3"
+justification = "A filter driver the host marks required but the allowlist withholds leaves the lane's Git without that filter; the lane launches with a warning naming the key, and domains.lanes.git_config_allow can pass the driver."
+
+[[rule]]
 code = "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION"
 site = "providers/src/launch.rs#private_git_objects"
 boundary = "git_isolation"

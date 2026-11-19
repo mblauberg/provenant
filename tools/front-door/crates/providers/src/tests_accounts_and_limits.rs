@@ -797,15 +797,12 @@ fn lanes_read_git_global_ignore_and_attributes_only_when_present()
     std::fs::write(git.join("ignore"), "")?;
     std::fs::write(git.join("attributes"), "")?;
     std::fs::write(git.join("config"), "")?;
+    // A sandboxed lane never reads the host configuration file itself: a
+    // writer receives its settings through the allowlisted private config.
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
         let mut paths = granted(access)?;
         paths.sort();
-        let mut expected = vec![git.join("attributes"), git.join("ignore")];
-        if access == Access::WorktreeWrite {
-            expected.push(git.join("config"));
-            expected.sort();
-        }
-        assert_eq!(paths, expected);
+        assert_eq!(paths, [git.join("attributes"), git.join("ignore")]);
     }
     Ok(())
 }
