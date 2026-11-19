@@ -71,16 +71,19 @@ ordinary lane work can continue without publishing credentials.
 
 ## Cargo target and seeding
 
-Keep the lane's Cargo bindings. Lanes default to the worktree's own Cargo target
-(`lanes.cargo_target = "project"`), shared with anyone building in that checkout;
-a new worktree starts cold. When configured as `lanes.cargo_target = "private"`,
-a host can build a seed for a registered
-repository with `provenant worktree seed-build`. It builds the configured verify
-base, so uncommitted work is not the seed source. Later writers copy a compatible
-target and Cargo decides which artifacts it can reuse. A `seeded` report proves
-the copy; Cargo's verbose `Fresh` lines prove dependency reuse.
+Keep the lane's Cargo bindings. Lanes default to the worktree's own target in its
+lane cache (`lanes.cargo_target = "private"`), cloned from the repository's host
+seed. A host builds that seed with `provenant worktree seed-build`, and tick
+refreshes it when the verify base moves. It builds the configured verify base,
+so uncommitted work is not the seed source. Each writer clones a compatible
+generation and ages its dep-info, so workspace members rebuild once from the
+worktree's sources and registry crates stay fresh. A `seeded` report proves the
+clone (`copied` when the filesystem cannot clone); Cargo's verbose `Fresh`
+lines prove dependency reuse. Settlement releases the target. For a checkout
+outside a lane, `provenant worktree seed-target PATH` seeds the same target and
+prints it for `CARGO_TARGET_DIR`.
 
-When `private` is configured, each repository keeps its own warm generations. `domains.fabric.lanes.cargo_seed.max_generations`
+Each repository keeps its own warm generations. `domains.fabric.lanes.cargo_seed.max_generations`
 limits history per repository; `max_bytes` limits the whole host and can evict a
 repository's only generation. Compiler, host platform and the effective lane
 profile must match. Unsupported compiler, target or build-flag overrides make

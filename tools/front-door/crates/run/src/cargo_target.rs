@@ -1,18 +1,23 @@
 //! Lane Cargo target knob (`lanes.cargo_target`).
 //!
 //! Controls where a lane's Cargo output is directed:
-//! - `project` (default): the writer worktree's own Cargo target, `target/` beside the
-//!   workspace manifest selected by the verify port, the same directory a person or
-//!   chair building in that checkout uses. Read-only lanes and non-Cargo projects use
-//!   the lane cache.
-//! - `private`: per-worktree copy-on-write seed clone under `~/Library/Caches/provenant-lane-cargo/<digest>/target`.
+//! - `private` (default): the worktree's own target in its lane cache,
+//!   `~/Library/Caches/provenant-lane-cargo/<digest>/target`, seeded warm by a
+//!   copy-on-write clone of the project's host seed generation with every dep-info
+//!   aged to the epoch (`cargo_seed`). `provenant worktree seed-target` seeds the
+//!   same directory for a checkout outside a lane. Removed with the worktree.
+//! - `project`: the writer worktree's own `target/` beside the workspace manifest
+//!   selected by the verify port. Cold unless a person already built there.
+//!   Read-only lanes and non-Cargo projects use the lane cache.
 //! - Absolute path: used as given.
 //!
 //! Every mode keeps one target per worktree unless an operator points several at one
 //! absolute path. Cargo hashes a workspace member's units by its workspace-relative
 //! path and decides freshness by comparing source mtimes with the last build's
 //! dep-info, so a target shared by worktrees of one repository serves one branch's
-//! artifacts to another whose sources are older (#3561).
+//! artifacts to another whose sources are older (#3561). A seed clone is safe
+//! because its aged dep-info makes every member rebuild once from this worktree's
+//! sources, while registry crates, whose dep-info lists no files, stay fresh.
 //!
 //! The value and its source appear in the lane preamble and in `provenant config show`.
 
@@ -31,8 +36,8 @@ const PROJECT_LINT_DIR: &str = "provenant-lint";
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CargoTargetSetting {
-    #[default]
     Project,
+    #[default]
     Private,
     Custom(PathBuf),
 }
@@ -82,7 +87,7 @@ pub struct ResolvedCargoTarget {
 impl Default for ResolvedCargoTarget {
     fn default() -> Self {
         Self {
-            value: CargoTargetSetting::Project,
+            value: CargoTargetSetting::Private,
             source: "default".into(),
         }
     }
@@ -111,10 +116,7 @@ impl ResolvedCargoTarget {
                 value,
                 source: display_source(knob_source).into(),
             },
-            None => Self {
-                value: CargoTargetSetting::Project,
-                source: "default".into(),
-            },
+            None => Self::default(),
         }
     }
 
@@ -197,13 +199,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn knob_default_is_project() {
+    fn knob_default_is_private() {
         let profile = HarnessProfile::default();
         let resolved = ResolvedCargoTarget::resolve(&profile);
-        assert_eq!(resolved.value, CargoTargetSetting::Project);
+        assert_eq!(resolved.value, CargoTargetSetting::Private);
         assert_eq!(resolved.source, "default");
-        assert!(resolved.value.is_project());
-        assert!(!resolved.value.is_private());
+        assert!(resolved.value.is_private());
+        assert!(!resolved.value.is_project());
     }
 
     #[test]
@@ -249,16 +251,16 @@ mod tests {
         let default_target = ResolvedCargoTarget::default();
         assert_eq!(
             default_target.preamble(),
-            "Cargo target: project (source: default; lanes.cargo_target).\n"
+            "Cargo target: private (source: default; lanes.cargo_target).\n"
         );
 
         let mut profile = HarnessProfile::default();
-        profile.knobs.insert(KNOB.into(), "private".into());
+        profile.knobs.insert(KNOB.into(), "project".into());
         profile.knob_sources.insert(KNOB.into(), LimitSource::Host);
         let resolved = ResolvedCargoTarget::resolve(&profile);
         assert_eq!(
             resolved.preamble(),
-            "Cargo target: private (source: host; lanes.cargo_target).\n"
+            "Cargo target: project (source: host; lanes.cargo_target).\n"
         );
 
         let custom = ResolvedCargoTarget {
@@ -285,7 +287,10 @@ mod tests {
         let workspace = Path::new("/Users/user/project/.worktrees/lane/tools/build");
         let private_cache = Path::new("/Users/user/Library/Caches/provenant-lane-cargo/abc");
 
-        let project = ResolvedCargoTarget::default();
+        let project = ResolvedCargoTarget {
+            value: CargoTargetSetting::Project,
+            source: "host".into(),
+        };
         let (target, lint) = project.target_paths(Some(workspace), private_cache);
         assert_eq!(target, workspace.join("target"));
         assert_eq!(lint, workspace.join("target/provenant-lint"));
@@ -323,16 +328,20 @@ mod tests {
             std::fs::create_dir_all(worktree)?;
             std::fs::write(worktree.join("Cargo.toml"), "[workspace]\n")?;
         }
-        let project = ResolvedCargoTarget::default();
-        let resolve = |worktree: &Path, cache: &str| {
-            let workspace = project.project_workspace(Some(worktree), root.path());
-            project.target_paths(workspace.as_deref(), &root.path().join(cache))
-        };
-        let (first_target, first_lint) = resolve(&first, "cache-1");
-        let (second_target, second_lint) = resolve(&second, "cache-2");
-        assert_eq!(first_target, first.canonicalize()?.join("target"));
-        assert_ne!(first_target, second_target);
-        assert_ne!(first_lint, second_lint);
+        for value in [CargoTargetSetting::default(), CargoTargetSetting::Project] {
+            let setting = ResolvedCargoTarget {
+                value,
+                source: "default".into(),
+            };
+            let resolve = |worktree: &Path, cache: &str| {
+                let workspace = setting.project_workspace(Some(worktree), root.path());
+                setting.target_paths(workspace.as_deref(), &root.path().join(cache))
+            };
+            let (first_target, first_lint) = resolve(&first, "cache-1");
+            let (second_target, second_lint) = resolve(&second, "cache-2");
+            assert_ne!(first_target, second_target, "{:?}", setting.value);
+            assert_ne!(first_lint, second_lint, "{:?}", setting.value);
+        }
         Ok(())
     }
 }

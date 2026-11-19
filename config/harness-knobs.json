@@ -698,11 +698,11 @@
     },
     "lanes.cargo_target": {
       "type": "cargo_target",
-      "default": "project",
+      "default": "private",
       "status": "wired",
       "reader": "tools/front-door/crates/run/src/cargo_target.rs",
-      "effect": "CARGO_TARGET_DIR for lanes: project (default; the writer worktree's own target/ beside its Cargo workspace, the one a person building in that checkout uses), private (a copy-on-write seed clone per worktree under the lane cache) or an absolute path. The value and its source appear in the lane preamble and in provenant config show.",
-      "trade_off": "project shares artifacts with builds in the same checkout and is removed with the worktree, but a new worktree starts cold. private starts warm from a host seed at the cost of a second target per worktree. Never point several worktrees at one absolute path: Cargo decides member freshness by source mtimes, so one worktree reuses another branch's artifacts."
+      "effect": "CARGO_TARGET_DIR for lanes: private (default; the worktree's own target in its lane cache, seeded warm by a copy-on-write clone of the project's host seed generation with dep-info aged so members rebuild from this worktree's sources), project (the writer worktree's own target/ beside its Cargo workspace) or an absolute path. provenant worktree seed-target prints and seeds the private target for a checkout outside a lane. The value and its source appear in the lane preamble and in provenant config show.",
+      "trade_off": "private starts warm and costs little disk on APFS, where clones share blocks; off APFS the seed is a full copy, with a warning. It is removed with the worktree. project shares artifacts with builds a person runs in the same checkout but starts cold. Never point several worktrees at one absolute path: Cargo decides member freshness by source mtimes, so one worktree reuses another branch's artifacts."
     },
     "lanes.ci_scope": {
       "type": "enum",
@@ -719,7 +719,7 @@
       "default": "targeted",
       "status": "wired",
       "reader": "tools/front-door/crates/run/src/verification.rs",
-      "effect": "Local verification a writer lane is told to run before it commits. targeted (default) uses a shared warm target for cargo check, clippy on touched crates and targeted tests. check is one cargo check of the package it changed. full runs the repository's documented local checks, leaving the whole workspace suite to CI. A brief line `Verification scope: targeted` (or check or full) overrides the knob; the preamble then names source brief. Host and project [knobs] name source host or project. Set per run with --knob lanes.verification=targeted.",
+      "effect": "Local verification a writer lane is told to run before it commits. targeted (default) uses the worktree's own warm target (lanes.cargo_target) for cargo check, clippy on touched crates and targeted tests. check is one cargo check of the package it changed. full runs the repository's documented local checks, leaving the whole workspace suite to CI. A brief line `Verification scope: targeted` (or check or full) overrides the knob; the preamble then names source brief. Host and project [knobs] name source host or project. Set per run with --knob lanes.verification=targeted.",
       "trade_off": "Advisory guidance; the cargo shim warns for commands outside lanes.local_cargo. A wider scope spends the host build cap."
     },
     "lanes.writer_dirty": {

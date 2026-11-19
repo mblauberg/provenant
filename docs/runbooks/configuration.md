@@ -74,12 +74,21 @@ to inspect the settings.
 ## Lane Cargo target
 
 `lanes.cargo_target` picks each writer lane's `CARGO_TARGET_DIR`. The default,
-`project`, is the worktree's own `target/`; choose `private` for a warm start
-from a host seed. An absolute path is used as given: never point several
-worktrees of one repository at it, because Cargo then serves one branch's
-artifacts to another ([run spec](../specs/run.md#cargo-target-directory)). A
-`shared` value from an older release is reported by `provenant config check`
-and the default applies.
+`private`, is the worktree's own target in its lane cache, cloned warm from the
+project's host seed (a full copy, with a warning, where the filesystem cannot
+clone). `project` uses the worktree's own `target/` and starts cold. An
+absolute path is used as given: never point several worktrees of one repository
+at it, because Cargo then serves one branch's artifacts to another
+([run spec](../specs/run.md#cargo-target-directory)). The lane preamble names
+the value and its source. A `shared` value from an older release is reported by
+`provenant config check` and the default applies; `provenant gc --apply`
+removes its old directories.
+
+To build warm in a checkout outside a lane, seed its private target and use it:
+
+```sh
+export CARGO_TARGET_DIR="$(provenant worktree seed-target .worktrees/my-branch)"
+```
 
 ## Git pre-push hook and local gate
 

@@ -2992,6 +2992,15 @@ mod tests {
         assert_eq!(path, std::path::PathBuf::from("../lane with spaces"));
     }
     #[test]
+    fn worktree_seed_target_requires_a_path() {
+        invalid(&["worktree", "seed-target"]);
+        let invocation = valid(&["worktree", "seed-target", ".worktrees/lane"]);
+        let Command::Worktree(Worktree::SeedTarget { path }) = invocation.command else {
+            panic!("worktree seed-target");
+        };
+        assert_eq!(path, std::path::PathBuf::from(".worktrees/lane"));
+    }
+    #[test]
     fn collection_caps_are_not_per_occurrence_caps() {
         let mut words = vec!["reconcile".to_string()];
         words.extend((0..100).map(|i| format!("graph-{i}")));

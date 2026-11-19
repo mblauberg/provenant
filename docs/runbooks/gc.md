@@ -63,7 +63,11 @@ After a merge, background cleanup targets only that branch's worktree and its
 attempt scratch. It does not scan the run store or collect shared caches. At lane
 launch, free space below `gc.free_floor` starts a best-effort background full
 sweep; a shared single-flight lock prevents parallel sweeps. Full GC protects
-busy and recently used shared caches and the newest Cargo seed generation. Private
+busy and recently used shared caches and the newest Cargo seed generation. It also
+retires the targets of the removed `lanes.cargo_target = "shared"` mode under
+`~/Library/Caches/provenant-shared-cargo/`: a preview lists them, and
+`--apply` removes each whose Cargo locks are free and that was not written
+within the build-directory grace. Private
 lane caches older than `gc.idle` are also eligible when their owner has settled
 or disappeared. Unknown custody and held Cargo or owner locks keep a cache.
 
