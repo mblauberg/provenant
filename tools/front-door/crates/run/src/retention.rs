@@ -553,14 +553,17 @@ impl RunStore {
                     if scratch_eligible && effects_done && !uncertain_loss {
                         let temporary = path.with_file_name("tmp");
                         let collection = (|| -> Result<()> {
-                            let pending_writer_cleanup = if record.provider_launched == Some(false)
-                                && matches!(record.state, AttemptState::Terminal { .. })
-                                && crate::artifacts::read_sealed(
-                                    &attempt,
-                                    "writer-git-pins.json",
-                                    crate::RECORD_LIMIT,
-                                )?
-                                .is_some()
+                            // A launched writer's cleanup can be deferred by a
+                            // busy writer lock too; keep its scratch until done.
+                            let pending_writer_cleanup = if matches!(
+                                record.state,
+                                AttemptState::Terminal { .. }
+                            ) && crate::artifacts::read_sealed(
+                                &attempt,
+                                "writer-git-pins.json",
+                                crate::RECORD_LIMIT,
+                            )?
+                            .is_some()
                             {
                                 let raw: Option<Vec<u8>> = rusqlite::OptionalExtension::optional(
                                 self.db.query_row(

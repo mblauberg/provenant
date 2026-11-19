@@ -138,6 +138,10 @@ pub enum LossUnproven {
     CustodyHeld,
     #[error("the process census is incomplete")]
     CensusIncomplete,
+    #[error(
+        "the guardian's recorded process tree is incomplete; an unrecorded process cannot be ruled out"
+    )]
+    TreeIncomplete,
     #[error("process {pid} of the attempt is still live")]
     Live { pid: i64 },
     #[error("process {pid} of the attempt cannot be identified")]
@@ -196,7 +200,32 @@ impl Recovery {
         observer: &dyn ProcessObserver,
         worktree_is_free: impl FnOnce() -> Result<bool>,
     ) -> Result<std::result::Result<GuardianLossRecovery, LossUnproven>> {
+        self.after_guardian_loss_with(
+            attempt,
+            observer,
+            &super::orphans::SystemProbe,
+            worktree_is_free,
+        )
+    }
+
+    /// [`Self::after_guardian_loss`] with an explicit sandbox probe. A
+    /// spawned tree the guardian recorded incompletely cannot be proven gone:
+    /// an unrecorded escapee outside the worktree passes every other check.
+    pub(crate) fn after_guardian_loss_with(
+        self,
+        attempt: &Directory,
+        observer: &dyn ProcessObserver,
+        probe: &dyn super::orphans::OrphanProbe,
+        worktree_is_free: impl FnOnce() -> Result<bool>,
+    ) -> Result<std::result::Result<GuardianLossRecovery, LossUnproven>> {
         validate_anchor(&self.directory, &self.reservation)?;
+        // Handing off records no provider yet; only a spawned tree can escape.
+        if self.reservation.omitted_descendants > 0
+            || (self.reservation.census_incomplete
+                && self.reservation.launch_state == LaunchState::Spawned)
+        {
+            return Ok(Err(LossUnproven::TreeIncomplete));
+        }
         let record: GuardianLock = match read_record(&self.directory, RECORD, RECORD_LIMIT) {
             Ok(record) => record,
             Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
@@ -259,14 +288,19 @@ impl Recovery {
             Ok(census) if census.is_complete() => census,
             _ => return Ok(Err(LossUnproven::CensusIncomplete)),
         };
-        // Check live roots and every retained descendant as well as their
-        // sessions/groups. PID reuse supplies no death evidence: the lock and
-        // the worktree census establish quiescence independently of PID values.
+        // Check live roots and every retained descendant, including those an
+        // unresolved exit named, as well as their sessions/groups. PID reuse
+        // supplies no death evidence: the lock and the worktree census
+        // establish quiescence independently of PID values.
+        let Ok(unresolved) = unresolved_exit_identities(attempt, self.scope()) else {
+            return Ok(Err(LossUnproven::Evidence));
+        };
         let identities: Vec<_> = record
             .guardian_process
             .iter()
             .chain(self.reservation.provider.iter())
             .chain(self.reservation.descendants.iter())
+            .chain(unresolved.iter())
             .collect();
         // A complete census lists every live process, so a recorded pid that is
         // not listed is absent; only a pid the census names as undescribable is
@@ -289,6 +323,16 @@ impl Recovery {
                 pid: fact.identity.pid,
             }));
         }
+        // Escapees the guardian never recorded still carry the sandbox mark.
+        if let Some(fact) = census.facts().find(|fact| {
+            !fact.zombie
+                && record.guardian_process.as_ref() != Some(&fact.identity)
+                && probe.in_attempt_sandbox(fact.identity.pid, &self.reservation.scope)
+        }) {
+            return Ok(Err(LossUnproven::Live {
+                pid: fact.identity.pid,
+            }));
+        }
         if !worktree_is_free()? {
             return Ok(Err(LossUnproven::WorktreeOccupied));
         }
@@ -305,4 +349,25 @@ impl Recovery {
             _custody: custody,
         }))
     }
+}
+
+/// Identities a published exit left unresolved, if one exists for this scope.
+/// A record that cannot be read for this scope is not evidence of absence.
+fn unresolved_exit_identities(attempt: &Directory, scope: Scope) -> Result<Vec<ProcessIdentity>> {
+    #[derive(Deserialize)]
+    struct Exit {
+        scope: Scope,
+        #[serde(default)]
+        unresolved_identities: Vec<ProcessIdentity>,
+    }
+    let bytes = match attempt.read_bounded(OsStr::new("process-exit.json"), EXIT_LIMIT) {
+        Ok(bytes) => bytes,
+        Err(error) if error.is_not_found() => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let exit: Exit = serde_json::from_slice(&bytes).map_err(|_| CustodyError::InvalidRecord)?;
+    if exit.scope != scope {
+        return Err(CustodyError::InvalidRecord);
+    }
+    Ok(exit.unresolved_identities)
 }

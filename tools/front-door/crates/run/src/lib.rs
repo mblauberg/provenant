@@ -635,8 +635,10 @@ pub enum RunError {
     WriterExclusionBusy {
         lock: std::path::PathBuf,
         holder: String,
-        /// Some reservation in the slot names a guardian that is still live.
-        guardian_live: bool,
+        /// Some holder may still release the lock: a live or unobservable
+        /// guardian, a live or unreadable settlement owner of another
+        /// reserved attempt, or a holder no reservation identifies.
+        holder_live: bool,
     },
     /// A steered writer's successor waits until settlement releases the
     /// predecessor's worktree custody; the accepted steering stays queued.

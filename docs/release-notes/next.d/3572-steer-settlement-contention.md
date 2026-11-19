@@ -10,12 +10,15 @@ writer's continuation waits for custody release instead of being dropped, and
 `provenant stop` on such a node resolves its queued steering at once, cause
 shown. Commands that settle a lane's cleanup no longer wait on another holder's
 lock; they leave it to the settlement worker. A lock held for three minutes
-with no live guardian is reported as blocked and names the recovery commands.
+with no live guardian and no live settlement owner is reported as blocked and
+names the recovery commands; an unidentified holder keeps the wait visible.
 Reconcile now shows a recorded settlement failure as past evidence with its age
 and recording process (`recorded 45s ago by process <pid>: ...`), never as a
 current failure. `provenant reconcile --abandon` now releases a node whose
 guardian died with its cleanup unresolved once a fresh census proves every
-recorded process gone; otherwise it refuses and names the live PID.
+recorded process gone and no process carries the lane's sandbox mark;
+otherwise it refuses and names the live PID or the incomplete record. Deferred
+Git cleanup is now retried for launched writers too.
 
 Nodes blocked by lock contention before this release keep their blocked state.
 Run `provenant reconcile <lane>`, or a bare `provenant reconcile` to sweep

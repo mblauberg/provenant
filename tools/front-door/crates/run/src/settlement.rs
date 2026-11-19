@@ -199,7 +199,7 @@ pub(crate) fn waiting(
     attempt: &Directory,
     scope: Scope,
     reason: &str,
-    guardian_live: bool,
+    holder_live: bool,
     clock: &dyn Clock,
 ) -> Result<()> {
     let _lock = journal_lock(attempt)?;
@@ -208,22 +208,23 @@ pub(crate) fn waiting(
     if owner_active(attempt, &journal, now)? {
         return Ok(());
     }
-    record_lock_wait(&mut journal, reason, guardian_live, now);
+    record_lock_wait(&mut journal, reason, holder_live, now);
     write(attempt, &journal)
 }
 
-/// Contention never spends the failure budget while a live guardian may still
-/// release the lock, so a busy holder cannot exhaust settlement. The first
-/// wait's deadline is kept, so a long wait ages into the stalled diagnostic. A
-/// lock still held past that threshold with no live guardian has no holder
-/// that will release it: it is recorded blocked, naming the explicit paths.
+/// Contention never spends the failure budget while a holder may still release
+/// the lock, so a busy holder cannot exhaust settlement. The first wait's
+/// deadline is kept, so a long wait ages into the stalled diagnostic. A lock
+/// still held past that threshold with no live guardian or settlement owner
+/// has no holder that will release it: it is recorded blocked, naming the
+/// explicit paths. An unidentified holder keeps waiting, visibly.
 /// Spent failures exhaust an import; a lock escalated by [`record_lock_wait`]
 /// blocks automatic retries but never seals the import as refused.
 fn failures_exhausted(journal: &Journal) -> bool {
     journal.recovery_failures >= LIMIT && journal.lock_wait_since_ms == 0
 }
 
-fn record_lock_wait(journal: &mut Journal, reason: &str, guardian_live: bool, now: u64) {
+fn record_lock_wait(journal: &mut Journal, reason: &str, holder_live: bool, now: u64) {
     if journal.lock_wait_since_ms == 0 {
         journal.lock_wait_since_ms = now;
     }
@@ -231,10 +232,10 @@ fn record_lock_wait(journal: &mut Journal, reason: &str, guardian_live: bool, no
         journal.retry_after_ms = now;
     }
     let waited = now.saturating_sub(journal.lock_wait_since_ms);
-    let reason = if !guardian_live && waited >= STALLED_RETRY_MS {
+    let reason = if !holder_live && waited >= STALLED_RETRY_MS {
         journal.recovery_failures = LIMIT;
         format!(
-            "{reason}; no live guardian holds it after {}s. Once the holder exits, run `provenant reconcile <lane>`, or release the retained work with `provenant reconcile --abandon <lane> --reason <text>`",
+            "{reason}; no live guardian or settlement owner holds it after {}s. Once the holder exits, run `provenant reconcile <lane>`, or release the retained work with `provenant reconcile --abandon <lane> --reason <text>`",
             waited / 1000
         )
     } else {
@@ -534,6 +535,17 @@ impl std::fmt::Display for Refusal {
 /// Refusal observations use the same locks and deadline as a claim, without
 /// changing its retry budget. A free lifetime lease proves a same-process owner
 /// has abandoned its driver, even if Drop could not clear the journal.
+/// Whether a settlement owner may still be driving this attempt (driver lock
+/// held, or a live recorded owner in another process); None when unreadable.
+pub(crate) fn settlement_owner_live(
+    attempt: &Directory,
+    scope: Scope,
+    clock: &dyn Clock,
+) -> Option<bool> {
+    let journal = read(attempt, scope).ok()?;
+    owner_active(attempt, &journal, now_ms(clock).ok()?).ok()
+}
+
 fn owner_active(attempt: &Directory, journal: &Journal, now: u64) -> Result<bool> {
     match try_progress_lock(attempt, "settlement-driver.lock") {
         Err(FsError::LockTimeout { .. }) => Ok(true),
@@ -729,8 +741,8 @@ impl Driver<'_> {
         let reason = error.to_string();
         let now = now_ms(self.clock)?;
         self.update(|journal| {
-            if let RunError::WriterExclusionBusy { guardian_live, .. } = error {
-                record_lock_wait(journal, &reason, *guardian_live, now);
+            if let RunError::WriterExclusionBusy { holder_live, .. } = error {
+                record_lock_wait(journal, &reason, *holder_live, now);
                 return Ok(());
             }
             journal.record_blocking(provenant_core::bounded_line(&reason, 4096), now);
@@ -2474,7 +2486,7 @@ mod tests {
             driver.record_failure(&RunError::WriterExclusionBusy {
                 lock: "/slot/writer.lock".into(),
                 holder: "attempt Y (guardian live, reserved 1s ago)".into(),
-                guardian_live: true,
+                holder_live: true,
             })?;
         }
         drop(driver);
@@ -2492,14 +2504,15 @@ mod tests {
 
     // Spec: docs/specs/run-settlement.md#settlement
     #[test]
-    fn a_held_writer_lock_blocks_only_without_a_live_guardian_after_the_stall() -> TestResult {
+    fn a_held_writer_lock_blocks_only_when_no_holder_can_release_it_after_the_stall() -> TestResult
+    {
         let mut clock = clock();
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
         let reason = "waiting for writer lock /slot/writer.lock, held by attempt X";
         // Zero means "not waiting", so start the wait after the epoch.
         advance_to(&mut clock, 1_000)?;
-        // A live guardian keeps the wait visible but never blocked.
+        // A holder that may release it keeps the wait visible, never blocked.
         waiting(&attempt, scope(), reason, true, &clock)?;
         let since = read(&attempt, scope())?.lock_wait_since_ms;
         advance_to(&mut clock, since + STALLED_RETRY_MS)?;
@@ -2509,7 +2522,7 @@ mod tests {
         let status = diagnostic(&journal, Some(now_ms(&clock)?)).ok_or("status")?;
         assert!(status.contains("retry stalled"), "{status}");
         assert!(status.contains("held by attempt X"), "{status}");
-        // The same wait with no live guardian is recorded blocked, naming
+        // The same wait with no holder that can release it is blocked, naming
         // the explicit recovery paths.
         waiting(&attempt, scope(), reason, false, &clock)?;
         let journal = read(&attempt, scope())?;
@@ -2531,9 +2544,27 @@ mod tests {
         let journal = read(&attempt, scope())?;
         assert_eq!(journal.recovery_failures, 0);
         assert_eq!(journal.lock_wait_since_ms, 0);
-        // Before the stall threshold, a holder with no live guardian waits.
+        // Before the stall threshold, even such a holder is waited on.
         waiting(&attempt, scope(), reason, false, &clock)?;
         assert_eq!(read(&attempt, scope())?.recovery_failures, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_settlement_owner_is_live_while_it_holds_the_driver_lock() -> TestResult {
+        let clock = clock();
+        let temp = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(temp.path())?;
+        assert_eq!(
+            settlement_owner_live(&attempt, scope(), &clock),
+            Some(false)
+        );
+        let driver = attempt.try_lock(OsStr::new("settlement-driver.lock"), LockMode::Exclusive)?;
+        assert_eq!(settlement_owner_live(&attempt, scope(), &clock), Some(true));
+        drop(driver);
+        // An unreadable journal is unknown, never "no owner".
+        std::fs::write(temp.path().join(FILE), b"not a journal")?;
+        assert_eq!(settlement_owner_live(&attempt, scope(), &clock), None);
         Ok(())
     }
 
@@ -2545,7 +2576,7 @@ mod tests {
             reason: UncertainReason::WriterLockBusy {
                 lock: "writer.lock".into(),
                 holder: "attempt X".into(),
-                guardian_live: true,
+                holder_live: true,
             },
         };
         let failed = Reconciled::Uncertain {

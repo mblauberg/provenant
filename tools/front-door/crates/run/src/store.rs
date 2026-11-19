@@ -2039,7 +2039,13 @@ impl RunStore {
                         call.clock,
                     )
                     .map_err(|error| {
-                        crate::controls::writer_exclusion_error(slot, Self::scope(record), error)
+                        crate::controls::writer_exclusion_error(
+                            self,
+                            slot,
+                            Self::scope(record),
+                            error,
+                            call,
+                        )
                     })?,
                 ),
                 _ => None,
