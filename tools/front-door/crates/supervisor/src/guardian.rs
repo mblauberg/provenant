@@ -384,7 +384,7 @@ pub type PublicationScopeBinder =
 pub struct GuardianHooks<'a> {
     /// Memory-only scope retained through capture and holder settlement.
     pub publication_scope: Option<&'a PublicationScopeBinder>,
-    /// Resource sampling cadence selected from `[domains.run]`; `None` uses the compiled default.
+    /// Process-tree sampling cadence from `[domains.run]`; `None` runs no sampler.
     pub resource_sample_interval: Option<Duration>,
     pub children: Option<&'a dyn ChildRegistry>,
     /// Run's terminal transaction. Without one, custody stays fenced after
@@ -1082,7 +1082,12 @@ impl Driver<'_> {
             env
         };
         // Replace any caller value with this guardian's own held attempt path.
-        let memory_path = crate::process_tree::snapshot_path(&self.attempt).ok();
+        // Process-tree sampling is opt-in; without an interval no path is set.
+        let sample_interval = hooks
+            .resource_sample_interval
+            .map(|interval| interval.max(Duration::from_millis(1)));
+        let memory_path = sample_interval
+            .and_then(|_| crate::process_tree::snapshot_path(&self.attempt).ok());
         let env = with_process_tree_path(env, memory_path.as_deref());
         if memory_path.is_some() {
             let _ = crate::process_tree::publish(&self.attempt, None);
@@ -1146,17 +1151,15 @@ impl Driver<'_> {
         let mut memory = memory_path
             .as_ref()
             .and(self.reservation.provider.as_ref())
-            .and_then(|root| {
+            .zip(sample_interval)
+            .and_then(|(root, interval)| {
                 crate::process_tree::Sampler::start(
                     &self.attempt,
                     root,
                     self.reservation.scope.attempt,
                     // Without a profile the lane has no sandbox mark to test.
                     self.profile_file.is_some(),
-                    hooks
-                        .resource_sample_interval
-                        .unwrap_or(crate::process_tree::DEFAULT_SAMPLE_INTERVAL)
-                        .max(Duration::from_millis(1)),
+                    interval,
                 )
             });
         if write_record(

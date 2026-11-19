@@ -1010,41 +1010,38 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
             .with_graph_read(move |context, input, cancel, within| {
                 fabric::read_lane_graph(context, input, cancel, within, workers)
             });
-        let (resource_sample_interval, resource_sample_interval_source) =
-            match roots::resolve(globals, Workspace::Project, Product::Optional) {
-                Ok(resolved) => match provenant_cli::config_reads::read_for(&resolved.roots, "internal") {
-                    Ok(config) => {
-                        let millis = config.domains.run.resource_sample_interval_ms;
+        // Lane process-tree sampling is opt-in: 0 (the default) runs no sampler.
+        let resource_sample_interval =
+            match roots::resolve(globals, Workspace::Project, Product::Optional)
+                .map_err(|error| error.to_string())
+                .and_then(|resolved| {
+                    provenant_cli::config_reads::read_for(&resolved.roots, "internal")
+                        .map_err(|error| error.to_string())
+                }) {
+                Ok(config) => match config.domains.run.resource_sample_interval_ms {
+                    0 => None,
+                    millis @ 1..=60_000 => {
                         let source = config
                             .origins
                             .get("domains.run.resource_sample_interval_ms")
                             .map(|origin| format!("{origin:?}"))
-                            .unwrap_or_else(|| "compiled default (origin unavailable)".into());
-                        if (1..=60_000).contains(&millis) {
-                            (Some(std::time::Duration::from_millis(millis)), source)
-                        } else {
-                            let _ = writeln!(io::stderr().lock(),
-                                "warning: domains.run.resource_sample_interval_ms is outside 1..=60000; using compiled {}ms default", provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL_MS);
-                            (None, "compiled default (invalid configured value)".into())
-                        }
-                    }
-                    Err(error) => {
+                            .unwrap_or_else(|| "origin unavailable".into());
                         let _ = writeln!(io::stderr().lock(),
-                            "warning: domains.run resource sampling configuration unavailable; using compiled {}ms default: {error}", provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL_MS);
-                        (None, "compiled default (configuration unavailable)".into())
+                            "process-tree sampling every {millis}ms (source: {source})");
+                        Some(std::time::Duration::from_millis(millis))
+                    }
+                    _ => {
+                        let _ = writeln!(io::stderr().lock(),
+                            "warning: domains.run.resource_sample_interval_ms is outside 0..=60000; process-tree sampling off");
+                        None
                     }
                 },
                 Err(error) => {
                     let _ = writeln!(io::stderr().lock(),
-                        "warning: resource sampling configuration roots unavailable; using compiled {}ms default: {error}", provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL_MS);
-                    (None, "compiled default (roots unavailable)".into())
+                        "warning: domains.run configuration unavailable; process-tree sampling off: {error}");
+                    None
                 }
             };
-        let effective_interval = resource_sample_interval
-            .unwrap_or(provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL);
-        let _ = writeln!(io::stderr().lock(),
-            "resource sampling interval: {}ms (source: {})",
-            effective_interval.as_millis(), resource_sample_interval_source);
         let bind_publication = |environment: &[(Vec<u8>, Vec<u8>)],
                                 secret: Option<&provenant_os::exec::SecretInput>,
                                 inherited: &provenant_os::exec::SecretValues| {
