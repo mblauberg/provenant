@@ -264,6 +264,7 @@ struct LaunchMessage {
     argv: Vec<Vec<u8>>,
     environment: Vec<(Vec<u8>, Vec<u8>)>,
     lane_ports: Option<provenant_os::lane_ports::Plan>,
+    resource_sample_interval_ms: Option<u64>,
     cwd: Vec<u8>,
     stdin: Vec<u8>,
     secret_input: Option<provenant_os::exec::SecretInput>,
@@ -324,6 +325,11 @@ pub(crate) fn handoff(
             .map(|(name, value)| (name.as_bytes().to_vec(), value.as_bytes().to_vec()))
             .collect(),
         lane_ports: owned.command.lane_ports,
+        resource_sample_interval_ms: owned.command.resource_sample_interval.map(|interval| {
+            u64::try_from(interval.as_millis())
+                .unwrap_or(u64::MAX)
+                .max(1)
+        }),
         cwd: owned.command.cwd.as_os_str().as_bytes().to_vec(),
         stdin: owned.command.stdin,
         secret_input: owned.command.secret_input,
@@ -378,8 +384,6 @@ pub type PublicationScopeBinder =
 pub struct GuardianHooks<'a> {
     /// Memory-only scope retained through capture and holder settlement.
     pub publication_scope: Option<&'a PublicationScopeBinder>,
-    /// Process-tree sampling cadence from `[domains.run]`; `None` runs no sampler.
-    pub resource_sample_interval: Option<Duration>,
     pub children: Option<&'a dyn ChildRegistry>,
     /// Run's terminal transaction. Without one, custody stays fenced after
     /// exit until an explicit recovery verifies Run's release attestations.
@@ -744,6 +748,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         cleanup_holders_warned: false,
         deferred_signal: false,
         deferred_cancel: false,
+        deferred_process_event: false,
         stopped_descendants: std::collections::BTreeSet::new(),
         settlement_evidence: SettlementEvidence::Unresolved,
         reaped: Vec::new(),
@@ -773,6 +778,9 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         holder: hooks.holder,
         holder_context: message.holder_context,
         lane_ports: message.lane_ports,
+        resource_sample_interval: message
+            .resource_sample_interval_ms
+            .map(Duration::from_millis),
         secret_input: message.secret_input,
         profile_file,
         priority: message.priority,
@@ -804,6 +812,7 @@ struct Driver<'a> {
     holder: Option<&'a dyn Holder>,
     holder_context: Vec<u8>,
     lane_ports: Option<provenant_os::lane_ports::Plan>,
+    resource_sample_interval: Option<Duration>,
     secret_input: Option<provenant_os::exec::SecretInput>,
     priority: u8,
     profile_file: Option<crate::ProfileFile>,
@@ -821,6 +830,9 @@ struct Driver<'a> {
     /// waited on exit watches, for the retained loop to act on.
     deferred_signal: bool,
     deferred_cancel: bool,
+    /// A process event a retained stop consumed while awaiting its targets;
+    /// any watched identity (a protected owner, say) may have exited.
+    deferred_process_event: bool,
     /// Descendants this guardian signalled, for the one summary warning.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     stopped_descendants: std::collections::BTreeSet<ProcessIdentity>,
@@ -1084,7 +1096,7 @@ impl Driver<'_> {
         };
         // Replace any caller value with this guardian's own held attempt path.
         // Process-tree sampling is opt-in; without an interval no path is set.
-        let sample_interval = hooks
+        let sample_interval = self
             .resource_sample_interval
             .map(|interval| interval.max(Duration::from_millis(1)));
         let memory_path =
@@ -2073,6 +2085,8 @@ impl Driver<'_> {
                     break;
                 }
                 cancel_pending |= std::mem::take(&mut self.deferred_cancel);
+                schedule.process_event |=
+                    std::mem::take(&mut self.deferred_process_event) && !schedule.escalate_only;
                 if step != RetainedStep::Wait {
                     schedule.watched = self.watch_retained_processes();
                 }

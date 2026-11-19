@@ -2615,6 +2615,41 @@ fn lane_port_plan(
     }))
 }
 
+/// The lane's process-tree sampling cadence, resolved here because the
+/// guardian starts with an empty environment and cannot read config. An
+/// explicit `domains.run.resource_sample_interval_ms` wins. At 0 (the
+/// default) an admission class with `memory_per_slot` needs a sample, so the
+/// lane is sampled at the default cadence; otherwise no sampler runs.
+/// `provenant config show --full` shows both settings and their sources.
+fn process_tree_interval(
+    state: &std::path::Path,
+    project: &std::path::Path,
+    policy: &provenant_records::policy::Policy,
+) -> Option<std::time::Duration> {
+    let configured = match provenant_confinement::run_config::RunConfig::read(state) {
+        Ok(config) => config.resource_sample_interval_ms,
+        Err(error) => {
+            if let provenant_records::policy::Effect::Warn(message) = policy.check(
+                "LAUNCH_PROCESS_TREE_INTERVAL_OR_WARN_NONE",
+                provenant_records::policy::Facts::violation(format!(
+                    "domains.run settings unavailable ({error}); no process-tree sampling"
+                )),
+            ) {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            }
+            return None;
+        }
+    };
+    if configured > 0 {
+        return Some(std::time::Duration::from_millis(configured));
+    }
+    provenant_config::ResolvedAdmissionClass::resolve_all(state, Some(project))
+        .into_values()
+        .any(|class| class.memory_per_slot_bytes.is_some())
+        .then_some(provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL)
+}
+
 fn lane_port_plan_or_warn(
     state: &std::path::Path,
     policy: &provenant_records::policy::Policy,

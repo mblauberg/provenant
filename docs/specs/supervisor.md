@@ -419,9 +419,12 @@ unsupported sample is unavailable, never a partial tree or zero memory.
 The sample is periodic observation, not an atomic census or a memory limit.
 Sampling runs only when something needs it:
 `domains.run.resource_sample_interval_ms` (1..=60000 ms) sets an interval, and
-when it is 0 (the default) an admission class with `memory_per_slot` turns
-sampling on every 5000 ms, logging that class and its config layer as the
-source. Otherwise sampling is off and `PROVENANT_PROCESS_TREE` is unset. Each private snapshot records a
+when it is 0 (the default) a host or project admission class with
+`memory_per_slot` turns sampling on every 5000 ms. Otherwise sampling is off
+and `PROVENANT_PROCESS_TREE` is unset. The launcher resolves the interval and
+hands it to the guardian, which starts with an empty environment and reads no
+config; unreadable run settings warn and launch without a sampler
+(`LAUNCH_PROCESS_TREE_INTERVAL_OR_WARN_NONE`). Each private snapshot records a
 freshness allowance derived from that interval plus the bounded sample budget;
 the CLI output and public sample schema do not change. The setting source is
 available from `provenant config show --full`.

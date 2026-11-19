@@ -1047,6 +1047,10 @@ pub struct ProviderCommand {
     /// Port space the guardian leases one block from for the provider's
     /// lifetime; the block is added to the provider's environment.
     pub lane_ports: Option<provenant_os::lane_ports::Plan>,
+    /// Process-tree sampling cadence; `None` runs no sampler. The launcher
+    /// resolves it: the guardian starts with an empty environment and cannot
+    /// read host or project config.
+    pub resource_sample_interval: Option<std::time::Duration>,
     pub cwd: PathBuf,
     pub stdin: Vec<u8>,
     pub secret_input: Option<provenant_os::exec::SecretInput>,

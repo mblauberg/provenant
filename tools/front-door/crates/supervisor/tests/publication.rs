@@ -44,6 +44,7 @@ fn start(root: &Path, name: &str, scenario: &str) -> Result<(CustodyLease, Custo
         &clock,
     )?;
     let command = ProviderCommand {
+        resource_sample_interval: None,
         publication_values: Default::default(),
         policy: Default::default(),
         profile_file: None,

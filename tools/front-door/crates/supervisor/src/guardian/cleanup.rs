@@ -793,7 +793,9 @@ impl Driver<'_> {
 
     /// Block on exit watches until every identity is gone or `grace` ends.
     /// Each wake checks only these identities, never a host census. Signal
-    /// and cancellation wakes are kept for the retained loop.
+    /// and cancellation wakes are kept for the retained loop, as is any
+    /// process event: it may be the exit of an identity outside `identities`
+    /// that blocks settlement.
     #[allow(clippy::disallowed_methods)]
     fn await_exits(&mut self, identities: &[ProcessIdentity], grace: Duration) {
         let pids = identities.iter().map(|identity| identity.pid).collect();
@@ -816,6 +818,7 @@ impl Driver<'_> {
             match self.reactor.wait(&[], wait) {
                 Ok(event) => {
                     self.deferred_cancel |= event.cancel_changed;
+                    self.deferred_process_event |= event.process_changed;
                     watched &= !event.process_overflow;
                     if event.supervisor_signal {
                         self.deferred_signal = true;
