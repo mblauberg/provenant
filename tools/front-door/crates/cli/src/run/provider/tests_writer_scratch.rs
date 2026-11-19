@@ -1183,7 +1183,6 @@ printf 'agy 1.0.0\n'
             user: "fixture".as_ref(),
             host_var: &|_| None,
             skill_stage_max_bytes: 16 * 1024 * 1024,
-            git_config_allow: &[],
             account: Some(&codex_account),
             token: None,
             cwd: &project.join(".worktrees/writer"),
@@ -1309,11 +1308,10 @@ printf 'agy 1.0.0\n'
         .join(binding.project_id().to_string());
     std::fs::create_dir_all(&policy_dir)?;
     std::fs::write(policy_dir.join("github.json"), r#"{"deny_labels":["ci"]}"#)?;
-    phase("linked git config allowlist");
+    phase("linked git config includes");
     // A linked global file and an XDG config beneath a linked directory both
-    // reach a sandboxed lane only through the allowlist: identity and aliases
-    // pass, while a token in an extra header, a rewrite URL or an inline
-    // helper never does, and neither host file is granted to the lane.
+    // reach every lane through a canonical include and an exact read grant,
+    // so Git resolves them under the lane's confinement boundary.
     const HOST_TOKEN: &str = "ghp_fixtureHostConfigToken";
     let dotfiles = base.join("dotfiles");
     std::fs::create_dir_all(dotfiles.join("xdg/git"))?;
@@ -1486,47 +1484,31 @@ printf 'agy 1.0.0\n'
     for target in [dotfiles.join("global"), dotfiles.join("xdg/git/config")] {
         let target = target.canonicalize()?;
         assert!(
-            !profile
+            config.contains(&format!(
+                "[include]\n\tpath = \"{}\"\n",
+                target.to_str().ok_or("config path")?
+            )),
+            "{config}"
+        );
+        assert!(
+            profile
                 .spec
                 .runtime_reads
                 .iter()
-                .any(|grant| grant.path == target)
+                .any(|grant| grant.path == target),
+            "missing read grant for {}",
+            target.display()
         );
-        if sandbox_effective {
-            assert!(!config.contains(target.to_str().ok_or("config path")?));
-        }
+        provenant_confinement::permissions::AnchoredDirectory::open_canonical(
+            target.parent().ok_or("config parent")?,
+        )?;
     }
-    let git_config = publishing.route.git_config.as_ref();
-    if sandbox_effective {
-        assert!(!config.contains(HOST_TOKEN), "{config}");
-        assert!(!config.contains("[include"), "{config}");
-        for kept in [
-            "\tname = \"Host Name\"\n",
-            "\temail = \"host@example.com\"\n",
-            "\tst = \"status --short\"\n",
-            "\txdg-log = \"log --oneline\"\n",
-            "\tuseConfigOnly = true\n",
-        ] {
-            assert!(config.contains(kept), "{kept} missing from {config}");
-        }
-        let receipt = git_config.ok_or("git config receipt")?;
-        assert_eq!(
-            receipt.dropped,
-            [
-                "fixture.xdg",
-                "alias.pub",
-                "http.*.extraheader",
-                "url.*.insteadof",
-                "credential.helper",
-            ]
-        );
-        assert_eq!(receipt.key, "domains.lanes.git_config_allow");
-        assert!(!serde_json::to_string(receipt)?.contains(HOST_TOKEN));
-    } else {
-        // An unsandboxed lane reads the host configuration in full.
-        assert!(git_config.is_none());
-        assert!(config.contains("[include]"));
-    }
+    assert!(
+        config.contains("[user]\n\tuseConfigOnly = true\n"),
+        "{config}"
+    );
+    // The private file includes the host files; it does not copy their values.
+    assert!(!config.contains(HOST_TOKEN), "{config}");
     // The original spelling really is unsuitable for the launcher's canonical
     // anchor boundary: a plan containing it would fail before provider launch.
     assert!(

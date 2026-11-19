@@ -1362,7 +1362,6 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
         user: "fixture".as_ref(),
         host_var: &|_| None,
         skill_stage_max_bytes: 0,
-        git_config_allow: &[],
         account: None,
         token: None,
         cwd: &cwd,

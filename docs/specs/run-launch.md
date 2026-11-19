@@ -147,16 +147,14 @@ continuations. Unsupported confinement is reported rather than represented as
 sandboxed execution.
 - Why: a retry must not silently weaken the requested boundary.
 
-A sandboxed lane's Git wrapper always exports `GIT_CONFIG_NOSYSTEM`, with or
-without a private identity config, and launch never strips it, so system Git
-configuration (on macOS, `credential.helper=osxkeychain`) is not read. The
-sandboxed lane environment drops `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`,
-`GIT_CONFIG_VALUE_*` and `GIT_CONFIG_PARAMETERS` and carries the token helper's
-own entries in their place. Its global configuration is the private allowlisted
-view described below. A lane that is not sandboxed keeps the host's helpers and
-askpass: it is not covered by this boundary.
-- Why: system configuration and inherited command-scope entries are credential
-  paths a lane never asked for
+A lane sees the host's Git configuration as the host does. Its Git wrapper no
+longer forces `GIT_CONFIG_NOSYSTEM`, and launch no longer drops
+`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`, `GIT_CONFIG_VALUE_*` or
+`GIT_CONFIG_PARAMETERS`. The lane's own token helper entries are appended on
+top of that configuration, with the empty `credential.helper` resetting the
+helper list so a GitHub push keeps using the lane's token. A lane that is not
+sandboxed keeps the host's own Git environment.
+- Why: lanes are free to see the host's Git settings, not a filtered subset
   ([ADR 0035](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md)).
 
 Read-only write exceptions come from user-owned configuration, remain within
@@ -168,39 +166,17 @@ Host-native launches retain confinement and provenance and cannot resume a
 provider session or select model-specific controls.
 - Why: native execution must not claim a provider contract it cannot satisfy.
 
-A sandboxed lane's private global Git configuration is built from the host's
-system-scope entries (the system file, or the host's `GIT_CONFIG_SYSTEM`, and
-any file the Git build reads before it, such as Apple's Xcode `gitconfig`;
-none when the host sets `GIT_CONFIG_NOSYSTEM` or has no system file) and
-global files (the XDG `git/config`, then `~/.gitconfig`, or the host's
-`GIT_CONFIG_GLOBAL` alone), in that order with includes expanded, through an
-allowlist: `user.name`, `user.email`, `alias.*`, `color.*`, named core,
-diff and merge presentation keys, `filter.lfs.{clean,smudge,process,required}`,
-and `url.*.insteadOf` when neither its target nor its prefix carries a
-password or token. A rewrite whose URL names any user withholds it, since a
-token can be the whole user of an HTTP URL; only SSH forms keep a bare user
-(`ssh://git@host/`, `git@host:`). An allowlisted value
-that carries a credential by the redactor's shape rules (a token shape, URL
-userinfo with a password, or a credential assignment) is withheld. A
-`domains.lanes.git_config_allow` pattern that carries a credential is invalid,
-because the receipt records the list. Every other
-key is withheld, including `credential.*`, `http.*`, `core.askPass`,
-`core.sshCommand`, `include` and `includeIf`. The lane receives no include of,
-and no read grant on, the host files, and keeps `GIT_CONFIG_NOSYSTEM` set so
-its Git never reads the system file directly. Withheld key names, with any
-subsection redacted and never their values, are recorded in the launch
-receipt's `git_config` field with the `domains.lanes.git_config_allow` list
-and its origin. That setting passes further keys deliberately and verbatim;
-`include` and `includeIf` never pass. A withheld `filter.<driver>.required`
-that is true warns at launch, naming the key, because Git then applies no
-filter and would commit the content unfiltered. A file that cannot be located
-or read contributes nothing, with a warning. A host identity holding a control
-character refuses the launch. Unsandboxed lanes do not get this isolation:
-their private configuration includes the host global files in full, and they
-can read them directly.
-- Why: a token in an extra header, a rewrite URL, an alias or an inline
-  helper in the host configuration would otherwise reach the lane; credentials
-  reach a lane only through its granted token helper ([ADR 0035](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md)).
+Every lane's private global Git configuration includes the host's global files
+in full: the XDG `git/config`, then `~/.gitconfig`, or the host's
+`GIT_CONFIG_GLOBAL` alone. A sandboxed lane also receives an exact read grant
+on each of those files, named by the same canonical path Git's include uses,
+so the include resolves under the confinement boundary. Both Git's include and
+the grant name the physical file, never a symlink spelling. The private
+configuration sets `user.useConfigOnly` so a missing host identity cannot fall
+back to a generated hostname identity. No host entry is filtered, copied or
+rewritten, and the launch receipt carries no Git-config filtering field.
+- Why: a lane sees the host Git configuration in full, and the read grant is
+  what lets an included host file be loaded inside the sandbox.
 
 ## Inputs and resources
 

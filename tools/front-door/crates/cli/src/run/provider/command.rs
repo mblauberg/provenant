@@ -264,7 +264,6 @@ pub(super) fn prepare_command(
                 }
             },
             skill_stage_max_bytes: config.domains.lanes.skill_stage_max_bytes,
-            git_config_allow: &config.domains.lanes.git_config_allow,
             account: None,
             token: None,
             cwd: &cwd,
