@@ -3940,15 +3940,10 @@ impl WriterLaunch {
             return Err(RunError::WriterHeadNotLaneBranch);
         }
 
-        let source = source
-            .as_ref()
-            .ok_or(RunError::Validation("writer private Git missing"))?;
-        let expected_merge = if merge_objects.is_empty() {
-            None
-        } else {
-            Some(crate::objects::merge_head(source)?)
-        };
-        worktrees::check_git_operation_terminal(&source.refs, expected_merge.as_deref())?;
+        // The host checkout must not be left mid-operation: settlement
+        // advances its files and index. A lane's own unfinished operation
+        // stays in its private Git, which never reaches the host.
+        worktrees::check_writer_terminal(self.worktree.repo())?;
         // The remote ref and dirty census can change after the first pass.
         // Once sealed, this attempt's summary is immutable even if its effect
         // receipt transaction failed. Reuse it after revalidating the pinned head.

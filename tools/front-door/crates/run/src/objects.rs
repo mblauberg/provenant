@@ -21,8 +21,8 @@ pub(crate) mod worktree;
 #[cfg(test)]
 use view::object_binding;
 pub(crate) use view::{
-    IndexSync, ObjectSource, bound_source, merge_head, merge_objects, prepare_bound,
-    prepare_read_only, private_tip, sync_native_index, update_private_tip,
+    IndexSync, ObjectSource, bound_source, merge_objects, prepare_bound, prepare_read_only,
+    private_tip, sync_native_index, update_private_tip,
 };
 #[cfg(test)]
 pub(crate) use view::{bind, followed_native_index, prepare_refs, seed_native_index};
