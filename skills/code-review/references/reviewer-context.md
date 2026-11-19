@@ -24,8 +24,10 @@ This is the only definition of blocking. A finding blocks when it shows one of:
 - a failed acceptance criterion, which includes an undisclosed divergence from
   the spec and a write outside the write scope;
 - a defect on a reachable default path;
-- a breach of a real boundary: credentials, Git isolation, data integrity,
-  authority, or one the repository declares;
+- a breach of a real boundary: a credential or secret reaching a lane,
+  provider or output not granted it; a lane moving, rewriting or deleting
+  another lane's refs, commits or uncommitted files; authority beyond the
+  grant; or a boundary the repository declares;
 - data loss.
 
 A default path is what ordinary use reaches: normal input, the scenarios the
@@ -87,6 +89,6 @@ that is a spec conflict, not a defect.
 
 Flag hand-kept parallel lists, per-host, project or provider branches, silent
 fallbacks, compatibility code, and rigid tests or snapshots that do not pin an
-invariant. Flag new refusals, locks, queues or waits outside credentials, Git
-isolation, data integrity and authority. Designing for foreseeable cases,
-including a core before a second use, is not itself a defect. See `deliver`.
+invariant. Flag new refusals, locks, queues or waits outside those boundaries.
+Designing for foreseeable cases, including a core before a second use, is not
+itself a defect. See `deliver`.
