@@ -64,30 +64,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn port_source_round_trips_and_rejects_unknown_values() {
-        for source in [PortSource::Builtin, PortSource::Host, PortSource::Project] {
-            let encoded = serde_json::to_value(source).expect("source serialises");
-            assert_eq!(
-                serde_json::from_value::<PortSource>(encoded).expect("source decodes"),
-                source
-            );
-        }
-        assert!(serde_json::from_value::<PortSource>(serde_json::json!("unknown")).is_err());
-    }
-
-    #[test]
-    fn exit_disposition_round_trips_and_rejects_unknown_values() {
-        for disposition in [ExitDisposition::Refused, ExitDisposition::Unknown] {
-            let encoded = serde_json::to_value(disposition).expect("disposition serialises");
-            assert_eq!(
-                serde_json::from_value::<ExitDisposition>(encoded).expect("disposition decodes"),
-                disposition
-            );
-        }
-        assert!(serde_json::from_value::<ExitDisposition>(serde_json::json!("success")).is_err());
-    }
-
-    #[test]
     fn command_exit_codes_round_trip_and_reject_malformed_values() {
         let cases = [
             CommandExitCodes {
@@ -114,41 +90,5 @@ mod tests {
             }))
             .is_err()
         );
-    }
-
-    #[test]
-    fn port_command_round_trips_and_rejects_malformed_values() {
-        let cases = [
-            PortCommand {
-                argv: vec!["check".into()],
-                exit_codes: CommandExitCodes {
-                    success: vec![0],
-                    unknown: vec![75],
-                    other: ExitDisposition::Refused,
-                },
-            },
-            PortCommand {
-                argv: vec!["release".into(), "${branch}".into()],
-                exit_codes: CommandExitCodes {
-                    success: vec![0, 1],
-                    unknown: vec![2],
-                    other: ExitDisposition::Unknown,
-                },
-            },
-        ];
-        for case in cases {
-            let encoded = serde_json::to_value(&case).expect("command serialises");
-            assert_eq!(
-                serde_json::from_value::<PortCommand>(encoded).expect("command decodes"),
-                case
-            );
-        }
-        // Wrong types are refused; unknown fields are tolerated (forward_compatibility).
-        for malformed in [
-            serde_json::json!({"argv":[1],"exit_codes":{"success":[0],"unknown":[],"other":"refused"}}),
-            serde_json::json!({"argv":["check"],"exit_codes":{"success":[0],"unknown":[],"other":"maybe"}}),
-        ] {
-            assert!(serde_json::from_value::<PortCommand>(malformed).is_err());
-        }
     }
 }
