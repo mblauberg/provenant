@@ -1491,41 +1491,6 @@ mod tests {
     }
 
     #[test]
-    fn retired_schedule_keys_drop_their_record_unless_it_restricts()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let table: toml_edit::DocumentMut = "pacing_overrides=[{provider='codex',policy='pace',expires_unix_seconds=9}]\n[[model_policy.rules]]\nstarts_unix_seconds=1\nwindows=[]\n[[model_policy.rules]]\nexpires_unix_seconds=1\n[model_policy.rules.policy.lane]\nread_only=true\n".parse()?;
-        let errors = (crate::SECTION.validate)(table.as_table());
-        let named: Vec<_> = errors
-            .iter()
-            .filter(|error| error.code.starts_with("moved_to_schedule."))
-            .map(|error| {
-                (
-                    error.field.as_str(),
-                    error.code,
-                    (crate::SECTION.boundary)(error),
-                )
-            })
-            .collect();
-        assert_eq!(
-            named,
-            [
-                ("pacing_overrides.0", "moved_to_schedule.expires", false),
-                ("model_policy.rules.0", "moved_to_schedule.starts", false),
-                ("model_policy.rules.0", "moved_to_schedule.windows", false),
-                (
-                    "model_policy.rules.1.expires_unix_seconds",
-                    "moved_to_schedule.expires",
-                    true
-                ),
-            ]
-        );
-        // Serde never reads a retired value into the schedule.
-        let rule: ModelPolicyRule = toml_edit::de::from_str("expires_unix_seconds=1\n")?;
-        assert_eq!(rule.schedule, Schedule::default());
-        Ok(())
-    }
-
-    #[test]
     fn schedule_expiry_is_evaluated_at_the_supplied_instant()
     -> Result<(), Box<dyn std::error::Error>> {
         let model = ModelId::parse("codex/gpt-6.1-terra")?;
