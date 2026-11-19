@@ -52,6 +52,8 @@ fn writer_preparation_fixture(fence_only: bool, gate_only: bool) -> Result<(), B
             #[allow(clippy::disallowed_methods)]
             let output = std::process::Command::new(std::env::current_exe()?)
                 .arg(test)
+                .env_clear()
+                .envs(provenant_os::fixture::git_env())
                 .env(CHILD, layout)
                 .env("GH_TOKEN", "fixture-host-token")
                 .env_remove("GIT_CONFIG_GLOBAL")
@@ -1656,9 +1658,10 @@ printf 'agy 1.0.0\n'
         options.env = Some(&publishing.environment);
         executor.execute(options)
     };
-    let denied = run_shim("ci")?;
-    assert_eq!(denied.termination, provenant_os::exec::Termination::Exit(1));
-    assert_eq!(denied.stderr.bytes, b"github.deny_labels\n");
+    let warned = run_shim("ci")?;
+    assert_eq!(warned.termination, provenant_os::exec::Termination::Exit(0));
+    assert_eq!(warned.stdout.bytes, b"forwarded\n");
+    assert!(String::from_utf8_lossy(&warned.stderr.bytes).contains("github.deny_labels"));
     let allowed = run_shim("docs")?;
     assert_eq!(
         allowed.termination,

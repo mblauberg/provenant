@@ -5281,6 +5281,13 @@ mod writer_recovery_tests {
     #[test]
     fn empty_committed_writer_requires_review_and_controls_fail()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let test = provenant_os::fixture::exact_test_path(
+            module_path!(),
+            "empty_committed_writer_requires_review_and_controls_fail",
+        );
+        if provenant_os::fixture::reexec_with_clean_git(&test)? {
+            return Ok(());
+        }
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         use provenant_records::wire::lane::{LaneProjectionFacts, LaneRow};
         for (writer, outcome, answer) in [
