@@ -4,7 +4,7 @@
 //! - `private` (default): the worktree's own target in its lane cache,
 //!   `~/Library/Caches/provenant-lane-cargo/<digest>/target`, seeded warm by a
 //!   copy-on-write clone of the project's host seed generation with every dep-info
-//!   aged to the epoch under any build layout (`cargo_seed`). `provenant worktree
+//!   aged to the epoch under any build layout, as each unit's fingerprint names it (`cargo_seed`). `provenant worktree
 //!   seed-target` seeds the same directory for a checkout outside a lane. Removed with
 //!   the worktree.
 //! - `project`: the writer worktree's own `target/` beside the workspace manifest

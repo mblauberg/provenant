@@ -91,7 +91,8 @@ export CARGO_TARGET_DIR="$(provenant worktree seed-target .worktrees/my-branch)"
 ```
 
 The command needs no lane environment: unset `RUSTUP_HOME` and `CARGO_HOME` mean
-the defaults under `$HOME`. When it cannot seed, it names what differed (for
+the defaults under `$HOME`. It prints where the Cargo home it verified came from,
+since your shell's `CARGO_HOME` can differ from the host a lane runs under. When it cannot seed, it names what differed (for
 example the pinned and the seeded compiler) and what to run next.
 
 ## Git pre-push hook and local gate

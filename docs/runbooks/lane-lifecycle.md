@@ -76,10 +76,10 @@ lane cache (`lanes.cargo_target = "private"`), cloned from the repository's host
 seed. A host builds that seed with `provenant worktree seed-build`, and tick
 refreshes it when the verify base moves. It builds the configured verify base,
 so uncommitted work is not the seed source. Each writer clones a compatible
-generation and ages every dep-info file in it, whatever fingerprint layout Cargo
+generation and ages the dep-info each unit's fingerprint names, whatever fingerprint layout Cargo
 uses, so workspace members rebuild once from the worktree's sources and registry
-crates stay fresh. A seed in which no dep-info is found is not used
-(`seed_layout_unrecognised`). A `seeded` report proves the
+crates stay fresh. A seed with a fingerprint that names no readable dep-info is not
+used (`seed_layout_unrecognised`). A `seeded` report proves the
 clone; where the filesystem cannot clone, the lane warns `clone_failed` and
 builds cold. Cargo's verbose `Fresh` lines prove dependency reuse. Settlement
 starts a detached cleanup that removes the target once writer custody is free;

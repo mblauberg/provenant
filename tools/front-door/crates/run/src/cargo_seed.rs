@@ -389,6 +389,10 @@ pub struct WorktreeSeed {
     pub generation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// Where the Cargo home that was verified came from: the caller's shell can
+    /// differ from the host a lane runs under.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cargo_home: Option<&'static str>,
     /// How a person gets a seed this checkout can use, when none was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repair: Option<&'static str>,
@@ -448,6 +452,7 @@ pub fn seed_worktree_target(
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
 ) -> WorktreeSeed {
     let environment = outside_lane_environment(home, environment);
+    let mut cargo_home_source = None;
     let outcome = match crate::target_seed::cargo_build_directory(worktree, state) {
         Ok(Some(build)) => match provenant_confinement::cargo::CargoHome::resolve(home, |name| {
             environment
@@ -456,8 +461,10 @@ pub fn seed_worktree_target(
                 .map(|(_, value)| value.clone())
         })
         .map_err(|_| codes::CARGO_HOME_UNRESOLVABLE)
-        .and_then(|cargo_home| crate::writer::verified_cargo_config(&build, &cargo_home.path))
-        {
+        .and_then(|cargo_home| {
+            cargo_home_source = Some(cargo_home.source);
+            crate::writer::verified_cargo_config(&build, &cargo_home.path)
+        }) {
             Err(detail) => Outcome::fallback_detail(fallback_reasons::TOOLCHAIN_UNVERIFIED, detail),
             Ok(()) => seed_target_with_reservation(
                 state,
@@ -479,6 +486,7 @@ pub fn seed_worktree_target(
     WorktreeSeed {
         target: cache.join("target"),
         warning: outcome.fallback_warning("the Cargo target", "builds in it start cold"),
+        cargo_home: cargo_home_source,
         repair: seed_repair(&outcome.reason).filter(|_| outcome.status == "fallback"),
         differs: outcome.differs.clone(),
         generation: outcome
@@ -785,7 +793,7 @@ fn seed_target_cancellable(
             .open_verified_directory(&stage)
             .map_err(|_| fallback_reasons::STAGING_UNAVAILABLE)?;
         clone(&source, &staging, deadline)?;
-        age_dep_info(&cache.join(&stage), deadline)?;
+        age_dep_info(&cache.join(&stage), deadline, cancel)?;
         if deadline.expired() {
             return Err(fallback_reasons::SEED_BUDGET_EXHAUSTED);
         }
@@ -845,73 +853,136 @@ fn seed_target_cancellable(
     }
 }
 
+/// The deepest directory the seed clone and the aging walk follow, so a tree
+/// one accepts is a tree the other can read.
+#[cfg(any(unix, test))]
+const MAX_TREE_DEPTH: usize = 128;
+
 /// A seed was built from another checkout. Cargo hashes a workspace member's
 /// units by its workspace-relative path and treats them as fresh while every
 /// source listed in their dep-info is older than that dep-info, so a worktree
 /// checked out before the seed was built would reuse the seed's member
-/// artifacts for different sources (#3561). Ageing every dep-info file to the
-/// epoch makes each unit that lists source files rebuild once in its new
-/// worktree; registry packages list none and stay fresh.
+/// artifacts for different sources (#3561). Ageing a unit's dep-info to the
+/// epoch makes it rebuild once in its new worktree.
 ///
 /// Cargo does not promise where fingerprints live (build-dir layout v2 puts
-/// them in `<profile>/build/<package>/<hash>/fingerprint/`, the earlier layout in
-/// `<profile>/.fingerprint/<unit>/`), so this walks the whole seed within the
-/// budget and ages every `dep-*` file in a `fingerprint` directory or a unit
-/// directory under `.fingerprint`. A non-empty seed in which none is found is
-/// `seed_layout_unrecognised`: seeding it would silently skip the protection.
-/// Returns how many files were aged.
+/// them in `<profile>/build/<package>/<hash>/fingerprint/`, the earlier layout
+/// in `<profile>/.fingerprint/<unit>/`), and it does not promise which units
+/// keep dep-info there. So the pass is driven by the fingerprints themselves:
+/// it walks the seed within the depth, budget and cancellation bounds for the
+/// `*.json` fingerprints in a `fingerprint` directory or a unit directory under
+/// `.fingerprint`, reads each one's `local` entries and ages exactly the files
+/// its `CheckDepInfo` entries name, relative to the target root. Unknown fields
+/// are ignored. A fingerprint that cannot be read as that shape, a named
+/// dep-info that is missing or lies outside the target, or a non-empty seed in
+/// which none is named is `seed_layout_unrecognised`: publishing it would
+/// silently skip the protection for some units. Returns how many files were aged.
 #[cfg(any(unix, test))]
-fn age_dep_info(target: &Path, budget: &SeedBudget) -> Result<usize, &'static str> {
-    use std::ffi::OsStr;
-    const MAX_DEPTH: usize = 16;
+fn age_dep_info(
+    target: &Path,
+    budget: &SeedBudget,
+    cancel: Option<&provenant_core::CancelToken>,
+) -> Result<usize, &'static str> {
+    use std::{collections::BTreeSet, ffi::OsStr, io::Read, path::Component};
+    /// A fingerprint lists a unit's dependencies; none approaches this.
+    const MAX_FINGERPRINT_BYTES: u64 = 1 << 20;
     fn named(path: &Path, name: &str) -> bool {
         path.file_name() == Some(OsStr::new(name))
     }
+    let stop = || {
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            Err(fallback_reasons::CANCELLED)
+        } else if budget.expired() {
+            Err(fallback_reasons::SEED_BUDGET_EXHAUSTED)
+        } else {
+            Ok(())
+        }
+    };
+    let failed = |_: std::io::Error| fallback_reasons::FRESHNESS_RESET_FAILED;
     fn visit(
         directory: &Path,
         depth: usize,
-        budget: &SeedBudget,
-        aged: &mut usize,
+        stop: &dyn Fn() -> Result<(), &'static str>,
+        fingerprints: &mut Vec<std::path::PathBuf>,
     ) -> Result<(), &'static str> {
-        if depth > MAX_DEPTH {
+        if depth > MAX_TREE_DEPTH {
             return Err(fallback_reasons::TARGET_TOO_DEEP);
         }
-        let holds_dep_info = named(directory, "fingerprint")
+        let failed = |_: std::io::Error| fallback_reasons::FRESHNESS_RESET_FAILED;
+        let holds_fingerprints = named(directory, "fingerprint")
             || named(directory, ".fingerprint")
             || directory
                 .parent()
                 .is_some_and(|parent| named(parent, ".fingerprint"));
-        let failed = |_: std::io::Error| fallback_reasons::FRESHNESS_RESET_FAILED;
         for entry in std::fs::read_dir(directory).map_err(failed)? {
-            if budget.expired() {
-                return Err(fallback_reasons::SEED_BUDGET_EXHAUSTED);
-            }
+            stop()?;
             let entry = entry.map_err(failed)?;
             let kind = entry.file_type().map_err(failed)?;
             if kind.is_dir() {
-                visit(&entry.path(), depth + 1, budget, aged)?;
+                visit(&entry.path(), depth + 1, stop, fingerprints)?;
             } else if kind.is_file()
-                && holds_dep_info
-                && entry.file_name().as_encoded_bytes().starts_with(b"dep-")
+                && holds_fingerprints
+                && entry.path().extension() == Some(OsStr::new("json"))
             {
-                std::fs::File::open(entry.path())
-                    .and_then(|file| file.set_modified(std::time::SystemTime::UNIX_EPOCH))
-                    .map_err(failed)?;
-                *aged += 1;
+                fingerprints.push(entry.path());
             }
         }
         Ok(())
     }
-    let mut aged = 0;
-    visit(target, 0, budget, &mut aged)?;
-    let empty = std::fs::read_dir(target)
-        .map_err(|_| fallback_reasons::FRESHNESS_RESET_FAILED)?
-        .next()
-        .is_none();
-    if aged == 0 && !empty {
+    let mut fingerprints = Vec::new();
+    visit(target, 0, &stop, &mut fingerprints)?;
+
+    let mut dep_infos = BTreeSet::new();
+    for fingerprint in &fingerprints {
+        stop()?;
+        let mut bytes = Vec::new();
+        std::fs::File::open(fingerprint)
+            .map_err(failed)?
+            .take(MAX_FINGERPRINT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(failed)?;
+        let local = (bytes.len() as u64 <= MAX_FINGERPRINT_BYTES)
+            .then(|| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .flatten()
+            .and_then(|value| match value.get("local") {
+                Some(serde_json::Value::Array(local)) => Some(local.clone()),
+                _ => None,
+            })
+            .ok_or(fallback_reasons::SEED_LAYOUT_UNRECOGNISED)?;
+        for entry in local {
+            let Some(check) = entry.get("CheckDepInfo") else {
+                continue;
+            };
+            let relative = check
+                .get("dep_info")
+                .and_then(serde_json::Value::as_str)
+                .map(Path::new)
+                .filter(|path| {
+                    path.components().next().is_some()
+                        && path
+                            .components()
+                            .all(|component| matches!(component, Component::Normal(_)))
+                })
+                .ok_or(fallback_reasons::SEED_LAYOUT_UNRECOGNISED)?;
+            dep_infos.insert(relative.to_path_buf());
+        }
+    }
+    for relative in &dep_infos {
+        stop()?;
+        let path = target.join(relative);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {}
+            _ => return Err(fallback_reasons::SEED_LAYOUT_UNRECOGNISED),
+        }
+        std::fs::File::open(&path)
+            .and_then(|file| file.set_modified(std::time::SystemTime::UNIX_EPOCH))
+            .map_err(failed)?;
+    }
+    let empty = std::fs::read_dir(target).map_err(failed)?.next().is_none();
+    if dep_infos.is_empty() && !empty {
         return Err(fallback_reasons::SEED_LAYOUT_UNRECOGNISED);
     }
-    Ok(aged)
+    Ok(dep_infos.len())
 }
 
 #[cfg(unix)]
@@ -1054,7 +1125,7 @@ fn clone_entries(
     if store.deadline.expired() {
         return Err(fallback_reasons::SEED_BUDGET_EXHAUSTED);
     }
-    if depth > 128 {
+    if depth > MAX_TREE_DEPTH {
         return Err(store.too_deep);
     }
     for entry in source.entries().map_err(|_| store.read_failed)? {
@@ -1201,47 +1272,90 @@ mod tests {
         }
     }
 
+    /// Write a unit's fingerprint the way Cargo does, naming the dep-info the unit
+    /// checks, and the dep-info itself.
+    fn unit(target: &Path, directory: &str, name: &str, local: &str) -> PathBuf {
+        let directory_path = target.join(directory);
+        std::fs::create_dir_all(&directory_path).unwrap();
+        std::fs::write(
+            directory_path.join(format!("{name}.json")),
+            format!(
+                "{{\"rustc\":1,\"deps\":[],\"local\":[{local}],\"future_field\":{{\"x\":[1]}}}}"
+            ),
+        )
+        .unwrap();
+        directory_path
+    }
+
+    fn check_dep_info(path: &str) -> String {
+        format!("{{\"CheckDepInfo\":{{\"dep_info\":\"{path}\",\"fingerprint\":\"mtime\"}}}}")
+    }
+
     #[test]
-    fn seeded_dep_info_is_aged_so_worktree_sources_decide_freshness()
+    fn seeded_dep_info_named_by_fingerprints_is_aged_so_worktree_sources_decide_freshness()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
         let target = root.path().join("target");
         // Both Cargo build-dir layouts, host and cross-compiled: fingerprints under
         // `.fingerprint/<unit>/` and under `build/<package>/<hash>/fingerprint/`.
-        let host_unit = target.join("debug/.fingerprint/member-0123456789abcdef");
-        let cross_unit =
-            target.join("aarch64-apple-darwin/debug/.fingerprint/member-fedcba9876543210");
-        let layered_unit = target.join("debug/build/member/0123456789abcdef/fingerprint");
-        let layered_cross_unit =
-            target.join("aarch64-apple-darwin/debug/build/member/fedcba9876543210/fingerprint");
-        let deps = target.join("debug/deps");
-        for directory in [
-            &host_unit,
-            &cross_unit,
-            &layered_unit,
-            &layered_cross_unit,
-            &deps,
+        let mut aged = Vec::new();
+        for (directory, name, dep_info) in [
+            (
+                "debug/.fingerprint/member-0123456789abcdef",
+                "lib-member",
+                "debug/.fingerprint/member-0123456789abcdef/dep-lib-member",
+            ),
+            (
+                "aarch64-apple-darwin/debug/.fingerprint/member-fedcba9876543210",
+                "lib-member",
+                "aarch64-apple-darwin/debug/.fingerprint/member-fedcba9876543210/dep-lib-member",
+            ),
+            (
+                "debug/build/member/0123456789abcdef/fingerprint",
+                "lib-member",
+                "debug/build/member/0123456789abcdef/fingerprint/dep-lib-member",
+            ),
+            // A unit kind whose dep-info does not sit in the unit's own directory
+            // is aged all the same, because the fingerprint names it.
+            (
+                "debug/build/member/0123456789abcdef/fingerprint",
+                "test-lib-member",
+                "debug/elsewhere/dep-test-lib-member",
+            ),
+            (
+                "aarch64-apple-darwin/debug/build/member/fedcba9876543210/fingerprint",
+                "build-script-build-script-build",
+                "aarch64-apple-darwin/debug/build/member/fedcba9876543210/fingerprint/dep-build-script-build-script-build",
+            ),
         ] {
-            std::fs::create_dir_all(directory)?;
+            unit(&target, directory, name, &check_dep_info(dep_info));
+            let path = target.join(dep_info);
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            std::fs::write(&path, b"x")?;
+            aged.push(path);
         }
-        let aged = [
-            host_unit.join("dep-lib-member"),
-            cross_unit.join("dep-lib-member"),
-            layered_unit.join("dep-lib-member"),
-            layered_unit.join("dep-test-lib-member"),
-            layered_cross_unit.join("dep-build-script-build-script-build"),
-        ];
+        // A run unit that only reruns on changes names no dep-info, and a
+        // registry-style unit is Precalculated: neither is touched.
+        let run = unit(
+            &target,
+            "debug/build/member/0123456789abcdef/fingerprint",
+            "run-build-script-build-script-build",
+            "{\"RerunIfChanged\":{\"output\":\"out\",\"paths\":[\"build.rs\"]}},{\"Precalculated\":\"1.0.0\"}",
+        );
         let kept = [
-            host_unit.join("lib-member.json"),
-            layered_unit.join("lib-member.json"),
-            deps.join("libmember.rmeta"),
-            // A `dep-` name outside a fingerprint directory is not dep-info.
-            deps.join("dep-unrelated"),
+            run.join("run-build-script-build-script-build.json"),
+            // A `dep-` file that no fingerprint names is not aged.
+            target.join("debug/deps/dep-unrelated"),
+            target.join("debug/deps/libmember.rmeta"),
         ];
-        for path in aged.iter().chain(&kept) {
+        std::fs::create_dir_all(target.join("debug/deps"))?;
+        for path in &kept[1..] {
             std::fs::write(path, b"x")?;
         }
-        assert_eq!(age_dep_info(&target, &SeedBudget::new()), Ok(aged.len()));
+        assert_eq!(
+            age_dep_info(&target, &SeedBudget::new(), None),
+            Ok(aged.len())
+        );
         for path in &aged {
             assert_eq!(
                 std::fs::metadata(path)?.modified()?,
@@ -1257,6 +1371,64 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    /// Ageing refuses, rather than skipping a unit, whenever a fingerprint cannot
+    /// say which dep-info it checks.
+    #[test]
+    fn a_fingerprint_that_cannot_name_its_dep_info_refuses_the_seed() {
+        let refuse = |prepare: &dyn Fn(&Path)| {
+            let root = tempfile::tempdir().unwrap();
+            let target = root.path().join("target");
+            let good = "debug/build/good/0123456789abcdef/fingerprint";
+            unit(
+                &target,
+                good,
+                "lib-good",
+                &check_dep_info(&format!("{good}/dep-lib-good")),
+            );
+            std::fs::write(target.join(good).join("dep-lib-good"), b"x").unwrap();
+            assert_eq!(age_dep_info(&target, &SeedBudget::new(), None), Ok(1));
+            prepare(&target);
+            assert_eq!(
+                age_dep_info(&target, &SeedBudget::new(), None),
+                Err(fallback_reasons::SEED_LAYOUT_UNRECOGNISED)
+            );
+        };
+        let bad = "debug/build/bad/fedcba9876543210/fingerprint";
+        // The named dep-info is missing.
+        refuse(&|target| {
+            unit(
+                target,
+                bad,
+                "lib-bad",
+                &check_dep_info(&format!("{bad}/dep-lib-bad")),
+            );
+        });
+        // The fingerprint is not JSON, or has no `local` list.
+        refuse(&|target| {
+            std::fs::create_dir_all(target.join(bad)).unwrap();
+            std::fs::write(target.join(bad).join("lib-bad.json"), b"not json").unwrap();
+        });
+        refuse(&|target| {
+            std::fs::create_dir_all(target.join(bad)).unwrap();
+            std::fs::write(target.join(bad).join("lib-bad.json"), b"{\"deps\":[]}").unwrap();
+        });
+        // The named dep-info is not a path inside the target.
+        for escape in ["../outside", "/etc/hosts", "", "a/../b"] {
+            refuse(&|target| {
+                unit(target, bad, "lib-bad", &check_dep_info(escape));
+            });
+        }
+        // A named dep-info that is not a string.
+        refuse(&|target| {
+            unit(
+                target,
+                bad,
+                "lib-bad",
+                "{\"CheckDepInfo\":{\"dep_info\":7}}",
+            );
+        });
     }
 
     #[test]
@@ -1723,17 +1895,30 @@ mod tests {
         let target = root.path().join("target");
         // Nothing to age in an empty seed, which is not an error.
         std::fs::create_dir(&target).unwrap();
-        assert_eq!(age_dep_info(&target, &SeedBudget::new()), Ok(0));
+        assert_eq!(age_dep_info(&target, &SeedBudget::new(), None), Ok(0));
         // Artifacts but no fingerprint directory: the layout is not one we can age.
         std::fs::create_dir_all(target.join("debug/deps")).unwrap();
         std::fs::write(target.join("debug/deps/libmember.rmeta"), b"x").unwrap();
         assert_eq!(
-            age_dep_info(&target, &SeedBudget::new()),
+            age_dep_info(&target, &SeedBudget::new(), None),
             Err(fallback_reasons::SEED_LAYOUT_UNRECOGNISED)
         );
+        let fingerprint = unit(
+            &target,
+            "debug/build/member/0123456789abcdef/fingerprint",
+            "lib-member",
+            &check_dep_info("debug/build/member/0123456789abcdef/fingerprint/dep-lib-member"),
+        );
+        std::fs::write(fingerprint.join("dep-lib-member"), b"x").unwrap();
         assert_eq!(
-            age_dep_info(&target, &SeedBudget::exhausted()),
+            age_dep_info(&target, &SeedBudget::exhausted(), None),
             Err(fallback_reasons::SEED_BUDGET_EXHAUSTED)
+        );
+        let cancel = provenant_core::CancelToken::new();
+        cancel.cancel();
+        assert_eq!(
+            age_dep_info(&target, &SeedBudget::new(), Some(&cancel)),
+            Err(fallback_reasons::CANCELLED)
         );
     }
 
@@ -1963,10 +2148,24 @@ mod tests {
         );
         write(
             "Cargo.toml",
-            "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nvendored = \"1\"\n\n[workspace]\n",
+            "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nvendored = \"1\"\ninner = { path = \"inner\" }\n\n[workspace]\n",
         );
         write(
             "src/lib.rs",
+            "pub fn value() -> u32 { inner::value() + vendored::value() }\n",
+        );
+        // A member with a build script, that another member depends on: every
+        // unit kind Cargo gives a local package, not only its library.
+        write(
+            "inner/Cargo.toml",
+            "[package]\nname = \"inner\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n\n[dependencies]\nvendored = \"1\"\n",
+        );
+        write(
+            "inner/build.rs",
+            "fn main() { println!(\"cargo:rerun-if-changed=build.rs\"); }\n",
+        );
+        write(
+            "inner/src/lib.rs",
             "pub fn value() -> u32 { vendored::value() }\n",
         );
         // A directory source stands in for the registry offline: like registry
@@ -2026,10 +2225,9 @@ mod tests {
 
         let built = tmp.path().join("built");
         let first = build(&built);
-        assert!(
-            !fresh(&first, "member") && !fresh(&first, "vendored"),
-            "{first:?}"
-        );
+        for name in ["member", "inner", "build-script-build", "vendored"] {
+            assert!(!fresh(&first, name), "{name}: {first:?}");
+        }
 
         // Publish it as a host generation.
         let state = tmp.path().join("state");
@@ -2083,19 +2281,31 @@ mod tests {
             .modified()
             .unwrap()
             - std::time::Duration::from_secs(3600);
-        for path in ["src/lib.rs", "Cargo.toml"] {
+        for path in [
+            "src/lib.rs",
+            "Cargo.toml",
+            "inner/src/lib.rs",
+            "inner/Cargo.toml",
+            "inner/build.rs",
+        ] {
             std::fs::File::open(workspace.join(path))
                 .unwrap()
                 .set_modified(older)
                 .unwrap();
         }
         let control = build(&plain);
-        assert!(
-            fresh(&control, "member"),
-            "without ageing the stale member is reused: {control:?}"
-        );
+        for name in ["member", "inner"] {
+            assert!(
+                fresh(&control, name),
+                "without ageing the stale {name} is reused: {control:?}"
+            );
+        }
+        // Every local unit rebuilds, the build script included, and the
+        // registry-style dependency stays fresh.
         let seeded = build(&cache.join("target"));
-        assert!(!fresh(&seeded, "member"), "{seeded:?}");
+        for name in ["member", "inner", "build-script-build"] {
+            assert!(!fresh(&seeded, name), "{name}: {seeded:?}");
+        }
         assert!(fresh(&seeded, "vendored"), "{seeded:?}");
         std::fs::set_permissions(&generation_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     }

@@ -241,6 +241,9 @@ fn seed_target_human(seed: &provenant_run::WorktreeSeed) -> String {
                 .unwrap_or_default()
         ),
     }
+    if let Some(source) = seed.cargo_home {
+        eprintln!("  Cargo home: {source}");
+    }
     seed.target.display().to_string()
 }
 
