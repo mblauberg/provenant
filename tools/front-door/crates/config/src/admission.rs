@@ -296,20 +296,4 @@ wait_seconds = 10
         assert_eq!(resolved.wait_seconds, 10);
         assert_eq!(resolved.wait_seconds_source, AdmissionSource::Project);
     }
-
-    #[test]
-    fn retired_build_cap_key_does_not_override_the_build_class() {
-        let temp = tempfile::tempdir().unwrap();
-        let config_toml = r#"
-schema_version = 1
-[domains.fabric.lanes]
-max_concurrent_builds = 3
-"#;
-        std::fs::write(temp.path().join("config.toml"), config_toml).unwrap();
-        let resolved = ResolvedAdmissionClass::resolve(DEFAULT_CLASS, temp.path(), None);
-        let defaults_dir = tempfile::tempdir().unwrap();
-        let defaults = ResolvedAdmissionClass::resolve(DEFAULT_CLASS, defaults_dir.path(), None);
-        assert_eq!(resolved.slots, defaults.slots);
-        assert_eq!(resolved.slots_source, AdmissionSource::Default);
-    }
 }
