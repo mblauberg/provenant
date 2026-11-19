@@ -1,3 +1,3 @@
 ## Fixes
 ### Git and safety
-- Lanes see only the token credential helper. The lane Git wrapper exports `GIT_CONFIG_NOSYSTEM` even when it supplies an identity config, launch no longer strips it, and the lane environment drops `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`, `GIT_CONFIG_VALUE_*` and `GIT_CONFIG_PARAMETERS`, so a host helper such as `osxkeychain` can no longer be reached from a lane. (#3569)
+- A sandboxed lane no longer reads system Git configuration or inherits command-scope Git configuration. Its Git wrapper exports `GIT_CONFIG_NOSYSTEM` even when it supplies an identity config, launch no longer strips it, and the lane environment drops `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`, `GIT_CONFIG_VALUE_*` and `GIT_CONFIG_PARAMETERS` in favour of the token helper's own entries, so a system helper such as `osxkeychain` is not reached. The host global Git configuration is still included in full (#3584), and a lane that is not sandboxed keeps the host's helpers. (#3569)

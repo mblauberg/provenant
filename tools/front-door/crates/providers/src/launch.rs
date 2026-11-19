@@ -974,10 +974,10 @@ pub(crate) fn private_git_objects(
         path: config.clone(),
         bytes: config_text.into_bytes(),
     });
+    // Only a sandboxed lane is under the credential boundary; a host-native
+    // lane keeps the host's own Git environment.
     if input.sandboxed() {
         crate::lane::install_token_config(&mut spec.env);
-    } else {
-        crate::lane::scrub_git_command_config(&mut spec.env);
     }
     if let Some((_, current)) = spec
         .env

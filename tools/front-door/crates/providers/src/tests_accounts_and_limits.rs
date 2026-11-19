@@ -408,14 +408,6 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
         1,
         "a sandboxed launch exports GIT_CONFIG_NOSYSTEM=1 exactly once"
     );
-    assert_eq!(
-        launch
-            .env
-            .iter()
-            .filter(|(key, _)| key == "GIT_CONFIG_NOSYSTEM")
-            .count(),
-        1
-    );
     for path in [
         "/fixture/home/.cargo/bin",
         "/fixture/home/.rustup/toolchains",
