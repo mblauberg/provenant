@@ -4986,11 +4986,18 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(setup_skip(&label, error));
             continue;
         }
-        let cargo_target_protection = run::build_dir_gc::target_protection_for_launch(
-            roots,
-            writer.as_ref().map(|writer| writer.worktree.path()),
-            common_git_dir.as_deref(),
-        );
+        // Only a writer's launch enforces the cache budget (a read-only lane
+        // returns before reading this snapshot), and the snapshot costs a
+        // registered-project and process census, so a read-only launch skips it.
+        let cargo_target_protection = if writer.is_some() {
+            run::build_dir_gc::target_protection_for_launch(
+                roots,
+                writer.as_ref().map(|writer| writer.worktree.path()),
+                common_git_dir.as_deref(),
+            )
+        } else {
+            Default::default()
+        };
         return Ok(run::PreparedLaunch {
             limits,
             continuation_expectation,
