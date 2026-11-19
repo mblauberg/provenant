@@ -168,8 +168,14 @@ Transfer to a named session is deferred.
 
 `result NAME[/NODE[#N]]` reads the current lane evidence in one call: state,
 branch, recorded head, handoff status and note, and verification reported in the
-handoff. `--json` retains the structured evidence and `--full` shows the complete
-human view. Missing or unavailable evidence is not proof of a check.
+handoff. For a review node it also projects the settled `verdict`, the typed
+`findings[]` (each carrying severity, `file` path, line and summary), their
+availability and whether the review was `partial`; a panel result lists one
+verdict per lens. The compact form shows the verdict and a count of findings by
+severity, and `--full` shows each finding. `--json` retains the same structured
+review evidence, reusing the projection `status` and `wait` read rather than
+parsing the result artifact again. Missing or unavailable evidence is not proof
+of a check.
 `retry TARGET --brief-file FILE` replaces the brief for a settled node; `-` reads stdin.
 `gc --idle DURATION` accepts zero and spans such as `6h` or `2d` for the minimum
 idle age; scheduled GC uses the configured `gc.idle`.
