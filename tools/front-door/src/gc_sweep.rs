@@ -5,9 +5,10 @@ use provenant_os::{
     fs::{Directory, LockGuard, LockMode, PublishMode},
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     io::{self, Write},
     time::{Duration, Instant},
 };
@@ -16,6 +17,9 @@ const PROGRESS_FILE: &str = "gc-progress.json";
 const LOCK_FILE: &str = "gc-sweep.lock";
 const EPOCH_FILE: &str = "gc-sweep-epoch";
 const PROGRESS_LIMIT: u64 = 16 * 1024;
+// One-time bound for converting progress files written before cursors moved
+// into per-scope sidecars. New lease records remain limited to PROGRESS_LIMIT.
+const LEGACY_PROGRESS_LIMIT: u64 = 64 * 1024 * 1024;
 const EPOCH_LIMIT: u64 = 32;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,13 +95,88 @@ struct Progress {
     trigger: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     scope: Option<String>,
+    #[serde(default)]
     cursor: Option<Cursor>,
+    // Read for migration from the original inline format, then omitted from
+    // every new write so the lease file stays bounded regardless of scopes.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     cursors: BTreeMap<String, Cursor>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct ScopeCursor {
+    key: String,
+    cursor: Cursor,
+}
+
 fn scope_key(trigger: &str, scope: &str) -> String {
     format!("{trigger}|{scope}")
+}
+
+fn scope_cursor_name(key: &str) -> OsString {
+    let digest = Sha256::digest(key.as_bytes());
+    format!("gc-cursor-{}", provenant_core::hex(&digest)).into()
+}
+
+fn read_scope_cursor(directory: &Directory, key: &str) -> Result<Option<Cursor>, io::Error> {
+    let name = scope_cursor_name(key);
+    let bytes = match directory.read_stable(&name, PROGRESS_LIMIT) {
+        Ok(bytes) => bytes,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(io::Error::other(error)),
+    };
+    let saved: ScopeCursor = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    if saved.key != key {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "GC scope cursor digest collision",
+        ));
+    }
+    Ok(Some(saved.cursor))
+}
+
+fn write_scope_cursor(directory: &Directory, key: &str, cursor: &Cursor) -> Result<(), io::Error> {
+    let bytes = serde_json::to_vec(&ScopeCursor {
+        key: key.to_owned(),
+        cursor: cursor.clone(),
+    })
+    .map_err(io::Error::other)?;
+    if bytes.len() as u64 > PROGRESS_LIMIT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "GC scope cursor exceeds its size limit",
+        ));
+    }
+    directory
+        .atomic_write(
+            &scope_cursor_name(key),
+            ".gc-cursor-",
+            &bytes,
+            PublishMode::Replace,
+        )
+        .map_err(io::Error::other)?;
+    Ok(())
+}
+
+fn clear_scope_cursor(directory: &Directory, key: &str) -> Result<(), io::Error> {
+    match directory.unlink(&scope_cursor_name(key)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.is_not_found() => Ok(()),
+        Err(error) => Err(io::Error::other(error)),
+    }
+}
+
+fn migrate_legacy_cursors(directory: &Directory, progress: &mut Progress) -> Result<(), io::Error> {
+    for (key, cursor) in std::mem::take(&mut progress.cursors) {
+        write_scope_cursor(directory, &key, &cursor)?;
+    }
+    if let (Some(trigger), Some(scope), Some(cursor)) =
+        (&progress.trigger, &progress.scope, &progress.cursor)
+    {
+        let key = scope_key(trigger, scope);
+        write_scope_cursor(directory, &key, cursor)?;
+    }
+    Ok(())
 }
 
 pub(crate) struct Lease {
@@ -176,12 +255,6 @@ impl Drop for Deadline {
 
 impl Lease {
     pub fn cursor(&self) -> Option<&Cursor> {
-        if let (Some(trigger), Some(scope)) = (self.trigger(), self.scope()) {
-            let key = scope_key(trigger, scope);
-            if let Some(cursor) = self.progress.cursors.get(&key) {
-                return Some(cursor);
-            }
-        }
         self.progress.cursor.as_ref()
     }
 
@@ -214,7 +287,7 @@ impl Lease {
         self.progress.trigger = Some(trigger.into());
         self.progress.scope = Some(scope.into());
         let key = scope_key(trigger, scope);
-        self.progress.cursor = self.progress.cursors.get(&key).cloned();
+        self.progress.cursor = read_scope_cursor(&self.directory, &key)?;
         self.progress.released = false;
         self.write_progress_locked()
     }
@@ -269,7 +342,7 @@ impl Lease {
         }
         if let (Some(trigger), Some(scope)) = (self.trigger(), self.scope()) {
             let key = scope_key(trigger, scope);
-            self.progress.cursors.insert(key, cursor.clone());
+            write_scope_cursor(&self.directory, &key, &cursor)?;
         }
         self.progress.cursor = Some(cursor);
         self.progress.released = false;
@@ -287,16 +360,12 @@ impl Lease {
         }
         if let (Some(trigger), Some(scope)) = (self.trigger(), self.scope()) {
             let key = scope_key(trigger, scope);
-            self.progress.cursors.remove(&key);
+            clear_scope_cursor(&self.directory, &key)?;
         }
         self.progress.cursor = None;
-        if self.progress.cursors.is_empty() {
-            self.directory
-                .unlink(OsStr::new(PROGRESS_FILE))
-                .map_err(io::Error::other)?;
-        } else {
-            self.write_progress_locked()?;
-        }
+        self.directory
+            .unlink(OsStr::new(PROGRESS_FILE))
+            .map_err(io::Error::other)?;
         if let Some(watcher) = self.watcher.take() {
             drop(watcher);
         }
@@ -305,6 +374,12 @@ impl Lease {
 
     fn write_progress_locked(&self) -> Result<(), io::Error> {
         let bytes = serde_json::to_vec(&self.progress).map_err(io::Error::other)?;
+        if bytes.len() as u64 > PROGRESS_LIMIT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "GC progress record exceeds its size limit",
+            ));
+        }
         self.directory
             .atomic_write(
                 OsStr::new(PROGRESS_FILE),
@@ -374,7 +449,7 @@ pub(crate) fn acquire(
         Err(error) if is_lock_timeout(&error) => return Ok(Acquire::Busy(None)),
         Err(error) => return Err(Box::new(error)),
     };
-    let old = read_progress(&directory)?;
+    let mut old = read_progress(&directory)?;
     let old_over_budget = old
         .as_ref()
         .is_some_and(|progress| holder_over_budget(progress, clock));
@@ -389,6 +464,9 @@ pub(crate) fn acquire(
         .is_some_and(|progress| !progress.released && !old_over_budget && !old_dead)
     {
         return Ok(Acquire::Busy(None));
+    }
+    if let Some(progress) = &mut old {
+        migrate_legacy_cursors(&directory, progress)?;
     }
     let warning = old.as_ref().and_then(|progress| {
         if progress.released {
@@ -415,17 +493,16 @@ pub(crate) fn acquire(
             "warning: gc.sweep_budget=0 checkpoints immediately without collecting"
         );
     }
-    let mut cursors = old
-        .as_ref()
-        .map(|progress| progress.cursors.clone())
-        .unwrap_or_default();
-    if let Some(progress) = &old
-        && cursors.is_empty()
-        && let (Some(trigger), Some(scope), Some(cursor)) =
-            (&progress.trigger, &progress.scope, &progress.cursor)
-    {
-        cursors.insert(scope_key(trigger, scope), cursor.clone());
-    }
+    let cursor = if let Some(progress) = &old {
+        if let (Some(trigger), Some(scope)) = (&progress.trigger, &progress.scope) {
+            read_scope_cursor(&directory, &scope_key(trigger, scope))?
+                .or_else(|| progress.cursor.clone())
+        } else {
+            progress.cursor.clone()
+        }
+    } else {
+        None
+    };
     let progress = Progress {
         pid: std::process::id() as i64,
         epoch,
@@ -436,8 +513,8 @@ pub(crate) fn acquire(
         released: false,
         trigger: old.as_ref().and_then(|progress| progress.trigger.clone()),
         scope: old.as_ref().and_then(|progress| progress.scope.clone()),
-        cursor: old.and_then(|progress| progress.cursor),
-        cursors,
+        cursor,
+        cursors: BTreeMap::new(),
     };
     let lease = Lease {
         directory,
@@ -483,7 +560,7 @@ fn metadata_lock_for_release(
 }
 
 fn read_progress(directory: &Directory) -> Result<Option<Progress>, Box<dyn std::error::Error>> {
-    let bytes = match directory.read_stable(OsStr::new(PROGRESS_FILE), PROGRESS_LIMIT) {
+    let bytes = match directory.read_stable(OsStr::new(PROGRESS_FILE), LEGACY_PROGRESS_LIMIT) {
         Ok(bytes) => bytes,
         Err(error) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(Box::new(error)),
@@ -833,6 +910,86 @@ mod tests {
         // Switching back or running as full_gc resumes from the saved cursor.
         resumed.set_identity("full_gc", "scheduled").unwrap();
         assert_eq!(resumed.cursor(), Some(&cursor));
+    }
+
+    #[test]
+    fn many_scope_cursors_migrate_out_of_the_bounded_lease_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let clock = test_clock();
+        let budget = Duration::from_secs(30);
+        let scope_names = (0..160)
+            .map(|index| format!("manual:scope-{index:04}-{}", "s".repeat(64)))
+            .collect::<Vec<_>>();
+        let cursor_for = |index: usize| Cursor {
+            class: format!("CacheSurvey-{index:04}"),
+            project: Some(format!("/repo/project-{index:04}-{}", "p".repeat(48)).into()),
+            candidate: Some(format!("/repo/target-{index:04}-{}", "c".repeat(48)).into()),
+            detail: Some(format!("continuation-{index:04}-{}", "d".repeat(96))),
+        };
+        let cursors = scope_names
+            .iter()
+            .enumerate()
+            .map(|(index, scope)| (scope_key("full_gc", scope), cursor_for(index)))
+            .collect::<BTreeMap<_, _>>();
+        let legacy = Progress {
+            pid: 2_000_000_000,
+            epoch: 3,
+            started_unix_seconds: clock.unix_seconds(),
+            started_host_monotonic_micros: clock.host_monotonic_micros().ok(),
+            boot_identity: clock.boot_identity().ok(),
+            budget_seconds: 30,
+            released: false,
+            trigger: Some("full_gc".into()),
+            scope: Some(scope_names[0].clone()),
+            cursor: Some(cursor_for(0)),
+            cursors,
+        };
+        let directory = provenant_config::private_directory(&root.join("tick"), true).unwrap();
+        next_epoch(&directory, Some(legacy.epoch)).unwrap();
+        write_progress(&directory, &legacy).unwrap();
+        assert!(
+            std::fs::metadata(root.join("tick").join(PROGRESS_FILE))
+                .unwrap()
+                .len()
+                > PROGRESS_LIMIT
+        );
+
+        let mut lease = match acquire(&root, budget, &clock).unwrap() {
+            Acquire::Held(lease) => lease,
+            Acquire::Busy(_) => panic!("dead legacy sweep should be taken over"),
+        };
+        assert_eq!(lease.cursor(), Some(&cursor_for(0)));
+        assert!(
+            std::fs::metadata(root.join("tick").join(PROGRESS_FILE))
+                .unwrap()
+                .len()
+                <= PROGRESS_LIMIT
+        );
+        assert!(
+            read_progress(&lease.directory)
+                .unwrap()
+                .unwrap()
+                .cursors
+                .is_empty()
+        );
+
+        for (index, scope) in scope_names.iter().enumerate() {
+            lease.set_identity("full_gc", scope).unwrap();
+            assert_eq!(lease.cursor(), Some(&cursor_for(index)), "scope {index}");
+        }
+
+        lease.set_identity("full_gc", &scope_names[0]).unwrap();
+        lease.complete().unwrap();
+
+        let mut resumed = match acquire(&root, budget, &clock).unwrap() {
+            Acquire::Held(lease) => lease,
+            Acquire::Busy(_) => panic!("completed scope should release its lease"),
+        };
+        resumed.set_identity("full_gc", &scope_names[0]).unwrap();
+        assert_eq!(resumed.cursor(), None);
+        resumed.set_identity("full_gc", &scope_names[1]).unwrap();
+        assert_eq!(resumed.cursor(), Some(&cursor_for(1)));
     }
 
     #[test]
