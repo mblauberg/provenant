@@ -3699,8 +3699,13 @@ mod outcome_release_tests {
             assert!(read_sealed(&attempt, "release.json", RECORD_LIMIT)?.is_none());
             if !prior_exit_location {
                 assert!(
-                    crate::release_progress(execution.state_root.as_path(), &finished.record, None)
-                        .is_some_and(|detail| detail.contains("1 survivors: pid 123"))
+                    crate::release_progress(
+                        execution.state_root.as_path(),
+                        &finished.record,
+                        None,
+                        None,
+                    )
+                    .is_some_and(|detail| detail.contains("1 survivors: pid 123"))
                 );
             }
             let evidence = finished

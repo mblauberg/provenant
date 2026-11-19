@@ -165,7 +165,7 @@ Every command exits with the code of its envelope `status`. This tier is stable.
 | `cancelled` | 130 |
 
 - Why: a script branches on the exit code before it parses any output.
-- Owner: `crates/cli/src/render.rs`
+- Owner: `crates/records/src/command_result.rs`
 
 ## Process tree
 

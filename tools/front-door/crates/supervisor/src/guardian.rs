@@ -63,6 +63,35 @@ const CANCEL_FALLBACK_POLL_MS: u64 = 100;
 // detached service outlives the lane. See `RetainedSchedule`.
 const RETAINED_OBSERVE_MS: u64 = 1_000;
 const RETAINED_ESCALATION_MS: u64 = 30_000;
+// Reaping the leader under the fenced lease backs off from 25 ms to 1 s and
+// gives up after about 5 s; the lease then falls with the guardian.
+const FINISH_FENCED_FIRST_MS: u64 = 25;
+const FINISH_FENCED_CAP_MS: u64 = 1_000;
+const FINISH_FENCED_BUDGET_MS: u64 = 5_000;
+// Durable-publication retries are unbounded while the disk may recover, but a
+// supervisor signal gives them this long before the guardian exits, leaving
+// the durable fence for reconcile as a crash would.
+const SIGNALLED_RETRY_BUDGET_MS: u64 = 5_000;
+
+/// Bounds an otherwise unbounded retry loop once a supervisor signal latches.
+/// The deadline starts at the first retry that sees the signal and is
+/// monotonic, because reactor pauses end early on any edge.
+#[derive(Default)]
+struct SignalledRetry {
+    deadline: Option<Instant>,
+}
+impl SignalledRetry {
+    #[allow(clippy::disallowed_methods)]
+    fn exhausted(&mut self, signalled: bool) -> bool {
+        if !signalled {
+            return false;
+        }
+        let now = Instant::now();
+        now >= *self
+            .deadline
+            .get_or_insert(now + Duration::from_millis(SIGNALLED_RETRY_BUDGET_MS))
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RetainedStep {
@@ -96,7 +125,23 @@ struct RetainedSchedule {
     /// this platform, so it would be wasted work.
     escalate_only: bool,
 }
+/// How the retained loop ended.
+enum RetainedEnd {
+    /// The group is gone; the settled exit replaces the unresolved one.
+    Settled,
+    /// The writer lock inode was retired; the durable fence stays.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Retired,
+    /// Retention stopped with the exit unresolved.
+    Ended(RetentionEndReason),
+}
 impl RetainedSchedule {
+    /// Fold reactor edges into the schedule.
+    fn absorb(&mut self, event: &crate::process_os::provider::ReactorEvent) {
+        self.process_event |= event.process_changed && !self.escalate_only;
+        self.watched &= !event.process_overflow;
+    }
+
     fn for_platform() -> Self {
         Self {
             escalate_only: !cfg!(target_os = "macos"),
@@ -746,9 +791,6 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         last_tracking: None,
         journal_warning_active: false,
         cleanup_holders_warned: false,
-        deferred_signal: false,
-        deferred_cancel: false,
-        deferred_process_event: false,
         stopped_descendants: std::collections::BTreeSet::new(),
         settlement_evidence: SettlementEvidence::Unresolved,
         reaped: Vec::new(),
@@ -760,6 +802,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         registry: hooks.children,
         descendant_stop_allowed: false,
         escapee_stop_allowed: false,
+        stop_refused: false,
         attempt: inherited.attempt_directory,
         writer_dir: evidence,
         lock_dir: inherited.writer_directory,
@@ -826,13 +869,6 @@ struct Driver<'a> {
     journal_warning_active: bool,
     /// The diagnostic holder scan has run; it runs once per guardian.
     cleanup_holders_warned: bool,
-    /// A supervisor signal or cancellation change seen while a retained stop
-    /// waited on exit watches, for the retained loop to act on.
-    deferred_signal: bool,
-    deferred_cancel: bool,
-    /// A process event a retained stop consumed while awaiting its targets;
-    /// any watched identity (a protected owner, say) may have exited.
-    deferred_process_event: bool,
     /// Descendants this guardian signalled, for the one summary warning.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     stopped_descendants: std::collections::BTreeSet<ProcessIdentity>,
@@ -850,6 +886,9 @@ struct Driver<'a> {
     /// Unproven registered owners stay protected. Independent of
     /// `descendant_stop_allowed`.
     escapee_stop_allowed: bool,
+    /// The last stop pass had live candidates it was not allowed to signal:
+    /// withheld descendant or escapee permission, or a host graph refusal.
+    stop_refused: bool,
 }
 /// Whether a writer's latest reported context has reached its context handoff
 /// threshold (`lanes.context_handoff_tokens`). 0 turns the threshold off, and a provider with no context figure
@@ -1249,7 +1288,6 @@ impl Driver<'_> {
             .reactor
             .watch_cancellation_directory(&self.attempt)
             .is_ok();
-        let mut signal_pending = false;
         let mut last_output_bytes = 0_u64;
         let mut last_output_checkpoint_ms = None;
         let mut last_output_at: Option<WallTime> = None;
@@ -1344,29 +1382,26 @@ impl Driver<'_> {
                     }
                 }
             }
-            let polled_signal = match self.reactor.wait(&[], Duration::ZERO) {
-                Ok(event) => {
-                    cancel_pending |= event.cancel_changed;
-                    cancel_watched &= !event.cancel_watch_failed;
-                    census_event_pending |= event.process_changed;
-                    census_event_failed |= event.process_overflow;
-                    event.supervisor_signal
+            if self.reactor.wait(&[], Duration::ZERO).is_err() {
+                cancel_watched = false;
+                census_event_failed = true;
+                census_reactor_failed = true;
+                if !reactor_warning_recorded {
+                    warn(
+                        &mut warnings,
+                        &mut omitted_warnings,
+                        "signal observation failed",
+                    );
+                    reactor_warning_recorded = true;
                 }
-                Err(_) => {
-                    cancel_watched = false;
-                    census_event_failed = true;
-                    census_reactor_failed = true;
-                    if !reactor_warning_recorded {
-                        warn(
-                            &mut warnings,
-                            &mut omitted_warnings,
-                            "signal observation failed",
-                        );
-                        reactor_warning_recorded = true;
-                    }
-                    false
-                }
-            };
+            }
+            // Every edge drained since the last turn, by this poll, the turn's
+            // wait or a cleanup pause, is taken here exactly once.
+            let event = self.reactor.take_events();
+            cancel_pending |= event.cancel_changed;
+            cancel_watched &= !event.cancel_watch_failed;
+            census_event_pending |= event.process_changed;
+            census_event_failed |= event.process_overflow;
             let cancel_due = std::mem::take(&mut cancel_pending)
                 || last_cancel_ms.is_none_or(|last| {
                     now.saturating_sub(last) >= cancel_poll_interval(cancel_watched)
@@ -1396,7 +1431,7 @@ impl Driver<'_> {
             } else {
                 None
             };
-            let signal = std::mem::replace(&mut signal_pending, false) || polled_signal;
+            let signal = event.supervisor_signal;
             use std::sync::atomic::Ordering;
             let newly_terminal = !terminal
                 && (out_events.terminal.load(Ordering::Relaxed)
@@ -1832,15 +1867,13 @@ impl Driver<'_> {
                         .saturating_sub(wait_now),
                 );
             }
+            // The next turn takes what this wait drains.
             match self.reactor.wait(&watches, Duration::from_millis(wait_ms)) {
-                Ok(event) => {
-                    io_ready = event.io_ready;
-                    cancel_pending |= event.cancel_changed;
-                    cancel_watched &= !event.cancel_watch_failed;
-                    signal_pending |= event.supervisor_signal;
-                    census_event_pending |= event.process_changed;
-                    census_event_failed |= event.process_overflow;
-                    if event.process_changed && !census_walk_due(wait_now, last_census_ms) {
+                Ok(ready) => {
+                    io_ready = ready;
+                    if self.reactor.pending().process_changed
+                        && !census_walk_due(wait_now, last_census_ms)
+                    {
                         provenant_os::sys::wait_pause(Duration::from_millis(
                             EVENT_DRAIN_BACKOFF_MS,
                         ));
@@ -1923,10 +1956,12 @@ impl Driver<'_> {
             // replacement followed by failed directory sync is not a durable
             // transition; retain the locks and retry the same proven facts.
             // A linked evidence directory may recover from ENOSPC or a sync
-            // error, so keep custody and retry indefinitely. An unlinked one
-            // cannot accept a reservation at all. In that case only, finish
-            // the same full-census and fresh-lease proof before retiring; do
-            // not publish an exit or clear a fence without its reservation.
+            // error, so keep custody and retry until a supervisor signal
+            // bounds the wait. An unlinked one cannot accept a reservation at
+            // all. In that case only, finish the same full-census and
+            // fresh-lease proof before retiring; do not publish an exit or
+            // clear a fence without its reservation.
+            let mut signalled_retry = SignalledRetry::default();
             while !self.persist_reservation() {
                 if writer_evidence_identity.is_some_and(|identity| {
                     attempt_removed(&self.writer_dir, writer_evidence_path.as_deref(), identity)
@@ -1956,7 +1991,14 @@ impl Driver<'_> {
                         )));
                     }
                 }
-                let _ = self.reactor.wait(&[], Duration::from_millis(25));
+                if signalled_retry.exhausted(self.reactor.signalled()) {
+                    // The previous reservation stays the durable fence, as
+                    // after a crash; reconcile recovers it.
+                    return Err(CustodyError::Io(io::Error::other(
+                        "cleanup reservation still not durable after a supervisor signal",
+                    )));
+                }
+                self.reactor.pause(Duration::from_millis(25));
             }
         }
         let mut totals = totals.into_iter();
@@ -2015,6 +2057,12 @@ impl Driver<'_> {
                 Vec::new()
             },
             settlement_evidence: self.settlement_evidence,
+            retention: unresolved.then(|| Retention {
+                guardian: self.guardian.clone(),
+                since: wall_now(),
+                limit_ms: plan.retained_custody_ms,
+                ended: None,
+            }),
             stdout,
             stderr,
             warnings: warnings.clone(),
@@ -2036,11 +2084,19 @@ impl Driver<'_> {
             // members remain and republish a settled exit once they are gone.
             // The guardian blocks on process, cancellation and signal events;
             // `RetainedSchedule` decides when to look and when to signal.
+            // Retention is bounded: a supervisor signal or the plan's limit
+            // ends it with the exit still unresolved and the reason recorded.
             let mut cancelled = false;
             let mut schedule = RetainedSchedule::for_platform();
             let mut cancel_pending = false;
             let mut last_cancel_ms: Option<u64> = None;
-            loop {
+            let began_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let limit_ms = plan.retained_custody_ms;
+            let ended = loop {
+                let event = self.reactor.take_events();
+                schedule.absorb(&event);
+                cancel_pending |= event.cancel_changed;
+                cancel_watched &= !event.cancel_watch_failed;
                 let now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 if std::mem::take(&mut cancel_pending)
                     || last_cancel_ms.is_none_or(|last| {
@@ -2055,6 +2111,30 @@ impl Driver<'_> {
                         cancelled = true;
                         schedule.escalation_requested = true;
                     }
+                }
+                if self.reactor.signalled() {
+                    // Never leave `unresolved` without one more bounded
+                    // stop attempt: TERM, the descendant grace, then KILL.
+                    let settled = self.cleanup(
+                        &mut child,
+                        plan,
+                        if cancelled {
+                            Some(machine::StopReason::ExplicitCancellation)
+                        } else {
+                            Some(machine::StopReason::SupervisorSignal)
+                        },
+                        &mut warnings,
+                        &mut omitted_warnings,
+                    );
+                    break if let Ok(true) = settled {
+                        RetainedEnd::Settled
+                    } else {
+                        RetainedEnd::Ended(RetentionEndReason::SupervisorSignal)
+                    };
+                }
+                let retained_ms = now.saturating_sub(began_ms);
+                if retained_ms >= limit_ms {
+                    break RetainedEnd::Ended(RetentionEndReason::LimitReached);
                 }
                 let step = schedule.next(now);
                 if step != RetainedStep::Wait && !outcome_committed && published {
@@ -2080,14 +2160,13 @@ impl Driver<'_> {
                     RetainedStep::Wait => Ok(false),
                 };
                 if let Ok(true) = settled {
-                    if published {
-                        self.republish_settled(record, &warnings, omitted_warnings)?;
-                    }
-                    break;
+                    break RetainedEnd::Settled;
                 }
-                cancel_pending |= std::mem::take(&mut self.deferred_cancel);
-                schedule.process_event |=
-                    std::mem::take(&mut self.deferred_process_event) && !schedule.escalate_only;
+                // Edges the step drained while it waited on exits.
+                let event = self.reactor.take_events();
+                schedule.absorb(&event);
+                cancel_pending |= event.cancel_changed;
+                cancel_watched &= !event.cancel_watch_failed;
                 if step != RetainedStep::Wait {
                     let (watched, gone) = self.watch_retained_processes();
                     schedule.watched = watched;
@@ -2099,7 +2178,7 @@ impl Driver<'_> {
                 // removed. Leave the durable unresolved fence untouched.
                 #[cfg(target_os = "macos")]
                 if self.retire_unlinked_writer(&mut child) {
-                    break;
+                    break RetainedEnd::Retired;
                 }
                 let wait_now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let wait_ms = schedule
@@ -2107,67 +2186,170 @@ impl Driver<'_> {
                     .min(last_cancel_ms.map_or(0, |last| {
                         last.saturating_add(cancel_poll_interval(cancel_watched))
                             .saturating_sub(wait_now)
-                    }));
-                let event = if std::mem::take(&mut self.deferred_signal) {
-                    Ok(crate::process_os::provider::ReactorEvent {
-                        supervisor_signal: true,
-                        ..Default::default()
-                    })
+                    }))
+                    .min(began_ms.saturating_add(limit_ms).saturating_sub(wait_now));
+                let waited = if cancel_pending || self.reactor.signalled() {
+                    Ok(false)
                 } else if schedule.process_event && wait_ms > 0 {
                     // A look is already due at the walk rate. Further fork or
                     // exit events add nothing before it, so sleep out the
-                    // window; signals and cancellation stay queued in kqueue.
+                    // window, then drain what kqueue queued meanwhile.
                     provenant_os::sys::wait_pause(Duration::from_millis(wait_ms));
-                    Ok(crate::process_os::provider::ReactorEvent::default())
+                    self.reactor.wait(&[], Duration::ZERO)
                 } else {
                     self.reactor.wait(&[], Duration::from_millis(wait_ms))
                 };
-                match event {
-                    Ok(event) if event.supervisor_signal => {
-                        // Never leave `unresolved` without one more bounded
-                        // stop attempt: TERM, the descendant grace, then KILL.
-                        if let Ok(true) = self.cleanup(
-                            &mut child,
-                            plan,
-                            if cancelled {
-                                Some(machine::StopReason::ExplicitCancellation)
-                            } else {
-                                Some(machine::StopReason::SupervisorSignal)
+                if waited.is_err() {
+                    // Without the reactor nothing wakes this loop early.
+                    schedule.watched = false;
+                    cancel_watched = false;
+                    let remaining = began_ms.saturating_add(limit_ms).saturating_sub(wait_now);
+                    provenant_os::sys::wait_pause(Duration::from_millis(
+                        RETAINED_OBSERVE_MS.min(remaining.max(1)),
+                    ));
+                }
+            };
+            let limit_reached = match ended {
+                RetainedEnd::Settled => {
+                    if published {
+                        self.republish_settled(record, &warnings, omitted_warnings)?;
+                    }
+                    None
+                }
+                RetainedEnd::Retired => None,
+                RetainedEnd::Ended(reason) => {
+                    let now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    let end = RetentionEnd {
+                        reason,
+                        retained_ms: now.saturating_sub(began_ms),
+                        blocker: self.retention_blocker(),
+                    };
+                    let unresolved_pids: Vec<i64> = self
+                        .tracked
+                        .iter()
+                        .take(16)
+                        .map(|identity| identity.pid)
+                        .collect();
+                    warn(
+                        &mut warnings,
+                        &mut omitted_warnings,
+                        &format!(
+                            "retained custody ended ({}) after {} s: {}; unresolved pids {unresolved_pids:?}; run `provenant reconcile` for the attempt",
+                            match reason {
+                                RetentionEndReason::LimitReached => "limit reached",
+                                RetentionEndReason::SupervisorSignal => "supervisor signal",
                             },
-                            &mut warnings,
-                            &mut omitted_warnings,
-                        ) && published
-                        {
-                            self.republish_settled(record, &warnings, omitted_warnings)?;
-                        }
-                        break;
+                            end.retained_ms / 1_000,
+                            end.blocker,
+                        ),
+                    );
+                    if published {
+                        self.republish_retention_end(
+                            record,
+                            end.clone(),
+                            &warnings,
+                            omitted_warnings,
+                        );
                     }
-                    Ok(event) => {
-                        schedule.process_event |= event.process_changed && !schedule.escalate_only;
-                        schedule.watched &= !event.process_overflow;
-                        cancel_pending |= event.cancel_changed;
-                        cancel_watched &= !event.cancel_watch_failed;
-                    }
-                    Err(_) => {
-                        // Without the reactor nothing wakes this loop early.
-                        schedule.watched = false;
-                        cancel_watched = false;
-                        provenant_os::sys::wait_pause(Duration::from_millis(RETAINED_OBSERVE_MS));
-                    }
+                    (reason == RetentionEndReason::LimitReached).then_some(RetentionLimitReached {
+                        scope: self.reservation.scope,
+                        limit_ms,
+                        end,
+                        unresolved_pids,
+                    })
                 }
-            }
-            loop {
-                match child.finish_fenced() {
-                    Ok(_) => break,
-                    Err(failure) => {
-                        let (retained, _) = *failure;
-                        child = retained;
-                        let _ = self.reactor.wait(&[], Duration::from_millis(25));
-                    }
-                }
+            };
+            self.finish_fenced(child);
+            if let Some(reached) = limit_reached {
+                return Err(CustodyError::RetentionLimit(Box::new(reached)));
             }
         }
         Ok(())
+    }
+    /// What kept the exit unresolved when retention ended, most specific first.
+    fn retention_blocker(&self) -> RetentionBlocker {
+        if self.stop_refused {
+            RetentionBlocker::StopRefused
+        } else if !self.protected.is_empty() {
+            RetentionBlocker::ProtectedOwner
+        } else if self.reservation.census_incomplete {
+            RetentionBlocker::CensusIncomplete
+        } else if !self.tracked.is_empty() {
+            RetentionBlocker::SurvivedStop
+        } else {
+            RetentionBlocker::SettlementUnproven
+        }
+    }
+    /// Record why retention ended on the still-unresolved exit. The exit and
+    /// reservation stay unresolved, so the fence holds for reconcile.
+    /// Best effort: the unresolved exit already on disk stays conservative.
+    fn republish_retention_end(
+        &mut self,
+        mut record: ProcessExit,
+        end: RetentionEnd,
+        warnings: &[String],
+        omitted_warnings: u64,
+    ) {
+        record.unresolved_pids = self
+            .tracked
+            .iter()
+            .take(16)
+            .map(|identity| identity.pid)
+            .collect();
+        record.unresolved_identities = self.tracked.iter().take(16).cloned().collect();
+        record.settlement_evidence = self.settlement_evidence;
+        record.reaped = self.reaped.clone();
+        record.omitted_reaped = self.omitted_reaped;
+        record.delivered_signals = self.delivered_signals.clone();
+        record.failed_deliveries = self.failed_deliveries.clone();
+        record.omitted_failed_deliveries = self.omitted_failed_deliveries;
+        record.warnings = warnings.to_vec();
+        record.omitted_warnings = omitted_warnings;
+        if let Some(retention) = record.retention.as_mut() {
+            retention.ended = Some(end);
+        }
+        let Ok(bytes) = record.bounded_bytes() else {
+            return;
+        };
+        let _ = self
+            .attempt
+            .atomic_write(
+                OsStr::new("process-exit.json"),
+                ".exit-",
+                &bytes,
+                PublishMode::Replace,
+            )
+            .map(|publication| publication.require_durable());
+    }
+    /// Reap the leader while the writer lease stays held. Retries back off and
+    /// are bounded by a monotonic deadline, since a pause ends early on any
+    /// reactor edge; past it the provider group is dropped unsignalled and the
+    /// lease falls with the guardian.
+    #[allow(clippy::disallowed_methods)]
+    fn finish_fenced(&mut self, mut child: crate::process_os::provider::ProviderGroup) {
+        let backoff = provenant_core::retry::Backoff::new(
+            Duration::from_millis(FINISH_FENCED_FIRST_MS),
+            2,
+            Duration::from_millis(FINISH_FENCED_CAP_MS),
+        );
+        let deadline = Instant::now() + Duration::from_millis(FINISH_FENCED_BUDGET_MS);
+        let mut attempt = 0;
+        loop {
+            match child.finish_fenced() {
+                Ok(_) => return,
+                Err(failure) => {
+                    let (retained, _) = *failure;
+                    child = retained;
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return;
+                    }
+                    let delay = backoff.delay(attempt).min(deadline - now);
+                    attempt = attempt.saturating_add(1);
+                    self.reactor.pause(delay);
+                }
+            }
+        }
     }
     /// Replace the unresolved exit with the settled facts once cleanup proves
     /// the group gone. The reservation is made resolved first, so a crash in
@@ -2186,6 +2368,8 @@ impl Driver<'_> {
         record.unresolved_cleanup = false;
         record.unresolved_pids = Vec::new();
         record.unresolved_identities = Vec::new();
+        // A settled exit holds nothing, so it names no retaining guardian.
+        record.retention = None;
         record.settlement_evidence = self.settlement_evidence;
         record.reaped = self.reaped.clone();
         record.omitted_reaped = self.omitted_reaped;
@@ -2386,10 +2570,11 @@ impl Driver<'_> {
         Ok(())
     }
     /// Retry until the exit is durable or the attempt is provably removed.
-    /// Custody survives ENOSPC and signals; process.json exposes
-    /// publication_pending. A removed attempt keeps its held descriptor usable,
-    /// so removal is judged by directory identity, never by a pathname or an
-    /// errno alone.
+    /// Custody survives ENOSPC; a supervisor signal bounds the retries to
+    /// `SIGNALLED_RETRY_BUDGET_MS`, then the guardian exits with an error.
+    /// process.json exposes publication_pending. A removed attempt keeps its
+    /// held descriptor usable, so removal is judged by directory identity,
+    /// never by a pathname or an errno alone.
     fn publish_until_durable(&mut self, record: &ProcessExit, state: &mut State) -> Result<bool> {
         let bytes = record.bounded_bytes()?;
         if bytes.len() as u64 > EXIT_LIMIT {
@@ -2404,6 +2589,7 @@ impl Driver<'_> {
         let system_exit_publisher = SystemExitPublisher;
         let exit_publisher: &dyn ExitPublisher =
             self.exit_publisher.unwrap_or(&system_exit_publisher);
+        let mut signalled_retry = SignalledRetry::default();
         loop {
             let result = if visible {
                 exit_publisher
@@ -2499,7 +2685,13 @@ impl Driver<'_> {
                 },
                 PublishMode::Replace,
             );
-            let _ = self.reactor.wait(&[], Duration::from_millis(50));
+            if signalled_retry.exhausted(self.reactor.signalled()) {
+                // publication_pending stays on disk for reconcile.
+                return Err(CustodyError::Io(io::Error::other(
+                    "exit publication still pending after a supervisor signal",
+                )));
+            }
+            self.reactor.pause(Duration::from_millis(50));
         }
     }
 }
