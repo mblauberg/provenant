@@ -844,6 +844,9 @@ struct PlannedGraph {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedNode {
+    // Derived from the persisted document; the warning is already retained there.
+    #[serde(skip)]
+    writer_dirty_preflight: bool,
     #[serde(skip)]
     review_launch: bool,
     #[serde(skip_serializing_if = "provenant_records::OnStop::is_empty")]
@@ -1108,6 +1111,29 @@ pub fn advance_with_budget<R: AttemptOwner, J: GraphJournal>(
         false,
         &[],
         &mut Default::default(),
+        &[],
+    )
+}
+
+/// Save submission refusals before any node is allowed to start.
+pub fn advance_with_submission_refusals<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    owner: &mut R,
+    journal: &mut J,
+    limits: &crate::config::GraphLimits,
+    budget: &crate::config::GraphBudget,
+    refusals: &[(String, String)],
+) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
+    advance_inner(
+        document,
+        owner,
+        journal,
+        limits,
+        budget,
+        false,
+        &[],
+        &mut Default::default(),
+        refusals,
     )
 }
 
@@ -1128,6 +1154,7 @@ pub fn resume_with_budget<R: AttemptOwner, J: GraphJournal>(
         true,
         extensions,
         &mut Default::default(),
+        &[],
     )
 }
 
@@ -1385,6 +1412,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     mut resume: bool,
     extensions: &[String],
     observed_ci: &mut std::collections::BTreeSet<String>,
+    submission_refusals: &[(String, String)],
 ) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
     let worktree_layout = owner.worktree_layout();
     // Resolve once for this graph operation, before replay and expansion.
@@ -1500,6 +1528,25 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             // then write an instance-bound request while a host owns the graph
             // lock and is resolving or creating a worktree.
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            if !submission_refusals.is_empty() {
+                for progress in &mut checkpoint.nodes {
+                    if progress.state == NodeState::Pending {
+                        let reason = submission_refusals
+                            .iter()
+                            .find(|(id, _)| id == &progress.id)
+                            .map_or("graph submission refused before launch", |(_, reason)| {
+                                reason.as_str()
+                            });
+                        transitions::fail_with(
+                            progress,
+                            "writer_preflight_refused",
+                            reason.to_owned(),
+                        );
+                    }
+                }
+                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                return Ok(transitions::graph_run(checkpoint));
+            }
             for index in 0..plan.nodes.len() {
                 if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
                     settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
@@ -1752,6 +1799,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 false,
                 &[],
                 observed_ci,
+                &[],
             );
         }
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
@@ -1966,6 +2014,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 true,
                                 &[extension],
                                 observed_ci,
+                                &[],
                             );
                         }
                     }
@@ -3010,6 +3059,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let observation = match owner.observe_or_start(
                     &key,
                     NodeInput {
+                        writer_dirty_preflight: node.writer_dirty_preflight,
                         review_launch: node.review_launch,
                         require_skill_location: node.require_skill_location,
                         settlement_retries,
@@ -3386,6 +3436,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         false,
                         &[],
                         observed_ci,
+                        &[],
                     );
                 }
                 let appended = if settled_result.is_some() || node.plan.is_some() {
@@ -3509,6 +3560,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 false,
                 &[],
                 observed_ci,
+                &[],
             );
         }
         if document.delivery == Some(provenant_records::run::DeliveryMode::Pr)

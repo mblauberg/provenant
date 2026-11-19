@@ -76,14 +76,21 @@ fn preflight_writer_worktrees(
     factory: &super::Factory,
     facts: &provenant_confinement::worktrees::RepoFacts,
     document: &mut provenant_fabric_runtime::graph::GraphDocument,
-) -> Result<(), FacadeError> {
+    expanded: &provenant_fabric_runtime::graph::GraphDocument,
+) -> Result<Vec<(String, String, String)>, FacadeError> {
     use provenant_fabric_runtime::graph::AccessMode;
     use provenant_run::writer_dirty::{self, Preflight};
     use std::io::Write;
     let resolved = writer_dirty_setting(factory);
     let git =
         provenant_os::git::git_executable().ok_or_else(|| FacadeError::io("git for preflight"))?;
-    for node in &mut document.nodes {
+    let mut outcomes = std::collections::BTreeMap::new();
+    let mut canonical_paths: std::collections::BTreeMap<std::path::PathBuf, String> =
+        std::collections::BTreeMap::new();
+    let mut aliases = Vec::new();
+    let mut refusals = Vec::new();
+    let mut pending_wip = Vec::new();
+    for node in &expanded.nodes {
         if node.access != AccessMode::WorktreeWrite
             || node
                 .attempt
@@ -95,6 +102,9 @@ fn preflight_writer_worktrees(
         let Some(path) = node.worktree.as_deref() else {
             continue;
         };
+        if outcomes.contains_key(path) {
+            continue;
+        }
         // A worktree that does not exist yet holds no edits. Its absence is
         // reported when the node starts, as before this preflight.
         if !factory.cwd.join(path).exists() {
@@ -106,13 +116,24 @@ fn preflight_writer_worktrees(
             Path::new(path),
         )
         .map_err(run_error)?;
-        let writer = provenant_run::prepare_writer_with_facts(
+        let writer = match provenant_run::prepare_writer_with_facts(
             &writer,
             factory.context.roots.state.as_path(),
             factory.context.identity.project,
             facts,
-        )
-        .map_err(run_error)?;
+        ) {
+            Ok(writer) => writer,
+            // The graph's normal binding records a detached writer as a node
+            // refusal; there is no writable branch to preflight here.
+            Err(provenant_run::RunError::Validation("writer needs a branch")) => continue,
+            Err(error) => return Err(run_error(error)),
+        };
+        let canonical = writer.worktree.path().to_path_buf();
+        if let Some(original) = canonical_paths.get(&canonical) {
+            aliases.push((path.to_owned(), original.clone()));
+            continue;
+        }
+        canonical_paths.insert(canonical, path.to_owned());
         let paths =
             writer
                 .uncommitted_paths(&git)
@@ -125,29 +146,84 @@ fn preflight_writer_worktrees(
                     ),
                 })?;
         match writer_dirty::preflight(&resolved, &paths) {
-            Preflight::Clean => {}
+            Preflight::Clean => {
+                outcomes.insert(path.to_owned(), (None, None));
+            }
             Preflight::Refuse(reason) => {
-                return Err(FacadeError::DispatchRefused {
-                    fact: None,
-                    disk: None,
-                    reason,
-                });
+                refusals.push((node.id.clone(), path.to_owned(), reason));
+                outcomes.insert(path.to_owned(), (None, None));
             }
             Preflight::WipCommit => {
-                let message = format!("WIP: graph submission {}", document.graph_id);
-                let head = writer.commit_wip(&git, &message).map_err(run_error)?;
-                node.wip_commit = Some(head.to_string());
-                node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
-                    commit: head.to_string(),
-                });
+                pending_wip.push((path.to_owned(), writer, paths));
+                outcomes.insert(path.to_owned(), (None, None));
             }
             Preflight::ContinueInPlace(warning) => {
                 let _ = writeln!(std::io::stderr().lock(), "{warning}");
-                node.writer_dirty_warning = Some(warning);
+                outcomes.insert(path.to_owned(), (None, Some(warning)));
             }
         }
     }
-    Ok(())
+    if !refusals.is_empty() {
+        return Ok(refusals);
+    }
+    if document.submission_patch.is_some()
+        && (outcomes
+            .values()
+            .any(|(head, warning)| head.is_some() || warning.is_some())
+            || !pending_wip.is_empty())
+    {
+        return Err(FacadeError::DispatchRefused {
+            fact: None, disk: None,
+            reason: "dirty writer preflight cannot update an already sealed submission; submit the original unsealed graph".into(),
+        });
+    }
+    for (path, writer, paths) in pending_wip {
+        let message = format!("WIP: graph submission {}", document.graph_id);
+        let head = writer
+            .commit_wip(&git, &message, &paths)
+            .map_err(run_error)?;
+        outcomes.insert(path, (Some(head.to_string()), None));
+    }
+    for (alias, original) in aliases {
+        if let Some(outcome) = outcomes.get(&original).cloned() {
+            outcomes.insert(alias, outcome);
+        }
+    }
+    fn apply(
+        nodes: &mut [provenant_fabric_runtime::graph::GraphNode],
+        outcomes: &std::collections::BTreeMap<String, (Option<String>, Option<String>)>,
+    ) {
+        for node in nodes {
+            if node.access == AccessMode::WorktreeWrite
+                && let Some((head, warning)) =
+                    node.worktree.as_ref().and_then(|path| outcomes.get(path))
+            {
+                if let Some(head) = head {
+                    node.wip_commit = Some(head.clone());
+                    if matches!(
+                        node.source,
+                        None | Some(provenant_fabric_runtime::graph::SourceBinding::Commit { .. })
+                    ) {
+                        node.source =
+                            Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
+                                commit: head.clone(),
+                            });
+                    }
+                }
+                if let Some(warning) = warning {
+                    node.writer_dirty_warning = Some(warning.clone());
+                }
+            }
+            if let Some(composite) = &mut node.composite {
+                apply(&mut composite.nodes, outcomes);
+            }
+            if let Some(body) = &mut node.loop_body {
+                apply(&mut body.body, outcomes);
+            }
+        }
+    }
+    apply(&mut document.nodes, &outcomes);
+    Ok(refusals)
 }
 
 /// Called once, as soon as a submitted graph's first checkpoint is saved.
@@ -670,6 +746,7 @@ impl Factory {
             })?;
         let resume = matches!(&input, GraphInput::Resume { .. });
         let mut scratch_source = None;
+        let mut submission_refusals = Vec::new();
         let document = match &input {
             GraphInput::Run { document, .. } | GraphInput::Resume { document, .. } => {
                 let scratch = match prepared_scratch {
@@ -701,25 +778,6 @@ impl Factory {
                     }
                     document
                 };
-                if !resume && document.submission_patch.is_none() {
-                    let submission_key = document
-                        .provenance
-                        .as_ref()
-                        .and_then(|provenance| {
-                            provenance
-                                .operation_id
-                                .as_ref()
-                                .map(|id| id.as_str().to_owned())
-                        })
-                        .unwrap_or_else(|| format!("submit:{}", document.graph_id));
-                    provenant_fabric_runtime::graph::patch::submission(
-                        &mut document,
-                        &submission_key,
-                        &self.context.config.graph.limits,
-                        self.context.port_table.worktree_layout.clone(),
-                    )
-                    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-                }
                 if let Some(branch) = &document.integration_branch {
                     provenant_run::HostDeliveryContext::validate_integration_target(
                         &self.cwd, branch,
@@ -745,21 +803,47 @@ impl Factory {
                         fact: None,
                     });
                 }
-                document
-                    .admit(&self.context.config.graph.limits)
-                    .map_err(FacadeError::graph_admission)?;
                 let expanded = document
-                    .expanded(&self.context.config.graph.limits)
-                    .map_err(|reason| FacadeError::DispatchRefused {
-                        reason,
-                        disk: None,
-                        fact: None,
-                    })?;
+                    .admit_expanded(&self.context.config.graph.limits)
+                    .map_err(FacadeError::graph_admission)?;
                 if !admitted && !resume {
+                    if document
+                        .nodes
+                        .iter()
+                        .any(provenant_fabric_runtime::graph::GraphNode::has_host_writer_preflight)
+                    {
+                        return Err(FacadeError::InvalidInput { detail: None });
+                    }
+                    provenant_fabric_runtime::graph::patch::validate_submission_snapshot(
+                        &document,
+                        &self.context.config.graph.limits,
+                        self.context.port_table.worktree_layout.clone(),
+                    )
+                    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
                     // No node has launched yet: a dirty-worktree refusal here
                     // costs no plan-node tokens. WIP and continue modes record
                     // their outcome on the node before any launch.
-                    preflight_writer_worktrees(self, &facts, &mut document)?;
+                    submission_refusals =
+                        preflight_writer_worktrees(self, &facts, &mut document, &expanded)?;
+                }
+                if !resume && document.submission_patch.is_none() {
+                    let submission_key = document
+                        .provenance
+                        .as_ref()
+                        .and_then(|provenance| {
+                            provenance
+                                .operation_id
+                                .as_ref()
+                                .map(|id| id.as_str().to_owned())
+                        })
+                        .unwrap_or_else(|| format!("submit:{}", document.graph_id));
+                    provenant_fabric_runtime::graph::patch::submission(
+                        &mut document,
+                        &submission_key,
+                        &self.context.config.graph.limits,
+                        self.context.port_table.worktree_layout.clone(),
+                    )
+                    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
                 }
                 // A new writer does not exist until the kernel has journalled
                 // its provisioning intent. Check its declared branch here;
@@ -1221,6 +1305,9 @@ impl Factory {
                 prices: None,
                 tick: false,
             };
+            for (node, path, reason) in &submission_refusals {
+                owner.retain_submission_refusal(&document.graph_id, node, path, reason)?;
+            }
             let graph_config = &owner.factory.context.config.graph;
             let mut journal = AnnouncingJournal {
                 journal: &mut journal,
@@ -1241,12 +1328,17 @@ impl Factory {
                     extensions,
                 )
             } else {
-                provenant_fabric_runtime::graph::advance_with_budget(
+                let refusals: Vec<_> = submission_refusals
+                    .iter()
+                    .map(|(node, _, reason)| (node.clone(), reason.clone()))
+                    .collect();
+                provenant_fabric_runtime::graph::advance_with_submission_refusals(
                     document,
                     &mut owner,
                     &mut journal,
                     &graph_config.limits,
                     &graph_config.budget,
+                    &refusals,
                 )
             };
             let run = run.map_err(|error| match error {

@@ -2218,6 +2218,22 @@ pub fn acquire_recovery(
     })
 }
 
+/// Hold writer exclusion for submission-time mutation only when no attempt
+/// reservation remains. The guard must outlive every checkout mutation.
+pub fn acquire_unreserved_writer(
+    directory: &Directory,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+) -> Result<LockGuard> {
+    let lease = lock_writer_exclusion(directory, budget, cancel, clock)?;
+    let listing = list_writer_reservations_in_slot(directory)?;
+    if !listing.reservations.is_empty() || !listing.issues.is_empty() {
+        return Err(CustodyError::Fenced);
+    }
+    Ok(lease)
+}
+
 /// Acquire a reservation for reboot recovery at the expected custody slot.
 pub fn acquire_reboot_recovery(
     directory: Directory,

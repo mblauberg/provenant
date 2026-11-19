@@ -2165,10 +2165,73 @@ fn writer_registry_fixture() -> Result<TestRig> {
         rig.state.join("config.toml"),
         "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\njunior=[{model='codex/gpt-6-luna',effort='low'}]\n",
     )?;
-    let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
-    let seeded = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
-    assert_eq!(code(&seeded), 0, "{seeded:?}");
+    let seeded = provenant_os::fixture::git_command()
+        .current_dir(&rig.project)
+        .args(["commit", "--allow-empty", "-qm", "base"])
+        .output()?;
+    assert!(seeded.status.success(), "{seeded:?}");
     Ok(rig)
+}
+
+// Spec: docs/specs/run.md#writer-pin-and-re-pin
+fn dirty_writer_mode_launches_direct_graph(mode: &str) -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = writer_registry_fixture()?;
+    let _cleanup = rig.process_cleanup();
+    fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.writer_dirty'='{mode}'\n[domains.routing.pools]\njunior=[{{model='codex/gpt-6-luna',effort='low'}}]\n"
+        ),
+    )?;
+    let made = rig.command(&[
+        "worktree",
+        "create",
+        "dirty-lane",
+        "--base",
+        "HEAD",
+        "--json",
+    ])?;
+    assert_eq!(code(&made), 0, "{made:?}");
+    let tree = rig.project.join(".worktrees/dirty-lane");
+    fs::write(tree.join("retained.txt"), "draft")?;
+    let git_head = || -> Result<String> {
+        let result = provenant_os::fixture::git_command()
+            .current_dir(&tree)
+            .args(["rev-parse", "HEAD"])
+            .output()?;
+        assert!(result.status.success());
+        Ok(String::from_utf8(result.stdout)?.trim().to_owned())
+    };
+    let before = git_head()?;
+    let lane = run_graph_provider_with_wait(
+        &rig,
+        &format!("dirty-{}", mode.replace('_', "-")),
+        json!({
+            "id":"writer", "prompt":"fixture writer", "access":"worktree_write", "worktree":tree,
+            "route":{"alias":"junior"}
+        }),
+        "30s",
+    )?;
+    assert!(!lane["started_at"].is_null(), "{lane}");
+    let after = git_head()?;
+    if mode == "wip_commit" {
+        assert_ne!(before, after);
+    } else {
+        assert_eq!(before, after);
+    }
+    assert_eq!(fs::read_to_string(tree.join("retained.txt"))?, "draft");
+    Ok(())
+}
+
+fn continue_in_place_launches_direct_writer_graph() -> Result {
+    dirty_writer_mode_launches_direct_graph("continue_in_place")
+}
+
+fn wip_commit_launches_direct_writer_graph() -> Result {
+    dirty_writer_mode_launches_direct_graph("wip_commit")
 }
 
 /// Admission starts or durably schedules a retry under repository contention.
@@ -6076,6 +6139,14 @@ fn main() -> ExitCode {
             (
                 "declared_stop_writer_retry_uses_the_public_cli",
                 declared_stop_writer_retry_uses_the_public_cli,
+            ),
+            (
+                "continue_in_place_launches_direct_writer_graph",
+                continue_in_place_launches_direct_writer_graph,
+            ),
+            (
+                "wip_commit_launches_direct_writer_graph",
+                wip_commit_launches_direct_writer_graph,
             ),
             ("graph_writer_restarts_fresh", graph_writer_restarts_fresh),
             ("nested_writer_fixture_child", nested_writer_fixture_child),

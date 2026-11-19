@@ -148,7 +148,10 @@ preflights the writer worktree: a dirty tree is refused at submission, naming
 the dirty paths and the setting `lanes.writer_dirty` with the layer that set it.
 That one overridable setting chooses `refuse` (the default), `wip_commit` (a
 local WIP commit whose id is recorded in the graph events before launch), or
-`continue_in_place` (a warning that names the retained paths). Credential and
+`continue_in_place` (a warning that names the retained paths). This preflight
+covers writer leaves in composites and loops before the submission snapshot is
+sealed. WIP mutation holds writer exclusion, refuses unsettled reservations and
+rechecks the head and dirty paths under that exclusion. Credential and
 Git-internal roots are a hard refusal under every value.
 
 On a manual retry, when the worktree head descends from the pinned commit — the

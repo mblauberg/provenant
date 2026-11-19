@@ -41,7 +41,7 @@ fn source_fast_forward_refuses_dirty_diverged_or_leased_tree() -> Result<(), Box
             .ok_or("missing writer")?
             .head
             .ok_or(WorktreeError::InvalidOutput)?;
-        let error = fast_forward(&context, &info.path, target, &cancel())
+        let error = fast_forward(&context, &info.path, target, WriterEdits::Refuse, &cancel())
             .err()
             .ok_or_else(|| format!("{scenario} source writer advanced"))?;
         match scenario {
@@ -72,6 +72,55 @@ fn source_fast_forward_refuses_dirty_diverged_or_leased_tree() -> Result<(), Box
 }
 
 #[test]
+fn continue_in_place_only_accepts_ordinary_edits_at_the_pinned_head() -> Result<(), Box<dyn Error>>
+{
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "retained-writer".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    fs::write(info.path.join("ordinary"), "draft")?;
+    fast_forward(
+        &context,
+        &info.path,
+        info.head,
+        WriterEdits::ContinueInPlace,
+        &cancel(),
+    )?;
+    fs::write(info.path.join(".env.local"), "credential")?;
+    assert!(matches!(
+        fast_forward(
+            &context,
+            &info.path,
+            info.head,
+            WriterEdits::ContinueInPlace,
+            &cancel()
+        ),
+        Err(WorktreeError::Dirty(_))
+    ));
+    fs::remove_file(info.path.join(".env.local"))?;
+    fixture.run(&["commit", "--allow-empty", "-m", "new target"])?;
+    assert!(matches!(
+        fast_forward(
+            &context,
+            &info.path,
+            fixture.head()?,
+            WriterEdits::ContinueInPlace,
+            &cancel()
+        ),
+        Err(WorktreeError::Dirty(_))
+    ));
+    assert_eq!(fs::read_to_string(info.path.join("ordinary"))?, "draft");
+    Ok(())
+}
+
+#[test]
 fn source_fast_forward_preserves_ignored_files_that_become_tracked() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     fs::write(fixture.root.join(".gitignore"), "cache\n")?;
@@ -93,7 +142,7 @@ fn source_fast_forward_preserves_ignored_files_that_become_tracked() -> Result<(
     fixture.run(&["commit", "-m", "track cache path"])?;
     let target = fixture.head()?;
     assert!(matches!(
-        fast_forward(&context, &info.path, target, &cancel()),
+        fast_forward(&context, &info.path, target, WriterEdits::Refuse, &cancel()),
         Err(WorktreeError::SourceAdvanceFailed { target: requested }) if requested == target
     ));
     let after = context
@@ -1128,7 +1177,13 @@ fn observed_holder_is_advisory_for_launch(kind: ProcessEvidenceKind) -> Result<(
         lock_worktree_for_mutation(&context, entry, &cancel()),
         Err(WorktreeError::LiveWriter | WorktreeError::LiveProcess(_))
     ));
-    fast_forward(&context, &info.path, info.head, &cancel())?;
+    fast_forward(
+        &context,
+        &info.path,
+        info.head,
+        WriterEdits::Refuse,
+        &cancel(),
+    )?;
     transient.occupied.store(false, Ordering::SeqCst);
     let held = lock_worktree_for_launch(&context, entry, &cancel())?;
     drop(held);
@@ -1324,7 +1379,13 @@ fn writer_git_preparation_leaves_the_shared_registry_free() -> Result<(), Box<dy
         .claiming
         .store(false, std::sync::atomic::Ordering::SeqCst);
     fixture.run(&["commit", "--allow-empty", "-m", "source"])?;
-    fast_forward(&context, &info.path, fixture.head()?, &cancel())?;
+    fast_forward(
+        &context,
+        &info.path,
+        fixture.head()?,
+        WriterEdits::Refuse,
+        &cancel(),
+    )?;
     assert!(probe.calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
     Ok(())
 }

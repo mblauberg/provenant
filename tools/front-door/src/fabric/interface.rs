@@ -2124,14 +2124,18 @@ impl Factory {
             }
         }
         document.set_replay_digest(&digest);
-        let submission_key = format!("submit:{}", document.graph_id);
-        patch::submission(
-            &mut document,
-            &submission_key,
-            &self.context.config.graph.limits,
-            self.context.port_table.worktree_layout.clone(),
-        )
-        .map_err(|error| submission_patch_error(error, input))?;
+        // Explain is read-only and still shows the compiled submission. For a
+        // launch, the host performs writer preflight before sealing the patch.
+        if input["explain"] == true {
+            let submission_key = format!("submit:{}", document.graph_id);
+            patch::submission(
+                &mut document,
+                &submission_key,
+                &self.context.config.graph.limits,
+                self.context.port_table.worktree_layout.clone(),
+            )
+            .map_err(|error| submission_patch_error(error, input))?;
+        }
         // Graph-wide metadata is retained losslessly. Content inspection is advisory.
         let bound_document =
             serde_json::to_string(&document).map_err(|_| FacadeError::StateCorrupt)?;

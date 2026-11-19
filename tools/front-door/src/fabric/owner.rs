@@ -215,6 +215,7 @@ impl BoundGraphOwner<'_> {
         directory: &Path,
         path: &Path,
         head: provenant_core::GitOid,
+        dirty_preflight: bool,
     ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
         let budget = self.writer_launch_budget.unwrap_or(self.budget);
         if budget.remaining(self.factory.clock.mono_now()).as_micros() == 0 {
@@ -237,7 +238,18 @@ impl BoundGraphOwner<'_> {
                     lock_budget: budget,
                     ..*context
                 };
-                provenant_confinement::worktrees::fast_forward(&context, path, head, self.cancel)
+                let edits = if dirty_preflight {
+                    provenant_confinement::worktrees::WriterEdits::ContinueInPlace
+                } else {
+                    provenant_confinement::worktrees::WriterEdits::Refuse
+                };
+                provenant_confinement::worktrees::fast_forward(
+                    &context,
+                    path,
+                    head,
+                    edits,
+                    self.cancel,
+                )
             },
         )
     }
@@ -253,6 +265,64 @@ impl BoundGraphOwner<'_> {
             chair: None,
         }
         .store_with_facts(self.cancel, &self.repo_facts)
+    }
+
+    /// Retain a submission-time dirty writer refusal under the graph attempt's
+    /// stable identity, before the scheduler can start any node.
+    pub(crate) fn retain_submission_refusal(
+        &self,
+        graph_id: &str,
+        node_id: &str,
+        worktree: &str,
+        reason: &str,
+    ) -> Result<(), FacadeError> {
+        let key = provenant_fabric_runtime::graph::AttemptKey {
+            extra: Default::default(),
+            retry_generation: None,
+            previous_attempt_ref: None,
+            graph_id: graph_id.to_owned(),
+            node_id: node_id.to_owned(),
+            attempt: 1,
+            route_index: 0,
+        };
+        let digest =
+            provenant_records::CanonicalV1::record_digest("graph-submission-refusal", 1, &key)
+                .map_err(|_| FacadeError::StateCorrupt)?;
+        let scope = GraphRefusalScope {
+            operation: graph_operation("graph-attempt-operation", &key)?,
+            actor: self.factory.context.identity.inbox.actor,
+            digest,
+            worktree: Path::new(worktree)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned),
+            chair: (!provenant_cli::fabric::in_lane()
+                && provenant_cli::workflow::session_actor(&self.factory.context, None).ok()
+                    == Some(self.factory.context.identity.inbox.actor))
+            .then(|| provenant_records::custody::Chair {
+                process: provenant_cli::fabric::chair_process(),
+                extra: Default::default(),
+                host: self.factory.context.identity.inbox.host,
+                actor: self.factory.context.identity.inbox.actor,
+                session: provenant_workflow::session::chair_session_for(
+                    &self.factory.context.roots.state,
+                    self.factory.context.identity.project,
+                    self.factory.context.identity.inbox.actor,
+                )
+                .map(|session| session.as_str().to_owned()),
+            }),
+            work: key.work_key(self.factory.context.identity.project).ok(),
+        };
+        let error = FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: reason.to_owned(),
+        };
+        let diagnostic = provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
+            .category("refused")
+            .detail(reason)
+            .next("commit or preserve the worktree changes before retrying");
+        self.retain_graph_refusal(&scope, &error, diagnostic)
     }
 
     fn post_graph_refusal(
@@ -3005,27 +3075,32 @@ impl BoundGraphOwner<'_> {
                 let head = commit
                     .parse()
                     .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-                self.fast_forward_writer(writer_directory, Path::new(path), head)
-                    .map_err(|error| {
-                        let diagnostic = matches!(
-                            error,
-                            provenant_confinement::worktrees::WorktreeError::Dirty(_)
-                        )
-                        .then(|| {
-                            provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
-                                .category("refused")
-                                .detail("the writer worktree has uncommitted edits")
-                                .next("commit or preserve the worktree changes before retrying")
-                        });
-                        let error = graph_writer_initialisation_error(commit, error);
-                        match diagnostic {
-                            Some(diagnostic) => self
-                                .retain_graph_refusal(refusal, &error, diagnostic)
-                                .err()
-                                .unwrap_or(error),
-                            None => error,
-                        }
-                    })?;
+                self.fast_forward_writer(
+                    writer_directory,
+                    Path::new(path),
+                    head,
+                    node.writer_dirty_preflight,
+                )
+                .map_err(|error| {
+                    let diagnostic = matches!(
+                        error,
+                        provenant_confinement::worktrees::WorktreeError::Dirty(_)
+                    )
+                    .then(|| {
+                        provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
+                            .category("refused")
+                            .detail("the writer worktree has uncommitted edits")
+                            .next("commit or preserve the worktree changes before retrying")
+                    });
+                    let error = graph_writer_initialisation_error(commit, error);
+                    match diagnostic {
+                        Some(diagnostic) => self
+                            .retain_graph_refusal(refusal, &error, diagnostic)
+                            .err()
+                            .unwrap_or(error),
+                        None => error,
+                    }
+                })?;
             }
             // Delivery is a writer obligation independent of the receipt preset.
             let delivery = if let Some(mode) = replay.delivery {
@@ -4372,6 +4447,7 @@ mod journal_error_tests {
             &rig.project,
             &rig.project.join(".worktrees/later"),
             source.trim().parse()?,
+            false,
         )?;
         assert_eq!(
             owner.writer_launch_budget.ok_or("budget")?.deadline(),
@@ -4441,6 +4517,7 @@ mod journal_error_tests {
             attempt: 1,
         };
         let node = |prompt| graph::NodeInput {
+            writer_dirty_preflight: false,
             review_launch: false,
             require_skill_location: false,
             settlement_retries: Some(1),

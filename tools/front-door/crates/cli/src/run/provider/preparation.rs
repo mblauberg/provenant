@@ -762,7 +762,7 @@ pub(super) enum PrepareError {
     WriterContinuation(String),
     /// A pin mismatch has its own honest cause, naming both commits; it is not
     /// a failed launch handoff.
-    #[error("writer worktree head {head} does not match pinned commit {pinned}")]
+    #[error("writer worktree head {head} does not match pinned commit {pinned}{}", dirty_predecessor_suffix(.uncommitted))]
     WriterPinMismatch {
         pinned: provenant_core::GitOid,
         head: provenant_core::GitOid,
@@ -1154,10 +1154,17 @@ impl PrepareError {
                 );
                 refusal
             }
-            Self::WriterPinMismatch { pinned, head, .. } => {
+            Self::WriterPinMismatch {
+                pinned,
+                head,
+                uncommitted,
+            } => {
                 let mut refusal = run::PrepareRefusal::boxed(
                     provenant_records::run::TerminalCause::WriterPinMismatch { pinned, head },
-                    format!("writer worktree head {head} differs from pinned commit {pinned}"),
+                    format!(
+                        "writer worktree head {head} differs from pinned commit {pinned}{}",
+                        dirty_predecessor_suffix(&uncommitted)
+                    ),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
                 refusal.policy_code = Some("CONFINEMENT_WRITER_SOURCE_CONTEXT_AUTHORITY".into());
@@ -1197,6 +1204,14 @@ impl PrepareError {
                 other.to_string(),
             ),
         }
+    }
+}
+
+fn dirty_predecessor_suffix(paths: &[String]) -> String {
+    if paths.is_empty() {
+        String::new()
+    } else {
+        format!("; uncommitted predecessor edits: {}", paths.join(", "))
     }
 }
 

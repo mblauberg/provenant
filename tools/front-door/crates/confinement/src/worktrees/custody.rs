@@ -416,7 +416,7 @@ fn dirty_paths_summary_bytes(paths: &[&[u8]]) -> DirtyPathsSummary {
 pub(super) enum WorktreeCleanliness {
     Clean,
     Ignored,
-    Dirty(String),
+    Dirty(String, bool),
     GitOperationInProgress,
     Unknown,
 }
@@ -450,9 +450,15 @@ pub(super) fn worktree_cleanliness_at(
     if dirty_records.is_empty() {
         Ok(WorktreeCleanliness::Ignored)
     } else {
-        Ok(WorktreeCleanliness::Dirty(dirty_paths_summary(
-            &dirty_records,
-        )))
+        let protected = dirty_records.iter().any(|record| {
+            std::iter::once(record.path.as_slice())
+                .chain(record.original_path.as_deref())
+                .any(|path| writer_edit_is_protected(&String::from_utf8_lossy(path)))
+        });
+        Ok(WorktreeCleanliness::Dirty(
+            dirty_paths_summary(&dirty_records),
+            protected,
+        ))
     }
 }
 
@@ -469,7 +475,7 @@ pub fn require_clean_worktree(
     match worktree_cleanliness_at(context, worktree.repo(), cancel)? {
         WorktreeCleanliness::Clean => Ok(()),
         WorktreeCleanliness::Ignored => Err(WorktreeError::IgnoredPaths(String::new())),
-        WorktreeCleanliness::Dirty(paths) => Err(WorktreeError::Dirty(paths)),
+        WorktreeCleanliness::Dirty(paths, _) => Err(WorktreeError::Dirty(paths)),
         WorktreeCleanliness::GitOperationInProgress => Err(WorktreeError::GitOperationInProgress),
         WorktreeCleanliness::Unknown => Err(WorktreeError::UnknownOccupancy {
             path: worktree.path().to_path_buf(),
@@ -486,7 +492,7 @@ pub(super) fn worktree_dirty_at(
     Ok(match worktree_cleanliness_at(context, repo, cancel)? {
         WorktreeCleanliness::Clean => WorktreeCondition::Clean,
         WorktreeCleanliness::Ignored => WorktreeCondition::Ignored,
-        WorktreeCleanliness::Dirty(_) => WorktreeCondition::Dirty,
+        WorktreeCleanliness::Dirty(..) => WorktreeCondition::Dirty,
         WorktreeCleanliness::GitOperationInProgress => WorktreeCondition::GitOperationInProgress,
         WorktreeCleanliness::Unknown => WorktreeCondition::Unknown,
     })
@@ -870,6 +876,11 @@ pub fn name_writer_lease(
     let Ok(slot) = project_state.open_verified_directory(&state_dir_name(path)) else {
         return error;
     };
+    // An unresolved import is distinct from a held lease and must retain its
+    // recovery guidance even when its reservation identifies one attempt.
+    if retained_import(&slot).is_err() {
+        return error;
+    }
     let Ok(listing) = provenant_supervisor::custody::list_writer_reservations_in_slot(&slot) else {
         return error;
     };
