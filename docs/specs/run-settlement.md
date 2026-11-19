@@ -48,7 +48,9 @@ worker and request paths (queued withdrawal, terminal replay and publication,
 loss), tries the lock once: when it is busy it leaves the cleanup effect
 pending without counting a failure and retains the attempt, and the
 settlement worker retries the cleanup of every terminal writer, launched or
-not, whose cleanup receipt is not done; retention keeps its scratch until then. Probes of a live attempt also take the lock once.
+not, whose cleanup receipt is not done; retention keeps its scratch until then.
+A refused Git import ends automatic cleanup instead: its pins and scratch are
+recovery evidence, never cleanup debt. Probes of a live attempt also take the lock once.
 - Why: another settler or a releasing guardian holding the lock is progress,
   not failure; counting it blocked settlement and left steered nodes running
   with no successor (#3572). A request must not stall on another holder, and a
@@ -207,9 +209,11 @@ A missing required writer handoff seals `handoff_missing` and goes to the chair;
 `Recovery::after_guardian_loss` offers a separate same-boot recovery capability.
 It requires the original guardian lock and attempt custody lock to be free,
 holds both alongside the original writer lease, and takes a fresh complete
-process census under those locks. A spawned tree the guardian recorded
-incompletely (census incomplete or descendants omitted) is never proven gone,
-because an unrecorded escapee could survive outside the worktree. Recorded
+process census under those locks. A tree whose recorded descendants omitted
+identities is never proven gone, because no census can check their sessions or
+groups. An incomplete guardian census is no such gap: a guardian keeps that
+flag until its first full census, so a guardian lost mid-run has it, and the
+fresh census and the checks below stand in for it. Recorded
 roots, descendants, identities an unresolved exit named, and their sessions or
 groups must have no surviving member, and no live process may carry the
 attempt's sandbox mark. The trusted host must also
@@ -240,7 +244,7 @@ Abandonment of custody that is not observed absent, such as a dead guardian
 that left its cleanup unresolved, first tries the same guardian-loss proof
 from a fresh census. A proof makes custody quiescent and abandonment proceeds;
 otherwise it refuses and names the blocker, including any live or
-unidentifiable PID or an incompletely recorded tree. The census-free absence
+unidentifiable PID or omitted descendants. The census-free absence
 classification is unchanged: an unresolved cleanup without that proof stays
 unknown, because an escaped process is excluded only by the proof.
 

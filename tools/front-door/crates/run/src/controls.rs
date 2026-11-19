@@ -6141,11 +6141,14 @@ impl RunStore {
         }
         // Any terminal writer whose cleanup is not done: a refusal defers it,
         // and a path that found the writer lock busy left it, launched or not.
+        // A refused import ends automatic cleanup instead: its Git pins and
+        // scratch are recovery evidence, never cleanup debt.
         let pending_writer = matches!(record.state, AttemptState::Terminal { .. })
             && self.request(record.attempt_id, call)?.task.writer.is_some()
             && !record.settlement_receipts.as_ref().is_some_and(|receipts| {
                 matches!(receipts.cleanup_custody_release, EffectDisposition::Done)
-            });
+            })
+            && crate::holder::object_import_refused(&directory, scope)?.is_none();
         // An unreadable reservation cannot establish absence of custody.
         if let Some(issue) = listing.issues.first() {
             let temporary = self.attempt_dir(id, false).and_then(|attempt| {
@@ -6176,12 +6179,6 @@ impl RunStore {
         // until the independently retried effect actually succeeds.
         if pending_writer {
             let attempt = self.attempt_dir(id, false)?;
-            if crate::holder::object_import_refused(&attempt, scope)?.is_some() {
-                return Ok(Some(Reconciled::TemporaryRetained {
-                    path,
-                    reason: "Git object import was refused; retain its evidence".into(),
-                }));
-            }
             if !self.import_release_permitted(record, call)? {
                 return Ok(Some(Reconciled::TemporaryRetained {
                     path,
@@ -6264,8 +6261,8 @@ impl RunStore {
                 }));
             }
         };
-        // Released refused-import scratch is recovery evidence, even for a
-        // launched writer settled after reboot. It is no longer cleanup debt.
+        // Released refused-import scratch is recovery evidence, launched or
+        // not, even when settled after reboot. It is never cleanup debt.
         if crate::holder::object_import_refused(&attempt, scope)?.is_some() {
             self.set_temporary_retained(id, false, call)?;
             return Ok(None);

@@ -1508,9 +1508,7 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
         "incomplete_census",
         "live_provider",
         "live_descendant",
-        "unresolved_cleanup",
         "omitted_descendants",
-        "recorded_census_incomplete",
         "sandboxed_escapee",
         "unresolved_exit_identity",
         "worktree_not_free",
@@ -1690,27 +1688,10 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                     .require_durable()?;
                 world.census_facts.push(process_fact(escapee));
             }
-            // The guardian recorded the spawned tree incompletely: an
-            // unrecorded escapee cannot be ruled out by any census.
-            "omitted_descendants" | "recorded_census_incomplete" => {
-                recovery.reservation.unresolved_cleanup = true;
-                if case == "omitted_descendants" {
-                    recovery.reservation.omitted_descendants = 1;
-                } else {
-                    recovery.reservation.census_incomplete = true;
-                }
-                write_record(
-                    &evidence,
-                    "reservation.json",
-                    &recovery.reservation,
-                    PublishMode::Replace,
-                )?
-                .require_durable()?;
-            }
-            // The guardian died before resolving its cleanup; the census and
-            // free locks still prove every recorded process gone.
-            "unresolved_cleanup" => {
-                recovery.reservation.unresolved_cleanup = true;
+            // The guardian's descendant record omitted identities whose
+            // sessions and groups no census can check.
+            "omitted_descendants" => {
+                recovery.reservation.omitted_descendants = 1;
                 write_record(
                     &evidence,
                     "reservation.json",
@@ -1726,6 +1707,12 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
         }
         if case != "custody_held" {
             drop(custody.take());
+        }
+        if case == "free" {
+            // A guardian that died mid-run: its cleanup is unresolved and it
+            // never completed a full census. The fresh census still proves loss.
+            assert!(recovery.reservation.unresolved_cleanup);
+            assert!(recovery.reservation.census_incomplete);
         }
         let probe = Sandbox(vec![5151]);
         let proof = recovery.after_guardian_loss_with(&attempt, &world, &probe, || {
@@ -1745,7 +1732,6 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                     | "drop_without_commit"
                     | "replaced_after_proof"
                     | "retain_through_settlement"
-                    | "unresolved_cleanup"
             ),
             "{case}"
         );
@@ -1772,10 +1758,10 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                     Some(&LossUnproven::Live { pid: 6161 })
                 );
             }
-            "omitted_descendants" | "recorded_census_incomplete" => {
-                let refusal = proof.as_ref().err().ok_or("incomplete tree")?;
-                assert_eq!(refusal, &LossUnproven::TreeIncomplete, "{case}");
-                assert!(refusal.to_string().contains("incomplete"), "{refusal}");
+            "omitted_descendants" => {
+                let refusal = proof.as_ref().err().ok_or("omitted descendants")?;
+                assert_eq!(refusal, &LossUnproven::DescendantsOmitted { omitted: 1 });
+                assert!(refusal.to_string().contains("omitted 1"), "{refusal}");
             }
             "guardian_held" => {
                 assert_eq!(proof.as_ref().err(), Some(&LossUnproven::GuardianHeld));
@@ -1790,13 +1776,6 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
         }
         if let Ok(proof) = proof {
             assert_eq!(proof.scope(), scope());
-            if case == "unresolved_cleanup" {
-                // A proven loss settles despite the durable unresolved fence.
-                let mut recovery = proof.into_recovery()?;
-                assert_eq!(recovery.observe_with(&world), RecoveryState::Absent);
-                recovery.prepare_settlement()?;
-                continue;
-            }
             for (directory, name) in [(&evidence, "guardian.lock"), (&attempt, "custody.lock")] {
                 assert!(
                     matches!(

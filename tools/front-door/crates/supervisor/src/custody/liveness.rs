@@ -139,9 +139,9 @@ pub enum LossUnproven {
     #[error("the process census is incomplete")]
     CensusIncomplete,
     #[error(
-        "the guardian's recorded process tree is incomplete; an unrecorded process cannot be ruled out"
+        "the guardian omitted {omitted} descendants from its record; an unrecorded process cannot be ruled out"
     )]
-    TreeIncomplete,
+    DescendantsOmitted { omitted: u64 },
     #[error("process {pid} of the attempt is still live")]
     Live { pid: i64 },
     #[error("process {pid} of the attempt cannot be identified")]
@@ -219,12 +219,14 @@ impl Recovery {
         worktree_is_free: impl FnOnce() -> Result<bool>,
     ) -> Result<std::result::Result<GuardianLossRecovery, LossUnproven>> {
         validate_anchor(&self.directory, &self.reservation)?;
-        // Handing off records no provider yet; only a spawned tree can escape.
-        if self.reservation.omitted_descendants > 0
-            || (self.reservation.census_incomplete
-                && self.reservation.launch_state == LaunchState::Spawned)
-        {
-            return Ok(Err(LossUnproven::TreeIncomplete));
+        // Omitted descendants have sessions and groups no census can check.
+        // An incomplete guardian census is not such a gap: it is the normal
+        // state until a full census, and the fresh census below, the session
+        // and group match and the sandbox scan stand in for it.
+        if self.reservation.omitted_descendants > 0 {
+            return Ok(Err(LossUnproven::DescendantsOmitted {
+                omitted: self.reservation.omitted_descendants,
+            }));
         }
         let record: GuardianLock = match read_record(&self.directory, RECORD, RECORD_LIMIT) {
             Ok(record) => record,

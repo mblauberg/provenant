@@ -17,8 +17,9 @@ and recording process (`recorded 45s ago by process <pid>: ...`), never as a
 current failure. `provenant reconcile --abandon` now releases a node whose
 guardian died with its cleanup unresolved once a fresh census proves every
 recorded process gone and no process carries the lane's sandbox mark;
-otherwise it refuses and names the live PID or the incomplete record. Deferred
-Git cleanup is now retried for launched writers too.
+otherwise it refuses and names the live PID or the omitted descendants.
+Deferred Git cleanup is now retried for launched writers too; a refused import
+keeps its Git evidence instead.
 
 Nodes blocked by lock contention before this release keep their blocked state.
 Run `provenant reconcile <lane>`, or a bare `provenant reconcile` to sweep
