@@ -591,6 +591,8 @@ pub(crate) mod peer_tests {
         assert!(std::panic::catch_unwind(|| assert_one_test_ran("case", b"running 0 tests\n")).is_err());
     }
 
+    const HOST_TEST_CEILING: std::time::Duration = std::time::Duration::from_secs(120);
+
     pub(crate) fn host_test(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
         if !provenant_cli::fabric::in_lane() {
             return Ok(false);
@@ -618,13 +620,10 @@ pub(crate) mod peer_tests {
             environment.push(("HOME".into(), fixture_home.path().as_os_str().to_owned()));
         }
         let cwd = std::env::current_dir()?;
-        // The graph-controls fixture now provisions and replays four variants.
-        let timeout = if name.ends_with("graph_run_controls_reach_the_sealed_attempt") {
-            120
-        } else {
-            30
-        };
-        let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(timeout));
+        // A hang ceiling, not a latency budget: the fixtures provision real
+        // repositories, so their duration scales with host load. A per-test
+        // table of longer ceilings only moved the flake to the next test.
+        let mut options = ExecOptions::new(&argv, &cwd, HOST_TEST_CEILING);
         options.env = Some(&environment);
         let output = SystemExecutor::new(1)?.execute(options)?;
         // Keep native-backend skip evidence visible through host isolation.
