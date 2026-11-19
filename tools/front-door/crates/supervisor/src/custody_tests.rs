@@ -185,6 +185,7 @@ fn current_attempt_reservation_preserves_uncommitted_work() -> TestResult {
         descendants: vec![],
         census_incomplete: true,
         omitted_descendants: 0,
+        sandboxed: false,
         extra: Default::default(),
     };
     let reservation_path = evidence_path.join("reservation.json");
@@ -1715,6 +1716,17 @@ fn spawned_reboot_recovery(
     writer.into_recovery()
 }
 
+/// Marks the listed PIDs as inside the attempt's sandbox; never signals.
+struct Sandbox(Vec<i64>);
+impl orphans::OrphanProbe for Sandbox {
+    fn in_attempt_sandbox(&self, pid: i64, asked: &Scope) -> bool {
+        *asked == scope() && self.0.contains(&pid)
+    }
+    fn signal(&self, _: &ProcessIdentity, _: bool) -> bool {
+        false
+    }
+}
+
 #[test]
 fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestResult {
     // Spec: docs/specs/run-settlement.md#guardian-loss-proof
@@ -1738,6 +1750,12 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
         "wrong_scope",
         "incomplete_census",
         "live_provider",
+        "live_descendant",
+        "omitted_descendants",
+        "recorded_census_incomplete",
+        "recorded_census_incomplete_sandboxed",
+        "sandboxed_escapee",
+        "unresolved_exit_identity",
         "worktree_not_free",
         "replaced_during_census",
         "replaced_after_proof",
@@ -1749,6 +1767,17 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
         let attempt = Directory::open_anchor(attempt_root.path())?;
         let mut recovery = spawned_reboot_recovery(root.path(), &attempt, BOOT, 10, 20)?;
         let evidence = recovery.directory.try_clone()?;
+        // A guardian lost mid-run has completed a census within seconds, which
+        // clears its incomplete flag: that is the ordinary lost-guardian state.
+        // The cases below that need an incomplete record set it themselves.
+        recovery.reservation.census_incomplete = false;
+        write_record(
+            &evidence,
+            "reservation.json",
+            &recovery.reservation,
+            PublishMode::Replace,
+        )?
+        .require_durable()?;
         let mut custody = Some(attempt.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive)?);
         liveness::prepare_guardian_lifetime(
             &evidence,
@@ -1910,7 +1939,79 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                 )?
                 .require_durable()?;
             }
-            "live_provider" => world.census_facts.push(process_fact(provider)),
+            // The census observes the provider live, so it is not also absent.
+            "live_provider" => {
+                world.observations.insert(
+                    provider.pid,
+                    ProcessObservation::Present(process_fact(provider.clone())),
+                );
+            }
+            // An unrecorded descendant still in the provider's session.
+            "live_descendant" => world.census_facts.push(process_fact(ProcessIdentity {
+                boot: BOOT.into(),
+                pid: 4242,
+                native_start: 9,
+                group_id: 4242,
+                session_id: provider.session_id,
+            })),
+            // A setsid escapee the guardian never recorded, outside the
+            // worktree, still carries the attempt's sandbox mark.
+            "sandboxed_escapee" => world.census_facts.push(process_fact(ProcessIdentity {
+                boot: BOOT.into(),
+                pid: 5151,
+                native_start: 9,
+                group_id: 5151,
+                session_id: 5151,
+            })),
+            // A published exit named a descendant it could not end.
+            "unresolved_exit_identity" => {
+                let escapee = ProcessIdentity {
+                    boot: BOOT.into(),
+                    pid: 6161,
+                    native_start: 9,
+                    group_id: 6161,
+                    session_id: 6161,
+                };
+                attempt
+                    .atomic_write(
+                        OsStr::new("process-exit.json"),
+                        ".exit-",
+                        &serde_json::to_vec(&serde_json::json!({
+                            "scope": scope(),
+                            "unresolved_cleanup": true,
+                            "unresolved_identities": [escapee],
+                        }))?,
+                        PublishMode::Replace,
+                    )?
+                    .require_durable()?;
+                world.census_facts.push(process_fact(escapee));
+            }
+            // The guardian's descendant record omitted identities whose
+            // sessions and groups no census can check.
+            // The guardian never completed a census of its tree. Whether the
+            // fresh scan may stand in depends on the sandbox mark having been
+            // in effect for the attempt.
+            "recorded_census_incomplete" | "recorded_census_incomplete_sandboxed" => {
+                recovery.reservation.census_incomplete = true;
+                recovery.reservation.sandboxed = case == "recorded_census_incomplete_sandboxed";
+                write_record(
+                    &evidence,
+                    "reservation.json",
+                    &recovery.reservation,
+                    PublishMode::Replace,
+                )?
+                .require_durable()?;
+            }
+            "omitted_descendants" => {
+                recovery.reservation.omitted_descendants = 1;
+                write_record(
+                    &evidence,
+                    "reservation.json",
+                    &recovery.reservation,
+                    PublishMode::Replace,
+                )?
+                .require_durable()?;
+            }
             _ => {}
         }
         if case != "guardian_held" {
@@ -1919,17 +2020,24 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
         if case != "custody_held" {
             drop(custody.take());
         }
-        let proof = recovery.after_guardian_loss(&attempt, &world, || {
+        if case == "free" {
+            // The real lost-guardian state: a complete recorded census.
+            assert!(!recovery.reservation.census_incomplete);
+            assert!(!recovery.reservation.sandboxed);
+        }
+        let probe = Sandbox(vec![5151]);
+        let proof = recovery.after_guardian_loss_with(&attempt, &world, &probe, || {
             if case == "replaced_during_census" {
                 replace_lock(&evidence, "guardian.lock")?;
             }
             Ok(case != "worktree_not_free")
         })?;
         assert_eq!(
-            proof.is_some(),
+            proof.is_ok(),
             matches!(
                 case,
                 "free"
+                    | "recorded_census_incomplete_sandboxed"
                     | "before_reservation_publication"
                     | "before_identity_publication"
                     | "before_guardian_spawn"
@@ -1939,7 +2047,51 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
             ),
             "{case}"
         );
-        if let Some(proof) = proof {
+        // An unproven loss names its blocker, including the live PID.
+        match case {
+            "live_provider" => assert_eq!(
+                proof.as_ref().err(),
+                Some(&LossUnproven::Live { pid: provider.pid })
+            ),
+            "live_descendant" => {
+                let refusal = proof.as_ref().err().ok_or("live descendant")?;
+                assert_eq!(refusal, &LossUnproven::Live { pid: 4242 });
+                assert!(refusal.to_string().contains("4242"), "{refusal}");
+            }
+            "sandboxed_escapee" => {
+                assert_eq!(
+                    proof.as_ref().err(),
+                    Some(&LossUnproven::Live { pid: 5151 })
+                );
+            }
+            "unresolved_exit_identity" => {
+                assert_eq!(
+                    proof.as_ref().err(),
+                    Some(&LossUnproven::Live { pid: 6161 })
+                );
+            }
+            "omitted_descendants" => {
+                let refusal = proof.as_ref().err().ok_or("omitted descendants")?;
+                assert_eq!(refusal, &LossUnproven::DescendantsOmitted { omitted: 1 });
+                assert!(refusal.to_string().contains("omitted 1"), "{refusal}");
+            }
+            "recorded_census_incomplete" => {
+                let refusal = proof.as_ref().err().ok_or("incomplete guardian census")?;
+                assert_eq!(refusal, &LossUnproven::GuardianCensusIncomplete);
+                assert!(refusal.to_string().contains("sandbox mark"), "{refusal}");
+            }
+            "guardian_held" => {
+                assert_eq!(proof.as_ref().err(), Some(&LossUnproven::GuardianHeld));
+            }
+            "incomplete_census" => {
+                assert_eq!(proof.as_ref().err(), Some(&LossUnproven::CensusIncomplete));
+            }
+            "worktree_not_free" => {
+                assert_eq!(proof.as_ref().err(), Some(&LossUnproven::WorktreeOccupied))
+            }
+            _ => {}
+        }
+        if let Ok(proof) = proof {
             assert_eq!(proof.scope(), scope());
             for (directory, name) in [(&evidence, "guardian.lock"), (&attempt, "custody.lock")] {
                 assert!(

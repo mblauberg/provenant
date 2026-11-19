@@ -30,6 +30,48 @@ before a driver is claimed.
 - Why: a retained writer must not contend with itself or spend CPU retrying an
   unchanged failure indefinitely.
 
+The detached settlement worker waits for an exited attempt's writer lock,
+when it takes recovery custody, within the store's lock budget (the SQLite busy
+timeout, 30 s by default) and wakes as soon as the lock is released. Contention that outlives the wait is `WriterExclusionBusy`,
+reported as `waiting for writer lock <path>, held by <holder>`, where the
+holder names each attempt reserved in the slot with its guardian's liveness
+and, once that guardian has exited, its settlement owner's. The holder list
+labels the waiting attempt's own reservation. Contention sets a retry
+deadline but never spends the failure budget, never seals cleanup or import
+as failed and never exhausts a resumed worker. A holder may still release the
+lock while its guardian is live or unobservable, or while another attempt's
+settlement owner (its driver lock or a live recorded owner) is live or
+unreadable; a holder no reservation identifies is treated the same way. Then
+the wait continues and ages into the stalled reason. Once the wait has lasted
+three minutes with no holder that may release it, nothing will: settlement is
+recorded blocked, and the reason names `provenant
+reconcile <lane>` and `provenant reconcile --abandon <lane> --reason <text>`.
+An explicit reconcile clears the block and restarts the wait.
+
+Only that acquisition waits. Every other path, including cleanup inside the
+worker and request paths (queued withdrawal, terminal replay and publication,
+loss), tries the lock once: when it is busy it leaves the cleanup effect
+pending without counting a failure and retains the attempt, and the
+settlement worker retries the cleanup of every terminal writer, launched or
+not, whose cleanup receipt is not done; retention keeps its scratch until then.
+A refused Git import ends automatic cleanup instead: its pins and scratch are
+recovery evidence, never cleanup debt. Probes of a live attempt also take the lock once.
+- Why: another settler or a releasing guardian holding the lock is progress,
+  not failure; counting it blocked settlement and left steered nodes running
+  with no successor (#3572). A request must not stall on another holder, and a
+  lock no live process will release must reach an operator rather than wait
+  forever. Recovery in the same process may hold the lock through another file
+  description, so a wait anywhere but the worker's own acquisition stalls for
+  the whole budget.
+
+Every recorded blocking reason is stamped with the wall time it was recorded
+and the process ID of the worker or reconcile that recorded it. Reconcile and
+settling reports show it as past evidence, `recorded <N>s ago by process
+<pid>: <reason>` (`recorded earlier` for an unstamped legacy reason), never as
+an observation of the current request.
+- Why: a reason recorded by an earlier worker read as a current failure and
+  misled recovery.
+
 Publication accepts a lane tip that descends from the launch base, the origin
 default branch, the ref the lane launched against, or any remote-tracking
 branch. It records the ancestor in the branch reflog and `publication-ancestor.json`
@@ -172,8 +214,18 @@ A missing required writer handoff seals `handoff_missing` and goes to the chair;
 `Recovery::after_guardian_loss` offers a separate same-boot recovery capability.
 It requires the original guardian lock and attempt custody lock to be free,
 holds both alongside the original writer lease, and takes a fresh complete
-process census under those locks. Recorded roots, descendants and their
-sessions or groups must have no surviving member. The trusted host must also
+process census under those locks. A tree whose recorded descendants omitted
+identities is never proven gone, because no census can check their sessions or
+groups. Nor is a spawned tree whose guardian never completed a census of it,
+unless the attempt's sandbox mark was in effect: a daemon that double-forks and
+calls setsid after the guardian's last complete census is recorded nowhere and
+matches no pid, session or group, and only the inherited mark finds it. The
+guardian clears the incomplete flag at its first full census, which a running
+guardian takes at least every 5 s, so a guardian lost mid-run normally has a
+complete record; an unsandboxed lane lost before that is refused, and
+`reconcile --abandon` is the explicit escape. Recorded roots, descendants,
+identities an unresolved exit named, and their sessions or groups must have no
+surviving member, and no live process may carry the attempt's sandbox mark. The trusted host must also
 prove worktree non-occupancy under exclusion; unknown or occupied is not free.
 For a read-only attempt there is no worktree to occupy.
 
@@ -197,6 +249,13 @@ The capability itself neither commits a Run outcome nor changes read-only
 presence classification. The Run settlement driver owns its consumption and
 the separate EOF outcome and quiescent import/release transactions. Manual
 `reconcile --abandon` remains the explicit escape when proof is unavailable.
+Abandonment of custody that is not observed absent, such as a dead guardian
+that left its cleanup unresolved, first tries the same guardian-loss proof
+from a fresh census. A proof makes custody quiescent and abandonment proceeds;
+otherwise it refuses and names the blocker, including any live or
+unidentifiable PID or omitted descendants. The census-free absence
+classification is unchanged: an unresolved cleanup without that proof stays
+unknown, because an escaped process is excluded only by the proof.
 
 ## Continuation
 

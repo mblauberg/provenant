@@ -1477,6 +1477,9 @@ impl RunStore {
         self.record(expected.attempt_id, call)
     }
 
+    /// Post-commit cleanup. It tries another holder's writer lock once: a
+    /// busy lock leaves the cleanup effect pending and the attempt retained
+    /// for the settlement worker, and never counts as a failure.
     pub(crate) fn settle_cleanup(
         &self,
         record: &AttemptRecord,
@@ -1516,7 +1519,14 @@ impl RunStore {
             .request(record.attempt_id, call)
             .is_ok_and(|request| request.task.writer.is_some())
         {
-            let _ = self.retry_git_cleanup_with_custody(record, recovery, call);
+            // Other failures are recorded on the cleanup effect itself.
+            if self
+                .retry_git_cleanup_with_custody(record, recovery, call)
+                .is_err_and(|error| error.is_writer_contention())
+            {
+                let _ = self.set_temporary_retained(record.attempt_id, true, call);
+                return;
+            }
         }
         // Reuse verified same-scope custody, including a read-only guardian's
         // attempt lock. A second open would contend with our own description.
@@ -2019,17 +2029,25 @@ impl RunStore {
                     .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?,
                 _ => false,
             };
-            // Refuse while another holder owns the writer lock.
+            // Try another holder's writer lock once; contention defers.
             let _lock = match &slot {
-                Some(slot) if !held => {
-                    let observation = provenant_supervisor::custody::writer_admission_guard(slot)
-                        .map_err(|error| {
-                        RunError::Io(std::io::Error::other(error.to_string()))
-                    })?;
-                    let writer = slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
-                    drop(observation);
-                    Some(writer)
-                }
+                Some(slot) if !held => Some(
+                    provenant_supervisor::custody::lock_writer_exclusion(
+                        slot,
+                        provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                        call.cancel,
+                        call.clock,
+                    )
+                    .map_err(|error| {
+                        crate::controls::writer_exclusion_error(
+                            self,
+                            slot,
+                            Self::scope(record),
+                            error,
+                            call,
+                        )
+                    })?,
+                ),
                 _ => None,
             };
             let attempt = self.attempt_dir(record.attempt_id, false)?;
@@ -2056,6 +2074,10 @@ impl RunStore {
         })();
         let disposition = match cleanup {
             Ok(()) => EffectDisposition::Done,
+            // Contention past the wait is returned unrecorded: it names the
+            // holder and settlement retries, so a busy holder never seals the
+            // cleanup as failed.
+            Err(error) if error.is_writer_contention() => return Err(error),
             Err(error) => EffectDisposition::Failed {
                 reason: error.to_string().chars().take(1024).collect(),
                 retryable: false,

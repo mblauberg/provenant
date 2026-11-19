@@ -957,7 +957,8 @@ impl From<&RunError> for ErrorKind {
             RunError::Cancelled => Self::Cancelled,
             RunError::DepthExceeded { .. } | RunError::DepthOverflow => Self::LaneDepth,
             RunError::Capacity => Self::QueueFull,
-            RunError::Contention => Self::Contention,
+            RunError::Contention | RunError::SteerAwaitingCustody => Self::Contention,
+            RunError::WriterExclusionBusy { .. } => Self::WriterBusy,
             RunError::Decode(error)
                 if matches!(
                     error.root_cause(),

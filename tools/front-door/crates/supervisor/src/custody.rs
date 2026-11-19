@@ -4,7 +4,7 @@ use crate::census::{
     CensusError, ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver,
 };
 use crate::machine::StopReason;
-pub use liveness::GuardianLossRecovery;
+pub use liveness::{GuardianLossRecovery, LossUnproven};
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, GitOid, WaitBudget};
 use provenant_os::{
     exec::{CapturedStream, Termination},
@@ -431,6 +431,11 @@ pub(crate) struct Reservation {
     pub descendants: Vec<ProcessIdentity>,
     pub census_incomplete: bool,
     pub omitted_descendants: u64,
+    /// The provider ran under the attempt's sandbox mark, so a later scan can
+    /// find processes the guardian never recorded. Set when the provider is
+    /// spawned; absent means no mark was in effect.
+    #[serde(default)]
+    pub sandboxed: bool,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
@@ -760,6 +765,7 @@ pub(crate) fn acquire_writer_with_observer(
         descendants: Vec::new(),
         census_incomplete: true,
         omitted_descendants: 0,
+        sandboxed: false,
         extra: Default::default(),
     };
     reservation.validate()?;

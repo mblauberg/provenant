@@ -1211,6 +1211,8 @@ impl Driver<'_> {
             );
         }
         self.reservation.launch_state = LaunchState::Spawned;
+        // Without a profile the lane has no sandbox mark for a later scan.
+        self.reservation.sandboxed = self.profile_file.is_some();
         self.reservation.provider = child.identity().cloned();
         let mut memory = memory_path
             .as_ref()

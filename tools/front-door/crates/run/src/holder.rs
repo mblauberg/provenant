@@ -1326,7 +1326,7 @@ impl RunStore {
                 )
             });
             if let Err(error) = &imported {
-                driver.record_failure(&error.to_string())?;
+                driver.record_failure(error)?;
             }
             match imported {
                 Ok(_) => {
@@ -1346,7 +1346,9 @@ impl RunStore {
                     );
                     self.refuse_pending_import(&record, attempt, &reason, call)?;
                 }
-                Err(error) if driver.exhausted() => {
+                // Contention never seals the import: even a lock escalated to
+                // blocked stays recoverable by an explicit reconcile.
+                Err(error) if driver.exhausted() && !error.is_writer_contention() => {
                     let reason = format!(
                         "settlement exhausted three attempts; private Git retained for host recovery: {error}"
                     );
@@ -1590,8 +1592,11 @@ impl RunStore {
                 .ok_or(RunError::Validation("graph continuation work key"))?,
         );
         let request = self.request(id, call)?;
+        // The successor reuses the predecessor's worktree. It waits for
+        // settlement to release custody; the steering stays queued, and this
+        // durable reaction stays pending and is retried.
         if request.task.writer.is_some() && !self.custody_released(&record, call)? {
-            return Err(RunError::Contention);
+            return Err(RunError::SteerAwaitingCustody);
         }
         context.writer_predecessor = request.task.writer.as_ref().map(|_| id);
         let operation_id = OperationId::parse(&format!("graph-steer-{id}"))
@@ -2719,7 +2724,7 @@ impl RunStore {
             if let Err(error) = &check
                 && let Some(driver) = &mut settlement
             {
-                driver.record_failure(&error.to_string())?;
+                driver.record_failure(error)?;
             }
             let last_failure = check.as_ref().err().map(ToString::to_string);
             match crate::artifacts::subdir(attempt, std::ffi::OsStr::new("quarantine"), false) {
