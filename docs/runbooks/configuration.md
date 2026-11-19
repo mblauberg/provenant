@@ -187,7 +187,8 @@ wait_seconds = 30
   defaults to host hardware capacity derived from CPU cores and RAM. Set it to
   `0` to disable the cap.
 - `memory_per_slot`: Optional memory per slot. Admission samples RSS through the
-  process-tree sampler.
+  process-tree sampler, which is off until `domains.run.resource_sample_interval_ms`
+  is set; without a sample the limit is skipped with a warning.
 - `disk_floor`: Optional minimum free disk floor required before running.
 - `trim_action`: Optional shell command executed to free resources if limits are
   exceeded before re-sampling.

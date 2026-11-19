@@ -72,7 +72,7 @@ locations may also differ from `HOME`.
 |---|---|---|---|---|
 | `PROVENANT_SANDBOX` | lane | stable | `on` when the lane runs inside Provenant's native sandbox, `off` when it does not. | every lane |
 | `PROVENANT_LANE_DEPTH` | lane | evolving | Nesting depth: 1 for a lane the caller started, one more per nested lane. Absent or `0` means not in a lane. | every lane |
-| `PROVENANT_PROCESS_TREE` | lane | stable | Names the sample behind `provenant process-tree --json`. Its presence is the contract; read the sample through that command, never the file. | while the supervisor samples the lane's processes |
+| `PROVENANT_PROCESS_TREE` | lane | stable | Names the sample behind `provenant process-tree --json`. Its presence is the contract; read the sample through that command, never the file. | while the supervisor samples the lane's processes (`domains.run.resource_sample_interval_ms` set; off by default) |
 | `PROVENANT_LANE_CARGO_LINT_TARGET` | lane | stable | A Cargo target directory beside the lane's own, for lint-only runs: point CARGO_TARGET_DIR and CARGO_BUILD_BUILD_DIR at it so lints do not queue behind builds. | writer lanes |
 | `PROVENANT_LANE_PORT_BASE` | lane | evolving | First port of the lane's private port block. | writer lanes holding an allocated port block |
 | `PROVENANT_LANE_PORT_COUNT` | lane | evolving | Number of ports in the lane's private block. | writer lanes holding an allocated port block |

@@ -13,6 +13,18 @@ relative to `tools/front-door/`.
 
 ## Custody
 
+### Custody, not activity
+
+The guardian does only what a provider cannot do for itself: start it with its
+environment, wait for its exit on events, end the lane's own process tree,
+record exit and settlement durably, and hold the writer, credential and
+authority boundaries. It does not judge activity (CPU, output silence or
+progress), sample disk, or match command names; provider permission modes and
+command admission cover those. Process-tree sampling is opt-in.
+- Why: one guardian runs per lane, so every periodic read multiplies across
+  parallel lanes on a loaded host.
+- Owner: `crates/supervisor/src/guardian.rs`
+
 ### Closed stop reasons; natural exit wins
 
 Only `ProviderGroup::stop(StopReason)` signals a provider: cancellation, the
@@ -31,20 +43,25 @@ The PID stays reserved until the handle is reaped last. Only the unreaped
 provider, its group while the leader is unreaped, descendants with retained
 proof of provider ancestry, and proven attempt-sandbox escapees may be signalled.
 Descendant proof survives session changes and reparenting, but every signal
-revalidates the full native identity. Native descendants may be stopped only for
-a recorded provider stop (cancellation, deadline, budget, context handoff, protocol
-rejection or supervisor signal); an ordinary provider exit leaves them under
-conservative custody. Registry and host child checks must permit cleanup. When
-there is no native child registry, a present host holder must affirm that no graph
-child remains. Spared and protected owners and their possible descendants stay excluded.
-A census listing or cwd observation alone never grants signal authority, and
-recovery signals only a PID whose recorded identity matches.
+revalidates the full native identity. On macOS, however the provider ends,
+natural exit included, cleanup ends the lane's own tree: recorded descendants and
+sandbox-marked escapees get TERM, then KILL after the descendant grace. Registry
+and host child checks must permit cleanup. When there is no native child
+registry, a present host holder must affirm that no graph child remains. Spared
+and protected owners and their possible descendants stay excluded. The exit
+records one summary warning ("killed N surviving descendants") and at most 16
+unresolved identities; the reservation journal records up to 128.
+A census listing or cwd observation alone never grants signal authority.
+Recovery after guardian loss signals only recorded descendants whose identity
+still matches and live processes carrying the attempt's sandbox mark; it runs
+its census and sandbox probe only for an unresolved exit.
 
 A launch is named by its attempt's `WorkKey`: the guardian's launch summary
 records the key, and a stop request is identified by attempt and generation.
 A supervisor restart finds a live writer by the key through the attempt row,
 then reads that attempt's custody records.
-- Why: signalling a recycled PID or a sibling's group kills unrelated work.
+- Why: signalling a recycled PID or a sibling's group kills unrelated work, and
+  a lane's backgrounded loops must not outlive it (#3545).
 - Owner: `crates/supervisor/src/process_os/`, `crates/supervisor/src/custody.rs`
 
 ### Read-only writer presence
@@ -129,8 +146,8 @@ service detached by an unsandboxed provider therefore cannot retain the lane's
 inherited writer lease. Guardian loss still leaves the durable unresolved
 reservation fenced against every new attempt, even if the kernel lease is free.
 
-Cleanup has a bounded stop budget. At its deadline a separate, cooperatively
-bounded diagnostic census names observable PIDs, short native command names and
+Cleanup has a bounded stop budget. At the first deadline a separate, cooperatively
+bounded diagnostic census (once per guardian) names observable PIDs, short native command names and
 open writer-lock paths, with a reconcile action. An open path is not proof of
 flock ownership and grants no signal authority. Unknown or unreadable holders
 remain explicit uncertainty. The guardian continues retaining unresolved
@@ -393,8 +410,9 @@ The process-tree interface reads a host-sampled snapshot of the lane's own
 descendants without process-listing authority. A missing, stale, incomplete or
 unsupported sample is unavailable, never a partial tree or zero memory.
 The sample is periodic observation, not an atomic census or a memory limit.
-`domains.run.resource_sample_interval_ms` controls CPU and process-tree sampling
-(1..=60000 ms, compiled default 5000 ms). Each private snapshot records a
+Sampling is off by default: `domains.run.resource_sample_interval_ms` (0 by
+default, else 1..=60000 ms) enables it, and only then is
+`PROVENANT_PROCESS_TREE` set. Each private snapshot records a
 freshness allowance derived from that interval plus the bounded sample budget;
 the CLI output and public sample schema do not change. The setting source is
 available from `provenant config show --full`.
