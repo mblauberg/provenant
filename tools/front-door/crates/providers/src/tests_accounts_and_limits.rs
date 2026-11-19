@@ -399,11 +399,22 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
             "{key}"
         );
     }
-    assert!(
+    assert_eq!(
         launch
             .env
             .iter()
-            .all(|(key, _)| key != "GIT_CONFIG_NOSYSTEM")
+            .filter(|(key, value)| key == "GIT_CONFIG_NOSYSTEM" && value == "1")
+            .count(),
+        1,
+        "a sandboxed launch exports GIT_CONFIG_NOSYSTEM=1 exactly once"
+    );
+    assert_eq!(
+        launch
+            .env
+            .iter()
+            .filter(|(key, _)| key == "GIT_CONFIG_NOSYSTEM")
+            .count(),
+        1
     );
     for path in [
         "/fixture/home/.cargo/bin",

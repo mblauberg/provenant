@@ -102,7 +102,9 @@ skipped and why. Remote placement takes neither control.
   must not be able to refuse the run it does not take part in.
 
 Every refusal of a launch input names the field that caused it, or the decoded
-path of a document or patch field. An unnamed `invalid input` is a defect.
+path of a document or patch field. An unnamed `invalid input` is a defect; the
+graph, peer, owner and unified paths build their refusals with
+`FacadeError::field`, and a test pins that none of them returns an empty one.
 - Why: the repair step says to check the named field.
 
 A refused bind keeps its typed cause all the way to the facade. A held writer
@@ -145,15 +147,18 @@ continuations. Unsupported confinement is reported rather than represented as
 sandboxed execution.
 - Why: a retry must not silently weaken the requested boundary.
 
-A lane sees Git credentials only through the token helper. Its Git wrapper
-always exports `GIT_CONFIG_NOSYSTEM`, with or without a private identity
-config, and launch never strips it, so system configuration (on macOS,
-`credential.helper=osxkeychain`) is never read. The lane environment drops
-`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`, `GIT_CONFIG_VALUE_*` and
-`GIT_CONFIG_PARAMETERS` and carries the token helper's own entries in their
-place.
-- Why: a host credential helper reachable from a lane is a credential boundary
-  breach ([ADR 0035](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md)).
+A sandboxed lane's Git wrapper always exports `GIT_CONFIG_NOSYSTEM`, with or
+without a private identity config, and launch never strips it, so system Git
+configuration (on macOS, `credential.helper=osxkeychain`) is not read. The
+sandboxed lane environment drops `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`,
+`GIT_CONFIG_VALUE_*` and `GIT_CONFIG_PARAMETERS` and carries the token helper's
+own entries in their place. This does not yet isolate the host global Git
+configuration, which is still included in full (#3584), and a lane that is not
+sandboxed keeps the host's helpers and askpass: it is not covered by this
+boundary.
+- Why: system configuration and inherited command-scope entries are credential
+  paths a lane never asked for
+  ([ADR 0035](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md)).
 
 Read-only write exceptions come from user-owned configuration, remain within
 verified repository paths and are recorded on the attempt. Git and provider

@@ -228,13 +228,33 @@ struct ActionsGrace {
     limit: Duration,
     /// The head last read and when it was first read.
     head: Option<(String, Instant)>,
+    /// When the last reading was held, the moment the hold ends. The waiter
+    /// must read again then: no event or timer of its own would wake it.
+    held_until: Option<Instant>,
 }
 impl ActionsGrace {
     fn new(limit: Duration) -> Self {
-        Self { limit, head: None }
+        Self {
+            limit,
+            head: None,
+            held_until: None,
+        }
+    }
+
+    /// How long until the hold on the last reading ends; `None` when the last
+    /// reading was not held.
+    fn due_in(&self) -> Option<Duration> {
+        self.held_until
+            .map(|end| end.saturating_duration_since(Instant::now()))
+    }
+
+    /// Whether a held reading's grace period has ended and it needs a fresh read.
+    fn is_due(&self) -> bool {
+        self.due_in().is_some_and(|left| left.is_zero())
     }
 
     fn apply(&mut self, reading: Reading, label: &str, complete: bool) -> Reading {
+        self.held_until = None;
         let Ok(mut line) = serde_json::from_value::<crate::pr::status::Line>(reading.data.clone())
         else {
             return reading;
@@ -251,6 +271,7 @@ impl ActionsGrace {
             return reading;
         }
         line.hold_for_actions();
+        self.held_until = Some(first_read + self.limit);
         Reading {
             settle: Settle::Pending,
             line: format!(
@@ -1807,7 +1828,8 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             *number,
                             Duration::from_secs(60)
                                 .saturating_sub(last_reconcile.elapsed())
-                                .min(deadline.saturating_duration_since(Instant::now())),
+                                .min(deadline.saturating_duration_since(Instant::now()))
+                                .min(grace.due_in().unwrap_or(Duration::MAX)),
                             &stop.cancel,
                         ) {
                             Ok(Some(detail)) => {
@@ -1842,11 +1864,18 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                     )
                                 }
                             }
-                            Ok(None) if last_reconcile.elapsed() >= Duration::from_secs(60) => {
+                            Ok(None)
+                                if last_reconcile.elapsed() >= Duration::from_secs(60)
+                                    || grace.is_due() =>
+                            {
                                 last_reconcile = Instant::now();
-                                if journal
-                                    .source_current(repository, *number, None)
-                                    .unwrap_or(false)
+                                // A held reading whose grace period ended needs a
+                                // fresh read even when the journal is current:
+                                // nothing else would settle it.
+                                if !grace.is_due()
+                                    && journal
+                                        .source_current(repository, *number, None)
+                                        .unwrap_or(false)
                                 {
                                     continue;
                                 }
@@ -1872,7 +1901,8 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             if !stop.pause(
                                 interval
                                     .saturating_sub(last_reconcile.elapsed())
-                                    .min(deadline.saturating_duration_since(Instant::now())),
+                                    .min(deadline.saturating_duration_since(Instant::now()))
+                                    .min(grace.due_in().unwrap_or(Duration::MAX)),
                             ) {
                                 break;
                             }
@@ -2804,6 +2834,9 @@ mod tests {
                 .settle,
             Settle::Pending
         );
+        assert!(!grace.is_due());
+        let left = grace.due_in().expect("a held reading has a deadline");
+        assert!(left > Duration::from_secs(3000), "{left:?}");
         // Age the head: the period has run out, so the reading settles.
         let (_, first_read) = grace.head.as_mut().unwrap();
         *first_read = Instant::now()
@@ -2815,6 +2848,7 @@ mod tests {
                 .settle,
             Settle::Succeeded
         );
+        assert_eq!(grace.due_in(), None, "a settled reading is not held");
         // A later push is a new head with its own period.
         assert_eq!(
             grace

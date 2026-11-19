@@ -1481,6 +1481,13 @@ pub(super) fn safe_input_field(field: &str) -> Option<String> {
         "branch",
         "integration_branch",
         "schema_version",
+        "action",
+        "commit",
+        "graph_context",
+        "max_nodes",
+        "node_id",
+        "part",
+        "source",
         "limits",
         "delivery",
         "review_base",
@@ -1608,6 +1615,11 @@ impl FacadeError {
         Self::InvalidInput {
             detail: Some(detail),
         }
+    }
+
+    /// An invalid-input refusal naming the one field that failed.
+    pub fn field(path: impl Into<String>) -> Self {
+        Self::invalid(InvalidInputDetail::Field(path.into()))
     }
 
     pub fn io(operation: impl Into<String>) -> Self {
@@ -2407,6 +2419,41 @@ mod diagnostic_tests {
         assert!(diagnostic.next.unwrap().contains("memory"));
         let generic = FacadeError::ConfinementRefused { resource: None }.diagnostic();
         assert!(generic.detail.is_none());
+    }
+
+    #[test]
+    fn a_named_field_refusal_discloses_the_field_it_names() {
+        for field in [
+            "action",
+            "after",
+            "commit",
+            "context.node_id",
+            "document",
+            "graph_context",
+            "host",
+            "integration_branch",
+            "key",
+            "knobs",
+            "limit",
+            "max_nodes",
+            "node",
+            "part",
+            "source.commit",
+            "targets",
+            "wait_seconds",
+            "worktree",
+        ] {
+            let refusal = FacadeError::field(field);
+            assert!(
+                refusal
+                    .to_string()
+                    .contains(&format!("invalid input field `{field}`")),
+                "{field}: {refusal}"
+            );
+            let received: FacadeError =
+                serde_json::from_value(serde_json::to_value(&refusal).unwrap()).unwrap();
+            assert_eq!(received, refusal, "{field} survives the wire");
+        }
     }
 
     #[test]

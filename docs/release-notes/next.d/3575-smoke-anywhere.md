@@ -1,4 +1,4 @@
 ## Fixes
 ### Pipelines and graphs
 - `provenant run smoke` and `provenant upgrade --verify` run from a primary checkout as well as a linked worktree. A node whose `when` condition does not hold is no longer inspected for writer scope, so the skipped write node cannot refuse a launch it takes no part in. Smoke runs its read-only nodes by default and its receipt names the node it skipped and why; `--worktree PATH`, or `--branch B --base REF`, also runs the write node. `upgrade --verify` provisions its write worktree on a scratch branch. (#3575)
-- Every refusal of a graph launch input names the field that caused it, and `plan`, `patch` and `write_scope` fields are named too; the composite launch-control refusal names the first control given. (#3575)
+- Every refusal of a graph launch input names the field that caused it, and `plan`, `patch` and `write_scope` fields are named too; the composite launch-control refusal names the first control given. The same holds for graph document, worktree, limit, target and host refusals on the peer, owner and graph-execution paths. (#3575)
