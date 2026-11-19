@@ -176,7 +176,7 @@ impl Factory {
             parent,
             reason.as_deref(),
         )
-        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        .map_err(|_| FacadeError::field("node"))?;
         // Persist the subtree fence before stopping any external process.
         journal.save(&checkpoint).map_err(graph_journal_error)?;
         let mut owner = BinaryRunOwner {
@@ -222,7 +222,7 @@ impl Factory {
             &mut graph_owner,
             &mut journal,
         ) {
-            first_error.get_or_insert(FacadeError::InvalidInput { detail: None });
+            first_error.get_or_insert(FacadeError::field("node"));
         }
         if let Some(error) = first_error {
             return Err(error);

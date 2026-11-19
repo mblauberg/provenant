@@ -1541,7 +1541,9 @@ impl LaunchConfinement {
                 }
             }
         }
-        if let Some(warning) = target_outcome.fallback_warning("the Cargo target") {
+        if let Some(warning) =
+            target_outcome.fallback_warning("the Cargo target", "this lane builds without it")
+        {
             use std::io::Write;
             let _ = writeln!(std::io::stderr().lock(), "{warning}");
         }
@@ -1988,7 +1990,10 @@ pub(super) fn verify_writer_git_paths(common: &Path, branch: &GitRefName) -> Res
 // Cargo configuration can override rustc independently of the rustup pin.
 // Refuse ambiguous configurations without executing or interpreting them.
 // Refusals are stable snake_case codes, recorded as the outcome `detail`.
-fn verified_cargo_config(build: &Path, cargo_home: &Path) -> std::result::Result<(), &'static str> {
+pub(crate) fn verified_cargo_config(
+    build: &Path,
+    cargo_home: &Path,
+) -> std::result::Result<(), &'static str> {
     let present = |directory: &Path| {
         provenant_confinement::cargo::CONFIG_FILES
             .iter()

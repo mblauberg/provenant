@@ -2126,11 +2126,14 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
                 global.map(|(_, value)| value.as_os_str()),
                 Some(expected.as_ref())
             );
+            // System Git configuration is never read, whatever the access.
             assert_eq!(
                 spec.env
                     .iter()
-                    .any(|(name, _)| name == "GIT_CONFIG_NOSYSTEM"),
-                access == Access::ReadOnly
+                    .filter(|(name, _)| name == "GIT_CONFIG_NOSYSTEM")
+                    .count(),
+                1,
+                "{access:?}"
             );
         }
     }

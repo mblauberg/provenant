@@ -225,7 +225,12 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
 #[allow(clippy::print_stderr)]
 fn seed_target_human(seed: &provenant_run::WorktreeSeed) -> String {
     match &seed.warning {
-        Some(warning) => eprintln!("{warning}"),
+        Some(warning) => {
+            eprintln!("{warning}");
+            if let Some(repair) = seed.repair {
+                eprintln!("  to fix: {repair}");
+            }
+        }
         None => eprintln!(
             "Cargo target {} ({}{})",
             seed.status,
@@ -235,6 +240,9 @@ fn seed_target_human(seed: &provenant_run::WorktreeSeed) -> String {
                 .map(|generation| format!(" from seed generation {generation}"))
                 .unwrap_or_default()
         ),
+    }
+    if let Some(source) = seed.cargo_home {
+        eprintln!("  Cargo home: {source}");
     }
     seed.target.display().to_string()
 }

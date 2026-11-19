@@ -974,17 +974,10 @@ pub(crate) fn private_git_objects(
         path: config.clone(),
         bytes: config_text.into_bytes(),
     });
+    // Only a sandboxed lane is under the credential boundary; a host-native
+    // lane keeps the host's own Git environment.
     if input.sandboxed() {
-        spec.env.retain(|(key, _)| key != "GIT_CONFIG_NOSYSTEM");
-        crate::lane::install_token_config(&mut spec.env).map_err(|error| {
-            input.policy.boundary_error(
-                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
-                Facts::violation(
-                    "Git credentials could not be isolated in the private writer Git environment",
-                ),
-                error,
-            )
-        })?;
+        crate::lane::install_token_config(&mut spec.env);
     }
     if let Some((_, current)) = spec
         .env

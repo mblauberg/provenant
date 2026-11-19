@@ -961,6 +961,11 @@ mod tests {
             (pr_read.min, pr_read.max, &pr_read.default),
             (Some(1), Some(600), &json!(60))
         );
+        let grace = field("domains.wait.actions_grace_seconds");
+        assert_eq!(
+            (grace.min, grace.max, &grace.default),
+            (Some(0), Some(600), &json!(60))
+        );
         let markers = field("domains.run.push_conflict_markers");
         assert_eq!((markers.kind, &markers.default), ("bool", &json!(true)));
         let idle = field("gc.idle");
