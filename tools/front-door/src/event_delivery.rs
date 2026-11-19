@@ -688,8 +688,14 @@ fn continue_after_index<T>(
     forge: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     if let Err(error) = graphs() {
+        let quarantined = error.is::<provenant_fabric_runtime::graph::UnreadableCheckpointNotice>();
         warn(&format!(
-            "graph observation indexing failed for {project}: {error}; will retry"
+            "graph observation indexing failed for {project}: {error}{}",
+            if quarantined {
+                "; quarantined, skipped on later ticks"
+            } else {
+                "; will retry"
+            }
         ));
     }
     if let Err(error) = notes() {

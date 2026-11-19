@@ -828,6 +828,9 @@ pub(crate) fn scheduled_gc(
 /// `provenant gc`: remove orphaned and idle lane caches, sparing any whose
 /// worktree has a live or unobservable writer.
 pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
+    // Keep per-PID EPERM census detail behind the global --full flag; the
+    // default prints one aggregate warning with a count.
+    worktrees::set_unreadable_census_detail(globals.full);
     if let Some(branch) = &command.finished_branch {
         if command.dry_run || !command.apply {
             return crate::fail_with_repair(

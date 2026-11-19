@@ -41,10 +41,10 @@ fn graph_factory_reopens_the_retained_directory() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn tick_reports_unreadable_each_time_and_advances_another_graph()
+fn tick_reports_unreadable_once_until_bytes_change_and_advances_another_graph()
 -> Result<(), Box<dyn std::error::Error>> {
     if host_test(
-        "fabric::peer_tests::peer_graph_lifecycle::tick_reports_unreadable_each_time_and_advances_another_graph",
+        "fabric::peer_tests::peer_graph_lifecycle::tick_reports_unreadable_once_until_bytes_change_and_advances_another_graph",
     )? {
         return Ok(());
     }
@@ -121,10 +121,25 @@ fn tick_reports_unreadable_each_time_and_advances_another_graph()
     let good = graph::FileJournal::read_checkpoint(&roots.state, project, "b-good")?
         .ok_or("missing good graph")?;
     assert_eq!(good.nodes[0].state, graph::NodeState::Succeeded);
-    let second = tick_graphs(&resolved, now, &FreeWorkers)?;
     // Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
-    assert_eq!(second.errors, first.errors);
+    // The same unreadable bytes are reported once; later ticks skip them quietly
+    // and the other graph is still visited without error.
+    let second = tick_graphs(&resolved, now, &FreeWorkers)?;
+    assert!(second.errors.is_empty(), "{:?}", second.errors);
     assert_eq!(second.advanced, 0);
+    let third = tick_graphs(&resolved, now, &FreeWorkers)?;
+    assert!(third.errors.is_empty(), "{:?}", third.errors);
+    assert_eq!(third.advanced, 0);
+    // Changed bytes are a new observation and are reported again, once.
+    std::fs::write(directory.join("graph-a-bad.json"), b"invalid json, changed")?;
+    let changed = tick_graphs(&resolved, now, &FreeWorkers)?;
+    assert_eq!(changed.errors.len(), 1, "{:?}", changed.errors);
+    assert!(changed.errors[0].contains("a-bad"));
+    let after = tick_graphs(&resolved, now, &FreeWorkers)?;
+    assert!(after.errors.is_empty(), "{:?}", after.errors);
+    let good = graph::FileJournal::read_checkpoint(&roots.state, project, "b-good")?
+        .ok_or("missing good graph")?;
+    assert_eq!(good.nodes[0].state, graph::NodeState::Succeeded);
     Ok(())
 }
 
