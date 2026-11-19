@@ -395,9 +395,7 @@ impl RunStore {
                     match child_wait {
                         Some(ChildWait::Children) => LaneWaitReason::Children,
                         Some(ChildWait::Admission) => LaneWaitReason::Admission,
-                        None => LaneWaitReason::ProviderSilence {
-                            silent_for_ms: lane.provider_silent_for_ms.0?,
-                        },
+                        None => return None,
                     }
                 } else {
                     self.recovery_process_wait(lane.attempt_id, call)

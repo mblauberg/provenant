@@ -142,7 +142,7 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         Lane,
         Stable,
         "Names the sample behind `provenant process-tree --json`. Its presence is the contract; read the sample through that command, never the file.",
-        "while the supervisor samples the lane's processes",
+        "while the supervisor samples the lane's processes (`domains.run.resource_sample_interval_ms` set, or an admission class sets `memory_per_slot`; off otherwise)",
     ),
     var(
         LANE_CARGO_LINT_TARGET,

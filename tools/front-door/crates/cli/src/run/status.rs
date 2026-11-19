@@ -362,13 +362,8 @@ fn project_lane_inner(
         })
         .or_else(|| wait.map(|wait| wait.waiting_for.description()))
         .or_else(|| {
-            lane.provider_silent_for_ms
-                .0
-                .map(run::provider_silence_reason)
-                .or_else(|| {
-                    (host_artifacts && matches!(lane.state, run::AttemptState::Starting { .. }))
-                        .then(|| "launch preparation".to_owned())
-                })
+            (host_artifacts && matches!(lane.state, run::AttemptState::Starting { .. }))
+                .then(|| "launch preparation".to_owned())
         });
     let transcript = lane
         .applied_route

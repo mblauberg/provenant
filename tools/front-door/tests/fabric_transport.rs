@@ -1006,33 +1006,6 @@ fn submission_stamps_the_local_host_on_its_trace() -> Result {
     Ok(())
 }
 
-#[test]
-fn silence_knob_controls_capture_plan_observations() -> Result {
-    let rig = TestRig::new()?;
-    let cleanup = rig.process_cleanup();
-    std::fs::create_dir_all(&rig.state)?;
-    std::fs::write(
-        rig.state.join("config.toml"),
-        "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.silence_seconds'=2\n",
-    )?;
-    let (request, attempt) = submitted_policy(
-        &rig,
-        "config-silence",
-        json!({"kind":"model","provider":"codex","model":"fixture"}),
-    )?;
-    let task = &request.task;
-    assert_eq!(serde_json::to_value(&task.profile)?, attempt["profile"]);
-    assert_eq!(task.profile.knobs["lanes.silence_seconds"], 2);
-    let plan = provenant_run::capture_plan(&request.task, &Default::default());
-    assert_eq!(plan.silence_ms, 2000);
-    assert!(!plan.silent(1999, Some(0)));
-    assert!(plan.silent(2000, Some(0)));
-    assert!(!plan.silent(2000, Some(2000)));
-    rig.assert_v1_root_untouched()?;
-    cleanup.disarm();
-    Ok(())
-}
-
 /// A loopback peer: the fake SSH executable runs this build's real
 /// `fabric peer` against a second state directory, so the placement record
 /// and every forwarded call cross the actual peer protocol.

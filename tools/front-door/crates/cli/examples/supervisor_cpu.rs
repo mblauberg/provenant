@@ -159,6 +159,7 @@ fn capture(root: &Path, churn: bool) -> Result {
         &clock,
     )?;
     let command = ProviderCommand {
+        resource_sample_interval: None,
         publication_values: Default::default(),
         policy: Default::default(),
         profile_file: None,
@@ -168,7 +169,6 @@ fn capture(root: &Path, churn: bool) -> Result {
         resolved_route: "fixture/cpu".into(),
         permission_plan_digest: Digest::from_bytes([0; 32]),
         key: provenant_supervisor::custody::fixture_key(4),
-        protected_commands: vec![],
         config_environment: fixture::config_environment(),
         argv: fixture::argv_with_args(
             if churn { "cpu-churn" } else { "wait-on-socket" },

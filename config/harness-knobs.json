@@ -5,7 +5,6 @@
       "lanes.max_concurrency",
       "lanes.max_concurrency_read_only",
       "lanes.max_depth",
-      "lanes.silence_seconds",
       "lanes.context_handoff_tokens",
       "lanes.token_budget",
       "lanes.budget_action",
@@ -19,7 +18,6 @@
       "lanes.writer_dirty",
       "lanes.gh_budget",
       "lanes.isolation",
-      "lanes.supervision",
       "lanes.receipts",
       "routing.exclude",
       "routing.graph_exclude",
@@ -428,6 +426,7 @@
       "policy.PREPARATION_GH_SHIM_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "An unsandboxed lane whose counting gh wrapper cannot be installed runs gh unmediated; the receipt records it as unmediated. The setting source is named in each warning."},
       "policy.PREPARATION_PREPARE_WRITER_DEPENDENCIES_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Automatic dependency setup warns with a redacted cause and lets the writer continue; cancellation still stops preparation. The setting source is named in each warning."},
       "policy.LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Unreadable or unrepresentable lane-port settings warn and leave the lane without an allocated port block. The setting source is named in each warning."},
+      "policy.LAUNCH_PROCESS_TREE_INTERVAL_OR_WARN_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Unreadable run settings warn and launch the lane without a process-tree sampler; admission then skips its memory limit with a warning. The setting source is named in each warning."},
       "policy.PORT_BLOCKS": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "An exhausted port-block pool warns the writer and reports the effective count, its host or compiled origin, and the setting that can raise the pool or disable allocation. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.GUARDIAN_LANE_PORT_ALLOCATION_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "A port-block allocation I/O failure warns and continues without a block; stale port-block environment variables are removed. The setting source is named in each warning."},
       "policy.PACING_ADAPTER": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "An adapter reserve defaults to shipped values and can be configured; the observation reports its effective percentage and source. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
@@ -457,7 +456,6 @@
       "policy.GRAPH_CONCURRENCY_CAP": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A configured graph concurrency cap is advisory; warn and continue unless policy explicitly selects refusal. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.ADMISSION_SPACING": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Startup spacing is configured; a lane of the same class started within the window, and the start is still recorded. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.DISK_FLOOR": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Measured free space below gc.critical_free warns with the figures, their sources and the remedy; submission, admission and new builds share this one decision. Refuse holds new work until space is reclaimed; a record that cannot be written still fails as data integrity. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
-      "policy.GUARDIAN_DISK": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "The guardian observes free space during a running lane and only warns; running builds continue. The setting source is named in each warning."},
       "policy.ADMISSION_PRESSURE": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "The effective pressure threshold is configured or shipped; its source and value accompany the observation. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.ADMISSION_PROJECT_WRITERS": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "The applicable host or project cap is configured or shipped; the observation names its setting, source and value. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.ADMISSION_WRITERS": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "The host writer cap is configured or shipped and its source and value accompany the observation. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
@@ -648,12 +646,6 @@
       "effect": "Maximum graph launch retry delay, at least the first delay.",
       "trade_off": "A longer cap reduces repeated load but slows recovery."
     },
-    "lanes.silence_seconds": {
-      "type": "int", "min": 1, "max": 3600, "default": 1800, "status": "wired",
-      "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/custody.rs, tools/front-door/crates/supervisor/src/guardian.rs",
-      "effect": "Mark a provider observation silent after this many seconds without output or CPU progress; never kill it for silence.",
-      "trade_off": "Lower marks silence sooner; the process census and observation cadence stays unchanged."
-    },
     "lanes.context_handoff_tokens": {
       "type": "int", "min": 0, "max": 2000000, "default": 0, "status": "wired",
       "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/guardian.rs",
@@ -760,15 +752,6 @@
       "reader": "tools/front-door/src/fabric/owner.rs",
       "effect": "Whether an unpinned read-only graph node reads its bound checkout live (shared). A read-only lane pinned to a commit always gets an immutable source view, under every setting. Writers always keep one writer per worktree, so shared is refused on a writer node. Set per graph node with `attempt.isolation` or the `light` preset (`attempt.preset`),.",
       "trade_off": "shared starts faster but the lane sees edits made while it runs. Secret redaction and object integrity are unchanged."
-    },
-    "lanes.supervision": {
-      "type": "enum",
-      "values": ["standard", "minimal"],
-      "default": "standard",
-      "status": "wired",
-      "reader": "tools/front-door/crates/run/src/launch.rs",
-      "effect": "minimal marks a silent provider only after the longest silence interval (one hour) instead of lanes.silence_seconds. Set per graph node with `attempt.supervision` or the `light` preset.",
-      "trade_off": "minimal reports a stalled lane later; deadlines, custody and confinement are unchanged."
     },
     "lanes.receipts": {
       "type": "enum",

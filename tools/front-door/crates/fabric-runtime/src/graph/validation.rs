@@ -979,11 +979,10 @@ fn attempt_error(node: &GraphNode, spec: &AttemptSpec) -> Option<&'static str> {
     }
     for (value, allowed) in [
         (&spec.isolation, ["private", "shared"]),
-        (&spec.supervision, ["standard", "minimal"]),
         (&spec.receipts, ["delivery", "none"]),
     ] {
         if value.as_deref().is_some_and(|v| !allowed.contains(&v)) {
-            return Some("invalid attempt isolation, supervision or receipts");
+            return Some("invalid attempt isolation or receipts");
         }
     }
     if node.access == AccessMode::WorktreeWrite && spec.effective_isolation() == "shared" {

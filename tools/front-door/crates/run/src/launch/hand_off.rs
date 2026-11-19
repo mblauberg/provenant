@@ -472,6 +472,8 @@ impl RunStore {
             .as_ref()
             .filter(|c| c.writer.is_some())
             .and_then(|c| lane_port_plan_or_warn(&c.state_root, &policy));
+        let resource_sample_interval =
+            process_tree_interval(self.context.state_root.as_path(), &plan.cwd, &policy);
         let key = record.key.clone();
         let command = ProviderCommand {
             publication_values: provenant_os::exec::SecretValues(local_or_withdraw!(
@@ -481,11 +483,11 @@ impl RunStore {
             policy: policy.clone(),
             profile_file,
             lane_ports,
+            resource_sample_interval,
             resolved_route: route,
             permission_plan_digest: task.authority_digest,
             key,
             requester,
-            protected_commands: vec![],
             // OpenCode stores answering-model evidence in its shared XDG data
             // directory. The guardian otherwise starts with an empty environment
             // and no Registry home; retain the absolute path selected at launch.
