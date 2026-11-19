@@ -1545,6 +1545,7 @@ impl LaunchConfinement {
                 free_floor: 0,
                 grace_seconds: 0,
                 idle_seconds: 0,
+                target_idle_seconds: None,
             },
             false,
             budget,

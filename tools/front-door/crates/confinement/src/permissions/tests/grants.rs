@@ -539,6 +539,15 @@ fn concurrent_writers_prepare_caches_and_shared_git_state_in_one_home()
                 let directory = Directory::open_anchor(&path)?;
                 verify_cache_metadata(&directory.metadata()?)?;
             }
+            assert_eq!(
+                std::fs::read(
+                    authority
+                        .cargo_cache
+                        .path
+                        .join(crate::cache::CACHE_DIRECTORY_TAG)
+                )?,
+                crate::cache::CACHE_DIRECTORY_TAG_CONTENT
+            );
         }
     }
     Ok(())

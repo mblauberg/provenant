@@ -233,6 +233,9 @@ fn create_derived_directory(
                     PublishMode::Replace,
                 )
                 .map_err(PermissionError::Filesystem)?;
+            // One tag covers every target under the cache, including a seed
+            // clone or `target-lint` that Cargo did not create.
+            crate::cache::tag_cache_directory(&directory).map_err(PermissionError::Filesystem)?;
         }
     }
     Ok(())

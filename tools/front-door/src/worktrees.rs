@@ -321,14 +321,26 @@ fn execute(
                         &provenant_core::CredentialRoots::for_home(home),
                     )?;
                     let environment: Vec<_> = std::env::vars_os().collect();
-                    Data::SeedTarget(provenant_run::seed_worktree_target(
+                    let mut seed = provenant_run::seed_worktree_target(
                         roots.state.as_path(),
                         home,
                         verified.path(),
                         verified.repo().common_git_dir(),
                         &cache,
                         &environment,
-                    ))
+                    );
+                    // GC dates a seeded target from this stamp, not from the
+                    // file times the clone carried over.
+                    if let Err(error) =
+                        provenant_run::build_dir_gc::mark_cache_targets_used(home, &cache)
+                    {
+                        let warning = format!("could not stamp the target's last use: {error}");
+                        seed.warning = Some(match seed.warning.take() {
+                            Some(existing) => format!("{existing}; {warning}"),
+                            None => warning,
+                        });
+                    }
+                    Data::SeedTarget(seed)
                 }
                 Worktree::Create { branch, base } => {
                     let info = worktrees::create(context, WorktreeCreate { branch, base }, cancel)?;
@@ -512,6 +524,14 @@ struct GcData {
     retention_errors: Vec<provenant_config::RetentionIssue>,
     #[serde(skip)]
     failed_classes: Vec<provenant_config::RetentionKind>,
+    /// Classes this pass started, so classes it never reached are reported
+    /// as not run rather than as a measured zero.
+    #[serde(skip)]
+    classes_run: Vec<provenant_config::RetentionKind>,
+    /// Scheduled classes this pass did not run, because an earlier pass ran
+    /// them before the saved cursor or the sweep stopped first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    classes_not_run: Vec<provenant_config::RetentionKind>,
     #[serde(skip)]
     retention_observations: Vec<provenant_config::RetentionBytes>,
     discard_archives: worktrees::ArchiveReport,
@@ -586,10 +606,16 @@ impl GcData {
     /// Measure only adapters selected for this pass. Keep results, so rendering
     /// cannot turn an unexecuted adapter's empty report into a measured zero.
     fn observe_retention(&mut self, trigger: provenant_config::RetentionTrigger) {
+        self.classes_not_run = provenant_config::retention_schedule(trigger)
+            .map(|class| class.class)
+            .filter(|class| !self.classes_run.contains(class))
+            .collect();
         self.retention_observations = provenant_config::retention_schedule(trigger)
             .map(|class| provenant_config::RetentionBytes {
                 class: class.class,
-                observation: if self.failed_classes.contains(&class.class) {
+                observation: if self.failed_classes.contains(&class.class)
+                    || self.classes_not_run.contains(&class.class)
+                {
                     provenant_config::ByteObservation::Unknown
                 } else {
                     class.adapter.measure(self)
@@ -971,16 +997,21 @@ fn gc_data_summary(data: &GcData) -> String {
         .sum();
     human.push_str(&format!("{trees} merged worktree(s), {outputs} output directory(s), {} attempt tmp directory(s), {} capture(s)\n",
         data.provider_state.attempt_tmp.len(), data.provider_state.attempt_logs.len()));
-    human.push_str(&format!(
-        "{} target seed generation(s), {} apparent bytes {}\n",
-        data.target_seeds.removed.len(),
-        data.target_seeds.bytes,
-        if data.report.dry_run {
-            "reclaimable"
-        } else {
-            "removed"
-        }
-    ));
+    let not_run = |class| data.classes_not_run.contains(&class);
+    if not_run(provenant_config::RetentionKind::TargetSeeds) {
+        human.push_str("target seed generations: not run in this pass\n");
+    } else {
+        human.push_str(&format!(
+            "{} target seed generation(s), {} apparent bytes {}\n",
+            data.target_seeds.removed.len(),
+            data.target_seeds.bytes,
+            if data.report.dry_run {
+                "reclaimable"
+            } else {
+                "removed"
+            }
+        ));
+    }
     let archives_count = if data.report.dry_run {
         data.discard_archives.would_remove.len()
     } else {
@@ -1001,9 +1032,19 @@ fn gc_data_summary(data: &GcData) -> String {
     for archive in &data.discard_archives.busy {
         human.push_str(&format!("busy discard archive {}\n", archive.display()));
     }
-    if data.build_dirs.measurement_skipped {
+    let idle = if data.build_dirs.target_idle_setting.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; idle after {} (source: {})",
+            data.build_dirs.target_idle_setting, data.build_dirs.target_idle_source
+        )
+    };
+    if not_run(provenant_config::RetentionKind::BuildDirectories) {
+        human.push_str("Cargo targets: not run in this pass\n");
+    } else if data.build_dirs.measurement_skipped {
         human.push_str(&format!(
-            "Cargo target census partial: {} known bytes / {} byte budget (setting {}; source: {}); resumes at {}\n",
+            "Cargo target census partial: {} known allocated bytes / {} byte budget (setting {}; source: {}{idle}); resumes at {}\n",
             data.build_dirs.cache_bytes,
             data.build_dirs.budget_bytes,
             data.build_dirs.budget_setting,
@@ -1016,7 +1057,7 @@ fn gc_data_summary(data: &GcData) -> String {
         ));
     } else {
         human.push_str(&format!(
-        "{} Cargo target(s), {} bytes {}; {} / {} bytes remain (budget setting {}; source: {}), {} busy, {} recent\n",
+        "{} Cargo target(s), {} allocated bytes {}; {} / {} allocated bytes remain (budget setting {}; source: {}{idle}), {} busy, {} recent\n",
         data.build_dirs.removed.len(),
         data.build_dirs.bytes,
         if data.report.dry_run {
@@ -1032,6 +1073,28 @@ fn gc_data_summary(data: &GcData) -> String {
         data.build_dirs.recent.len(),
     ));
     }
+    for removal in &data.build_dirs.removed {
+        human.push_str(&format!(
+            "{} Cargo target {} ({}{}; {} allocated bytes{})\n",
+            if data.report.dry_run {
+                "would remove"
+            } else {
+                "removed"
+            },
+            removal.path.display(),
+            removal.reason.as_str(),
+            removal
+                .last_use
+                .map(|last_use| format!("; last use from {}", last_use.as_str()))
+                .unwrap_or_default(),
+            removal.bytes,
+            removal
+                .worktree
+                .as_deref()
+                .map(|worktree| format!("; worktree {}", worktree.display()))
+                .unwrap_or_default(),
+        ));
+    }
     for warning in &data.build_dirs.warnings {
         human.push_str(&format!("Cargo cache warning: {warning}\n"));
     }
@@ -1046,19 +1109,30 @@ fn gc_data_summary(data: &GcData) -> String {
     }
     let shared = &data.shared_targets;
     if !shared.found.is_empty() {
-        human.push_str(&if data.report.dry_run {
-            format!(
-                "{} retired shared Cargo target(s) would be removed\n",
-                shared.found.len()
-            )
-        } else {
-            format!(
-                "{} retired shared Cargo target(s), {} bytes removed; {} in use kept\n",
-                shared.removed.len(),
-                shared.bytes,
-                shared.busy.len()
-            )
-        });
+        human.push_str(&format!(
+            "{} of {} retired shared Cargo target(s), {} allocated bytes {}; {} kept{}\n",
+            shared.removed.len(),
+            shared.found.len(),
+            shared.bytes,
+            if data.report.dry_run {
+                "removable"
+            } else {
+                "removed"
+            },
+            shared.kept.len(),
+            shared
+                .interrupted_at
+                .as_deref()
+                .map(|path| format!("; resumes at {}", path.display()))
+                .unwrap_or_default(),
+        ));
+    }
+    for kept in &shared.kept {
+        human.push_str(&format!(
+            "kept retired shared Cargo target {}: {}\n",
+            kept.path.display(),
+            kept.cause
+        ));
     }
     for error in &shared.errors {
         human.push_str(&format!("retired shared Cargo target: {error}\n"));
@@ -1307,6 +1381,10 @@ enum GcOutput<'a> {
         build_dir_budget_source: &'a str,
         build_dir_measurement_skipped: bool,
         build_dir_interrupted_at: &'a Option<PathBuf>,
+        build_dir_target_idle_setting: &'a str,
+        build_dir_target_idle_source: &'a str,
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        classes_not_run: &'a [provenant_config::RetentionKind],
         graph_checkpoints_removed: usize,
         discard_archives_reclaimed: usize,
         discard_archive_bytes: u64,
@@ -1378,6 +1456,9 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         build_dir_budget_source: &data.build_dirs.budget_source,
         build_dir_measurement_skipped: data.build_dirs.measurement_skipped,
         build_dir_interrupted_at: &data.build_dirs.interrupted_at,
+        build_dir_target_idle_setting: &data.build_dirs.target_idle_setting,
+        build_dir_target_idle_source: &data.build_dirs.target_idle_source,
+        classes_not_run: &data.classes_not_run,
         graph_checkpoints_removed: data.graph_checkpoints_removed,
         discard_archives_reclaimed: if data.report.dry_run {
             data.discard_archives.would_remove.len()
@@ -2404,8 +2485,15 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .wall_now()
         .map(|now| i128::from(now.as_micros()) * 1_000)
         .map_err(|_| Error::Budget)?;
+    let target_idle_seconds = config
+        .gc
+        .cargo_target_idle_seconds()
+        .map_err(|_| Error::GcObservation("invalid Cargo target idle duration"))?;
     let policy = CacheGcPolicy {
         idle_before_ns: Some(now_ns - i128::from(idle_seconds) * 1_000_000_000),
+        // Chair-made, hand-made and other projects' worktrees keep their
+        // caches until `gc.cargo_target_idle`.
+        foreign_idle_before_ns: Some(now_ns - i128::from(target_idle_seconds) * 1_000_000_000),
         // build_directories owns the shared lane/target budget and disk floor.
         // This pass reclaims only idle or orphaned whole private caches.
         dry_run: command.dry_run,
@@ -2534,6 +2622,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 })
                 .map_err(|error| Error::RetentionCollection(error.to_string()))?;
         }
+        adapters.data.classes_run.push(class.class);
         if let Err(error) = class.adapter.collect(&mut adapters) {
             if adapters.stop_requested() {
                 let cursor =
@@ -2795,10 +2884,12 @@ impl GcAdapters<'_> {
         !sweep_should_continue(self.deadline, self.lease.as_ref())
     }
 
+    /// Stop before an adapter does any work; the class then counts as not run.
     fn stop_at_resume(&mut self) -> Result<bool, Error> {
         if !self.stop_requested() {
             return Ok(false);
         }
+        self.data.classes_run.pop();
         let cursor = crate::gc_sweep::Cursor {
             class: self.active_class.clone(),
             project: self.project_start.clone(),
@@ -3478,31 +3569,58 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let home = self.home;
         let config = self.config;
         let free_floor = self.free_floor;
-        self.data.shared_targets = provenant_run::build_dir_gc::retire_shared_targets(
-            home,
-            config
-                .domains
-                .fabric
-                .lanes
-                .build_settings()
-                .build_dir_grace_seconds(),
-            command.dry_run,
-            self.now_ns,
+        let sweep_deadline = self.deadline;
+        // A retirement cursor and a target census epoch both resume this
+        // class; each goes only to its own step.
+        let resume_detail = self.resume_detail().map(str::to_owned);
+        let retirement_resume = self.resume_candidate().map(Path::to_path_buf).zip(
+            resume_detail
+                .clone()
+                .filter(|detail| provenant_run::build_dir_gc::is_retirement_detail(detail)),
         );
+        let resume_detail = resume_detail
+            .filter(|detail| !provenant_run::build_dir_gc::is_retirement_detail(detail));
+        self.data.shared_targets = {
+            let lease = self.lease.as_ref();
+            let mut should_stop = || !sweep_should_continue(sweep_deadline, lease);
+            provenant_run::build_dir_gc::retire_shared_targets(
+                home,
+                config
+                    .domains
+                    .fabric
+                    .lanes
+                    .build_settings()
+                    .build_dir_grace_seconds(),
+                command.dry_run,
+                self.now_ns,
+                retirement_resume
+                    .as_ref()
+                    .map(|(path, detail)| (path.as_path(), detail.as_str())),
+                &mut should_stop,
+            )
+        };
+        if let Some(stopped) = self.data.shared_targets.interrupted_at.clone() {
+            let detail = self.data.shared_targets.cursor_detail.clone();
+            self.stop_at(None, Some(stopped), detail)?;
+            return Ok(());
+        }
         let profile = config.dispatch_profile(&[])?;
         let cache_root = provenant_run::build_dir_gc::shared_cache_root(home);
         let budget = match provenant_config::cargo_cache_budget(&profile, &cache_root) {
             Ok(budget) => budget,
             Err(error) => {
-                append_sweep_warning(
-                    &mut self.data.sweep_warning,
-                    format!(
-                        "Cargo cache budget could not be resolved ({error}); skipping target cache collection"
-                    ),
+                let message = format!(
+                    "Cargo cache budget could not be resolved ({error}); skipping target cache collection"
                 );
+                self.data.build_dirs.errors.push(message.clone());
+                append_sweep_warning(&mut self.data.sweep_warning, message);
                 return Ok(());
             }
         };
+        let target_idle_seconds = config
+            .gc
+            .cargo_target_idle_seconds()
+            .map_err(|_| Error::GcObservation("invalid Cargo target idle duration"))?;
         let mut protection = provenant_run::build_dir_gc::TargetProtection::default();
         for project in &self.projects {
             let live = project
@@ -3522,8 +3640,6 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             }
         }
         protection.unobserved = !self.data.unobserved_projects.is_empty();
-        let sweep_deadline = self.deadline;
-        let resume_detail = self.resume_detail().map(str::to_owned);
         let epoch_number = if let Some(lease) = self.lease.as_ref() {
             lease.epoch()
         } else {
@@ -3575,6 +3691,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                         .build_settings()
                         .build_dir_grace_seconds(),
                     idle_seconds: self.data.idle_seconds,
+                    target_idle_seconds: Some(target_idle_seconds),
                 },
                 command.dry_run,
                 &budget,
@@ -3587,6 +3704,12 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         }
         .map_err(|error| Error::RetentionCollection(error.to_string()))?;
         report.warnings.append(&mut warnings);
+        report.target_idle_setting = config.gc.cargo_target_idle.clone();
+        report.target_idle_source = config
+            .origins
+            .get("gc.cargo_target_idle")
+            .map(gc_origin_source)
+            .unwrap_or_else(|| "compiled default".into());
         if let Some(candidate) = report.interrupted_at.clone() {
             self.stop_at(None, Some(candidate), report.cursor_detail.clone())?;
         } else if self
@@ -4207,36 +4330,64 @@ mod gc_preview_tests {
     #[test]
     fn gc_summary_reports_build_output_reclaimed_and_remaining() {
         let mut data = GcData::default();
-        data.build_dirs.removed.push("/cache/a/target".into());
+        data.build_dirs
+            .removed
+            .push(provenant_run::build_dir_gc::TargetRemoval {
+                path: "/cache/a/target".into(),
+                worktree: Some("/repo/.worktrees/gone".into()),
+                reason: provenant_run::build_dir_gc::TargetReason::Idle,
+                last_use: Some(provenant_run::build_dir_gc::LastUse::Stamp),
+                bytes: 4096,
+            });
         data.build_dirs.bytes = 4096;
         data.build_dirs.cache_bytes = 8192;
         data.build_dirs.budget_bytes = 16384;
         data.build_dirs.budget_setting = "16K".into();
         data.build_dirs.budget_source = "host".into();
+        data.build_dirs.target_idle_setting = "30d".into();
+        data.build_dirs.target_idle_source = "compiled default".into();
         data.build_dirs.busy.push("/cache/b/target".into());
         data.build_dirs.recent.push("/cache/c/target".into());
-        for (dry_run, expected) in [
+        for (dry_run, expected, verb) in [
             (
                 true,
-                "1 Cargo target(s), 4096 bytes reclaimable; 8192 / 16384 bytes remain (budget setting 16K; source: host), 1 busy, 1 recent\n",
+                "1 Cargo target(s), 4096 allocated bytes reclaimable; 8192 / 16384 allocated bytes remain (budget setting 16K; source: host; idle after 30d (source: compiled default)), 1 busy, 1 recent\n",
+                "would remove",
             ),
             (
                 false,
-                "1 Cargo target(s), 4096 bytes reclaimed; 8192 / 16384 bytes remain (budget setting 16K; source: host), 1 busy, 1 recent\n",
+                "1 Cargo target(s), 4096 allocated bytes reclaimed; 8192 / 16384 allocated bytes remain (budget setting 16K; source: host; idle after 30d (source: compiled default)), 1 busy, 1 recent\n",
+                "removed",
             ),
         ] {
             data.report.dry_run = dry_run;
-            assert!(gc_data_summary(&data).contains(expected));
+            let summary = gc_data_summary(&data);
+            assert!(summary.contains(expected), "{summary}");
+            assert!(
+                summary.contains(&format!(
+                    "{verb} Cargo target /cache/a/target (idle; last use from last-use stamp; 4096 allocated bytes; worktree /repo/.worktrees/gone)\n"
+                )),
+                "{summary}"
+            );
         }
         let json = serde_json::to_value(gc_result_data(&data, false)).unwrap_or_default();
         assert_eq!(json["build_dirs_removed"], 1);
         assert_eq!(json["build_dir_bytes_reclaimed"], 4096);
         assert_eq!(json["build_dir_bytes"], 8192);
         assert_eq!(json["build_dir_budget_source"], "host");
+        assert_eq!(json["build_dir_target_idle_setting"], "30d");
+        assert_eq!(json["build_dir_target_idle_source"], "compiled default");
         let json = serde_json::to_value(gc_result_data(&data, true)).unwrap_or_default();
         assert_eq!(json["build_dirs"]["cache_bytes"], 8192);
         assert_eq!(json["build_dirs"]["budget_source"], "host");
         assert_eq!(json["build_dirs"]["recent"][0], "/cache/c/target");
+        assert_eq!(json["build_dirs"]["removed"][0]["path"], "/cache/a/target");
+        assert_eq!(json["build_dirs"]["removed"][0]["reason"], "idle");
+        assert_eq!(json["build_dirs"]["removed"][0]["last_use"], "stamp");
+        assert_eq!(
+            json["build_dirs"]["removed"][0]["worktree"],
+            "/repo/.worktrees/gone"
+        );
     }
     #[test]
     fn gc_summary_reports_event_expiry_in_preview_and_applied_mode() {
@@ -4296,6 +4447,54 @@ mod gc_preview_tests {
         }
     }
 
+    /// A sweep that stops before a class never reports that class's empty
+    /// report as a measured zero with a blank budget and source.
+    #[test]
+    fn a_class_the_sweep_never_reached_reports_not_run() {
+        use provenant_config::{ByteObservation, RetentionKind};
+        let mut data = GcData {
+            classes_run: vec![RetentionKind::LaneCargoCaches],
+            ..GcData::default()
+        };
+        data.observe_retention(provenant_config::RetentionTrigger::FullGc);
+        assert!(
+            data.classes_not_run
+                .contains(&RetentionKind::BuildDirectories)
+        );
+        assert!(data.classes_not_run.contains(&RetentionKind::TargetSeeds));
+        assert!(
+            !data
+                .classes_not_run
+                .contains(&RetentionKind::LaneCargoCaches)
+        );
+        let rows = gc_retention_bytes(&data);
+        for class in [RetentionKind::BuildDirectories, RetentionKind::TargetSeeds] {
+            assert_eq!(
+                rows.iter()
+                    .find(|row| row.class == class)
+                    .unwrap()
+                    .observation,
+                ByteObservation::Unknown,
+                "{class:?}"
+            );
+        }
+        let summary = gc_data_summary(&data);
+        assert!(
+            summary.contains("Cargo targets: not run in this pass\n"),
+            "{summary}"
+        );
+        assert!(summary.contains("target seed generations: not run in this pass\n"));
+        assert!(!summary.contains("Cargo target(s)"), "{summary}");
+        assert!(!summary.contains("budget setting ;"), "{summary}");
+        let json = serde_json::to_value(gc_result_data(&data, false)).unwrap();
+        assert!(
+            json["classes_not_run"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("build_directories"))
+        );
+    }
+
     #[test]
     fn measurement_failure_is_scoped_to_its_retention_class() {
         use provenant_config::{ByteObservation, RetentionIssue, RetentionKind};
@@ -4313,6 +4512,10 @@ mod gc_preview_tests {
             });
             let mut data = GcData::default();
             data.worktree_cleanup.push(report);
+            data.classes_run = provenant_config::RETENTION_CLASSES
+                .iter()
+                .map(|class| class.class)
+                .collect();
             data.observe_retention(provenant_config::RetentionTrigger::FullGc);
             for row in gc_retention_bytes(&data).into_iter().filter(|r| {
                 matches!(
@@ -4360,6 +4563,7 @@ mod gc_preview_tests {
                 .iter()
                 .all(|row| matches!(row.observation, ByteObservation::Unknown))
         );
+        data.classes_run = RETENTION_CLASSES.iter().map(|class| class.class).collect();
         data.observe_retention(provenant_config::RetentionTrigger::FullGc);
         let rows = gc_retention_bytes(&data);
         assert_eq!(rows.len(), RETENTION_CLASSES.len());

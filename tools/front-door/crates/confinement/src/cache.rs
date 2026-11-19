@@ -23,8 +23,123 @@ pub(crate) const CARGO_CACHE_OWNER_VERSION: &[u8] = match CARGO_CACHE_OWNER_PREF
     Some((_, version)) => version,
     None => CARGO_CACHE_OWNER_PREFIX,
 };
+/// The cache directory tag (<https://bford.info/cachedir/>) Cargo writes into a
+/// target directory it creates. Backup and indexing tools skip a tagged tree.
+pub const CACHE_DIRECTORY_TAG: &str = "CACHEDIR.TAG";
+pub const CACHE_DIRECTORY_TAG_CONTENT: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55\n\
+# This file is a cache directory tag created by cargo.\n\
+# For information about cache directory tags see https://bford.info/cachedir/\n";
+
+/// Tag `directory` as a cache, as Cargo tags a target directory it creates,
+/// unless something already holds the name. Provenant creates target roots
+/// Cargo never sees created, so it writes the tag itself. Only backup and
+/// indexing tools read it; GC never does.
+pub fn tag_cache_directory(directory: &Directory) -> Result<(), FsError> {
+    let name = OsStr::new(CACHE_DIRECTORY_TAG);
+    match directory.metadata_at(name, false) {
+        Ok(_) => return Ok(()),
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error),
+    }
+    match directory.atomic_write(
+        name,
+        ".provenant-cachedir-tag-",
+        CACHE_DIRECTORY_TAG_CONTENT,
+        provenant_os::fs::PublishMode::NoReplace,
+    ) {
+        Ok(_) => Ok(()),
+        Err(error) if error.is_exists() => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+/// A Cargo target's last-use stamp. Launches and seeds replace it with the
+/// wall time in microseconds since the epoch; GC reads that content.
+pub const TARGET_LAST_USED: &str = ".provenant-last-used";
+/// The activity marker under each managed Cargo cache root. Every launch and
+/// seed replaces it after stamping its targets.
+pub const CACHE_ACTIVITY_MARKER: &str = ".provenant-cache-activity";
+/// The directories Cargo builds into under a private lane cache.
+pub const CARGO_TARGET_NAMES: [&str; 2] = ["target", "target-lint"];
+
+/// A target's last-use stamp in nanoseconds; `None` when it is absent or
+/// holds anything but microseconds.
+pub fn read_last_use_stamp(target: &Directory) -> Option<i128> {
+    let file = target.open_read(OsStr::new(TARGET_LAST_USED)).ok()?;
+    let mut text = String::new();
+    file.take(64).read_to_string(&mut text).ok()?;
+    let micros: u64 = text.trim().parse().ok()?;
+    Some(i128::from(micros).saturating_mul(1_000))
+}
+
+/// Which activity marker a cache root held. Writers replace the marker after
+/// their stamps, so an unchanged marker means no stamp landed after it was
+/// read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CacheActivity(Option<(u64, u64, i128)>);
+
+impl CacheActivity {
+    fn read(root: &Directory) -> Result<Self, FsError> {
+        match root.metadata_at(OsStr::new(CACHE_ACTIVITY_MARKER), false) {
+            Ok(marker) => Ok(Self(Some((
+                marker.device,
+                marker.inode,
+                marker.modified_ns,
+            )))),
+            Err(error) if error.is_not_found() => Ok(Self(None)),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// The last use a removal rechecks just before it detaches a target or a lane
+/// cache. Lane cache GC and Cargo target GC both decide through it.
+#[derive(Debug)]
+pub struct LastUseRecheck {
+    newest: i128,
+    activity: CacheActivity,
+}
+
+impl LastUseRecheck {
+    /// The newer of `file_newest` and the stamp of each named target under
+    /// `cache`. `file_newest` must come from a measurement taken with the
+    /// cache's Cargo locks held, which keep Cargo out; the stamps and the
+    /// activity marker of `root`, read first, cover launches and seeds,
+    /// which write without those locks.
+    pub fn read(
+        root: &Directory,
+        cache: &Directory,
+        targets: &[&str],
+        file_newest: i128,
+    ) -> Result<Self, FsError> {
+        let activity = CacheActivity::read(root)?;
+        let mut newest = file_newest;
+        for target in targets {
+            match cache.open_verified_directory(OsStr::new(target)) {
+                Ok(target) => {
+                    if let Some(stamp) = read_last_use_stamp(&target) {
+                        newest = newest.max(stamp);
+                    }
+                }
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(Self { newest, activity })
+    }
+
+    pub fn newest(&self) -> i128 {
+        self.newest
+    }
+
+    /// Whether no launch or seed has published activity under `root` since
+    /// the stamps were read. Call it immediately before detaching: a removal
+    /// that finds it false keeps the target for a later pass.
+    pub fn still_current(&self, root: &Directory) -> Result<bool, FsError> {
+        Ok(CacheActivity::read(root)? == self.activity)
+    }
+}
+
 const MAX_CACHE_SWEEP_DEPTH: usize = 32;
-const MAX_TREE_MEASURE_ENTRIES: usize = 4096;
 const MAX_TREE_CURSOR_BYTES: usize = 14 * 1024;
 const MAX_CACHE_CURSOR_BYTES: usize = 14 * 1024;
 const CACHE_DELETE_BATCH_ENTRIES: usize = 64;
@@ -41,8 +156,15 @@ pub enum CacheGcReason {
     Idle,
     /// A detached cache left by an interrupted sweep.
     Tombstone,
-    /// An existing owner outside the selected project; always kept.
+    /// An existing owner outside the selected project, kept until nothing
+    /// used its cache for `gc.cargo_target_idle`.
     Foreign,
+    /// An existing owner outside the selected project whose cache nothing
+    /// used for `gc.cargo_target_idle`.
+    ForeignIdle,
+    /// Another directory now stands at the owner path. The cache key records
+    /// the original worktree's identity, so no worktree builds here again.
+    Replaced,
     /// A process was observed live in the owner tree; always kept.
     Live,
     /// Writer exclusion cannot be established; always kept.
@@ -57,6 +179,10 @@ pub struct CacheGcPolicy {
     pub idle_before_ns: Option<i128>,
     /// Report without deleting.
     pub dry_run: bool,
+    /// Also remove caches of existing owners outside the selected project
+    /// whose newest write is older than this (`gc.cargo_target_idle`). `None`
+    /// keeps them.
+    pub foreign_idle_before_ns: Option<i128>,
     /// Canonical worktrees listed by the selected project.
     pub project_owners: BTreeSet<PathBuf>,
     /// Limit collection to listed owners, including orphan and detached output.
@@ -81,7 +207,8 @@ pub struct CacheGcReport {
     pub kept: Vec<CacheGcEntry>,
     pub bytes_freed: u64,
     pub errors: Vec<RetentionIssue>,
-    /// Preview measurements stopped at the shared entry or time bound.
+    /// A measurement stopped at the caller's deadline, so byte totals are a
+    /// lower bound.
     pub bytes_estimated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub free_bytes_before: Option<u64>,
@@ -223,8 +350,10 @@ struct TreeMeasureFrame {
     metadata: TreeMeasureMetadata,
 }
 
-/// Measure an allocated tree without following links. A pass stops after 4,096
-/// entries or the caller's deadline. Its opaque cursor resumes
+/// Measure an allocated tree without following links. A pass stops only at the
+/// caller's deadline, never at an entry count: a per-pass cap would end every
+/// GC sweep at the first large cache and starve the classes after it. Its
+/// opaque cursor resumes
 /// only while every open directory frame retains the same identity and content
 /// metadata. A stale cursor restarts at the supplied root.
 pub fn measure_tree_with_progress(
@@ -259,11 +388,10 @@ pub fn measure_tree_with_progress(
         fresh_tree_measure(directory, display_root, root_metadata)?
     };
 
-    let mut visited = 0_usize;
     while !frames.is_empty() {
         let depth = frames.len();
         let frame = frames.last_mut().ok_or(PermissionError::CacheSweepDepth)?;
-        if visited >= MAX_TREE_MEASURE_ENTRIES || !keep_going() {
+        if !keep_going() {
             let cursor = tree_measure_cursor(&stats, &mut frames)?;
             let continuation = serde_json::to_string(&cursor).ok();
             return Ok(TreeMeasureProgress {
@@ -282,7 +410,6 @@ pub fn measure_tree_with_progress(
                     .map_err(cache_fs_error("stat measured entry", &path))?;
                 stats.allocated_bytes = stats.allocated_bytes.saturating_add(metadata.allocated);
                 stats.newest_modified_ns = stats.newest_modified_ns.max(metadata.modified_ns);
-                visited += 1;
                 if metadata.kind == FileKind::Directory {
                     if depth >= MAX_CACHE_SWEEP_DEPTH {
                         return Err(PermissionError::CacheSweepDepth);
@@ -1009,7 +1136,7 @@ impl std::error::Error for CacheSweepFailures {}
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "cache identity, custody and shared measurement budget stay explicit at the mutation boundary"
+    reason = "cache identity, custody and the sweep deadline stay explicit at the mutation boundary"
 )]
 fn prune_worktree_cache(
     root: &provenant_os::fs::Directory,
@@ -1064,18 +1191,31 @@ fn prune_worktree_cache(
     {
         return Ok(());
     }
-    let Some(_cargo_guards) = lock_cargo_profiles(&cache, &|| scan.permits()) else {
-        if !scan.permits() {
+    let _cargo_guards = match lock_cargo_profiles(&cache, &|| scan.permits()) {
+        Ok(guards) => guards,
+        Err(CargoLockProbe::Stopped) => {
             report.interrupted_at = Some(cache_root.join(name));
             report.continuation = None;
             return Ok(());
         }
-        report.kept.push(CacheGcEntry {
-            path: cache_root.join(name),
-            bytes: 0,
-            reason: CacheGcReason::Busy,
-        });
-        return Ok(());
+        Err(probe) => {
+            if let CargoLockProbe::Failed { path, cause } = &probe {
+                report.errors.push(RetentionIssue {
+                    path: cache_root.join(name).join(path),
+                    operation: "probe Cargo locks".into(),
+                    cause: cause.clone(),
+                });
+            }
+            report.kept.push(CacheGcEntry {
+                path: cache_root.join(name),
+                bytes: 0,
+                reason: match probe {
+                    CargoLockProbe::Held(_) => CacheGcReason::Busy,
+                    _ => CacheGcReason::Unobservable,
+                },
+            });
+            return Ok(());
+        }
     };
     // Acquire the worktree writer lock before measuring an idle candidate. The
     // last-write snapshot must describe the cache after an active writer has
@@ -1224,16 +1364,33 @@ fn prune_worktree_cache(
                 return Ok(());
             }
             // Measurement may take time. Recheck the marker, owner and last
-            // write immediately before detaching the cache from the lane path.
+            // use immediately before detaching the cache from the lane path.
             if read_cache_owner(&cache, Path::new(name))? != owner {
                 return Ok(());
             }
-            let newest = measured.map_or(i128::MIN, |stats| stats.newest_modified_ns);
+            cache_gc_operation("recheck", Path::new(name), || Ok(()))
+                .map_err(cache_fs_error("recheck", Path::new(name)))?;
+            // This pass has held the Cargo locks since before it measured, so
+            // Cargo wrote nothing since. A measurement resumed from an earlier
+            // pass was partly taken without them and is repeated here.
+            let file_newest = if detail.is_some() {
+                let progress = measure_cache(&cache, &cache_root.join(name), None, scan)?;
+                let Some(stats) = progress.stats else {
+                    report.interrupted_at = Some(cache_root.join(name));
+                    report.continuation = None;
+                    return Ok(());
+                };
+                stats.newest_modified_ns
+            } else {
+                measured.map_or(i128::MIN, |stats| stats.newest_modified_ns)
+            };
+            let recheck = LastUseRecheck::read(root, &cache, &CARGO_TARGET_NAMES, file_newest)
+                .map_err(cache_fs_error("recheck last use", Path::new(name)))?;
             let current_reason = cache_gc_reason_with_newest(
                 &cache_root.join(name),
                 original_owner,
                 policy,
-                || Ok(newest),
+                || Ok(recheck.newest()),
             )?;
             if current_reason == Some(CacheGcReason::Foreign) {
                 report.kept.push(CacheGcEntry {
@@ -1243,6 +1400,14 @@ fn prune_worktree_cache(
                 });
             }
             if current_reason != Some(reason) {
+                return Ok(());
+            }
+            // A launch or seed that stamped a target after the recheck read
+            // the stamps keeps the cache for a later pass.
+            if !recheck
+                .still_current(root)
+                .map_err(cache_fs_error("recheck cache activity", Path::new(name)))?
+            {
                 return Ok(());
             }
             cache_gc_operation("before rename", Path::new(name), || {
@@ -1333,82 +1498,118 @@ fn prune_worktree_cache(
     Ok(())
 }
 
+/// Why a Cargo lock probe could not hold every lock under a cache. Each case
+/// keeps the directory, but only `Held` means a live build: the others are
+/// reported with their cause so a kept directory is never silent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CargoLockProbe {
+    /// A live process holds this lock, relative to the probed cache.
+    Held(PathBuf),
+    /// The caller's deadline stopped the probe before it finished.
+    Stopped,
+    /// A lock or directory could not be observed.
+    Failed { path: PathBuf, cause: String },
+}
+
+impl std::fmt::Display for CargoLockProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Held(path) => write!(f, "Cargo lock {} is held", path.display()),
+            Self::Stopped => f.write_str("the lock probe reached the sweep deadline"),
+            Self::Failed { path, cause } => {
+                write!(f, "Cargo lock probe failed at {}: {cause}", path.display())
+            }
+        }
+    }
+}
+
 /// Hold all Cargo profile and target owner locks under one cache root. Shared
 /// project targets use the same probe as private lane caches.
 pub fn lock_cargo_profiles(
     cache: &Directory,
     keep_going: &dyn Fn() -> bool,
-) -> Option<Vec<LockGuard>> {
+) -> Result<Vec<LockGuard>, CargoLockProbe> {
+    fn failed(path: &Path, cause: impl std::fmt::Display) -> CargoLockProbe {
+        CargoLockProbe::Failed {
+            path: path.to_owned(),
+            cause: cause.to_string(),
+        }
+    }
+    fn lock(
+        dir: &Directory,
+        path: &Path,
+        name: &str,
+        guards: &mut Vec<LockGuard>,
+    ) -> Result<bool, CargoLockProbe> {
+        match dir.try_flock_foreign(OsStr::new(name), LockMode::Exclusive) {
+            Ok(ForeignLock::Held) => Err(CargoLockProbe::Held(path.join(name))),
+            Err(error) => Err(failed(&path.join(name), error)),
+            Ok(ForeignLock::Acquired(guard)) => {
+                guards.push(guard);
+                Ok(true)
+            }
+            Ok(ForeignLock::Absent) => Ok(false),
+        }
+    }
     fn visit(
         dir: &Directory,
+        path: &Path,
         depth: usize,
         guards: &mut Vec<LockGuard>,
         keep_going: &dyn Fn() -> bool,
-    ) -> Option<()> {
+    ) -> Result<(), CargoLockProbe> {
         if !keep_going() {
-            return None;
+            return Err(CargoLockProbe::Stopped);
         }
         let mut profile = false;
         for name in [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"] {
             if !keep_going() {
-                return None;
+                return Err(CargoLockProbe::Stopped);
             }
-            match dir.try_flock_foreign(OsStr::new(name), LockMode::Exclusive) {
-                Ok(ForeignLock::Held) | Err(_) => return None,
-                Ok(ForeignLock::Acquired(guard)) => {
-                    profile = true;
-                    guards.push(guard);
-                }
-                Ok(ForeignLock::Absent) => {}
-            }
+            profile |= lock(dir, path, name, guards)?;
         }
         // A target-root lock does not cover a nested profile lock.
         if (profile && depth > 0) || depth == 2 {
-            return Some(());
+            return Ok(());
         }
-        let entries = dir.entries().ok()?;
-        let mut count = 0_usize;
+        // Depth and the caller's deadline bound the walk. An entry count cap
+        // would fail every probe of a target whose root holds a large output
+        // directory, keeping that target for ever.
+        let entries = dir.entries().map_err(|error| failed(path, error))?;
         for entry in entries {
             if !keep_going() {
-                return None;
+                return Err(CargoLockProbe::Stopped);
             }
-            count += 1;
-            if count > 1000 {
-                return None;
-            }
-            let name = entry.ok()?;
-            let meta = dir.metadata_at(&name, false).ok()?;
+            let name = entry.map_err(|error| failed(path, error))?;
+            let child_path = path.join(&name);
+            let meta = dir
+                .metadata_at(&name, false)
+                .map_err(|error| failed(&child_path, error))?;
             if meta.kind == FileKind::Directory {
-                visit(
-                    &dir.open_verified_directory(&name).ok()?,
-                    depth + 1,
-                    guards,
-                    keep_going,
-                )?;
+                let child = dir
+                    .open_verified_directory(&name)
+                    .map_err(|error| failed(&child_path, error))?;
+                visit(&child, &child_path, depth + 1, guards, keep_going)?;
             }
         }
-        Some(())
+        Ok(())
     }
     let mut guards = Vec::new();
     if !keep_going() {
-        return None;
+        return Err(CargoLockProbe::Stopped);
     }
-    match cache.try_flock_foreign(OsStr::new(CARGO_CACHE_OWNER), LockMode::Exclusive) {
-        Ok(ForeignLock::Held) | Err(_) => return None,
-        Ok(ForeignLock::Acquired(guard)) => guards.push(guard),
-        Ok(ForeignLock::Absent) => {}
-    }
-    for target_name in ["target", "target-lint"] {
+    lock(cache, Path::new(""), CARGO_CACHE_OWNER, &mut guards)?;
+    for target_name in CARGO_TARGET_NAMES {
         if !keep_going() {
-            return None;
+            return Err(CargoLockProbe::Stopped);
         }
         match cache.open_verified_directory(OsStr::new(target_name)) {
-            Ok(target) => visit(&target, 0, &mut guards, keep_going)?,
+            Ok(target) => visit(&target, Path::new(target_name), 0, &mut guards, keep_going)?,
             Err(error) if error.is_not_found() => {}
-            Err(_) => return None,
+            Err(error) => return Err(failed(Path::new(target_name), error)),
         }
     }
-    Some(guards)
+    Ok(guards)
 }
 
 /// Probe every directory in attempt scratch, holding discovered Cargo locks until
@@ -1463,11 +1664,55 @@ pub fn lock_scratch_cargo_profiles(
     Some(guards)
 }
 
-/// Read the verified worktree path that owns a private lane cache.
-pub fn lane_cargo_cache_owner_path(
+/// What became of the worktree a private lane cache was made for. Lane cache
+/// GC and target GC classify owners through this one function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerStatus {
+    /// The worktree exists with its recorded identity and, where the caller
+    /// classifies by registration, a registered lane lists it.
+    Live,
+    /// The worktree exists with its recorded identity, but no registered lane
+    /// of the selected project lists it: a chair-made or hand-made worktree,
+    /// or another project's.
+    Foreign,
+    /// Another directory stands at the owner path. The cache key records the
+    /// original identity, so no worktree builds in this cache again.
+    Replaced,
+    /// Nothing exists at the owner path.
+    Gone,
+}
+
+/// Classify an owner. `registered` lists the selected project's worktrees;
+/// `None` does not classify by registration, so an intact owner is `Live`.
+pub(crate) fn owner_status(
+    owner: &CacheOwner,
+    registered: Option<&BTreeSet<PathBuf>>,
+) -> std::io::Result<OwnerStatus> {
+    match std::fs::symlink_metadata(&owner.path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(OwnerStatus::Gone),
+        Err(error) => Err(error),
+        Ok(metadata) if owner.identity != (metadata.dev(), metadata.ino()) => {
+            Ok(OwnerStatus::Replaced)
+        }
+        Ok(_) if registered.is_some_and(|listed| !listed.contains(&owner.path)) => {
+            Ok(OwnerStatus::Foreign)
+        }
+        Ok(_) => Ok(OwnerStatus::Live),
+    }
+}
+
+/// The recorded owner of a private lane cache and what became of it, without
+/// classifying by registration.
+pub fn lane_cargo_cache_owner(
     cache: &Directory,
-) -> Result<Option<std::path::PathBuf>, PermissionError> {
-    Ok(read_cache_owner(cache, Path::new("."))?.map(|owner| owner.path))
+) -> Result<Option<(PathBuf, OwnerStatus)>, PermissionError> {
+    let Some(owner) = read_cache_owner(cache, Path::new("."))? else {
+        return Ok(None);
+    };
+    let status = owner_status(&owner, None)
+        .map_err(|error| cache_io_error("stat owner", &owner.path, error))?;
+    Ok(Some((owner.path, status)))
 }
 
 fn verify_detached_cache(
@@ -1679,48 +1924,58 @@ pub(crate) fn cache_gc_reason_with_newest(
     policy: &CacheGcPolicy,
     newest_write_ns: impl FnOnce() -> Result<i128, PermissionError>,
 ) -> Result<Option<CacheGcReason>, PermissionError> {
-    use std::io;
-
     // Occupancy is stronger than cache age and owner state. In particular, a
     // busy cache whose worktree disappeared during a run remains protected.
     if policy.protected_owners.contains_key(&owner.path) {
         return Ok(None);
     }
 
-    let reason = match std::fs::symlink_metadata(&owner.path) {
-        Ok(_) if !policy.project_owners.contains(&owner.path) => {
-            if let Some(threshold) = policy.idle_before_ns
-                && newest_write_ns()? >= threshold
-            {
-                return Ok(None);
-            }
-            CacheGcReason::Foreign
-        }
-        Ok(metadata) if owner.identity == (metadata.dev(), metadata.ino()) => {
+    let status = owner_status(owner, Some(&policy.project_owners)).map_err(|error| {
+        cache_fs_error("stat owner", relative)(FsError::Io {
+            operation: "symlink_metadata owner",
+            path: owner.path.clone(),
+            source: error,
+        })
+    })?;
+    let reason = match status {
+        OwnerStatus::Live => {
             let Some(threshold) = policy.idle_before_ns else {
                 return Ok(None);
             };
-            let newest = newest_write_ns()?;
-            if newest >= threshold {
+            if newest_write_ns()? >= threshold {
                 return Ok(None);
             }
             CacheGcReason::Idle
         }
-        Ok(_) => return Ok(None),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+        OwnerStatus::Foreign => {
+            let newest = newest_write_ns()?;
+            if policy
+                .foreign_idle_before_ns
+                .is_some_and(|threshold| newest < threshold)
+            {
+                CacheGcReason::ForeignIdle
+            } else if policy
+                .idle_before_ns
+                .is_some_and(|threshold| newest >= threshold)
+            {
+                return Ok(None);
+            } else {
+                CacheGcReason::Foreign
+            }
+        }
+        // A replaced owner is as gone as a missing one: the cache key cannot
+        // match the directory now at that path. Both wait out `gc.idle`.
+        OwnerStatus::Replaced | OwnerStatus::Gone => {
             if let Some(threshold) = policy.idle_before_ns
                 && newest_write_ns()? >= threshold
             {
                 return Ok(None);
             }
-            CacheGcReason::Orphaned
-        }
-        Err(error) => {
-            return Err(cache_fs_error("stat owner", relative)(FsError::Io {
-                operation: "symlink_metadata owner",
-                path: owner.path.clone(),
-                source: error,
-            }));
+            if status == OwnerStatus::Gone {
+                CacheGcReason::Orphaned
+            } else {
+                CacheGcReason::Replaced
+            }
         }
     };
     Ok(Some(reason))
@@ -2170,6 +2425,79 @@ mod tests {
             Ok(path)
         }
 
+        /// A launch that stamps a cache's target between GC's measurement and
+        /// its removal keeps the cache: the recheck reads the stamp under the
+        /// held Cargo locks. Its twin, never stamped, goes in the same pass.
+        #[test]
+        fn a_stamp_written_after_the_measurement_keeps_an_idle_foreign_cache()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let temporary = tempfile::tempdir()?;
+            let home = temporary.path();
+            let owner = home.join("other-project");
+            std::fs::create_dir(&owner)?;
+            let now = std::time::SystemTime::now();
+            let old = now - std::time::Duration::from_secs(31 * 86_400);
+            let mut caches = Vec::new();
+            for letter in ["a", "b"] {
+                let path = cache(home, &letter.repeat(64), &owner)?;
+                std::fs::create_dir(path.join("target"))?;
+                std::fs::write(path.join("target/payload"), b"o")?;
+                for entry in [
+                    path.join("target/payload"),
+                    path.join("target"),
+                    path.join("artifact"),
+                    path.join(CARGO_CACHE_OWNER),
+                    path.clone(),
+                ] {
+                    std::fs::File::open(&entry)?.set_modified(old)?;
+                }
+                caches.push(path);
+            }
+            let (stamped, unstamped) = (caches[0].clone(), caches[1].clone());
+            let cutoff = i128::try_from(now.duration_since(std::time::UNIX_EPOCH)?.as_nanos())?
+                - 86_400 * 1_000_000_000;
+            let policy = CacheGcPolicy {
+                foreign_idle_before_ns: Some(cutoff),
+                ..CacheGcPolicy::default()
+            };
+            let stamp = stamped.join("target").join(TARGET_LAST_USED);
+            let late_stamp = stamp.clone();
+            let launched = stamped.clone();
+            let report = sweep(
+                home,
+                &policy,
+                Arc::new(move |event, path| {
+                    if event == "recheck" && path == launched {
+                        let micros = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_err(io::Error::other)?
+                            .as_micros();
+                        std::fs::write(&late_stamp, format!("{micros}\n"))?;
+                    }
+                    Ok(())
+                }),
+            )?;
+            let entries = |entries: &[CacheGcEntry]| {
+                entries
+                    .iter()
+                    .map(|entry| (entry.path.clone(), entry.reason))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                entries(&report.kept),
+                vec![(stamped.clone(), CacheGcReason::Foreign)],
+                "{report:?}"
+            );
+            assert_eq!(
+                entries(&report.removed),
+                vec![(unstamped.clone(), CacheGcReason::ForeignIdle)],
+                "{report:?}"
+            );
+            assert!(stamp.is_file() && stamped.join("target/payload").is_file());
+            assert!(!unstamped.exists());
+            Ok(())
+        }
+
         #[test]
         fn interrupted_root_sweep_resumes_without_restarting_completed_entries()
         -> Result<(), Box<dyn std::error::Error>> {
@@ -2554,6 +2882,7 @@ mod tests {
                         project_owners: [owner.clone()].into(),
                         protected_owners: [(owner.clone(), state.clone())].into(),
                         selected_only: false,
+                        foreign_idle_before_ns: None,
                     };
                     let report =
                         gc_worktree_cargo_caches_with_writer_guard(home, &policy, |path| {
@@ -3186,8 +3515,35 @@ mod tests {
         }
     }
 
+    /// The tag is Cargo's, byte for byte, and an existing entry is never
+    /// replaced.
     #[test]
-    fn lane_cache_gc_keeps_existing_foreign_owners_even_with_old_identity()
+    fn a_tagged_cache_directory_holds_cargos_tag_and_keeps_an_existing_one()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root))?;
+        let directory = Directory::open_anchor(root.path())?;
+        tag_cache_directory(&directory)?;
+        let tag = std::fs::read(root.path().join(CACHE_DIRECTORY_TAG))?;
+        assert_eq!(tag, CACHE_DIRECTORY_TAG_CONTENT);
+        assert!(tag.starts_with(b"Signature: 8a477f597d28d172789f06886806bc55"));
+        assert_eq!(tag.iter().filter(|byte| **byte == b'\n').count(), 3);
+        tag_cache_directory(&directory)?;
+        assert_eq!(std::fs::read(root.path().join(CACHE_DIRECTORY_TAG))?, tag);
+
+        let other = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root))?;
+        std::fs::write(other.path().join(CACHE_DIRECTORY_TAG), b"someone else's")?;
+        tag_cache_directory(&Directory::open_anchor(other.path())?)?;
+        assert_eq!(
+            std::fs::read(other.path().join(CACHE_DIRECTORY_TAG))?,
+            b"someone else's"
+        );
+        Ok(())
+    }
+
+    /// A foreign owner is kept until `gc.cargo_target_idle` passes; a replaced
+    /// one can never build here again, so it goes like a missing owner.
+    #[test]
+    fn lane_cache_gc_keeps_a_foreign_owner_until_idle_and_collects_a_replaced_one()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
 
@@ -3208,24 +3564,76 @@ mod tests {
             });
             std::fs::write(cache.join(CARGO_CACHE_OWNER), marker)?;
         }
+        let foreign = root.join("a".repeat(64));
+        let replaced = root.join("b".repeat(64));
+        // Past `gc.idle` but not `gc.cargo_target_idle`: the foreign cache stays.
         let policy = CacheGcPolicy {
             idle_before_ns: Some(i128::MAX),
+            foreign_idle_before_ns: Some(i128::MIN),
             ..CacheGcPolicy::default()
         };
         let report = gc_worktree_cargo_caches(home, &policy)?;
-        assert!(
-            report.removed.is_empty(),
-            "existing foreign owners must be kept"
-        );
-        assert_eq!(report.kept.len(), 2);
-        assert!(
+        assert_eq!(
             report
                 .kept
                 .iter()
-                .all(|entry| entry.reason == CacheGcReason::Foreign)
+                .map(|entry| (entry.path.clone(), entry.reason))
+                .collect::<Vec<_>>(),
+            vec![(foreign.clone(), CacheGcReason::Foreign)]
         );
-        assert!(root.join("a".repeat(64)).is_dir());
-        assert!(root.join("b".repeat(64)).is_dir());
+        assert_eq!(
+            report
+                .removed
+                .iter()
+                .map(|entry| (entry.path.clone(), entry.reason))
+                .collect::<Vec<_>>(),
+            vec![(replaced.clone(), CacheGcReason::Replaced)]
+        );
+        assert!(foreign.is_dir() && !replaced.exists());
+
+        let policy = CacheGcPolicy {
+            foreign_idle_before_ns: Some(i128::MAX),
+            ..policy
+        };
+        let report = gc_worktree_cargo_caches(home, &policy)?;
+        assert!(report.kept.is_empty(), "{report:?}");
+        assert_eq!(
+            report
+                .removed
+                .iter()
+                .map(|entry| (entry.path.clone(), entry.reason))
+                .collect::<Vec<_>>(),
+            vec![(foreign.clone(), CacheGcReason::ForeignIdle)]
+        );
+        assert!(!foreign.exists());
+        Ok(())
+    }
+
+    /// A replaced owner waits out `gc.idle` like a missing one.
+    #[test]
+    fn a_replaced_owner_is_kept_within_the_idle_grace() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::MetadataExt;
+
+        let temporary = tempfile::tempdir()?;
+        let path = temporary.path().join("worktree");
+        std::fs::create_dir(&path)?;
+        let metadata = std::fs::metadata(&path)?;
+        let replaced = CacheOwner {
+            path,
+            identity: (metadata.dev(), metadata.ino() + 1),
+        };
+        let policy = CacheGcPolicy {
+            idle_before_ns: Some(20),
+            ..Default::default()
+        };
+        assert_eq!(
+            cache_gc_reason_with_newest(Path::new("cache"), &replaced, &policy, || Ok(30))?,
+            None
+        );
+        assert_eq!(
+            cache_gc_reason_with_newest(Path::new("cache"), &replaced, &policy, || Ok(10))?,
+            Some(CacheGcReason::Replaced)
+        );
         Ok(())
     }
 
@@ -3443,6 +3851,7 @@ mod tests {
             project_owners: caches.iter().map(|(_, owner)| owner.clone()).collect(),
             protected_owners: [(caches[2].1.clone(), Occupancy::Observed { process: None })].into(),
             selected_only: false,
+            foreign_idle_before_ns: None,
         };
 
         policy.selected_only = true;

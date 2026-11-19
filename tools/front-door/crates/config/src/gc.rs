@@ -693,6 +693,8 @@ pub struct GcSettings {
     pub stale_graph_age: String,
     pub graph_checkpoint_days: u64,
     pub discard_archive_retention: String,
+    /// Age after which a private Cargo target no build has used is collected.
+    pub cargo_target_idle: String,
     pub free_floor: Option<String>,
     /// Only this small critical threshold may stop new builds; free_floor warns.
     pub critical_free: Option<String>,
@@ -709,6 +711,7 @@ impl Default for GcSettings {
             stale_graph_age: "1d".into(),
             graph_checkpoint_days: 90,
             discard_archive_retention: "14d".into(),
+            cargo_target_idle: "30d".into(),
             free_floor: None,
             critical_free: None,
             alert_below: None,
@@ -820,6 +823,11 @@ impl GcSettings {
         parse_gc_idle_duration(&self.discard_archive_retention)
     }
 
+    /// Age after which an unused managed Cargo target is collected, in seconds.
+    pub fn cargo_target_idle_seconds(&self) -> Result<u64, &'static str> {
+        parse_gc_idle_duration(&self.cargo_target_idle)
+    }
+
     /// Age after which gc offers to stop a stale graph, in seconds.
     pub fn stale_graph_age_seconds(&self) -> Result<u64, &'static str> {
         parse_gc_idle_duration(&self.stale_graph_age)
@@ -888,6 +896,7 @@ impl GcSettings {
         self.idle_seconds()?;
         self.sweep_budget_seconds()?;
         self.discard_archive_retention_seconds()?;
+        self.cargo_target_idle_seconds()?;
         self.stale_graph_age_seconds()?;
         if !(1..=3650).contains(&self.graph_checkpoint_days) {
             return Err("graph_checkpoint_days_range");
@@ -1637,6 +1646,22 @@ mod disk_limit_tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn cargo_target_idle_parses_duration_and_defaults_to_30_days() {
+        let defaults = GcSettings::default();
+        assert_eq!(defaults.cargo_target_idle, "30d");
+        assert_eq!(defaults.cargo_target_idle_seconds(), Ok(30 * 86_400));
+        let mut custom = GcSettings {
+            cargo_target_idle: "2w".into(),
+            ..GcSettings::default()
+        };
+        assert_eq!(custom.cargo_target_idle_seconds(), Ok(14 * 86_400));
+        assert!(custom.validate().is_ok());
+        custom.cargo_target_idle = "soon".into();
+        assert!(custom.cargo_target_idle_seconds().is_err());
+        assert!(custom.validate().is_err());
     }
 
     #[test]
