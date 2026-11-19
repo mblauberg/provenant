@@ -1144,6 +1144,85 @@ struct GitPins {
     base: GitOid,
 }
 
+/// Where the primary checkout's HEAD stood. A lane bound to a linked worktree
+/// that works in the primary checkout instead moves it (#3611).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct PrimaryPosition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    head_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    head: Option<GitOid>,
+}
+
+impl PrimaryPosition {
+    fn describe(&self) -> String {
+        let branch = self.head_ref.as_deref().map_or("detached HEAD", |name| {
+            name.strip_prefix("refs/heads/").unwrap_or(name)
+        });
+        match self.head {
+            Some(head) => format!(
+                "{branch} at {}",
+                head.to_string().chars().take(12).collect::<String>()
+            ),
+            None => format!("{branch} with no commit"),
+        }
+    }
+}
+
+/// The primary checkout as launch found it, sealed beside the attempt.
+const PRIMARY_PIN: &str = "primary-checkout.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PrimaryPin {
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
+    schema_version: u64,
+    scope: provenant_records::custody::Scope,
+    checkout: String,
+    position: PrimaryPosition,
+}
+
+/// Work a writer made outside its bound worktree, seen at settlement.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct StrayWork {
+    /// The finding: where the primary checkout moved and what the bound branch holds.
+    pub note: String,
+    /// False when the bound branch gained no commits, so the lane's work is elsewhere.
+    pub bound_has_commits: bool,
+}
+
+impl StrayWork {
+    /// None while the primary checkout stands where launch found it.
+    fn found(
+        checkout: &str,
+        before: &PrimaryPosition,
+        now: &PrimaryPosition,
+        branch: &str,
+        worktree: &Path,
+        bound_has_commits: bool,
+    ) -> Option<Self> {
+        if before == now {
+            return None;
+        }
+        let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+        let note = format!(
+            "primary checkout {checkout} moved during the attempt ({} -> {}) while bound branch {branch} {} in {}; the lane may have worked in the primary checkout instead of its bound worktree",
+            before.describe(),
+            now.describe(),
+            if bound_has_commits {
+                "gained commits"
+            } else {
+                "gained no commits"
+            },
+            worktree.display(),
+        );
+        Some(Self {
+            note,
+            bound_has_commits,
+        })
+    }
+}
+
 struct LaunchBases {
     host: GitOid,
     work: GitOid,
@@ -2481,6 +2560,165 @@ mod cargo_setup_tests {
         Ok(true)
     }
 
+    fn position(branch: &str, hex: char) -> PrimaryPosition {
+        PrimaryPosition {
+            head_ref: Some(format!("refs/heads/{branch}")),
+            head: GitOid::parse(&hex.to_string().repeat(40)).ok(),
+        }
+    }
+
+    // Spec: docs/specs/run-settlement.md#stray-lane-work
+    #[test]
+    fn stray_work_is_reported_only_when_the_primary_checkout_moved() {
+        let worktree = Path::new("/repo/.worktrees/lane");
+        let launch = position("main", 'a');
+        let found = |now: &PrimaryPosition, commits| {
+            StrayWork::found(
+                "/repo",
+                &launch,
+                now,
+                "refs/heads/fix/lane",
+                worktree,
+                commits,
+            )
+        };
+        assert_eq!(
+            found(&launch, false),
+            None,
+            "an unmoved primary is no finding"
+        );
+        assert_eq!(found(&launch, true), None);
+        let moved = position("fix/lane", 'b');
+        let empty = found(&moved, false).expect("a moved primary is a finding");
+        assert!(
+            !empty.bound_has_commits,
+            "no new commit means the work is elsewhere"
+        );
+        for fragment in [
+            "/repo",
+            "main at aaaaaaaaaaaa",
+            "fix/lane at bbbbbbbbbbbb",
+            "gained no commits",
+            "/repo/.worktrees/lane",
+        ] {
+            assert!(empty.note.contains(fragment), "{fragment}: {}", empty.note);
+        }
+        let committed = found(&moved, true).expect("still reported");
+        assert!(committed.bound_has_commits, "real commits only warn");
+        assert!(committed.note.contains("gained commits"));
+    }
+
+    // Spec: docs/specs/run-settlement.md#stray-lane-work
+    #[test]
+    fn primary_position_follows_the_primary_checkout_not_the_bound_worktree() -> FixtureResult<()> {
+        if clean_environment_child(stringify!(
+            primary_position_follows_the_primary_checkout_not_the_bound_worktree
+        ))? {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let project = root.join("project");
+        let git_dir = root.join("metadata/project.git");
+        let caller = root.join("caller");
+        let writer = project.join(".worktrees/writer");
+        let home = root.join("home");
+        let state = root.join("state");
+        for path in [
+            &project,
+            git_dir.parent().ok_or("metadata parent")?,
+            writer.parent().ok_or("writer parent")?,
+            &home,
+        ] {
+            std::fs::create_dir_all(path)?;
+        }
+        provenant_os::fixture::private_state_dir(&state)?;
+        let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
+        let run_git = |cwd: &Path, args: &[&str]| -> FixtureResult<String> {
+            let output = provenant_os::fixture::git_command_at(&git)
+                .env_clear()
+                .envs(provenant_os::fixture::fixture_git_settings())
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .current_dir(cwd)
+                .args(args)
+                .output()?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+            }
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        run_git(
+            &root,
+            &[
+                "init",
+                "-q",
+                "--separate-git-dir",
+                git_dir.to_str().ok_or("git dir path")?,
+                project.to_str().ok_or("project path")?,
+            ],
+        )?;
+        run_git(&project, &["config", "user.name", "Fixture"])?;
+        run_git(
+            &project,
+            &["config", "user.email", "fixture@example.invalid"],
+        )?;
+        run_git(&project, &["commit", "--allow-empty", "-qm", "initial"])?;
+        for (branch, path) in [("chore/caller", &caller), ("chore/writer", &writer)] {
+            run_git(
+                &project,
+                &[
+                    "worktree",
+                    "add",
+                    "-qb",
+                    branch,
+                    path.to_str().ok_or("path")?,
+                ],
+            )?;
+        }
+        let mut roots = provenant_core::RootInputs::new(home.clone(), project.clone());
+        roots.state_dir = Some(state.clone());
+        let roots = roots.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let utility = UtilityRuntime::read_only(&git, &state)?;
+        let executor = SystemExecutor::new(1)?;
+        let discovered =
+            utility.project_location(&executor, &project, budget()?, &CancelToken::new())?;
+        let binding = provenant_config::bind_project(&roots, discovered.location)?;
+        let request = resolve_writer(&state, &caller, Path::new(".worktrees/writer"))?;
+        let launch = prepare_writer(&request, &state, binding.project_id())?;
+
+        let primary_branch = run_git(&project, &["symbolic-ref", "HEAD"])?;
+        let (checkout, launched) = launch.primary_position(&git).ok_or("primary position")?;
+        assert_eq!(checkout, project.display().to_string());
+        assert_eq!(launched.head_ref.as_deref(), Some(primary_branch.as_str()));
+        assert_eq!(
+            launched.head,
+            Some(GitOid::parse(&run_git(&project, &["rev-parse", "HEAD"])?)?)
+        );
+
+        // A commit in the bound worktree is the lane doing its job.
+        run_git(&writer, &["config", "user.name", "Fixture"])?;
+        run_git(
+            &writer,
+            &["config", "user.email", "fixture@example.invalid"],
+        )?;
+        run_git(&writer, &["commit", "--allow-empty", "-qm", "lane work"])?;
+        let (_, after_lane_commit) = launch.primary_position(&git).ok_or("primary position")?;
+        assert_eq!(after_lane_commit, launched);
+
+        // A commit in the primary checkout is the lane working in the wrong place.
+        run_git(&project, &["commit", "--allow-empty", "-qm", "stray work"])?;
+        let (_, after_stray) = launch.primary_position(&git).ok_or("primary position")?;
+        assert_ne!(after_stray, launched);
+        assert_eq!(
+            after_stray.head,
+            Some(GitOid::parse(&run_git(&project, &["rev-parse", "HEAD"])?)?)
+        );
+        Ok(())
+    }
+
     // Spec: docs/specs/run-git.md#project-layout-ownership
     #[test]
     fn source_and_writer_resolution_use_the_registered_primary_with_separate_git_dir()
@@ -3556,6 +3794,7 @@ impl WriterLaunch {
             })?,
             crate::RECORD_LIMIT,
         )?;
+        self.record_primary_position(utility.git_program_path(), attempt, scope);
         let reference = format!("refs/provenant/lane-base/{}", scope.attempt);
         match crate::objects::resolve_ref(
             utility.git_program_path(),
@@ -4362,6 +4601,91 @@ fn invalid_write_scope_snapshot(policy: &provenant_records::policy::Policy) -> R
 }
 
 impl WriterLaunch {
+    /// The primary checkout and where its HEAD stands now. None for a bare
+    /// repository, which has no primary checkout, or when HEAD cannot be read.
+    fn primary_position(&self, git: &Path) -> Option<(String, PrimaryPosition)> {
+        let checkout = self.project_root()?;
+        let (head_ref, head) = crate::objects::primary_head(git, self.worktree.repo());
+        (head_ref.is_some() || head.is_some()).then(|| {
+            (
+                checkout.display().to_string(),
+                PrimaryPosition { head_ref, head },
+            )
+        })
+    }
+
+    /// Record the primary checkout's HEAD at launch so settlement can tell
+    /// whether the lane moved it. Best effort: a warning, never a refusal.
+    fn record_primary_position(
+        &self,
+        git: &Path,
+        attempt: &Directory,
+        scope: provenant_records::custody::Scope,
+    ) {
+        let Some((checkout, position)) = self.primary_position(git) else {
+            return;
+        };
+        let sealed = crate::db::bytes(&PrimaryPin {
+            extra: Default::default(),
+            schema_version: 1,
+            scope,
+            checkout,
+            position,
+        })
+        .and_then(|bytes| {
+            crate::artifacts::seal(attempt, PRIMARY_PIN, &bytes, crate::RECORD_LIMIT)
+        });
+        if let Err(error) = sealed {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: could not record the primary checkout position: {error}"
+            );
+        }
+    }
+
+    /// Compare the primary checkout with its launch position. `Some` when it
+    /// moved during the attempt, with whether the bound branch gained commits.
+    /// Call it after `terminal` succeeds; no recorded position means no finding.
+    pub(crate) fn stray_work(
+        &self,
+        attempt: &Directory,
+        state: &Path,
+        custody: &provenant_supervisor::custody::Recovery,
+    ) -> Result<Option<StrayWork>> {
+        let Some(raw) = crate::artifacts::read_sealed(attempt, PRIMARY_PIN, crate::RECORD_LIMIT)?
+        else {
+            return Ok(None);
+        };
+        let pin: PrimaryPin = crate::db::decode(&raw)?;
+        let utility = runtime(state)?;
+        let git = utility.git_program_path();
+        let Some((checkout, now)) = self.primary_position(git) else {
+            return Ok(None);
+        };
+        if now == pin.position {
+            return Ok(None);
+        }
+        let base = custody
+            .writer_base(
+                self.worktree.repo().root_dir(),
+                self.worktree.repo().private_dir(),
+                self.branch.as_str(),
+            )
+            .map_err(error(
+                "read writer custody base",
+                Some(self.worktree.path()),
+            ))?;
+        let tip = crate::objects::resolve_ref(git, self.worktree.repo(), self.branch.as_str())?;
+        Ok(StrayWork::found(
+            &checkout,
+            &pin.position,
+            &now,
+            self.branch.as_str(),
+            self.worktree.path(),
+            tip != base,
+        ))
+    }
+
     /// A diagnostic naming the edits a writer left uncommitted, or `None` when
     /// it committed or its tree is clean. Call it after `terminal` succeeds.
     pub(crate) fn uncommitted(

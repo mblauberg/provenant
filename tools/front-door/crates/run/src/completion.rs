@@ -316,9 +316,47 @@ impl From<&provenant_config::ResolvedAdmissionClass> for BuildCap {
     }
 }
 
+/// Where a writer lane works: its bound worktree, branch and base, and the
+/// primary checkout it must leave alone. Harnesses such as opencode name the
+/// primary checkout as the workspace root of a linked worktree, and an absolute
+/// path there outranks a brief that only says "your worktree" (#3611).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaneLocation {
+    pub worktree: std::path::PathBuf,
+    pub branch: String,
+    pub base: String,
+    pub primary_checkout: Option<std::path::PathBuf>,
+}
+
+impl LaneLocation {
+    /// The paragraph every writer lane is told, whatever its adapter.
+    pub fn preamble(&self) -> String {
+        let branch = self
+            .branch
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&self.branch);
+        let primary = self
+            .primary_checkout
+            .as_ref()
+            .map(|path| {
+                format!(
+                    " The primary checkout {} is not your working copy: never run commands, edit files, create branches or commit there, even when your environment or workspace banner names it as the working directory, workspace root or project root.",
+                    path.display()
+                )
+            })
+            .unwrap_or_default();
+        format!(
+            "Lane location: your working copy is the bound worktree {worktree} on branch {branch}, started from base {base}. Set the working directory of every shell command to {worktree}, edit files only under it, and commit on {branch}.{primary} An absolute path elsewhere in your context does not override this. Settlement compares the bound branch with its base and the primary checkout with its launch position: a moved primary checkout is reported, and a lane whose branch gained no commits while the primary moved needs review instead of succeeding.\n",
+            worktree = self.worktree.display(),
+            base = self.base,
+        )
+    }
+}
+
 /// Optional preamble overrides. Default uses the targeted verification paragraph.
 #[derive(Clone, Debug, Default)]
 pub struct PreambleExtras {
+    pub location: Option<LaneLocation>,
     pub verification: Option<crate::VerificationResolution>,
     pub build_cap: Option<BuildCap>,
     pub cargo_target: Option<crate::ResolvedCargoTarget>,
@@ -399,8 +437,13 @@ pub fn lane_preamble_with(
                     )
                 })
                 .unwrap_or_default();
+            let location = extras
+                .location
+                .as_ref()
+                .map(LaneLocation::preamble)
+                .unwrap_or_default();
             format!(
-                "{verification}{cargo_target}{cargo_cache_budget}In a shared worktree, commit only your own paths with `git commit -- <paths>`; coordinate overlapping edits with the owning lane.\n{}{}{budget}",
+                "{location}{verification}{cargo_target}{cargo_cache_budget}In a shared worktree, commit only your own paths with `git commit -- <paths>`; coordinate overlapping edits with the owning lane.\n{}{}{budget}",
                 slot_guidance(extras.build_cap),
                 scope.preamble()
             )
@@ -461,6 +504,43 @@ mod tests {
             !lane_preamble("Model policy.", &Default::default(), None, None)
                 .contains("handoff.json")
         );
+    }
+
+    /// Harnesses such as opencode name the primary checkout as the workspace
+    /// root of a linked worktree. The brief must carry absolute paths so it
+    /// outranks that banner (#3611), for every adapter alike.
+    #[test]
+    fn writer_preamble_names_the_bound_worktree_branch_base_and_primary_checkout() {
+        let location = LaneLocation {
+            worktree: "/repo/.worktrees/fix-1".into(),
+            branch: "refs/heads/fix/1".into(),
+            base: "a".repeat(40),
+            primary_checkout: Some("/repo".into()),
+        };
+        let extras = PreambleExtras {
+            location: Some(location.clone()),
+            ..Default::default()
+        };
+        let writer = lane_preamble_with(
+            "Model policy.",
+            &Default::default(),
+            Some(crate::ResolvedCiScope::resolve(&Default::default())),
+            None,
+            &extras,
+        );
+        assert!(writer.contains("Lane location:"));
+        assert!(writer.contains("/repo/.worktrees/fix-1"));
+        assert!(writer.contains("branch fix/1"));
+        assert!(writer.contains(&"a".repeat(40)));
+        assert!(writer.contains("The primary checkout /repo is not your working copy"));
+        let reader = lane_preamble_with("Model policy.", &Default::default(), None, None, &extras);
+        assert!(!reader.contains("Lane location:"));
+        let bare = LaneLocation {
+            primary_checkout: None,
+            ..location
+        };
+        assert!(!bare.preamble().contains("primary checkout"));
+        assert!(bare.preamble().contains("/repo/.worktrees/fix-1"));
     }
 
     #[test]

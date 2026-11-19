@@ -160,6 +160,21 @@ different branch, head or unclean tree is refused with the named cause.
   where the launch command ran, and a failed bind must not leave a half-made
   worktree.
 
+Every writer lane's prompt, for every adapter, opens its host preamble with one
+`Lane location` paragraph built once by `lane_preamble_with`. It states the
+absolute bound worktree path, the bound branch and its base commit, and that the
+primary checkout (also an absolute path, when the project has one) is not the
+lane's working copy: run commands, edit, branch and commit only in the bound
+worktree. The paragraph is advice, never a fence, and it says an absolute path
+elsewhere in the lane's context does not override it. Launch also records the
+primary checkout's HEAD (`primary-checkout.json` beside the attempt) so
+settlement can detect stray work (see run-settlement, Stray lane work).
+- Why: opencode's system prompt names the Git common directory's project, the
+  primary checkout, as the workspace root of a linked worktree. A brief that said
+  only "your worktree" lost to that absolute path, and Hy 4 lanes edited,
+  branched and committed in the primary checkout while the bound worktree stayed
+  at base (#3611).
+
 A node whose launch condition (`when`) does not hold never runs, so it needs no
 writer scope: submission neither inspects nor preflights its worktree, and a
 launch whose only writer is skipped runs from a primary checkout wherever a

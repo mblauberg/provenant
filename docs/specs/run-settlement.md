@@ -209,6 +209,31 @@ A missing required writer handoff seals `handoff_missing` and goes to the chair;
 - Why: all readers need the same cause for the next decision; host stops must
   preserve valid handoffs and never count as negative provider-quality evidence.
 
+## Stray lane work
+
+A writer's work is the commits on its bound branch. Launch records where the
+primary checkout's HEAD stands (the branch it names and its commit). At
+settlement, once the writer's terminal check passes, the host compares the
+primary checkout with that record and the bound branch with its launch base:
+- The primary moved and the bound branch gained no commits: the work was made
+  outside the bound worktree. The attempt does not succeed. It settles
+  `review_required` with the `stray_work` partial signal and settlement reason,
+  whose graph outcome is failed so dependants stay held, and the reason names
+  the primary checkout, where it moved from and to, and the bound worktree.
+- The primary moved and the bound branch also gained commits: a warning with the
+  same finding, on stderr and in the reason. The outcome is unchanged, because
+  an owner working in the primary checkout during a long attempt is ordinary.
+- The primary did not move, no position was recorded (a bare repository, or a
+  record that could not be written), or the comparison cannot run: no finding.
+  An unreadable position warns and the lane still settles.
+Only host Git facts decide this. The handoff is the lane's prose, so branch or
+head names in it are never parsed. A lane with uncommitted edits in its bound
+worktree keeps its `uncommitted` outcome, which already needs the chair.
+- Why: settlement said `succeeded` for a lane whose work sat on a stray branch
+  in the primary checkout while its bound worktree stayed at base (#3611). The
+  check warns or asks for review; it never refuses or stops a lane.
+- Owner: `crates/run/src/writer.rs`, `crates/run/src/holder.rs`
+
 ## Guardian loss proof
 
 `Recovery::after_guardian_loss` offers a separate same-boot recovery capability.

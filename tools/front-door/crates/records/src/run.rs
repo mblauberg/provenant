@@ -2031,6 +2031,9 @@ settlement_reasons! {
     ProviderStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
     /// A writer left edits it did not commit.
     UncommittedWork { source: Provider, node: Failed, outcome: Uncommitted, stop: None },
+    /// The bound branch gained no commits while the primary checkout moved: the
+    /// lane's work went to the wrong checkout (#3611).
+    StrayWork { source: Host, node: Failed, outcome: ReviewRequired, stop: None },
     /// Refused before any process started.
     PreLaunchRefusal { source: Host, node: Failed, outcome: Preserve, stop: None },
     Cancelled { source: Owner, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
@@ -2069,6 +2072,7 @@ impl SettlementReason {
                 Some(TerminalCause::EmptyWriterResult) => Self::EmptyResult,
                 Some(TerminalCause::Blocked | TerminalCause::StoppedNoWork) => Self::DeclaredStop,
                 Some(TerminalCause::ProviderEarlyStop) => Self::ProviderStop,
+                _ if partial.contains(&PartialSignal::StrayWork) => Self::StrayWork,
                 _ if handoff
                     .is_ok_and(|handoff| handoff.is_some_and(|handoff| handoff.unfinished())) =>
                 {
@@ -2741,6 +2745,9 @@ pub enum PartialSignal {
     ProviderStop,
     /// A writer left edits it did not commit.
     UncommittedWork,
+    /// The primary checkout moved during the attempt while the bound branch
+    /// gained no commits: the work was made outside the bound worktree.
+    StrayWork,
 }
 impl PartialSignal {
     pub const fn as_str(self) -> &'static str {
@@ -2751,6 +2758,7 @@ impl PartialSignal {
             Self::DeclaredStop => "declared_stop",
             Self::ProviderStop => "provider_stop",
             Self::UncommittedWork => "uncommitted_work",
+            Self::StrayWork => "stray_work",
         }
     }
 }

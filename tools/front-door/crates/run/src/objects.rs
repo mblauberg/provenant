@@ -322,6 +322,28 @@ pub(crate) fn resolve_ref(git: &Path, repo: &VerifiedRepo, reference: &str) -> R
     GitOid::parse(std::str::from_utf8(&bytes).map_err(|_| invalid())?.trim()).map_err(|_| invalid())
 }
 
+/// Where the primary checkout's HEAD stands: the branch it names (none when
+/// detached) and the commit (none when unborn). The common Git directory's own
+/// HEAD is the primary checkout's, whichever linked worktree asks.
+pub(crate) fn primary_head(git: &Path, repo: &VerifiedRepo) -> (Option<String>, Option<GitOid>) {
+    let read = |arguments: &[&str]| {
+        command(
+            git,
+            repo.common_git_dir(),
+            repo.root_path(),
+            &args(arguments),
+            None,
+        )
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .map(|text| text.trim().to_owned())
+    };
+    let head_ref = read(&["symbolic-ref", "-q", "HEAD"]).filter(|name| !name.is_empty());
+    let head = read(&["rev-parse", "--verify", "--end-of-options", "HEAD"])
+        .and_then(|text| GitOid::parse(&text).ok());
+    (head_ref, head)
+}
+
 pub(crate) fn clear_import_refs(
     git: &Path,
     repo: &VerifiedRepo,
