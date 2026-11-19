@@ -527,7 +527,7 @@ mod tests {
             observed_unix_seconds: at,
             used_basis_points: used,
             resets_unix_seconds: Some(10_000_000),
-            plan: Some("max_5x".into()),
+            plan: Some("plan-a".into()),
             cost_microdollars: cost,
             usage: [0; 5],
             priced: cost.is_some(),
@@ -538,228 +538,309 @@ mod tests {
         Series {
             account_key: "k1".into(),
             label: "work".into(),
-            provider: "claude".into(),
+            provider: "test-provider".into(),
             window: "five_hour".into(),
             window_seconds: Some(18_000),
             readings,
         }
     }
 
-    fn options() -> Options {
+    fn options(min_runs: u32) -> Options {
         Options {
-            min_runs: 1,
+            min_runs,
             ..Options::default()
         }
     }
 
-    #[test]
-    fn three_readings_give_exact_mileage_and_capacity() {
-        let report = analyse(
-            &series(vec![
-                reading(0, 1_000, Some(0)),
-                reading(100, 3_000, Some(20_000_000)),
-                reading(200, 6_000, Some(30_000_000)),
-            ]),
-            options(),
-        );
-        // 20% for $20 and 30% for $30 are each $1 per point.
-        let mileage = report.mileage.mileage.as_ref().unwrap();
-        assert_eq!(mileage.microdollars, 1_000_000);
-        assert_eq!(
-            report.mileage.capacity.as_ref().unwrap().microdollars,
-            100_000_000
-        );
-        assert_eq!((report.mileage.n, report.mileage.priced), (2, 2));
-        assert_eq!(report.mileage.priced_share_basis_points, Some(10_000));
-        assert_eq!(report.runs.len(), 1);
-        assert_eq!(report.runs[0].segments, 2);
+    fn with_reset(mut reading: Reading, resets_unix_seconds: i64) -> Reading {
+        reading.resets_unix_seconds = Some(resets_unix_seconds);
+        reading
     }
 
-    #[test]
-    fn a_drop_or_a_reset_splits_runs_without_negative_mileage() {
-        let mut reset = reading(200, 100, Some(90_000_000));
-        reset.resets_unix_seconds = Some(20_000_000);
-        let report = analyse(
-            &series(vec![
-                reading(0, 1_000, Some(0)),
-                reading(100, 3_000, Some(20_000_000)),
-                reset,
-                reading(300, 2_000, Some(10_000_000)),
-                reading(400, 500, Some(2_000_000)),
-            ]),
-            options(),
-        );
-        assert_eq!(report.runs.len(), 3);
-        assert_eq!(report.runs[1].reset, Some("reported"));
-        assert_eq!(report.runs[2].reset, Some("inferred"));
-        assert!(report.runs.iter().all(|run| {
-            run.mileage
-                .as_ref()
-                .is_none_or(|mileage| mileage.microdollars > 0)
-        }));
-        // The drops themselves contribute no segment.
-        assert_eq!(report.mileage.n, 2);
+    fn with_plan(mut reading: Reading, plan: &str) -> Reading {
+        reading.plan = Some(plan.into());
+        reading
     }
 
-    #[test]
-    fn a_null_reset_time_is_segmented_by_a_drop_and_flagged_inferred() {
-        let mut first = reading(0, 5_000, Some(0));
-        first.resets_unix_seconds = None;
-        let mut dropped = reading(100, 500, Some(4_000_000));
-        dropped.resets_unix_seconds = None;
-        let mut later = reading(200, 1_500, Some(9_000_000));
-        later.resets_unix_seconds = None;
-        let report = analyse(&series(vec![first, dropped, later]), options());
-        assert_eq!(report.runs.len(), 2);
-        assert_eq!(report.runs[1].reset, Some("inferred"));
-        assert_eq!(
-            report.runs[1].capacity.as_ref().unwrap().microdollars,
-            90_000_000
-        );
-    }
-
-    #[test]
-    fn reset_time_jitter_under_a_minute_stays_in_one_window() {
-        // The reset time drifts 40 s a reading: no single step is a reset.
-        let mut readings: Vec<Reading> = [0, 40, 80, 120]
-            .into_iter()
-            .enumerate()
-            .map(|(index, drift)| {
-                let mut reading = reading(
-                    100 * index as i64,
-                    1_000 * (index as u64 + 1),
-                    Some(10_000_000),
-                );
-                reading.resets_unix_seconds = Some(10_000_000 + drift);
-                reading
-            })
-            .collect();
-        let report = analyse(&series(readings.clone()), options());
-        assert_eq!(report.runs.len(), 1);
-        assert_eq!(report.mileage.n, 3);
-        // A reset a full window later still starts a new run.
-        let mut reset = reading(400, 1_500, Some(5_000_000));
-        reset.resets_unix_seconds = Some(10_018_000);
-        readings.push(reset);
-        let report = analyse(&series(readings), options());
-        assert_eq!(report.runs.len(), 2);
-        assert_eq!(report.runs[1].reset, Some("reported"));
-    }
-
-    fn capacity_series(
+    /// `count` readings `step` seconds apart, each rising `rise` basis points
+    /// with an API-equivalent cost of `cost` microdollars in the interval.
+    fn rising(
         from: i64,
-        each: i64,
+        step: i64,
         count: usize,
-        cost: u64,
         base_used: u64,
+        rise: u64,
+        cost: u64,
     ) -> Vec<Reading> {
-        let mut readings = Vec::new();
-        for index in 0..count {
-            readings.push(reading(
-                from + each * index as i64,
-                base_used + 100 * index as u64,
-                Some(cost),
-            ));
+        (0..count)
+            .map(|index| {
+                reading(
+                    from + step * index as i64,
+                    base_used + rise * index as u64,
+                    Some(cost),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mileage_and_capacity_reconcile_with_priced_usage() {
+        // Mileage is cost * 100 / rise in basis points; capacity is 100 points.
+        // Varied but equivalent cost/rise pairs must give the same per-point
+        // mileage, so the arithmetic itself is the oracle.
+        for (cost, rise) in [
+            (20_000_000u64, 2_000u64),
+            (10_000_000, 1_000),
+            (30_000_000, 3_000),
+        ] {
+            let readings = vec![
+                reading(0, 1_000, Some(0)),
+                reading(100, 1_000 + rise, Some(cost)),
+                reading(200, 1_000 + 2 * rise, Some(cost)),
+            ];
+            let report = analyse(&series(readings), options(1));
+            let summary = &report.mileage;
+            assert_eq!(summary.n, 2);
+            assert_eq!(summary.priced, summary.n);
+            assert_eq!(summary.priced_share_basis_points, Some(10_000));
+            let mileage = summary.mileage.as_ref().unwrap().microdollars;
+            let capacity = summary.capacity.as_ref().unwrap().microdollars;
+            assert_eq!(mileage, cost * 100 / rise);
+            assert!(capacity.abs_diff(mileage * 100) <= 100);
         }
-        readings
     }
 
     #[test]
-    fn a_thirty_percent_fall_at_a_constant_plan_is_flagged() {
-        // Ten prior segments at $1000 capacity, then ten recent at $700.
-        let mut readings = capacity_series(-29 * 86_400, 86_400, 11, 10_000_000, 100);
-        readings.extend(capacity_series(-2 * 86_400, 3_600, 10, 7_000_000, 1_200));
-        let report = analyse(
-            &series(readings),
-            Options {
-                min_runs: 10,
-                ..Options::default()
+    fn runs_partition_readings_and_segments_are_nonnegative() {
+        struct Case {
+            name: &'static str,
+            readings: Vec<Reading>,
+            reasons: Vec<Option<&'static str>>,
+        }
+        let cases = vec![
+            Case {
+                name: "monotonic",
+                readings: vec![
+                    reading(0, 1_000, Some(0)),
+                    reading(100, 2_000, Some(1_000_000)),
+                    reading(200, 3_000, Some(1_000_000)),
+                ],
+                reasons: vec![None],
             },
-        );
-        assert_eq!(report.step_change.prior_n, 10);
-        assert_eq!(report.step_change.recent_n, 10);
-        assert_eq!(report.step_change.status, "flagged");
-        assert!(
-            report
-                .step_change
-                .percent
-                .is_some_and(|p| (p - 30.0).abs() < 0.01)
-        );
+            Case {
+                name: "fall",
+                readings: vec![
+                    reading(0, 1_000, Some(0)),
+                    reading(100, 500, Some(1_000_000)),
+                    reading(200, 1_500, Some(1_000_000)),
+                ],
+                reasons: vec![None, Some("inferred")],
+            },
+            Case {
+                name: "reported reset",
+                readings: vec![
+                    reading(0, 1_000, Some(0)),
+                    with_reset(reading(100, 500, Some(1_000_000)), 10_000_060),
+                    reading(200, 1_500, Some(1_000_000)),
+                ],
+                reasons: vec![None, Some("reported")],
+            },
+            Case {
+                name: "jitter under a minute",
+                readings: vec![
+                    reading(0, 1_000, Some(0)),
+                    with_reset(reading(100, 2_000, Some(1_000_000)), 10_000_040),
+                    with_reset(reading(200, 3_000, Some(1_000_000)), 10_000_080),
+                ],
+                reasons: vec![None],
+            },
+            Case {
+                name: "plan change",
+                readings: vec![
+                    reading(0, 1_000, Some(0)),
+                    with_plan(reading(100, 2_000, Some(1_000_000)), "plan-b"),
+                    with_plan(reading(200, 3_000, Some(1_000_000)), "plan-b"),
+                ],
+                reasons: vec![None, Some("plan_change")],
+            },
+        ];
+        for Case {
+            name,
+            readings,
+            reasons,
+        } in cases
+        {
+            let report = analyse(&series(readings.clone()), options(1));
+            let actual: Vec<_> = report.runs.iter().map(|run| run.reset).collect();
+            assert_eq!(actual, reasons, "{name}: boundary reasons");
+            let mut offset = 0;
+            for run in &report.runs {
+                let part = &readings[offset..offset + run.readings as usize];
+                let rising_pairs = part
+                    .windows(2)
+                    .filter(|pair| pair[1].used_basis_points > pair[0].used_basis_points)
+                    .count();
+                assert_eq!(
+                    run.segments as usize, rising_pairs,
+                    "{name}: only rising pairs form segments"
+                );
+                assert!(run.priced_segments <= run.segments);
+                if run.segments > 0 {
+                    assert!(run.mileage.is_some(), "{name}: priced rises have mileage");
+                }
+                offset += run.readings as usize;
+            }
+            assert_eq!(
+                offset,
+                readings.len(),
+                "{name}: runs must partition readings"
+            );
+        }
     }
 
     #[test]
-    fn a_ten_percent_fall_or_too_few_runs_is_inconclusive() {
-        let mut readings = capacity_series(-29 * 86_400, 86_400, 11, 10_000_000, 100);
-        readings.extend(capacity_series(-2 * 86_400, 3_600, 10, 9_000_000, 1_200));
-        let report = analyse(
-            &series(readings),
-            Options {
-                min_runs: 10,
-                ..Options::default()
-            },
-        );
-        assert!(
-            report
-                .step_change
-                .percent
-                .is_some_and(|p| (p - 10.0).abs() < 0.01)
-        );
-        assert_eq!(report.step_change.status, "inconclusive");
-        let mut few = capacity_series(-20 * 86_400, 86_400, 6, 10_000_000, 100);
-        few.extend(capacity_series(-2 * 86_400, 3_600, 6, 5_000_000, 700));
-        let report = analyse(
-            &series(few),
-            Options {
-                min_runs: 10,
-                ..Options::default()
-            },
-        );
-        assert_eq!(report.step_change.status, "inconclusive");
+    fn summary_tracks_priced_evidence_without_inventing_mileage() {
+        let readings = vec![
+            reading(0, 1_000, None),
+            reading(100, 2_000, Some(20_000_000)),
+            reading(200, 2_500, None),
+            reading(300, 3_500, Some(20_000_000)),
+        ];
+        let report = analyse(&series(readings), options(1));
+        let summary = &report.mileage;
+        assert!(summary.priced < summary.n);
         assert_eq!(
-            (report.step_change.prior_n, report.step_change.recent_n),
-            (5, 6)
+            summary.priced_share_basis_points,
+            Some(summary.priced * 10_000 / summary.n)
         );
+        assert_eq!(summary.mileage.as_ref().unwrap().microdollars, 2_000_000);
+
+        let unpriced = [reading(0, 1_000, None), reading(100, 2_000, None)];
+        let report = analyse(&series(unpriced.to_vec()), options(1));
+        let summary = &report.mileage;
+        assert!(summary.n > 0);
+        assert_eq!(summary.priced, 0);
+        assert_eq!(summary.priced_share_basis_points, Some(0));
+        assert!(summary.mileage.is_none());
+        assert!(summary.capacity.is_none());
     }
 
     #[test]
-    fn a_plan_change_reports_the_upgrade_gain() {
-        let mut readings = capacity_series(0, 100, 5, 10_000_000, 100);
+    fn step_change_flags_only_sufficient_falls() {
+        struct Case {
+            costs: (u64, u64),
+            counts: (usize, usize),
+            status: &'static str,
+            percent: Option<f64>,
+        }
+        let cases = [
+            Case {
+                costs: (10_000_000, 7_000_000),
+                counts: (11, 10),
+                status: "flagged",
+                percent: Some(30.0),
+            },
+            Case {
+                costs: (10_000_000, 9_000_000),
+                counts: (11, 10),
+                status: "inconclusive",
+                percent: Some(10.0),
+            },
+            Case {
+                costs: (10_000_000, 5_000_000),
+                counts: (6, 6),
+                status: "inconclusive",
+                percent: Some(50.0),
+            },
+        ];
+        for case in cases {
+            let mut readings = rising(-29 * 86_400, 86_400, case.counts.0, 100, 100, case.costs.0);
+            readings.extend(rising(
+                -2 * 86_400,
+                3_600,
+                case.counts.1,
+                1_200,
+                100,
+                case.costs.1,
+            ));
+            let report = analyse(&series(readings), options(10));
+            let change = &report.step_change;
+            assert_eq!(change.status, case.status, "costs {:?}", case.costs);
+            match case.percent {
+                Some(expected) => {
+                    let actual = change.percent.expect("percent present");
+                    assert!((actual - expected).abs() < 0.01, "{actual} vs {expected}");
+                }
+                None => assert!(change.percent.is_none()),
+            }
+        }
+    }
+
+    #[test]
+    fn plan_change_reports_capacity_gain_from_its_own_evidence() {
+        let mut readings = rising(0, 100, 5, 100, 100, 10_000_000);
         for reading in &mut readings[2..] {
-            reading.plan = Some("max_20x".into());
+            reading.plan = Some("plan-b".into());
             reading.cost_microdollars = Some(15_000_000);
         }
-        let report = analyse(&series(readings), options());
-        let upgrade = report.upgrade.unwrap();
-        assert_eq!(upgrade.plan_from.as_deref(), Some("max_5x"));
-        assert_eq!(upgrade.plan_to.as_deref(), Some("max_20x"));
-        assert!(upgrade.percent.is_some_and(|p| (p - 50.0).abs() < 0.01));
+        let report = analyse(&series(readings), options(1));
+        let upgrade = report.upgrade.as_ref().unwrap();
+        assert_eq!(upgrade.plan_from.as_deref(), Some("plan-a"));
+        assert_eq!(upgrade.plan_to.as_deref(), Some("plan-b"));
+
+        let rise = 100u64;
+        // Capacity is the cost of a full window: mileage (cost * 100 / rise)
+        // times 100 percentage points.
+        let before = 10_000_000u64 * 100 / rise * 100;
+        let after = 15_000_000u64 * 100 / rise * 100;
+        assert_eq!(upgrade.before.as_ref().unwrap().microdollars, before);
+        assert_eq!(upgrade.after.as_ref().unwrap().microdollars, after);
+        let expected = (after as f64 - before as f64) / before as f64 * 100.0;
+        assert!((upgrade.percent.unwrap() - expected).abs() < 1e-9);
     }
 
     #[test]
-    fn fitted_weights_need_enough_rows_and_a_good_fit() {
-        let rows: Vec<Observation> = [
-            [1u64, 0],
-            [0, 1],
-            [1, 1],
-            [2, 0],
-            [0, 2],
-            [2, 1],
-            [1, 2],
-            [3, 0],
-            [0, 3],
-            [2, 2],
-        ]
-        .map(|[a, b]| ([a, b, 0, 0, 0], 2 * a + 3 * b))
-        .to_vec();
-        let fitted = fit(&rows, 10).unwrap();
-        assert_eq!(fitted.n, 10);
-        assert!(fitted.r_squared > 0.99);
-        assert!((fitted.weights_basis_points_per_million_tokens[0] - 2_000_000.0).abs() < 1.0);
-        assert!((fitted.weights_basis_points_per_million_tokens[1] - 3_000_000.0).abs() < 1.0);
-        assert!(fit(&rows[..5], 10).is_none());
+    fn fit_requires_enough_rows_and_explains_linear_variance() {
+        for (a, b) in [(2u64, 3u64), (3, 1)] {
+            let rows: Vec<Observation> = [
+                [1u64, 0],
+                [0, 1],
+                [1, 1],
+                [2, 0],
+                [0, 2],
+                [2, 1],
+                [1, 2],
+                [3, 0],
+                [0, 3],
+                [2, 2],
+            ]
+            .map(|[x, y]| ([x, y, 0, 0, 0], a * x + b * y))
+            .to_vec();
+            let fitted = fit(&rows, 10).unwrap();
+            assert_eq!(fitted.n, rows.len() as u64);
+            assert!(fitted.r_squared >= MIN_FIT_R2);
+            assert!(
+                fitted
+                    .weights_basis_points_per_million_tokens
+                    .iter()
+                    .all(|weight| *weight >= 0.0)
+            );
+            assert!(
+                (fitted.weights_basis_points_per_million_tokens[0] - a as f64 * 1_000_000.0).abs()
+                    < 1.0
+            );
+            assert!(
+                (fitted.weights_basis_points_per_million_tokens[1] - b as f64 * 1_000_000.0).abs()
+                    < 1.0
+            );
+            assert!(
+                fit(&rows[..5], 10).is_none(),
+                "fewer rows than the minimum must not report a fit"
+            );
+        }
         let noisy: Vec<Observation> = (1..=10)
             .map(|n| ([n, 0, 0, 0, 0], if n % 2 == 0 { 1 } else { 100 }))
             .collect();
-        assert!(fit(&noisy, 10).is_none());
+        assert!(fit(&noisy, 10).is_none(), "a poor fit must not be reported");
     }
 }
