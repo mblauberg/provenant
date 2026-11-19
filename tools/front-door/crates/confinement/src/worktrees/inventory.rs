@@ -527,11 +527,10 @@ impl RepoFacts {
         } else {
             GitRead::WorktreeList
         };
+        let command = operation.command_label();
         let outcome =
             crate::utility::run_read_utility(executor, operation, repo, utility, budget, cancel)?;
-        if exit_code(&outcome)? != 0 {
-            return Err(WorktreeError::InvalidOutput);
-        }
+        require_exit(&command, &outcome, &[0])?;
         Ok(outcome.stdout.bytes)
     }
 
@@ -666,9 +665,7 @@ impl RepoFacts {
             budget.with_stdout_cap(self.inventory_limit)?,
             cancel,
         )?;
-        if exit_code(&outcome)? != 0 {
-            return Err(WorktreeError::InvalidOutput);
-        }
+        require_exit(&GitRead::WorktreeList.command_label(), &outcome, &[0])?;
         snapshots.insert(
             path.to_owned(),
             RawInventorySnapshot {
@@ -1119,30 +1116,105 @@ pub(super) fn parse_oid(bytes: &[u8]) -> Result<GitOid, WorktreeError> {
     GitOid::parse(text).map_err(|_| WorktreeError::InvalidOutput)
 }
 
-pub(super) fn parse_branch_tips(
-    bytes: &[u8],
-) -> Result<BTreeMap<GitRefName, GitOid>, WorktreeError> {
+/// Parse `for-each-ref` tips of local branches and remote refs. Any ref name
+/// Git lists under `refs/remotes/` is accepted, including a single-component
+/// ref fetched by hand such as `refs/remotes/pr123`. The error names the defect.
+pub(super) fn parse_branch_tips(bytes: &[u8]) -> Result<BTreeMap<GitRefName, GitOid>, String> {
     let mut fields = bytes.split(|byte| *byte == 0);
     let mut result = BTreeMap::new();
     while let Some(name) = fields.next() {
         if trim_ascii(name).is_empty() {
             continue;
         }
-        let oid = fields.next().ok_or(WorktreeError::InvalidOutput)?;
-        let name =
-            std::str::from_utf8(trim_ascii(name)).map_err(|_| WorktreeError::InvalidOutput)?;
-        let name = if let Some(remote) = name.strip_prefix("refs/remotes/") {
-            GitRefName::remote_tracking(remote)
+        let name = String::from_utf8_lossy(trim_ascii(name));
+        let oid = fields
+            .next()
+            .ok_or_else(|| format!("ref {name} has no object name"))?;
+        let reference = if let Some(remote) = name.strip_prefix("refs/remotes/") {
+            GitRefName::remote_ref(remote)
         } else {
-            GitRefName::new(name)
+            GitRefName::new(&*name)
         }
-        .map_err(|_| WorktreeError::InvalidOutput)?;
-        let oid = parse_oid(trim_ascii(oid))?;
-        if result.insert(name, oid).is_some() || result.len() > MAX_BRANCHES {
-            return Err(WorktreeError::InvalidOutput);
+        .map_err(|_| format!("ref {name} is not a branch or remote ref name"))?;
+        let oid = parse_oid(trim_ascii(oid))
+            .map_err(|_| format!("ref {name} has a malformed object name"))?;
+        if result.insert(reference, oid).is_some() {
+            return Err(format!("ref {name} is listed twice"));
+        }
+        if result.len() > MAX_BRANCHES {
+            return Err(format!("more than {MAX_BRANCHES} refs are listed"));
         }
     }
     Ok(result)
+}
+
+/// How a Git read ended, for a refusal that names it.
+fn termination_label(termination: Termination) -> String {
+    match termination {
+        Termination::Exit(code) => format!("exited {code}"),
+        Termination::Signal(signal) => format!("was killed by signal {signal}"),
+    }
+}
+
+/// Git's first non-empty stderr line, bounded, or nothing.
+fn first_stderr_line(outcome: &ExecOutcome) -> String {
+    const LIMIT: usize = 240;
+    let line = outcome
+        .stderr
+        .bytes
+        .split(|byte| *byte == b'\n')
+        .map(trim_ascii)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let line = String::from_utf8_lossy(line);
+    match line.char_indices().nth(LIMIT) {
+        Some((end, _)) => format!("{}...", &line[..end]),
+        None => line.into_owned(),
+    }
+}
+
+/// A refusal naming the read, how it ended and what was wrong with it.
+pub(super) fn git_read_failure(
+    command: &str,
+    outcome: &ExecOutcome,
+    detail: impl Into<String>,
+) -> WorktreeError {
+    WorktreeError::GitRead(Box::new(GitReadFailure {
+        command: command.to_owned(),
+        status: termination_label(outcome.termination),
+        detail: detail.into(),
+    }))
+}
+
+/// Require a read to exit with one of `accepted`; otherwise refuse with the
+/// command, its status and Git's first stderr line.
+pub(super) fn require_exit(
+    command: &str,
+    outcome: &ExecOutcome,
+    accepted: &[i64],
+) -> Result<i64, WorktreeError> {
+    match outcome.termination {
+        Termination::Exit(code) if accepted.contains(&code) => Ok(code),
+        _ => Err(git_read_failure(
+            command,
+            outcome,
+            first_stderr_line(outcome),
+        )),
+    }
+}
+
+/// Run a `for-each-ref` tip read and parse it, naming the read on failure.
+pub(super) fn read_ref_tips(
+    context: &WorktreeContext<'_>,
+    repo: &VerifiedRepo,
+    read: GitRead,
+    cancel: &CancelToken,
+) -> Result<BTreeMap<GitRefName, GitOid>, WorktreeError> {
+    let command = read.command_label();
+    let outcome = run_git(context, repo, read, cancel)?;
+    require_exit(&command, &outcome, &[0])?;
+    parse_branch_tips(&outcome.stdout.bytes)
+        .map_err(|detail| git_read_failure(&command, &outcome, format!("output: {detail}")))
 }
 
 pub(super) fn trim_ascii(bytes: &[u8]) -> &[u8] {
@@ -1185,11 +1257,7 @@ pub(super) fn read_branch_tips(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
 ) -> Result<BTreeMap<GitRefName, GitOid>, WorktreeError> {
-    let outcome = run_git(context, context.repo, GitRead::BranchTips, cancel)?;
-    if exit_code(&outcome)? != 0 {
-        return Err(WorktreeError::InvalidOutput);
-    }
-    parse_branch_tips(&outcome.stdout.bytes)
+    read_ref_tips(context, context.repo, GitRead::BranchTips, cancel)
 }
 
 pub fn is_ancestor(
@@ -1198,17 +1266,10 @@ pub fn is_ancestor(
     tip: GitOid,
     cancel: &CancelToken,
 ) -> Result<bool, WorktreeError> {
-    let outcome = run_git(
-        context,
-        context.repo,
-        GitRead::MergeBaseIsAncestor { ancestor, tip },
-        cancel,
-    )?;
-    match exit_code(&outcome)? {
-        0 => Ok(true),
-        1 => Ok(false),
-        _ => Err(WorktreeError::InvalidOutput),
-    }
+    let read = GitRead::MergeBaseIsAncestor { ancestor, tip };
+    let command = read.command_label();
+    let outcome = run_git(context, context.repo, read, cancel)?;
+    Ok(require_exit(&command, &outcome, &[0, 1])? == 0)
 }
 
 pub(super) fn is_first_parent_commit(
@@ -1217,14 +1278,16 @@ pub(super) fn is_first_parent_commit(
     candidate: GitOid,
     cancel: &CancelToken,
 ) -> Result<bool, WorktreeError> {
-    let outcome = run_git(
-        context,
-        context.repo,
-        GitRead::FirstParentHistory { tip: history_tip },
-        cancel,
-    )?;
-    if exit_code(&outcome)? != 0 || !outcome.stdout.bytes.ends_with(b"\n") {
-        return Err(WorktreeError::InvalidOutput);
+    let read = GitRead::FirstParentHistory { tip: history_tip };
+    let command = read.command_label();
+    let outcome = run_git(context, context.repo, read, cancel)?;
+    require_exit(&command, &outcome, &[0])?;
+    if !outcome.stdout.bytes.ends_with(b"\n") {
+        return Err(git_read_failure(
+            &command,
+            &outcome,
+            "output: history is not newline-terminated",
+        ));
     }
     let history = outcome
         .stdout

@@ -582,11 +582,7 @@ fn create_with_default(
     }
 
     if create_branch {
-        let remote = run_git(context, context.repo, GitRead::RemoteBranchTips, cancel)?;
-        if exit_code(&remote)? != 0 {
-            return Err(WorktreeError::InvalidOutput);
-        }
-        let remote_tips = parse_branch_tips(&remote.stdout.bytes)?;
+        let remote_tips = read_ref_tips(context, context.repo, GitRead::RemoteBranchTips, cancel)?;
         for name in branch_tips.keys().chain(remote_tips.keys()) {
             let text = name.as_str();
             let local_collision = text

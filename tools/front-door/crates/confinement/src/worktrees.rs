@@ -303,6 +303,8 @@ pub enum WorktreeError {
     Primary,
     #[error("worktree Git output is malformed or incomplete")]
     InvalidOutput,
+    #[error("worktree Git read failed: {0}")]
+    GitRead(Box<GitReadFailure>),
     #[error("{operation} failed (Git reported lock failure: {lock_failure})")]
     MutationFailed {
         operation: GitMutationOperation,
@@ -335,6 +337,25 @@ pub enum WorktreeError {
     Repository(#[from] RepoError),
     #[error(transparent)]
     PathWire(#[from] PathWireError),
+}
+
+/// A Git read that ended outside its contract: the subcommand it ran, how it
+/// ended, and Git's first stderr line or the output defect that was found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitReadFailure {
+    pub command: String,
+    pub status: String,
+    pub detail: String,
+}
+
+impl std::fmt::Display for GitReadFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "`git {}` {}", self.command, self.status)?;
+        if !self.detail.is_empty() {
+            write!(f, ": {}", self.detail)?;
+        }
+        Ok(())
+    }
 }
 
 /// Closed operation names: no Git output, arguments or host paths are disclosed.
@@ -1074,6 +1095,28 @@ mod tests {
             parsed
                 .keys()
                 .any(|name| name.as_str() == "refs/heads/feature/recorded")
+        );
+    }
+
+    #[test]
+    fn branch_tips_accept_every_remote_ref_git_lists() {
+        let oid = "0123456789abcdef0123456789abcdef01234567";
+        let listing = format!("refs/remotes/origin/main\0{oid}\0\nrefs/remotes/pr3467\0{oid}\0\n");
+        let parsed = parse_branch_tips(listing.as_bytes()).expect("Git-listed remote refs");
+        let names: Vec<_> = parsed.keys().map(GitRefName::as_str).collect();
+        assert_eq!(names, ["refs/remotes/origin/main", "refs/remotes/pr3467"]);
+    }
+
+    #[test]
+    fn git_read_failure_names_command_status_and_detail() {
+        let failure = WorktreeError::GitRead(Box::new(GitReadFailure {
+            command: GitRead::RemoteBranchTips.command_label(),
+            status: "exited 128".into(),
+            detail: "fatal: bad object".into(),
+        }));
+        assert_eq!(
+            failure.to_string(),
+            "worktree Git read failed: `git for-each-ref --format=%(refname)%00%(objectname)%00 refs/remotes` exited 128: fatal: bad object"
         );
     }
 

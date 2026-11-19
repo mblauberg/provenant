@@ -1121,7 +1121,7 @@ fn evidence_ref_name(reference: &str) -> Option<GitRefName> {
     }
     reference
         .strip_prefix("refs/remotes/")
-        .and_then(|remote_tracking| GitRefName::remote_tracking(remote_tracking).ok())
+        .and_then(|remote| GitRefName::remote_ref(remote).ok())
 }
 
 fn resolve_commit_tree(
