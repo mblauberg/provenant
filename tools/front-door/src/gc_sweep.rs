@@ -372,12 +372,14 @@ impl Lease {
             clear_scope_cursor(&self.directory, &key)?;
         }
         self.progress.cursor = None;
-        self.directory
-            .unlink(OsStr::new(PROGRESS_FILE))
-            .map_err(io::Error::other)?;
+        // Stop the watcher first: it reads without the mutex, so it would
+        // otherwise read the cleared record as a takeover.
         if let Some(watcher) = self.watcher.take() {
             drop(watcher);
         }
+        self.directory
+            .unlink(OsStr::new(PROGRESS_FILE))
+            .map_err(io::Error::other)?;
         Ok(())
     }
 
@@ -412,6 +414,10 @@ impl Drop for FenceWatcher {
 
 impl Drop for Lease {
     fn drop(&mut self) {
+        // The unlocked watcher would read the released record as a takeover.
+        if let Some(watcher) = self.watcher.take() {
+            drop(watcher);
+        }
         if !progress_has_epoch(&self.directory, self.progress.epoch) {
             if let Some(cancel) = &self.fenced_cancel {
                 cancel.cancel();
@@ -561,15 +567,28 @@ fn metadata_lock(directory: &Directory) -> Result<LockGuard, provenant_os::fs::F
     directory.try_lock(OsStr::new(LOCK_FILE), LockMode::Exclusive)
 }
 
-// A checkpoint replaces the progress file under this mutex. A busy mutex is
-// not evidence of takeover; retry rather than cancelling our own sweep.
+// The fence watcher never takes the metadata mutex. Every writer replaces the
+// progress file atomically, so a reader sees a whole record, and a watcher that
+// held the mutex could stall the sweep's own checkpoint, which waits for it
+// only briefly. A read that races a replacement is retried, not a fence.
 fn fence_observation(
     directory: &Directory,
     epoch: u64,
-) -> Result<Option<bool>, provenant_os::fs::FsError> {
-    match metadata_lock(directory) {
-        Ok(_guard) => Ok(Some(progress_has_epoch(directory, epoch))),
-        Err(error) if is_lock_timeout(&error) => Ok(None),
+) -> Result<Option<bool>, Box<dyn std::error::Error>> {
+    match read_progress(directory) {
+        Ok(progress) => {
+            Ok(Some(progress.is_some_and(|progress| {
+                progress.epoch == epoch && !progress.released
+            })))
+        }
+        Err(error)
+            if matches!(
+                error.downcast_ref::<provenant_os::fs::FsError>(),
+                Some(provenant_os::fs::FsError::RaceRefused { .. })
+            ) =>
+        {
+            Ok(None)
+        }
         Err(error) => Err(error),
     }
 }
@@ -760,10 +779,16 @@ mod tests {
         let Acquire::Held(lease) = acquire(&root, Duration::from_secs(30), &clock).unwrap() else {
             panic!("new sweep is busy");
         };
+        // The watcher reads without the mutex, so a held mutex neither fences
+        // the sweep nor is held by the watcher against its own checkpoint.
         let guard = metadata_lock(&lease.directory).unwrap();
         assert_eq!(
             fence_observation(&lease.directory, lease.epoch()).unwrap(),
-            None
+            Some(true)
+        );
+        assert_eq!(
+            fence_observation(&lease.directory, lease.epoch() + 1).unwrap(),
+            Some(false)
         );
         drop(guard);
         assert_eq!(

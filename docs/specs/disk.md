@@ -105,7 +105,11 @@ Every output mutation holds writer exclusion and requires a fresh free census.
 Each sweep observes the overridable `gc.sweep_budget`, reports its value and
 source, and records where it stopped so a later sweep continues there. Its
 single-flight guard is released on every exit. A dead or over-budget holder is
-detected and takeover emits a warning. Recursive surveys persist bounded
+detected and takeover emits a warning. Only writers of the lease record take its
+short metadata mutex; the holder's fence watcher reads the atomically replaced
+record without it, so the watcher never delays the holder's own checkpoint and a
+read that races a replacement is retried rather than read as a takeover.
+Recursive surveys persist bounded
 traversal progress and accumulated measurements so a large tree makes progress
 across passes. A survey snapshot never grants removal authority: takeover and
 resumption require fresh candidate custody checks. Each trigger and scope keeps
