@@ -1,0 +1,3 @@
+## Fixes
+### Lanes and settlement
+- Restore the macOS Cargo seed tests that #3581 left failing on `main`; seeding itself was unaffected. Their fixtures now match what `provenant worktree seed-build` publishes: a sealed, read-only generation whose target names its dep-info from Cargo fingerprints. The toolchain-override refusal test now runs on every Unix host and checks that the refusal names the variable, never its value. Pull requests that change the seed code, or another file a native macOS test group targets by package, now run those native tests, and `scripts/check-ci-suites` refuses a CI manifest that leaves such a package unwatched. (#3589)
