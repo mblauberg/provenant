@@ -25,5 +25,5 @@ pub const FIXTURE_OWNER_PID_ENV: &str = "PROVENANT_TEST_FIXTURE_OWNER_PID";
 #[cfg(feature = "fixture")]
 pub(crate) const FIXTURE_OWNER_ENV: &str = "PROVENANT_TEST_FIXTURE_OWNER";
 pub use guardian::{
-    ChildRegistry, DiskPressure, GuardianHooks, Holder, RegisteredChild, supervise,
+    ChildRegistry, GuardianHooks, Holder, RegisteredChild, supervise,
 };

@@ -32,28 +32,11 @@ const S2_REFUSE_ADMISSION: &str = "s2-refuse-admission";
 const S2_IGNORE_CHILD_REGISTRY: &str = "s2-ignore-child-registry";
 const S2_SUPPRESSED_REGISTRY_READ: &str = "s2-registry-suppressed-read";
 
-const S2_DISK_PRESSURE: &str = "s2-disk-pressure";
 /// Seconds the guardian's wall clock jumps forward after launch, as a sleeping
 /// host's does while its monotonic clock stands still.
 const S2_WALL_JUMP: &str = "s2-wall-jump-seconds";
 /// Present once the jump has happened.
 const S2_WALL_JUMP_NOW: &str = "s2-wall-jump-now";
-const S2_DISK_SAMPLED: &str = "s2-disk-sampled";
-
-struct MarkerDiskPressure {
-    state: PathBuf,
-}
-impl provenant_supervisor::DiskPressure for MarkerDiskPressure {
-    fn below_floor(&self, _: &[u8]) -> io::Result<bool> {
-        let decision = std::fs::read(self.state.join(S2_DISK_PRESSURE))?;
-        std::fs::write(self.state.join(S2_DISK_SAMPLED), &decision)?;
-        match decision.as_slice() {
-            b"low" => Ok(true),
-            b"high" => Ok(false),
-            _ => Err(io::Error::other("injected disk sample failure")),
-        }
-    }
-}
 
 struct CensusGateObserver;
 
@@ -2277,82 +2260,6 @@ fn checkpoint_enospc_while_provider_lives_never_signals_it(root: &Path) -> Resul
     Ok(())
 }
 
-struct DiskBuild {
-    _writer: CustodyLease,
-    handle: CustodyHandle,
-    channel: UnixStream,
-    gate: UnixStream,
-    state: PathBuf,
-}
-
-fn disk_build(root: &Path) -> Result<DiskBuild> {
-    let state = root.join("PROVENANT_STATE_DIR");
-    std::fs::create_dir_all(&state)?;
-    std::fs::write(state.join(S2_DISK_PRESSURE), b"high")?;
-    let build_socket = root.join("disk-build.sock");
-    let gate_socket = root.join("disk-gate.sock");
-    let build_listener = UnixListener::bind(&build_socket).map_err(|error| {
-        io::Error::new(error.kind(), format!("bind disk build socket: {error}"))
-    })?;
-    let gate_listener = UnixListener::bind(&gate_socket)
-        .map_err(|error| io::Error::new(error.kind(), format!("bind disk gate socket: {error}")))?;
-    let (writer, handle) = start(
-        root,
-        "disk",
-        "s2-disk-build-provider",
-        &[build_socket.into_os_string(), gate_socket.into_os_string()],
-        CapturePlan {
-            descendant_grace_ms: 500,
-            ..CapturePlan::default()
-        },
-    )?;
-    let mut channel = fixture::fixture_accept(&build_listener, Duration::from_secs(5))?;
-    byte(&mut channel, b'R')?;
-    process_identity(read_pid_line(&mut channel)?)?;
-    let mut gate = fixture::fixture_accept(&gate_listener, Duration::from_secs(5))?;
-    byte(&mut gate, b'R')?;
-    channel.write_all(b"I")?;
-    byte(&mut channel, b'I')?;
-    set_disk_sample(&state, b"low")?;
-    channel.write_all(b"A")?;
-    byte(&mut channel, b'A')?;
-    Ok(DiskBuild {
-        _writer: writer,
-        handle,
-        channel,
-        gate,
-        state,
-    })
-}
-
-fn set_disk_sample(state: &Path, sample: &[u8]) -> Result<()> {
-    std::fs::write(state.join(S2_DISK_PRESSURE), sample)?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if std::fs::read(state.join(S2_DISK_SAMPLED)).is_ok_and(|seen| seen == sample) {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::other("guardian did not sample disk decision").into());
-        }
-        std::thread::park_timeout(Duration::from_millis(10));
-    }
-}
-
-fn disk_floor_never_stops_a_running_build(root: &Path) -> Result<()> {
-    let mut fixture = disk_build(root)?;
-
-    set_disk_sample(&fixture.state, b"low")?;
-    fixture.channel.write_all(b"B")?;
-    byte(&mut fixture.channel, b'B')?;
-    drop(fixture.gate);
-    // The build lives in its own session, so cleanup may not signal it; EOF
-    // lets it exit so the census can settle.
-    drop(fixture.channel);
-    assert!(!exited(&fixture.handle)?.unresolved_cleanup);
-    Ok(())
-}
-
 fn guardian_signal_requests_provider_stop(root: &Path, signal: i32, label: &str) -> Result<()> {
     let socket = root.join(format!("guardian-{label}.sock"));
     let listener = UnixListener::bind(&socket)?;
@@ -3044,10 +2951,6 @@ const CASES: &[Case] = &[
         process_watch_failure_records_one_fallback,
     ),
     (
-        "disk_floor_never_stops_a_running_build",
-        disk_floor_never_stops_a_running_build,
-    ),
-    (
         "live_provider_publishes_initial_checkpoint",
         live_provider_publishes_initial_checkpoint,
     ),
@@ -3320,10 +3223,6 @@ fn main() -> Result<()> {
         let graph_children = GraphChildrenHolder(home.clone());
         let registry = FileChildRegistry { home };
         let observer = CensusGateObserver;
-        let disk = std::env::var_os("PROVENANT_STATE_DIR")
-            .map(PathBuf::from)
-            .filter(|state| state.join(S2_DISK_PRESSURE).is_file())
-            .map(|state| MarkerDiskPressure { state });
         let publisher = match std::env::var_os("PROVENANT_STATE_DIR") {
             Some(path) => fixture::ExitPublicationFaults::from_state_dir(&PathBuf::from(path))?,
             None => None,
@@ -3357,9 +3256,6 @@ fn main() -> Result<()> {
                 wall_clock: jump
                     .is_some()
                     .then_some(&jumping as &dyn provenant_core::Clock),
-                disk: disk
-                    .as_ref()
-                    .map(|disk| disk as &dyn provenant_supervisor::DiskPressure),
                 exit_publisher: tracking_publisher
                     .as_ref()
                     .map(|item| item as &dyn ExitPublisher)

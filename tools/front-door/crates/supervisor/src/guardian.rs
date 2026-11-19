@@ -384,8 +384,6 @@ pub type PublicationScopeBinder =
 pub struct GuardianHooks<'a> {
     /// Memory-only scope retained through capture and holder settlement.
     pub publication_scope: Option<&'a PublicationScopeBinder>,
-    /// Host disk policy, sampled only while this attempt has a live provider.
-    pub disk: Option<&'a dyn DiskPressure>,
     /// Resource sampling cadence selected from `[domains.run]`; `None` uses the compiled default.
     pub resource_sample_interval: Option<Duration>,
     pub children: Option<&'a dyn ChildRegistry>,
@@ -409,10 +407,6 @@ pub struct GuardianHooks<'a> {
 }
 /// The host resolves the same free-space floor used by admission and GC.
 /// Samples are advisory and never authorise signalling a running build.
-pub trait DiskPressure {
-    fn below_floor(&self, context: &[u8]) -> io::Result<bool>;
-}
-
 /// The holder role: the composed terminal publisher runs inside the guardian,
 /// after durable exit and completed cleanup. The writer reservation remains,
 /// but its kernel lock is released before external settlement commands run.
@@ -1235,8 +1229,6 @@ impl Driver<'_> {
         let mut capture_drain_truncated = false;
         let mut last_checkpoint = None;
         let mut last_observation_ms: Option<u64> = None;
-        let mut last_disk_sample_ms = None;
-        let mut disk_warning_active = false;
         let mut last_cancel_ms = None;
         let mut cancel_pending = false;
         let mut cancel_watched = self
@@ -1620,32 +1612,6 @@ impl Driver<'_> {
                         }
                     };
                     break;
-                }
-            }
-            // The host is sampled only during this running lane. Reuse the
-            // existing native custody census to find builds, never host-wide
-            // command-line matching. No independent timer survives this lane.
-            if exit.is_none()
-                && stop_reason.is_none()
-                && last_disk_sample_ms.is_none_or(|last| now.saturating_sub(last) >= 1_000)
-            {
-                last_disk_sample_ms = Some(now);
-                if let Some(disk) = hooks.disk {
-                    let warning = match disk.below_floor(&self.holder_context) {
-                        Ok(true) => Some(
-                            "disk space below a configured build threshold; avoid starting new builds; running builds continue",
-                        ),
-                        Ok(false) => None,
-                        Err(_) => Some("disk floor observation failed; running builds continue"),
-                    };
-                    if let Some(message) = warning {
-                        if !disk_warning_active {
-                            warn(&mut warnings, &mut omitted_warnings, message);
-                        }
-                        disk_warning_active = true;
-                    } else {
-                        disk_warning_active = false;
-                    }
                 }
             }
             // Process events wake the scoped tree and provider-group walk, at

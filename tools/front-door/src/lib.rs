@@ -1010,7 +1010,6 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
             .with_graph_read(move |context, input, cancel, within| {
                 fabric::read_lane_graph(context, input, cancel, within, workers)
             });
-        let disk = disk_guard::LaneDisk::default();
         let (resource_sample_interval, resource_sample_interval_source) =
             match roots::resolve(globals, Workspace::Project, Product::Optional) {
                 Ok(resolved) => match provenant_cli::config_reads::read_for(&resolved.roots, "internal") {
@@ -1058,7 +1057,6 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
         };
         let hooks = provenant_supervisor::GuardianHooks {
             publication_scope: Some(&bind_publication),
-            disk: Some(&disk),
             resource_sample_interval,
             holder: Some(&holder),
             stdout_decoder: Some(holder.stdout_decoder()),

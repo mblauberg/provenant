@@ -931,15 +931,6 @@ threshold = "gc.critical_free"
 justification = "Measured free space below gc.critical_free warns with the figures, their sources and the remedy; submission, admission and new builds share this one decision. Refuse holds new work until space is reclaimed; a record that cannot be written still fails as data integrity."
 
 [[rule]]
-code = "GUARDIAN_DISK"
-site = "src/disk_guard.rs#LaneDisk::below_floor"
-boundary = "none"
-strength = "warn"
-knob = "policy.GUARDIAN_DISK"
-threshold = "gc.free_floor"
-justification = "The guardian observes free space during a running lane and only warns; running builds continue."
-
-[[rule]]
 code = "ADMISSION_PRESSURE"
 site = "run/src/admission.rs#RunStore::admit"
 boundary = "none"
