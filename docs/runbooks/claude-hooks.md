@@ -5,8 +5,8 @@ Anchor: [`hooks::run`](../../tools/front-door/src/hooks.rs)
 `provenant install --harness claude --hooks on` registers these hooks in the
 Claude settings (see [install](install.md)). Other harnesses use their native
 hook events declared in [`AdapterSpec`](../../tools/front-door/crates/records/src/adapters.rs). Unrecognised or unusable advisory input
-abstains with exit 0 and a diagnostic. Worktree ownership, writer isolation,
-data integrity and authority checks can refuse with exit 2. Stdout contains
+abstains with exit 0 and a diagnostic. Worktree operation errors and
+[hard boundary](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md) checks can refuse with exit 2. Stdout contains
 only the native protocol response.
 
 | Event | Handler | What it does |

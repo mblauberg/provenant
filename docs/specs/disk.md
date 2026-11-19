@@ -67,6 +67,6 @@ A command backend streams the repository wrapper around Cargo; `none` skips
 build admission. Both retain the independent local-Cargo execution policy. Builtin sandbox-off preparation
 takes the same decision against its target volume before launch. A record that
 cannot be written still fails as a data-integrity error, outside this decision.
-- Why: low space is not one of the four hard boundaries
-  ([ADR 0035](../adr/0035-four-hard-boundaries-and-flexible-everything-else.md)); a collection target must not
+- Why: low space is not a hard boundary
+  ([ADR 0035](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md)); a collection target must not
   prevent ordinary lane work, and a host that wants a hard floor declares it.

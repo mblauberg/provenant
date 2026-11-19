@@ -224,8 +224,9 @@ configured stop remains distinct from a mandatory boundary refusal.
 Every credential declaration is enforced independently. An exception for an
 enclosing runtime, package or selected authentication root cannot open a nested
 declared store. Selected authentication and its exact aliases retain only their
-declared access. Link operations remain subject to credential, state, source
-and Git boundaries without a blanket denial of ordinary hard links.
+declared access. A lane cannot create a hard link to a file in a credential root, the shared
+Git control directory or another lane's worktree; every other hard link is
+allowed.
 
 ### Plans refuse unsafe roots
 
@@ -352,8 +353,8 @@ A writer owns a private Git directory with the shared object store as a
 read-only alternate; shared refs, config, hooks and admin metadata stay
 read-only, and the host imports the result and moves the branch by
 compare-and-swap.
-- Why: ordinary Git works in the lane while one host boundary guards shared
-  metadata.
+- Why: ordinary Git works in the lane while other lanes' refs and the host's Git
+  behaviour stay protected; sharing objects and caches is intended.
 
 ### Native environment and sandbox tool stores
 

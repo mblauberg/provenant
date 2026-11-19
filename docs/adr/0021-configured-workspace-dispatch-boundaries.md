@@ -8,7 +8,7 @@ One-way dependencies keep policy testable without the command layer and prevent 
 
 ## Decision
 
-Compose one Rust executable from libraries with one-way, enforced dependency edges. Each execution concern has one owner; the CLI composes those owners rather than owning a second launch path. Delegation may narrow authority, never widen it ([ADR 0035](0035-four-hard-boundaries-and-flexible-everything-else.md), [ADR 0040](0040-open-lane-policy-with-explicit-boundaries.md)). External provider, hook and skill contracts remain theirs.
+Compose one Rust executable from libraries with one-way, enforced dependency edges. Each execution concern has one owner; the CLI composes those owners rather than owning a second launch path. Delegation may narrow authority, never widen it ([ADR 0035](0035-three-hard-boundaries-and-flexible-everything-else.md), [ADR 0040](0040-open-lane-policy-with-explicit-boundaries.md)). External provider, hook and skill contracts remain theirs.
 
 The [workspace spec](../specs/rust-workspace.md#crate-layering) owns the layering contract; [ADR 0028](0028-rust-port-dependencies.md) owns dependency admission.
 
