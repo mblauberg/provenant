@@ -63,8 +63,9 @@ pub const DEFAULT_ALLOW: &[&str] = &[
 
 /// Whether `pattern` is a valid allowlist entry: a dotted key of printable
 /// ASCII without whitespace, quotes or backslashes, optionally ending in `.*`.
-/// `include` and `includeIf` never pass, so naming them is invalid, and a
-/// pattern that carries a credential is invalid because the receipt records it.
+/// `include` and `includeIf` never pass, so naming them is invalid. The
+/// receipt records the list, so a pattern is held to the rewrite rule: one
+/// that carries a credential or names a non-SSH URL user is invalid.
 pub fn valid_pattern(pattern: &str) -> bool {
     let body = pattern.strip_suffix(".*").unwrap_or(pattern);
     let lower = body.to_ascii_lowercase();
@@ -77,7 +78,7 @@ pub fn valid_pattern(pattern: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_graphic() && !b"\"\\*".contains(&byte))
         && !never_passes(&lower)
-        && !carries_secret(pattern)
+        && clean_rewrite(pattern)
 }
 
 fn never_passes(key: &str) -> bool {
@@ -176,19 +177,10 @@ fn admitted(key: &str, value: Option<&str>, extra: &[String]) -> bool {
 /// scanner knows, so any user there withholds the rewrite. Only SSH forms
 /// keep a bare user (`ssh://git@host/`, `git@host:`), where it names the
 /// account rather than carrying a secret.
+/// The authority is read by the redactor's shared URL parser, which skips
+/// the extra slashes Git accepts (`https:///user@host/`).
 fn clean_rewrite(url: &str) -> bool {
-    if carries_secret(url) {
-        return false;
-    }
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return true;
-    };
-    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
-    !authority.contains('@')
-        || matches!(
-            scheme.to_ascii_lowercase().as_str(),
-            "ssh" | "git+ssh" | "ssh+git"
-        )
+    !carries_secret(url) && !provenant_redact::url::names_non_ssh_user(url.as_bytes())
 }
 
 /// Characters a quoted configuration value can carry.
@@ -473,6 +465,55 @@ mod tests {
             "url.https://x-access-token:{TOKEN}@github.com/.insteadof"
         )));
         assert!(!valid_pattern(&format!("alias.{TOKEN}")));
+    }
+
+    #[test]
+    fn extra_slashes_and_case_do_not_hide_an_http_user() {
+        // Built at run time: a token of no known shape, and a password.
+        let unknown = "a1".repeat(26);
+        let password = ["pw", "fixture"].concat();
+        let entries = vec![
+            entry(
+                &format!("url.https:///oauth2:{password}@gitlab.example/.insteadof"),
+                Some("gl:"),
+            ),
+            entry(
+                &format!("url.HtTpS:////{unknown}@dev.azure.com/.insteadof"),
+                Some("az:"),
+            ),
+            entry(
+                "url.https://plain.example/.insteadof",
+                Some(&format!("HTTP:///{unknown}@legacy.example/")),
+            ),
+            entry("url.ssh:///git@host.example/.insteadof", Some("host:")),
+        ];
+        let view = lane_view(&entries, &[]).unwrap();
+        for withheld in [
+            unknown.as_str(),
+            password.as_str(),
+            "gitlab",
+            "azure",
+            "legacy",
+        ] {
+            assert!(!view.text.contains(withheld), "{}", view.text);
+        }
+        assert_eq!(view.dropped, ["url.*.insteadof"]);
+        assert!(
+            view.text
+                .contains("[url \"ssh:///git@host.example/\"]\n\tinsteadof = \"host:\"\n"),
+            "{}",
+            view.text
+        );
+        // The receipt records allow patterns, so the same rule refuses them.
+        for pattern in [
+            format!("url.https://{unknown}@dev.azure.com/.insteadof"),
+            format!("url.https:///{unknown}@dev.azure.com/.*"),
+            format!("url.HTTPS:////oauth2:{password}@gitlab.example/.insteadof"),
+        ] {
+            assert!(!valid_pattern(&pattern), "{pattern}");
+        }
+        assert!(valid_pattern("url.ssh://git@host.example/.insteadof"));
+        assert!(valid_pattern("url.https://mirror.example/.insteadof"));
     }
 
     #[test]

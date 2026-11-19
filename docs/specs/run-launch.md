@@ -179,11 +179,15 @@ diff and merge presentation keys, `filter.lfs.{clean,smudge,process,required}`,
 and `url.*.insteadOf` when neither its target nor its prefix carries a
 password or token. A rewrite whose URL names any user withholds it, since a
 token can be the whole user of an HTTP URL; only SSH forms keep a bare user
-(`ssh://git@host/`, `git@host:`). An allowlisted value
+(`ssh://git@host/`, `git@host:`). The user is read after any number of
+slashes following `scheme://`, as Git and curl accept them
+(`https:///user@host/`), by the URL-authority parser the redactor shares. An
+allowlisted value
 that carries a credential by the redactor's shape rules (a token shape, URL
 userinfo with a password, or a credential assignment) is withheld. A
-`domains.lanes.git_config_allow` pattern that carries a credential is invalid,
-because the receipt records the list. Every other
+`domains.lanes.git_config_allow` pattern is held to the same rewrite rule,
+because the receipt records the list: one that carries a credential or names a
+non-SSH URL user is invalid. Every other
 key is withheld, including `credential.*`, `http.*`, `core.askPass`,
 `core.sshCommand`, `include` and `includeIf`. The lane receives no include of,
 and no read grant on, the host files, and keeps `GIT_CONFIG_NOSYSTEM` set so

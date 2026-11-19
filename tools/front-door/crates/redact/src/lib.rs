@@ -8,6 +8,8 @@ use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, FilterError};
 use std::collections::{BTreeMap, VecDeque};
 use thiserror::Error;
 
+pub mod url;
+
 const REDACTED: &[u8] = b"[REDACTED]";
 /// Short values are too ambiguous for document-wide substring replacement or refusal.
 pub const MIN_EXACT_BYTES: usize = 8;
@@ -245,7 +247,7 @@ impl TokenScanner {
         while index < input.len() {
             if self.url_authority.is_some() {
                 let mut authority = self.url_authority.take().unwrap_or_default();
-                while index < input.len() && !url_delimiter(input[index]) {
+                while index < input.len() && url::authority_continues(&authority, input[index]) {
                     authority.push(input[index]);
                     if authority.len() > FRAME_LIMIT {
                         return Err(FilterError);
@@ -425,10 +427,12 @@ impl TokenScanner {
                 .into_iter()
                 .map(|(start, len)| (offset + start, len)),
         );
-        if let Some(userinfo_end) = authority.iter().rposition(|byte| *byte == b'@')
-            && authority[..userinfo_end].contains(&b':')
+        // Leading slashes after `scheme://` precede the userinfo.
+        let start = url::leading_slashes(&authority);
+        if let Some(userinfo) = url::userinfo(&authority[start..])
+            && userinfo.contains(&b':')
         {
-            for decision in &mut decisions[..userinfo_end] {
+            for decision in &mut decisions[start..start + userinfo.len()] {
                 decision.1 = true;
             }
             self.matched = true;
@@ -547,10 +551,6 @@ fn token_marker_prefix(bytes: &[u8]) -> bool {
 
 fn word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
-}
-
-fn url_delimiter(byte: u8) -> bool {
-    byte.is_ascii_whitespace() || b"/?#\\\"'<>`\\\\".contains(&byte)
 }
 
 /// Credential keys, matched case-insensitively. A run of identifier bytes
@@ -2569,6 +2569,33 @@ mod tests {
         );
         assert_eq!(output, expected);
         assert!(!redactor.has_redaction());
+    }
+
+    #[test]
+    fn url_userinfo_after_extra_slashes_is_redacted_across_chunks() {
+        let password = ["pw", "fixture"].concat();
+        for scheme in ["https:///", "https:////", "HtTpS:///"] {
+            let input = format!("see {scheme}oauth2:{password}@gitlab.example/r end");
+            let expected = format!("see {scheme}[REDACTED]@gitlab.example/r end");
+            for split in 0..=input.len() {
+                let mut redactor = Redactor::new([]).expect("empty secret set");
+                assert_eq!(
+                    joined(
+                        &mut redactor,
+                        &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
+                    ),
+                    expected.as_bytes(),
+                    "{scheme} split {split}"
+                );
+                assert!(redactor.has_redaction());
+            }
+        }
+        // A path after the host is not userinfo.
+        let mut redactor = Redactor::new([]).expect("empty secret set");
+        assert_eq!(
+            joined(&mut redactor, &[b"https:///host/a:b@c".as_slice()]),
+            b"https:///host/a:b@c"
+        );
     }
 
     #[test]
