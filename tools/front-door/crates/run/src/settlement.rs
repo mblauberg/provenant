@@ -3679,7 +3679,9 @@ pub fn resume(raw: &str, providers: &dyn crate::Providers) -> Result<()> {
         clock: &clock,
         cancel: &cancel,
     };
-    let store = crate::RunStore::open(&context, &call)?.with_writer_registry(&request.registry);
+    let store = crate::RunStore::open(&context, &call)?
+        .with_writer_registry(&request.registry)
+        .into_settle_worker();
     let directory = store.attempt_dir(request.attempt, false)?;
     // A queuing reader can briefly hold this lock while probing for a worker.
     // Wait through that probe instead of abandoning the queued request.

@@ -6148,7 +6148,16 @@ impl RunStore {
                     reason: "Git import still holds custody".into(),
                 }));
             }
-            let receipts = self.retry_git_cleanup(record, call)?;
+            // A busy writer lock leaves the cleanup pending, naming its holder.
+            let receipts = match self.retry_git_cleanup(record, call) {
+                Err(error) if error.is_writer_contention() => {
+                    return Ok(Some(Reconciled::TemporaryRetained {
+                        path,
+                        reason: error.to_string().into(),
+                    }));
+                }
+                receipts => receipts?,
+            };
             if !matches!(receipts.cleanup_custody_release, EffectDisposition::Done) {
                 return Ok(Some(Reconciled::TemporaryRetained {
                     path,
@@ -6353,12 +6362,13 @@ impl RunStore {
                     custody::observe(&handle, call.lock_budget(), call.cancel, call.clock)
                         .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?
                 {
-                    // The provider exited; wait boundedly for the holder of
-                    // its writer lock instead of counting contention as failure.
+                    // The provider exited. The settlement worker waits boundedly
+                    // for another holder of its writer lock; contention is never
+                    // counted as failure.
                     let recovery = self.orphan_recovery(
                         &record,
                         directory.try_clone()?,
-                        call.lock_budget(),
+                        self.writer_lock_wait(call),
                         call,
                     )?;
                     self.finish_recovered_terminal(

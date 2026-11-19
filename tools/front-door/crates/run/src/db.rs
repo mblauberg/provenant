@@ -52,6 +52,8 @@ pub struct RunStore {
     pub(crate) sealed_parent_network: Option<NetworkAccess>,
     /// This host's ID, stamped on new attempts when the edge supplies it.
     pub(crate) host: Option<provenant_core::HostId>,
+    /// Set only in the detached settlement worker; see [`Self::writer_lock_wait`].
+    pub(crate) settle_worker: bool,
     _owner: PhantomData<Rc<()>>,
 }
 impl RunStore {
@@ -82,6 +84,24 @@ impl RunStore {
     pub fn with_writer_registry(mut self, state: &std::path::Path) -> Self {
         self.writer_registry = state.to_owned();
         self
+    }
+    /// Run as the detached settlement worker, the one path that waits for
+    /// another holder's writer lock.
+    pub(crate) fn into_settle_worker(mut self) -> Self {
+        self.settle_worker = true;
+        self
+    }
+    /// How long to wait for another holder of a writer lock. Only the
+    /// detached settlement worker waits, boundedly by the lock budget, to
+    /// take recovery custody. Every other path tries the lock once and defers
+    /// the step to that worker: a request must not stall, and the holder may
+    /// be this very process through another description.
+    pub(crate) fn writer_lock_wait(&self, call: &crate::Request<'_>) -> provenant_core::WaitBudget {
+        if self.settle_worker {
+            call.lock_budget()
+        } else {
+            provenant_core::WaitBudget::nonblocking(call.clock.mono_now())
+        }
     }
     /// The host state root whose admission ledger and registrations this store
     /// reads, which is not its own directory inside a nested lane.
@@ -172,6 +192,7 @@ impl RunStore {
             root,
             context: context.clone(),
             writer_registry: context.state_root.as_path().to_owned(),
+            settle_worker: false,
             repo_facts: Default::default(),
             policy: Default::default(),
             sealed_parent_network: None,
@@ -190,6 +211,7 @@ impl RunStore {
             root,
             context: context.clone(),
             writer_registry: context.state_root.as_path().to_owned(),
+            settle_worker: false,
             repo_facts: Default::default(),
             policy: Default::default(),
             sealed_parent_network: None,

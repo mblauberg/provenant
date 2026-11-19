@@ -651,12 +651,7 @@ impl RunStore {
         let (record, committed) = self.replay_terminal_locked(id, call)?;
         drop(guard);
         if committed {
-            self.settle_cleanup(
-                &record,
-                None,
-                provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
-                call,
-            );
+            self.settle_cleanup(&record, None, call);
         } else {
             self.release_admission(&record, call);
         }
@@ -1140,12 +1135,7 @@ impl RunStore {
         );
         match result {
             Ok(record) => {
-                self.settle_cleanup(
-                    &record,
-                    None,
-                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
-                    call,
-                );
+                self.settle_cleanup(&record, None, call);
                 self.record(id, call)
             }
             Err(error) => Err(error),
@@ -1378,12 +1368,7 @@ impl RunStore {
                     return self.record(id, call).map(Some);
                 }
                 if !preserve_evidence {
-                    self.settle_cleanup(
-                        &record,
-                        None,
-                        provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
-                        call,
-                    );
+                    self.settle_cleanup(&record, None, call);
                 } else {
                     self.release_admission(&record, call);
                 }
@@ -1492,16 +1477,13 @@ impl RunStore {
         self.record(expected.attempt_id, call)
     }
 
-    /// Post-commit cleanup. `writer_wait` bounds the wait for another holder
-    /// of a writer lock: settlement passes the lock budget, while request
-    /// paths pass a nonblocking budget and never wait on `writer.lock`. A
+    /// Post-commit cleanup. It tries another holder's writer lock once: a
     /// busy lock leaves the cleanup effect pending and the attempt retained
-    /// for the settlement worker.
+    /// for the settlement worker, and never counts as a failure.
     pub(crate) fn settle_cleanup(
         &self,
         record: &AttemptRecord,
         recovery: Option<&provenant_supervisor::custody::Recovery>,
-        writer_wait: provenant_core::WaitBudget,
         call: &Request<'_>,
     ) {
         if !self.release_admission(record, call) {
@@ -1539,7 +1521,7 @@ impl RunStore {
         {
             // Other failures are recorded on the cleanup effect itself.
             if self
-                .retry_git_cleanup_with_custody(record, recovery, writer_wait, call)
+                .retry_git_cleanup_with_custody(record, recovery, call)
                 .is_err_and(|error| error.is_writer_contention())
             {
                 let _ = self.set_temporary_retained(record.attempt_id, true, call);
@@ -1958,12 +1940,7 @@ impl RunStore {
                     let (record, committed) = self.replay_terminal_locked(old.attempt_id, call)?;
                     drop(_publication);
                     if committed {
-                        self.settle_cleanup(
-                            &record,
-                            None,
-                            provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
-                            call,
-                        );
+                        self.settle_cleanup(&record, None, call);
                     } else {
                         self.release_admission(&record, call);
                     }
@@ -2021,15 +1998,13 @@ impl RunStore {
         record: &AttemptRecord,
         call: &Request<'_>,
     ) -> Result<SettlementReceipts> {
-        self.retry_git_cleanup_with_custody(record, None, call.lock_budget(), call)
+        self.retry_git_cleanup_with_custody(record, None, call)
     }
 
-    /// `writer_wait` bounds the wait for another holder of the writer lock.
     fn retry_git_cleanup_with_custody(
         &self,
         record: &AttemptRecord,
         recovery: Option<&provenant_supervisor::custody::Recovery>,
-        writer_wait: provenant_core::WaitBudget,
         call: &Request<'_>,
     ) -> Result<SettlementReceipts> {
         if !self.release_admission(record, call) {
@@ -2054,12 +2029,12 @@ impl RunStore {
                     .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?,
                 _ => false,
             };
-            // Wait boundedly for another holder of the writer lock.
+            // Try another holder's writer lock once; contention defers.
             let _lock = match &slot {
                 Some(slot) if !held => Some(
                     provenant_supervisor::custody::lock_writer_exclusion(
                         slot,
-                        writer_wait,
+                        provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
                         call.cancel,
                         call.clock,
                     )

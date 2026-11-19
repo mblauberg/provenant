@@ -1227,7 +1227,6 @@ impl RunStore {
         self.settle_cleanup(
             &self.record(record.attempt_id, call)?,
             completion.custody(),
-            call.lock_budget(),
             call,
         );
         self.prepare_budget_wrap_up(record.attempt_id, call)?;
