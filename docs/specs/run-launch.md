@@ -152,10 +152,9 @@ without a private identity config, and launch never strips it, so system Git
 configuration (on macOS, `credential.helper=osxkeychain`) is not read. The
 sandboxed lane environment drops `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`,
 `GIT_CONFIG_VALUE_*` and `GIT_CONFIG_PARAMETERS` and carries the token helper's
-own entries in their place. This does not yet isolate the host global Git
-configuration, which is still included in full (#3584), and a lane that is not
-sandboxed keeps the host's helpers and askpass: it is not covered by this
-boundary.
+own entries in their place. Its global configuration is the private allowlisted
+view described below. A lane that is not sandboxed keeps the host's helpers and
+askpass: it is not covered by this boundary.
 - Why: system configuration and inherited command-scope entries are credential
   paths a lane never asked for
   ([ADR 0035](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md)).
