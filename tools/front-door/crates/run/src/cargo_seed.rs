@@ -2038,16 +2038,23 @@ mod tests {
             "{warning}"
         );
         assert!(unset.repair.is_some_and(|text| text.contains("seed-build")));
-        // Spelling the defaults out changes nothing: that is what unset means.
+        // Only the injected environment decides the Cargo home, whatever the test
+        // process exports, and the outcome says which source won.
+        assert_eq!(unset.cargo_home, Some("host HOME/.cargo"));
+        // Spelling the defaults out changes nothing but that source: unset means
+        // the defaults.
         let spelled = fixture.seed(&[
             ("HOME", &fixture.home),
             ("RUSTUP_HOME", &fixture.home.join(".rustup")),
             ("CARGO_HOME", &fixture.home.join(".cargo")),
         ]);
-        assert_eq!(
-            serde_json::to_value(&spelled).unwrap(),
-            serde_json::to_value(&unset).unwrap()
-        );
+        assert_eq!(spelled.cargo_home, Some("host CARGO_HOME"));
+        let without_source = |seed: &WorktreeSeed| {
+            let mut value = serde_json::to_value(seed).unwrap();
+            value.as_object_mut().unwrap().remove("cargo_home");
+            value
+        };
+        assert_eq!(without_source(&spelled), without_source(&unset));
         assert!(!fixture.cache.join("target").exists());
     }
 
