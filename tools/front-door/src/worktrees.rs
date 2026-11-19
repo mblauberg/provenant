@@ -740,12 +740,21 @@ fn gc_failure<'a>(data: &'a GcData, message: &str, detailed: bool) -> CommandRes
     result
 }
 
+/// How a scheduled collection that raised no error ended.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum GcCompletion {
+    Complete,
+    /// The sweep stopped at its budget and saved a cursor, so the next sweep
+    /// resumes it. This is progress, not a failure.
+    Partial(String),
+}
+
 /// Daily tick task, using the same collection policy and custody as explicit GC.
 pub(crate) fn scheduled_gc(
     globals: &Globals,
     idle_seconds: u64,
     workers: &dyn WorkerObserver,
-) -> Result<(), String> {
+) -> Result<GcCompletion, String> {
     let command = Gc {
         scheduled: true,
         pressure: false,
@@ -762,13 +771,8 @@ pub(crate) fn scheduled_gc(
         || !data.port_receipts.errors.is_empty()
         || !data.retention_errors.is_empty()
         || !data.provider_state.payload.errors.is_empty()
-        || data.sweep_stopped
     {
-        return Err(if data.sweep_stopped {
-            "retention sweep reached gc.sweep_budget and saved its cursor; it resumes on the next sweep".into()
-        } else {
-            "retention incomplete; next: provenant gc --apply".into()
-        });
+        return Err("retention incomplete; next: provenant gc --apply".into());
     }
     let upstream_failures = data
         .worktree_cleanup
@@ -785,7 +789,14 @@ pub(crate) fn scheduled_gc(
             data.build_dirs.errors.len()
         ));
     }
-    Ok(())
+    Ok(if data.sweep_stopped {
+        GcCompletion::Partial(
+            "retention sweep reached gc.sweep_budget and saved its cursor; it resumes on the next sweep"
+                .into(),
+        )
+    } else {
+        GcCompletion::Complete
+    })
 }
 
 /// `provenant gc`: remove orphaned and idle lane caches, sparing any whose
