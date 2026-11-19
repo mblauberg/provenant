@@ -460,6 +460,43 @@ fn model_refusal(message: &str) -> bool {
         .iter()
         .any(|phrase| lower.contains(phrase))
 }
+
+/// Whether a Codex `error` event is actually configuration advice: a key the
+/// account's inherited config still sets that Codex deprecated. It is not a
+/// failed turn, so it must not fail a lane or headline a result as a provider
+/// error. The notice names a bracketed config key (for example
+/// `[features].multi_agent`), which distinguishes it from real failures.
+pub fn config_deprecation_notice(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("is deprecated")
+        && (lower.contains("[features]")
+            || lower.contains("[agents]")
+            || lower.contains("[general]")
+            || lower.contains("config.toml"))
+}
+
+/// The config file a deprecation notice is about, when it names one. Codex
+/// reads its settings from `config.toml` in its home, so that conventional
+/// name is reported when the message gives no fuller path.
+fn config_notice_source(message: &str) -> String {
+    message
+        .split_whitespace()
+        .map(|word| {
+            word.trim_matches(|ch: char| matches!(ch, '"' | '\'' | ',' | ';' | ')' | '(' | ':'))
+        })
+        .find(|word| word.ends_with(".toml"))
+        .map_or_else(|| "config.toml".into(), str::to_owned)
+}
+
+/// A deprecation notice as a warning event, keeping the provider's text and
+/// the config file it names so the host can show one actionable warning.
+fn config_warning(message: &str) -> E {
+    E::Warning {
+        message: message.to_owned(),
+        source: Some(config_notice_source(message)),
+    }
+}
+
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     Ok(match wire::<Event>(bytes)? {
         Event::Thread { thread_id } => vec![E::Session(thread_id)],
@@ -493,6 +530,8 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                 limited
             } else if lower.contains("too many requests") || lower.contains("status: 429") {
                 E::RateLimited { message }
+            } else if config_deprecation_notice(&message) {
+                config_warning(&message)
             } else {
                 E::Error
             }]
@@ -533,7 +572,12 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                     _ => None,
                 }
             });
-            vec![typed.unwrap_or(E::Error)]
+            let warning = error
+                .as_ref()
+                .and_then(|error| error.get("message")?.as_str())
+                .filter(|message| config_deprecation_notice(message))
+                .map(config_warning);
+            vec![typed.or(warning).unwrap_or(E::Error)]
         }
         _ => vec![],
     })
@@ -695,5 +739,20 @@ mod model_refusal_tests {
         let other = serde_json::json!({"type": "error", "message": "stream disconnected"});
         let events = decode(other.to_string().as_bytes()).expect("decoded");
         assert!(matches!(events.as_slice(), [E::Error]));
+    }
+
+    #[test]
+    fn a_config_deprecation_is_a_warning_and_not_a_failure() {
+        let message = "[features].multi_agent is deprecated. Use [agents].enabled=false instead.";
+        for line in [
+            serde_json::json!({"type": "error", "message": message}),
+            serde_json::json!({"type": "turn.failed", "error": {"message": message}}),
+        ] {
+            let events = decode(line.to_string().as_bytes()).expect("decoded");
+            assert!(
+                matches!(events.as_slice(), [E::Warning { message: m, source }] if m == message && source.as_deref() == Some("config.toml")),
+                "{events:?}"
+            );
+        }
     }
 }

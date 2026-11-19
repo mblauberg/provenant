@@ -1209,6 +1209,37 @@ impl Registry<'_> {
                 _ => {}
             }
         }
+        // Provider config-deprecation notices are advice, not failures. Show
+        // each distinct notice once per attempt beside the applied route,
+        // naming the config file the provider reported. The same notice can
+        // also arrive on stderr; collapsing both channels here keeps one
+        // warning even when Codex prints the key twice.
+        let mut seen_notices = std::collections::BTreeSet::new();
+        let mut config_notice = |message: &str, source: Option<&str>| {
+            let source = source.unwrap_or("config.toml");
+            let text = format!(
+                "warning: provider config deprecation ({source}): {}; fix the key or use providers.codex.clean_config",
+                crate::bounded_text(message, 512)
+            );
+            if seen_notices.insert(text.clone())
+                && let Some(route) = decoded.observed_route.as_mut()
+            {
+                route.launch_warnings.push(text);
+            }
+        };
+        for event in &events {
+            if let ProviderEvent::Warning { message, source } = event {
+                config_notice(message, source.as_deref());
+            }
+        }
+        if adapter.id() == "codex" {
+            for line in stderr.split(|&byte| byte == b'\n') {
+                let line = String::from_utf8_lossy(line);
+                if provenant_providers::codex::config_deprecation_notice(&line) {
+                    config_notice(line.trim(), None);
+                }
+            }
+        }
         if provenant_records::AdapterSpec::get(adapter.id())
             .is_some_and(|spec| spec.deduplicate_result)
         {

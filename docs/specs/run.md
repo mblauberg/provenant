@@ -138,9 +138,21 @@ unavailable push leaves the committed head and unpushed count visible.
 
 | Record field | Reader compatibility |
 | --- | --- |
-| `AttemptRecord.stop_work` | Optional; older records read as absent, and older readers retain it as an unknown field. |
+`status` and `result` report the budget's unit beside the provider's totals: the
+unit name (`fresh_tokens`: uncached input, cache writes and output/reasoning,
+with cache reads excluded because each call rereads the context), the limit's
+value and the layer that set it, the fresh tokens counted for the attempt and
+the provider's cumulative input including cache reads for comparison. Codex
+totals are session-wide unless an attempt marks them per-attempt, so a counted
+or reported figure can be absent; absence is never a guessed zero. An adapter
+that cannot interrupt a turn names that caveat in the same receipt, and the
+receipt is projected from the same limit and usage record enforcement reads,
+so the two outputs cannot disagree about the unit.
 
-- Why: budget enforcement must preserve completed work and report its evidence.
+| `AttemptRecord.stop_work` | Optional; older records read as absent, and older readers retain it as an unknown field. |
+| `status.budget_usage`, `result.budget_usage` | Optional; older readers retain them as unknown fields. |
+
+- Why: a budget that excludes cache reads must not look like an unenforced budget when the provider reports a much larger cumulative input.
 
 ## Lane verification and build admission
 
@@ -157,6 +169,23 @@ their reported source from it, so status JSON and the preamble show the true
 layer.
 - Why: a value reported under the wrong source sends the operator to the wrong
   place to change it.
+
+## Provider config notices are warnings
+
+A provider's own configuration-deprecation notice (a deprecated key in the
+config the account home inherits, such as Codex's `[features].multi_agent`)
+is advice for the user, not a failed provider turn. The adapter classifies it
+at the decode site as a warning carrying the provider's text and the config
+file it names; it never sets the stream's error flag or fails the lane. The
+same notice on stderr is likewise held out of the attempt's provider-error
+headline. Each distinct notice is shown once per attempt beside the applied
+route, names `config.toml` when the message gives no fuller path and points at
+`providers.codex.clean_config` as the way to stop inheriting stale keys.
+- Why: a stale inherited key must be actionable for the user without being
+  reported as a provider failure, and two copies of the same notice must not
+  read as two errors.
+- Owner: `crates/providers/src/codex.rs`, `crates/providers/src/stream.rs`,
+  `crates/cli/src/run.rs`, `crates/cli/src/run/output.rs`
 
 ## Lane Git and import
 

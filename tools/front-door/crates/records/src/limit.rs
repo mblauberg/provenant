@@ -336,7 +336,64 @@ pub struct LaneLimits {
     pub extra: crate::ExtraFields,
 }
 
+/// The unit a writer token budget counts, the figure it counted for one
+/// attempt and the provider's own totals beside it. `status` and `result`
+/// both project this from the same limit and usage record, so the unit named
+/// to the chair is the one enforcement used.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenBudgetUsage {
+    /// Stable unit name: fresh tokens (cache reads excluded).
+    pub unit: String,
+    /// Plain-language definition of what the unit counts and excludes.
+    pub unit_detail: String,
+    /// The budget's value in that unit.
+    pub limit: u64,
+    /// The layer that set the budget.
+    pub source: LimitSource,
+    /// Fresh tokens counted for this attempt; absent when the provider
+    /// reported no usage, never a guessed zero.
+    pub counted: Option<u64>,
+    /// The provider's cumulative input including cache reads, for comparison
+    /// with `counted`. A different number is expected, not an inconsistency.
+    pub reported_input: Option<u64>,
+    /// Whether the reported totals cover this attempt or the provider's whole
+    /// session. Codex session totals cannot be attributed to one attempt.
+    pub basis: String,
+    /// Provider-specific caveat, such as turn-boundary enforcement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
 impl LaneLimits {
+    /// Project the budget's unit and counted usage for one attempt. Absent
+    /// when no writer token budget was set; `provider` adds an adapter's
+    /// caveat when it declares one.
+    pub fn budget_usage(
+        &self,
+        usage: &crate::run::UsageRecord,
+        provider: Option<&str>,
+    ) -> Option<TokenBudgetUsage> {
+        let budget = self.token_budget.as_ref()?;
+        Some(TokenBudgetUsage {
+            unit: "fresh_tokens".into(),
+            unit_detail:
+                "uncached input + cache writes + output and reasoning; cache reads excluded".into(),
+            limit: budget.value,
+            source: budget.source,
+            counted: usage.fresh_tokens(),
+            reported_input: usage.input_including_cache(),
+            basis: if provider == Some("codex") && usage.per_attempt != Some(true) {
+                "session".into()
+            } else {
+                "attempt".into()
+            },
+            notice: provider
+                .and_then(crate::AdapterSpec::get)
+                .and_then(|spec| spec.token_budget_notice)
+                .map(str::to_owned),
+        })
+    }
+
     /// The limits that are set, by name.
     pub fn named(&self) -> impl Iterator<Item = (&'static str, &Limit)> {
         [
