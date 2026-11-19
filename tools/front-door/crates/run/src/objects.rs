@@ -322,22 +322,35 @@ pub(crate) fn resolve_ref(git: &Path, repo: &VerifiedRepo, reference: &str) -> R
     GitOid::parse(std::str::from_utf8(&bytes).map_err(|_| invalid())?.trim()).map_err(|_| invalid())
 }
 
-pub(crate) fn clear_import_refs(
-    git: &Path,
-    repo: &VerifiedRepo,
-    attempt: provenant_core::AttemptId,
-    objects: &[GitOid],
-) -> Result<()> {
-    if objects.is_empty() {
+/// List the refs below a Provenant-owned prefix. Ref names come from Git, so
+/// they are already validated; the prefix check keeps the result in namespace.
+fn list_refs(git: &Path, repo: &VerifiedRepo, prefix: &str) -> Result<Vec<String>> {
+    let output = execute(
+        git,
+        repo.common_git_dir(),
+        repo.root_path(),
+        &args(&["for-each-ref", "--format=%(refname)", prefix]),
+        None,
+    )?;
+    Ok(String::from_utf8_lossy(&output)
+        .lines()
+        .filter(|line| line.starts_with(prefix) && line.len() > prefix.len())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Delete refs in one atomic `update-ref --stdin` transaction, never one
+/// process per ref: an attempt may pin thousands of objects. The `start`,
+/// `prepare` and `commit` wrapper keeps the buffered transaction retry-safe on
+/// a native ref-lock collision (`is_atomic_ref_transaction`).
+pub(crate) fn delete_refs(git: &Path, repo: &VerifiedRepo, refs: &[String]) -> Result<()> {
+    if refs.is_empty() {
         return Ok(());
     }
     let mut input = String::from("start\n");
-    input.push_str(
-        &objects
-            .iter()
-            .map(|oid| format!("delete refs/provenant/import-extra/{attempt}/{oid}\n"))
-            .collect::<String>(),
-    );
+    for reference in refs {
+        input.push_str(&format!("delete {reference}\n"));
+    }
     input.push_str("prepare\ncommit\n");
     execute_bounded(
         git,
@@ -351,6 +364,19 @@ pub(crate) fn clear_import_refs(
         },
     )?;
     Ok(())
+}
+
+/// Remove every import-extra pin of one attempt, whatever outcome settled it.
+/// The OIDs are read from the ref store, so cleanup does not depend on the
+/// success path having remembered the objects it imported.
+pub(crate) fn clear_import_refs(git: &Path, repo: &VerifiedRepo, attempt: AttemptId) -> Result<()> {
+    let prefix = format!("refs/provenant/import-extra/{attempt}/");
+    delete_refs(git, repo, &list_refs(git, repo, &prefix)?)
+}
+
+/// Every attempt-scoped import-extra pin, for GC's settled/missing sweep.
+pub(crate) fn all_import_extra_refs(git: &Path, repo: &VerifiedRepo) -> Result<Vec<String>> {
+    list_refs(git, repo, "refs/provenant/import-extra/")
 }
 
 // Shared objects are host-owned. receive-pack checks newly introduced content

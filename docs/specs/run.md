@@ -209,7 +209,11 @@ or the record or index cannot be read, the index and record are left unchanged
 and status reports `index_out_of_sync` with the reason, the paths and one
 command that resets the index and the record together.
 Import retention refs belong to each attempt, even for an identical commit;
-publication and cleanup remove only that attempt's pins.
+publication and cleanup remove only that attempt's pins. Settlement clears an
+attempt's import pins on every terminal outcome, not just successful
+publication, and GC removes the pins of any settled or missing attempt so ref
+listings stay small. Bulk pin removal is one batched ref transaction, never one
+Git process per pin; a refused import keeps its pins as recovery evidence.
 Lane Git import runs with `-c advice.graftFileDeprecated=false`, and raw git advice
 (such as `hint:` lines) is filtered from stderr before warning so advice lines
 never surface as Provenant warnings.

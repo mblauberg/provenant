@@ -914,12 +914,14 @@ fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
         drop(driver);
         let stage = crate::objects::import_pin(id, launch.base);
         fixture.git(&["update-ref", &stage, &launch.base.to_string()])?;
+        let extra = format!("refs/provenant/import-extra/{id}/object");
+        fixture.git(&["update-ref", &extra, &launch.base.to_string()])?;
         tests::seal_observation(&store, &input, &exit)?;
         let mut publication = tests::publication();
         publication.outcome = outcome;
         let terminal = store.publish_terminal(id, 1, &publication, &exit, &call)?;
         assert!(matches!(terminal.state, AttemptState::Terminal { .. }));
-        for reference in [&pin, &stage] {
+        for reference in [&pin, &stage, &extra] {
             assert!(
                 crate::objects::resolve_ref(&git, launch.worktree.repo(), reference).is_err(),
                 "retained terminal ref {reference} after {outcome:?}"
@@ -953,9 +955,15 @@ fn terminal_cleanup_removes_only_its_import_pin()
         provenant_core::AttemptId::from_bytes([0x9a; 16]),
         launch.base,
     );
+    let own_extra = format!("refs/provenant/import-extra/{}/object", input.attempt_id);
+    let sibling_extra = format!(
+        "refs/provenant/import-extra/{}/object",
+        provenant_core::AttemptId::from_bytes([0x9a; 16])
+    );
     let oid = launch.base.to_string();
-    fixture.git(&["update-ref", &own, &oid])?;
-    fixture.git(&["update-ref", &sibling, &oid])?;
+    for reference in [&own, &sibling, &own_extra, &sibling_extra] {
+        fixture.git(&["update-ref", reference, &oid])?;
+    }
 
     crate::writer::cleanup_git_pins(
         execution.state_root.as_path(),
@@ -966,9 +974,64 @@ fn terminal_cleanup_removes_only_its_import_pin()
         true,
     )?;
 
-    assert!(crate::objects::resolve_ref(&git, launch.worktree.repo(), &own).is_err());
+    for reference in [&own, &own_extra] {
+        assert!(
+            crate::objects::resolve_ref(&git, launch.worktree.repo(), reference).is_err(),
+            "retained terminal ref {reference}"
+        );
+    }
+    for reference in [&sibling, &sibling_extra] {
+        assert_eq!(
+            crate::objects::resolve_ref(&git, launch.worktree.repo(), reference)?,
+            launch.base,
+            "another attempt's pin was removed"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/run-settlement.md#retention-and-disclosure
+fn gc_removes_import_pins_of_missing_attempts_and_keeps_live_ones()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let execution = registered_landed_writer_fixture(&fixture)?;
+    let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
+    let call = tests::call(&clock, &cancel);
+    let store = RunStore::open(&execution, &call)?;
+    let mut input = tests::input();
+    input.request.task.writer = Some(fixture.writer.clone());
+    store.create(&input, &call)?;
+    let launch = crate::prepare_writer(
+        &fixture.writer,
+        execution.state_root.as_path(),
+        execution.project_id,
+    )?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let oid = launch.base.to_string();
+    let live = format!("refs/provenant/import-extra/{}/object", input.attempt_id);
+    let missing = format!(
+        "refs/provenant/import-extra/{}/object",
+        provenant_core::AttemptId::from_bytes([0x9a; 16])
+    );
+    fixture.git(&["update-ref", &live, &oid])?;
+    fixture.git(&["update-ref", &missing, &oid])?;
     assert_eq!(
-        crate::objects::resolve_ref(&git, launch.worktree.repo(), &sibling)?,
+        crate::gc_import_pins(&git, launch.worktree.repo(), &store, &call, true)?,
+        1
+    );
+    assert_eq!(
+        crate::objects::resolve_ref(&git, launch.worktree.repo(), &missing)?,
+        launch.base,
+        "a preview must not delete refs"
+    );
+    assert_eq!(
+        crate::gc_import_pins(&git, launch.worktree.repo(), &store, &call, false)?,
+        1
+    );
+    assert!(crate::objects::resolve_ref(&git, launch.worktree.repo(), &missing).is_err());
+    assert_eq!(
+        crate::objects::resolve_ref(&git, launch.worktree.repo(), &live)?,
         launch.base
     );
     Ok(())

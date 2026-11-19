@@ -1579,6 +1579,34 @@ fn gc_project(
                     "GC requires a verified primary checkout or bound bare owner",
                 ));
             }
+            if !read_only {
+                // Settlement clears these pins on every outcome. GC is the
+                // backstop for pins left by an earlier version or an attempt
+                // whose record has since gone.
+                let call = provenant_run::Request {
+                    clock: context.clock,
+                    cancel,
+                };
+                let store_context = provenant_run::ExecutionContext {
+                    state_root: roots.state.clone(),
+                    project_id: context.binding.project_id(),
+                    actor_id: provenant_core::ActorId::from_bytes([0; 16]),
+                    read_prompts: false,
+                };
+                if let Some(store) =
+                    provenant_run::RunStore::open_disk_read_only(&store_context, &call)
+                        .map_err(|error| Error::RetentionCollection(error.to_string()))?
+                {
+                    provenant_run::gc_import_pins(
+                        context.utility.git_program_path(),
+                        context.repo,
+                        &store,
+                        &call,
+                        read_only,
+                    )
+                    .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+                }
+            }
             Ok(GcProject {
                 binding: context.binding.clone(),
                 path: project.to_owned(),
