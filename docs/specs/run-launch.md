@@ -177,9 +177,13 @@ global files (the XDG `git/config`, then `~/.gitconfig`, or the host's
 allowlist: `user.name`, `user.email`, `alias.*`, `color.*`, named core,
 diff and merge presentation keys, `filter.lfs.{clean,smudge,process,required}`,
 and `url.*.insteadOf` when neither its target nor its prefix carries a
-password or token (a bare user such as `git@` passes). An allowlisted value
+password or token. A rewrite whose URL names any user withholds it, since a
+token can be the whole user of an HTTP URL; only SSH forms keep a bare user
+(`ssh://git@host/`, `git@host:`). An allowlisted value
 that carries a credential by the redactor's shape rules (a token shape, URL
-userinfo with a password, or a credential assignment) is withheld. Every other
+userinfo with a password, or a credential assignment) is withheld. A
+`domains.lanes.git_config_allow` pattern that carries a credential is invalid,
+because the receipt records the list. Every other
 key is withheld, including `credential.*`, `http.*`, `core.askPass`,
 `core.sshCommand`, `include` and `includeIf`. The lane receives no include of,
 and no read grant on, the host files, and keeps `GIT_CONFIG_NOSYSTEM` set so

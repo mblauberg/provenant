@@ -63,7 +63,8 @@ pub const DEFAULT_ALLOW: &[&str] = &[
 
 /// Whether `pattern` is a valid allowlist entry: a dotted key of printable
 /// ASCII without whitespace, quotes or backslashes, optionally ending in `.*`.
-/// `include` and `includeIf` never pass, so naming them is invalid.
+/// `include` and `includeIf` never pass, so naming them is invalid, and a
+/// pattern that carries a credential is invalid because the receipt records it.
 pub fn valid_pattern(pattern: &str) -> bool {
     let body = pattern.strip_suffix(".*").unwrap_or(pattern);
     let lower = body.to_ascii_lowercase();
@@ -76,6 +77,7 @@ pub fn valid_pattern(pattern: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_graphic() && !b"\"\\*".contains(&byte))
         && !never_passes(&lower)
+        && !carries_secret(pattern)
 }
 
 fn never_passes(key: &str) -> bool {
@@ -158,18 +160,35 @@ fn admitted(key: &str, value: Option<&str>, extra: &[String]) -> bool {
     if DEFAULT_ALLOW.iter().any(|pattern| matches(pattern, key)) {
         return clean;
     }
-    // A rewrite passes when neither its target nor the prefix it replaces
-    // carries a credential; a bare user such as `git@` is not one.
     match split(key) {
         Some((section, Some(base), variable)) => {
             section == "url"
                 && variable == "insteadof"
-                && !carries_secret(base)
-                && value.is_some()
-                && clean
+                && clean_rewrite(base)
+                && value.is_some_and(clean_rewrite)
         }
         _ => false,
     }
+}
+
+/// Whether a rewrite URL or prefix is free of credentials. A token can be
+/// the whole user of an HTTP URL (`https://TOKEN@host/`) in shapes no
+/// scanner knows, so any user there withholds the rewrite. Only SSH forms
+/// keep a bare user (`ssh://git@host/`, `git@host:`), where it names the
+/// account rather than carrying a secret.
+fn clean_rewrite(url: &str) -> bool {
+    if carries_secret(url) {
+        return false;
+    }
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return true;
+    };
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    !authority.contains('@')
+        || matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "ssh" | "git+ssh" | "ssh+git"
+        )
 }
 
 /// Characters a quoted configuration value can carry.
@@ -449,6 +468,60 @@ mod tests {
         assert!(!valid_pattern("user name"));
         assert!(valid_pattern("push.default"));
         assert!(valid_pattern("pull.*"));
+        // The receipt records the allowlist, so a credential cannot be one.
+        assert!(!valid_pattern(&format!(
+            "url.https://x-access-token:{TOKEN}@github.com/.insteadof"
+        )));
+        assert!(!valid_pattern(&format!("alias.{TOKEN}")));
+    }
+
+    #[test]
+    fn http_rewrites_with_any_user_are_withheld_and_ssh_users_pass() {
+        // Tokens no shape rule knows, used as the HTTP user: an Azure DevOps
+        // personal access token and a legacy 40-hex OAuth token.
+        let azure = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z6";
+        let oauth = "0123456789abcdef0123456789abcdef01234567";
+        let entries = vec![
+            entry(
+                &format!("url.https://{azure}@dev.azure.com/.insteadof"),
+                Some("https://dev.azure.com/"),
+            ),
+            entry(
+                "url.https://legacy.example/.insteadof",
+                Some(&format!("HTTP://{oauth}@legacy.example/")),
+            ),
+            entry(
+                "url.https://deploy@plain.example/.insteadof",
+                Some("plain:"),
+            ),
+            entry("url.ssh://git@host.example/.insteadof", Some("host:")),
+            entry(
+                "url.git+ssh://git@ssh.example/.insteadof",
+                Some("ssh-host:"),
+            ),
+            entry("url.git@github.com:.insteadof", Some("gh:")),
+            entry(
+                "url.https://mirror.example/.insteadof",
+                Some("git@github.com:"),
+            ),
+        ];
+        let view = lane_view(&entries, &[]).unwrap();
+        for withheld in [azure, oauth, "dev.azure.com", "legacy.example", "plain"] {
+            assert!(!view.text.contains(withheld), "{}", view.text);
+        }
+        assert_eq!(view.dropped, ["url.*.insteadof"]);
+        for kept in [
+            "[url \"ssh://git@host.example/\"]\n\tinsteadof = \"host:\"\n",
+            "[url \"git+ssh://git@ssh.example/\"]\n\tinsteadof = \"ssh-host:\"\n",
+            "[url \"git@github.com:\"]\n\tinsteadof = \"gh:\"\n",
+            "[url \"https://mirror.example/\"]\n\tinsteadof = \"git@github.com:\"\n",
+        ] {
+            assert!(
+                view.text.contains(kept),
+                "{kept} missing from {}",
+                view.text
+            );
+        }
     }
 
     #[test]

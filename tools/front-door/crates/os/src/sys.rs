@@ -91,6 +91,8 @@ pub fn git_system_config(
         .args(["config", "--list", "--show-scope", "-z"])
         .env_remove("GIT_CONFIG_PARAMETERS")
         .env_remove("GIT_CONFIG_COUNT")
+        // The deprecated single-file selector would replace every file read.
+        .env_remove("GIT_CONFIG")
         .env_remove("GIT_CONFIG_SYSTEM")
         .env_remove("GIT_CONFIG_NOSYSTEM")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")

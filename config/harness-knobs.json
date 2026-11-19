@@ -358,7 +358,7 @@
         "type": "string_list",
         "allowed": "up to 64 Git configuration keys, such as push.default, or a prefix ending in .* such as pull.*; include and includeIf are never passed",
         "default": [],
-        "effect": "Extra host Git configuration keys a sandboxed lane receives from the host system and global files beyond the compiled allowlist (user.name, user.email, alias.*, color.*, core, diff and merge presentation keys, filter.lfs.{clean,smudge,process,required}, and url.*.insteadOf whose URLs carry no password or token). Compiled-allowlist values that carry a credential are withheld; keys listed here pass verbatim, so listing credential.* or http.* hands the lane those credentials. Withheld key names, never values, are recorded with this list and its origin in the launch receipt. Unsandboxed lanes read the host configuration in full."
+        "effect": "Extra host Git configuration keys a sandboxed lane receives from the host system and global files beyond the compiled allowlist (user.name, user.email, alias.*, color.*, core, diff and merge presentation keys, filter.lfs.{clean,smudge,process,required}, and url.*.insteadOf whose URLs carry no password or token and name a user only in SSH form). Compiled-allowlist values that carry a credential are withheld; keys listed here pass verbatim, so listing credential.* or http.* hands the lane those credentials; a pattern that itself carries a credential is invalid. Withheld key names, never values, are recorded with this list and its origin in the launch receipt. Unsandboxed lanes read the host configuration in full."
       },
       "projects.{project}.capabilities": {
         "type": "string_list",
