@@ -928,27 +928,23 @@ pub(crate) fn private_git_objects(
         // neither an include nor a read grant on the host files. The system
         // file comes first, as Git reads it; the lane's Git never reads it
         // directly because `GIT_CONFIG_NOSYSTEM` stays set.
-        let system = if (input.host_var)("GIT_CONFIG_NOSYSTEM")
-            .is_some_and(|value| crate::git_config::git_true(Some(&value.to_string_lossy())))
-        {
-            None
-        } else if let Some(path) = (input.host_var)("GIT_CONFIG_SYSTEM") {
-            Some(PathBuf::from(path))
-        } else {
-            match provenant_os::sys::git_system_config_path(input.provenant.git) {
-                Ok(path) => path,
-                Err(_) => {
-                    policy_warning(
-                        input.policy,
-                        "LAUNCH_PRIVATE_GIT_OBJECTS_NONE_2",
-                        "the host system Git configuration could not be located; the lane receives none of its settings",
-                    )?;
-                    None
-                }
+        let mut entries = match provenant_os::sys::git_system_config(
+            input.provenant.git,
+            input.cwd,
+            (input.host_var)("GIT_CONFIG_SYSTEM").as_deref(),
+            (input.host_var)("GIT_CONFIG_NOSYSTEM").as_deref(),
+        ) {
+            Ok(entries) => entries,
+            Err(_) => {
+                policy_warning(
+                    input.policy,
+                    "LAUNCH_PRIVATE_GIT_OBJECTS_NONE_2",
+                    "the host system Git configuration could not be read; the lane receives none of its settings",
+                )?;
+                Vec::new()
             }
         };
-        let mut entries = Vec::new();
-        for path in system.iter().chain(&globals).filter(|path| path.is_file()) {
+        for path in globals.iter().filter(|path| path.is_file()) {
             match provenant_os::sys::git_config_file(input.provenant.git, path, input.cwd) {
                 Ok(read) => entries.extend(read),
                 Err(_) => policy_warning(

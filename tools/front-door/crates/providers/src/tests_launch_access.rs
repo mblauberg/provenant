@@ -1429,17 +1429,28 @@ fn sandboxed_private_git_config_withholds_host_credentials() -> Result<(), Box<d
         1,
         "the lane's Git never reads the host system file directly"
     );
-    assert_eq!(
-        spec.git_config_dropped(),
-        Some(
-            &[
-                "credential.helper".to_owned(),
-                "alias.pub".to_owned(),
-                "http.*.extraheader".to_owned(),
-                "url.*.insteadof".to_owned(),
-                "core.askpass".to_owned(),
-            ][..]
-        )
-    );
+    // A Git build may read its own file before the system one (Apple's
+    // Xcode gitconfig); its withheld names come first.
+    let builtin = provenant_os::sys::git_system_config(
+        &git,
+        &repo,
+        Some(std::ffi::OsStr::new("/dev/null")),
+        None,
+    )?;
+    let mut expected = crate::git_config::lane_view(&builtin, &[])
+        .map_err(|_| "built-in Git identity")?
+        .dropped;
+    for name in [
+        "credential.helper",
+        "alias.pub",
+        "http.*.extraheader",
+        "url.*.insteadof",
+        "core.askpass",
+    ] {
+        if !expected.iter().any(|dropped| dropped == name) {
+            expected.push(name.to_owned());
+        }
+    }
+    assert_eq!(spec.git_config_dropped(), Some(&expected[..]));
     Ok(())
 }

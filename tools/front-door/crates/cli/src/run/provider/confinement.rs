@@ -1038,6 +1038,9 @@ pub(super) fn host_provider_var(registry: &Registry<'_>, name: &str) -> Option<s
                 | "CODEX_HOME"
                 | "CLAUDE_CONFIG_DIR"
                 | "GH_CONFIG_DIR"
+                | "GIT_CONFIG_GLOBAL"
+                | "GIT_CONFIG_NOSYSTEM"
+                | "GIT_CONFIG_SYSTEM"
                 | "XDG_CONFIG_HOME"
                 | "XDG_DATA_HOME"
         )

@@ -71,25 +71,64 @@ pub fn git_config_file(git: &Path, file: &Path, cwd: &Path) -> io::Result<Vec<Gi
     Ok(parse_git_config_list(&output.stdout))
 }
 
-/// The system configuration file Git reads, as `git var GIT_CONFIG_SYSTEM`
-/// reports it without any host override; `None` when Git names none. The
-/// caller applies the host's `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_NOSYSTEM`.
+/// The entries Git reads below the global scope, includes expanded: the
+/// system file and any file a Git build reads before it (Apple's Xcode
+/// `gitconfig`, which `--show-scope` reports as `unknown`). Git applies the
+/// host's `system` (`GIT_CONFIG_SYSTEM`) and `nosystem`
+/// (`GIT_CONFIG_NOSYSTEM`) itself, and a host with no system file yields no
+/// entries rather than an error, whatever the Git version. Global and
+/// repository entries are not returned; command-scope configuration is not
+/// read.
 #[allow(clippy::disallowed_methods)]
-pub fn git_system_config_path(git: &Path) -> io::Result<Option<PathBuf>> {
-    let output = std::process::Command::new(git)
-        .args(["var", "GIT_CONFIG_SYSTEM"])
+pub fn git_system_config(
+    git: &Path,
+    cwd: &Path,
+    system: Option<&OsStr>,
+    nosystem: Option<&OsStr>,
+) -> io::Result<Vec<GitConfigEntry>> {
+    let mut command = std::process::Command::new(git);
+    command
+        .args(["config", "--list", "--show-scope", "-z"])
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
         .env_remove("GIT_CONFIG_SYSTEM")
         .env_remove("GIT_CONFIG_NOSYSTEM")
-        .stdin(std::process::Stdio::null())
-        .output()?;
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .stdin(std::process::Stdio::null());
+    if let Some(system) = system {
+        command.env("GIT_CONFIG_SYSTEM", system);
+    }
+    if let Some(nosystem) = nosystem {
+        command.env("GIT_CONFIG_NOSYSTEM", nosystem);
+    }
+    if cwd.is_dir() {
+        command.current_dir(cwd);
+    }
+    let output = command.output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
-            "git var GIT_CONFIG_SYSTEM exited with {}",
+            "git config --list --show-scope exited with {}",
             output.status
         )));
     }
-    let path = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
-    Ok((!path.is_empty()).then(|| PathBuf::from(OsStr::from_bytes(path))))
+    Ok(parse_scoped_git_config_list(&output.stdout)
+        .into_iter()
+        .filter(|(scope, _)| matches!(scope.as_slice(), b"system" | b"unknown"))
+        .map(|(_, entry)| entry)
+        .collect())
+}
+
+/// Parse `git config --list --show-scope -z`: each entry is preceded by its
+/// scope, terminated by NUL.
+fn parse_scoped_git_config_list(bytes: &[u8]) -> Vec<(Vec<u8>, GitConfigEntry)> {
+    let mut fields = bytes.split(|byte| *byte == 0);
+    let mut entries = Vec::new();
+    while let (Some(scope), Some(entry)) = (fields.next(), fields.next()) {
+        if !entry.is_empty() {
+            entries.push((scope.to_vec(), parse_git_config_entry(entry)));
+        }
+    }
+    entries
 }
 
 /// Parse `git config --list -z`: each entry is the key, then a newline and
@@ -98,17 +137,22 @@ fn parse_git_config_list(bytes: &[u8]) -> Vec<GitConfigEntry> {
     bytes
         .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty())
-        .map(|entry| match entry.iter().position(|byte| *byte == b'\n') {
-            Some(split) => GitConfigEntry {
-                key: entry[..split].to_vec(),
-                value: Some(entry[split + 1..].to_vec()),
-            },
-            None => GitConfigEntry {
-                key: entry.to_vec(),
-                value: None,
-            },
-        })
+        .map(parse_git_config_entry)
         .collect()
+}
+
+/// One `key\nvalue` entry, or a bare key for an implicit true.
+fn parse_git_config_entry(entry: &[u8]) -> GitConfigEntry {
+    match entry.iter().position(|byte| *byte == b'\n') {
+        Some(split) => GitConfigEntry {
+            key: entry[..split].to_vec(),
+            value: Some(entry[split + 1..].to_vec()),
+        },
+        None => GitConfigEntry {
+            key: entry.to_vec(),
+            value: None,
+        },
+    }
 }
 
 #[derive(Debug, Error)]
@@ -355,6 +399,78 @@ mod tests {
             ]
         );
         assert!(git_config_file(&git, &dir.path().join("missing"), dir.path()).is_err());
+    }
+
+    #[test]
+    fn git_system_config_reads_the_system_scope_and_tolerates_a_missing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let git = crate::git::git_executable().expect("Git unavailable");
+        let included = temp.path().join("included");
+        std::fs::write(&included, "[alias]\n inc = log\n").unwrap();
+        let system = temp.path().join("system");
+        std::fs::write(
+            &system,
+            format!(
+                "[credential]\n helper = osxkeychain\n[include]\n path = {}\n",
+                included.display()
+            ),
+        )
+        .unwrap();
+        let read = |system: &Path, nosystem: Option<&str>| {
+            git_system_config(
+                &git,
+                temp.path(),
+                Some(system.as_os_str()),
+                nosystem.map(OsStr::new),
+            )
+            .unwrap()
+        };
+        // A Git build may read its own file before the system one (Apple's
+        // Xcode gitconfig); a missing system file adds nothing and no error.
+        let builtin = read(Path::new("/dev/null"), None);
+        assert_eq!(read(&temp.path().join("absent"), None), builtin);
+        let entry = |key: &str, value: &str| GitConfigEntry {
+            key: key.into(),
+            value: Some(value.into()),
+        };
+        let mut expected = builtin;
+        expected.extend([
+            entry("credential.helper", "osxkeychain"),
+            entry("include.path", included.to_str().unwrap()),
+            entry("alias.inc", "log"),
+        ]);
+        assert_eq!(read(&system, None), expected);
+        assert!(read(&system, Some("1")).is_empty());
+    }
+
+    #[test]
+    fn scoped_git_config_list_pairs_each_entry_with_its_scope() {
+        assert_eq!(
+            parse_scoped_git_config_list(b"system\0a.b\nv\0unknown\0c.d\0global\0e.f\nx\0"),
+            [
+                (
+                    b"system".to_vec(),
+                    GitConfigEntry {
+                        key: b"a.b".to_vec(),
+                        value: Some(b"v".to_vec())
+                    }
+                ),
+                (
+                    b"unknown".to_vec(),
+                    GitConfigEntry {
+                        key: b"c.d".to_vec(),
+                        value: None
+                    }
+                ),
+                (
+                    b"global".to_vec(),
+                    GitConfigEntry {
+                        key: b"e.f".to_vec(),
+                        value: Some(b"x".to_vec())
+                    }
+                ),
+            ]
+        );
     }
 
     #[test]

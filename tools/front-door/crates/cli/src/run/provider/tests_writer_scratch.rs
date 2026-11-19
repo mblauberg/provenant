@@ -1362,8 +1362,22 @@ printf 'agy 1.0.0\n'
         .profile
         .knobs
         .insert("lanes.publish".into(), serde_json::json!(true));
+    // The host's Git configuration selection comes from the host context, so
+    // the runner's own system file and environment cannot reach this check.
+    let mut git_host = run::HostLaunchContext::from_environment(&state, &project, git.clone());
+    git_host
+        .provider_path_environment
+        .retain(|name, _| !name.starts_with("GIT_CONFIG") && name != "XDG_CONFIG_HOME");
+    git_host
+        .provider_path_environment
+        .insert("GIT_CONFIG_NOSYSTEM".into(), "1".into());
+    let publishing_registry = Registry {
+        host: Some(&git_host),
+        repo_facts: registry.repo_facts.clone(),
+        ..registry
+    };
     let publishing = prepare_with(
-        &registry,
+        &publishing_registry,
         &publishing_task,
         "publishing policy fixture",
         &publishing_paths,
@@ -1496,20 +1510,16 @@ printf 'agy 1.0.0\n'
             assert!(config.contains(kept), "{kept} missing from {config}");
         }
         let receipt = git_config.ok_or("git config receipt")?;
-        // The host system file, when the runner has one, adds its own names.
-        for name in [
-            "fixture.xdg",
-            "alias.pub",
-            "http.*.extraheader",
-            "url.*.insteadof",
-            "credential.helper",
-        ] {
-            assert!(
-                receipt.dropped.iter().any(|dropped| dropped == name),
-                "{name} missing from {:?}",
-                receipt.dropped
-            );
-        }
+        assert_eq!(
+            receipt.dropped,
+            [
+                "fixture.xdg",
+                "alias.pub",
+                "http.*.extraheader",
+                "url.*.insteadof",
+                "credential.helper",
+            ]
+        );
         assert_eq!(receipt.key, "domains.lanes.git_config_allow");
         assert!(!serde_json::to_string(receipt)?.contains(HOST_TOKEN));
     } else {

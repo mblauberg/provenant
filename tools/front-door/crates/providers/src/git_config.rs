@@ -107,7 +107,7 @@ fn carries_secret(text: &str) -> bool {
 }
 
 /// Git's reading of a boolean: an implicit value is true.
-pub(crate) fn git_true(value: Option<&str>) -> bool {
+fn git_true(value: Option<&str>) -> bool {
     value.is_none_or(|value| {
         let value = value.trim().to_ascii_lowercase();
         matches!(value.as_str(), "true" | "yes" | "on")

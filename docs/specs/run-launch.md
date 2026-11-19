@@ -170,8 +170,9 @@ provider session or select model-specific controls.
 - Why: native execution must not claim a provider contract it cannot satisfy.
 
 A sandboxed lane's private global Git configuration is built from the host's
-system file (as `git var GIT_CONFIG_SYSTEM` names it, or the host's
-`GIT_CONFIG_SYSTEM`; none when the host sets `GIT_CONFIG_NOSYSTEM`) and
+system-scope entries (the system file, or the host's `GIT_CONFIG_SYSTEM`, and
+any file the Git build reads before it, such as Apple's Xcode `gitconfig`;
+none when the host sets `GIT_CONFIG_NOSYSTEM` or has no system file) and
 global files (the XDG `git/config`, then `~/.gitconfig`, or the host's
 `GIT_CONFIG_GLOBAL` alone), in that order with includes expanded, through an
 allowlist: `user.name`, `user.email`, `alias.*`, `color.*`, named core,
