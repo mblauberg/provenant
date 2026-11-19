@@ -5,12 +5,28 @@ use provenant_cli::Globals;
 use provenant_config::ports::Request;
 use provenant_core::Clock;
 use provenant_records::{CommandResult, Outcome};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
     time::Duration,
 };
+
+const REPAIR_SCHEMA: u8 = 1;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RepairOperation {
+    schema_version: u8,
+    repository: String,
+    number: u64,
+    head_branch: String,
+    head_repository: Option<String>,
+    base_branch: String,
+    base_repository: Option<String>,
+    observed_head: String,
+    base_head: String,
+}
 
 #[derive(Deserialize)]
 struct Pull {
@@ -28,6 +44,95 @@ struct Branch {
 #[derive(Deserialize)]
 struct Repository {
     full_name: String,
+}
+
+fn repair_key(repository: &str) -> String {
+    Sha256::digest(repository.to_ascii_lowercase().as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn repair_path(state: &Path, repository: &str, number: u64) -> PathBuf {
+    state
+        .join("pr-sync")
+        .join("repairs")
+        .join(format!("{}-{number}.json", repair_key(repository)))
+}
+
+fn repository_name(repository: Option<&Repository>) -> Option<String> {
+    repository.map(|repository| repository.full_name.to_ascii_lowercase())
+}
+
+fn read_repair(state: &Path, repository: &str, number: u64) -> Result<Option<RepairOperation>> {
+    let path = repair_path(state, repository, number);
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!("cannot read pull request repair operation: {error}").into());
+        }
+    };
+    let operation: RepairOperation =
+        provenant_records::decode(file, provenant_records::Limits::default())?;
+    if operation.schema_version != REPAIR_SCHEMA
+        || operation.repository != repository.to_ascii_lowercase()
+        || operation.number != number
+    {
+        return Err("pull request repair operation identity or schema mismatch".into());
+    }
+    Ok(Some(operation))
+}
+
+fn write_repair(state: &Path, operation: &RepairOperation) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(operation)?;
+    super::landing::receipt::atomic_write(
+        &repair_path(state, &operation.repository, operation.number),
+        &bytes,
+    )?;
+    Ok(())
+}
+
+fn remove_repair(state: &Path, repository: &str, number: u64) -> Result<()> {
+    let path = repair_path(state, repository, number);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            if let Some(parent) = path.parent()
+                && let Ok(directory) = std::fs::File::open(parent)
+            {
+                let _ = directory.sync_all();
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(format!("cannot remove completed pull request repair operation: {error}").into())
+        }
+    }
+}
+
+fn repair_matches_pull(operation: &RepairOperation, repository: &str, pull: &Pull) -> bool {
+    operation.repository == repository.to_ascii_lowercase()
+        && operation.head_branch == pull.head.name
+        && operation.head_repository == repository_name(pull.head.repo.as_ref())
+        && operation.base_branch == pull.base.name
+        && operation.base_repository == repository_name(pull.base.repo.as_ref())
+}
+
+fn is_repair_commit(
+    git: &super::git::Git,
+    path: &Path,
+    head: &str,
+    operation: &RepairOperation,
+) -> Result<bool> {
+    let parents = git
+        .full(path, &["rev-list", "--parents", "-n", "1", head])?
+        .ok_or("cannot inspect pull request repair commit")?;
+    let mut fields = parents.split_whitespace();
+    Ok(fields.next() == Some(head)
+        && fields.next() == Some(operation.observed_head.as_str())
+        && fields.next() == Some(operation.base_head.as_str())
+        && fields.next().is_none())
 }
 
 pub(crate) fn run(numbers: Vec<u64>, no_lane: bool, globals: &Globals) -> u8 {
@@ -227,18 +332,11 @@ fn sync_one(
         git,
     )?;
     let operation = (|| -> Result<(PathBuf, String, String)> {
-        let observed = git
+        let local_head = git
             .full(&path, &["rev-parse", "HEAD"])?
-            .ok_or("cannot resolve pull request head")?;
-        if observed.trim() != pull.head.sha {
-            return Err(format!(
-            "worktree branch {} is at {}, forge head is {}; synchronise the branch before retrying",
-            pull.head.name,
-            observed.trim(),
-            pull.head.sha
-        )
-        .into());
-        }
+            .ok_or("cannot resolve pull request head")?
+            .trim()
+            .to_owned();
         let dirty = git
             .full(&path, &["status", "--porcelain"])?
             .ok_or("cannot verify pull request worktree cleanliness")?;
@@ -249,98 +347,161 @@ fn sync_one(
             )
             .into());
         }
-        let base_remote = match pull.base.repo.as_ref() {
-            Some(base_repo) if base_repo.full_name.eq_ignore_ascii_case(repository) => {
-                git.remote_of(&path, &pull.base.name)?
-            }
-            Some(base_repo) => {
-                remote_url_for_repo(git, &path, &pull.base.name, &base_repo.full_name)?
-            }
-            None => git.remote_of(&path, &pull.base.name)?,
-        };
-        let base_ref = format!("refs/provenant/pr-sync/{number}/base");
-        let base_refspec = format!("+refs/heads/{}:{base_ref}", pull.base.name);
-        if !git
-            .run(&path, &["fetch", "--no-tags", &base_remote, &base_refspec])?
-            .0
+
+        let mut repair = read_repair(state, repository, number)?;
+        if let Some(operation) = repair.as_ref()
+            && !repair_matches_pull(operation, repository, &pull)
         {
-            return Err(format!(
-                "could not fetch base branch {} from {base_remote}",
-                pull.base.name,
-            )
-            .into());
+            return Err("pull request no longer matches its recorded conflict repair".into());
         }
-        let approved_head = git
-            .full(&path, &["rev-parse", "HEAD"])?
-            .ok_or("cannot resolve pull request head")?
-            .trim()
-            .to_owned();
-        if !git
-            .run(&path, &["merge", "--no-edit", "--no-ff", &base_ref])?
-            .0
-        {
-            let paths = git
-                .full(&path, &["diff", "--name-only", "--diff-filter=U"])?
-                .ok_or("cannot read conflicted paths")?;
-            let base_head = git
+        let base_ref = format!("refs/provenant/pr-sync/{number}/base");
+        let (approved_head, base_head, merge_base) = if let Some(operation) = repair.as_ref() {
+            if !is_repair_commit(git, &path, &local_head, operation)?
+                && local_head != operation.observed_head
+            {
+                return Err(format!(
+                    "worktree branch {} moved outside its recorded conflict repair",
+                    pull.head.name
+                )
+                .into());
+            }
+            if pull.head.sha != operation.observed_head
+                && !(is_repair_commit(git, &path, &local_head, operation)?
+                    && pull.head.sha == local_head)
+            {
+                return Err(format!(
+                    "forge head {} moved outside the recorded conflict repair from {}",
+                    pull.head.sha, operation.observed_head
+                )
+                .into());
+            }
+            let pinned_base = git
                 .full(&path, &["rev-parse", &base_ref])?
-                .ok_or("cannot resolve the fetched base")?
+                .ok_or("recorded pull request repair base is missing")?
                 .trim()
                 .to_owned();
-            if !git.run(&path, &["merge", "--abort"])?.0 {
+            if pinned_base != operation.base_head {
+                return Err("recorded pull request repair base moved".into());
+            }
+            (
+                operation.observed_head.clone(),
+                operation.base_head.clone(),
+                local_head == operation.observed_head,
+            )
+        } else {
+            if local_head != pull.head.sha {
                 return Err(format!(
-                    "merge conflict cleanup failed; MERGE_HEAD may remain; conflicted paths: {}",
-                    paths.lines().collect::<Vec<_>>().join(", ")
+                    "worktree branch {} is at {}, forge head is {}; synchronise the branch before retrying",
+                    pull.head.name, local_head, pull.head.sha
                 )
                 .into());
             }
-            let (merge_head_code, _, merge_head_error) =
-                git.exit(&path, &["rev-parse", "--verify", "-q", "MERGE_HEAD"])?;
-            if merge_head_code == 0 {
-                return Err("merge conflict cleanup left MERGE_HEAD in place".into());
-            }
-            if !matches!(merge_head_code, 1 | 128) {
-                return Err(format!("cannot verify MERGE_HEAD cleanup: {merge_head_error}").into());
-            }
-            let status = git
-                .full(&path, &["status", "--porcelain"])?
-                .ok_or("cannot verify worktree cleanliness after merge abort")?;
-            if !status.trim().is_empty() {
-                return Err(format!(
-                    "merge conflict cleanup left a dirty worktree: {}",
-                    status.trim()
-                )
-                .into());
-            }
-            let paths = paths.lines().collect::<Vec<_>>().join(", ");
-            let brief = format!(
-                "Merge base {base_ref} at {base_head} into this pull request branch, resolve the conflicts in {paths}, commit the resolution, and leave the worktree clean."
-            );
-            let next = format!(
-                "provenant run implement --worktree {} --brief {}",
-                shell_quote(&path),
-                shell_quote_text(&brief)
-            );
-            if !no_lane {
-                if let Some(held) = writer.take() {
-                    held.withdraw_unlaunched()?;
+            let base_remote = match pull.base.repo.as_ref() {
+                Some(base_repo) if base_repo.full_name.eq_ignore_ascii_case(repository) => {
+                    git.remote_of(&path, &pull.base.name)?
                 }
-                launch_repair(project, &path, &base_ref, &base_head, &paths)?;
-                return Err(format!("merge conflict in {paths}; implement lane launched for {}; rerun `provenant pr sync {number}` after it finishes", path.display()).into());
+                Some(base_repo) => {
+                    remote_url_for_repo(git, &path, &pull.base.name, &base_repo.full_name)?
+                }
+                None => git.remote_of(&path, &pull.base.name)?,
+            };
+            let base_refspec = format!("+refs/heads/{}:{base_ref}", pull.base.name);
+            if !git
+                .run(&path, &["fetch", "--no-tags", &base_remote, &base_refspec])?
+                .0
+            {
+                return Err(format!(
+                    "could not fetch base branch {} from {base_remote}",
+                    pull.base.name,
+                )
+                .into());
             }
-            return Err(format!("merge conflict in {paths}; next: {next}").into());
+            let base_head = git
+                .full(&path, &["rev-parse", &base_ref])?
+                .ok_or("cannot resolve fetched base")?
+                .trim()
+                .to_owned();
+            (local_head.clone(), base_head, true)
+        };
+
+        let current_head = if merge_base {
+            if !git
+                .run(&path, &["merge", "--no-edit", "--no-ff", &base_ref])?
+                .0
+            {
+                let paths = git
+                    .full(&path, &["diff", "--name-only", "--diff-filter=U"])?
+                    .ok_or("cannot read conflicted paths")?;
+                if !git.run(&path, &["merge", "--abort"])?.0 {
+                    return Err(format!(
+                        "merge conflict cleanup failed; MERGE_HEAD may remain; conflicted paths: {}",
+                        paths.lines().collect::<Vec<_>>().join(", ")
+                    )
+                    .into());
+                }
+                let (merge_head_code, _, merge_head_error) =
+                    git.exit(&path, &["rev-parse", "--verify", "-q", "MERGE_HEAD"])?;
+                if merge_head_code == 0 {
+                    return Err("merge conflict cleanup left MERGE_HEAD in place".into());
+                }
+                if !matches!(merge_head_code, 1 | 128) {
+                    return Err(
+                        format!("cannot verify MERGE_HEAD cleanup: {merge_head_error}").into(),
+                    );
+                }
+                let status = git
+                    .full(&path, &["status", "--porcelain"])?
+                    .ok_or("cannot verify worktree cleanliness after merge abort")?;
+                if !status.trim().is_empty() {
+                    return Err(format!(
+                        "merge conflict cleanup left a dirty worktree: {}",
+                        status.trim()
+                    )
+                    .into());
+                }
+                let conflicts = paths.lines().collect::<Vec<_>>().join(", ");
+                let operation = repair.get_or_insert_with(|| RepairOperation {
+                    schema_version: REPAIR_SCHEMA,
+                    repository: repository.to_ascii_lowercase(),
+                    number,
+                    head_branch: pull.head.name.clone(),
+                    head_repository: repository_name(pull.head.repo.as_ref()),
+                    base_branch: pull.base.name.clone(),
+                    base_repository: repository_name(pull.base.repo.as_ref()),
+                    observed_head: approved_head.clone(),
+                    base_head: base_head.clone(),
+                });
+                write_repair(state, operation)?;
+                let brief = format!(
+                    "Merge base {base_ref} at {base_head} into this pull request branch, resolve the conflicts in {conflicts}, commit the resolution, and leave the worktree clean."
+                );
+                let next = format!(
+                    "provenant run implement --worktree {} --brief {}",
+                    shell_quote(&path),
+                    shell_quote_text(&brief)
+                );
+                if !no_lane {
+                    if let Some(held) = writer.take() {
+                        held.withdraw_unlaunched()?;
+                    }
+                    launch_repair(project, &path, &base_ref, &base_head, &conflicts)?;
+                    return Err(format!("merge conflict in {conflicts}; implement lane launched for {}; rerun `provenant pr sync {number}` after it finishes", path.display()).into());
+                }
+                return Err(format!("merge conflict in {conflicts}; next: {next}").into());
+            }
+            git.full(&path, &["rev-parse", "HEAD"])?
+                .ok_or("cannot resolve synchronised head")?
+                .trim()
+                .to_owned()
+        } else {
+            local_head
+        };
+
+        if let Some(operation) = repair.as_ref()
+            && !is_repair_commit(git, &path, &current_head, operation)?
+        {
+            return Err("pull request resolution is not the recorded two-parent merge".into());
         }
-        let current_head = git
-            .full(&path, &["rev-parse", "HEAD"])?
-            .ok_or("cannot resolve synchronised head")?
-            .trim()
-            .to_owned();
-        let base_head = git
-            .full(&path, &["rev-parse", &base_ref])?
-            .ok_or("cannot resolve fetched base")?
-            .trim()
-            .to_owned();
-        let remote_branch = format!("{}:{}", pull.head.name, pull.head.name);
         let push_remote = match pull.head.repo.as_ref() {
             Some(head_repo) if head_repo.full_name.eq_ignore_ascii_case(repository) => {
                 git.remote_of(&path, &pull.head.name)?
@@ -350,21 +511,36 @@ fn sync_one(
             }
             None => git.remote_of(&path, &pull.head.name)?,
         };
-        if !git.run(&path, &["push", &push_remote, &remote_branch])?.0 {
+        let expected_remote_head = format!(
+            "--force-with-lease=refs/heads/{}:{}",
+            pull.head.name, pull.head.sha
+        );
+        let remote_branch = format!("{}:{}", pull.head.name, pull.head.name);
+        if !git
+            .run(
+                &path,
+                &["push", &expected_remote_head, &push_remote, &remote_branch],
+            )?
+            .0
+        {
             return Err("push of synchronised pull request branch failed".into());
         }
-        super::landing::receipt::write_approval_carry(
-            state,
-            &super::landing::receipt::ApprovalCarryReceipt {
-                repository: repository.to_owned(),
-                number,
-                approved_head: approved_head.clone(),
-                current_head: current_head.clone(),
-                base_head,
-                kind: provenant_cli::domains::ApprovalCarry::CleanMerge,
-                extra: Default::default(),
-            },
-        )?;
+        if repair.is_some() {
+            remove_repair(state, repository, number)?;
+        } else {
+            super::landing::receipt::write_approval_carry(
+                state,
+                &super::landing::receipt::ApprovalCarryReceipt {
+                    repository: repository.to_owned(),
+                    number,
+                    approved_head: approved_head.clone(),
+                    current_head: current_head.clone(),
+                    base_head,
+                    kind: provenant_cli::domains::ApprovalCarry::CleanMerge,
+                    extra: Default::default(),
+                },
+            )?;
+        }
         Ok((path, approved_head, current_head))
     })();
     let cleanup = match writer.take() {
@@ -607,7 +783,7 @@ fn acquire_writer(
     let worktrees = child_directory(&state_root, OsStr::new("worktrees"))?;
     let project_state = child_directory(&worktrees, OsStr::new(&project_id.to_string()))?;
     let listing = git
-        .full(project, &["worktree", "list", "--porcelain"])?
+        .full(project, &["worktree", "list", "--porcelain", "-z"])?
         .ok_or("cannot read registered worktrees")?
         .into_bytes();
     let branch = provenant_confinement::repo::GitRefName::branch(branch)?;

@@ -95,7 +95,7 @@ fn live_pr_origin(rig: &TestRig) -> Result<String> {
     fs::write(rig.project.join("live-pr"), "")?;
     fs::write(
         rig.project.join(".git/info/exclude"),
-        "/head.json\n/checks.json\n/base-sha\n/live-pr\n/gh-calls\n/head-read\n/head-seq\n/merge-args\n/merged\n/merge-*\n/reviews.json\n",
+        "/head.json\n/checks.json\n/base-sha\n/live-pr\n/gh-calls\n/head-read\n/head-seq\n/merge-args\n/merged\n/merge-*\n/reviews.json\n/.worktrees/\n",
     )?;
     let refs = fixture_git(rig, &["ls-remote", "--heads", "origin"])?;
     assert!(
@@ -124,6 +124,86 @@ fn bind_sync_project(rig: &TestRig) -> Result {
         )?,
     )?;
     Ok(())
+}
+
+fn branch_worktree_path(rig: &TestRig, branch: &str) -> Result<std::path::PathBuf> {
+    let listing = fixture_git(rig, &["worktree", "list", "--porcelain"])?;
+    let target = format!("branch refs/heads/{branch}");
+    let mut current = None;
+    for line in listing.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            current = Some(std::path::PathBuf::from(path));
+        }
+        if line == target {
+            return current.ok_or_else(|| "branch worktree has no path".into());
+        }
+    }
+    Err(format!("branch worktree {branch} was not found").into())
+}
+
+fn prepare_conflicted_sync(
+    rig: &TestRig,
+) -> Result<(String, std::path::PathBuf, provenant_os::exec::ExecOutcome)> {
+    live_pr_origin(rig)?;
+    fixture_git(rig, &["checkout", "main"])?;
+    fs::write(rig.project.join("base.txt"), "base changed upstream\n")?;
+    fixture_git(rig, &["add", "base.txt"])?;
+    fixture_git(rig, &["commit", "-qm", "advance base"])?;
+    fixture_git(rig, &["push", "-q", "origin", "main"])?;
+    let base = fixture_git(rig, &["rev-parse", "HEAD"])?;
+    fs::write(rig.project.join("base-sha"), base)?;
+    fixture_git(rig, &["checkout", "feature"])?;
+    fs::write(rig.project.join("base.txt"), "base changed in PR\n")?;
+    fixture_git(rig, &["add", "base.txt"])?;
+    fixture_git(rig, &["commit", "-qm", "change base file"])?;
+    let head = fixture_git(rig, &["rev-parse", "HEAD"])?;
+    fixture_git(rig, &["push", "-q", "origin", "feature"])?;
+    fs::write(
+        rig.project.join("head.json"),
+        serde_json::to_vec(&serde_json::json!({"headRefOid": head}))?,
+    )?;
+    fixture_git(rig, &["checkout", "main"])?;
+    let worktree = rig.project.join(".worktrees/feature");
+    fs::create_dir_all(worktree.parent().ok_or("worktree parent")?)?;
+    fixture_git(
+        rig,
+        &[
+            "worktree",
+            "add",
+            worktree.to_str().ok_or("worktree path")?,
+            "feature",
+        ],
+    )?;
+    bind_sync_project(rig)?;
+    let output = rig.command(&["pr", "sync", "1668", "--no-lane"])?;
+    assert_ne!(code(&output), 0, "conflict must fail sync");
+    Ok((head, branch_worktree_path(rig, "feature")?, output))
+}
+
+fn resolve_conflicted_sync(rig: &TestRig, worktree: &Path) -> Result<String> {
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("native Git executable")?;
+    let worktree = worktree.to_string_lossy().into_owned();
+    let merge = rig.execute(
+        &git,
+        &[
+            "-C",
+            &worktree,
+            "merge",
+            "--no-edit",
+            "--no-ff",
+            "refs/provenant/pr-sync/1668/base",
+        ],
+        None,
+    )?;
+    assert_ne!(code(&merge), 0, "fixture merge should conflict");
+    let worktree_path = Path::new(&worktree);
+    fs::write(worktree_path.join("base.txt"), "resolved conflict\n")?;
+    fixture_git(rig, &["-C", &worktree, "add", "base.txt"])?;
+    fixture_git(
+        rig,
+        &["-C", &worktree, "commit", "-qm", "resolve sync conflict"],
+    )?;
+    fixture_git(rig, &["-C", &worktree, "rev-parse", "HEAD"])
 }
 
 fn merge(rig: &TestRig) -> Result<provenant_os::exec::ExecOutcome> {
@@ -580,27 +660,7 @@ fn pr_sync_merges_base_pushes_and_records_repository_scoped_carry() -> Result {
 
 fn pr_sync_conflict_aborts_cleanly_and_reports_repair_command() -> Result {
     let rig = self::rig()?;
-    live_pr_origin(&rig)?;
-    fixture_git(&rig, &["checkout", "main"])?;
-    fs::write(rig.project.join("base.txt"), "base changed upstream\n")?;
-    fixture_git(&rig, &["add", "base.txt"])?;
-    fixture_git(&rig, &["commit", "-qm", "advance base"])?;
-    fixture_git(&rig, &["push", "-q", "origin", "main"])?;
-    let base = fixture_git(&rig, &["rev-parse", "HEAD"])?;
-    fs::write(rig.project.join("base-sha"), base)?;
-    fixture_git(&rig, &["checkout", "feature"])?;
-    fs::write(rig.project.join("base.txt"), "base changed in PR\n")?;
-    fixture_git(&rig, &["add", "base.txt"])?;
-    fixture_git(&rig, &["commit", "-qm", "change base file"])?;
-    let head = fixture_git(&rig, &["rev-parse", "HEAD"])?;
-    fixture_git(&rig, &["push", "-q", "origin", "feature"])?;
-    fs::write(
-        rig.project.join("head.json"),
-        serde_json::to_vec(&serde_json::json!({"headRefOid": head}))?,
-    )?;
-    bind_sync_project(&rig)?;
-    let output_no_lane = rig.command(&["pr", "sync", "1668", "--no-lane"])?;
-    assert_ne!(code(&output_no_lane), 0, "conflict must fail sync");
+    let (_head, worktree, output_no_lane) = prepare_conflicted_sync(&rig)?;
     let text_no_lane = format!(
         "{}{}",
         String::from_utf8_lossy(&output_no_lane.stdout.bytes),
@@ -624,8 +684,112 @@ fn pr_sync_conflict_aborts_cleanly_and_reports_repair_command() -> Result {
         text_default.contains("implement lane launched for"),
         "{text_default}"
     );
-    assert!(!rig.project.join(".git/MERGE_HEAD").exists());
-    assert!(fixture_git(&rig, &["status", "--porcelain"])?.is_empty());
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("native Git executable")?;
+    let worktree = worktree.to_string_lossy().into_owned();
+    let merge_head = rig.execute(
+        &git,
+        &["-C", &worktree, "rev-parse", "--verify", "-q", "MERGE_HEAD"],
+        None,
+    )?;
+    assert_ne!(code(&merge_head), 0, "worktree MERGE_HEAD must be absent");
+    assert!(fixture_git(&rig, &["-C", &worktree, "status", "--porcelain"])?.is_empty());
+    Ok(())
+}
+
+fn pr_sync_retry_pushes_the_recorded_merge_and_rejects_later_movement() -> Result {
+    let rig = self::rig()?;
+    let (_head, worktree, _conflict) = prepare_conflicted_sync(&rig)?;
+    let resolution = resolve_conflicted_sync(&rig, &worktree)?;
+    let retried = rig.command(&["pr", "sync", "1668", "--no-lane"])?;
+    assert_eq!(code(&retried), 0, "{retried:?}");
+    let remote = fixture_git(&rig, &["ls-remote", "origin", "refs/heads/feature"])?;
+    assert!(remote.starts_with(&format!("{resolution}\t")), "{remote}");
+    assert!(
+        !rig.state.join("landing/approval-carry").exists(),
+        "a manually resolved conflict must not create clean-merge approval carry"
+    );
+
+    let rig = self::rig()?;
+    let (head, worktree, _conflict) = prepare_conflicted_sync(&rig)?;
+    resolve_conflicted_sync(&rig, &worktree)?;
+    let worktree = worktree.to_string_lossy().into_owned();
+    fs::write(
+        Path::new(&worktree).join("unrelated.txt"),
+        "later movement\n",
+    )?;
+    fixture_git(&rig, &["-C", &worktree, "add", "unrelated.txt"])?;
+    fixture_git(
+        &rig,
+        &[
+            "-C",
+            &worktree,
+            "commit",
+            "-qm",
+            "unrelated movement after repair",
+        ],
+    )?;
+    let refused = rig.command(&["pr", "sync", "1668", "--no-lane"])?;
+    assert_ne!(code(&refused), 0, "later branch movement must fail sync");
+    let message = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout.bytes),
+        String::from_utf8_lossy(&refused.stderr.bytes)
+    );
+    assert!(
+        message.contains("moved outside its recorded conflict repair"),
+        "{message}"
+    );
+    let remote = fixture_git(&rig, &["ls-remote", "origin", "refs/heads/feature"])?;
+    assert!(remote.starts_with(&format!("{head}\t")), "{remote}");
+
+    let mut rig = self::rig()?;
+    let (_head, worktree, _conflict) = prepare_conflicted_sync(&rig)?;
+    resolve_conflicted_sync(&rig, &worktree)?;
+    let ancestor = fixture_git(
+        &rig,
+        &[
+            "-C",
+            worktree.to_str().ok_or("worktree path")?,
+            "rev-parse",
+            "HEAD^1^1",
+        ],
+    )?;
+    let origin = rig.root.join("origin.git");
+    let hooks = rig.root.join("git-hooks");
+    fs::create_dir(&hooks)?;
+    let hook = hooks.join("pre-push");
+    let marker = rig.root.join("pre-push-ran");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\ngit --git-dir='{}' update-ref refs/heads/feature '{}'\nprintf ran > '{}'\n",
+            origin.display(),
+            ancestor,
+            marker.display()
+        ),
+    )?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))?;
+    let (_, hook_path) = rig
+        .env
+        .iter_mut()
+        .find(|(key, _)| key == "GIT_CONFIG_VALUE_1")
+        .ok_or("fixture Git hooks setting")?;
+    *hook_path = hooks.clone().into_os_string();
+    let raced = rig.command(&["pr", "sync", "1668", "--no-lane"])?;
+    assert!(marker.exists(), "pre-push hook did not run: {raced:?}");
+    assert_ne!(code(&raced), 0, "remote movement during push must fail");
+    let message = format!(
+        "{}{}",
+        String::from_utf8_lossy(&raced.stdout.bytes),
+        String::from_utf8_lossy(&raced.stderr.bytes)
+    );
+    assert!(
+        message.contains("push of synchronised pull request branch failed"),
+        "{message}"
+    );
+    let remote = fixture_git(&rig, &["ls-remote", "origin", "refs/heads/feature"])?;
+    assert!(remote.starts_with(&format!("{ancestor}\t")), "{remote}");
     Ok(())
 }
 
@@ -1350,6 +1514,10 @@ fn main() -> ExitCode {
             (
                 "pr_sync_conflict_aborts_cleanly_and_reports_repair_command",
                 pr_sync_conflict_aborts_cleanly_and_reports_repair_command,
+            ),
+            (
+                "pr_sync_retry_pushes_the_recorded_merge_and_rejects_later_movement",
+                pr_sync_retry_pushes_the_recorded_merge_and_rejects_later_movement,
             ),
             (
                 "pr_status_prints_one_compact_line_per_pull_request",

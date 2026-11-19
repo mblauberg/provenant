@@ -169,7 +169,7 @@ fn receipt_dir(state: &Path) -> PathBuf {
 }
 
 /// Write `bytes` to `path` through a synced sibling file and a rename.
-pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), LandingError> {
+pub(in crate::pr) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), LandingError> {
     use std::io::Write;
     let parent = path
         .parent()
