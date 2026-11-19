@@ -410,6 +410,16 @@ pub(super) fn worktree_cleanliness_at(
     repo: &VerifiedRepo,
     cancel: &CancelToken,
 ) -> Result<WorktreeCleanliness, WorktreeError> {
+    let cleanliness = native_worktree_cleanliness_at(context, repo, cancel)?;
+    require_attempt_indexes_clean(context, repo, cancel)?;
+    Ok(cleanliness)
+}
+
+fn native_worktree_cleanliness_at(
+    context: &WorktreeContext<'_>,
+    repo: &VerifiedRepo,
+    cancel: &CancelToken,
+) -> Result<WorktreeCleanliness, WorktreeError> {
     match check_writer_terminal(repo) {
         Ok(()) => {}
         Err(WorktreeError::GitOperationInProgress) => {
@@ -440,6 +450,99 @@ pub(super) fn worktree_cleanliness_at(
     }
 }
 
+/// Run only after the caller has exclusive worktree occupancy. A native index
+/// can be clean while a crashed or unreconciled attempt still has staged paths
+/// in its private index, so removal must account for every durable record.
+fn require_attempt_indexes_clean(
+    context: &WorktreeContext<'_>,
+    repo: &VerifiedRepo,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    let path = repo.root_path().to_path_buf();
+    let slot_name = state_dir_name(repo.root_path());
+    let slot = match context.project_state.open_verified_directory(&slot_name) {
+        Ok(slot) => slot,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(_) => {
+            return Err(private_attempt_index_unknown(
+                &path,
+                "private attempt index custody could not be opened",
+            ));
+        }
+    };
+    let records = provenant_supervisor::custody::recorded_attempt_indexes(&slot).map_err(|_| {
+        private_attempt_index_unknown(&path, "private attempt index custody could not be verified")
+    })?;
+    for record in records {
+        if let Err(error) = check_git_operation_terminal(&record.refs, None) {
+            return match error {
+                WorktreeError::GitOperationInProgress => Err(WorktreeError::Dirty(format!(
+                    "attempt {} has an unfinished Git operation",
+                    record.scope.attempt
+                ))),
+                error => Err(error),
+            };
+        }
+
+        let head =
+            provenant_os::git::private_branch_tip(&record.refs, &record.branch).map_err(|_| {
+                private_attempt_index_unknown(
+                    &path,
+                    "private attempt branch tip could not be verified",
+                )
+            })?;
+        record
+            .refs
+            .read_stable(OsStr::new("index"), 64 * 1024 * 1024)
+            .map_err(|_| {
+                private_attempt_index_unknown(&path, "private attempt index could not be read")
+            })?;
+        let index = record
+            .refs
+            .current_path()
+            .map_err(|_| {
+                private_attempt_index_unknown(&path, "private attempt index path changed")
+            })?
+            .join("index");
+        let outcome = run_git(context, repo, GitRead::AttemptIndex { index, head }, cancel)
+            .map_err(|_| {
+                private_attempt_index_unknown(&path, "private attempt index could not be compared")
+            })?;
+        match exit_code(&outcome).map_err(|_| {
+            private_attempt_index_unknown(&path, "private attempt index result was incomplete")
+        })? {
+            0 | 1 => {}
+            _ => {
+                return Err(private_attempt_index_unknown(
+                    &path,
+                    "private attempt branch objects are unavailable",
+                ));
+            }
+        }
+        let staged: Vec<_> = outcome
+            .stdout
+            .bytes
+            .split(|byte| *byte == 0)
+            .filter(|name| !name.is_empty())
+            .collect();
+        if !staged.is_empty() {
+            let summary = dirty_paths_summary_bytes(&staged).text;
+            return Err(WorktreeError::Dirty(format!(
+                "attempt {} staged paths: {summary}",
+                record.scope.attempt
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn private_attempt_index_unknown(path: &Path, detail: &str) -> WorktreeError {
+    WorktreeError::UnknownOccupancy {
+        path: path.to_path_buf(),
+        detail: detail.to_owned(),
+    }
+}
+
 /// Recheck that a verified worktree is clean while the caller holds writer
 /// custody. This probes the worktree's Git configuration before running status.
 pub fn require_clean_worktree(
@@ -467,13 +570,17 @@ pub(super) fn worktree_dirty_at(
     repo: &VerifiedRepo,
     cancel: &CancelToken,
 ) -> Result<WorktreeCondition, WorktreeError> {
-    Ok(match worktree_cleanliness_at(context, repo, cancel)? {
-        WorktreeCleanliness::Clean => WorktreeCondition::Clean,
-        WorktreeCleanliness::Ignored => WorktreeCondition::Ignored,
-        WorktreeCleanliness::Dirty(_) => WorktreeCondition::Dirty,
-        WorktreeCleanliness::GitOperationInProgress => WorktreeCondition::GitOperationInProgress,
-        WorktreeCleanliness::Unknown => WorktreeCondition::Unknown,
-    })
+    Ok(
+        match native_worktree_cleanliness_at(context, repo, cancel)? {
+            WorktreeCleanliness::Clean => WorktreeCondition::Clean,
+            WorktreeCleanliness::Ignored => WorktreeCondition::Ignored,
+            WorktreeCleanliness::Dirty(_) => WorktreeCondition::Dirty,
+            WorktreeCleanliness::GitOperationInProgress => {
+                WorktreeCondition::GitOperationInProgress
+            }
+            WorktreeCleanliness::Unknown => WorktreeCondition::Unknown,
+        },
+    )
 }
 
 pub(super) struct LockedWorktree {
@@ -688,6 +795,11 @@ fn lock_worktree_impl(
                 path: verified.path().to_path_buf(),
                 detail,
             })?;
+            // Observation probes already treat reservations as durable
+            // recovery evidence. Repeat that fence after taking exclusive
+            // custody so a crashed writer cannot be mistaken for a clean tree
+            // by a mutating operation such as worktree removal.
+            outstanding_reservation(&state, verified.path()).map_err(custody_refusal)?;
             Some(writer)
         };
     let canonical = canonicalize(verified.path())?;

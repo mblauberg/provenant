@@ -18,6 +18,11 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+mod indexes;
+pub use indexes::{
+    RecordedAttemptIndex, attempt_index_retired, recorded_attempt_indexes, register_attempt_index,
+};
+
 pub(crate) const RECORD_LIMIT: u64 = 1024 * 1024;
 pub(crate) const EXIT_LIMIT: u64 = 16 * 1024;
 pub const HOLDER_LOCK: &str = "holder.lock";
@@ -546,6 +551,7 @@ impl CustodyLease {
         if self.launched || self.lease.is_none() {
             return Err(CustodyError::Fenced);
         }
+        indexes::retire_unlaunched_index(&self.directory, &self.reservation)?;
         clear_reservation(&self.directory, self.scope())
     }
     fn ensure_lease(&mut self) -> Result<()> {
@@ -3062,6 +3068,7 @@ impl Recovery {
             },
             PublishMode::Replace,
         )?)?;
+        indexes::retire_unlaunched_index(&self.directory, &self.reservation)?;
         clear_reservation(&self.directory, self.scope())
     }
     pub fn verify_settlement(&self, attempt: &Directory) -> Result<SettlementCommit> {

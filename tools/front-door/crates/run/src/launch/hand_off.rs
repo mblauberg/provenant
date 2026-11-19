@@ -468,6 +468,29 @@ impl RunStore {
                         &error
                     ))
                 );
+                let candidate = local_or_withdraw!(
+                    confinement
+                        .plan
+                        .permissions()
+                        .scratch
+                        .path
+                        .file_name()
+                        .and_then(std::ffi::OsStr::to_str)
+                        .ok_or_else(|| local(
+                            "private Git index",
+                            &RunError::Validation("candidate identity missing")
+                        ))
+                );
+                local_or_withdraw!(
+                    provenant_supervisor::custody::register_attempt_index(
+                        lease.lock_directory(),
+                        scope,
+                        &writer_attempt,
+                        candidate,
+                        writer.branch.as_str(),
+                    )
+                    .map_err(|error| local("private Git index", &error))
+                );
                 local_or_withdraw!(
                     writer
                         .snapshot(

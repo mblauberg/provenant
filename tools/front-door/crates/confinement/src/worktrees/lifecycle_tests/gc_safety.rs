@@ -61,6 +61,68 @@ fn gc_keeps_worktree_until_every_shared_holder_leaves() -> Result<(), Box<dyn Er
 }
 
 #[test]
+fn removal_keeps_a_worktree_with_an_unsettled_reservation() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "unsettled-removal".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let slot = writer_directory(context.project_state, &info.path)?;
+    let scope = provenant_records::custody::Scope {
+        attempt: provenant_core::AttemptId::from_bytes([78; 16]),
+        generation: 1,
+    };
+    let lease = provenant_supervisor::fixture::acquire_writer(
+        slot.try_clone()?,
+        scope,
+        WaitBudget::nonblocking(context.clock.mono_now()),
+        &cancel(),
+        context.clock,
+    )?;
+    drop(lease);
+    // Model a holder crash: the kernel lease is gone, while the reservation
+    // remains for run-owned reconciliation.
+    fs::remove_file(slot.current_path()?.join(WRITER_LOCK))?;
+
+    let entries = context.facts.fresh_inventory(&context, &cancel())?;
+    let entry = entries
+        .iter()
+        .find(|entry| canonicalize(&entry.path).ok().as_ref() == Some(&info.path))
+        .ok_or("worktree vanished before removal")?;
+    let result = super::super::lifecycle::remove_tree_when_before_delete(
+        &context,
+        entry,
+        info.head,
+        &cancel(),
+        &|_| Ok(()),
+        Some(&Default::default()),
+        false,
+        |_, _, _| Ok(()),
+    );
+    let error = result
+        .err()
+        .ok_or("removed a worktree with an unsettled reservation")?;
+    assert!(
+        matches!(
+            error,
+            WorktreeError::UnknownOccupancy { ref path, ref detail }
+                if path == &info.path
+                    && detail.contains(&scope.attempt.to_string())
+                    && detail.contains("provenant reconcile")
+        ),
+        "unexpected refusal: {error}"
+    );
+    assert!(info.path.is_dir(), "the reserved worktree was removed");
+    Ok(())
+}
+
+#[test]
 fn remove_registered_detached_worktree() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
@@ -91,6 +153,228 @@ fn remove_registered_detached_worktree() -> Result<(), Box<dyn Error>> {
     assert!(!info.path.exists());
     assert!(removed.pruned_refs.is_empty());
     assert!(read_branch_tips(&context, &cancel())?.contains_key(&GitRefName::branch("detached")?));
+    Ok(())
+}
+
+#[test]
+fn removal_preserves_staged_attempt_index_when_native_index_is_clean() -> Result<(), Box<dyn Error>>
+{
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let lane = gc_merged_worktree(&test, &context, "private-index")?;
+    let branch = lane.branch.as_deref().ok_or("fixture lane has no branch")?;
+    let branch_ref = format!("refs/heads/{branch}");
+    let verified = verify_worktree(context.repo, &lane.path)?;
+    let slot = writer_directory(context.project_state, &lane.path)?;
+    let scope = provenant_records::custody::Scope {
+        attempt: provenant_core::AttemptId::from_bytes([81; 16]),
+        generation: 1,
+    };
+    let attempt_path = test
+        .fixture
+        ._temp
+        .path()
+        .join("attempts")
+        .join(scope.attempt.to_string());
+    fs::create_dir_all(attempt_path.join("tmp/candidate-0/git-common/refs/heads"))?;
+    fs::create_dir_all(attempt_path.join("tmp/candidate-0/git-objects"))?;
+    let private_refs_path = attempt_path.join("tmp/candidate-0/git-common");
+    fs::write(
+        private_refs_path.join("HEAD"),
+        format!("ref: {branch_ref}\n"),
+    )?;
+    fs::create_dir_all(private_refs_path.join("refs/heads"))?;
+    let private_branch = private_refs_path.join(&branch_ref);
+    fs::create_dir_all(private_branch.parent().ok_or("branch parent")?)?;
+    fs::write(private_branch, format!("{}\n", lane.head))?;
+    let attempt = Directory::open_anchor(&attempt_path)?;
+    let index_path = private_refs_path.join("index");
+    let private_refs = Directory::open_anchor(&private_refs_path)?;
+
+    let binding = provenant_supervisor::custody::WriterBinding::from_verified(
+        verified.repo().root_dir(),
+        verified.repo().private_dir(),
+        &branch_ref,
+        lane.head,
+    )?;
+    let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+        slot.try_clone()?,
+        scope,
+        binding,
+        WaitBudget::nonblocking(context.clock.mono_now()),
+        &cancel(),
+        context.clock,
+    )?;
+    let native_git_dir = verified
+        .repo()
+        .private_git_dir()
+        .to_str()
+        .ok_or("non-UTF8 native Git directory")?
+        .to_owned();
+    let worktree = lane
+        .path
+        .to_str()
+        .ok_or("non-UTF8 worktree path")?
+        .to_owned();
+    let index = index_path
+        .to_str()
+        .ok_or("non-UTF8 attempt index")?
+        .to_owned();
+    let mut private_index_env = fixture_env(&test.fixture.home, test.fixture._temp.path());
+    private_index_env.push(("GIT_INDEX_FILE".into(), index.into()));
+    run_fixture_git(
+        &test.fixture.executor,
+        &test.fixture.git,
+        &lane.path,
+        &private_index_env,
+        &[
+            "--git-dir",
+            &native_git_dir,
+            "--work-tree",
+            &worktree,
+            "read-tree",
+            &lane.head.to_string(),
+        ],
+    )?;
+    let staged_payload = test.fixture._temp.path().join("private-staged-payload");
+    fs::write(&staged_payload, "private staged attempt data")?;
+    let staged_payload = staged_payload
+        .to_str()
+        .ok_or("non-UTF8 staged payload path")?
+        .to_owned();
+    let blob = run_fixture_git(
+        &test.fixture.executor,
+        &test.fixture.git,
+        &lane.path,
+        &fixture_env(&test.fixture.home, test.fixture._temp.path()),
+        &[
+            "--git-dir",
+            &native_git_dir,
+            "--work-tree",
+            &worktree,
+            "hash-object",
+            "-w",
+            &staged_payload,
+        ],
+    )?;
+    let blob = std::str::from_utf8(&blob.stdout.bytes)?.trim().to_owned();
+    let cacheinfo = format!("100644,{blob},private-sibling.txt");
+    run_fixture_git(
+        &test.fixture.executor,
+        &test.fixture.git,
+        &lane.path,
+        &private_index_env,
+        &[
+            "--git-dir",
+            &native_git_dir,
+            "--work-tree",
+            &worktree,
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &cacheinfo,
+        ],
+    )?;
+    provenant_supervisor::custody::register_attempt_index(
+        &slot,
+        scope,
+        &attempt,
+        "candidate-0",
+        &branch_ref,
+    )?;
+    assert!(
+        run_fixture_git(
+            &test.fixture.executor,
+            &test.fixture.git,
+            &lane.path,
+            &fixture_env(&test.fixture.home, test.fixture._temp.path()),
+            &[
+                "--git-dir",
+                &native_git_dir,
+                "--work-tree",
+                &worktree,
+                "status",
+                "--porcelain"
+            ],
+        )?
+        .stdout
+        .bytes
+        .is_empty(),
+        "the native worktree index should be clean"
+    );
+
+    // Model a terminal attempt whose cleanup left its private index registered.
+    // The slot has no live reservation, so removal must inspect the index itself.
+    lease.into_recovery()?.release_lost()?;
+    assert!(
+        private_refs
+            .read_stable(OsStr::new("index"), 64 * 1024 * 1024)
+            .is_ok()
+    );
+
+    let entries = context.facts.fresh_inventory(&context, &cancel())?;
+    let entry = entries
+        .iter()
+        .find(|entry| canonicalize(&entry.path).ok().as_ref() == Some(&lane.path))
+        .ok_or("worktree vanished before removal")?;
+    let result = super::super::lifecycle::remove_tree_when_before_delete(
+        &context,
+        entry,
+        lane.head,
+        &cancel(),
+        &|_| Ok(()),
+        Some(&Default::default()),
+        false,
+        |_, _, _| Ok(()),
+    );
+    let error = result
+        .err()
+        .ok_or("removed a worktree with a staged private attempt index")?;
+    assert!(
+        matches!(error, WorktreeError::Dirty(ref paths) if paths.contains("private-sibling.txt")),
+        "unexpected refusal: {error}"
+    );
+    assert!(
+        lane.path.is_dir(),
+        "the staged attempt worktree was removed"
+    );
+    run_fixture_git(
+        &test.fixture.executor,
+        &test.fixture.git,
+        &lane.path,
+        &private_index_env,
+        &[
+            "--git-dir",
+            &native_git_dir,
+            "--work-tree",
+            &worktree,
+            "read-tree",
+            &lane.head.to_string(),
+        ],
+    )?;
+    fs::write(
+        private_refs_path.join("MERGE_HEAD"),
+        format!("{}\n", lane.head),
+    )?;
+    let result = super::super::lifecycle::remove_tree_when_before_delete(
+        &context,
+        entry,
+        lane.head,
+        &cancel(),
+        &|_| Ok(()),
+        Some(&Default::default()),
+        false,
+        |_, _, _| Ok(()),
+    );
+    let error = result
+        .err()
+        .ok_or("removed worktree with unfinished private merge")?;
+    assert!(
+        matches!(error, WorktreeError::Dirty(_)),
+        "unfinished private merge was not retained: {error}"
+    );
+    assert!(lane.path.is_dir());
     Ok(())
 }
 

@@ -441,18 +441,21 @@ are advisory and overlapping claims refuse nothing; a live conflicting writer is
 not excluded by Provenant. Attempts own separate Git refs, indexes and object
 stores; ordinary commits cannot take a sibling's staged snapshot. Host publication
 uses expected-old-tip compare-and-swap after verification, retaining divergent
-private commits for recovery. An unscoped budget commit requires durable proof that
-no sibling shared the worktree during that attempt and holds the admission gate
-through the commit. Shared attempts instead report typed leftover paths. Custody outlives the requesting call. Each attempt
+private commits for recovery. Custody outlives the requesting call. Each attempt
 also holds its own holder lease; proof that a sibling has settled cannot release
-another attempt's custody. Removal requires exclusive occupancy with zero live holders.
-`worktree remove` refuses the primary, a live writer or observed process, and has
-no force. Dirty work
-requires explicit discard, with its recoverable archive captured before removal;
-it deletes a branch only with current landing evidence or explicit discard.
+another attempt's custody. An unscoped budget commit requires durable proof that
+no sibling shared the worktree during that attempt, and holds the admission gate
+through the commit. Shared attempts instead report typed leftover paths.
+Removal requires exclusive occupancy with zero live holders and no unresolved
+reservation. Terminal outcome publication alone does not release custody. Under
+exclusion, removal checks native cleanliness and every recorded attempt index;
+staged work or uncertain index identity retains the checkout. `worktree remove`
+refuses the primary, a live writer or observed process, and has no force. Dirty
+work requires explicit discard, with its recoverable archive captured before
+removal; it deletes a branch only with current landing evidence or explicit discard.
 A persisted writer reservation remains a custody fence when its kernel lock is
-absent: read-only occupancy is unknown until run-owned reconciliation settles
-the attempt, and cache guards refuse the slot without clearing its evidence.
+absent until run-owned reconciliation settles the attempt; cache guards and
+actual removal both refuse without clearing its evidence.
 Named removal without current landing or subsumption proof returns
 `WorktreeError::UnprovenLanding`, naming the branch and missing proof, with an
 explicit-discard recovery command. `IdentityChanged` remains a changed-identity

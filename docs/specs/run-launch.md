@@ -77,6 +77,14 @@ with no live holder, ordinary reuse falls through to exclusive occupancy and ver
 cleanliness, so an actual checkout advance or unshared reuse still requires a clean tree.
 - Why: independent worktrees and coherent config reads must not queue behind sibling launches.
 
+The host records each prepared private index's attempt and directory identities
+in the worktree custody slot before provider spawn. Unresolved reservations keep
+the checkout fenced even after a holder crash. Settlement retires a clean index
+record before scratch cleanup; staged indexes remain recovery evidence. Under
+exclusive removal custody, the native index and every remaining recorded attempt
+index must be clean. A terminal outcome alone cannot authorise removal.
+- Why: staged snapshots can survive after the native checkout appears clean.
+
 Before entering handoff or spawning a guardian, the launcher durably prepares
 the per-attempt `guardian.lock` inode alongside the attempt, writer and custody
 identities. The guardian acquires and verifies that original inode before

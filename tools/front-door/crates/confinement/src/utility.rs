@@ -281,6 +281,13 @@ pub enum GitRead {
     },
     /// Staged changes against HEAD with their modes.
     StagedModes,
+    /// Staged paths in a separately recorded attempt index, compared with its
+    /// private branch tip while using this repository's verified Git config and
+    /// object database.
+    AttemptIndex {
+        index: PathBuf,
+        head: GitOid,
+    },
     /// Changed paths with their old and new modes (`diff --raw`).
     ChangedModes {
         base: GitOid,
@@ -1137,15 +1144,27 @@ pub fn run_utility(
     cancel: &CancelToken,
 ) -> Result<ExecOutcome, UtilityError> {
     let stdin = git_stdin(&operation);
+    let index_file = attempt_index_file(&operation)?;
     execute_git(
         executor,
         repo,
         runtime,
         budget,
         cancel,
-        false,
+        GitEnvironment {
+            release_scan: false,
+            index_file: index_file.as_deref(),
+        },
         |attribute_source| Ok((git_args(operation, repo, attribute_source)?, stdin)),
     )
+}
+
+fn attempt_index_file(operation: &GitRead) -> Result<Option<PathBuf>, UtilityError> {
+    match operation {
+        GitRead::AttemptIndex { index, .. } if index.is_absolute() => Ok(Some(index.clone())),
+        GitRead::AttemptIndex { .. } => Err(UtilityError::InvalidOperationValue),
+        _ => Ok(None),
+    }
 }
 
 /// The one hardened way host code runs Git against a remote: no hooks, no
@@ -1429,13 +1448,17 @@ pub fn run_release_read_utility(
     cancel: &CancelToken,
 ) -> Result<ExecOutcome, UtilityError> {
     let stdin = git_stdin(&operation);
+    let index_file = attempt_index_file(&operation)?;
     execute_git(
         executor,
         &repo.0,
         runtime,
         budget,
         cancel,
-        true,
+        GitEnvironment {
+            release_scan: true,
+            index_file: index_file.as_deref(),
+        },
         |attribute_source| Ok((git_args(operation, &repo.0, attribute_source)?, stdin)),
     )
 }
@@ -1551,13 +1574,19 @@ pub fn run_read_utility(
 
 /// Keep the authority checks, attribute source and bounded execution identical
 /// for reads and the separately typed custody mutations.
+#[derive(Default)]
+struct GitEnvironment<'a> {
+    release_scan: bool,
+    index_file: Option<&'a Path>,
+}
+
 fn execute_git(
     executor: &dyn Executor,
     repo: &VerifiedRepo,
     runtime: &UtilityRuntime,
     budget: UtilityBudget,
     cancel: &CancelToken,
-    release_scan: bool,
+    selected: GitEnvironment<'_>,
     command: impl FnOnce(&str) -> Result<(Vec<OsString>, Option<Vec<u8>>), UtilityError>,
 ) -> Result<ExecOutcome, UtilityError> {
     if cancel.is_cancelled() {
@@ -1576,7 +1605,10 @@ fn execute_git(
     argv.push(runtime.git.program()?.into_os_string());
     argv.extend(args);
     let mut env = environment(runtime, repo);
-    if release_scan {
+    if let Some(index_file) = selected.index_file {
+        env.push(("GIT_INDEX_FILE".into(), index_file.as_os_str().to_owned()));
+    }
+    if selected.release_scan {
         env.push(("GIT_SHALLOW_FILE".into(), "/dev/null".into()));
     }
     env.push(("GIT_ATTR_SOURCE".into(), attribute_source.into()));
@@ -1683,6 +1715,17 @@ fn git_args(
             "--no-ext-diff".into(),
             "--no-textconv".into(),
             "HEAD".into(),
+            "--".into(),
+        ],
+        GitRead::AttemptIndex { head, .. } => vec![
+            "diff-index".into(),
+            "--cached".into(),
+            "--name-only".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            "--no-renames".into(),
+            "-z".into(),
+            head.to_string().into(),
             "--".into(),
         ],
         GitRead::Untracked => vec![
@@ -2104,7 +2147,7 @@ pub(crate) fn execute_git_mutation(
                 runtime,
                 attempt_budget,
                 cancel,
-                false,
+                GitEnvironment::default(),
                 |attribute_source| {
                     let (mut args, stdin) = mutation_args(mutation.clone())?;
                     args.insert(0, format!("--attr-source={attribute_source}").into());

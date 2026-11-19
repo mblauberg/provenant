@@ -10,9 +10,11 @@ Paths are relative to `tools/front-door/`.
 A settlement driver holds an exclusive lease. Journal locks do not span external
 commands, and terminal effects have separate exclusion. Import precedes
 writer branch publication, the terminal record is committed before custody release, and
-import refusal retains private Git for recovery. Private staged snapshots survive
-terminal cleanup for recovery.
-Each attempt publishes only its private ref; a sibling-divergent host tip
+import refusal retains private Git for recovery. Private staged indexes also
+survive terminal cleanup and remain a worktree-removal fence until reconciled.
+Staging and stopped merges stay in attempt-private Git, with the worktree files
+left intact. Native index convergence uses only committed trees and preserves
+conflicting native staging or operations. Each attempt publishes only its private ref; a sibling-divergent host tip
 refuses publication while retaining both commits for recovery.
 - Why: recovery must resume durable effects without racing another driver or losing work.
 

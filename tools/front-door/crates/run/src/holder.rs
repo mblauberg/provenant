@@ -1046,7 +1046,7 @@ impl RunStore {
     pub(crate) fn settle_recovered(
         &self,
         attempt: &Directory,
-        recovery: custody::Recovery,
+        mut recovery: custody::Recovery,
     ) -> Result<()> {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
@@ -1069,11 +1069,41 @@ impl RunStore {
                 )
             })
             .transpose()?;
-        let staged_paths = launch
+        let retired = launch
             .as_ref()
-            .map(|writer| writer.private_staged_paths(attempt))
-            .transpose()?
-            .unwrap_or_default();
+            .and_then(|writer| writer.custody.as_ref())
+            .map(|(slot, _)| custody::attempt_index_retired(slot, recovery.scope()))
+            .transpose()
+            .map_err(|error| RunError::Io(std::io::Error::other(error)))?
+            .unwrap_or(false);
+        let source = match crate::objects::bound_source(attempt) {
+            Ok(source) => source,
+            Err(RunError::Filesystem(error)) if retired && error.is_not_found() => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(writer) = &launch
+            && let Some(source) = &source
+            && let Some((slot, _)) = &writer.custody
+        {
+            let refs = source.refs.current_path()?;
+            let candidate = refs
+                .parent()
+                .and_then(std::path::Path::file_name)
+                .and_then(std::ffi::OsStr::to_str)
+                .ok_or(RunError::Validation("private Git candidate identity"))?;
+            custody::register_attempt_index(
+                slot,
+                recovery.scope(),
+                attempt,
+                candidate,
+                writer.branch.as_str(),
+            )
+            .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
+        }
+        let staged_paths = match (&launch, source) {
+            (Some(writer), Some(_)) => writer.private_staged_paths(attempt)?,
+            _ => Vec::new(),
+        };
         let merge_retained =
             crate::artifacts::read_sealed(attempt, "private-merge-retained.json", RECORD_LIMIT)?
                 .is_some();
@@ -1122,6 +1152,11 @@ impl RunStore {
         let commit = recovery
             .verify_settlement(attempt)
             .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
+        if launch.is_some() {
+            recovery
+                .retire_attempt_index(&commit)
+                .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
+        }
         let mut scratch = provenant_os::scratch::Scratch::new(attempt.try_clone()?)?;
         recovery
             .settle(commit, &mut scratch)
@@ -4625,6 +4660,162 @@ mod writer_recovery_tests {
         );
         Ok(())
     }
+    #[test]
+    fn clean_settlement_retry_accepts_deleted_private_view_with_retirement_receipt()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+
+        let fixture = PrepareFixture::new()?;
+        let execution = registered_landed_writer_fixture(&fixture)?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&execution, &call)?;
+        let mut run = input();
+        run.request.task.writer = Some(fixture.writer.clone());
+        store.create(&run, &call)?;
+        let id = run.attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let scope = RunStore::scope(&record);
+        let attempt = store.attempt_dir(id, false)?;
+        let mut launch = crate::prepare_writer(
+            &fixture.writer,
+            execution.state_root.as_path(),
+            execution.project_id,
+        )?;
+        launch.snapshot(
+            execution.state_root.as_path(),
+            &attempt,
+            scope,
+            &provenant_records::policy::Policy::default(),
+        )?;
+        let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+        std::fs::create_dir_all(&candidate)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        crate::objects::prepare_bound(
+            &git,
+            launch.worktree.repo(),
+            &attempt,
+            &candidate,
+            launch.branch.as_str(),
+            launch.base,
+        )?;
+        assert!(launch.private_staged_paths(&attempt)?.is_empty());
+        let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+        let slot = directory.try_clone()?;
+        let recovery_directory = directory.try_clone()?;
+        let pin = crate::objects::import_pin(scope.attempt, launch.base);
+        fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
+        let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+            directory,
+            scope,
+            binding,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        drop(provenant_supervisor::fixture::bind_writer_attempt(
+            lease, &attempt,
+        )?);
+        provenant_supervisor::custody::register_attempt_index(
+            &slot,
+            scope,
+            &attempt,
+            "candidate-0",
+            launch.branch.as_str(),
+        )?;
+        let mut recovery = store
+            .recover_writer_exit(recovery_directory.try_clone()?, scope, &call)?
+            .ok_or("prepared writer recovery")?;
+        recovery.prepare_settlement()?;
+        let mut observed = crate::tests::exit();
+        observed.scope = scope;
+        crate::dispatch_tests::seal_exit(&store, &observed)?;
+        crate::artifacts::seal(
+            &attempt,
+            "launch.json",
+            &crate::db::bytes(
+                &serde_json::json!({"schema_version":1,"scope":scope,"requester":execution.actor_id}),
+            )?,
+            RECORD_LIMIT,
+        )?;
+        let finished = store.drive_settlement(
+            id,
+            &attempt,
+            &observed,
+            Completion::Recovered(Some(&recovery)),
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+        )?;
+        assert!(finished.release_permitted);
+        assert_eq!(
+            finished.record.settlement_receipts.unwrap().git_import,
+            EffectDisposition::Done
+        );
+
+        // Match the durable prefix of settle_recovered, then model a crash after
+        // private scratch removal but before the still-live reservation is cleared.
+        crate::writer::settle_launch_staging(&attempt)?;
+        provenant_supervisor::custody::publish_release(&attempt, scope)?;
+        crate::settlement::complete(&attempt, scope)?;
+        let commit = recovery
+            .verify_settlement(&attempt)
+            .map_err(|e| format!("verify clean release: {e}"))?;
+        recovery
+            .retire_attempt_index(&commit)
+            .map_err(|e| format!("retire clean index: {e}"))?;
+        let mut scratch = provenant_os::scratch::Scratch::new(attempt.try_clone()?)?;
+        scratch.settle()?;
+        std::fs::remove_dir_all(attempt.current_path()?.join("tmp"))?;
+        assert!(!candidate.exists());
+        assert!(provenant_supervisor::custody::attempt_index_retired(
+            &slot, scope
+        )?);
+        let reservation = slot
+            .current_path()?
+            .join(id.to_string())
+            .join("reservation.json");
+        assert!(
+            reservation.is_file(),
+            "reservation remains the removal fence"
+        );
+        assert!(!store.writer_fences()?.is_empty());
+        drop(scratch);
+        drop(commit);
+        drop(recovery);
+
+        let mut retry = store
+            .recover_writer_exit(recovery_directory, scope, &call)?
+            .ok_or("reservation must remain recoverable")?;
+        retry
+            .prepare_settlement()
+            .map_err(|e| format!("prepare retry: {e}"))?;
+        store
+            .settle_recovered(&attempt, retry)
+            .map_err(|e| format!("settle retry: {e}"))?;
+        assert!(store.writer_fences()?.is_empty());
+        assert!(!reservation.exists());
+        assert!(
+            slot.current_path()?
+                .join(id.to_string())
+                .join("settlement.json")
+                .is_file()
+        );
+        assert!(provenant_supervisor::custody::attempt_index_retired(
+            &slot, scope
+        )?);
+        assert!(!attempt.current_path()?.join("tmp").exists());
+        assert!(store.custody_released(&store.record(id, &call)?, &call)?);
+        Ok(())
+    }
+
     #[test]
     fn budget_warning_records_the_steer_refusal_for_lane_providers()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
