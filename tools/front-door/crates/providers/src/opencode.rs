@@ -407,7 +407,6 @@ fn prepare(
     env.retain(|(key, _)| {
         ![
             "GIT_CONFIG_GLOBAL",
-            "GIT_CONFIG_NOSYSTEM",
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
             "XDG_CACHE_HOME",
@@ -418,7 +417,6 @@ fn prepare(
     });
     env.extend([
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         ("XDG_CONFIG_HOME".into(), private_config.into_os_string()),
         ("XDG_DATA_HOME".into(), private_data.into_os_string()),
         (

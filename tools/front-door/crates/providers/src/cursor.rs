@@ -232,10 +232,7 @@ fn prepare(
     let path = crate::launch::tool_search_path(input.home, true, input.policy)?;
     let mut env = base_env(input, &plan.scratch.path, path)?;
     if input.sandboxed() {
-        env.extend([
-            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-        ]);
+        env.extend([("GIT_CONFIG_GLOBAL".into(), "/dev/null".into())]);
     }
     let private = &plan
         .private_state

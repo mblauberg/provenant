@@ -99,10 +99,7 @@ fn prepare(
         crate::launch::tool_search_path(input.home, true, input.policy)?,
     )?;
     if input.sandboxed() {
-        env.extend([
-            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-        ]);
+        env.extend([("GIT_CONFIG_GLOBAL".into(), "/dev/null".into())]);
     }
     let mut profile = ProviderProfileSpec {
         process_executables: vec![exact("/bin/sh"), exact(input.executable)],
