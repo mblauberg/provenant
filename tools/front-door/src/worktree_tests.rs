@@ -1214,27 +1214,24 @@ fn assert_terminal_outcome(
     Ok(())
 }
 
+/// Terminal publication precedes the guardian's release of the reservation. The
+/// guardian notices a holder's exit by event and otherwise at its five-second
+/// full-census backstop, so the wait is an upper bound on that state change, not
+/// a pause: it returns the moment the reservation list is empty.
+const WRITER_RELEASE_BOUND: Duration = Duration::from_secs(20);
+
 pub(super) fn wait_for_writer_release(store: &provenant_run::RunStore) -> Result {
-    let mut failure = None;
-    let released = provenant_test_support::wait_for(
+    let observed = provenant_test_support::wait_for(
         "writer reservation release",
-        Duration::from_secs(5),
-        || match store.writer_fences() {
-            Ok(fences) => fences.is_empty(),
-            Err(error) => {
-                failure = Some(error);
-                true
-            }
-        },
-        |done| *done,
+        WRITER_RELEASE_BOUND,
+        || store.writer_fences(),
+        |fences| fences.as_ref().map_or(true, Vec::is_empty),
     )
-    .is_ok();
-    if let Some(error) = failure {
-        return Err(error.into());
-    }
-    released
-        .then_some(())
-        .ok_or_else(|| "writer reservation was not released after terminal publication".into())
+    .map_err(|error| {
+        format!("writer reservation was not released after terminal publication: {error}")
+    })?;
+    observed?;
+    Ok(())
 }
 
 struct ReleaseOnDrop(PathBuf);

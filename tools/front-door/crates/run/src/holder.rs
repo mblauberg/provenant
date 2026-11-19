@@ -1059,6 +1059,9 @@ impl RunStore {
         if !self.import_release_permitted(&record, &call)? {
             return Err(RunError::Validation("writer import remains unresolved"));
         }
+        // A refused import keeps its private Git as evidence whatever the
+        // index holds, and its tip may be absent from the objects.
+        let import_refused = object_import_refused(attempt, recovery.scope())?.is_some();
         let request = self.request(record.attempt_id, &call)?;
         let launch = request
             .task
@@ -1075,7 +1078,22 @@ impl RunStore {
                     &self.repo_facts,
                 )
             })
-            .transpose()?;
+            .transpose();
+        let launch = match launch {
+            Ok(launch) => launch,
+            // The private Git is retained whole, and refusal already settled
+            // the import without the worktree: a checkout that cannot be
+            // prepared (rebuilt, unbound) must not keep it unsettled forever.
+            Err(error) if import_refused => {
+                use std::io::Write as _;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: writer not prepared for attempt index registration; retaining the private Git: {error}"
+                );
+                None
+            }
+            Err(error) => return Err(error),
+        };
         let retired = launch
             .as_ref()
             .and_then(|writer| writer.custody.as_ref())
@@ -1088,9 +1106,6 @@ impl RunStore {
             Err(RunError::Filesystem(error)) if retired && error.is_not_found() => None,
             Err(error) => return Err(error),
         };
-        // A refused import keeps its private Git as evidence whatever the
-        // index holds, and its tip may be absent from the objects.
-        let import_refused = object_import_refused(attempt, recovery.scope())?.is_some();
         if let Some(writer) = &launch
             && let Some(source) = &source
             && let Some((slot, _)) = &writer.custody
