@@ -1,2 +1,9 @@
 # Add entries only for tests with an open issue and remove them in the fixing PR.
 # Expiry is limited to 30 days from the day the CI check runs.
+
+[[test]]
+package = "provenant-cli"
+name = "run::provider::tests::pool_redraw_continuation_and_unconfinable_plan_through_preparation"
+issue = "#3300"
+owner = "chair"
+expires = 2026-12-14
