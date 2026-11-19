@@ -140,7 +140,7 @@ impl Context {
     }
 }
 
-/// Identity bytes and object keys are immutable, so refuse credentials rather
+/// Identity bytes and object keys are immutable, so warn on credentials rather
 /// than silently changing references. Check the entire fresh structured block,
 /// including fields that a later typed projection may discard.
 pub(super) fn validate_identities(

@@ -1294,6 +1294,12 @@ pub enum TerminalCause {
     WriteGrantsRefused,
     WorktreeBusy,
     HandoffRefused,
+    /// A retry's writer head does not match the graph's pinned source commit.
+    /// It is a pin problem, not a failed launch handoff.
+    WriterPinMismatch {
+        pinned: GitOid,
+        head: GitOid,
+    },
     RetainedWriterImport,
     UnsupportedPlatform,
     UnknownPacingAccount,
@@ -1346,6 +1352,7 @@ impl TerminalCause {
             Self::WriteGrantsRefused => "write grants refused; provenant output ID",
             Self::WorktreeBusy => "worktree busy; provenant output ID",
             Self::HandoffRefused => "launch handoff refused; provenant output ID",
+            Self::WriterPinMismatch { .. } => "writer source pin mismatch; provenant output ID",
             Self::RetainedWriterImport => "writer import retained; provenant output ID",
             Self::UnsupportedPlatform => "sandbox unavailable; provenant output ID",
             Self::UnknownPacingAccount => "pacing account unknown; provenant output ID",
@@ -1379,6 +1386,9 @@ impl TerminalCause {
         match self {
             Self::ProviderCaptureDefect { line } if detail => format!(
                 "provider capture evidence defect at stdout.log line {line}; replay incomplete"
+            ),
+            Self::WriterPinMismatch { pinned, head } if detail => format!(
+                "writer source pin mismatch: pinned commit {pinned}, current head {head}; retry re-pins to the head when it descends from the pinned commit"
             ),
             _ => if detail { self.detail() } else { self.reason() }.to_owned(),
         }
@@ -1422,6 +1432,9 @@ impl TerminalCause {
             }
             Self::HandoffRefused => {
                 "the host refused the launch handoff; inspect local launch evidence and host configuration before retrying"
+            }
+            Self::WriterPinMismatch { .. } => {
+                "the writer worktree head does not match the commit pinned for this continuation; retry re-pins when the head descends from the pinned commit, otherwise restore that lineage"
             }
             Self::RetainedWriterImport => {
                 "a retained writer import blocks launch; reconcile the earlier writer's import before retrying"
@@ -2890,6 +2903,23 @@ pub struct RunEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pin_mismatch_has_its_own_honest_cause_text() {
+        let pinned = GitOid::parse(&"a".repeat(40)).expect("pinned");
+        let head = GitOid::parse(&"b".repeat(40)).expect("head");
+        let cause = TerminalCause::WriterPinMismatch { pinned, head };
+        let text = cause.diagnostic(true);
+        assert!(text.contains(&pinned.to_string()), "{text}");
+        assert!(text.contains(&head.to_string()), "{text}");
+        assert!(
+            !text.contains(TerminalCause::HandoffRefused.detail()),
+            "a pin mismatch must not blame the launch handoff: {text}"
+        );
+        let detail = cause.detail();
+        assert!(detail.contains("re-pins"), "{detail}");
+        assert!(!detail.contains("host configuration"), "{detail}");
+    }
 
     #[test]
     fn attempt_state_fields_round_trip_and_reject_malformed_values() {

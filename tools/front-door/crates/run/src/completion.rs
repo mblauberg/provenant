@@ -298,13 +298,22 @@ pub fn sanitise_handoff_result(handoff: HandoffResult) -> HandoffResult {
 /// The verification and slot-wait rules every writer lane is told. A writer's `cargo` commands
 /// share the host's build cap, and a lane that
 /// stopped to report the wait cost a whole task (#2484).
-pub const BUILD_SLOT_GUIDANCE: &str = "Build slots: `cargo` commands share a host-wide cap (source: default; domains.fabric.lanes.max_concurrent_builds), derived from cores and memory. Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n";
+pub const BUILD_SLOT_GUIDANCE: &str = "Build slots: `cargo` commands share the `build` admission class cap (source: default; `[admission.build].slots`), derived from cores and memory. Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n";
 
 /// Host build cap stated in the preamble.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuildCap {
     pub slots: u64,
     pub source: &'static str,
+}
+
+impl From<&provenant_config::ResolvedAdmissionClass> for BuildCap {
+    fn from(class: &provenant_config::ResolvedAdmissionClass) -> Self {
+        Self {
+            slots: class.slots,
+            source: class.slots_source.description(),
+        }
+    }
 }
 
 /// Optional preamble overrides. Default uses the targeted verification paragraph.
@@ -318,7 +327,7 @@ pub struct PreambleExtras {
 fn slot_guidance(cap: Option<BuildCap>) -> String {
     match cap {
         Some(cap) => format!(
-            "Build slots: `cargo` commands share a host-wide cap of {} (source: {}; domains.fabric.lanes.max_concurrent_builds). Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n",
+            "Build slots: `cargo` commands share the `build` admission class cap of {} (source: {}; `[admission.build].slots`). Busy or unavailable slots wait a bounded time, then warn and the build proceeds. 0 disables the cap. Cargo manages its own build locks.\n",
             cap.slots, cap.source
         ),
         None => BUILD_SLOT_GUIDANCE.to_string(),
@@ -439,6 +448,30 @@ mod tests {
             !lane_preamble("Model policy.", &Default::default(), None, None)
                 .contains("handoff.json")
         );
+    }
+
+    #[test]
+    fn configured_build_slots_appear_in_writer_preamble() {
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(
+            state.path().join("config.toml"),
+            "schema_version=1\n[admission.build]\nslots=7\n",
+        )
+        .unwrap();
+        let class = provenant_config::ResolvedAdmissionClass::resolve("build", state.path(), None);
+        let extras = PreambleExtras {
+            build_cap: Some(BuildCap::from(&class)),
+            ..Default::default()
+        };
+        let preamble = lane_preamble_with(
+            "Model policy.",
+            &Default::default(),
+            Some(crate::ResolvedCiScope::resolve(&Default::default())),
+            None,
+            &extras,
+        );
+        assert!(preamble.contains("build` admission class cap of 7"));
+        assert!(preamble.contains("source: host; `[admission.build].slots`"));
     }
 
     fn snapshot(status: &str) -> Vec<u8> {

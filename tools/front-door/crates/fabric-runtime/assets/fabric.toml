@@ -6,9 +6,6 @@ peers = {}
 commands = {} # named command tables, e.g. fmt-check = { argv = ["cargo", "fmt", "--check"], runtimes = [] }
 [lanes]
 memory_pressure_threshold = "critical"
-# A build throttle for cooperative fair sharing of CPU and memory among lanes, not a hard cap:
-# lanes' `cargo` commands wait for a slot; direct `~/.cargo/bin/cargo`, rustc and non-cargo builds are not gated.
-max_concurrent_builds = -1 # host-wide builds at once, 1-64; automatic: max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))
 max_writer_lanes = -1 # writer lanes live at once across the host, 1-64; automatic: unlimited
 lane_port_base = -1 # first port of the range split into per-writer-lane blocks, 1024-65535; automatic: 30000
 lane_port_block = -1 # ports in each writer lane's block, 1-1024; automatic: 16
@@ -46,6 +43,9 @@ store_busy_timeout_ms = 30000 # wait for a contended store before reporting cont
 plan = false
 warn_unbounded_junior = true
 
+[batch]
+max_parallel = 4 # cap on concurrent slices running at once, 1-64
+
 [plan]
 mode = "auto" # auto, on or off; --plan overrides it
 route = "principal" # route alias the planner node runs on
@@ -58,6 +58,7 @@ batch_issues = 2 # this many distinct issues in one brief turns it on
 
 [steer]
 fallback = "fresh_with_handoff" # fresh_with_handoff or refuse when a stopped session is unavailable
+restart_spacing_ms = 2000 # minimum spacing between steer restarts; 0 disables the stagger
 
 [graph]
 launch_wait_seconds = 55 # general launch and read/wait allowance

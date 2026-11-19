@@ -889,7 +889,7 @@ fn source_fast_forward_advances_clean_tree_and_preserves_ignored_output()
     fs::set_permissions(hooks.join("post-merge"), fs::Permissions::from_mode(0o700))?;
     let session = CensusSession::new(&test.workers, &test.clock);
     context.workers = &session;
-    fast_forward(&context, &info.path, target, &cancel())?;
+    fast_forward(&context, &info.path, target, WriterEdits::Refuse, &cancel())?;
     assert_eq!(
         session.observed_at(),
         None,
@@ -910,7 +910,7 @@ fn source_fast_forward_advances_clean_tree_and_preserves_ignored_output()
         "retained output"
     );
     assert!(!info.path.join("hook-ran").exists());
-    fast_forward(&context, &info.path, target, &cancel())?;
+    fast_forward(&context, &info.path, target, WriterEdits::Refuse, &cancel())?;
     Ok(())
 }
 
@@ -960,7 +960,13 @@ fn batch_worktree_on_a_private_branch_follows_an_integration_ref_by_fast_forward
     let before = entry(&batch.path)?;
     assert_eq!(before.head, start);
     assert_eq!(before.dirty, WorktreeCondition::Clean);
-    fast_forward(&context, &batch.path, lane_head, &cancel())?;
+    fast_forward(
+        &context,
+        &batch.path,
+        lane_head,
+        WriterEdits::Refuse,
+        &cancel(),
+    )?;
     assert!(
         context.facts.take_inventory(&context).is_none(),
         "a Git mutation must not leave the earlier inventory snapshot reusable"
@@ -986,7 +992,7 @@ fn fallback_writer_after_a_partial_commit_continues_past_the_pin() -> Result<(),
         &cancel(),
     )?;
     let pin = fixture.head()?;
-    fast_forward(&context, &info.path, pin, &cancel())?;
+    fast_forward(&context, &info.path, pin, WriterEdits::Refuse, &cancel())?;
     run_in_worktree(
         &fixture,
         &info.path,
@@ -1001,7 +1007,7 @@ fn fallback_writer_after_a_partial_commit_continues_past_the_pin() -> Result<(),
         .head
         .ok_or(WorktreeError::InvalidOutput)?;
     assert_ne!(ahead, pin);
-    fast_forward(&context, &info.path, pin, &cancel())?;
+    fast_forward(&context, &info.path, pin, WriterEdits::Refuse, &cancel())?;
     let after = context
         .facts
         .read_inventory(&context, &cancel())?

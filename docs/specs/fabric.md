@@ -92,7 +92,7 @@ Claims do not expire, lock or refuse overlapping advisory ownership. Acquiring
 another holder's item warns, records the previous holder in the same transaction
 as the custody change, and proceeds. Gone holders leave unattended items for
 adoption. Unknown native presence stays unknown. Run writer leases still own
-Git isolation. Cursors advance monotonically; an unreachable peer is Unknown.
+worktree custody. Cursors advance monotonically; an unreachable peer is Unknown.
 Holder identifiers in warnings use their normal hexadecimal display rather than
 debug-struct formatting.
 - Why: unattended work must remain discoverable without making advisory custody
@@ -182,9 +182,74 @@ the writer consumes. `domains.fabric.implement.plan` sets the default and
 input, write scope or explicit plan parameter emits the advisory
 `unbounded_brief_junior_writer` warning. Set
 `domains.fabric.implement.warn_unbounded_junior=false` to suppress it.
+
+`batch` expands over `items`, accepting either bare strings or structured item tables
+`{ id, brief | brief_file, route | model, write_scope, after, with }`. Mutual exclusion
+is enforced between `brief` and `brief_file`, and between `route` and `model`. Slices
+support ordering via `after`, which names prerequisite item IDs; unknown IDs and dependency
+cycles are refused at compile time with offending IDs named. Slices run under a concurrency
+cap specified by `max_parallel` (default from config `domains.fabric.batch.max_parallel`,
+reported with its source in `--explain`, and overridable per run via `--set max_parallel=N`).
+The host provisions a distinct managed worktree for each slice. A dependent slice
+starts from the current integration head after its prerequisites integrate; an
+independent slice starts from the graph's pinned integration base.
+Queued slices appear as `waiting` in status with reason `cap` or `after`. As each slice settles,
+it integrates into `integration_branch`; a merge conflict pauses only the conflicting slice
+(`blocked` with conflicting files reported) and leaves remaining slices running.
 - Why: single writers start without an implicit planning stage; callers choose
-  when planning adds value.
-- Owner: `src/fabric/interface.rs`, `src/graph_interface.rs`, `crates/fabric-runtime/src/graph/template.rs`
+  when planning adds value. Batch tasks require flexible per-slice briefs, routing,
+  dependency ordering, bounded concurrency, and isolated merge conflict handling.
+- Owner: `src/fabric/interface.rs`, `src/graph_interface.rs`, `crates/fabric-runtime/src/graph/template.rs`, `crates/fabric-runtime/src/graph/transitions.rs`, `crates/run/src/delivery.rs`
+
+### Graph admission and refusal causes
+
+Launch, retry, edit and relay add/edit build the complete candidate in memory.
+Requester binding and PATH, extension syntax (`GraphInput::validate_input`),
+prospective loop expansion, structural host limits, the checkpoint
+envelope and effective input policy must all pass before publishing anything. The
+journal lock covers reading the original state through publication. A refused
+candidate leaves the checkpoint and execution binding unchanged. The pure
+`admit_candidate` gate owns admission; entry points do not maintain separate
+resume validators.
+A structural limit at first admission refuses without publishing. An existing
+running graph that exceeds a structural limit, including during expansion or
+following a host limit reduction, saves a `StructuralLimit` pause and can
+resume after the limit is raised. A cancelled graph, or a settled graph with
+no pending recovery, saves no new structural pause. A verdict correction that
+cannot fit retains the structural pause on its failed lens until retried.
+Resume does not reactivate a previous expansion pause before
+retrying its decision. Malformed fragments remain `InvalidPlanExpansion`;
+only a typed structural overrun receives `StructuralLimit`. Persisted topology
+is checked by the candidate gate before prospective topology so corrupt checkpoints retain their node
+and `bad_checkpoint` diagnosis. Extensions have no separate count or byte cap;
+the complete retained extension list contributes to the checkpoint envelope.
+
+Admission refusals may name node IDs, loop keys and field paths that passed the
+identifier grammar, and host-owned rule identifiers and schema positions. They
+never echo free-form caller text such as prompt or brief bodies. A disclosure
+identifier containing a registered credential is omitted (`null`) in structured
+output and displayed as `[masked]` in text while the refusal keeps its typed cause. `SchemaPath` retains schema positions only. Arbitrary
+map keys become `[<key>]`; array positions may use indices. Secret-shaped input
+produces a `SECRET_SHAPED_INPUT` warning naming the field and saying it looks
+like a credential, without echoing the value. The compiled default is Warn;
+`policy.SECRET_SHAPED_INPUT` can suppress the warning; shape-only matches never
+refuse, including when a retained policy requests Refuse. Warnings name their source
+and knob. Operator retry briefs refuse only exact known credential values of at
+least eight bytes, excluding `[REDACTED]`; this check never opens credential
+stores. Out-of-bounds ambient credentials (>16 KiB, >128 variables or >64 KiB total)
+are skipped only by `matches_credential_value_for_retry`, with one warning per process
+that contains no environment names or values, and never refuse retry. Publication
+collection (`ambient_values`) remains strict: an over-bound credential set fails
+validation and withdraws publication, including streaming filters, diagnostic
+projection and per-launch publication context. No raw fallback is allowed.
+The retry refusal precedes any mutation or reservation. Automatic writer restarts reuse accepted input
+without this operator admission check.
+Warnings are returned in command/relay receipts, including detached launches. Extension causes carry a closed extension
+kind and rule; limit causes name the host limit, never the supplied value.
+CLI stderr, diagnostic JSON and relay wire details project the same cause.
+
+- Why: a refusal must neither publish rejected input nor copy it into diagnostics.
+- Owner: `crates/fabric-runtime/src/graph/candidate.rs`, `crates/fabric-runtime/src/graph/refusal.rs`, `src/fabric/interface.rs`, `src/fabric/graph_execution.rs`, `crates/cli/src/fabric/graph_relay.rs`
 
 ### Composite settlement
 
@@ -210,13 +275,25 @@ requests an interrupt through the attempt's existing custody owner only after
 that readiness record is durable. If readiness is not yet available, the text
 stays queued while the provider continues. After settlement, the graph resumes
 the same provider, model, account and session with the saved instructions as
-the next user turn. It preserves writer custody. When the provider session is
-unavailable, steer.fallback defaults to fresh_with_handoff: settlement warns
-with the configuration source, then starts a fresh session using the original
-accepted brief, the previous bounded handoff and all queued steer text. Set
-domains.fabric.steer.fallback to "refuse" to retain the accepted steer without
-a successor. A route, account, session or process identity mismatch remains
-fatal and never takes the fresh fallback.
+the next user turn. It preserves writer custody. Before it interrupts the live
+attempt, the owner prints one line naming the configured steer.fallback and the
+layer that set it, so the action is stated before it happens. When the provider
+session is unavailable, steer.fallback defaults to fresh_with_handoff: the fresh
+session continues with the original accepted brief, the previous bounded handoff
+and all queued steer text. Set domains.fabric.steer.fallback to "refuse" to
+retain the accepted steer without a successor. A route, account, session or
+process identity mismatch remains fatal and never takes the fresh fallback.
+Providers that can resume (claude, codex, cursor, agy, opencode) keep their
+session across the restart; command and host-native routes cannot resume and
+start fresh. Injecting a turn into an already-running provider process without
+a restart is not implemented: it needs a persistent, authenticated bidirectional
+channel per adapter, which none of the adapters expose. The resume-capable
+providers are the ones that could support it; until then the session-preserving
+restart is the delivery path. Steered lanes that settle close together claim a
+restart slot from
+a host-state gate spaced by domains.fabric.steer.restart_spacing_ms (default
+2000 ms; 0 disables), which bounds concurrent restarts instead of racing the
+launch lock; an applied wait names its configuration source.
 
 When placement or the accepted run owner is temporarily unavailable, the graph
 journal persists a bounded steer intent for the exact work key before replying

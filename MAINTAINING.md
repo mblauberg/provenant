@@ -1,8 +1,9 @@
 # Maintaining Provenant
 
 Read [AGENTS.md](AGENTS.md), [GLOBAL-AGENTS.md](GLOBAL-AGENTS.md) and the
-[architecture](docs/ARCHITECTURE.md). The global rules own authority and
-boundaries; [worktrees](docs/worktrees.md) owns Git isolation and operations.
+[architecture](docs/ARCHITECTURE.md). [ADR 0035](docs/adr/0035-three-hard-boundaries-and-flexible-everything-else.md) defines
+the hard boundaries; [worktrees](docs/worktrees.md) owns worktree layout,
+merge and cleanup.
 Preserve unrelated work and follow the repository process below.
 
 ## Repository process
@@ -65,8 +66,8 @@ The [deliver skill](skills/deliver/SKILL.md) owns the engineering stance.
 - Build extensible, configurable, modular mechanisms with one declared core
   and one owner per concern. Generalise where it makes change easier.
 - Use explicit typed failures and catch mistakes before runtime. Checks allow or
-  warn by default; hard holds protect credentials, Git isolation, data integrity
-  and authority. When busy, skip and retry.
+  warn by default; hard holds protect only the
+  [three boundaries](docs/adr/0035-three-hard-boundaries-and-flexible-everything-else.md). When busy, skip and retry.
 - Move callers to the new shape and remove compatibility code. For tests, see
   [test-design](skills/test-design/SKILL.md).
 
@@ -87,6 +88,13 @@ This repository supports multiple agent platforms. Platform-specific scope
 must be explicit. Changes to ambient rules apply to new sessions.
 
 ## Verify and release
+
+When cutting a version, start with `scripts/prepare-release vX.Y.Z`. It bumps
+each workspace member's own `[package] version` under `tools/front-door`,
+refreshes `Cargo.lock` offline, updates the bug template placeholder from
+`rust-toolchain.toml`, warns about merged changes that have no next.d fragment,
+and collates the notes. Review and commit its changes, then run the gates
+below; the script prints the remaining steps (pull request and tag).
 
 Use the [CI runbook](docs/runbooks/ci.md), [test tiers](docs/runbooks/test-tiers.md)
 and [release skill](skills/release/SKILL.md) for the relevant checks. Run the

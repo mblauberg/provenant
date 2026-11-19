@@ -95,6 +95,10 @@ fn holder_seals_raw_results_and_digests_the_stored_bytes() -> TestResult {
             "credential ghp_abcdefghijklmnopqrstuvwxyz0123456789",
             "credential ghp_abcdefghijklmnopqrstuvwxyz0123456789",
         ),
+        (
+            "unregistered sk-abcdefghijklmnopqrstuvwxyz password=\"printed-value\"",
+            "unregistered sk-abcdefghijklmnopqrstuvwxyz password=\"printed-value\"",
+        ),
     ] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
@@ -162,6 +166,7 @@ fn settlement_preserves_provider_session_history() -> TestResult {
     let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
     let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let _scope = provenant_redact::publication_scope([token.as_bytes().to_vec()])?;
     let attempt = store
         .context
         .state_root
@@ -643,7 +648,17 @@ fn orphan_result_with_plaintext_settles_once_and_preserves_its_bytes() -> TestRe
     let dir = store.attempt_dir(id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
     let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let _scope = provenant_redact::publication_scope([token.as_bytes().to_vec()])?;
     artifacts::seal(&dir, "result.md", token.as_bytes(), RESULT_LIMIT)?;
+    // An independent session traversal failure must not rewrite an orphan.
+    let deep = store
+        .context
+        .state_root
+        .as_path()
+        .join(format!("attempts/{id}/provider-state/candidate-0/sessions"))
+        .join("d/".repeat(32));
+    std::fs::create_dir_all(&deep)?;
+    std::fs::write(deep.join("deep.jsonl"), "session text")?;
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
     seal_exit(&store, &observed)?;

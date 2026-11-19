@@ -184,30 +184,33 @@ pub(super) fn validate_resume_extension(
     checkpoint: &GraphCheckpoint,
     extension: &str,
     limits: &crate::config::GraphLimits,
-) -> Result<(), String> {
-    validate_extension(document, extension, limits)?;
-    let flattened = composites::expand(document, limits).map_err(|error| error.to_string())?;
+) -> Result<(), refusal::ExtensionRule> {
+    validate_extension(document, extension, limits).map_err(|_| refusal::ExtensionRule::Value)?;
+    let flattened =
+        composites::expand(document, limits).map_err(|_| refusal::ExtensionRule::Value)?;
     let document = &flattened;
     if checkpoint.extensions.iter().any(|saved| saved == extension) {
         return Ok(());
     }
-    let (key, value) = extension.split_once('=').ok_or("expected KEY=VALUE")?;
+    let (key, value) = extension
+        .split_once('=')
+        .ok_or(refusal::ExtensionRule::Syntax)?;
     let (name, field) = key
         .strip_prefix("loop.")
         .and_then(|key| key.rsplit_once('.'))
-        .ok_or("invalid loop extension")?;
+        .ok_or(refusal::ExtensionRule::Key)?;
     if checkpoint
         .extensions
         .iter()
         .any(|e| e.starts_with(&format!("loop.{name}.decision=")))
     {
-        return Err("loop already has a terminal decision".into());
+        return Err(refusal::ExtensionRule::TerminalDecision);
     }
     let progress = checkpoint
         .nodes
         .iter()
         .find(|n| n.id == name)
-        .ok_or("unknown loop")?;
+        .ok_or(refusal::ExtensionRule::Key)?;
     let body: Vec<_> = checkpoint
         .nodes
         .iter()
@@ -221,20 +224,20 @@ pub(super) fn validate_resume_extension(
                 || n.round.as_ref().is_some_and(|r| !r.until) && n.state != NodeState::Succeeded
         })
     {
-        return Err("loop decisions and extensions require exhaustion".into());
+        return Err(refusal::ExtensionRule::Exhaustion);
     }
     if field == "rounds" {
         let original = document
             .nodes
             .iter()
             .find(|n| n.id == name)
-            .ok_or("unknown loop")?;
+            .ok_or(refusal::ExtensionRule::Key)?;
         let current = allowance(original, &checkpoint.extensions);
         let target = value
             .parse::<usize>()
-            .map_err(|_| "invalid loop allowance")?;
+            .map_err(|_| refusal::ExtensionRule::Value)?;
         if target <= current {
-            return Err("loop allowance must increase".into());
+            return Err(refusal::ExtensionRule::NonIncreasing);
         }
         if target - current
             > original
@@ -242,7 +245,7 @@ pub(super) fn validate_resume_extension(
                 .as_ref()
                 .map_or(5, |spec| spec.max_extension_rounds)
         {
-            return Err("loop extension exceeds max_extension_rounds".into());
+            return Err(refusal::ExtensionRule::MaxExtensionRounds);
         }
     }
     Ok(())
@@ -722,6 +725,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                     NodeState::Skipped
                 },
                 cancelled_from: None,
+                wait_reason: None,
                 skip_reason: when::skip_reason(&n.when),
                 advance_error: None,
                 advance_error_code: None,
@@ -1056,13 +1060,32 @@ pub(super) fn pause_invalid_decision<R: Error + 'static, J: GraphJournal>(
     journal.save(checkpoint).map_err(GraphError::Journal)
 }
 
+pub(super) enum DecisionExtensionError {
+    Invalid(String),
+    Structural(GraphStructuralLimit),
+}
+
 pub(super) fn prepare_decision_extension(
     document: &GraphDocument,
     checkpoint: &GraphCheckpoint,
     extension: &str,
     limits: &crate::config::GraphLimits,
-) -> Result<(), String> {
-    validate_resume_extension(document, checkpoint, extension, limits)?;
+) -> Result<(), DecisionExtensionError> {
+    let generous = crate::config::GraphLimits {
+        nodes: usize::MAX,
+        edges: usize::MAX,
+        routes_per_node: u16::MAX as usize,
+        node_prompt_bytes: usize::MAX,
+        graph_prompt_bytes: usize::MAX,
+        fan_out_width: usize::MAX,
+        expansion_depth: usize::MAX,
+        ..limits.clone()
+    };
+    validate_resume_extension(document, checkpoint, extension, &generous).map_err(|rule| {
+        DecisionExtensionError::Invalid(
+            refusal::ExtensionCause::loop_rule(extension, rule).to_string(),
+        )
+    })?;
     if extension
         .split_once('=')
         .is_some_and(|(key, _)| key.ends_with(".decision"))
@@ -1071,15 +1094,17 @@ pub(super) fn prepare_decision_extension(
     }
     let mut extensions = checkpoint.extensions.clone();
     extensions.push(extension.to_owned());
-    let expanded = plans::expand(document, &extensions, &checkpoint.expansions, limits)?;
-    let (plan, _) = validate_flat_plan(&expanded, limits).map_err(|error| error.to_string())?;
-    if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
-        return Err(reason);
+    let expanded = plans::expand(document, &extensions, &checkpoint.expansions, &generous)
+        .map_err(DecisionExtensionError::Invalid)?;
+    let (plan, _) = validate_flat_plan(&expanded, &generous)
+        .map_err(|error| DecisionExtensionError::Invalid(error.to_string()))?;
+    if let Some(limit) = structural_limit(&expanded, &plan, limits) {
+        return Err(DecisionExtensionError::Structural(limit));
     }
     if let Some(reason) =
         graph_envelope_reason(document, &checkpoint.expansions, &extensions, &plan)
     {
-        return Err(reason);
+        return Err(DecisionExtensionError::Invalid(reason));
     }
     Ok(())
 }

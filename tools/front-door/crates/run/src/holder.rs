@@ -4363,7 +4363,9 @@ mod writer_recovery_tests {
                     found.as_slice(),
                     [(
                         _,
-                        crate::Reconciled::Finished | crate::Reconciled::Withdrawn
+                        crate::Reconciled::Finished
+                            | crate::Reconciled::Withdrawn
+                            | crate::Reconciled::WriterLeaseReleased { .. }
                     )]
                 ),
                 "{mode}: {found:?}"
@@ -7234,7 +7236,12 @@ mod writer_recovery_tests {
                 &call,
                 &provenant_supervisor::census::SystemProcessObserver,
             )?;
-            assert_eq!(found, vec![(id, crate::Reconciled::Finished)]);
+            assert!(matches!(
+                found.as_slice(),
+                [
+                    (attempt, crate::Reconciled::WriterLeaseReleased { locks })
+                ] if *attempt == id && !locks.is_empty()
+            ));
             let record = store.record(id, &call)?;
             assert!(
                 matches!(record.state, AttemptState::Terminal { outcome, .. } if outcome == expected)
@@ -7258,13 +7265,23 @@ mod writer_recovery_tests {
     #[test]
     fn reconcile_settles_failed_import_once_and_keeps_evidence()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        settlement_fault_modes(&["reconcile_failed", "reconcile_new", "reconcile_reboot"])
+        for mode in ["reconcile_failed", "reconcile_new", "reconcile_reboot"] {
+            settlement_fault_modes(&[mode])
+                .map_err(|error| std::io::Error::other(format!("{mode}: {error}")))?;
+        }
+        Ok(())
     }
 
     #[test]
     fn retained_import_excludes_writer_after_lock_release()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         settlement_fault_modes(&["release_boundary"])
+    }
+
+    #[test]
+    fn retained_graph_writer_import_completes_while_recovery_holds_writer_lock()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        settlement_fault_modes(&["held_import_success"])
     }
 
     #[test]
@@ -7318,7 +7335,9 @@ mod writer_recovery_tests {
             )?;
             let candidate = store.temporary_path(id, &call)?.join("candidate-0");
             std::fs::create_dir_all(&candidate)?;
-            let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+            // Fixture commands must bypass the active lane's private Git binding.
+            let git =
+                provenant_os::git::resolve_git_executable(None).ok_or("native Git unavailable")?;
             crate::objects::prepare_bound(
                 &git,
                 launch.worktree.repo(),
@@ -7327,7 +7346,8 @@ mod writer_recovery_tests {
                 launch.branch.as_str(),
                 launch.base,
             )?;
-            let retained_commit = if mode.starts_with("reconcile_") {
+            let retained_commit = if mode.starts_with("reconcile_") || mode == "held_import_success"
+            {
                 // Make a real commit that exists only in the lane's private objects.
                 let tree = crate::objects::command(
                     &git,
@@ -7365,16 +7385,54 @@ mod writer_recovery_tests {
                 );
                 let raw = output.stdout;
                 let head = provenant_core::GitOid::parse(std::str::from_utf8(&raw)?.trim())?;
-                std::fs::write(
-                    candidate.join("git-common").join(launch.branch.as_str()),
-                    format!("{head}\n"),
-                )?;
+                if mode == "held_import_success" {
+                    let commit = format!("{head}^{{commit}}");
+                    let private = provenant_os::fixture::git_command_at(&git)
+                        .arg("--git-dir")
+                        .arg(candidate.join("git-common"))
+                        .args(["cat-file", "-e", &commit])
+                        .env("GIT_OBJECT_DIRECTORY", candidate.join("git-objects"))
+                        .env(
+                            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                            launch.worktree.repo().common_git_dir().join("objects"),
+                        )
+                        .output()?;
+                    assert!(
+                        private.status.success(),
+                        "commit is absent from private Git source: {}",
+                        String::from_utf8_lossy(&private.stderr)
+                    );
+                    let host = provenant_os::fixture::git_command_at(&git)
+                        .arg("--git-dir")
+                        .arg(launch.worktree.repo().common_git_dir())
+                        .args(["cat-file", "-e", &commit])
+                        .output()?;
+                    assert!(
+                        !host.status.success(),
+                        "retained commit was already visible in host Git"
+                    );
+                }
+                let branch_ref = candidate.join("git-common").join(launch.branch.as_str());
+                std::fs::write(&branch_ref, format!("{head}\n")).map_err(|error| {
+                    std::io::Error::other(format!(
+                        "write retained private branch ref {}: {error}",
+                        branch_ref.display()
+                    ))
+                })?;
                 let oid = head.to_string();
                 let path = candidate
                     .join("git-objects")
                     .join(&oid[..2])
                     .join(&oid[2..]);
-                Some((head, path.clone(), std::fs::read(path)?))
+                // The fixture Git executable must honour the candidate's
+                // GIT_OBJECT_DIRECTORY for this private source snapshot.
+                let bytes = std::fs::read(&path).map_err(|error| {
+                    std::io::Error::other(format!(
+                        "read retained private commit object {}: {error}",
+                        path.display()
+                    ))
+                })?;
+                Some((head, path, bytes))
             } else {
                 None
             };
@@ -7395,6 +7453,7 @@ mod writer_recovery_tests {
                 fixture.commit(&fixture.writer.worktree, "Competing branch")?;
             }
             let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+            let lock_directory = directory.try_clone()?;
             let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
                 directory,
                 scope,
@@ -7406,6 +7465,18 @@ mod writer_recovery_tests {
             let mut recovery = provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?
                 .into_recovery()?;
             recovery.prepare_settlement()?;
+            if mode == "held_import_success" {
+                store.record_worktree_settlement(
+                    id,
+                    &serde_json::json!({
+                        "schema_version":1,
+                        "state":"retained",
+                        "worktree":fixture.writer.worktree,
+                        "reason":"graph writer worktree retained for continuation, later rounds and explicit delivery",
+                    }),
+                    &call,
+                )?;
+            }
             let mut observed = crate::tests::exit();
             observed.scope = scope;
             crate::dispatch_tests::seal_exit(&store, &observed)?;
@@ -7458,7 +7529,14 @@ mod writer_recovery_tests {
                     &provenant_supervisor::census::SystemProcessObserver,
                 );
                 crate::writer::FAIL_IMPORT.with(|fault| fault.set(false));
-                assert!(found?.contains(&(id, crate::Reconciled::Finished)));
+                assert!(found?.iter().any(|(attempt, state)| {
+                    *attempt == id
+                        && matches!(
+                            state,
+                            crate::Reconciled::Finished
+                                | crate::Reconciled::WriterLeaseReleased { .. }
+                        )
+                }));
                 assert!(
                     matches!(store.record(id, &call)?.settlement_receipts.unwrap().git_import,
                     EffectDisposition::Failed { retryable: false, ref reason }
@@ -7466,7 +7544,12 @@ mod writer_recovery_tests {
                 );
                 assert!(store.writer_fences()?.is_empty());
                 let (_, path, bytes) = retained_commit.as_ref().ok_or("private commit")?;
-                assert_eq!(&std::fs::read(path)?, bytes);
+                assert_eq!(
+                    &std::fs::read(path).map_err(|error| {
+                        std::io::Error::other(format!("retained private commit after GC: {error}"))
+                    })?,
+                    bytes
+                );
                 assert_eq!(
                     crate::objects::resolve_ref(
                         &git,
@@ -7506,7 +7589,60 @@ mod writer_recovery_tests {
                 &call,
             );
             crate::writer::FAIL_IMPORT.with(|fault| fault.set(false));
-            let first = first?;
+            let first = first.map_err(|error| {
+                std::io::Error::other(format!(
+                    "drive held-Recovery settlement import and effects: {error}"
+                ))
+            })?;
+            if mode == "held_import_success" {
+                assert!(
+                    first.release_permitted,
+                    "{:?}",
+                    first.record.settlement_receipts
+                );
+                assert!(matches!(
+                    &first
+                        .record
+                        .settlement_receipts
+                        .as_ref()
+                        .ok_or("settlement receipts")?
+                        .git_import,
+                    EffectDisposition::Done
+                ));
+                assert_eq!(
+                    store
+                        .worktree_settlement(id, &call)?
+                        .ok_or("retained receipt")?["state"],
+                    "retained"
+                );
+                assert!(recovery.holds_writer_lock(&lock_directory)?);
+                assert!(
+                    lock_directory
+                        .try_lock(
+                            OsStr::new("writer.lock"),
+                            provenant_os::fs::LockMode::Exclusive,
+                        )
+                        .is_err()
+                );
+                let (head, _, _) = retained_commit.as_ref().ok_or("retained commit")?;
+                assert_eq!(
+                    crate::objects::resolve_ref(
+                        &git,
+                        launch.worktree.repo(),
+                        launch.branch.as_str()
+                    )?,
+                    *head
+                );
+                store
+                    .settle_recovered(&attempt, recovery)
+                    .map_err(|error| {
+                        std::io::Error::other(format!(
+                            "settle recovered writer after successful import: {error}"
+                        ))
+                    })?;
+                assert!(store.writer_fences()?.is_empty());
+                continue;
+            }
             if mode == "manifest_conflict" {
                 assert!(matches!(
                     first.record.settlement_receipts.unwrap().manifest_conflict,
@@ -7715,7 +7851,14 @@ mod writer_recovery_tests {
                         .reconcile_with_observer(run.attempt_id, &providers, &call, observer)
                         .expect("recovery");
                     assert!(
-                        found.contains(&(id, crate::Reconciled::Finished)),
+                        found.iter().any(|(attempt, state)| {
+                            *attempt == id
+                                && matches!(
+                                    state,
+                                    crate::Reconciled::Finished
+                                        | crate::Reconciled::WriterLeaseReleased { .. }
+                                )
+                        }),
                         "{found:?}"
                     );
                     Ok(())
@@ -7736,7 +7879,14 @@ mod writer_recovery_tests {
                     read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?,
                     sealed
                 );
-                assert_eq!(std::fs::read(candidate.join("git-common/HEAD"))?, retained);
+                assert_eq!(
+                    std::fs::read(candidate.join("git-common/HEAD")).map_err(|error| {
+                        std::io::Error::other(format!(
+                            "retained candidate HEAD after reconcile: {error}"
+                        ))
+                    })?,
+                    retained
+                );
                 assert_eq!(read_sealed(&attempt, "result.md", RESULT_LIMIT)?, result);
                 let (head, path, bytes) = retained_commit.as_ref().ok_or("private commit")?;
                 let recovery_info =
@@ -7753,7 +7903,12 @@ mod writer_recovery_tests {
                     false,
                     &call,
                 )?;
-                assert_eq!(&std::fs::read(path)?, bytes);
+                assert_eq!(
+                    &std::fs::read(path).map_err(|error| {
+                        std::io::Error::other(format!("retained private commit after GC: {error}"))
+                    })?,
+                    bytes
+                );
                 assert_eq!(
                     crate::objects::resolve_ref(
                         &git,
@@ -7838,7 +7993,14 @@ mod writer_recovery_tests {
                         &provenant_supervisor::census::SystemProcessObserver,
                     )?;
                     assert!(
-                        found.contains(&(id, crate::Reconciled::Finished)),
+                        found.iter().any(|(attempt, state)| {
+                            *attempt == id
+                                && matches!(
+                                    state,
+                                    crate::Reconciled::Finished
+                                        | crate::Reconciled::WriterLeaseReleased { .. }
+                                )
+                        }),
                         "{found:?}"
                     );
                     assert!(

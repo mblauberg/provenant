@@ -400,7 +400,7 @@ fn dirty_paths_summary_bytes(paths: &[&[u8]]) -> DirtyPathsSummary {
 pub(super) enum WorktreeCleanliness {
     Clean,
     Ignored,
-    Dirty(String),
+    Dirty(String, bool),
     GitOperationInProgress,
     Unknown,
 }
@@ -444,9 +444,15 @@ fn native_worktree_cleanliness_at(
     if dirty_records.is_empty() {
         Ok(WorktreeCleanliness::Ignored)
     } else {
-        Ok(WorktreeCleanliness::Dirty(dirty_paths_summary(
-            &dirty_records,
-        )))
+        let protected = dirty_records.iter().any(|record| {
+            std::iter::once(record.path.as_slice())
+                .chain(record.original_path.as_deref())
+                .any(|path| writer_edit_is_protected(&String::from_utf8_lossy(path)))
+        });
+        Ok(WorktreeCleanliness::Dirty(
+            dirty_paths_summary(&dirty_records),
+            protected,
+        ))
     }
 }
 
@@ -556,7 +562,7 @@ pub fn require_clean_worktree(
     match worktree_cleanliness_at(context, worktree.repo(), cancel)? {
         WorktreeCleanliness::Clean => Ok(()),
         WorktreeCleanliness::Ignored => Err(WorktreeError::IgnoredPaths(String::new())),
-        WorktreeCleanliness::Dirty(paths) => Err(WorktreeError::Dirty(paths)),
+        WorktreeCleanliness::Dirty(paths, _) => Err(WorktreeError::Dirty(paths)),
         WorktreeCleanliness::GitOperationInProgress => Err(WorktreeError::GitOperationInProgress),
         WorktreeCleanliness::Unknown => Err(WorktreeError::UnknownOccupancy {
             path: worktree.path().to_path_buf(),
@@ -574,7 +580,7 @@ pub(super) fn worktree_dirty_at(
         match native_worktree_cleanliness_at(context, repo, cancel)? {
             WorktreeCleanliness::Clean => WorktreeCondition::Clean,
             WorktreeCleanliness::Ignored => WorktreeCondition::Ignored,
-            WorktreeCleanliness::Dirty(_) => WorktreeCondition::Dirty,
+            WorktreeCleanliness::Dirty(..) => WorktreeCondition::Dirty,
             WorktreeCleanliness::GitOperationInProgress => {
                 WorktreeCondition::GitOperationInProgress
             }
@@ -753,6 +759,7 @@ pub(super) fn lock_worktree_for_launch(
     cancel: &CancelToken,
 ) -> Result<LockedWorktree, WorktreeError> {
     lock_worktree_impl(context, entry, cancel, false, true)
+        .map_err(|error| name_writer_lease(context.project_state, &entry.path, error))
 }
 
 fn lock_worktree_impl(
@@ -932,6 +939,49 @@ pub fn custody_refusal(state: Occupancy) -> WorktreeError {
     }
 }
 
+/// Attach the durable holder to a writer-bind refusal. A missing or ambiguous
+/// reservation remains the original refusal, never guessed ownership.
+pub fn name_writer_lease(
+    project_state: &Directory,
+    path: &Path,
+    error: WorktreeError,
+) -> WorktreeError {
+    if !matches!(
+        error,
+        WorktreeError::LockBusy
+            | WorktreeError::UnknownWriter
+            | WorktreeError::UnknownOccupancy { .. }
+            | WorktreeError::WriterBusy { .. }
+    ) {
+        return error;
+    }
+    let Ok(slot) = project_state.open_verified_directory(&state_dir_name(path)) else {
+        return error;
+    };
+    // An unresolved import is distinct from a held lease and must retain its
+    // recovery guidance even when its reservation identifies one attempt.
+    if retained_import(&slot).is_err() {
+        return error;
+    }
+    let Ok(listing) = provenant_supervisor::custody::list_writer_reservations_in_slot(&slot) else {
+        return error;
+    };
+    if !listing.issues.is_empty() || listing.reservations.len() != 1 {
+        return error;
+    }
+    let reservation = &listing.reservations[0];
+    WorktreeError::WriterLeaseHeld {
+        holder: reservation.scope.attempt,
+        branch: reservation
+            .branch
+            .clone()
+            .unwrap_or_else(|| "unknown".into()),
+        worktree: path.to_path_buf(),
+        age: reservation.age.clone().unwrap_or_else(|| "unknown".into()),
+        live: reservation.live,
+    }
+}
+
 /// Identify the attempt recorded in the held writer slot, when unambiguous.
 pub fn writer_holder(project_state: &Directory, path: &Path) -> Option<provenant_core::AttemptId> {
     let slot = PathBuf::from(state_dir_name(path));
@@ -1095,6 +1145,15 @@ pub(super) fn claim_writer_directory(
 /// Owner claims queue behind brief observations, but still refuse a live writer
 /// immediately. A report's temporary probe is not writer custody (#3338).
 pub(super) fn claim_writer_guard(
+    context: &WorktreeContext<'_>,
+    path: &Path,
+    cancel: &CancelToken,
+) -> Result<LockGuard, WorktreeError> {
+    claim_writer_guard_inner(context, path, cancel)
+        .map_err(|error| name_writer_lease(context.project_state, path, error))
+}
+
+fn claim_writer_guard_inner(
     context: &WorktreeContext<'_>,
     path: &Path,
     cancel: &CancelToken,

@@ -10,15 +10,38 @@ pub(super) fn set_expansion_pause(
     reason: String,
     fallback: bool,
     fragment_error: Option<PlanFailureFact>,
+    structural_limit: Option<GraphStructuralLimit>,
 ) {
     checkpoint.nodes[index].expansion_pause = Some(reason.clone());
     checkpoint.nodes[index].expansion_cause = Some(NodeDecisionCause::PlanExpansionPaused {
         active: false,
         fallback,
         fragment_error,
+        structural_limit,
     });
     checkpoint.activate_expansion_pause(index);
-    checkpoint.set_pause(PauseCause::InvalidPlanExpansion, &reason);
+    checkpoint.set_pause(
+        if structural_limit.is_some() {
+            PauseCause::StructuralLimit
+        } else {
+            PauseCause::InvalidPlanExpansion
+        },
+        &reason,
+    );
+}
+
+pub(super) fn expansion_pause_cause(node: &NodeProgress) -> PauseCause {
+    if matches!(
+        node.expansion_cause,
+        Some(NodeDecisionCause::PlanExpansionPaused {
+            structural_limit: Some(_),
+            ..
+        })
+    ) {
+        PauseCause::StructuralLimit
+    } else {
+        PauseCause::InvalidPlanExpansion
+    }
 }
 
 pub(super) fn clear_expansion_pause(checkpoint: &mut GraphCheckpoint, index: usize, refresh: bool) {
@@ -48,8 +71,9 @@ pub(super) fn clear_expansion_pause(checkpoint: &mut GraphCheckpoint, index: usi
             });
         checkpoint.deactivate_expansion_pauses();
         checkpoint.pause = None;
-        if let Some((_, reason)) = &next {
-            checkpoint.set_pause(PauseCause::InvalidPlanExpansion, reason);
+        if let Some((index, reason)) = &next {
+            let cause = expansion_pause_cause(&checkpoint.nodes[*index]);
+            checkpoint.set_pause(cause, reason);
         }
         if let Some((next, _)) = next {
             checkpoint.activate_expansion_pause(next);
@@ -396,6 +420,9 @@ fn block<'a>(
 /// New captured patches enter as structured JSON so identities survive. A
 /// saved fragment is already admitted text and bypasses this function on replay.
 fn normalise_fragment(json: &str) -> Result<String, String> {
+    let raw: serde_json::Value =
+        serde_json::from_str(json).map_err(|_| "patch JSON is invalid".to_owned())?;
+    prompt_text::validate_identities(&raw, prompt_text::Context::Patch).map_err(str::to_owned)?;
     let value = super::patch::Patch::from_fragment(json)?;
     let value =
         prompt_text::normalise(&value, prompt_text::Context::Patch).map_err(str::to_owned)?;
@@ -434,8 +461,16 @@ pub(super) fn expand(
     expansions: &[Expansion],
     limits: &crate::config::GraphLimits,
 ) -> Result<GraphDocument, String> {
-    let mut expanded =
-        loops::expand(document, extensions, limits).map_err(|error| error.to_string())?;
+    expand_typed(document, extensions, expansions, limits).map_err(|error| error.to_string())
+}
+
+pub(super) fn expand_typed(
+    document: &GraphDocument,
+    extensions: &[String],
+    expansions: &[Expansion],
+    limits: &crate::config::GraphLimits,
+) -> Result<GraphDocument, AdmissionError> {
+    let mut expanded = loops::expand(document, extensions, limits)?;
     let mut sources = std::collections::BTreeSet::new();
     for addition in expansions.iter().filter(|addition| !addition.retired()) {
         // A patch may come from the host (no source), a parent may patch more
@@ -448,7 +483,7 @@ pub(super) fn expand(
                 && expanded.nodes.iter().any(|n| n.id == addition.source)
         };
         if !valid {
-            return Err("invalid expansion source".into());
+            return Err(AdmissionError::Plan("invalid expansion source".into()));
         }
         append(&mut expanded, addition);
     }
@@ -1266,6 +1301,57 @@ pub(super) fn add_floor_uses(
     Ok(())
 }
 
+pub(super) fn provision_paths(
+    nodes: &mut [GraphNode],
+    graph: &str,
+    prefix: &str,
+    worktree_layout: &provenant_config::WorktreeLayoutPort,
+) -> Result<(), String> {
+    for child in nodes {
+        let id = if prefix.is_empty() {
+            child.id.clone()
+        } else {
+            format!("{prefix}--{}", child.id)
+        };
+        if child.access == AccessMode::WorktreeWrite && child.worktree.is_none() {
+            child.worktree = Some(
+                super::relay::child_worktree(worktree_layout, graph, &id)
+                    .map_err(|error| error.to_string())?,
+            );
+            child.provision_worktree = true;
+        }
+        if let Some(composite) = &mut child.composite {
+            // A composite exporting one member writer's commit (a planned
+            // implementation) names that checkout after itself, as a
+            // relayed add of the same child does.
+            let mut exported = composite
+                .exports
+                .iter()
+                .filter(|export| export.outputs.contains(&OutputKind::Commit));
+            if let (Some(export), None) = (exported.next(), exported.next())
+                && let Some(writer) = composite.nodes.iter_mut().find(|member| {
+                    member.id == export.node
+                        && member.access == AccessMode::WorktreeWrite
+                        && member.worktree.is_none()
+                        && member.composite.is_none()
+                        && member.loop_body.is_none()
+                })
+            {
+                writer.worktree = Some(
+                    super::relay::child_worktree(worktree_layout, graph, &id)
+                        .map_err(|error| error.to_string())?,
+                );
+                writer.provision_worktree = true;
+            }
+            provision_paths(&mut composite.nodes, graph, &id, worktree_layout)?;
+        }
+        if let Some(body) = &mut child.loop_body {
+            provision_paths(&mut body.body, graph, &id, worktree_layout)?;
+        }
+    }
+    Ok(())
+}
+
 /// Expand a patch's compiled nodes (composites and loops included), check
 /// them as one graph, then namespace them under their parent and share
 /// checkouts between overlapping writers.
@@ -1320,56 +1406,6 @@ pub(super) fn flatten_fragment(
         }
     }
     clear_authored_provisioning(&mut local_nodes);
-    fn provision_paths(
-        nodes: &mut [GraphNode],
-        graph: &str,
-        prefix: &str,
-        worktree_layout: &provenant_config::WorktreeLayoutPort,
-    ) -> Result<(), String> {
-        for child in nodes {
-            let id = if prefix.is_empty() {
-                child.id.clone()
-            } else {
-                format!("{prefix}--{}", child.id)
-            };
-            if child.access == AccessMode::WorktreeWrite && child.worktree.is_none() {
-                child.worktree = Some(
-                    super::relay::child_worktree(worktree_layout, graph, &id)
-                        .map_err(|error| error.to_string())?,
-                );
-                child.provision_worktree = true;
-            }
-            if let Some(composite) = &mut child.composite {
-                // A composite exporting one member writer's commit (a planned
-                // implementation) names that checkout after itself, as a
-                // relayed add of the same child does.
-                let mut exported = composite
-                    .exports
-                    .iter()
-                    .filter(|export| export.outputs.contains(&OutputKind::Commit));
-                if let (Some(export), None) = (exported.next(), exported.next())
-                    && let Some(writer) = composite.nodes.iter_mut().find(|member| {
-                        member.id == export.node
-                            && member.access == AccessMode::WorktreeWrite
-                            && member.worktree.is_none()
-                            && member.composite.is_none()
-                            && member.loop_body.is_none()
-                    })
-                {
-                    writer.worktree = Some(
-                        super::relay::child_worktree(worktree_layout, graph, &id)
-                            .map_err(|error| error.to_string())?,
-                    );
-                    writer.provision_worktree = true;
-                }
-                provision_paths(&mut composite.nodes, graph, &id, worktree_layout)?;
-            }
-            if let Some(body) = &mut child.loop_body {
-                provision_paths(&mut body.body, graph, &id, worktree_layout)?;
-            }
-        }
-        Ok(())
-    }
     provision_paths(
         &mut local_nodes,
         &document.graph_id,
@@ -1659,6 +1695,7 @@ pub(super) fn remaining(
 }
 
 /// Validate the entire prospective graph before publishing any added node.
+#[allow(clippy::too_many_arguments)] // Fresh captured patches use the effective admission policy.
 pub(super) fn settle(
     node: &PlannedNode,
     source: &GraphDocument,
@@ -1667,6 +1704,7 @@ pub(super) fn settle(
     capture: Option<&crate::result_capture::CapturedResult>,
     limits: &crate::config::GraphLimits,
     worktree_layout: &provenant_config::WorktreeLayoutPort,
+    policy: &provenant_records::policy::Policy,
 ) -> Option<(
     GraphDocument,
     PlannedGraph,
@@ -1701,6 +1739,7 @@ pub(super) fn settle(
         let reason = fallback_reason(&checkpoint.nodes[index]);
         let mut safe_fallback_error =
             "fallback graph is invalid; check the declared graph constraints".to_owned();
+        let mut fallback_limit = None;
         let built = (|| {
             let mut addition = fallback_expansion_for_generation(
                 &node.id,
@@ -1714,9 +1753,10 @@ pub(super) fn settle(
             append(&mut preview, &addition);
             let (plan, positions) =
                 validate_flat_plan(&preview, &generous()).map_err(|error| error.to_string())?;
-            if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
-                safe_fallback_error = reason.clone();
-                return Err(reason);
+            if let Some(limit) = structural_limit(&preview, &plan, limits) {
+                fallback_limit = Some(limit);
+                safe_fallback_error = limit.to_string();
+                return Err(safe_fallback_error.clone());
             }
             let mut expansions = checkpoint.expansions.clone();
             expansions.push(addition.clone());
@@ -1739,7 +1779,7 @@ pub(super) fn settle(
                     ),
                     MAX_ADVANCE_ERROR_BYTES,
                 );
-                set_expansion_pause(checkpoint, index, reason, true, None);
+                set_expansion_pause(checkpoint, index, reason, true, None, fallback_limit);
                 return None;
             }
         };
@@ -1790,10 +1830,19 @@ pub(super) fn settle(
             match final_patch.unwrap_or(Ok(None)) {
                 Ok(Some(json)) => {
                     safe_reason = PlanFailureFact::InvalidFragment;
-                    normalise_fragment(&json).inspect(|json| {
-                        super::patch::warn_for_secrets("graph.fragment", json);
-                        checkpoint.nodes[index].fragment = Some(json.clone());
-                    })
+                    serde_json::from_str::<serde_json::Value>(&json)
+                        .map_err(|_| "patch JSON is invalid".to_owned())
+                        .and_then(|value| {
+                            let warnings = super::refusal::input_warnings(&value, policy);
+                            for warning in warnings {
+                                if !checkpoint.nodes[index].warnings.contains(&warning) {
+                                    checkpoint.nodes[index].warnings.push(warning);
+                                }
+                            }
+                            normalise_fragment(&json).inspect(|json| {
+                                checkpoint.nodes[index].fragment = Some(json.clone());
+                            })
+                        })
                 }
                 Ok(None) => {
                     safe_reason = PlanFailureFact::MissingBlock;
@@ -1917,6 +1966,7 @@ pub(super) fn settle(
                 );
                 let mut safe_fallback_error =
                     "fallback graph is invalid; check the declared graph constraints".to_owned();
+                let mut fallback_limit = None;
                 let fallback = (|| {
                     let mut addition = fallback_expansion_for_generation(
                         &node.id,
@@ -1932,9 +1982,10 @@ pub(super) fn settle(
                     let (plan, positions) = validate_flat_plan(&preview, &generous())
                         .map_err(|error| error.to_string())?;
                     validate_output_kinds(&preview).map_err(|error| error.to_string())?;
-                    if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
-                        safe_fallback_error = reason.clone();
-                        return Err(reason);
+                    if let Some(limit) = structural_limit(&preview, &plan, limits) {
+                        fallback_limit = Some(limit);
+                        safe_fallback_error = limit.to_string();
+                        return Err(safe_fallback_error.clone());
                     }
                     let mut expansions = checkpoint.expansions.clone();
                     expansions.push(addition.clone());
@@ -1976,6 +2027,7 @@ pub(super) fn settle(
                             bounded(&display_reason, MAX_ADVANCE_ERROR_BYTES),
                             false,
                             Some(fragment_error),
+                            fallback_limit,
                         );
                         return None;
                     }
@@ -1985,7 +2037,11 @@ pub(super) fn settle(
                 &format!("node {} expansion paused: {safe_reason}: {reason}", node.id),
                 MAX_ADVANCE_ERROR_BYTES,
             );
-            set_expansion_pause(checkpoint, index, reason, false, None);
+            let structural_limit = match safe_reason {
+                PlanFailureFact::Structural(limit) => Some(limit),
+                _ => None,
+            };
+            set_expansion_pause(checkpoint, index, reason, false, None, structural_limit);
             None
         }
     }

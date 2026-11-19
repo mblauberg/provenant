@@ -310,6 +310,11 @@ fn node_bound(
         expansion_cause: expands.then_some(NodeDecisionCause::PlanExpansionPaused {
             active: false,
             fallback: false,
+            structural_limit: Some(GraphStructuralLimit {
+                key: GraphLimitKey::GraphPromptBytes,
+                actual: usize::MAX,
+                max: usize::MAX,
+            }),
             fragment_error: Some(PlanFailureFact::Structural(GraphStructuralLimit {
                 key: GraphLimitKey::GraphPromptBytes,
                 actual: usize::MAX,
@@ -375,6 +380,7 @@ fn node_bound(
         new_worktree_base: None,
         id: node.id.clone(),
         state: NodeState::Succeeded,
+        wait_reason: None,
         cancelled_from: Some(NodeState::Running),
         skip_reason: Some("graph cancelled".into()),
         advance_error: Some(String::new()),

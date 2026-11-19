@@ -110,18 +110,23 @@ fn document_limits_are_ignored_with_a_warning() {
     ]);
     document.limits = Some(serde_json::json!({"nodes": 999, "future": 0}));
     let limits = crate::config::GraphLimits {
-        nodes: 1,
+        nodes: 2,
         ..Default::default()
     };
     let run = advance_with_budget(
         &document,
-        &mut FakeOwner::default(),
+        &mut FakeOwner {
+            observations: VecDeque::from([
+                terminal(AttemptOutcome::Succeeded),
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..Default::default()
+        },
         &mut MemoryJournal::default(),
         &limits,
         &Default::default(),
     )
     .unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
     assert!(run.checkpoint.limit_notes[0].contains("ignored"));
 }
 
@@ -191,7 +196,7 @@ fn unset_extensions_are_refused() {
 }
 
 #[test]
-fn structural_limit_pauses_and_host_limit_change_resumes() {
+fn structural_limit_refuses_without_saving_and_host_limit_change_admits() {
     let document = graph(vec![
         node("one", route("first")),
         node("two", route("first")),
@@ -208,25 +213,10 @@ fn structural_limit_pauses_and_host_limit_change_resumes() {
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
-    let paused = advance_with_budget(
-        &document,
-        &mut owner,
-        &mut journal,
-        &limits,
-        &Default::default(),
-    )
-    .unwrap();
-    assert_eq!(paused.status, GraphStatus::Paused);
-    assert_eq!(
-        paused.checkpoint.pause_cause(),
-        Some(PauseCause::StructuralLimit)
-    );
-    let reason = limits.nodes_bound().refusal(2).unwrap();
-    assert_eq!(document.admit(&limits).unwrap_err().to_string(), reason);
-    assert_eq!(
-        paused.checkpoint.pause_reason(),
-        Some(reason.as_str())
-    );
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    let error = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default()).unwrap_err();
+    assert!(matches!(error, GraphError::Candidate(CandidateError::Structural(_))));
+    assert!(journal.0.is_none());
     assert!(owner.calls.is_empty());
     let raised = crate::config::GraphLimits { nodes: 2, ..limits };
     let resumed = resume_with_budget(
@@ -242,7 +232,27 @@ fn structural_limit_pauses_and_host_limit_change_resumes() {
 }
 
 #[test]
-fn fan_out_and_depth_pause_before_launch() {
+fn lowered_structural_limit_pauses_running_graph_until_raised() {
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    let document = graph(vec![node("one", route("first")), node("two", route("first"))]);
+    let mut owner = FakeOwner {
+        observations: std::iter::repeat_n(AttemptObservation::Pending { attempt_ref: None }, 12).collect(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance_with_budget(&document, &mut owner, &mut journal, &Default::default(), &Default::default()).unwrap();
+    let lowered = crate::config::GraphLimits { nodes: 1, ..Default::default() };
+    let paused = resume_with_budget(&document, &mut owner, &mut journal, &lowered, &Default::default(), &[]).unwrap();
+    assert_eq!(paused.status, GraphStatus::Paused);
+    assert_eq!(paused.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+    assert_eq!(journal.0.as_ref().unwrap().pause_cause(), Some(PauseCause::StructuralLimit));
+    let resumed = resume_with_budget(&document, &mut owner, &mut journal, &Default::default(), &Default::default(), &[]).unwrap();
+    assert_ne!(resumed.status, GraphStatus::Paused);
+    assert_eq!(resumed.checkpoint.pause_cause(), None);
+}
+
+#[test]
+fn fan_out_and_depth_refuse_before_publication() {
     let root = node("root", route("first"));
     let mut a = node("a", route("first"));
     a.depends_on.push("root".into());
@@ -262,27 +272,11 @@ fn fan_out_and_depth_pause_before_launch() {
         },
     ] {
         let mut owner = FakeOwner::default();
-        let run = advance_with_budget(
-            &document,
-            &mut owner,
-            &mut MemoryJournal::default(),
-            &limits,
-            &Default::default(),
-        )
-        .unwrap();
-        assert_eq!(run.status, GraphStatus::Paused);
-        assert_eq!(
-            run.checkpoint.pause_cause(),
-            Some(PauseCause::StructuralLimit)
-        );
-        if limits.expansion_depth == 1 {
-            let reason = limits.expansion_depth_bound().refusal(2).unwrap();
-            assert_eq!(document.admit(&limits).unwrap_err().to_string(), reason);
-            assert_eq!(
-                run.checkpoint.pause_reason(),
-                Some(reason.as_str())
-            );
-        }
+        // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+        let mut journal = MemoryJournal::default();
+        let error = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default()).unwrap_err();
+        assert!(matches!(error, GraphError::Candidate(CandidateError::Structural(_))));
+        assert!(journal.0.is_none());
         assert!(owner.calls.is_empty());
     }
 }

@@ -315,7 +315,7 @@ pub(super) fn apply_attempt_observation(
                 let warned = result_warning.is_some();
                 let mut outputs = make_outputs_with_upstream(
                     result.as_deref(),
-                    result_warning,
+                    result_warning.clone(),
                     result_path,
                     branch,
                     commit.clone(),
@@ -813,7 +813,18 @@ pub(super) fn apply_attempt_observation(
                     | AttemptOutcome::OtherFailure
                     | AttemptOutcome::DeclaredStop
                     | AttemptOutcome::StoppedNoWork => {
-                        progress.state = NodeState::Failed;
+                        let is_merge_conflict = result_warning.as_ref().is_some_and(|w| {
+                            w.contains("integration_conflict") || w.contains("merge conflict")
+                        });
+                        if is_merge_conflict {
+                            progress.state = NodeState::Blocked;
+                            progress.advance_error_code = Some("merge_conflict".into());
+                            progress.advance_error = result_warning
+                                .as_ref()
+                                .map(|w| bounded(w, MAX_ADVANCE_ERROR_BYTES));
+                        } else {
+                            progress.state = NodeState::Failed;
+                        }
                         false
                     }
                 }
@@ -929,6 +940,7 @@ pub(super) fn initial_checkpoint(
                     NodeState::Skipped
                 },
                 cancelled_from: None,
+                wait_reason: None,
                 skip_reason: when::skip_reason(&node.when),
                 advance_error: None,
                 advance_error_code: None,
@@ -1050,6 +1062,39 @@ pub(super) fn admit_attempt(
 ) -> Admission {
     let node = &plan.nodes[node_index];
     let cap = limits.node_prompt_bytes;
+    for parent in plan
+        .nodes
+        .iter()
+        .filter(|candidate| candidate.max_parallel.is_some())
+    {
+        let Some(member) = parent
+            .composite_members
+            .iter()
+            .find(|member| node.id == **member || node.id.starts_with(&format!("{member}--")))
+        else {
+            continue;
+        };
+        let cap = parent.max_parallel.unwrap_or(usize::MAX);
+        let running_siblings = parent
+            .composite_members
+            .iter()
+            .filter(|member_id| {
+                *member_id != member
+                    && checkpoint.nodes.iter().any(|progress| {
+                        (progress.id == **member_id
+                            || progress.id.starts_with(&format!("{member_id}--")))
+                            && progress.state == NodeState::Running
+                    })
+            })
+            .count();
+        if running_siblings >= cap {
+            checkpoint.nodes[node_index].wait_reason = Some("cap".into());
+            return Admission::SaveAndWait;
+        }
+    }
+    if checkpoint.nodes[node_index].wait_reason.as_deref() == Some("cap") {
+        checkpoint.nodes[node_index].wait_reason = None;
+    }
     let over_concurrency_cap = limits.concurrency.is_some_and(|cap| {
         checkpoint
             .nodes
@@ -1208,6 +1253,7 @@ pub(super) fn begin_attempt(
         usage: None,
     });
     checkpoint.nodes[node_index].state = NodeState::Running;
+    checkpoint.nodes[node_index].wait_reason = None;
     if let Some(timing) = timing
         && checkpoint.nodes[node_index].launch_retry.is_none()
     {
@@ -1493,6 +1539,7 @@ pub(super) fn node_action<'a>(
 ) -> NodeAction<'a> {
     let node = &plan.nodes[index];
     if checkpoint.nodes[index].state.settled() {
+        checkpoint.nodes[index].wait_reason = None;
         let changed = checkpoint.nodes[index].state == NodeState::Blocked
             && dependency_state(node, plan, checkpoint, positions) == Some(NodeState::Blocked)
             && attribute_blocker(index, node, checkpoint, positions);
@@ -1516,8 +1563,21 @@ pub(super) fn node_action<'a>(
     if let Some(state) = dependency_state(node, plan, checkpoint, positions) {
         let mut changed = checkpoint.nodes[index].state != state;
         if state == NodeState::Blocked {
+            checkpoint.nodes[index].wait_reason = None;
             changed |= attribute_blocker(index, node, checkpoint, positions);
-        } else if changed
+        } else if state == NodeState::Pending {
+            if checkpoint.nodes[index].wait_reason.as_deref() != Some("after") {
+                checkpoint.nodes[index].wait_reason = Some("after".into());
+                changed = true;
+            }
+        } else if state.settled() {
+            // A node settled by its dependencies (skipped by a passing gate,
+            // say) no longer waits, exactly as a replay records it.
+            checkpoint.nodes[index].wait_reason = None;
+        }
+        if state != NodeState::Blocked
+            && state != NodeState::Pending
+            && changed
             && checkpoint.nodes[index].advance_error_code.as_deref() == Some("upstream_blocked")
         {
             checkpoint.nodes[index].advance_error = None;
@@ -1527,6 +1587,9 @@ pub(super) fn node_action<'a>(
             checkpoint.nodes[index].state = state;
         }
         return NodeAction::Wait { changed };
+    }
+    if checkpoint.nodes[index].wait_reason.as_deref() == Some("after") {
+        checkpoint.nodes[index].wait_reason = None;
     }
     if let Some(spec) = &node.decide {
         return NodeAction::Decide(spec);
@@ -1582,30 +1645,46 @@ pub(super) fn apply_loop_extensions(
     Ok(())
 }
 
+fn recovery_pending(checkpoint: &GraphCheckpoint) -> bool {
+    checkpoint
+        .nodes
+        .iter()
+        .any(|node| next_step::stop_cause(node, checkpoint).is_some())
+        || checkpoint.nodes.iter().any(|node| {
+            node.state == NodeState::Failed
+                && node.advance_error_code.as_deref() == Some("review_verdict_invalid")
+                && node.review_verdict_correction_refused.is_none()
+                && !checkpoint
+                    .expansions
+                    .iter()
+                    .filter_map(|expansion| expansion.patch.as_ref())
+                    .any(|patch| {
+                        patch.reason.as_deref()
+                            == Some(format!("correct review verdict {}", node.id).as_str())
+                    })
+        })
+}
+
 pub(super) fn refresh_structure_pause(
     checkpoint: &mut GraphCheckpoint,
     expanded: &GraphDocument,
     plan: &PlannedGraph,
     limits: &crate::config::GraphLimits,
 ) -> Option<String> {
-    if let Some((index, reason)) = checkpoint
-        .nodes
-        .iter()
-        .enumerate()
-        .find_map(|(index, node)| {
-            node.expansion_pause
-                .as_ref()
-                .map(|reason| (index, reason.clone()))
-        })
-    {
-        checkpoint.activate_expansion_pause(index);
-        checkpoint.set_pause(PauseCause::InvalidPlanExpansion, &reason);
+    // Node expansion pauses are activated by their owning transitions. Replaying
+    // them here would undo apply_resume before a continuation can be retried.
+    if checkpoint.cancelled {
+        return None;
     }
-    let structural_pause = if checkpoint.nodes.iter().all(|node| node.state.settled()) {
-        None
-    } else {
-        structural_limit_reason(expanded, plan, limits)
-    };
+    // A settled failed lens or stopped writer may still owe a recovery patch.
+    // Its existing topology must be paused before that patch is planned.
+    let recovery_pending = recovery_pending(checkpoint);
+    let structural_pause =
+        if checkpoint.nodes.iter().all(|node| node.state.settled()) && !recovery_pending {
+            None
+        } else {
+            structural_limit_reason(expanded, plan, limits)
+        };
     if let Some(reason) = &structural_pause {
         checkpoint.deactivate_expansion_pauses();
         checkpoint.set_pause(PauseCause::StructuralLimit, reason);
@@ -1679,6 +1758,7 @@ pub(super) fn record_separation(progress: &mut NodeProgress, record: FamilySepar
 
 pub(super) fn clear_settled_pause(checkpoint: &mut GraphCheckpoint) -> bool {
     if checkpoint.nodes.iter().all(|node| node.state.settled())
+        && !recovery_pending(checkpoint)
         && checkpoint
             .nodes
             .iter()

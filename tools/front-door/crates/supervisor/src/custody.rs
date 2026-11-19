@@ -103,12 +103,34 @@ pub enum CustodyError {
     Timeout,
     #[error(transparent)]
     Admission(#[from] AdmissionError),
+    #[error(transparent)]
+    Decode(#[from] provenant_records::DecodeError),
     #[error("custody reservation may be retained: {0}")]
     ReservationRetained(String),
     #[error("custody I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]
     Filesystem(#[from] FsError),
+    #[error(
+        "reading stored record {} (record type {record_type}) failed: {source}",
+        path.display()
+    )]
+    StoredRecordRead {
+        path: PathBuf,
+        record_type: String,
+        #[source]
+        source: Box<FsError>,
+    },
+}
+
+impl CustodyError {
+    /// A stored record that is present but does not decode, whether or not the
+    /// decoder kept its path and type. Callers that classify a malformed
+    /// record (as an invalid stop intent, a replaceable stale record or an
+    /// authority boundary) match this rather than one variant.
+    pub fn is_invalid_record(&self) -> bool {
+        matches!(self, Self::InvalidRecord | Self::Decode(_))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -125,7 +147,7 @@ pub enum AdmissionError {
     )]
     Clock,
     #[error(
-        "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds, cargo_build_jobs, cargo_debug"
+        "invalid host build settings: check domains.fabric.lanes.cargo_build_jobs and cargo_debug"
     )]
     BuildSettings,
     #[error("guardian process identity unavailable; retry when process observation is available")]
@@ -168,9 +190,8 @@ impl AdmissionError {
         match self {
             Self::Clock | Self::GuardianIdentity | Self::Processes { .. } => Vec::new(),
             Self::BuildSettings => vec![
-                "domains.fabric.lanes.max_concurrent_builds",
-                "cargo_build_jobs",
-                "cargo_debug",
+                "domains.fabric.lanes.cargo_build_jobs",
+                "domains.fabric.lanes.cargo_debug",
             ],
             Self::Disk { .. } => vec!["gc.critical_free"],
             Self::MemoryPressure { .. } => {
@@ -1035,15 +1056,30 @@ pub(crate) fn read_record<T: serde::de::DeserializeOwned>(
     name: &str,
     limit: u64,
 ) -> Result<T> {
-    let bytes = dir.read_bounded(OsStr::new(name), limit)?;
-    decode(
+    let type_name = std::any::type_name::<T>();
+    let clean_type = type_name.rsplit("::").next().unwrap_or(type_name);
+    let path = dir.current_path()?.join(name);
+    let bytes = match dir.read_bounded(OsStr::new(name), limit) {
+        Ok(bytes) => bytes,
+        Err(error) if error.is_not_found() => return Err(CustodyError::Filesystem(error)),
+        Err(source) => {
+            return Err(CustodyError::StoredRecordRead {
+                path,
+                record_type: clean_type.to_owned(),
+                source: Box::new(source),
+            });
+        }
+    };
+    provenant_records::decode_stored_record(
         bytes.as_slice(),
         Limits {
             max_bytes: limit,
             ..Limits::CONFIG
         },
+        path,
+        clean_type,
     )
-    .map_err(|_| CustodyError::InvalidRecord)
+    .map_err(CustodyError::from)
 }
 
 /// Pre-spawn attempt lock and physical publication headroom. Never a launch file.
@@ -1117,6 +1153,7 @@ pub struct ProviderCommand {
     pub cwd: PathBuf,
     pub stdin: Vec<u8>,
     pub secret_input: Option<provenant_os::exec::SecretInput>,
+    pub publication_values: provenant_os::exec::SecretValues,
     /// Opaque, bounded reference for the composed terminal holder. It travels
     /// on the handoff pipe only and is never written to the launch summary.
     pub holder_context: Vec<u8>,
@@ -1449,7 +1486,7 @@ pub fn read_stop_intent(directory: &Directory, scope: Scope) -> Result<StopInten
         let request = match read_record::<StopIntent>(directory, file, RECORD_LIMIT) {
             Ok(request) => request,
             Err(CustodyError::Filesystem(error)) if error.is_not_found() => continue,
-            Err(CustodyError::InvalidRecord) => return Ok(StopIntentState::Invalid),
+            Err(error) if error.is_invalid_record() => return Ok(StopIntentState::Invalid),
             Err(error) => return Err(error),
         };
         if request.schema_version != 1
@@ -1537,7 +1574,8 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
                 {
                     return Err(CustodyError::InvalidRecord);
                 }
-                Ok(_) | Err(CustodyError::InvalidRecord) => {}
+                Ok(_) => {}
+                Err(error) if error.is_invalid_record() => {}
                 // A symlink, FIFO or oversize entry is replaced too: rename
                 // swaps the entry without following or opening it. A
                 // directory still refuses the rename.
@@ -1762,41 +1800,41 @@ impl From<&CapturedStream> for CaptureTotals {
 }
 // Current storage DTO permits future additive fields.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct StoredExit {
-    schema_version: u64,
+pub struct StoredExit {
+    pub schema_version: u64,
     #[serde(default)]
-    priority: Option<i32>,
-    scope: Scope,
-    termination: Option<Termination>,
-    never_spawned: bool,
-    stop_reason: Option<StopReason>,
+    pub priority: Option<i32>,
+    pub scope: Scope,
+    pub termination: Option<Termination>,
+    pub never_spawned: bool,
+    pub stop_reason: Option<StopReason>,
     #[serde(deserialize_with = "serde::Deserialize::deserialize")]
-    cancel_delivered_before_exit: Option<bool>,
+    pub cancel_delivered_before_exit: Option<bool>,
     #[serde(default)]
-    provider_identity_conflict: bool,
+    pub provider_identity_conflict: bool,
     #[serde(default)]
-    provider_identity_evidence_incomplete: bool,
+    pub provider_identity_evidence_incomplete: bool,
     #[serde(default)]
-    provider_identity_eof_fragment: bool,
-    delivered_signals: Vec<i64>,
-    reaped: Vec<ProcessIdentity>,
-    omitted_reaped: u64,
-    spared: Vec<ProcessIdentity>,
-    omitted_spared: u64,
+    pub provider_identity_eof_fragment: bool,
+    pub delivered_signals: Vec<i64>,
+    pub reaped: Vec<ProcessIdentity>,
+    pub omitted_reaped: u64,
+    pub spared: Vec<ProcessIdentity>,
+    pub omitted_spared: u64,
     #[serde(default)]
-    launch_refusal: Option<provenant_records::diagnostic::ResourceFact>,
-    warnings: Vec<String>,
-    omitted_warnings: u64,
-    terminal_observed: bool,
-    unresolved_cleanup: bool,
-    unresolved_pids: Vec<i64>,
+    pub launch_refusal: Option<provenant_records::diagnostic::ResourceFact>,
+    pub warnings: Vec<String>,
+    pub omitted_warnings: u64,
+    pub terminal_observed: bool,
+    pub unresolved_cleanup: bool,
+    pub unresolved_pids: Vec<i64>,
     #[serde(default)]
-    unresolved_identities: Vec<ProcessIdentity>,
-    settlement_evidence: SettlementEvidence,
-    stdout: CaptureTotals,
-    stderr: CaptureTotals,
+    pub unresolved_identities: Vec<ProcessIdentity>,
+    pub settlement_evidence: SettlementEvidence,
+    pub stdout: CaptureTotals,
+    pub stderr: CaptureTotals,
     #[serde(flatten)]
-    extra: ExtraFields,
+    pub extra: ExtraFields,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct ExitObservation {
@@ -2217,6 +2255,8 @@ fn lock_writer_mode(
         // An observation is not writer custody: contention here is busy,
         // regardless of the caller's permitted wait for the actual writer.
         let observation = writer_admission_guard(directory)?;
+        // A nonblocking budget still probes the stable inode once. Keep the
+        // caller's cancellation checks before and after that acquisition.
         let attempt = directory.lock(
             OsStr::new("writer.lock"),
             mode,
@@ -2420,6 +2460,22 @@ pub fn acquire_recovery(
     })
 }
 
+/// Hold writer exclusion for submission-time mutation only when no attempt
+/// reservation remains. The guard must outlive every checkout mutation.
+pub fn acquire_unreserved_writer(
+    directory: &Directory,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+) -> Result<LockGuard> {
+    let lease = lock_writer_exclusion(directory, budget, cancel, clock)?;
+    let listing = list_writer_reservations_in_slot(directory)?;
+    if !listing.reservations.is_empty() || !listing.issues.is_empty() {
+        return Err(CustodyError::Fenced);
+    }
+    Ok(lease)
+}
+
 /// Acquire a reservation for reboot recovery at the expected custody slot.
 pub fn acquire_reboot_recovery(
     directory: Directory,
@@ -2542,10 +2598,14 @@ fn validate_anchor(directory: &Directory, reservation: &Reservation) -> Result<(
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct WriterReservation {
     pub scope: Scope,
     pub reservation: PathBuf,
+    pub branch: Option<String>,
+    /// Native presence of the recorded guardian; None means unobservable.
+    pub live: Option<bool>,
+    pub age: Option<String>,
 }
 impl WriterReservation {
     /// The stable lock slot containing this attempt's journal.
@@ -2555,6 +2615,39 @@ impl WriterReservation {
             return None;
         }
         parent.parent()
+    }
+}
+
+// Holder presence is diagnostic identity evidence, not cleanup eligibility.
+// A settling guardian may still live; recovery may hold its old writer lock.
+fn reservation_holder_live(
+    reservation: &Reservation,
+    observer: &dyn ProcessObserver,
+) -> Option<bool> {
+    let boot = observer.boot_identity().ok()?;
+    if boot != reservation.boot {
+        return Some(false);
+    }
+    let guardian = reservation.guardian.as_ref()?;
+    match observer.observe(guardian.pid) {
+        ProcessObservation::Present(fact) => Some(fact.identity == *guardian && !fact.zombie),
+        ProcessObservation::Absent => Some(false),
+        ProcessObservation::Unknown(_) => None,
+    }
+}
+
+fn format_age_ns(modified_ns: i128, now: provenant_core::WallTime) -> String {
+    let now_ns = i128::from(now.as_micros()) * 1_000;
+    let diff_ns = (now_ns - modified_ns).max(0);
+    let secs = (diff_ns / 1_000_000_000) as u64;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else if secs < 86400 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d {}h", secs / 86400, (secs % 86400) / 3600)
     }
 }
 #[derive(Debug, Serialize)]
@@ -2605,6 +2698,7 @@ pub fn list_writer_reservations(directory: &Directory) -> Result<ReservationList
 /// slot's writer exclusion; sibling worktrees need no observation or lock.
 /// Paths are relative to the slot, including malformed evidence.
 pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationListing> {
+    let now = provenant_os::clock::SystemClock::new().wall_now().ok();
     let mut listing = ReservationListing::default();
     for (index, attempt) in slot.entries()?.enumerate() {
         if index >= 10_000 {
@@ -2630,9 +2724,22 @@ pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationL
             if attempt != OsStr::new(&reservation.scope.attempt.to_string()) {
                 return Err(CustodyError::InvalidRecord);
             }
+            let branch = match &reservation.binding {
+                StoredWriterBinding::Worktree { branch, .. } => Some(branch.clone()),
+                _ => None,
+            };
+            let live = reservation_holder_live(&reservation, &SystemProcessObserver);
+            let age = child
+                .metadata_at(OsStr::new("reservation.json"), false)
+                .ok()
+                .zip(now)
+                .map(|(m, now)| format_age_ns(m.modified_ns, now));
             Ok(Some(WriterReservation {
                 scope: reservation.scope,
                 reservation: path.clone(),
+                branch,
+                live,
+                age,
             }))
         };
         match entry() {

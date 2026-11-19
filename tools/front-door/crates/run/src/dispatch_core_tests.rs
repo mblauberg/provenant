@@ -739,22 +739,15 @@ fn pressure_errors_and_low_advisory_memory_do_not_refuse() -> TestResult {
 }
 #[test]
 fn out_of_range_build_settings_do_not_block_admission() -> TestResult {
-    for (assignment, explicit_policy) in [
-        ("cargo_build_jobs = -2", false),
-        ("cargo_build_jobs = 'invalid'", false),
-        ("max_concurrent_builds = 0", true),
+    for assignment in [
+        "cargo_build_jobs = -2",
+        "cargo_build_jobs = 'invalid'",
+        "cargo_build_jobs = 0",
     ] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let mut store = RunStore::open(&context(temp.path())?, &call)?;
-        if explicit_policy {
-            store.set_admission_policy(AdmissionPolicy {
-                startup_spacing_ms: 0,
-                admission_seconds: 1,
-                ..AdmissionPolicy::default()
-            });
-        }
+        let store = RunStore::open(&context(temp.path())?, &call)?;
         let run = lane(69, true);
         let id = starting(&store, &run, &call)?;
         let attempt = store.attempt_dir(id, false)?;
@@ -763,17 +756,7 @@ fn out_of_range_build_settings_do_not_block_admission() -> TestResult {
             format!("schema_version=1\n[domains.fabric.lanes]\n{assignment}\n"),
         )?;
         let result = store.admit(id, &attempt, &HostFacts::new(100), &clock, &cancel);
-        if explicit_policy {
-            assert_eq!(
-                result?.state,
-                AttemptState::Running {
-                    extra: Default::default(),
-                    child_wait: None,
-                }
-            );
-        } else {
-            assert!(result.is_ok(), "{assignment}");
-        }
+        assert!(result.is_ok(), "{assignment}");
     }
     Ok(())
 }
@@ -843,7 +826,7 @@ fn guardian_identity_unknown_refuses_without_waiting() -> TestResult {
 }
 #[test]
 fn idle_writers_are_admitted_beyond_the_build_limit() -> TestResult {
-    // `max_concurrent_builds` gates builds inside lanes, never writer lanes.
+    // The `build` admission class gates commands inside lanes, never writer lanes.
     for limit in [None, Some(1)] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
@@ -852,9 +835,7 @@ fn idle_writers_are_admitted_beyond_the_build_limit() -> TestResult {
         if let Some(limit) = limit {
             std::fs::write(
                 store.writer_registry.join("config.toml"),
-                format!(
-                    "schema_version=1\n[domains.fabric.lanes]\nmax_concurrent_builds = {limit}\n"
-                ),
+                format!("schema_version=1\n[admission.build]\nslots = {limit}\n"),
             )?;
         }
         for seed in 1..=70 {

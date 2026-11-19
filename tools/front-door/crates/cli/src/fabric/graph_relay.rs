@@ -40,7 +40,19 @@ fn refused(code: &str, message: impl Into<String>) -> ServiceError {
         "invalid_config" => Some(Cause::InvalidConfig),
         "invalid_review" => Some(Cause::InvalidReview),
         "cycle" => Some(Cause::Cycle),
-        "conflict" => Some(Cause::Conflict),
+        "conflict" | "stale_revision" | "idempotency_conflict" => {
+            return ServiceError::Cli {
+                code: code.into(),
+                message: FacadeError::GraphRelayRefused {
+                    refusal_code: code.into(),
+                    detail: Some(InvalidInputDetail::GraphRelayCause(Cause::Conflict)),
+                }
+                .diagnostic()
+                .detail
+                .unwrap_or_default(),
+                data: Value::Null,
+            };
+        }
         "invalid" if message.ends_with("writer worktree") => Some(Cause::WriterWorktree),
         "invalid"
             if message == "writer composite children require explicit per-node work bindings" =>
@@ -64,8 +76,11 @@ fn refused(code: &str, message: impl Into<String>) -> ServiceError {
 }
 
 fn patch_refused(error: provenant_fabric_runtime::graph::patch::PatchError) -> ServiceError {
+    if let Some(candidate) = error.candidate {
+        return ServiceError::Facade(FacadeError::graph_candidate(*candidate));
+    }
     match error.admission {
-        Some(admission) => ServiceError::Facade(FacadeError::graph_admission(admission)),
+        Some(admission) => ServiceError::Facade(FacadeError::graph_admission(*admission)),
         None => refused(error.code, error.message),
     }
 }
@@ -386,6 +401,10 @@ pub fn serve_with_read_and_parent(
     )
 }
 
+#[allow(
+    clippy::print_stderr,
+    reason = "warn operator when policy is unavailable and defaults are used"
+)]
 fn serve_authorised(
     context: &Context,
     attempt: &str,
@@ -419,6 +438,30 @@ fn serve_authorised(
             "worktree provisioning is derived by the host; omit provision_worktree",
         ));
     }
+    let mutating_input = matches!(arguments["op"].as_str(), Some("add" | "edit" | "run"));
+    let policy = if mutating_input {
+        match crate::config_reads::read_for(&context.roots, "run admission") {
+            Ok(config) => config.domains.policy.resolve_with_knobs(
+                &context.identity.project.to_string(),
+                &config.knobs,
+                &Default::default(),
+            ),
+            Err(error) => {
+                let error = provenant_records::diagnostic::safe_text(&error.to_string());
+                eprintln!(
+                    "warning: graph admission policy unavailable ({error}); using compiled defaults"
+                );
+                Default::default()
+            }
+        }
+    } else {
+        Default::default()
+    };
+    let mut warnings = if mutating_input {
+        provenant_fabric_runtime::graph::refusal::input_warnings(&arguments, &policy)
+    } else {
+        Vec::new()
+    };
     let mut op: RelayOp = serde_json::from_value(arguments)
         .map_err(|error| refused("invalid_input", format!("invalid graph frame: {error}")))?;
     // The lane has already started the launch allowance. This confirmed
@@ -462,7 +505,9 @@ fn serve_authorised(
         let parent =
             relay::historical_parent_of_attempt(&checkpoint, &reference).ok_or_else(not_a_node)?;
         if let Some(receipt) = replay_run_request(&checkpoint, parent, &request)? {
-            return Ok(admission_value(serde_json::to_value(receipt)?, &checkpoint));
+            let mut value = admission_value(serde_json::to_value(receipt)?, &checkpoint);
+            merge_warnings(&mut value, &warnings);
+            return Ok(value);
         }
         if relay::parent_of_attempt(&checkpoint, &reference).is_none() {
             return Err(not_a_node());
@@ -528,7 +573,9 @@ fn serve_authorised(
         // Preparation runs without the lock; another caller may have admitted
         // this raw request in the meantime, with different resolved pins.
         if let Some(receipt) = replay_run_request(&checkpoint, parent, request)? {
-            return Ok(admission_value(serde_json::to_value(receipt)?, &checkpoint));
+            let mut value = admission_value(serde_json::to_value(receipt)?, &checkpoint);
+            merge_warnings(&mut value, &warnings);
+            return Ok(value);
         }
     }
     let document = FileJournal::execution(state, project, &graph_id)
@@ -553,7 +600,9 @@ fn serve_authorised(
                         retain_run_request(&mut checkpoint, &receipt, request)?;
                         journal.save(&checkpoint).map_err(journal_error)?;
                     }
-                    Ok(admission_value(serde_json::to_value(receipt)?, &checkpoint))
+                    let mut value = admission_value(serde_json::to_value(receipt)?, &checkpoint);
+                    merge_warnings(&mut value, &warnings);
+                    Ok(value)
                 }
                 None => Err(not_a_node()),
             };
@@ -572,7 +621,9 @@ fn serve_authorised(
                     retain_run_request(&mut checkpoint, &receipt, request)?;
                     journal.save(&checkpoint).map_err(journal_error)?;
                 }
-                return Ok(admission_value(serde_json::to_value(receipt)?, &checkpoint));
+                let mut value = admission_value(serde_json::to_value(receipt)?, &checkpoint);
+                merge_warnings(&mut value, &warnings);
+                return Ok(value);
             }
             let library = template_library(&context.home, &context.cwd)
                 .map_err(|error| refused("invalid_template", error))?;
@@ -704,6 +755,12 @@ fn serve_authorised(
                     .map(|(branch, commit)| (branch.as_str(), commit.as_str())),
             )
             .map_err(patch_refused)?;
+            if let Some(expansion) = checkpoint.expansions.last() {
+                warnings.extend(provenant_fabric_runtime::graph::refusal::input_warnings(
+                    &serde_json::to_value(expansion)?,
+                    &policy,
+                ));
+            }
             if let Some(request) = &run_request {
                 retain_run_request(&mut checkpoint, &receipt, request)?;
             }
@@ -712,7 +769,9 @@ fn serve_authorised(
                     journal.save(&checkpoint).map_err(journal_error)?;
                 }
                 // Nothing changed; the earlier admission is already journalled.
-                return Ok(admission_value(serde_json::to_value(receipt)?, &checkpoint));
+                let mut value = admission_value(serde_json::to_value(receipt)?, &checkpoint);
+                merge_warnings(&mut value, &warnings);
+                return Ok(value);
             }
             if nested {
                 bind_admitted_provisioning_owners(&mut checkpoint)?;
@@ -821,6 +880,12 @@ fn serve_authorised(
                 },
             )
             .map_err(patch_refused)?;
+            if let Some(expansion) = checkpoint.expansions.last() {
+                warnings.extend(provenant_fabric_runtime::graph::refusal::input_warnings(
+                    &serde_json::to_value(expansion)?,
+                    &policy,
+                ));
+            }
             if nested && !admitted.replayed {
                 bind_admitted_provisioning_owners(&mut checkpoint)?;
                 bind_shared_writers(context, &mut checkpoint, sealed_parent_worktree)?;
@@ -889,7 +954,7 @@ fn serve_authorised(
             json!({"graph_id": graph_id, "node": parent, "waiting": waiting})
         }
     };
-    let value = admission_value(value, &checkpoint);
+    let mut value = admission_value(value, &checkpoint);
     if let Some(warnings) = value.get("warnings").and_then(Value::as_array)
         && let Some(owner) = checkpoint.nodes.iter_mut().find(|row| row.id == parent)
     {
@@ -900,7 +965,31 @@ fn serve_authorised(
         }
     }
     journal.save(&checkpoint).map_err(journal_error)?;
+    merge_warnings(&mut value, &warnings);
     Ok(value)
+}
+
+/// Add this request's advisory input warnings to any durable admission
+/// warnings already on the reply, sorted and deduplicated.
+fn merge_warnings(value: &mut Value, extra: &[String]) {
+    if extra.is_empty() {
+        return;
+    }
+    let mut all: Vec<String> = value
+        .get("warnings")
+        .and_then(Value::as_array)
+        .map(|existing| {
+            existing
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    all.extend(extra.iter().cloned());
+    all.sort();
+    all.dedup();
+    value["warnings"] = json!(all);
 }
 
 fn replay_run_request(
@@ -3407,7 +3496,7 @@ mod provisioning_tests {
                 journal.save(&checkpoint)?;
             }
             let request = json!({
-                "op":"add","id":"child","use":"task","prompt":"Read", "idempotency_key":"lost-reply",
+                "op":"add","id":"child","use":"task","prompt":"password=example-lost-reply-3391", "idempotency_key":"lost-reply",
                 "launch":{"node":{"use":"task","prompt":format!("Review {base}...{subject}"),
                     "source":{"type":"commit","commit":subject}}}
             });
@@ -3593,6 +3682,21 @@ mod provisioning_tests {
             let replay = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
             assert_eq!(replay["node"], receipt["node"]);
             assert_eq!(replay["revision"], receipt["revision"]);
+            {
+                let warnings = replay["warnings"]
+                    .as_array()
+                    .ok_or("visible replay warnings")?;
+                assert!(
+                    warnings
+                        .iter()
+                        .any(|w| w.to_string().contains("prompt looks like a credential"))
+                );
+                assert!(
+                    warnings
+                        .iter()
+                        .all(|w| !w.to_string().contains("example-lost-reply-3391"))
+                );
+            }
             assert_eq!(replay["replayed"], true);
             let unavailable = |_| panic!("settled run must not prepare or fetch");
             let prepared_replay = serve_with_read(
@@ -3604,7 +3708,8 @@ mod provisioning_tests {
                 &clock,
                 &unavailable,
             )?;
-            assert_eq!(prepared_replay, replay);
+            assert_eq!(prepared_replay["node"], replay["node"]);
+            assert_eq!(prepared_replay["revision"], replay["revision"]);
             let mut changed_run = run.clone();
             changed_run["input"]["pr"] = json!(8);
             assert!(
@@ -3723,7 +3828,7 @@ mod provisioning_tests {
         Ok(())
     }
 
-    // Spec: docs/specs/fabric.md#cli-and-relay-surfaces
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     #[test]
     fn crash_after_the_fence_is_recovered_by_the_next_serve()
     -> Result<(), Box<dyn std::error::Error>> {

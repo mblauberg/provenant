@@ -83,6 +83,10 @@ pub enum TransportError {
     LaneProgram { key: String, program: String },
     #[error("Git configuration could not be read")]
     Unreadable,
+    /// A malformed port table is a port error, not a Git configuration error.
+    /// The detail already names the file and key that must be corrected.
+    #[error("port configuration could not be read: {detail}")]
+    UnreadablePorts { detail: String },
 }
 
 /// Locations a lane can write. A path is inside when its lexical form or its
@@ -107,16 +111,23 @@ impl LaneRoots {
 
     /// The lane areas of a project checkout: its configured worktrees and scratch.
     pub fn project(root: &Path, host_state: &Path) -> Result<Self, TransportError> {
-        let ports = provenant_config::PortTable::read_for(Some(root), host_state)
-            .map_err(|_| TransportError::Unreadable)?;
+        let ports =
+            provenant_config::PortTable::read_for(Some(root), host_state).map_err(|error| {
+                TransportError::UnreadablePorts {
+                    detail: error.to_string(),
+                }
+            })?;
         Ok(Self::project_roots(root, ports))
     }
 
     /// Project-declared roots when the caller has no validated host state to
     /// read host-level port overrides from.
     pub fn project_without_host_state(root: &Path) -> Result<Self, TransportError> {
-        let ports = provenant_config::PortTable::read_project_only(root)
-            .map_err(|_| TransportError::Unreadable)?;
+        let ports = provenant_config::PortTable::read_project_only(root).map_err(|error| {
+            TransportError::UnreadablePorts {
+                detail: error.to_string(),
+            }
+        })?;
         Ok(Self::project_roots(root, ports))
     }
 
@@ -128,8 +139,11 @@ impl LaneRoots {
     /// checkout, as in a verified bare repository. Project scratch does not
     /// belong to the common metadata directory.
     fn host_only(root: &Path, host_state: &Path) -> Result<Self, TransportError> {
-        let ports = provenant_config::PortTable::read_for(None, host_state)
-            .map_err(|_| TransportError::Unreadable)?;
+        let ports = provenant_config::PortTable::read_for(None, host_state).map_err(|error| {
+            TransportError::UnreadablePorts {
+                detail: error.to_string(),
+            }
+        })?;
         Ok(Self::layout_roots(root, ports, false))
     }
 

@@ -11,7 +11,7 @@ Admission commits the reservation and attempt together. A worktree's owning lane
 decides who else writes in it; active lanes share an occupancy lease. Resource
 probes run outside the admission transaction. Busy capacity is not a queue. Direct-run custody uses
 the same captured project and actor identity as the run store. Uncertain custody
-keeps its ownership until release is proved.
+keeps its ownership until release is proved. Writer-bind refusals identify the durable lease holder, branch, worktree, reservation age and observed liveness. Reservation age is measured from its last durable update. Reconciliation reports released custody only after exclusion and native absence evidence prove it safe; an unknown or live holder retains custody. Stable lock inodes remain in place so concurrent observers cannot split exclusion.
 - Why: shared work must remain possible without holding coordination locks across external work.
 
 Nested sharing is authorised by the owning guardian's host-sealed worktree
@@ -123,11 +123,50 @@ Terminal attempts are immutable. A retry is a new linked attempt, and a writer
 is never replayed over its edits. A terminal attempt has at most one successor.
 - Why: continuation must preserve both history and its attempt's custody.
 
+## Graph naming
+
+A named launch treats its name as a handle for the launch input. The same
+input replays the existing graph and starts nothing. Changed input under that
+name starts the next free `NAME-k` (`NAME-2`, `NAME-3`, ...) and leaves earlier
+graphs alone; an unnamed launch takes the next `BASE-k` from 1 and never
+replays. A name is one lowercase letter, then lowercase letters, digits and
+single hyphens, ending in a letter or digit. A grammar refusal suggests the
+normalised form, so `--name Foo-` is refused with `try \`foo\``.
+- Why: a reused name must not silently attach a different brief to old work.
+
+A suffixed launch says so in its first output line:
+`started NAME-2 (NAME exists with a different input)`. The `--json` receipt
+carries the prior handle as `named.superseded` alongside `named.graph`.
+`wait NAME` and `status NAME` keep reading the older graph, but warn that it
+was superseded and print the newer handle as the next step
+(`next: provenant wait NAME-2`). They never redirect silently.
+- Why: the operator must see the new handle without losing access to the old graph.
+
+## Writer binding
+
+`--branch B --base REF` allocates a managed writer worktree under the project
+layout, not under the invoking checkout. The launch owner resolves and
+checkpoints `REF` before any Git effect, then creates the worktree from that
+commit and binds it by source identity and head. This is identical from the
+primary checkout, a linked worktree, a separate Git directory or a bare linked
+checkout: the project's saved primary layout owns the allocation in every case.
+An existing clean worktree at the exact checkpointed head is rebound; a
+different branch, head or unclean tree is refused with the named cause.
+- Why: an owned writer must land in one project-owned location regardless of
+  where the launch command ran, and a failed bind must not leave a half-made
+  worktree.
+
+A refused bind keeps its typed cause all the way to the facade. A held writer
+lease is `writer_lease_held` and names its holder locally; scope, confinement
+and resource failures keep their own codes and repair actions instead of
+reporting `confinement_refused` with no resource. See
+`docs/specs/cli.md#run-refusals-keep-their-own-code-at-the-facade`.
+- Why: the operator needs the real cause to repair a launch.
+
 ## Policy and confinement
 
-Launch policy defaults to refusal only at credentials, Git isolation, data
-integrity and authority boundaries. Other checks allow or warn unless configured
-otherwise. A write-scope refusal happens before publication and retains private
+Launch policy refuses only at the [hard boundaries](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md).
+Other checks allow or warn unless configured otherwise. A write-scope refusal happens before publication and retains private
 work. The lane instructions say the same: a write scope lists the expected files,
 so a writer edits another file when the fix needs it and lists it in its
 handoff; only a strict `WRITE_SCOPE` policy refuses it.

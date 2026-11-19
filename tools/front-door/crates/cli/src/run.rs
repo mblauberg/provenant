@@ -36,6 +36,7 @@ mod reconcile;
 mod remote;
 mod resume;
 mod status;
+mod steer_pacing;
 mod submit;
 mod telemetry;
 mod telemetry_context;
@@ -45,6 +46,7 @@ pub use holder::HostHolder;
 pub use key::{resolve_fail, resolve_target};
 pub use launch::*;
 pub use output::*;
+pub use steer_pacing::pace_steer_restart;
 pub fn provider_executable(name: &str) -> Result<PathBuf, String> {
     provider::find_executable(name)
 }

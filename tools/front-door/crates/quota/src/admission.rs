@@ -52,6 +52,45 @@ pub(crate) fn refusal_expiry(
     Ok(reset.map_or(bounded, |reset| reset.min(bounded)))
 }
 
+/// Why a recorded refusal was cleared. Every clearing carries its source so a
+/// manual repair, a successful run and a fresh reading can be told apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalClearSource {
+    /// A newer usage reading proved headroom after the refusal was observed.
+    Reading,
+    /// A successful run on the route disproved the refusal.
+    Run,
+    /// The owner cleared it with `provenant quota clear`.
+    Manual,
+}
+impl RefusalClearSource {
+    /// Every persisted clearing source, for exhaustive format tables.
+    pub const ALL: &[Self] = &[Self::Reading, Self::Run, Self::Manual];
+    /// Stable text for reports and diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reading => "reading",
+            Self::Run => "run",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+/// A durable record of a refusal that stopped holding. The refusal itself is
+/// removed; this keeps what it covered, when, and the signal that cleared it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefusalClearing {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+    pub account: AccountScope,
+    pub model: String,
+    pub pool: Option<String>,
+    pub observed_unix_seconds: i64,
+    pub cleared_unix_seconds: i64,
+    pub source: RefusalClearSource,
+}
+
 /// Short-lived provider capacity evidence, separate from quota admission.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapacityCooldown {
@@ -201,8 +240,12 @@ impl Admission<'_> {
     }
 
     /// Whether `refusal` still holds: unexpired, and not cleared by a fresh
-    /// reading of its pool that proves headroom. The one clearing rule, shared
-    /// by admission and the readiness record.
+    /// reading that proves headroom. The one clearing rule, shared by admission
+    /// and the readiness record. A pool refusal reads only its pool, an
+    /// account-wide refusal every reported window, and a model refusal without
+    /// a pool every reported window too: with no verified binding we cannot
+    /// narrow the reading to one pool, so all reported windows must have
+    /// headroom before the model is unblocked.
     pub fn refusal_holds(
         &self,
         adapter: &str,
@@ -214,29 +257,40 @@ impl Admission<'_> {
         let pool = refusal.pool.as_deref();
         let comparable_newer = record.is_some_and(|r| r.last_error.is_none())
             && snapshot.is_some_and(|s| {
-                s.observed_unix_seconds > refusal.observed_unix_seconds
-                    && pool.is_some_and(|pool| {
-                        let mut windows = s
-                            .windows
-                            .iter()
-                            .filter(|w| {
-                                pool == ACCOUNT_ROUTE || matches_pool(adapter, &w.pool, pool)
-                            })
-                            .peekable();
-                        // An account-wide refusal clears only when every
-                        // window the account reports has headroom again.
-                        windows.peek().is_some()
-                            && windows.all(|w| {
-                                // A lapsed reset alone cannot clear a refusal.
-                                w.used_basis_points < CLEAR_HEADROOM_BASIS_POINTS
-                                    && s.details.as_ref().is_none_or(|d| {
-                                        d.coverage.as_deref() != Some("partial")
-                                            || d.calibration_active(&w.pool, self.now_unix_seconds)
-                                    })
-                            })
-                    })
+                s.observed_unix_seconds > refusal.observed_unix_seconds && {
+                    let mut windows = s
+                        .windows
+                        .iter()
+                        .filter(|w| match pool {
+                            Some(pool) if pool == ACCOUNT_ROUTE => true,
+                            Some(pool) => matches_pool(adapter, &w.pool, pool),
+                            None => true,
+                        })
+                        .peekable();
+                    windows.peek().is_some()
+                        && windows.all(|w| {
+                            // A lapsed reset alone cannot clear a refusal.
+                            w.used_basis_points < CLEAR_HEADROOM_BASIS_POINTS
+                                && s.details.as_ref().is_none_or(|d| {
+                                    d.coverage.as_deref() != Some("partial")
+                                        || d.calibration_active(&w.pool, self.now_unix_seconds)
+                                })
+                        })
+                }
             });
         Ok(expires > self.now_unix_seconds && !comparable_newer)
+    }
+
+    /// Whether a fresh reading, rather than plain expiry, superseded
+    /// `refusal`. Only such clearings are recorded with source `reading`.
+    pub fn refusal_cleared_by_reading(
+        &self,
+        adapter: &str,
+        record: Option<&AccountRecord>,
+        refusal: &Refusal,
+    ) -> Result<bool, QuotaError> {
+        Ok(refusal.expires_unix_seconds()? > self.now_unix_seconds
+            && !self.refusal_holds(adapter, record, refusal)?)
     }
 
     /// Whether persisted mismatch or a live provider refusal blocks `account_key`
@@ -494,6 +548,54 @@ pub fn record_refusal(
         readiness_probe_result: None,
         login_probe_expiry: None,
     })
+}
+
+/// Remove the refusals selected by `select` from `record` and record each one
+/// with `source`. Returns what was removed, in the order it was held. The
+/// caller owns the revision bump and publishes the mutated record; nothing here
+/// touches the filesystem.
+pub fn clear_refusals(
+    record: &mut AccountRecord,
+    now: i64,
+    source: RefusalClearSource,
+    mut select: impl FnMut(&Refusal) -> bool,
+) -> Result<Vec<RefusalClearing>, QuotaError> {
+    record.validate()?;
+    let mut removed = Vec::new();
+    let mut kept = Vec::with_capacity(record.refusals.len());
+    for refusal in std::mem::take(&mut record.refusals) {
+        if select(&refusal) {
+            removed.push(RefusalClearing {
+                extra: refusal.extra.clone(),
+                account: refusal.account.updated_from(&record.account),
+                model: refusal.model.clone(),
+                pool: refusal.pool.clone(),
+                observed_unix_seconds: refusal.observed_unix_seconds,
+                cleared_unix_seconds: now,
+                source,
+            });
+        } else {
+            kept.push(refusal);
+        }
+    }
+    if removed.is_empty() {
+        record.refusals = kept;
+        return Ok(removed);
+    }
+    record.refusals = kept;
+    // Keep the clearing log bounded and drop superseded entries for the same
+    // refusal, so repeated clears do not grow state without limit.
+    record.cleared_refusals.retain(|clearing| {
+        removed
+            .iter()
+            .all(|new| clearing.model != new.model || clearing.pool != new.pool)
+    });
+    while record.cleared_refusals.len() + removed.len() > MAX_WINDOWS {
+        record.cleared_refusals.remove(0);
+    }
+    record.cleared_refusals.extend(removed.iter().cloned());
+    record.validate()?;
+    Ok(removed)
 }
 
 /// The keyless free pool an adapter draws on, if it has one.
@@ -1110,6 +1212,109 @@ mod admission_tests {
             }
         }
         assert!(record_refusal(None, &account, &model, None, 1000, Some(1000)).is_err());
+    }
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
+    #[test]
+    fn a_fresh_reading_clears_a_model_refusal_without_a_pool() {
+        let account = record(QuotaStatus::Available).account;
+        let model = "model";
+        let intent = record_refusal(
+            None,
+            &account,
+            &format!("{}/{}", account.adapter, model),
+            None,
+            1000,
+            Some(30_000),
+        )
+        .expect("refusal");
+        let refused = intent.replacement.expect("record");
+        let snapshot_at = |observed: i64, used: u64| QuotaSnapshot {
+            extra: Default::default(),
+            schema_version: 1,
+            account: account.clone(),
+            revision: refused.revision,
+            status: QuotaStatus::Unknown,
+            observed_unix_seconds: observed,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: None,
+            windows: vec![QuotaWindow {
+                extra: Default::default(),
+                window_seconds: None,
+                pool: "primary".into(),
+                used_basis_points: used,
+                resets_unix_seconds: Some(30_000),
+            }],
+        };
+        fn admission_for<'a>(record: &'a AccountRecord, now: i64) -> Admission<'a> {
+            Admission {
+                policy: crate::source::test_policy(),
+                policies: crate::source::TEST_POLICIES,
+                now_unix_seconds: now,
+                records: std::slice::from_ref(record),
+                pools: &[],
+            }
+        }
+        let refusal = &refused.refusals[0];
+        assert!(refusal.pool.is_none());
+        assert!(
+            admission_for(&refused, 1001)
+                .refusal_holds(&account.adapter, Some(&refused), refusal)
+                .unwrap()
+        );
+
+        // A newer reading with headroom in every reported window supersedes it,
+        // even though the snapshot's overall status is Unknown.
+        let mut fresh = refused.clone();
+        fresh.snapshot = Some(snapshot_at(1001, 1000));
+        let admission = admission_for(&fresh, 1002);
+        assert!(
+            !admission
+                .refusal_holds(&account.adapter, Some(&fresh), refusal)
+                .unwrap()
+        );
+        assert!(
+            admission
+                .refusal_cleared_by_reading(&account.adapter, Some(&fresh), refusal)
+                .unwrap()
+        );
+        assert_eq!(
+            admission
+                .account_block(&account.adapter, &account.account_key, model)
+                .unwrap(),
+            None
+        );
+
+        // A stale reading or one still showing exhaustion cannot clear it.
+        for (observed, used) in [(999, 1000), (1001, 10_000)] {
+            let mut unchanged = refused.clone();
+            unchanged.snapshot = Some(snapshot_at(observed, used));
+            let admission = admission_for(&unchanged, 1002);
+            assert!(
+                admission
+                    .refusal_holds(&account.adapter, Some(&unchanged), refusal)
+                    .unwrap()
+            );
+            assert!(
+                !admission
+                    .refusal_cleared_by_reading(&account.adapter, Some(&unchanged), refusal)
+                    .unwrap()
+            );
+        }
+
+        // The clearing is durable and names its source.
+        let mut cleared = fresh.clone();
+        let removed =
+            clear_refusals(&mut cleared, 1002, RefusalClearSource::Reading, |_| true).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert!(cleared.refusals.is_empty());
+        assert_eq!(cleared.cleared_refusals.len(), 1);
+        assert_eq!(
+            cleared.cleared_refusals[0].source,
+            RefusalClearSource::Reading
+        );
+        assert_eq!(cleared.cleared_refusals[0].model, model);
+        assert_eq!(cleared.cleared_refusals[0].cleared_unix_seconds, 1002);
     }
     // Spec: docs/specs/routing.md#unknown-never-means-ready
     #[test]

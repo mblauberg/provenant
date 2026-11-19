@@ -1367,3 +1367,52 @@ fn discovery_tick_respects_eligibility_knob_and_deadline() -> Result {
     assert!(String::from_utf8_lossy(&out.stdout.bytes).contains("retaining previous snapshot"));
     Ok(())
 }
+
+#[test]
+// Spec: docs/specs/routing.md#unknown-never-means-ready
+fn quota_clear_removes_a_recorded_refusal_and_reports_it() -> Result {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = quota_rig()?;
+    assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 0);
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(rig.state.join("quota/report.json"))?)?;
+    let row = &report["accounts"][0];
+    let adapter = row["account"]["adapter"].as_str().unwrap();
+    let key = row["account"]["account_key"].as_str().unwrap();
+    let path = rig
+        .state
+        .join("quota")
+        .join(key)
+        .join(format!("{adapter}.json"));
+    let mut record: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    record["refusals"] = serde_json::json!([{
+        "account": record["account"].clone(),
+        "model": "gpt-6.1-sol",
+        "pool": null,
+        "observed_unix_seconds": 1,
+        "resets_unix_seconds": 9_000_000_000i64,
+    }]);
+    std::fs::write(&path, serde_json::to_vec(&record)?)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+
+    let out = rig.command(&["quota", "clear", key, "--json"])?;
+    assert_eq!(
+        code(&out),
+        0,
+        "{}",
+        String::from_utf8_lossy(&out.stdout.bytes)
+    );
+    let cleared = json(&out)?;
+    assert_eq!(cleared["command"], "quota clear");
+    assert_eq!(cleared["data"]["count"], 1);
+    assert_eq!(cleared["data"]["cleared"][0]["model"], "gpt-6.1-sol");
+    assert_eq!(cleared["data"]["cleared"][0]["source"], "manual");
+    let after: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    assert!(after["refusals"].as_array().unwrap().is_empty());
+    assert_eq!(after["cleared_refusals"][0]["source"], "manual");
+
+    let out = rig.command(&["quota", "clear", key, "absent", "--json"])?;
+    assert_eq!(code(&out), 0);
+    assert_eq!(json(&out)?["data"]["count"], 0);
+    rig.assert_v1_root_untouched()
+}

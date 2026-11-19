@@ -33,8 +33,9 @@ checklists: name the alternatives and say which one you chose and why.
 - Failures are explicit typed states, never silent fallbacks. Catch mistakes
   before runtime with types, lints and generators.
 - Checks default to allow or warn and have one deciding point. Add no new
-  refusal without a real boundary: credentials, Git isolation, data integrity, authority or platform safety. Use coordination where needed for
-  correctness; prefer structural speed improvements.
+  refusal outside the real boundaries: credentials, other lanes' work and
+  authority. Use coordination where needed for correctness; prefer structural
+  speed improvements.
 
 ## No compatibility code
 

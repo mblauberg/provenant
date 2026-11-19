@@ -726,7 +726,6 @@ error_kinds! {
     UnknownAccount => "UNKNOWN_ACCOUNT", "The requested account is not registered.";
     DuplicatePacingProfile => "DUPLICATE_PACING_PROFILE", "Multiple pacing profiles resolve to the same account.";
     Git => "GIT", "Git is unavailable or a Git query failed.";
-    SecretInput => "SECRET_INPUT", "The prompt or input appears to contain a secret.";
     WorktreeRequired => "WORKTREE_REQUIRED", "The requested mode needs a worktree.";
     WorktreeNotApplicable => "WORKTREE_NOT_APPLICABLE", "A worktree was given for a mode that does not use one.";
     ParentAttempt => "PARENT_ATTEMPT", "The parent attempt is missing or cannot start children.";
@@ -748,6 +747,7 @@ error_kinds! {
     Timeout => "TIMEOUT", "The wait budget expired.";
     Peer => "PEER", "The peer host returned an error.";
     WriterScope => "WRITER_SCOPE", "The writer worktree scope was refused.";
+    WriterLeaseHeld => "writer_lease_held", "Another attempt holds the writer lease.";
     WriterBusy => "WRITER_BUSY", "The writer or its lock is held by another operation.";
     WriterLockBusy => "WRITER_LOCK_BUSY", "The writer registry lock is held by another operation.";
     WriterUnknown => "WRITER_UNKNOWN", "Writer custody could not be determined.";
@@ -807,6 +807,7 @@ impl ErrorKind {
             | Self::Refused
             | Self::WriterScope
             | Self::WriterBusy
+            | Self::WriterLeaseHeld
             | Self::WriterLockBusy
             | Self::WriterUnknown
             | Self::RetainedWriterImport
@@ -824,7 +825,6 @@ impl ErrorKind {
             | Self::Conflict
             | Self::LaneDepth
             | Self::QueueFull
-            | Self::SecretInput
             | Self::Unsupported
             | Self::ContinuationUnsupported => "refused",
             _ => "error",
@@ -837,7 +837,7 @@ impl ErrorKind {
         match self {
             Self::CredentialRoot | Self::SharedSettingsNeverSynced => B::Credentials,
             Self::ObjectImportLimit | Self::StateCorrupt => B::Integrity,
-            Self::RetainedWriterImport => B::LaneGit,
+            Self::RetainedWriterImport | Self::WriterLeaseHeld => B::LaneGit,
             Self::WriterScope
             | Self::WriterBusy
             | Self::WriterLockBusy
@@ -852,6 +852,7 @@ impl ErrorKind {
 impl From<&RunError> for ErrorKind {
     fn from(error: &RunError) -> Self {
         match error {
+            RunError::StoredRecordRead { source, .. } => Self::from(source.as_ref()),
             RunError::Input { kind, .. } => *kind,
             RunError::ContinuationRefused { .. } => Self::ContinuationUnsupported,
             RunError::InvalidTaskTitle(_) | RunError::AttemptReservationRetained => Self::Invalid,
@@ -873,6 +874,9 @@ impl From<&RunError> for ErrorKind {
                 | provenant_confinement::worktrees::WorktreeError::UnknownOccupancy { .. }
                 | provenant_confinement::worktrees::WorktreeError::IncompleteCensus { .. },
             ) => Self::WriterUnknown,
+            RunError::Writer(
+                provenant_confinement::worktrees::WorktreeError::WriterLeaseHeld { .. },
+            ) => Self::WriterLeaseHeld,
             RunError::Writer(_) => Self::WriterScope,
             RunError::Confinement(
                 provenant_confinement::permissions::PermissionError::CredentialRoot
@@ -917,9 +921,15 @@ impl From<&RunError> for ErrorKind {
             RunError::DepthExceeded { .. } | RunError::DepthOverflow => Self::LaneDepth,
             RunError::Capacity => Self::QueueFull,
             RunError::Contention => Self::Contention,
-            RunError::Decode(provenant_records::DecodeError::UnsupportedVersion {
-                found, ..
-            }) if *found > 1 => Self::UpgradeRequired,
+            RunError::Decode(error)
+                if matches!(
+                    error.root_cause(),
+                    provenant_records::DecodeError::UnsupportedVersion { found, .. }
+                        if *found > 1
+                ) =>
+            {
+                Self::UpgradeRequired
+            }
             RunError::Decode(_) | RunError::ArtifactMismatch(_) => Self::StateCorrupt,
             _ => Self::Io,
         }

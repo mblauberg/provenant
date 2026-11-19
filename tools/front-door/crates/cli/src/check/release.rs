@@ -154,7 +154,9 @@ pub(super) fn inspect(
             }
             WorkingFile::Missing => {
                 let Some((rule, message)) = required_file(&path) else {
-                    return Err(CheckError::Evidence("tracked working file is missing"));
+                    return Err(CheckError::EvidencePath(format!(
+                        "tracked working file is missing: {path}"
+                    )));
                 };
                 scan.note(format!("release:working-missing:{path}"), b"missing");
                 scan.finding(rule, Path::new(&path), 1, message)?;

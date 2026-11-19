@@ -429,6 +429,7 @@ fn dispatch_replay_output_and_cancel_share_the_service() -> TestResult {
     Ok(())
 }
 
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
 #[test]
 fn secret_shaped_input_is_accepted_losslessly() -> TestResult {
     // Spec: docs/specs/fabric.md#checkpoint-envelope

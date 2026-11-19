@@ -12,9 +12,7 @@ A small change needs no review; for routine work, use one reviewer. For risky ch
 a strong reviewer from another model family, optionally paired with one from
 the author's family. Avoid a lightweight cross-family slot; if only the same
 family is available, warn and proceed. These are overridable preferences, not
-routing requirements. Sources: [review diversity](https://arxiv.org/abs/2610.01471),
-[family bias](https://arxiv.org/abs/2609.17857) and
-[review trade-offs](https://marmelab.com/blog/2026/09/24/the-state-of-ai-harness-engineering-2026.html).
+routing requirements.
 
 For a configured panel, pin the subject and base and supply the spec:
 
@@ -22,8 +20,9 @@ For a configured panel, pin the subject and base and supply the spec:
 provenant run review-panel --pr 123 --brief-file brief.md
 ```
 
-A dotted leaf such as `review.security` selects one lens. Review a changed
-subject against prior findings and the invariant under repair.
+A dotted leaf such as `review.correctness` selects one lens. Security-privacy
+runs only for credential, secret or publication paths, or when the owner asks.
+Review a changed subject against prior findings and the invariant under repair.
 
 ## Independence
 

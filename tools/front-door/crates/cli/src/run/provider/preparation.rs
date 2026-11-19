@@ -760,6 +760,14 @@ pub(super) enum PrepareError {
     SourceRoots(#[from] super::source_tree::SourceRootOverlap),
     #[error("{0}")]
     WriterContinuation(String),
+    /// A pin mismatch has its own honest cause, naming both commits; it is not
+    /// a failed launch handoff.
+    #[error("writer worktree head {head} does not match pinned commit {pinned}{}", dirty_predecessor_suffix(.uncommitted))]
+    WriterPinMismatch {
+        pinned: provenant_core::GitOid,
+        head: provenant_core::GitOid,
+        uncommitted: Vec<String>,
+    },
     #[error(transparent)]
     SourceHead(#[from] SourceHeadError),
     #[error(transparent)]
@@ -1052,10 +1060,16 @@ impl PrepareError {
             Self::Run(run::RunError::Plan(error)) => PlanCheckError::Plan(error).into_refusal(),
             Self::Run(error) => {
                 let boundary_class = error.boundary_class();
-                let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::HandoffRefused,
-                    error.to_string(),
-                );
+                let cause = match error {
+                    run::RunError::WriterSourceMismatch { expected, actual } => {
+                        provenant_records::run::TerminalCause::WriterPinMismatch {
+                            pinned: expected,
+                            head: actual,
+                        }
+                    }
+                    _ => provenant_records::run::TerminalCause::HandoffRefused,
+                };
+                let mut refusal = run::PrepareRefusal::boxed(cause, error.to_string());
                 refusal.boundary_class = boundary_class;
                 refusal.policy_code = policy_code_for_boundary(boundary_class).map(str::to_owned);
                 refusal
@@ -1125,6 +1139,22 @@ impl PrepareError {
                 );
                 refusal
             }
+            Self::WriterPinMismatch {
+                pinned,
+                head,
+                uncommitted,
+            } => {
+                let mut refusal = run::PrepareRefusal::boxed(
+                    provenant_records::run::TerminalCause::WriterPinMismatch { pinned, head },
+                    format!(
+                        "writer worktree head {head} differs from pinned commit {pinned}{}",
+                        dirty_predecessor_suffix(&uncommitted)
+                    ),
+                );
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.policy_code = Some("CONFINEMENT_WRITER_SOURCE_CONTEXT_AUTHORITY".into());
+                refusal
+            }
             error @ (Self::GraphInputsAuthority(_)
             | Self::SourceProfileIsolated(_)
             | Self::SourceViewReadOnly(_)
@@ -1159,6 +1189,44 @@ impl PrepareError {
                 other.to_string(),
             ),
         }
+    }
+}
+
+fn dirty_predecessor_suffix(paths: &[String]) -> String {
+    if paths.is_empty() {
+        String::new()
+    } else {
+        format!("; uncommitted predecessor edits: {}", paths.join(", "))
+    }
+}
+
+#[cfg(test)]
+#[test]
+// Spec: docs/specs/run.md#writer-pin-and-re-pin
+fn a_pin_mismatch_refusal_uses_its_own_text_not_the_handoff_cause() {
+    use provenant_records::run::TerminalCause;
+    let pinned = provenant_core::GitOid::parse(&"a".repeat(40)).expect("pinned");
+    let head = provenant_core::GitOid::parse(&"b".repeat(40)).expect("head");
+    for error in [
+        PrepareError::Run(run::RunError::WriterSourceMismatch {
+            expected: pinned,
+            actual: head,
+        }),
+        PrepareError::WriterPinMismatch {
+            pinned,
+            head,
+            uncommitted: vec!["src/main.rs".into()],
+        },
+    ] {
+        let refusal = error.into_refusal();
+        assert_eq!(
+            refusal.terminal_cause,
+            TerminalCause::WriterPinMismatch { pinned, head }
+        );
+        let text = refusal.terminal_cause.diagnostic(true);
+        assert!(text.contains(&pinned.to_string()), "{text}");
+        assert!(text.contains(&head.to_string()), "{text}");
+        assert!(!text.contains(TerminalCause::HandoffRefused.detail()));
     }
 }
 
@@ -3969,18 +4037,15 @@ pub(super) fn prepare_candidates_inner(
                     .and_then(|provider| provider.runtime_deadline_seconds),
             },
         );
-        let lanes = provenant_config::LaneBuildSettings::read(state_root).unwrap_or_default();
-        let total = provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
+        let build_class =
+            provenant_config::ResolvedAdmissionClass::resolve("build", state_root, Some(&source));
         let cargo_target = run::ResolvedCargoTarget::resolve_with_brief(&task.profile, prompt_text);
         let extras = run::PreambleExtras {
             verification: Some(run::VerificationResolution::resolve(
                 &task.profile,
                 prompt_text,
             )),
-            build_cap: Some(run::BuildCap {
-                slots: lanes.build_limit(total),
-                source: lanes.build_limit_source(),
-            }),
+            build_cap: Some(run::BuildCap::from(&build_class)),
             cargo_target: Some(cargo_target.clone()),
         };
         let text = format!(
@@ -4682,7 +4747,11 @@ pub(super) fn prepare_candidates_inner(
         {
             push_launch_warning(&mut route, warning);
         }
-        if route.eligibility == provenant_records::RouteEligibility::UnverifiedModel {
+        // Check the effective catalogue already loaded for this launch (bundled
+        // plus discovered models), the same lookup and revision `route list`
+        // uses. An eligibility left over from a different revision must not
+        // make a discovered exact model look uncatalogued at launch.
+        if catalogue.model(&model_id).is_none() {
             let warning = format!(
                 "model {}/{} is not in the catalogue; the provider will check it",
                 route.adapter, route.model

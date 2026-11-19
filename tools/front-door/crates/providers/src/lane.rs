@@ -117,7 +117,7 @@ impl crate::LaunchSpec {
         {
             return Err(ProviderError::Malformed);
         }
-        let bin = scratch.join(provenant_os::build_slots::SHIM_DIRECTORY);
+        let bin = scratch.join(provenant_os::admission::SHIM_DIRECTORY);
         let backend = serde_json::to_string(&gate.backend).map_err(|_| ProviderError::Malformed)?;
         let source = serde_json::to_string(&gate.source).map_err(|_| ProviderError::Malformed)?;
         let disk = gate
@@ -128,28 +128,57 @@ impl crate::LaunchSpec {
                 Ok::<_, ProviderError>(format!(
                     "{name}={}\nexport {name}\n",
                     shell_quote(&json),
-                    name = consumer_env::BUILD_DISK_LIMITS,
+                    name = consumer_env::ADMISSION_DISK_LIMITS,
                 ))
             })
             .transpose()?
             .unwrap_or_default();
-        let script = format!(
-            "#!/bin/sh\n{disk}{backend_env}={} {source_env}={} {state}={} {slots}={} {local}={} {wait_env}={}\nexport {backend_env} {source_env} {state} {slots} {local} {wait_env}\nexec {} internal build-slot -- {} \"$@\"\n",
+        let class_config = gate
+            .class_config
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|_| ProviderError::Malformed)?
+            .unwrap_or_default();
+        let env_prefix = format!(
+            "#!/bin/sh\n{disk}{backend_env}={} {source_env}={} {state}={} {slots}={} {local}={} {wait_env}={} PROVENANT_ADMISSION_CONFIG={}\nexport {backend_env} {source_env} {state} {slots} {local} {wait_env} PROVENANT_ADMISSION_CONFIG\n",
             shell_quote(&backend),
             shell_quote(&source),
             text(gate.state)?,
             gate.slots,
             gate.local_cargo,
             text(scratch)?,
+            shell_quote(&class_config),
+            backend_env = consumer_env::ADMISSION_BACKEND,
+            source_env = consumer_env::ADMISSION_SOURCE,
+            state = consumer_env::ADMISSION_SLOT_STATE,
+            slots = consumer_env::ADMISSION_SLOTS,
+            local = consumer_env::LOCAL_CARGO,
+            wait_env = consumer_env::ADMISSION_WAIT_DIR,
+        );
+        let cargo_script = format!(
+            "{env_prefix}exec {} admit build -- {} \"$@\"\n",
             text(gate.provenant)?,
             text(gate.cargo)?,
-            backend_env = consumer_env::BUILD_ADMISSION_BACKEND,
-            source_env = consumer_env::BUILD_ADMISSION_SOURCE,
-            state = consumer_env::BUILD_SLOT_STATE,
-            slots = consumer_env::BUILD_SLOTS,
-            local = consumer_env::LOCAL_CARGO,
-            wait_env = consumer_env::BUILD_WAIT_DIR,
         );
+        // Gate nextest only where a real executable exists. A cargo-nextest
+        // shim that ran `cargo nextest` would find itself on PATH and recurse;
+        // without one, Cargo reports its own missing-subcommand error.
+        let provenant = text(gate.provenant)?;
+        let nextest_target = match (gate.nextest, gate.cargo_nextest) {
+            (Some(nextest), _) => Some(format!("{} \"$@\"", text(nextest)?)),
+            (None, Some(cargo_nextest)) => Some(format!("{} nextest \"$@\"", text(cargo_nextest)?)),
+            (None, None) => None,
+        };
+        let nextest_script = nextest_target
+            .map(|target| format!("{env_prefix}exec {provenant} admit build -- {target}\n"));
+        let cargo_nextest_script = match gate.cargo_nextest {
+            Some(cargo_nextest) => Some(format!(
+                "{env_prefix}exec {provenant} admit build -- {} \"$@\"\n",
+                text(cargo_nextest)?,
+            )),
+            None => None,
+        };
         // Validate the environment before mutating setup or grants. The caller
         // can then omit this optional shim if its paths cannot be represented.
         let path_index = self
@@ -164,20 +193,26 @@ impl crate::LaunchSpec {
             std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(path)))
                 .map_err(|_| ProviderError::InvalidPath)?
         };
-        let slots = gate
-            .state
-            .join(provenant_os::build_slots::DIRECTORY.join("/"));
+        let slots = gate.state.join("admission");
         let create = SetupStep::CreateDir(bin.clone());
         if !self.setup.contains(&create) {
             self.setup.push(create);
         }
         self.setup.push(SetupStep::WriteExecutable {
             path: bin.join("cargo"),
-            bytes: script.into_bytes(),
+            bytes: cargo_script.into_bytes(),
         });
-        self.setup.push(SetupStep::CreateLock(
-            bin.join(provenant_os::build_slots::WAIT_FILE),
-        ));
+        for (name, script) in [
+            ("nextest", nextest_script),
+            ("cargo-nextest", cargo_nextest_script),
+        ] {
+            if let Some(script) = script {
+                self.setup.push(SetupStep::WriteExecutable {
+                    path: bin.join(name),
+                    bytes: script.into_bytes(),
+                });
+            }
+        }
         self.env[path_index].1 = next_path;
         let profile = &mut self.profile.spec;
         // Read only: command and none backends do not receive host slot files.
@@ -1006,17 +1041,23 @@ pub struct BuildSlotGate<'a> {
     pub backend: provenant_config::PortBackend,
     /// Source of the effective backend declaration.
     pub source: provenant_config::PortSource,
-    /// The `provenant` executable that runs `internal build-slot`.
+    /// The `provenant` executable that runs `admit`.
     pub provenant: &'a Path,
     /// Host state directory, shared by every project, holding the slot files.
     pub state: &'a Path,
     /// How many builds the host runs at once.
     pub slots: u64,
+    /// Frozen sourced class settings, resolved before confinement.
+    pub class_config: Option<provenant_config::ResolvedAdmissionClass>,
     /// Resolved advisory and critical limits and the effective `DISK_FLOOR`
     /// policy, with their sources: the shim takes the host's one decision.
     pub disk_gate: Option<provenant_config::DiskGate>,
     /// The real `cargo` the shim runs once it holds a slot.
     pub cargo: &'a Path,
+    /// Optional real `nextest` binary.
+    pub nextest: Option<&'a Path>,
+    /// Optional real `cargo-nextest` binary.
+    pub cargo_nextest: Option<&'a Path>,
     /// Cargo commands the lane may run: `all`, `check` or `none`. The shim
     /// warns on the rest; see the `lanes.local_cargo` knob.
     pub local_cargo: &'a str,
@@ -2756,30 +2797,7 @@ mod tests {
     }
 
     fn bare_spec(path: &str) -> crate::LaunchSpec {
-        crate::LaunchSpec {
-            argv: Vec::new(),
-            env: vec![("PATH".into(), path.into())],
-            stdin: crate::Stdin::Null,
-            secret_input: None,
-            cwd: PathBuf::from("/"),
-            setup: Vec::new(),
-            omitted_discovery: Vec::new(),
-            user_skills: Default::default(),
-            tool_requirements: Default::default(),
-            git_wrapper: Default::default(),
-            policy: Policy::default(),
-            credential_roots: provenant_core::CredentialRoots::for_home(Path::new("/fixture/home")),
-            session_state: crate::SessionStateLocation::AttemptPrivate,
-            profile: provenant_confinement::permissions::ProviderProfile {
-                spec: ProviderProfileSpec::default(),
-                observations: Default::default(),
-            },
-            stream: crate::StreamState::new(
-                "claude",
-                |_| Ok(Vec::new()),
-                &provenant_records::policy::Policy::default(),
-            ),
-        }
+        crate::bare_spec(path)
     }
 
     #[test]
@@ -2807,6 +2825,9 @@ mod tests {
             state: &state,
             slots: 3,
             cargo: Path::new("/home/.cargo/bin/cargo"),
+            nextest: None,
+            cargo_nextest: None,
+            class_config: None,
             local_cargo: "all",
             project: &root,
             backend: provenant_config::PortBackend::Builtin,
@@ -2819,12 +2840,12 @@ mod tests {
         let (_, path) = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
         assert_eq!(
             std::env::split_paths(path).next().unwrap(),
-            scratch.join(provenant_os::build_slots::SHIM_DIRECTORY)
+            scratch.join(provenant_os::admission::SHIM_DIRECTORY)
         );
         // The lane gets no write to the slot directory, the state root,
         // `fabric/locks` or anything near a repository's `.git`: only a read
         // of the slot directory, which the host provisions beforehand.
-        let slots = state.join(provenant_os::build_slots::DIRECTORY.join("/"));
+        let slots = state.join("admission");
         assert!(spec.profile.spec.state_writes.is_empty());
         assert!(spec.profile.spec.tool_writes.is_empty());
         assert!(spec.profile.spec.runtime_reads.contains(&subtree(&slots)));
@@ -2835,6 +2856,13 @@ mod tests {
                 .any(|step| matches!(step, SetupStep::CreateDir(path) if path.starts_with(&slots))),
             "the lane never creates the slot directory"
         );
+        // No real nextest: no nextest shim, so `cargo nextest` cannot find a
+        // shim that calls `cargo nextest` again.
+        assert!(!spec.setup.iter().any(|step| matches!(
+            step,
+            SetupStep::WriteExecutable { path, .. }
+                if path.ends_with("cargo-bin/nextest") || path.ends_with("cargo-bin/cargo-nextest")
+        )));
         let bytes = spec
             .setup
             .iter()
@@ -2849,7 +2877,7 @@ mod tests {
         // and the host's slot environment, with hostile values in the lane's.
         std::fs::write(
             &provenant,
-            "#!/bin/sh\nprintf '%s\\0' \"$@\" \"$PROVENANT_BUILD_SLOT_STATE\" \"$PROVENANT_BUILD_SLOTS\" \"$PROVENANT_BUILD_DISK_LIMITS\"\n",
+            "#!/bin/sh\nprintf '%s\\0' \"$@\" \"$PROVENANT_ADMISSION_SLOT_STATE\" \"$PROVENANT_ADMISSION_SLOTS\" \"$PROVENANT_ADMISSION_DISK_LIMITS\"\n",
         )
         .unwrap();
         let shim = root.join("cargo");
@@ -2859,9 +2887,9 @@ mod tests {
         }
         let output = std::process::Command::new(&shim)
             .args(["test", "--", "two words"])
-            .env("PROVENANT_BUILD_SLOT_STATE", "/lane/chosen")
-            .env("PROVENANT_BUILD_SLOTS", "64")
-            .env("PROVENANT_BUILD_DISK_LIMITS", "lane value")
+            .env("PROVENANT_ADMISSION_SLOT_STATE", "/lane/chosen")
+            .env("PROVENANT_ADMISSION_SLOTS", "64")
+            .env("PROVENANT_ADMISSION_DISK_LIMITS", "lane value")
             .output()
             .unwrap();
         assert!(output.status.success());
@@ -2871,8 +2899,8 @@ mod tests {
             .filter(|field| !field.is_empty())
             .map(str::to_owned)
             .collect();
-        assert_eq!(fields.first().map(String::as_str), Some("internal"));
-        assert_eq!(fields.get(1).map(String::as_str), Some("build-slot"));
+        assert_eq!(fields.first().map(String::as_str), Some("admit"));
+        assert_eq!(fields.get(1).map(String::as_str), Some("build"));
         assert_eq!(fields.get(2).map(String::as_str), Some("--"));
         assert_eq!(
             fields.get(3).map(String::as_str),
@@ -2903,6 +2931,9 @@ mod tests {
             state: Path::new("/state"),
             slots: 1,
             cargo: Path::new("/cargo"),
+            nextest: None,
+            cargo_nextest: None,
+            class_config: None,
             local_cargo: "all",
             project: Path::new("/project"),
             backend: provenant_config::PortBackend::Builtin,
@@ -2935,7 +2966,7 @@ mod tests {
         let state = base.join("state");
         std::fs::create_dir(&state).unwrap();
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let slots = state.join(provenant_os::build_slots::DIRECTORY.join("/"));
+        let slots = state.join("admission");
         let plan = crate::tests::fixture_access_plan(Access::WorktreeWrite, Some("login"), true);
         let prompt = Prompt::new("fixture prompt".into());
         let mut route = crate::tests::route("codex", "fixture-model");
@@ -2949,6 +2980,9 @@ mod tests {
             state: &state,
             slots: 2,
             cargo: Path::new("/home/.cargo/bin/cargo"),
+            nextest: None,
+            cargo_nextest: None,
+            class_config: None,
             local_cargo: "all",
             project: Path::new("/p"),
             backend: provenant_config::PortBackend::Builtin,
@@ -2988,6 +3022,9 @@ mod tests {
                 state: Path::new(state),
                 slots,
                 cargo: Path::new("/c"),
+                nextest: None,
+                cargo_nextest: None,
+                class_config: None,
                 local_cargo: "all",
                 project: Path::new("/p"),
                 backend: provenant_config::PortBackend::Builtin,
@@ -3000,7 +3037,7 @@ mod tests {
             );
             assert!(spec.setup.is_empty());
         }
-        // Zero disables the shared build cap (max_concurrent_builds = 0), so it
+        // Zero disables the shared build cap ([admission.build].slots = 0), so it
         // is a trusted setting that still installs the shim.
         let mut spec = bare_spec("/usr/bin");
         let gate = BuildSlotGate {
@@ -3009,6 +3046,9 @@ mod tests {
             state: Path::new("/s"),
             slots: 0,
             cargo: Path::new("/c"),
+            nextest: None,
+            cargo_nextest: None,
+            class_config: None,
             local_cargo: "all",
             project: Path::new("/p"),
             backend: provenant_config::PortBackend::Builtin,
@@ -3026,6 +3066,9 @@ mod tests {
                 state: Path::new(state),
                 slots: 1,
                 cargo: Path::new("/c"),
+                nextest: None,
+                cargo_nextest: None,
+                class_config: None,
                 local_cargo: "all",
                 project: Path::new("/p"),
                 backend: provenant_config::PortBackend::Builtin,
@@ -3047,6 +3090,9 @@ mod tests {
             state: Path::new("/state"),
             slots: 1,
             cargo: Path::new("/cargo"),
+            nextest: None,
+            cargo_nextest: None,
+            class_config: None,
             local_cargo: "all",
             project: Path::new("/p"),
             backend: provenant_config::PortBackend::Builtin,

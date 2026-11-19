@@ -528,10 +528,10 @@ fn writer_repository_open_failure_hides_unanchored_project_path()
         Ok(_) => return Err("non-repository unexpectedly opened".into()),
         Err(error) => super::run_error(error),
     };
-    let public = serde_json::to_value(error)?;
-    assert_eq!(public["code"], "io");
-    assert!(public["path"].is_null());
-    assert!(!public.to_string().contains(root.to_str().ok_or("fixture path")?));
+    assert_eq!(error.code(), "WRITER_SCOPE");
+    let wire = serde_json::to_value(&error)?.to_string();
+    assert!(!wire.contains("non-repository"), "{wire}");
+    assert!(!wire.contains(root.to_string_lossy().as_ref()), "{wire}");
     Ok(())
 }
 
@@ -562,7 +562,7 @@ fn typed_run_errors_keep_their_codes() {
             }),
             "state_corrupt",
         ),
-        (provenant_run::RunError::Refused, "confinement_refused"),
+        (provenant_run::RunError::Refused, "REFUSED"),
         (provenant_run::RunError::Capacity, "busy"),
     ] {
         assert_eq!(super::run_error(error).code(), expected);

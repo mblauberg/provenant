@@ -113,9 +113,9 @@ unavailable push leaves the committed head and unpushed count visible.
 
 - Why: budget enforcement must preserve completed work and report its evidence.
 
-## Lane verification and the host build cap
+## Lane verification and build admission
 
-A writer preamble's verification paragraph is `lanes.verification` (`check`, `targeted` or `full`). Unset, the sourced default is targeted: use a shared warm target, run cargo check, clippy on touched crates and targeted tests, and leave the workspace suite to CI. A brief line `Verification scope: targeted` (or `check` or `full`) overrides the knob and the paragraph names source `brief`. When the knob and that line disagree, the paragraph follows the brief and the stop cause names both scopes. The host build cap is `domains.fabric.lanes.max_concurrent_builds`: unset, the count is derived from cores and memory (source `default`); a set value is source `host`; `0` disables the cap. Lane Cargo commands, including aliases and nextest, use a PATH shim to acquire a slot. A command that finds every slot busy waits a bounded time, then warns and proceeds; status shows the wait. Direct paths bypass this cooperative throttle.
+A writer preamble's verification paragraph is `lanes.verification` (`check`, `targeted` or `full`). Unset, the sourced default is targeted: use a shared warm target, run cargo check, clippy on touched crates and targeted tests, and leave the workspace suite to CI. A brief line `Verification scope: targeted` (or `check` or `full`) overrides the knob and the paragraph names source `brief`. When the knob and that line disagree, the paragraph follows the brief and the stop cause names both scopes. Lane Cargo commands share the `build` admission class, configured through `[admission.build].slots`; unset, its count is derived from cores and memory (source `default`), and a configured value names its host or project source. Set it to `0` to disable the cap. Lane Cargo commands, including aliases and nextest, use a PATH shim to acquire a slot. A command that finds every slot busy waits a bounded time, then warns and proceeds; status shows the wait. Direct paths bypass this cooperative throttle.
 - Why: a chair brief must be able to widen what a lane verifies, and parallel lanes must share one host cap instead of each taking the machine.
 
 ## Every limit names the layer that set it
@@ -145,6 +145,30 @@ The GitHub credential receipt governs token delivery even when sandboxing is
 off: `none` withholds host token environment variables, `injected` passes only
 the selected token, and `ambient` preserves the native host environment.
 - Why: untrusted lane state must not alter shared Git or publish over another writer.
+
+## Writer pin and re-pin
+
+A graph pins its source commit at submission. A retry keeps that pin and the
+predecessor's terminal head. Before any plan node spends tokens, the host
+preflights the writer worktree: a dirty tree is refused at submission, naming
+the dirty paths and the setting `lanes.writer_dirty` with the layer that set it.
+That one overridable setting chooses `refuse` (the default), `wip_commit` (a
+local WIP commit whose id is recorded in the graph events before launch), or
+`continue_in_place` (a warning that names the retained paths). This preflight
+covers writer leaves in composites and loops before the submission snapshot is
+sealed. WIP mutation holds writer exclusion, refuses unsettled reservations and
+rechecks the head and dirty paths under that exclusion. Credential and
+Git-internal roots are a hard refusal under every value.
+
+On a manual retry, when the worktree head descends from the pinned commit — the
+writer's own commits are the only difference — the retry re-pins to that head
+and warns with both ids. When the head is not a descendant it refuses, naming
+the pinned commit and the current head. A pin mismatch never uses the launch
+handoff refusal text; its cause names the pin and the head and says what to do.
+- Why: a refusal the host could predict must not waste a plan node's tokens, and
+  an opaque "host configuration" cause sends the operator to the wrong place.
+- Owner: `crates/run/src/writer_dirty.rs`, `crates/run/src/writer.rs`,
+  `src/fabric/graph_execution.rs`, `src/fabric/owner.rs`.
 
 ## PR contributions JSON reference
 

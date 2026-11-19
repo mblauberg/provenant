@@ -168,11 +168,50 @@ pub struct AccountPacingView {
     pub profile: Option<PacingProfile>,
     pub expires: Option<provenant_core::WallTime>,
 }
+/// The configuration layer a pool weight was set in. Bundled weights come
+/// from the shipped catalogue; the others come from an owner's configuration
+/// at host or project scope. Distinct from `RoutePoolMemberView::source`,
+/// which names the model's own provenance at pool granularity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum WeightLayer {
+    #[serde(rename = "bundled")]
+    Bundled,
+    #[serde(rename = "host config")]
+    HostConfig,
+    #[serde(rename = "project config")]
+    ProjectConfig,
+}
+impl WeightLayer {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bundled => "bundled",
+            Self::HostConfig => "host config",
+            Self::ProjectConfig => "project config",
+        }
+    }
+}
+/// A pool defined in configuration overrides the whole bundled pool, so all of
+/// its weights share the layer recorded for that pool. Compiled defaults carry
+/// no pools; a project-scoped origin is reported as such when present.
+fn pool_weight_layer(config: &crate::RoutingConfig, name: &str) -> WeightLayer {
+    if !config.pools.contains_key(name) {
+        return WeightLayer::Bundled;
+    }
+    match config
+        .preference_sources
+        .get(&format!("domains.routing.pools.{name}"))
+        .map(String::as_str)
+    {
+        Some("project") => WeightLayer::ProjectConfig,
+        _ => WeightLayer::HostConfig,
+    }
+}
 #[derive(Debug, Serialize)]
 pub struct RoutePoolMemberView {
     pub model: ModelId,
     pub source: String,
     pub weight: u8,
+    pub weight_layer: WeightLayer,
     pub effort: Option<String>,
     pub efforts: Vec<String>,
     pub free: bool,
@@ -210,6 +249,7 @@ pub fn list(
         let Some(members) = effective_pool(context, &name) else {
             continue;
         };
+        let weight_layer = pool_weight_layer(context.config, &name);
         let mut views = Vec::new();
         for member in members
             .iter()
@@ -228,6 +268,7 @@ pub fn list(
                         .into()
                 },
                 weight: member.weight,
+                weight_layer,
                 effort: member.effort.clone(),
                 efforts: member.efforts.clone(),
                 free: context.catalogue.is_free_model(&member.model),
@@ -2887,9 +2928,11 @@ fn classify_pool(
             .unwrap_or(1)
             .max(1);
         let observed_prior = context.selection_evidence.and_then(|evidence| {
-            evidence.priors.iter().find(|prior| {
-                prior.model == member.model && prior.pool == name && prior.role == role
-            })
+            evidence.prior(&crate::OutcomeKey::new(
+                member.model.clone(),
+                name,
+                role_key.clone(),
+            ))
         });
         let prior = context
             .config

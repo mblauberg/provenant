@@ -7,6 +7,146 @@ mod graph_writer_admission_tests {
     use provenant_os::fs::FsError;
     use std::{path::PathBuf, time::Duration};
 
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    #[test]
+    fn prepatched_run_preserves_admission_refusal_in_cli_diagnostic() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::coordination::facade::DispatchRefusalFact;
+        use provenant_fabric_runtime::graph::{self, GraphDocument};
+        struct Free;
+        impl WorkerObserver for Free {
+            fn observe_roots(&self, roots: &[PathBuf]) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy> {
+                roots.iter().cloned().map(|root| (root, provenant_confinement::worktrees::Occupancy::Available)).collect()
+            }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let mut factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, workers: &Free,
+        };
+        let mut base: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 2, "graph_id": "typed-refusal", "nodes": [
+                {"id":"one","prompt":"one","access":"read_only","route":{"alias":"fixture"}},
+                {"id":"two","prompt":"two","access":"read_only","route":{"alias":"fixture"}}
+            ]
+        }))?;
+        graph::patch::submission(&mut base, "submit:typed-refusal", &factory.context.config.graph.limits, factory.context.port_table.worktree_layout.clone())?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        for case in ["schema", "composite", "cycle", "writer", "plan", "output", "envelope", "structural"] {
+            let mut value = serde_json::to_value(&base)?;
+            match case {
+                "schema" => {
+                    value["schema_version"] = 1.into();
+                    value["review_base"] = serde_json::json!("main");
+                }
+                "composite" => value["nodes"][0] = serde_json::json!({"id":"one","kind":"loop","access":"read_only"}),
+                "cycle" => {
+                    value["nodes"][0]["depends_on"] = serde_json::json!(["two"]);
+                    value["nodes"][1]["depends_on"] = serde_json::json!(["one"]);
+                }
+                // Missing dependencies fail earlier during composite name resolution.
+                // A zero deadline reaches the flat-plan validator instead.
+                "plan" => value["nodes"][0]["deadline_seconds"] = serde_json::json!(0),
+                "writer" => value["nodes"][0]["access"] = serde_json::json!("worktree_write"),
+                "output" => {
+                    value["nodes"][1]["depends_on"] = serde_json::json!(["one"]);
+                    value["nodes"][1]["inputs"] = serde_json::json!([{"node":"one","outputs":["commit"]}]);
+                }
+                "envelope" => {
+                    factory.context.config.graph.limits.nodes = 2048;
+                    value["nodes"] = (0..1024).map(|index| serde_json::json!({
+                        "id":format!("node-{index}"), "prompt":"x", "access":"read_only", "route":{"alias":"fixture"}
+                    })).collect();
+                }
+                "structural" => factory.context.config.graph.limits.nodes = 1,
+                _ => unreachable!(),
+            }
+            let path = rig.project.join(format!("{case}.json"));
+            std::fs::write(&path, serde_json::to_vec(&value)?)?;
+            let error = factory.graph(GraphInput::Run { extra: Default::default(), document: path }, budget, &cancel).unwrap_err();
+            let fact = match &error {
+                FacadeError::DispatchRefused { fact: Some(fact), .. } => fact,
+                other => panic!("{case}: {other:?}"),
+            };
+            assert!(match case {
+                "schema" => matches!(fact, DispatchRefusalFact::GraphSchema),
+                "composite" => matches!(fact, DispatchRefusalFact::GraphComposite),
+                "cycle" => matches!(fact, DispatchRefusalFact::GraphCycle { .. }),
+                "writer" => matches!(fact, DispatchRefusalFact::GraphWriterWorktree { .. }),
+                "plan" => matches!(fact, DispatchRefusalFact::GraphPlan),
+                "output" => matches!(fact, DispatchRefusalFact::GraphOutputKind(_)),
+                "envelope" => matches!(fact, DispatchRefusalFact::GraphEnvelope),
+                "structural" => matches!(fact, DispatchRefusalFact::GraphStructuralLimit(_)),
+                _ => false,
+            }, "{case}: {fact:?}");
+            let diagnostic = error.diagnostic();
+            assert!(diagnostic.detail.is_some() && diagnostic.next.is_some(), "{case}");
+        }
+        Ok(())
+    }
+
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    #[test]
+    fn facade_resume_persists_lowered_structural_limit_and_recovers() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{self, GraphJournal};
+        use provenant_records::pause::PauseCause;
+
+        struct Pending(provenant_core::ActorId);
+        impl graph::AttemptOwner for Pending {
+            type Error = std::convert::Infallible;
+            fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+                provenant_config::PortTable::builtin().worktree_layout
+            }
+            fn actor(&self) -> String { self.0.to_string() }
+            fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>, _: &graph::GraphRoute, _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>) -> Result<graph::AttemptObservation, Self::Error> {
+                Ok(graph::AttemptObservation::Pending { attempt_ref: None })
+            }
+        }
+        struct Free;
+        impl WorkerObserver for Free {
+            fn observe_roots(&self, roots: &[PathBuf]) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy> {
+                roots.iter().cloned().map(|root| (root, provenant_confinement::worktrees::Occupancy::Available)).collect()
+            }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let mut factory = Factory {
+            context: Context::open(roots.clone(), &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, workers: &Free,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "limit-resume", "nodes": [
+                {"id":"one","prompt":"one","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}},
+                {"id":"two","prompt":"two","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}
+            ]
+        }))?;
+        graph::patch::submission(&mut document, "submit:limit-resume", &factory.context.config.graph.limits, factory.context.port_table.worktree_layout.clone())?;
+        let project = factory.context.identity.project;
+        let mut journal = graph::FileJournal::open(&roots.state, project, &document.graph_id, budget, &cancel, &factory.clock)?;
+        journal.bind(graph::GraphExecution {
+            peer_origin_context: None, peer_submission_digest: None, requester_path: None,
+            extra: Default::default(), bases: None, directory: rig.project.clone(), document: document.clone(),
+        })?;
+        graph::advance_with_budget(&document, &mut Pending(factory.context.identity.inbox.actor), &mut journal, &Default::default(), &Default::default())?;
+        drop(journal);
+        factory.context.config.graph.limits.nodes = 1;
+        let resume = || GraphInput::Resume { extra: Default::default(), document: "limit-resume".into(), extend: vec![] };
+        let paused = factory.graph(resume(), budget, &cancel)?;
+        assert_eq!(paused.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+        assert_eq!(graph::FileJournal::read_checkpoint(&roots.state, project, "limit-resume")?.unwrap().pause_cause(), Some(PauseCause::StructuralLimit));
+        factory.context.config.graph.limits.nodes = provenant_fabric_runtime::config::GraphLimits::default().nodes;
+        let resumed = factory.graph(resume(), budget, &cancel)?;
+        assert_ne!(resumed.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+        Ok(())
+    }
+
     #[test]
     fn writer_contention_is_typed_separately_from_permanent_refusals() {
         let lock = |path: &str| {
@@ -3671,7 +3811,7 @@ mod provisioned_writer_submission_tests {
                 serde_json::from_value(serde_json::json!({"preset":"light"}))?
             };
             let node = graph::NodeInput {
-                review_launch: false,
+                writer_dirty_preflight: false, review_launch: false,
                 require_skill_location: false,
                 settlement_retries: Some(1),
                 prior_attempts: &[],

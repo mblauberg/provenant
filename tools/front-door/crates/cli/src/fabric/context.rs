@@ -1071,13 +1071,13 @@ fn active_harness_client() -> Option<&'static str> {
 /// peer and cause. The detail is message text only; the wire codes are unchanged.
 #[derive(Debug)]
 pub struct PeerFailure {
-    pub error: FacadeError,
+    pub error: Box<FacadeError>,
     pub detail: Option<String>,
 }
 impl PeerFailure {
     fn new(error: FacadeError, detail: impl Into<String>) -> Self {
         Self {
-            error,
+            error: Box::new(error),
             detail: Some(detail.into()),
         }
     }
@@ -1085,7 +1085,7 @@ impl PeerFailure {
 impl From<FacadeError> for PeerFailure {
     fn from(error: FacadeError) -> Self {
         Self {
-            error,
+            error: Box::new(error),
             detail: None,
         }
     }
@@ -1115,6 +1115,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         | FacadeError::GraphRelayRefused { .. }
         | FacadeError::RecordedRefusal { .. } => (Outcome::Refused, ErrorKind::Refused),
         FacadeError::WriterBusy { .. } => (Outcome::Refused, ErrorKind::WriterBusy),
+        FacadeError::WriterLeaseHeld { .. } => (Outcome::Refused, ErrorKind::WriterLeaseHeld),
         FacadeError::WriterLockBusy => (Outcome::Refused, ErrorKind::WriterLockBusy),
         FacadeError::WriterUnknown => (Outcome::Refused, ErrorKind::WriterUnknown),
         FacadeError::CredentialRoot { .. } => (Outcome::Refused, ErrorKind::CredentialRoot),
@@ -1142,6 +1143,19 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::UpgradeRefused => (Outcome::Refused, ErrorKind::UpgradeRefused),
         FacadeError::UpgradeRequired { .. } => (Outcome::Refused, ErrorKind::UpgradeRequired),
         FacadeError::Timeout => (Outcome::Error, ErrorKind::Timeout),
+        FacadeError::RunKind { run_code, .. } => {
+            let kind = ErrorKind::ALL
+                .iter()
+                .copied()
+                .find(|kind| kind.code() == run_code)
+                .unwrap_or(ErrorKind::Refused);
+            let outcome = match kind.category() {
+                "invalid" => Outcome::Invalid,
+                "refused" => Outcome::Refused,
+                _ => Outcome::Error,
+            };
+            (outcome, kind)
+        }
         FacadeError::StaleFence
         | FacadeError::ContinuationUnsupported
         | FacadeError::OutputTooLarge
@@ -1159,7 +1173,7 @@ pub fn peer_failure(destination: &str, error: &PeerError) -> PeerFailure {
         _ => None,
     };
     PeerFailure {
-        error: FacadeError::from(error),
+        error: Box::new(FacadeError::from(error)),
         detail,
     }
 }
@@ -1615,6 +1629,34 @@ node_prompt_bytes = 262144
         assert_eq!(
             super::facade_outcome(&failure.error).1.code(),
             "PEER_VERSION"
+        );
+    }
+
+    #[test]
+    fn typed_run_facade_errors_map_back_to_their_run_kind() {
+        use provenant_fabric_runtime::coordination::facade::FacadeError;
+        use provenant_records::Outcome;
+        let run_kind = FacadeError::RunKind {
+            run_code: "DISK_FLOOR".into(),
+            next: "run provenant gc --apply".into(),
+            detail: None,
+            resource: None,
+        };
+        assert_eq!(run_kind.code(), "DISK_FLOOR");
+        assert_eq!(
+            super::facade_outcome(&run_kind),
+            (Outcome::Refused, provenant_run::ErrorKind::DiskFloor)
+        );
+        let lease = FacadeError::WriterLeaseHeld {
+            holder: None,
+            branch: None,
+            worktree: None,
+            age: None,
+            live: None,
+        };
+        assert_eq!(
+            super::facade_outcome(&lease),
+            (Outcome::Refused, provenant_run::ErrorKind::WriterLeaseHeld)
         );
     }
 }

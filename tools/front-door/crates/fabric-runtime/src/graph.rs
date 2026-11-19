@@ -22,6 +22,9 @@ mod asks;
 mod ci;
 pub use ci::{CiFailedCheck, CiTarget};
 mod budget;
+mod candidate;
+pub mod refusal;
+pub use candidate::{AdmittedCandidate, CandidateError, admit_candidate, admit_running_candidate};
 mod cancellation_intent;
 #[cfg(test)]
 #[path = "graph/checkpoint_tests.rs"]
@@ -788,8 +791,8 @@ pub enum GraphError<RunError: Error + 'static, JournalError: Error + 'static> {
     Invalid(String),
     #[error("invalid graph: {0}")]
     Admission(AdmissionError),
-    #[error("invalid extension: {0}")]
-    Extension(String),
+    #[error("{0}")]
+    Candidate(CandidateError),
     /// The graph cannot advance as it stands; the text names the next step.
     #[error("{0}")]
     Refused(String),
@@ -814,7 +817,11 @@ impl<R: Error + 'static, J: Error + 'static> GraphError<R, J> {
         match self {
             Self::Instance(_) => "instance",
             Self::Invalid(_) | Self::Admission(_) => "invalid_graph",
-            Self::Extension(_) => "invalid_extension",
+            Self::Candidate(CandidateError::Extension(_)) => "invalid_extension",
+            Self::Candidate(
+                CandidateError::Checkpoint | CandidateError::CheckpointTopology { .. },
+            ) => "bad_checkpoint",
+            Self::Candidate(_) => "invalid_graph",
             Self::Refused(_) => "graph_refused",
             Self::PlanChanged => "plan_changed",
             Self::BadCheckpoint { .. } => "bad_checkpoint",
@@ -846,6 +853,9 @@ struct PlannedGraph {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedNode {
+    // Derived from the persisted document; the warning is already retained there.
+    #[serde(skip)]
+    writer_dirty_preflight: bool,
     #[serde(skip)]
     review_launch: bool,
     #[serde(skip_serializing_if = "provenant_records::OnStop::is_empty")]
@@ -860,6 +870,8 @@ struct PlannedNode {
     composite_members: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     composite: Option<CompositeSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_parallel: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1108,6 +1120,31 @@ pub fn advance_with_budget<R: AttemptOwner, J: GraphJournal>(
         false,
         &[],
         &mut Default::default(),
+        &[],
+        None,
+    )
+}
+
+/// Save submission refusals before any node is allowed to start.
+pub fn advance_with_submission_refusals<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    owner: &mut R,
+    journal: &mut J,
+    limits: &crate::config::GraphLimits,
+    budget: &crate::config::GraphBudget,
+    refusals: &[(String, String)],
+) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
+    advance_inner(
+        document,
+        owner,
+        journal,
+        limits,
+        budget,
+        false,
+        &[],
+        &mut Default::default(),
+        refusals,
+        None,
     )
 }
 
@@ -1128,6 +1165,32 @@ pub fn resume_with_budget<R: AttemptOwner, J: GraphJournal>(
         true,
         extensions,
         &mut Default::default(),
+        &[],
+        None,
+    )
+}
+
+/// Resume with the candidate admitted while holding the same journal lock.
+pub fn resume_admitted<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    owner: &mut R,
+    journal: &mut J,
+    limits: &crate::config::GraphLimits,
+    budget: &crate::config::GraphBudget,
+    extensions: &[String],
+    candidate: AdmittedCandidate,
+) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
+    advance_inner(
+        document,
+        owner,
+        journal,
+        limits,
+        budget,
+        true,
+        extensions,
+        &mut Default::default(),
+        &[],
+        Some(candidate),
     )
 }
 
@@ -1385,6 +1448,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     mut resume: bool,
     extensions: &[String],
     observed_ci: &mut std::collections::BTreeSet<String>,
+    submission_refusals: &[(String, String)],
+    admitted_candidate: Option<AdmittedCandidate>,
 ) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
     let worktree_layout = owner.worktree_layout();
     // Resolve once for this graph operation, before replay and expansion.
@@ -1402,22 +1467,39 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     let stored = journal
         .load(&document.graph_id)
         .map_err(GraphError::Journal)?;
-    if let Some(checkpoint) = &stored {
-        plans::validate_persisted_topology(
-            document,
-            &checkpoint.extensions,
-            &checkpoint.expansions,
-            &unbounded,
-        )
-        .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
-    }
-    let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
     let (base, _) = if stored.is_some() {
         validate_replay_plan(document, &unbounded)
             .map_err(|error| GraphError::Invalid(error.to_string()))?
     } else {
         validate_plan_with_limits(document, &unbounded).map_err(GraphError::Admission)?
     };
+    let admitted = match admitted_candidate {
+        Some(candidate) => {
+            if candidate.source != *document
+                || candidate.checkpoint != stored
+                || candidate.extensions != extensions
+            {
+                return Err(GraphError::Invalid(
+                    "admitted candidate does not match the execution state".into(),
+                ));
+            }
+            candidate
+        }
+        None => match stored.as_ref() {
+            Some(checkpoint) => {
+                admit_running_candidate(document, checkpoint, extensions, limits, budget, None)
+            }
+            None => admit_candidate(document, None, extensions, limits, budget, None),
+        }
+        .map_err(|error| match error {
+            CandidateError::CheckpointTopology { node, invariant } => GraphError::BadCheckpoint {
+                node: node.to_string(),
+                invariant,
+            },
+            other => GraphError::Candidate(other),
+        })?,
+    };
+    let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
     let mut expanded = plans::expand(
         document,
         stored_extensions,
@@ -1500,6 +1582,25 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             // then write an instance-bound request while a host owns the graph
             // lock and is resolving or creating a worktree.
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            if !submission_refusals.is_empty() {
+                for progress in &mut checkpoint.nodes {
+                    if progress.state == NodeState::Pending {
+                        let reason = submission_refusals
+                            .iter()
+                            .find(|(id, _)| id == &progress.id)
+                            .map_or("graph submission refused before launch", |(_, reason)| {
+                                reason.as_str()
+                            });
+                        transitions::fail_with(
+                            progress,
+                            "writer_preflight_refused",
+                            reason.to_owned(),
+                        );
+                    }
+                }
+                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                return Ok(transitions::graph_run(checkpoint));
+            }
             for index in 0..plan.nodes.len() {
                 if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
                     settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
@@ -1591,6 +1692,21 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
     };
 
+    if let Some(limit) = admitted.growth_limit {
+        // A refused resume cannot reopen or re-pause a cancelled graph.
+        if checkpoint.cancelled {
+            return Ok(GraphRun {
+                status: GraphStatus::Cancelled,
+                outcome: None,
+                checkpoint,
+                advance_error: None,
+            });
+        }
+        checkpoint.set_pause(PauseCause::StructuralLimit, &limit.to_string());
+        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+        return Ok(transitions::graph_run(checkpoint));
+    }
+
     if recover_minima(&mut checkpoint, &plan) {
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
@@ -1599,50 +1715,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         asks::identity::<R, J::Error>(&mut checkpoint, owner)?;
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
-    // Extensions have no count or length limit of their own; they only have
-    // to fit in the checkpoint envelope with everything else.
-    if extensions
-        .iter()
-        .any(|e| !checkpoint.extensions.contains(e))
-    {
-        let mut all = checkpoint.extensions.clone();
-        all.extend(
-            extensions
-                .iter()
-                .filter(|e| !checkpoint.extensions.contains(e))
-                .cloned(),
-        );
-        if let Some(reason) = graph_envelope_reason(document, &checkpoint.expansions, &all, &plan) {
-            return Err(GraphError::Extension(reason));
-        }
-    }
-    let mut effective_budget = budget.clone();
-    for (extension, replay) in
-        checkpoint
-            .extensions
-            .iter()
-            .map(|e| (e, true))
-            .chain(extensions.iter().map(|e| {
-                (
-                    e,
-                    e.starts_with("limits.") && checkpoint.extensions.contains(e),
-                )
-            }))
-    {
-        if extension.starts_with("loop.") {
-            loops::validate_extension(document, extension, &unbounded)
-                .map_err(GraphError::Extension)?;
-        } else if extension.starts_with("limits.") {
-            if !replay {
-                return Err(GraphError::Extension(format!(
-                    "{extension}: graph limits are configured by the host"
-                )));
-            }
-        } else {
-            apply_extension(&mut effective_budget, extension, replay)
-                .map_err(|error| GraphError::Extension(error.to_string()))?;
-        }
-    }
+    let effective_budget = admitted.effective_budget;
     if transitions::refresh_limit_notes(&mut checkpoint, document) {
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
@@ -1654,68 +1727,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         let mut resume_view = checkpoint.clone();
         restore_cancelled_nodes(&mut resume_view)
             .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
-        if extensions.iter().any(|e| e.starts_with("loop.")) {
-            let mut prospective = resume_view.clone();
-            for extension in extensions.iter().filter(|e| e.starts_with("loop.")) {
-                loops::validate_resume_extension(document, &resume_view, extension, &unbounded)
-                    .map_err(GraphError::Extension)?;
-                loops::validate_resume_extension(document, &prospective, extension, &unbounded)
-                    .map_err(GraphError::Extension)?;
-                if !prospective.extensions.contains(extension) {
-                    prospective.extensions.push(extension.clone());
-                }
-            }
-        }
-        if extensions.iter().any(|e| {
-            e.starts_with("loop.")
-                && e.split_once('=')
-                    .is_some_and(|(key, _)| key.ends_with(".rounds"))
-        }) {
-            let mut prospective = checkpoint.clone();
-            for extension in extensions {
-                if !prospective.extensions.contains(extension) {
-                    prospective.extensions.push(extension.clone());
-                }
-            }
-            let preview = plans::expand(
-                document,
-                &prospective.extensions,
-                &checkpoint.expansions,
-                &unbounded,
-            )
-            .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
-            let (preview_plan, _) = validate_flat_plan(&preview, &unbounded)
-                .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
-            if let Some(reason) =
-                structural_limit_reason(&preview, &preview_plan, limits).or_else(|| {
-                    graph_envelope_reason(
-                        document,
-                        &checkpoint.expansions,
-                        &prospective.extensions,
-                        &preview_plan,
-                    )
-                })
-            {
-                for extension in extensions.iter().filter(|e| e.starts_with("loop.")) {
-                    let name = extension
-                        .strip_prefix("loop.")
-                        .and_then(|e| e.split_once('=').map(|(key, _)| key))
-                        .and_then(|key| key.rsplit_once('.').map(|(name, _)| name))
-                        .ok_or(GraphError::Invalid(String::from("loop extension")))?;
-                    loops::pause_invalid_decision(&mut checkpoint, name, &reason, journal)?;
-                }
-                return Ok(GraphRun {
-                    status: if checkpoint.cancelled {
-                        GraphStatus::Cancelled
-                    } else {
-                        GraphStatus::Paused
-                    },
-                    outcome: None,
-                    checkpoint,
-                    advance_error: None,
-                });
-            }
-        }
         // Keep the cancellation fence and its displayed states durable until
         // every extension is accepted. Reopen in the same save as those states.
         if checkpoint.cancelled {
@@ -1752,6 +1763,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 false,
                 &[],
                 observed_ci,
+                &[],
+                None,
             );
         }
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
@@ -1762,37 +1775,54 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
             continue 'schedule;
         }
-        if let Some(next) =
-            review::correct_verdict(document, &plan, &checkpoint, limits, &worktree_layout)
-                .map_err(|error| GraphError::Refused(error.to_string()))?
-        {
-            let next_expanded = plans::expand(document, &next.extensions, &next.expansions, limits)
-                .map_err(|error| GraphError::Invalid(error.to_string()))?;
-            let (next_plan, next_positions) = validate_flat_plan(&next_expanded, limits)
-                .map_err(|error| GraphError::Invalid(error.to_string()))?;
-            owner
-                .validate_expansion(&next_expanded, &next)
-                .map_err(GraphError::Run)?;
-            journal.save(&next).map_err(GraphError::Journal)?;
-            checkpoint = next;
-            (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
-            resume = false;
-            continue 'schedule;
+        // Save the running graph's pause before any recovery patch is planned
+        // against today's tighter limits.
+        let structural_pause =
+            transitions::refresh_structure_pause(&mut checkpoint, &expanded, &plan, limits);
+        if structural_pause.is_some() {
+            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            // A resume against tighter limits must return the durable pause
+            // before observing attempts can settle the graph and clear it.
+            if resume {
+                return Ok(transitions::graph_run(checkpoint));
+            }
         }
-        if let Some((next, next_expanded, next_plan, next_positions)) = settle_stopped_writer::<R, J>(
-            document,
-            owner,
-            &plan,
-            &checkpoint,
-            limits,
-            &worktree_layout,
-        )? {
-            // A stop saved by an earlier host, or one the chair resumed.
-            journal.save(&next).map_err(GraphError::Journal)?;
-            checkpoint = next;
-            (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
-            resume = false;
-            continue 'schedule;
+        if structural_pause.is_none() {
+            if let Some(next) =
+                review::correct_verdict(document, &plan, &checkpoint, limits, &worktree_layout)
+                    .map_err(|error| GraphError::Refused(error.to_string()))?
+            {
+                let next_expanded =
+                    plans::expand(document, &next.extensions, &next.expansions, limits)
+                        .map_err(|error| GraphError::Invalid(error.to_string()))?;
+                let (next_plan, next_positions) = validate_flat_plan(&next_expanded, limits)
+                    .map_err(|error| GraphError::Invalid(error.to_string()))?;
+                owner
+                    .validate_expansion(&next_expanded, &next)
+                    .map_err(GraphError::Run)?;
+                journal.save(&next).map_err(GraphError::Journal)?;
+                checkpoint = next;
+                (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
+                resume = false;
+                continue 'schedule;
+            }
+            if let Some((next, next_expanded, next_plan, next_positions)) =
+                settle_stopped_writer::<R, J>(
+                    document,
+                    owner,
+                    &plan,
+                    &checkpoint,
+                    limits,
+                    &worktree_layout,
+                )?
+            {
+                // A stop saved by an earlier host, or one the chair resumed.
+                journal.save(&next).map_err(GraphError::Journal)?;
+                checkpoint = next;
+                (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
+                resume = false;
+                continue 'schedule;
+            }
         }
         plans::remaining(&mut checkpoint, &expanded, limits);
         if checkpoint.cancelled {
@@ -1818,12 +1848,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     .is_some_and(|spec| spec.fallback.is_some()))
                             || (n.state == NodeState::Succeeded
                                 && n.expansion_pause.is_some()
-                                && node
-                                    .plan
-                                    .as_ref()
-                                    .is_some_and(|spec| spec.fallback.is_some())))
+                                && node.plan.is_some()))
                 })
-                && let Some((next_expanded, next_plan, next_positions)) = plans::settle(
+            {
+                let before_settle = checkpoint.clone();
+                let settled = plans::settle(
                     node,
                     document,
                     &expanded,
@@ -1831,21 +1860,36 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     None,
                     limits,
                     &worktree_layout,
-                )
-            {
-                validate_expanded_rows(&checkpoint, &next_plan)?;
-                owner
-                    .validate_expansion(&next_expanded, &checkpoint)
-                    .map_err(GraphError::Run)?;
-                journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
-                resume = false;
-                continue 'schedule;
+                    &admission_policy,
+                );
+                if let Some((next_expanded, next_plan, next_positions)) = settled {
+                    validate_expanded_rows(&checkpoint, &next_plan)?;
+                    owner
+                        .validate_expansion(&next_expanded, &checkpoint)
+                        .map_err(GraphError::Run)?;
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                    (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
+                    resume = false;
+                    continue 'schedule;
+                }
+                // A rejected retry reactivates its pause; persist it before
+                // returning or considering other work.
+                if checkpoint != before_settle {
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                }
             }
         }
         let structural_pause =
             transitions::refresh_structure_pause(&mut checkpoint, &expanded, &plan, limits);
-        if structural_pause.is_some() {
+        if structural_pause.is_some()
+            || (checkpoint.pause_cause() == Some(PauseCause::StructuralLimit)
+                && checkpoint.nodes.iter().any(|node| {
+                    matches!(
+                        node.expansion_cause,
+                        Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
+                    )
+                }))
+        {
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
 
@@ -1944,18 +1988,27 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             journal,
                         )?
                     {
-                        if let Err(reason) = loops::prepare_decision_extension(
+                        if let Err(error) = loops::prepare_decision_extension(
                             document,
                             &checkpoint,
                             &extension,
                             limits,
                         ) {
-                            loops::pause_invalid_decision(
-                                &mut checkpoint,
-                                &node.id,
-                                &reason,
-                                journal,
-                            )?;
+                            match error {
+                                loops::DecisionExtensionError::Structural(limit) => {
+                                    checkpoint
+                                        .set_pause(PauseCause::StructuralLimit, &limit.to_string());
+                                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                                }
+                                loops::DecisionExtensionError::Invalid(reason) => {
+                                    loops::pause_invalid_decision(
+                                        &mut checkpoint,
+                                        &node.id,
+                                        &reason,
+                                        journal,
+                                    )?;
+                                }
+                            }
                         } else {
                             return advance_inner(
                                 document,
@@ -1966,6 +2019,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 true,
                                 &[extension],
                                 observed_ci,
+                                &[],
+                                None,
                             );
                         }
                     }
@@ -3035,6 +3090,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let observation = match owner.observe_or_start(
                     &key,
                     NodeInput {
+                        writer_dirty_preflight: node.writer_dirty_preflight,
                         review_launch: node.review_launch,
                         require_skill_location: node.require_skill_location,
                         settlement_retries,
@@ -3411,6 +3467,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         false,
                         &[],
                         observed_ci,
+                        &[],
+                        None,
                     );
                 }
                 let appended = if settled_result.is_some() || node.plan.is_some() {
@@ -3422,6 +3480,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         settled_result.as_deref(),
                         limits,
                         &worktree_layout,
+                        &admission_policy,
                     )
                 } else {
                     None
@@ -3491,6 +3550,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     None,
                     limits,
                     &worktree_layout,
+                    &admission_policy,
                 )
             {
                 validate_expanded_rows(&checkpoint, &next_plan)?;
@@ -3534,6 +3594,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 false,
                 &[],
                 observed_ci,
+                &[],
+                None,
             );
         }
         if document.delivery == Some(provenant_records::run::DeliveryMode::Pr)

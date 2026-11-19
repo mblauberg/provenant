@@ -182,7 +182,7 @@ bounded_input! {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DispatchRefusalFact {
     DetachedWriter,
@@ -191,14 +191,25 @@ pub enum DispatchRefusalFact {
     GraphSchema,
     GraphComposite,
     GraphPlan,
+    GraphCycle {
+        node: crate::graph::refusal::GraphIdentifier,
+    },
+    GraphWriterWorktree {
+        node: crate::graph::refusal::GraphIdentifier,
+    },
     GraphStructuralLimit(crate::graph::GraphStructuralLimit),
+    GraphExtension(crate::graph::refusal::ExtensionCause),
+    GraphNodeLimit {
+        node: crate::graph::refusal::GraphIdentifier,
+        limit: crate::graph::GraphStructuralLimit,
+    },
     GraphEnvelope,
     GraphOutputKind(crate::graph::GraphOutputField),
     Resource(provenant_records::diagnostic::ResourceFact),
 }
 
 /// Host-owned causes safe to return through an attempt's relay.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphRelayCause {
     ParentSettled,
@@ -207,6 +218,7 @@ pub enum GraphRelayCause {
     RetryContainerBrief,
     RetryBriefNeedsNode,
     RetryInvalidConfiguration,
+    CredentialValue,
     ChildDepth,
     WriterParentRequired,
     WriterWorktree,
@@ -223,14 +235,16 @@ pub enum GraphRelayCause {
     InvalidTemplate,
     InvalidConfig,
     InvalidReview,
-    Secret,
     Cycle,
     Conflict,
 }
 
 impl GraphRelayCause {
-    fn text(self) -> &'static str {
+    fn text(&self) -> &'static str {
         match self {
+            Self::CredentialValue => {
+                "input matches the declared credential value rule; remove credential material and retry"
+            }
             Self::RetryInvalidConfiguration => {
                 "the selected node cannot be retried with its current graph configuration"
             }
@@ -287,9 +301,6 @@ impl GraphRelayCause {
             Self::InvalidReview => {
                 "the review panel could not be resolved; check the review routing configuration"
             }
-            Self::Secret => {
-                "the child request contains a potential secret; remove credential material before retrying"
-            }
             Self::Cycle => "the patch creates a dependency cycle; remove the cyclic dependency",
             Self::Conflict => {
                 "the patch conflicts with the current graph revision or started nodes; refresh status and revise the patch"
@@ -330,11 +341,6 @@ pub enum InvalidInputDetail {
         limit: usize,
     },
     FieldTitle(String),
-    /// Scanner facts contain only a bounded field name and a closed rule identifier.
-    ContentScan {
-        field: String,
-        assignment: bool,
-    },
     InputUnreadable,
     InputTooLarge,
     InputInvalidUtf8,
@@ -367,10 +373,6 @@ impl InvalidInputDetail {
                 limit: *limit,
             },
             Self::FieldTitle(field) => Self::FieldTitle(clean(field)),
-            Self::ContentScan { field, assignment } => Self::ContentScan {
-                field: clean(field),
-                assignment: *assignment,
-            },
             Self::Parameter(refusal) => Self::Parameter(Box::new(refusal.bounded())),
             other => other.clone(),
         }
@@ -388,9 +390,7 @@ impl InvalidInputDetail {
             | Self::Configuration(text) => vec![text],
             Self::RetryNode { graph, node } => vec![graph, node],
             Self::Parameter(refusal) => refusal.strings_mut(),
-            Self::FieldDecode { field, .. }
-            | Self::FieldTooLarge { field, .. }
-            | Self::ContentScan { field, .. } => vec![field],
+            Self::FieldDecode { field, .. } | Self::FieldTooLarge { field, .. } => vec![field],
             Self::CloudPlacementRemoved
             | Self::OperationIdRetired
             | Self::OperationFailed
@@ -428,6 +428,7 @@ impl InvalidInputDetail {
                     Some("select a node to retry with `provenant retry NAME/NODE`".into())
                 }
             }
+
             Self::UpgradeDrainRequired => Some("Finish or cancel old pending graphs and drain live lanes with the previous release before admitting new work.".into()),
             Self::CutoverFindings(findings) => Some(findings.clone()),
             Self::TemplateInvalid => Some("invalid input field `templates`: template could not be loaded or validated".into()),
@@ -453,7 +454,6 @@ impl InvalidInputDetail {
             Self::FieldTooLarge { field, limit } => safe_input_field(field)
                 .map(|path| format!("invalid input field `{path}`: exceeds {limit} bytes")),
             Self::FieldTitle(field) => safe_input_field(field).map(|path| format!("invalid input field `{path}`: task title must be 1 to 256 bytes and contain no control characters")),
-            Self::ContentScan { field, assignment } => safe_input_field(field).map(|path| format!("input field `{path}` matches the {} rule; remove credential material and retry", if *assignment { "credential assignment" } else { "credential token or URL userinfo" })),
         }
     }
 }
@@ -493,7 +493,9 @@ fn safe_template_name_error(reason: &str) -> Option<String> {
     let (unknown, remainder) = message
         .strip_prefix("unknown template ")?
         .split_once("; ")?;
-    if !crate::graph::template::valid_template_name(unknown) {
+    if !crate::graph::template::valid_template_name(unknown)
+        || crate::graph::patch::scan_for_secrets(unknown).is_err()
+    {
         return None;
     }
     if remainder == "no known templates are available" {
@@ -592,6 +594,42 @@ pub enum FacadeError {
     ConfinementRefused {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resource: Option<provenant_records::diagnostic::ResourceFact>,
+    },
+    /// A writer bind refused because another lease holds the worktree. Holder
+    /// facts are local-only: peers receive the typed code and repair action,
+    /// never an unanchored worktree path.
+    #[error("writer lease held{}", .holder.map_or_else(String::new, |holder| format!(" by {holder}")))]
+    WriterLeaseHeld {
+        #[serde(skip)]
+        holder: Option<AttemptId>,
+        #[serde(skip)]
+        branch: Option<String>,
+        #[serde(skip)]
+        worktree: Option<String>,
+        #[serde(skip)]
+        age: Option<String>,
+        #[serde(skip)]
+        live: Option<bool>,
+    },
+    /// A typed run refusal with no richer facade projection. It carries the
+    /// run's own stable code and repair action so causes never collapse into
+    /// one umbrella refusal. Local detail is in-process only; peers see the
+    /// typed code and action, never the unprojected source text.
+    #[error("{run_code}: {next}")]
+    RunKind {
+        /// `provenant_run::ErrorKind::code()` that caused the refusal.
+        /// Named `run_code` so it does not collide with the serde tag `code`.
+        run_code: String,
+        /// Actionable repair for this kind, safe to disclose on the peer wire.
+        next: String,
+        /// Sanitised local diagnostic detail; never published to a peer.
+        #[serde(skip)]
+        detail: Option<String>,
+        /// The typed resource fact behind an admission refusal (disk floor,
+        /// memory pressure, lane cap). Closed and safe for the peer wire, so
+        /// the setting and its source survive both adapters.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource: Option<Box<provenant_records::diagnostic::ResourceFact>>,
     },
     #[error("writer lock or writer is busy{}", .holder.map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
     WriterBusy {
@@ -758,7 +796,7 @@ fn dispatch_refused_wire<S: serde::Serializer>(
     let diagnostic = FacadeError::DispatchRefused {
         reason: reason.to_owned(),
         disk: disk.clone(),
-        fact: *fact,
+        fact: fact.clone(),
     }
     .diagnostic();
     let mut wire = serializer.serialize_struct("DispatchRefused", 3)?;
@@ -947,13 +985,83 @@ impl FacadeError {
         )
     }
 
+    pub fn graph_candidate(error: crate::graph::CandidateError) -> Self {
+        use crate::graph::CandidateError;
+        match error {
+            CandidateError::Plan => {
+                Self::graph_admission(crate::graph::AdmissionError::Plan(String::new()))
+            }
+            CandidateError::CloudPlacementRemoved => {
+                Self::invalid(InvalidInputDetail::CloudPlacementRemoved)
+            }
+            CandidateError::Checkpoint => Self::StateCorrupt,
+            CandidateError::CheckpointTopology { node, invariant } => Self::StateCorruptDetail {
+                detail: format!("graph checkpoint node {node}: {invariant}"),
+            },
+            CandidateError::Cycle { node } => {
+                Self::graph_admission(crate::graph::AdmissionError::Cycle { node })
+            }
+            CandidateError::WriterWorktree { node } => {
+                Self::graph_admission(crate::graph::AdmissionError::WriterWorktree { node })
+            }
+            CandidateError::Schema => {
+                Self::graph_admission(crate::graph::AdmissionError::Schema(String::new()))
+            }
+            CandidateError::Composite => {
+                Self::graph_admission(crate::graph::AdmissionError::Composite(String::new()))
+            }
+            CandidateError::OutputKind(field) => {
+                Self::graph_admission(crate::graph::AdmissionError::OutputKind {
+                    field,
+                    reason: String::new(),
+                })
+            }
+            CandidateError::Extension(cause) => Self::DispatchRefused {
+                reason: cause.to_string(),
+                fact: Some(DispatchRefusalFact::GraphExtension(cause)),
+                disk: None,
+            },
+            CandidateError::NodeStructural { node, limit } => Self::DispatchRefused {
+                reason: format!("node {node}: {limit}"),
+                fact: Some(DispatchRefusalFact::GraphNodeLimit { node, limit }),
+                disk: None,
+            },
+            CandidateError::Structural(limit) => {
+                Self::graph_admission(crate::graph::AdmissionError::StructuralLimit(limit))
+            }
+            CandidateError::Envelope(limit) => {
+                Self::graph_admission(crate::graph::AdmissionError::Envelope(limit))
+            }
+            other => Self::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: other.to_string(),
+            },
+        }
+    }
+
     /// Retain the typed admission stage while keeping its original refusal text.
     pub fn graph_admission(error: crate::graph::AdmissionError) -> Self {
         use crate::graph::AdmissionError;
         let fact = match &error {
+            AdmissionError::CloudPlacementRemoved => {
+                return Self::invalid(InvalidInputDetail::CloudPlacementRemoved);
+            }
             AdmissionError::Schema(_) => DispatchRefusalFact::GraphSchema,
             AdmissionError::Composite(_) => DispatchRefusalFact::GraphComposite,
-            AdmissionError::Plan(_) => DispatchRefusalFact::GraphPlan,
+            AdmissionError::Plan(reason) => reason
+                .strip_prefix("node ")
+                .and_then(|reason| reason.strip_suffix(": writer worktree"))
+                .and_then(|node| node.to_owned().try_into().ok())
+                .map_or(DispatchRefusalFact::GraphPlan, |node| {
+                    DispatchRefusalFact::GraphWriterWorktree { node }
+                }),
+            AdmissionError::WriterWorktree { node } => {
+                DispatchRefusalFact::GraphWriterWorktree { node: node.clone() }
+            }
+            AdmissionError::Cycle { node } => {
+                DispatchRefusalFact::GraphCycle { node: node.clone() }
+            }
             AdmissionError::StructuralLimit(limit) => {
                 DispatchRefusalFact::GraphStructuralLimit(*limit)
             }
@@ -963,7 +1071,28 @@ impl FacadeError {
             }
         };
         Self::DispatchRefused {
-            reason: error.to_string(),
+            reason: match &fact {
+                DispatchRefusalFact::GraphStructuralLimit(limit) => limit.to_string(),
+                DispatchRefusalFact::GraphCycle { node } => {
+                    format!("node {node}: dependency cycle")
+                }
+                DispatchRefusalFact::GraphWriterWorktree { node } => {
+                    format!("node {node}: writer worktree")
+                }
+                DispatchRefusalFact::GraphEnvelope => {
+                    "graph checkpoint would exceed its size limit".into()
+                }
+                DispatchRefusalFact::GraphSchema => {
+                    "graph document schema_version is invalid".into()
+                }
+                DispatchRefusalFact::GraphOutputKind(_) => {
+                    "graph outputs select an unavailable output kind".into()
+                }
+                DispatchRefusalFact::GraphComposite => {
+                    "graph composite or loop expansion is invalid".into()
+                }
+                _ => "graph plan schema or topology is invalid".into(),
+            },
             disk: None,
             fact: Some(fact),
         }
@@ -1031,6 +1160,20 @@ impl FacadeError {
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphStructuralLimit(limit)), .. } => {
                 projected = projected.detail(limit.to_string()).next("reduce the graph or adjust the named graph limit");
             }
+            Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphNodeLimit { node, limit }), .. } => {
+                projected = projected.detail(format!("node {node}: {limit}")).next("reduce the node input or adjust the named graph limit");
+            }
+            Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphExtension(cause)), .. } => {
+                projected = projected.detail(cause.to_string()).next(cause.next_action());
+            }
+            Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphWriterWorktree { node }), .. } => {
+                projected = projected.detail(format!("node {node}: writer worktree"))
+                    .next("pass --worktree PATH for an existing worktree, or --branch B --base REF to create one");
+            }
+            Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphCycle { node }), .. } => {
+                projected = projected.detail(format!("node {node}: dependency cycle"))
+                    .next("remove the cyclic dependency and retry");
+            }
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphPlan), reason, .. } => {
                 let reason = safe_graph_plan_reason(&provenant_core::bounded_line(reason, 4096));
                 let next = if reason.contains("writer worktree") {
@@ -1050,8 +1193,10 @@ impl FacadeError {
                     DispatchRefusalFact::CheckedOutWriter => ("the branch is already checked out", "run `provenant worktree list`, inspect custody, then select the existing checkout with --worktree"),
                     DispatchRefusalFact::GraphSchema => ("graph document schema_version is invalid", "use a schema version that supports the document fields"),
                     DispatchRefusalFact::GraphComposite => ("graph composite or loop expansion is invalid", "inspect the composite or loop definition"),
-                    DispatchRefusalFact::GraphPlan => unreachable!(),
+                    DispatchRefusalFact::GraphPlan | DispatchRefusalFact::GraphCycle { .. } | DispatchRefusalFact::GraphWriterWorktree { .. } => unreachable!(),
                     DispatchRefusalFact::GraphStructuralLimit(_) => unreachable!(),
+                    DispatchRefusalFact::GraphExtension(_) => unreachable!(),
+                    DispatchRefusalFact::GraphNodeLimit { .. } => unreachable!(),
                     DispatchRefusalFact::Resource(_) => unreachable!(),
                     DispatchRefusalFact::GraphEnvelope => ("graph checkpoint would exceed its size limit", "split the graph into smaller runs"),
                     DispatchRefusalFact::GraphOutputKind(crate::graph::GraphOutputField::Input) => ("graph inputs[].outputs selects an unavailable output kind", "select an output supplied by the source node"),
@@ -1089,6 +1234,41 @@ impl FacadeError {
             Self::WriterUnknown | Self::WorktreeUnregistered { .. } => projected = projected.next("inspect worktree registration and custody before selecting a checkout with --worktree"),
             Self::ConfinementRefused { resource: Some(fact) } => projected = fact.project(projected),
             Self::ConfinementRefused { resource: None } => projected = projected.next("inspect the requested access and confinement policy"),
+            Self::WriterLeaseHeld {
+                holder,
+                branch,
+                worktree,
+                age,
+                live,
+            } => {
+                let mut facts = Vec::new();
+                if let Some(holder) = holder {
+                    facts.push(format!("attempt {holder}"));
+                }
+                if let Some(branch) = branch {
+                    facts.push(format!("branch {branch}"));
+                }
+                if let Some(worktree) = worktree {
+                    facts.push(format!("worktree {worktree}"));
+                }
+                if let Some(age) = age {
+                    facts.push(format!("reservation age {age}"));
+                }
+                if let Some(live) = live {
+                    facts.push(format!("live: {live}"));
+                }
+                if !facts.is_empty() {
+                    projected = projected.detail(facts.join(", "));
+                }
+                projected = projected.next("reconcile the holding attempt before retrying writer binding");
+            }
+            Self::RunKind { resource: Some(fact), .. } => projected = fact.project(projected),
+            Self::RunKind { next, detail, resource: None, .. } => {
+                if let Some(detail) = detail {
+                    projected = projected.detail(detail.clone());
+                }
+                projected = projected.next(next.clone());
+            }
             Self::CredentialRoot { access } => {
                 let access = match access.as_str() { "read" => "read", "write" => "write", _ => "requested" };
                 projected = projected.detail(format!("credential root refused for {access} grant"))
@@ -1104,6 +1284,9 @@ impl FacadeError {
     }
 
     pub fn code(&self) -> &str {
+        if let Self::RunKind { run_code, .. } = self {
+            return run_code;
+        }
         if let Self::GraphRelayRefused { refusal_code, .. }
         | Self::RecordedRefusal { refusal_code, .. } = self
             && !refusal_code.is_empty()
@@ -1140,9 +1323,11 @@ impl FacadeError {
             Self::LaneDepth => "lane_depth",
             Self::LaneCoordinationRefused => "lane_coordination_refused",
             Self::ConfinementRefused { .. } => "confinement_refused",
+            Self::RunKind { .. } => "run_refused",
             Self::WriterBusy { .. } => "writer_busy",
             Self::WriterLockBusy => "writer_lock_busy",
             Self::WriterUnknown => "writer_unknown",
+            Self::WriterLeaseHeld { .. } => "writer_lease_held",
             Self::CredentialRoot { .. } => "credential_root",
             Self::DispatchRefused { .. } => "dispatch_refused",
             Self::DispatchUnobserved { .. } => "dispatch_unobserved",
@@ -1361,6 +1546,7 @@ pub(super) fn safe_input_field(field: &str) -> Option<String> {
         "encoding",
         "generation",
         "expected",
+        "replace",
     ];
     if field.len() <= 128
         && field.bytes().all(|b| {
@@ -1550,6 +1736,18 @@ impl From<&super::CoordinationError> for FacadeError {
 impl From<&provenant_fabric_store::Error> for FacadeError {
     fn from(error: &provenant_fabric_store::Error) -> Self {
         use provenant_fabric_store::Error;
+        if let Error::Decode(decode) = error
+            && let provenant_records::DecodeError::UnsupportedVersion { found, .. } =
+                decode.root_cause()
+            && *found > 1
+        {
+            return Self::UpgradeRequired {
+                reader_release: env!("CARGO_PKG_VERSION").into(),
+                writer_release: "unknown".into(),
+                record: "record schema".into(),
+                version: *found,
+            };
+        }
         match error {
             Error::NotFound => Self::NotFound,
             Error::StaleFence => Self::StaleFence,
@@ -1558,16 +1756,6 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             Error::Cancelled => Self::Cancelled,
             Error::Invalid(_) => Self::InvalidInput { detail: None },
             Error::PathEncoding => Self::InvalidInput { detail: None },
-            Error::Decode(provenant_records::DecodeError::UnsupportedVersion { found, .. })
-                if *found > 1 =>
-            {
-                Self::UpgradeRequired {
-                    reader_release: env!("CARGO_PKG_VERSION").into(),
-                    writer_release: "unknown".into(),
-                    record: "record schema".into(),
-                    version: *found,
-                }
-            }
             Error::SchemaVersion(version)
                 if *version > provenant_fabric_store::CURRENT_SCHEMA_VERSION as i64 =>
             {
@@ -1632,6 +1820,7 @@ mod diagnostic_tests {
     fn relay_causes_survive_diagnostics_and_wire_round_trips()
     -> Result<(), Box<dyn std::error::Error>> {
         for cause in [
+            super::GraphRelayCause::CredentialValue,
             super::GraphRelayCause::WriterParentRequired,
             super::GraphRelayCause::WriterWorktree,
             super::GraphRelayCause::ChildDepth,
@@ -1639,7 +1828,7 @@ mod diagnostic_tests {
         ] {
             let error = FacadeError::GraphRelayRefused {
                 refusal_code: "refused_child".into(),
-                detail: Some(super::InvalidInputDetail::GraphRelayCause(cause)),
+                detail: Some(super::InvalidInputDetail::GraphRelayCause(cause.clone())),
             };
             assert_eq!(error.diagnostic().detail.as_deref(), Some(cause.text()));
             let restored: FacadeError = serde_json::from_value(serde_json::to_value(&error)?)?;
@@ -1777,6 +1966,8 @@ mod diagnostic_tests {
         let error = provenant_fabric_store::Error::Decode(provenant_records::DecodeError::Typed {
             line: 2,
             column: 3,
+            field: None,
+            schema_version: None,
         });
         let facade = FacadeError::from(&error);
         assert_eq!(facade.code(), "state_corrupt");
@@ -1799,6 +1990,14 @@ mod diagnostic_tests {
                 line: 1,
                 column: 1,
             }),
+            Error::Decode(
+                provenant_records::DecodeError::UnsupportedVersion {
+                    found: 3,
+                    line: 1,
+                    column: 1,
+                }
+                .with_context("/state/attempts/example/launch.json", "LaunchRecord"),
+            ),
         ];
         for error in errors {
             let facade = FacadeError::from(&error);

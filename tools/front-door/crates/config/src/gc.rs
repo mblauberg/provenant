@@ -254,8 +254,8 @@ retention_classes! {
         owner: FabricRuntime,
         adapter: graph_checkpoints,
         eligibility: Declared,
-        detail: "terminal checkpoint older than configured retention",
-        settings: ["gc.graph_checkpoint_days"],
+        detail: "terminal checkpoint older than configured retention; stale open graphs are offered for stop",
+        settings: ["gc.graph_checkpoint_days", "gc.stale_graph_age"],
         triggers: FULL_GC
     },
     ManagedReleases => {
@@ -351,8 +351,6 @@ pub struct LaneBuildSettings {
     pub start_spacing_ms: Option<u64>,
     /// Kernel pressure threshold for admission; Critical unless set.
     pub memory_pressure_threshold: Option<MemoryPressureThreshold>,
-    #[serde(default, deserialize_with = "deserialize_auto")]
-    pub max_concurrent_builds: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_auto")]
     /// Compiler jobs per lane; at most two by default to bound memory on laptops.
     pub cargo_build_jobs: Option<u64>,
@@ -533,9 +531,6 @@ impl LaneBuildSettings {
     pub fn invalid_keys(&self) -> Vec<&'static str> {
         let mut invalid = Vec::new();
         let in_range = |value: Option<u64>, max: u64| value.is_none_or(|n| (1..=max).contains(&n));
-        if self.max_concurrent_builds.is_some_and(|n| n > 64) {
-            invalid.push("max_concurrent_builds");
-        }
         if self
             .start_spacing_ms
             .is_some_and(|spacing| spacing > MAX_START_SPACING_MS)
@@ -621,31 +616,17 @@ impl LaneBuildSettings {
         self.build_dir_grace_seconds
             .unwrap_or(DEFAULT_BUILD_DIR_GRACE_SECONDS)
     }
-    /// Concurrent cargo builds the host allows. `0` disables the cap. An
-    /// unset value is `max(1, min(cores / cargo_build_jobs, total GiB / 6))`,
-    /// so a 10-core 16 GiB host with the default 2 jobs gets 2.
-    pub fn build_limit(&self, total_bytes: u64) -> u64 {
-        if let Some(limit) = self.max_concurrent_builds {
-            return if limit == 0 { 0 } else { limit.clamp(1, 64) };
-        }
-        let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u64);
-        Self::automatic_builds(cores, self.jobs(), total_bytes)
-    }
-
-    /// `host` when `max_concurrent_builds` is set, including `0` (disabled).
-    /// Otherwise the count is the compiled default from cores and memory.
-    pub fn build_limit_source(&self) -> &'static str {
-        if self.max_concurrent_builds.is_some() {
-            "host"
-        } else {
-            "default"
-        }
-    }
     /// The automatic build limit for a host with `cores` and `total_bytes`.
+    /// A 10-core 16 GiB host with the default 2 jobs gets 2.
     pub fn automatic_builds(cores: u64, jobs: u64, total_bytes: u64) -> u64 {
         let by_cpu = cores / jobs.max(1);
         let by_memory = total_bytes / (6 * 1024_u64.pow(3));
         by_cpu.min(by_memory).clamp(1, 64)
+    }
+
+    pub(crate) fn automatic_build_limit(&self, total_bytes: u64) -> u64 {
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u64);
+        Self::automatic_builds(cores, self.jobs(), total_bytes)
     }
     /// Unconfigured caps are disabled. Explicit settings retain their bounds.
     pub fn total_lanes(&self) -> u64 {
@@ -717,6 +698,8 @@ impl StoreSettings {
 pub struct GcSettings {
     pub schedule: bool,
     pub idle: String,
+    /// Age after which a paused/pending graph with landed work is offered for stop.
+    pub stale_graph_age: String,
     pub graph_checkpoint_days: u64,
     pub discard_archive_days: u64,
     pub free_floor: Option<String>,
@@ -733,6 +716,7 @@ impl Default for GcSettings {
         Self {
             schedule: true,
             idle: "6h".into(),
+            stale_graph_age: "1d".into(),
             graph_checkpoint_days: 90,
             discard_archive_days: 90,
             free_floor: None,
@@ -837,6 +821,11 @@ impl GcSettings {
         parse_gc_idle_duration(&self.idle)
     }
 
+    /// Age after which gc offers to stop a stale graph, in seconds.
+    pub fn stale_graph_age_seconds(&self) -> Result<u64, &'static str> {
+        parse_gc_idle_duration(&self.stale_graph_age)
+    }
+
     pub fn disk_limits(&self, state: &Path) -> std::io::Result<DiskLimits> {
         use provenant_records::diagnostic::SettingSource::{Configuration, ShippedDefault};
         Ok(DiskLimits {
@@ -908,6 +897,7 @@ impl GcSettings {
 
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         self.idle_seconds()?;
+        self.stale_graph_age_seconds()?;
         if !(1..=3650).contains(&self.discard_archive_days) {
             return Err("discard_archive_days_range");
         }
@@ -1201,14 +1191,13 @@ mod tests {
         let temp = tempfile::tempdir()?;
         std::fs::write(
             temp.path().join("config.toml"),
-            "schema_version=1\n[gc]\nidle='invalid'\nschedule=false\nfuture_option=true\n[domains.fabric.lanes]\ncargo_build_jobs=-2\nmax_concurrent_builds=3\nmemory_pressure_threshold='unknown'\n",
+            "schema_version=1\n[gc]\nidle='invalid'\nschedule=false\nfuture_option=true\n[domains.fabric.lanes]\ncargo_build_jobs=-2\nmemory_pressure_threshold='unknown'\n",
         )?;
         let gc = super::GcSettings::read(temp.path())?;
         assert_eq!(gc.idle, super::GcSettings::default().idle);
         assert!(!gc.schedule);
         let lanes = super::LaneBuildSettings::read(temp.path())?;
         assert_eq!(lanes.cargo_build_jobs, None);
-        assert_eq!(lanes.max_concurrent_builds, Some(3));
         assert_eq!(
             lanes.memory_pressure_threshold(),
             super::MemoryPressureThreshold::Critical
@@ -1436,14 +1425,11 @@ mod build_tests {
     #[test]
     fn automatic_and_invalid_build_values() {
         let automatic: LaneBuildSettings =
-            toml_edit::de::from_str("max_concurrent_builds = -1\ncargo_build_jobs = -1").unwrap();
+            toml_edit::de::from_str("cargo_build_jobs = -1").unwrap();
         assert_eq!(automatic, LaneBuildSettings::default());
         let invalid: LaneBuildSettings =
-            toml_edit::de::from_str("max_concurrent_builds = 0\ncargo_build_jobs = 1025").unwrap();
+            toml_edit::de::from_str("cargo_build_jobs = 1025").unwrap();
         assert_eq!(invalid.invalid_keys(), ["cargo_build_jobs"]);
-        assert_eq!(invalid.max_concurrent_builds, Some(0));
-        assert_eq!(invalid.build_limit(0), 0);
-        assert_eq!(invalid.build_limit_source(), "host");
         assert!(toml_edit::de::from_str::<LaneBuildSettings>("cargo_build_jobs = -2").is_err());
     }
     #[test]
@@ -1516,21 +1502,12 @@ mod build_tests {
     #[test]
     fn defaults_and_overrides() {
         let settings = LaneBuildSettings {
-            max_concurrent_builds: Some(3),
             cargo_build_jobs: Some(7),
             ..LaneBuildSettings::default()
         };
-        assert_eq!(settings.build_limit(1), 3);
         assert_eq!(settings.jobs(), 7);
         assert!((1..=2).contains(&LaneBuildSettings::default().jobs()));
-        assert!(LaneBuildSettings::default().build_limit(0) >= 1);
-        // Out-of-range values are rejected at config load and clamped here.
-        let wild = LaneBuildSettings {
-            max_concurrent_builds: Some(0),
-            ..Default::default()
-        };
-        assert_eq!(wild.build_limit(0), 0);
-        assert_eq!(LaneBuildSettings::default().build_limit_source(), "default");
+        assert!(LaneBuildSettings::default().automatic_build_limit(0) >= 1);
     }
     #[test]
     fn total_lane_caps_are_optional_and_validate_host_policy() {
