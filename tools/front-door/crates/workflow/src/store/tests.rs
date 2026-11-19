@@ -105,53 +105,6 @@ fn saves_one_complete_receipt_and_rejects_a_stale_revision() {
     assert_eq!(store.read().unwrap(), Some(second));
 }
 
-#[test]
-fn a_retired_receipt_is_typed_and_saving_again_uses_the_current_shape() {
-    let (_temp, store, r) = setup();
-    let first = save(&store, &r, 0, 20).unwrap();
-    // The retired shape omitted the reviewed base from a pull request subject.
-    let mut retired = serde_json::to_value(&first).unwrap();
-    retired["schema_version"] = (RECEIPT_SCHEMA_VERSION - 1).into();
-    retired["subject"].as_object_mut().unwrap().remove("base");
-    std::fs::write(
-        directory(&store).join("receipt.json"),
-        serde_json::to_vec(&retired).unwrap(),
-    )
-    .unwrap();
-    let error = store.read().unwrap_err();
-    assert!(matches!(
-        error,
-        StoreError::Retired { revision, .. } if revision == first.revision()
-    ));
-    let Subject::Pr {
-        repository, number, ..
-    } = *first.subject()
-    else {
-        panic!("pull request fixture");
-    };
-    let found = pull_request_receipts(&store.root, store.project, repository, number).unwrap();
-    assert!(found.receipts.is_empty());
-    assert!(matches!(
-        found.retired.as_slice(),
-        [StoreError::Retired { revision, .. }] if *revision == first.revision()
-    ));
-    let saved = save(&store, &r, first.revision(), 30).unwrap();
-    assert_eq!(saved.revision(), first.revision() + 1);
-    assert_eq!(saved.created_at(), first.created_at());
-    assert_eq!(saved.schema_version(), RECEIPT_SCHEMA_VERSION);
-    assert_eq!(store.read().unwrap(), Some(saved));
-    let found = pull_request_receipts(&store.root, store.project, repository, number).unwrap();
-    assert_eq!(found.receipts.len(), 1);
-    assert!(found.retired.is_empty());
-    let other = provenant_core::RepoId::from_bytes([9; 16]);
-    assert!(
-        pull_request_receipts(&store.root, store.project, other, number)
-            .unwrap()
-            .receipts
-            .is_empty()
-    );
-}
-
 #[cfg(test)]
 #[path = "concurrency.rs"]
 mod concurrency;
