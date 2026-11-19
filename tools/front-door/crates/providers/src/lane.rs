@@ -563,36 +563,35 @@ fn probe_host_exec_path(
 /// written to the launcher or to any argument.
 const TOKEN_HELPER: &str = "!f() { test \"$1\" = get && test -n \"$GH_TOKEN\" && printf 'username=x-access-token\\npassword=%s\\n' \"$GH_TOKEN\"; }; f";
 
-/// Append to the command-scope configuration without discarding caller entries.
-pub(crate) fn install_token_config(
-    env: &mut Vec<(OsString, OsString)>,
-) -> Result<(), ProviderError> {
-    let count = match env.iter().find(|(key, _)| key == "GIT_CONFIG_COUNT") {
-        Some((_, value)) => value
-            .to_str()
-            .and_then(|v| v.parse::<usize>().ok())
-            .ok_or(ProviderError::Malformed)?,
-        None => 0,
-    };
-    let next = count.checked_add(2).ok_or(ProviderError::Malformed)?;
-    env.retain(|(key, _)| key != "GIT_CONFIG_COUNT");
+/// Whether a variable carries command-scope Git configuration, which can name
+/// a credential helper as readily as a configuration file can.
+fn is_git_command_config(name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(|name| {
+        matches!(name, "GIT_CONFIG_COUNT" | "GIT_CONFIG_PARAMETERS")
+            || name.starts_with("GIT_CONFIG_KEY_")
+            || name.starts_with("GIT_CONFIG_VALUE_")
+    })
+}
+
+/// Drop every inherited command-scope Git configuration variable.
+pub(crate) fn scrub_git_command_config(env: &mut Vec<(OsString, OsString)>) {
+    env.retain(|(key, _)| !is_git_command_config(key));
+}
+
+/// Replace the command-scope configuration with the token helper alone. A
+/// lane never inherits a host credential helper through the environment.
+pub(crate) fn install_token_config(env: &mut Vec<(OsString, OsString)>) {
+    scrub_git_command_config(env);
     env.extend([
-        ("GIT_CONFIG_COUNT".into(), next.to_string().into()),
+        ("GIT_CONFIG_COUNT".into(), "2".into()),
+        ("GIT_CONFIG_KEY_0".into(), "credential.helper".into()),
+        ("GIT_CONFIG_VALUE_0".into(), "".into()),
         (
-            format!("GIT_CONFIG_KEY_{count}").into(),
-            "credential.helper".into(),
-        ),
-        (format!("GIT_CONFIG_VALUE_{count}").into(), "".into()),
-        (
-            format!("GIT_CONFIG_KEY_{}", count + 1).into(),
+            "GIT_CONFIG_KEY_1".into(),
             "credential.https://github.com.helper".into(),
         ),
-        (
-            format!("GIT_CONFIG_VALUE_{}", count + 1).into(),
-            TOKEN_HELPER.into(),
-        ),
+        ("GIT_CONFIG_VALUE_1".into(), TOKEN_HELPER.into()),
     ]);
-    Ok(())
 }
 
 pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, ProviderError> {
@@ -630,9 +629,9 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
         bytes.extend_from_slice(
             format!("GIT_CONFIG_GLOBAL={global}\nexport GIT_CONFIG_GLOBAL\n").as_bytes(),
         );
-        if options.identity_config.is_none() {
-            bytes.extend_from_slice(b"GIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_NOSYSTEM\n");
-        }
+        // System configuration can bring in a host credential helper (macOS
+        // ships `osxkeychain` there), so it is never read, identity or not.
+        bytes.extend_from_slice(b"GIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_NOSYSTEM\n");
     }
     if let Some(exec_path) = host_exec_path(Path::new(std::ffi::OsStr::from_bytes(git))) {
         let exec_path = exec_path.to_str().ok_or_else(|| {
@@ -1467,7 +1466,7 @@ mod tests {
             ("GIT_CONFIG_KEY_0".into(), "fixture.setting".into()),
             ("GIT_CONFIG_VALUE_0".into(), "kept".into()),
         ];
-        install_token_config(&mut env)?;
+        install_token_config(&mut env);
         for (executable, with_config, token) in [
             (&git, false, false),
             (&git, true, true),
@@ -1507,6 +1506,75 @@ mod tests {
                 }));
         }
         Ok(())
+    }
+
+    #[test]
+    fn lane_command_config_is_the_token_helper_alone() {
+        let get = |env: &[(OsString, OsString)], name: &str| {
+            env.iter()
+                .filter(|(key, _)| key == name)
+                .map(|(_, value)| value.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let inherited = || -> Vec<(OsString, OsString)> {
+            vec![
+                ("PATH".into(), "/usr/bin".into()),
+                ("GIT_CONFIG_COUNT".into(), "3".into()),
+                ("GIT_CONFIG_KEY_0".into(), "credential.helper".into()),
+                ("GIT_CONFIG_VALUE_0".into(), "osxkeychain".into()),
+                ("GIT_CONFIG_KEY_2".into(), "credential.helper".into()),
+                ("GIT_CONFIG_VALUE_2".into(), "osxkeychain".into()),
+                (
+                    "GIT_CONFIG_PARAMETERS".into(),
+                    "'credential.helper=osxkeychain'".into(),
+                ),
+            ]
+        };
+        let mut env = inherited();
+        install_token_config(&mut env);
+        assert_eq!(get(&env, "PATH"), ["/usr/bin"]);
+        assert_eq!(get(&env, "GIT_CONFIG_COUNT"), ["2"]);
+        assert_eq!(get(&env, "GIT_CONFIG_KEY_0"), ["credential.helper"]);
+        assert_eq!(get(&env, "GIT_CONFIG_VALUE_0"), [""]);
+        assert_eq!(
+            get(&env, "GIT_CONFIG_KEY_1"),
+            ["credential.https://github.com.helper"]
+        );
+        assert_eq!(get(&env, "GIT_CONFIG_VALUE_1"), [TOKEN_HELPER]);
+        assert!(get(&env, "GIT_CONFIG_PARAMETERS").is_empty());
+        assert!(get(&env, "GIT_CONFIG_KEY_2").is_empty());
+        assert!(get(&env, "GIT_CONFIG_VALUE_2").is_empty());
+        assert!(
+            env.iter()
+                .all(|(_, value)| !value.to_string_lossy().contains("osxkeychain"))
+        );
+
+        let mut env = inherited();
+        scrub_git_command_config(&mut env);
+        assert_eq!(
+            env,
+            vec![(OsString::from("PATH"), OsString::from("/usr/bin"))]
+        );
+    }
+
+    #[test]
+    fn git_wrapper_never_reads_system_config() {
+        for identity_config in [None, Some(PathBuf::from("/fixture/identity"))] {
+            let wrapper = git_wrapper(
+                Path::new("/usr/bin/git"),
+                &GitWrapper {
+                    scrub: true,
+                    identity_config,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let text = String::from_utf8(wrapper).unwrap();
+            assert!(
+                text.contains("GIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_NOSYSTEM\n"),
+                "{text}"
+            );
+        }
     }
 
     #[test]

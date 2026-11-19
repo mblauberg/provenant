@@ -1057,7 +1057,7 @@ impl RunStore {
                             .wall_now()
                             .map_err(|_| RunError::Validation("wall clock"))?,
                         failure: None,
-                        terminal_cause: Some(TerminalCause::AccessPolicyRefused),
+                        terminal_cause: None,
                         terminal_note: None,
                     },
                     call,
