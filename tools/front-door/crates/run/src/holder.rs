@@ -608,6 +608,16 @@ fn seal_import_refusal(
     )
 }
 
+/// A refused import keeps its private Git whole, so a step that only guards
+/// removal of that Git is reported, not fatal.
+fn warn_retained_private_git(what: &str, error: &dyn std::fmt::Display) {
+    use std::io::Write as _;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "warning: {what}; retaining the private Git: {error}"
+    );
+}
+
 pub(crate) fn object_import_refused(
     attempt: &Directory,
     scope: provenant_records::custody::Scope,
@@ -1085,10 +1095,9 @@ impl RunStore {
             // the import without the worktree: a checkout that cannot be
             // prepared (rebuilt, unbound) must not keep it unsettled forever.
             Err(error) if import_refused => {
-                use std::io::Write as _;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: writer not prepared for attempt index registration; retaining the private Git: {error}"
+                warn_retained_private_git(
+                    "writer not prepared for attempt index registration",
+                    &error,
                 );
                 None
             }
@@ -1098,12 +1107,24 @@ impl RunStore {
             .as_ref()
             .and_then(|writer| writer.custody.as_ref())
             .map(|(slot, _)| custody::attempt_index_retired(slot, recovery.scope()))
-            .transpose()
-            .map_err(|error| RunError::Io(std::io::Error::other(error)))?
-            .unwrap_or(false);
+            .transpose();
+        let retired = match retired {
+            Ok(retired) => retired.unwrap_or(false),
+            Err(error) if import_refused => {
+                warn_retained_private_git("attempt index state unreadable", &error);
+                false
+            }
+            Err(error) => return Err(RunError::Io(std::io::Error::other(error))),
+        };
         let source = match crate::objects::bound_source(attempt) {
             Ok(source) => source,
             Err(RunError::Filesystem(error)) if retired && error.is_not_found() => None,
+            // A refused import releases without reading the private Git, so
+            // a binding that no longer verifies must not keep it unsettled.
+            Err(error) if import_refused => {
+                warn_retained_private_git("private Git binding unreadable", &error);
+                None
+            }
             Err(error) => return Err(error),
         };
         if let Some(writer) = &launch
@@ -1128,11 +1149,7 @@ impl RunStore {
                 // The private Git is retained whole, so an index that cannot be
                 // registered must not keep a refused import unsettled forever.
                 Err(error) if import_refused => {
-                    use std::io::Write as _;
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "warning: private attempt index not registered; retaining the private Git: {error}"
-                    );
+                    warn_retained_private_git("private attempt index not registered", &error);
                 }
                 Err(error) => return Err(RunError::Io(std::io::Error::other(error))),
             }
