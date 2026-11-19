@@ -92,7 +92,10 @@ fn preflight_writer_worktrees(
     let mut refusals = Vec::new();
     let mut pending_wip = Vec::new();
     for node in &expanded.nodes {
+        // A node whose launch condition fails never runs, so it needs no
+        // writer scope: its worktree is not inspected, and may be unset.
         if node.access != AccessMode::WorktreeWrite
+            || !provenant_fabric_runtime::graph::when::holds(&node.when)
             || node
                 .attempt
                 .as_ref()
@@ -925,6 +928,9 @@ impl Factory {
                             .to_owned())
                     };
                     for node in &expanded.nodes {
+                        if !provenant_fabric_runtime::graph::when::holds(&node.when) {
+                            continue;
+                        }
                         if let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
                             &node.delivery
                         {
