@@ -92,8 +92,18 @@ struct RetainedSchedule {
     escalation_requested: bool,
     /// Every identity that can block settlement carries exit and fork filters.
     watched: bool,
+    /// Only the repeated stop runs: the signal-free look cannot settle on
+    /// this platform, so it would be wasted work.
+    escalate_only: bool,
 }
 impl RetainedSchedule {
+    fn for_platform() -> Self {
+        Self {
+            escalate_only: !cfg!(target_os = "macos"),
+            ..Self::default()
+        }
+    }
+
     fn observation_interval(&self) -> u64 {
         if self.watched {
             FULL_CENSUS_INTERVAL_MS
@@ -111,11 +121,13 @@ impl RetainedSchedule {
             self.last_escalation_ms = Some(now);
             self.escalation_requested = false;
             RetainedStep::Escalate
-        } else if self.last_observation_ms.is_none_or(|last| {
-            let since = now.saturating_sub(last);
-            since >= self.observation_interval()
-                || (self.process_event && since >= CENSUS_INTERVAL_MS)
-        }) {
+        } else if !self.escalate_only
+            && self.last_observation_ms.is_none_or(|last| {
+                let since = now.saturating_sub(last);
+                since >= self.observation_interval()
+                    || (self.process_event && since >= CENSUS_INTERVAL_MS)
+            })
+        {
             RetainedStep::Observe
         } else {
             return RetainedStep::Wait;
@@ -134,6 +146,9 @@ impl RetainedSchedule {
             last.saturating_add(RETAINED_ESCALATION_MS)
                 .saturating_sub(now)
         });
+        if self.escalate_only {
+            return escalation;
+        }
         let interval = if self.process_event {
             CENSUS_INTERVAL_MS
         } else {
@@ -727,6 +742,8 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         last_tracking: None,
         journal_warning_active: false,
         cleanup_holders_warned: false,
+        deferred_signal: false,
+        deferred_cancel: false,
         stopped_descendants: std::collections::BTreeSet::new(),
         settlement_evidence: SettlementEvidence::Unresolved,
         reaped: Vec::new(),
@@ -800,6 +817,10 @@ struct Driver<'a> {
     journal_warning_active: bool,
     /// The diagnostic holder scan has run; it runs once per guardian.
     cleanup_holders_warned: bool,
+    /// A supervisor signal or cancellation change seen while a retained stop
+    /// waited on exit watches, for the retained loop to act on.
+    deferred_signal: bool,
+    deferred_cancel: bool,
     /// Descendants this guardian signalled, for the one summary warning.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     stopped_descendants: std::collections::BTreeSet<ProcessIdentity>,
@@ -2003,7 +2024,7 @@ impl Driver<'_> {
             // The guardian blocks on process, cancellation and signal events;
             // `RetainedSchedule` decides when to look and when to signal.
             let mut cancelled = false;
-            let mut schedule = RetainedSchedule::default();
+            let mut schedule = RetainedSchedule::for_platform();
             let mut cancel_pending = false;
             let mut last_cancel_ms: Option<u64> = None;
             loop {
@@ -2027,7 +2048,7 @@ impl Driver<'_> {
                     outcome_committed = self.commit_outcome(&record);
                 }
                 let settled = match step {
-                    RetainedStep::Escalate => self.cleanup(
+                    RetainedStep::Escalate => self.retained_stop(
                         &mut child,
                         plan,
                         if cancelled {
@@ -2047,10 +2068,11 @@ impl Driver<'_> {
                 };
                 if let Ok(true) = settled {
                     if published {
-                        self.republish_settled(record)?;
+                        self.republish_settled(record, &warnings, omitted_warnings)?;
                     }
                     break;
                 }
+                cancel_pending |= std::mem::take(&mut self.deferred_cancel);
                 if step != RetainedStep::Wait {
                     schedule.watched = self.watch_retained_processes();
                 }
@@ -2067,7 +2089,21 @@ impl Driver<'_> {
                         last.saturating_add(cancel_poll_interval(cancel_watched))
                             .saturating_sub(wait_now)
                     }));
-                match self.reactor.wait(&[], Duration::from_millis(wait_ms)) {
+                let event = if std::mem::take(&mut self.deferred_signal) {
+                    Ok(crate::process_os::provider::ReactorEvent {
+                        supervisor_signal: true,
+                        ..Default::default()
+                    })
+                } else if schedule.process_event && wait_ms > 0 {
+                    // A look is already due at the walk rate. Further fork or
+                    // exit events add nothing before it, so sleep out the
+                    // window; signals and cancellation stay queued in kqueue.
+                    provenant_os::sys::wait_pause(Duration::from_millis(wait_ms));
+                    Ok(crate::process_os::provider::ReactorEvent::default())
+                } else {
+                    self.reactor.wait(&[], Duration::from_millis(wait_ms))
+                };
+                match event {
                     Ok(event) if event.supervisor_signal => {
                         // Never leave `unresolved` without one more bounded
                         // stop attempt: TERM, the descendant grace, then KILL.
@@ -2083,12 +2119,12 @@ impl Driver<'_> {
                             &mut omitted_warnings,
                         ) && published
                         {
-                            self.republish_settled(record)?;
+                            self.republish_settled(record, &warnings, omitted_warnings)?;
                         }
                         break;
                     }
                     Ok(event) => {
-                        schedule.process_event |= event.process_changed;
+                        schedule.process_event |= event.process_changed && !schedule.escalate_only;
                         schedule.watched &= !event.process_overflow;
                         cancel_pending |= event.cancel_changed;
                         cancel_watched &= !event.cancel_watch_failed;
@@ -2117,7 +2153,12 @@ impl Driver<'_> {
     /// Replace the unresolved exit with the settled facts once cleanup proves
     /// the group gone. The reservation is made resolved first, so a crash in
     /// between leaves only the conservative unresolved exit visible.
-    fn republish_settled(&mut self, mut record: ProcessExit) -> Result<()> {
+    fn republish_settled(
+        &mut self,
+        mut record: ProcessExit,
+        warnings: &[String],
+        omitted_warnings: u64,
+    ) -> Result<()> {
         self.reservation.unresolved_cleanup = false;
         if !self.persist_reservation() {
             self.reservation.unresolved_cleanup = true;
@@ -2132,6 +2173,9 @@ impl Driver<'_> {
         record.delivered_signals = self.delivered_signals.clone();
         record.failed_deliveries = self.failed_deliveries.clone();
         record.omitted_failed_deliveries = self.omitted_failed_deliveries;
+        // Retained stops add warnings, such as the descendant kill summary.
+        record.warnings = warnings.to_vec();
+        record.omitted_warnings = omitted_warnings;
         let Ok(bytes) = record.bounded_bytes() else {
             return Ok(());
         };
