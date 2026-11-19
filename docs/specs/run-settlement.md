@@ -30,13 +30,25 @@ lock budget (the SQLite busy timeout, 30 s by default) and wakes as soon as the
 lock is released. Contention that outlives the wait is `WriterExclusionBusy`,
 reported as `waiting for writer lock <path>, held by <holder>`, where the
 holder names each attempt reserved in the slot and whether its guardian is
-live. It sets a retry deadline but never spends the failure budget, never
-seals cleanup as failed and never exhausts a resumed worker. A wait that
-outlives its holder ages into the stalled reason. Probes of a live attempt
-still take the lock once without waiting.
+live. The holder list labels the waiting attempt's own reservation. Contention sets
+a retry deadline but never spends the failure budget, never seals cleanup or
+import as failed and never exhausts a resumed worker. While any holder's
+guardian is live the wait continues and ages into the stalled reason. Once the
+wait has lasted three minutes with no live guardian, nothing will release the
+lock: settlement is recorded blocked, and the reason names `provenant
+reconcile <lane>` and `provenant reconcile --abandon <lane> --reason <text>`.
+An explicit reconcile clears the block and restarts the wait.
+
+Only settlement waits on a writer lock. Request paths (queued withdrawal,
+terminal replay and publication, loss) try it once: when it is busy they
+leave the cleanup effect pending and retain the attempt, and the settlement
+worker retries the cleanup of every unlaunched writer whose cleanup is not
+done. Probes of a live attempt also take the lock once without waiting.
 - Why: another settler or a releasing guardian holding the lock is progress,
   not failure; counting it blocked settlement and left steered nodes running
-  with no successor (#3572).
+  with no successor (#3572). A request must not stall on another holder, and a
+  lock no live process will release must reach an operator rather than wait
+  forever.
 
 Publication accepts a lane tip that descends from the launch base, the origin
 default branch, the ref the lane launched against, or any remote-tracking

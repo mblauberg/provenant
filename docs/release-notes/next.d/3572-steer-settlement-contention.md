@@ -8,4 +8,15 @@ running with no successor. Status names the holder: `waiting for writer lock
 <path>, held by attempt <id> (guardian live, reserved 4s ago)`. A steered
 writer's continuation waits for custody release instead of being dropped, and
 `provenant stop` on such a node resolves its queued steering at once, cause
-shown.
+shown. Commands that settle a lane's cleanup no longer wait on another holder's
+lock; they leave it to the settlement worker. A lock held for three minutes
+with no live guardian is reported as blocked and names the recovery commands.
+
+Nodes blocked by lock contention before this release keep their blocked state.
+Run `provenant reconcile <lane>`, or a bare `provenant reconcile` to sweep
+every blocked node; an explicit reconcile resets the failure count and
+settlement resumes. An import that settlement already sealed as refused
+(status: `settlement exhausted three attempts; private Git retained for host
+recovery`) is final and reconcile will not retry it. Release that node with
+`provenant reconcile --abandon <lane> --reason <text>`: abandonment keeps the
+private Git evidence but stops automatic import, so recover that work by hand.

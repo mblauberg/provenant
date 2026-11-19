@@ -188,18 +188,18 @@ pub(crate) fn blocked(
     journal.recovery_failures = journal.recovery_failures.saturating_add(1).min(LIMIT);
     journal.blocking_reason = Some(provenant_core::bounded_line(reason, 4096));
     journal.retry_after_ms = now.saturating_add(backoff_ms(journal.recovery_failures));
+    journal.lock_wait_since_ms = 0;
     write(attempt, &journal)
 }
 
-/// Record that settlement waits on a contended lock. The reason names the
-/// holder for status; contention never consumes the recovery budget, so a
-/// busy holder cannot exhaust settlement into a blocked state. The first
-/// wait's deadline is kept, so a wait that outlives its holder ages into a
-/// stalled diagnostic instead of hiding behind a fresh deadline.
+/// Record that settlement waits on a contended writer lock. The reason names
+/// the holder for status. See [`record_lock_wait`] for when a wait stops
+/// being progress.
 pub(crate) fn waiting(
     attempt: &Directory,
     scope: Scope,
     reason: &str,
+    guardian_live: bool,
     clock: &dyn Clock,
 ) -> Result<()> {
     let _lock = journal_lock(attempt)?;
@@ -208,11 +208,39 @@ pub(crate) fn waiting(
     if owner_active(attempt, &journal, now)? {
         return Ok(());
     }
-    journal.blocking_reason = Some(provenant_core::bounded_line(reason, 4096));
+    record_lock_wait(&mut journal, reason, guardian_live, now);
+    write(attempt, &journal)
+}
+
+/// Contention never spends the failure budget while a live guardian may still
+/// release the lock, so a busy holder cannot exhaust settlement. The first
+/// wait's deadline is kept, so a long wait ages into the stalled diagnostic. A
+/// lock still held past that threshold with no live guardian has no holder
+/// that will release it: it is recorded blocked, naming the explicit paths.
+/// Spent failures exhaust an import; a lock escalated by [`record_lock_wait`]
+/// blocks automatic retries but never seals the import as refused.
+fn failures_exhausted(journal: &Journal) -> bool {
+    journal.recovery_failures >= LIMIT && journal.lock_wait_since_ms == 0
+}
+
+fn record_lock_wait(journal: &mut Journal, reason: &str, guardian_live: bool, now: u64) {
+    if journal.lock_wait_since_ms == 0 {
+        journal.lock_wait_since_ms = now;
+    }
     if journal.retry_after_ms == 0 {
         journal.retry_after_ms = now;
     }
-    write(attempt, &journal)
+    let waited = now.saturating_sub(journal.lock_wait_since_ms);
+    let reason = if !guardian_live && waited >= STALLED_RETRY_MS {
+        journal.recovery_failures = LIMIT;
+        format!(
+            "{reason}; no live guardian holds it after {}s. Once the holder exits, run `provenant reconcile <lane>`, or release the retained work with `provenant reconcile --abandon <lane> --reason <text>`",
+            waited / 1000
+        )
+    } else {
+        reason.to_owned()
+    };
+    journal.blocking_reason = Some(provenant_core::bounded_line(&reason, 4096));
 }
 
 /// Read-only, scope-checked diagnostic for status. The guardian records this
@@ -234,6 +262,10 @@ pub fn diagnostic_for(
 fn diagnostic(journal: &Journal, now_ms: Option<u64>) -> Option<String> {
     let reason = journal.blocking_reason.as_deref()?;
     if journal.recovery_failures >= LIMIT {
+        // A lock escalated by `record_lock_wait` is blocked without failures.
+        if journal.lock_wait_since_ms > 0 {
+            return Some(format!("settlement blocked: {reason}"));
+        }
         return Some(format!(
             "settlement blocked after {LIMIT} failures: {reason}; correct the cause and reconcile explicitly"
         ));
@@ -258,6 +290,7 @@ pub(crate) fn clear_blocked(attempt: &Directory, scope: Scope) -> Result<()> {
     let mut journal = read(attempt, scope)?;
     if journal.blocking_reason.take().is_some() {
         journal.recovery_failures = 0;
+        journal.lock_wait_since_ms = 0;
         write(attempt, &journal)?;
     }
     Ok(())
@@ -553,7 +586,7 @@ impl Guard {
         }) {
             return Ok((None, Some(ClaimRefusal::LiveOwner)));
         }
-        if (journal.attempts == LIMIT || journal.recovery_failures >= LIMIT)
+        if (journal.attempts == LIMIT || failures_exhausted(&journal))
             && journal.phase == Phase::Import
         {
             return Err(RunError::ObjectImportLimit(
@@ -613,7 +646,7 @@ impl Driver<'_> {
         self.journal.attempts
     }
     pub(crate) fn exhausted(&self) -> bool {
-        self.journal.attempts >= LIMIT || self.journal.recovery_failures >= LIMIT
+        self.journal.attempts >= LIMIT || failures_exhausted(&self.journal)
     }
     /// Charge only a driver which has reached the actual object import.
     pub(crate) fn begin_import(&mut self) -> Result<()> {
@@ -666,25 +699,24 @@ impl Driver<'_> {
             journal.phase = journal.phase.max(phase);
             journal.blocking_reason = None;
             journal.recovery_failures = 0;
+            journal.lock_wait_since_ms = 0;
             Ok(())
         })
     }
     /// Record a failed settlement step. Writer-lock contention is recorded as
-    /// a wait naming its holder and never consumes the recovery budget.
+    /// a wait naming its holder (see [`record_lock_wait`]).
     pub(crate) fn record_failure(&mut self, error: &RunError) -> Result<()> {
-        let reason = provenant_core::bounded_line(&error.to_string(), 4096);
-        let contention = error.is_writer_contention();
+        let reason = error.to_string();
         let now = now_ms(self.clock)?;
         self.update(|journal| {
-            journal.blocking_reason = Some(reason);
-            if contention {
-                if journal.retry_after_ms == 0 {
-                    journal.retry_after_ms = now;
-                }
+            if let RunError::WriterExclusionBusy { guardian_live, .. } = error {
+                record_lock_wait(journal, &reason, *guardian_live, now);
                 return Ok(());
             }
+            journal.blocking_reason = Some(provenant_core::bounded_line(&reason, 4096));
             journal.recovery_failures = journal.recovery_failures.saturating_add(1).min(LIMIT);
             journal.retry_after_ms = now.saturating_add(backoff_ms(journal.recovery_failures));
+            journal.lock_wait_since_ms = 0;
             Ok(())
         })
     }
@@ -2339,7 +2371,7 @@ mod tests {
         let attempt = Directory::open_anchor(temp.path())?;
         let reason = "waiting for writer lock /slot/writer.lock, held by attempt X (guardian live, reserved 2s ago)";
         for _ in 0..=LIMIT {
-            waiting(&attempt, scope(), reason, &clock)?;
+            waiting(&attempt, scope(), reason, true, &clock)?;
         }
         let journal = read(&attempt, scope())?;
         assert_eq!(journal.recovery_failures, 0);
@@ -2360,6 +2392,7 @@ mod tests {
             driver.record_failure(&RunError::WriterExclusionBusy {
                 lock: "/slot/writer.lock".into(),
                 holder: "attempt Y (guardian live, reserved 1s ago)".into(),
+                guardian_live: true,
             })?;
         }
         drop(driver);
@@ -2375,6 +2408,53 @@ mod tests {
         Ok(())
     }
 
+    // Spec: docs/specs/run-settlement.md#settlement
+    #[test]
+    fn a_held_writer_lock_blocks_only_without_a_live_guardian_after_the_stall() -> TestResult {
+        let mut clock = clock();
+        let temp = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(temp.path())?;
+        let reason = "waiting for writer lock /slot/writer.lock, held by attempt X";
+        // Zero means "not waiting", so start the wait after the epoch.
+        advance_to(&mut clock, 1_000)?;
+        // A live guardian keeps the wait visible but never blocked.
+        waiting(&attempt, scope(), reason, true, &clock)?;
+        let since = read(&attempt, scope())?.lock_wait_since_ms;
+        advance_to(&mut clock, since + STALLED_RETRY_MS)?;
+        waiting(&attempt, scope(), reason, true, &clock)?;
+        let journal = read(&attempt, scope())?;
+        assert_eq!(journal.recovery_failures, 0);
+        let status = diagnostic(&journal, Some(now_ms(&clock)?)).ok_or("status")?;
+        assert!(status.contains("retry stalled"), "{status}");
+        assert!(status.contains("held by attempt X"), "{status}");
+        // The same wait with no live guardian is recorded blocked, naming
+        // the explicit recovery paths.
+        waiting(&attempt, scope(), reason, false, &clock)?;
+        let journal = read(&attempt, scope())?;
+        assert_eq!(journal.recovery_failures, LIMIT);
+        let status = diagnostic(&journal, Some(now_ms(&clock)?)).ok_or("status")?;
+        assert!(status.contains("settlement blocked"), "{status}");
+        assert!(status.contains("provenant reconcile <lane>"), "{status}");
+        assert!(status.contains("provenant reconcile --abandon"), "{status}");
+        // Escalation never seals the import as refused.
+        let mut journal = read(&attempt, scope())?;
+        journal.phase = Phase::Import;
+        write(&attempt, &journal)?;
+        assert!(!matches!(
+            Guard::claim(&attempt, scope(), &clock),
+            Err(RunError::ObjectImportLimit(_))
+        ));
+        // An explicit reconcile clears the block and restarts the wait clock.
+        clear_blocked(&attempt, scope())?;
+        let journal = read(&attempt, scope())?;
+        assert_eq!(journal.recovery_failures, 0);
+        assert_eq!(journal.lock_wait_since_ms, 0);
+        // Before the stall threshold, a holder with no live guardian waits.
+        waiting(&attempt, scope(), reason, false, &clock)?;
+        assert_eq!(read(&attempt, scope())?.recovery_failures, 0);
+        Ok(())
+    }
+
     #[test]
     fn a_pass_is_contended_only_when_every_pending_step_waits_on_a_writer_lock() {
         use crate::{Reconciled, UncertainReason};
@@ -2383,6 +2463,7 @@ mod tests {
             reason: UncertainReason::WriterLockBusy {
                 lock: "writer.lock".into(),
                 holder: "attempt X".into(),
+                guardian_live: true,
             },
         };
         let failed = Reconciled::Uncertain {
@@ -2568,6 +2649,7 @@ mod tests {
             retry_after_ms: 0,
             recovery_failures: 0,
             blocking_reason: None,
+            lock_wait_since_ms: 0,
             abandonment: Some(Abandonment {
                 reason: "fixture".into(),
                 actor: provenant_core::ActorId::from_bytes([4; 16]),
@@ -3431,6 +3513,7 @@ impl crate::RunStore {
                         let mut journal = read(&directory, scope)?;
                         // Keep the last reason visible until recovery succeeds.
                         journal.recovery_failures = 0;
+                        journal.lock_wait_since_ms = 0;
                         write(&directory, &journal)?;
                     }
                     Ok(())

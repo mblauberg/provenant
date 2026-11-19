@@ -1188,7 +1188,9 @@ impl RunStore {
                         call,
                     )?;
                 }
-                Err(error) if driver.exhausted() => {
+                // Contention never seals the import: even a lock escalated to
+                // blocked stays recoverable by an explicit reconcile.
+                Err(error) if driver.exhausted() && !error.is_writer_contention() => {
                     let reason = format!(
                         "settlement exhausted three attempts; private Git retained for host recovery: {error}"
                     );
@@ -1225,6 +1227,7 @@ impl RunStore {
         self.settle_cleanup(
             &self.record(record.attempt_id, call)?,
             completion.custody(),
+            call.lock_budget(),
             call,
         );
         self.prepare_budget_wrap_up(record.attempt_id, call)?;

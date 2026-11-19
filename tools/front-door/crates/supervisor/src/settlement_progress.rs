@@ -36,6 +36,10 @@ pub struct Journal {
     pub recovery_failures: u32,
     #[serde(default)]
     pub blocking_reason: Option<String>,
+    /// When settlement began waiting on a contended writer lock; 0 when it is
+    /// not waiting. Bounds how long a lock with no live holder is waited on.
+    #[serde(default)]
+    pub lock_wait_since_ms: u64,
     #[serde(default)]
     pub abandonment: Option<Abandonment>,
     #[serde(default, flatten)]
@@ -69,6 +73,7 @@ impl Journal {
             retry_after_ms: 0,
             recovery_failures: 0,
             blocking_reason: None,
+            lock_wait_since_ms: 0,
             abandonment: None,
             extra: Default::default(),
         }

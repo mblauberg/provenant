@@ -789,6 +789,7 @@ pub enum UncertainReason {
     WriterLockBusy {
         lock: std::path::PathBuf,
         holder: String,
+        guardian_live: bool,
     },
 }
 /// The source of an unavailable reboot proof.
@@ -852,7 +853,7 @@ impl std::fmt::Display for UncertainReason {
                 "writer reservation retained after terminal commit: {}; chair recovery required",
                 reservation.display()
             ),
-            Self::WriterLockBusy { lock, holder } => write!(
+            Self::WriterLockBusy { lock, holder, .. } => write!(
                 f,
                 "waiting for writer lock {}, held by {holder}",
                 lock.display()
@@ -2799,6 +2800,7 @@ pub(crate) fn retry_reconcile<T>(
 /// stays an I/O failure.
 pub(crate) fn writer_exclusion_error(
     slot: &provenant_os::fs::Directory,
+    own: Scope,
     error: CustodyError,
 ) -> RunError {
     let lock = match error {
@@ -2808,22 +2810,36 @@ pub(crate) fn writer_exclusion_error(
             .map_or_else(|_| "writer.lock".into(), |path| path.join("writer.lock")),
         other => return RunError::Io(std::io::Error::other(other.to_string())),
     };
+    let (holder, guardian_live) = writer_lock_holder(slot, own);
     RunError::WriterExclusionBusy {
         lock,
-        holder: writer_lock_holder(slot),
+        holder,
+        guardian_live,
     }
 }
 
-/// Name the attempts whose reservations occupy a writer slot, for status. A
-/// flock has no owner record, so the slot's reservations are the evidence.
-fn writer_lock_holder(slot: &provenant_os::fs::Directory) -> String {
+/// Name the attempts whose reservations occupy a writer slot, for status, and
+/// whether any of their guardians is live. A flock has no owner record, so the
+/// slot's reservations are the evidence. The caller's own reservation is
+/// labelled: its guardian may still be releasing the lock it waits on.
+fn writer_lock_holder(slot: &provenant_os::fs::Directory, own: Scope) -> (String, bool) {
     let Ok(listing) = custody::list_writer_reservations_in_slot(slot) else {
-        return "an unidentified holder (slot reservations unreadable)".into();
+        return (
+            "an unidentified holder (slot reservations unreadable)".into(),
+            false,
+        );
     };
     if listing.reservations.is_empty() {
-        return "an unidentified holder (no reservation recorded in the slot)".into();
+        return (
+            "an unidentified holder (no reservation recorded in the slot)".into(),
+            false,
+        );
     }
-    listing
+    let guardian_live = listing
+        .reservations
+        .iter()
+        .any(|reservation| reservation.live == Some(true));
+    let holder = listing
         .reservations
         .iter()
         .map(|reservation| {
@@ -2832,24 +2848,39 @@ fn writer_lock_holder(slot: &provenant_os::fs::Directory) -> String {
                 Some(false) => "guardian exited",
                 None => "guardian unobservable",
             };
+            let whose = if reservation.scope == own {
+                "this attempt's own reservation"
+            } else {
+                "attempt"
+            };
             format!(
-                "attempt {} ({guardian}, reserved {} ago)",
+                "{whose} {} ({guardian}, reserved {} ago)",
                 reservation.scope.attempt,
                 reservation.age.as_deref().unwrap_or("an unknown time")
             )
         })
         .collect::<Vec<_>>()
-        .join("; ")
+        .join("; ");
+    (holder, guardian_live)
 }
 
 // A lock timeout can race a terminal commit by another settlement owner.
 // Writer contention that did not race one is a wait, never a failure.
 fn reconcile_failure(error: RunError, terminal: impl FnOnce() -> bool) -> Reconciled {
-    if let RunError::WriterExclusionBusy { lock, holder } = error {
+    if let RunError::WriterExclusionBusy {
+        lock,
+        holder,
+        guardian_live,
+    } = error
+    {
         return if terminal() {
             Reconciled::Finished
         } else {
-            Reconciled::uncertain(UncertainReason::WriterLockBusy { lock, holder })
+            Reconciled::uncertain(UncertainReason::WriterLockBusy {
+                lock,
+                holder,
+                guardian_live,
+            })
         };
     }
     let timed_out = match &error {
@@ -2895,6 +2926,7 @@ fn lock_timeout_reports_a_concurrently_settled_attempt() {
     let busy = || RunError::WriterExclusionBusy {
         lock: "writer.lock".into(),
         holder: "attempt X (guardian live, reserved 2s ago)".into(),
+        guardian_live: true,
     };
     assert_eq!(reconcile_failure(busy(), || true), Reconciled::Finished);
     assert_eq!(
@@ -2903,6 +2935,7 @@ fn lock_timeout_reports_a_concurrently_settled_attempt() {
             reason: UncertainReason::WriterLockBusy {
                 lock: "writer.lock".into(),
                 holder: "attempt X (guardian live, reserved 2s ago)".into(),
+                guardian_live: true,
             }
         }
     );
@@ -4143,7 +4176,7 @@ impl RunStore {
             call.cancel,
             call.clock,
         )
-        .map_err(|error| writer_exclusion_error(&slot, error))
+        .map_err(|error| writer_exclusion_error(&slot, Self::scope(record), error))
     }
     /// A durable provider exit survives guardian loss; only cleanup is recovered.
     fn settle_proven_guardian_exit(
@@ -5765,8 +5798,14 @@ impl RunStore {
                 // Contention names its holder for status without consuming
                 // the recovery budget; the holder is still progressing.
                 Reconciled::Uncertain {
-                    reason: reason @ UncertainReason::WriterLockBusy { .. },
-                } => crate::settlement::waiting(&directory, scope, &reason.to_string(), call.clock),
+                    reason: reason @ UncertainReason::WriterLockBusy { guardian_live, .. },
+                } => crate::settlement::waiting(
+                    &directory,
+                    scope,
+                    &reason.to_string(),
+                    *guardian_live,
+                    call.clock,
+                ),
                 Reconciled::Uncertain { reason } => {
                     crate::settlement::blocked(&directory, scope, &reason.to_string(), call.clock)
                 }
@@ -6059,14 +6098,10 @@ impl RunStore {
             }
             None => {}
         }
+        // Any unlaunched writer whose cleanup is not done: a refusal defers
+        // it, and a request path that found the writer lock busy left it.
         let pending_writer = record.provider_launched == Some(false)
-            && matches!(
-                record.state,
-                AttemptState::Terminal {
-                    outcome: Outcome::Rejected,
-                    ..
-                }
-            )
+            && matches!(record.state, AttemptState::Terminal { .. })
             && self.request(record.attempt_id, call)?.task.writer.is_some()
             && !record.settlement_receipts.as_ref().is_some_and(|receipts| {
                 matches!(receipts.cleanup_custody_release, EffectDisposition::Done)
@@ -8424,6 +8459,7 @@ mod tests {
             reason: UncertainReason::WriterLockBusy {
                 lock: "/slot/writer.lock".into(),
                 holder: "attempt X (guardian live, reserved 2s ago)".into(),
+                guardian_live: true,
             },
         };
         for _ in 0..=crate::settlement::LIMIT {

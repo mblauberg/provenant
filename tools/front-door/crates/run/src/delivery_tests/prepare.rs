@@ -722,6 +722,25 @@ fn publication_cleanup_never_removes_another_import_pin()
         .is_err()
     );
     fixture.git(&["show-ref", "--verify", &reference])?;
+    // A request path never waits on the writer lock, whatever the lock
+    // budget: it leaves the cleanup pending and retains the attempt for the
+    // settlement worker.
+    store.set_temporary_retained(id, false, &call)?;
+    provenant_sqlite::with_busy_timeout(std::time::Duration::from_secs(3600), || {
+        store.settle_cleanup(
+            &record,
+            None,
+            provenant_core::WaitBudget::nonblocking(provenant_core::Clock::mono_now(&clock)),
+            &call,
+        );
+    });
+    let retained: bool = store.db.query_row(
+        "SELECT tmp_retained FROM attempts WHERE id=?1",
+        [id.to_string()],
+        |row| row.get(0),
+    )?;
+    assert!(retained, "a busy writer lock defers cleanup to the worker");
+    fixture.git(&["show-ref", "--verify", &reference])?;
     lease.withdraw_unlaunched()?;
     assert!(matches!(
         store

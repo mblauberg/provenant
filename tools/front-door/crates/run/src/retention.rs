@@ -554,13 +554,7 @@ impl RunStore {
                         let temporary = path.with_file_name("tmp");
                         let collection = (|| -> Result<()> {
                             let pending_writer_cleanup = if record.provider_launched == Some(false)
-                                && matches!(
-                                    record.state,
-                                    AttemptState::Terminal {
-                                        outcome: Outcome::Rejected,
-                                        ..
-                                    }
-                                )
+                                && matches!(record.state, AttemptState::Terminal { .. })
                                 && crate::artifacts::read_sealed(
                                     &attempt,
                                     "writer-git-pins.json",
