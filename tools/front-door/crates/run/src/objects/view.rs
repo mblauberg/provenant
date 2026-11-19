@@ -538,18 +538,30 @@ pub(crate) fn bound_source(attempt: &Directory) -> Result<Option<ObjectSource>> 
 }
 
 const NATIVE_INDEX_RECORD: &str = "provenant-native-index.json";
+/// Serialises native-index advances for one worktree. It lives beside the
+/// record in the worktree's private Git directory, so it never contends with
+/// the custody slot's admission gate that launch, removal and landing probe.
+const NATIVE_INDEX_LOCK: &str = "provenant-native-index.lock";
+const NATIVE_INDEX_LIMIT: u64 = 64 * 1024 * 1024;
+const NATIVE_INDEX_WAIT_SECONDS: u64 = 10;
+
+/// One command that repairs a native index that stopped following the branch:
+/// it resets the index to HEAD and drops the record, so the next settlement
+/// records the repaired index instead of judging it against the stale one.
+pub(crate) const NATIVE_INDEX_REMEDY: &str =
+    "git reset -q && rm -f -- \"$(git rev-parse --git-path provenant-native-index.json)\"";
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct NativeIndexRecord {
     schema_version: u64,
     followed: String,
+    /// Digest of the index entries Provenant last left in place. An index that
+    /// no longer matches was committed, reset or restaged by someone else since,
+    /// so merging from `followed` could silently stage a reversal.
+    index_digest: String,
 }
 
-/// The commit the host worktree's native index last followed, if recorded.
-/// Publications advance the index from this commit, never from whichever tip a
-/// given publication happened to replace: siblings may publish between two
-/// advances, and a crash may leave the index behind the branch.
-pub(crate) fn followed_native_index(repo: &VerifiedRepo) -> Result<Option<GitOid>> {
+fn native_index_record(repo: &VerifiedRepo) -> Result<Option<NativeIndexRecord>> {
     let bytes = match repo
         .private_dir()
         .read_stable(OsStr::new(NATIVE_INDEX_RECORD), 4096)
@@ -559,18 +571,34 @@ pub(crate) fn followed_native_index(repo: &VerifiedRepo) -> Result<Option<GitOid
         Err(error) => return Err(error.into()),
     };
     let record: NativeIndexRecord = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-    if record.schema_version != 1 {
+    if record.schema_version != 2 {
         return Err(invalid());
     }
-    GitOid::parse(&record.followed)
-        .map(Some)
-        .map_err(|_| invalid())
+    GitOid::parse(&record.followed).map_err(|_| invalid())?;
+    Ok(Some(record))
 }
 
-fn record_native_index(repo: &VerifiedRepo, followed: GitOid, mode: PublishMode) -> Result<()> {
+/// The commit the host worktree's native index last followed, if recorded.
+/// Publications advance the index from this commit, never from whichever tip a
+/// given publication happened to replace: siblings may publish between two
+/// advances, and a crash may leave the index behind the branch.
+#[cfg(test)]
+pub(crate) fn followed_native_index(repo: &VerifiedRepo) -> Result<Option<GitOid>> {
+    native_index_record(repo)?
+        .map(|record| GitOid::parse(&record.followed).map_err(|_| invalid()))
+        .transpose()
+}
+
+fn record_native_index(
+    repo: &VerifiedRepo,
+    followed: GitOid,
+    index_digest: &str,
+    mode: PublishMode,
+) -> Result<()> {
     let bytes = serde_json::to_vec(&NativeIndexRecord {
-        schema_version: 1,
+        schema_version: 2,
         followed: followed.to_string(),
+        index_digest: index_digest.to_owned(),
     })
     .map_err(|_| invalid())?;
     match repo
@@ -584,19 +612,73 @@ fn record_native_index(repo: &VerifiedRepo, followed: GitOid, mode: PublishMode)
     Ok(())
 }
 
+/// Digest of the index's entries (mode, object, stage and path), read without
+/// taking index.lock or rewriting the index. A missing or oversized index is
+/// unreadable here rather than an error for the caller's settlement.
+fn index_digest(git: &Path, repo: &VerifiedRepo) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    match repo.private_dir().metadata_at(OsStr::new("index"), false) {
+        Ok(metadata)
+            if metadata.kind == FileKind::Regular && metadata.size <= NATIVE_INDEX_LIMIT => {}
+        Ok(_) => {
+            return Err(RunError::Validation(
+                "native index is not a bounded regular file",
+            ));
+        }
+        Err(error) if error.is_not_found() => {
+            return Err(RunError::Validation("native index is missing"));
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let entries = execute(
+        git,
+        repo.private_git_dir(),
+        repo.root_path(),
+        &args(&["ls-files", "-s", "-z"]),
+        None,
+    )?;
+    Ok(Sha256::digest(&entries)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn paths_from(git: &Path, repo: &VerifiedRepo, arguments: &[&str]) -> Result<Vec<String>> {
+    let bytes = execute(
+        git,
+        repo.private_git_dir(),
+        repo.root_path(),
+        &args(arguments),
+        None,
+    )?;
+    let mut paths = bytes
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
+}
+
 /// Record the commit the native index starts from when a writer first attaches.
 /// An existing record is kept: it is never newer than the index, which is the
-/// safe direction for the two-tree merge.
+/// safe direction for the two-tree merge. An index that cannot be digested
+/// leaves no record; the first sync records one.
 pub(crate) fn seed_native_index(repo: &VerifiedRepo, base: GitOid) -> Result<()> {
-    record_native_index(repo, base, PublishMode::NoReplace)
+    let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+    let Ok(digest) = index_digest(&git, repo) else {
+        return Ok(());
+    };
+    record_native_index(repo, base, &digest, PublishMode::NoReplace)
 }
 
 /// Why the native index could not follow the branch tip. The index is left as
-/// it was; the paths are the ones the branch changed since the index followed.
+/// it was. Commits are absent when the inspection failed before resolving them,
+/// and the paths are the ones that differ from the commit the index followed.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct IndexOutOfSync {
-    pub followed: GitOid,
-    pub target: GitOid,
+    pub followed: Option<GitOid>,
+    pub target: Option<GitOid>,
     pub paths: Vec<String>,
     pub reason: String,
 }
@@ -605,11 +687,20 @@ pub(crate) struct IndexOutOfSync {
 pub(crate) enum IndexSync {
     /// The index follows the branch tip, whether it advanced now or already did.
     Synced,
-    /// A native merge, rebase or similar operation owns the index; nothing moved
-    /// and the record is unchanged, so the next sync advances from the same commit.
+    /// A native merge, rebase or similar operation owns the index, or another
+    /// settlement is advancing it; nothing moved and the record is unchanged, so
+    /// the next sync advances from the same commit.
     Deferred,
-    /// Git refused the two-tree merge. The index is untouched.
+    /// The index was left unchanged and the record was not advanced: Git refused
+    /// the two-tree merge, the index changed since Provenant last left it, or it
+    /// could not be inspected. This is advisory and never fails settlement.
     OutOfSync(IndexOutOfSync),
+}
+
+#[derive(Default)]
+struct Resolved {
+    followed: Option<GitOid>,
+    target: Option<GitOid>,
 }
 
 /// Move only committed host state into the native index. Private staging and
@@ -620,12 +711,56 @@ pub(crate) enum IndexSync {
 ///
 /// The merge runs from the recorded commit the index last followed to the
 /// branch tip, so it is idempotent: repeating it after a crash, or after a
-/// sibling already advanced the index, is a no-op. `fallback` is used only when
-/// nothing is recorded. The caller serialises syncs for one worktree.
-pub(crate) fn sync_native_index(repo: &VerifiedRepo, fallback: GitOid) -> Result<IndexSync> {
+/// sibling already advanced the index, is a no-op. It runs only while the index
+/// still matches what the record says Provenant left there; an index someone
+/// else committed, reset or restaged since is left alone. `fallback` is used
+/// only when nothing is recorded. Every inspection or record failure, including
+/// a corrupt record, becomes an unknown result that leaves the index and the
+/// record as they were. One lock per worktree serialises concurrent syncs.
+pub(crate) fn sync_native_index(repo: &VerifiedRepo, fallback: GitOid) -> IndexSync {
+    let mut resolved = Resolved::default();
+    let unknown = |resolved: &Resolved, reason: String| {
+        IndexSync::OutOfSync(IndexOutOfSync {
+            followed: resolved.followed,
+            target: resolved.target,
+            paths: Vec::new(),
+            reason,
+        })
+    };
+    let clock = provenant_os::clock::SystemClock::new();
+    let Ok(budget) = provenant_core::WaitBudget::cli(clock.mono_now(), NATIVE_INDEX_WAIT_SECONDS)
+    else {
+        return unknown(&resolved, "native index wait budget".to_owned());
+    };
+    let _lock = match repo.private_dir().lock(
+        OsStr::new(NATIVE_INDEX_LOCK),
+        provenant_os::fs::LockMode::Exclusive,
+        budget,
+        &CancelToken::new(),
+        &clock,
+    ) {
+        Ok(lock) => lock,
+        Err(provenant_os::fs::FsError::LockTimeout { .. }) => return IndexSync::Deferred,
+        Err(error) => return unknown(&resolved, format!("native index lock: {error}")),
+    };
+    match advance_native_index(repo, fallback, &mut resolved) {
+        Ok(sync) => sync,
+        Err(error) => unknown(&resolved, error.to_string()),
+    }
+}
+
+fn advance_native_index(
+    repo: &VerifiedRepo,
+    fallback: GitOid,
+    resolved: &mut Resolved,
+) -> Result<IndexSync> {
     let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
-    let recorded = followed_native_index(repo)?;
-    let followed = recorded.unwrap_or(fallback);
+    let recorded = native_index_record(repo)?;
+    let followed = match &recorded {
+        Some(record) => GitOid::parse(&record.followed).map_err(|_| invalid())?,
+        None => fallback,
+    };
+    resolved.followed = Some(followed);
     let target = GitOid::parse(
         std::str::from_utf8(&execute(
             &git,
@@ -638,9 +773,17 @@ pub(crate) fn sync_native_index(repo: &VerifiedRepo, fallback: GitOid) -> Result
         .trim(),
     )
     .map_err(|_| invalid())?;
+    resolved.target = Some(target);
     if followed == target {
-        if recorded.is_none() {
-            record_native_index(repo, target, PublishMode::NoReplace)?;
+        // Nothing to merge. Staging added since the last sync belongs to the
+        // person: it sits on the tip the index already follows, so it becomes
+        // the baseline the next advance is judged against.
+        if let Ok(live) = index_digest(&git, repo)
+            && recorded
+                .as_ref()
+                .is_none_or(|record| record.index_digest != live)
+        {
+            record_native_index(repo, target, &live, PublishMode::Replace)?;
         }
         return Ok(IndexSync::Synced);
     }
@@ -659,8 +802,39 @@ pub(crate) fn sync_native_index(repo: &VerifiedRepo, fallback: GitOid) -> Result
             Err(error) => return Err(error.into()),
         }
     }
-    repo.private_dir()
-        .read_stable(OsStr::new("index"), 64 * 1024 * 1024)?;
+    let live = index_digest(&git, repo)?;
+    if let Some(record) = &recorded
+        && record.index_digest != live
+    {
+        let target_name = target.to_string();
+        let followed_name = followed.to_string();
+        let diff = |tree: &str| {
+            paths_from(
+                &git,
+                repo,
+                &[
+                    "diff-index",
+                    "--cached",
+                    "--no-renames",
+                    "--name-only",
+                    "-z",
+                    tree,
+                ],
+            )
+        };
+        if diff(&target_name)?.is_empty() {
+            // The index already holds exactly the tip: an advance that died
+            // before recording, or a reset to it. Nothing to merge.
+            record_native_index(repo, target, &live, PublishMode::Replace)?;
+            return Ok(IndexSync::Synced);
+        }
+        return Ok(IndexSync::OutOfSync(IndexOutOfSync {
+            followed: Some(followed),
+            target: Some(target),
+            paths: diff(&followed_name).unwrap_or_default(),
+            reason: "the index changed since Provenant last advanced it, so a merge from the recorded commit could stage a reversal".to_owned(),
+        }));
+    }
     if let Err(error) = execute(
         &git,
         repo.private_git_dir(),
@@ -674,11 +848,10 @@ pub(crate) fn sync_native_index(repo: &VerifiedRepo, fallback: GitOid) -> Result
         ]),
         None,
     ) {
-        let mut paths = execute(
+        let paths = paths_from(
             &git,
-            repo.private_git_dir(),
-            repo.root_path(),
-            &args(&[
+            repo,
+            &[
                 "diff-tree",
                 "-r",
                 "--name-only",
@@ -686,21 +859,12 @@ pub(crate) fn sync_native_index(repo: &VerifiedRepo, fallback: GitOid) -> Result
                 "-z",
                 &followed.to_string(),
                 &target.to_string(),
-            ]),
-            None,
+            ],
         )
-        .map(|bytes| {
-            bytes
-                .split(|byte| *byte == 0)
-                .filter(|path| !path.is_empty())
-                .map(|path| String::from_utf8_lossy(path).into_owned())
-                .collect::<Vec<_>>()
-        })
         .unwrap_or_default();
-        paths.sort();
         return Ok(IndexSync::OutOfSync(IndexOutOfSync {
-            followed,
-            target,
+            followed: Some(followed),
+            target: Some(target),
             paths,
             reason: error.to_string(),
         }));
@@ -725,7 +889,12 @@ pub(crate) fn sync_native_index(repo: &VerifiedRepo, fallback: GitOid) -> Result
             },
         )?;
     }
-    record_native_index(repo, target, PublishMode::Replace)?;
+    record_native_index(
+        repo,
+        target,
+        &index_digest(&git, repo)?,
+        PublishMode::Replace,
+    )?;
     Ok(IndexSync::Synced)
 }
 

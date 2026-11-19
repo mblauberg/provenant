@@ -2085,7 +2085,7 @@ fn stopped_merge_retains_private_state_without_adoption_by_a_new_attempt() -> Te
         },
         &provenant_records::policy::Policy::default(),
     )?;
-    super::sync_native_index(fixture.worktree.repo(), fixture.base)?;
+    super::sync_native_index(fixture.worktree.repo(), fixture.base);
     let import_attempt = provenant_core::AttemptId::from_bytes([0; 16]);
     super::clear_import_refs(
         &fixture.git,
@@ -2215,7 +2215,7 @@ fn native_index_advance_keeps_private_flags_and_exposes_worktree_edits() -> Test
             },
             &provenant_records::policy::Policy::default(),
         )?;
-        super::sync_native_index(fixture.worktree.repo(), fixture.base)?;
+        super::sync_native_index(fixture.worktree.repo(), fixture.base);
         assert_eq!(
             fixture.git_overlay(&scratch, &["ls-files", "-v"])?.stdout,
             expected
@@ -2300,6 +2300,92 @@ fn assert_native_index_follows(fixture: &Fixture, tip: GitOid, content: &[u8]) -
 
 #[test]
 // Spec: docs/specs/run-launch.md#admission-and-custody
+fn a_native_index_changed_since_the_record_is_left_alone_instead_of_merged_from_a_stale_commit()
+-> TestResult {
+    let mut fixture = Fixture::new("sha1")?;
+    let (_attempt, _scratch) = fixture.overlay()?;
+    fixture.import()?;
+    super::seed_native_index(fixture.worktree.repo(), fixture.base)?;
+    let first = publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
+    assert_eq!(
+        super::sync_native_index(fixture.worktree.repo(), first.previous),
+        super::IndexSync::Synced
+    );
+    // A person restages `file` in the shared worktree after the index followed
+    // the first tip; the record still describes the index Provenant left.
+    let native = |args: &[&str]| git(&fixture.git, &fixture.home, &fixture.lane, None, args);
+    fs::write(fixture.lane.join("file"), "person staged blob\n")?;
+    native(&["add", "file"])?;
+    let index = fixture.worktree.repo().private_git_dir().join("index");
+    let person_index = fs::read(&index)?;
+    let second_head = sibling_commit(&fixture, fixture.head, "second lane blob\n")?;
+    publish_tip(&fixture, second_head, AttemptId::from_bytes([1; 16]))?;
+    let super::IndexSync::OutOfSync(report) =
+        super::sync_native_index(fixture.worktree.repo(), fixture.base)
+    else {
+        return Err("a changed index must not be merged from the recorded commit".into());
+    };
+    assert_eq!(report.followed, Some(fixture.head));
+    assert_eq!(report.target, Some(second_head));
+    assert_eq!(report.paths, vec!["file".to_owned()]);
+    assert_eq!(fs::read(&index)?, person_index);
+    assert_eq!(
+        super::followed_native_index(fixture.worktree.repo())?,
+        Some(fixture.head)
+    );
+    // The advertised remedy repairs the index and the record together.
+    let remedy = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(super::NATIVE_INDEX_REMEDY)
+        .current_dir(&fixture.lane)
+        .env("HOME", &fixture.home)
+        .status()?;
+    assert!(remedy.success());
+    assert_eq!(
+        super::sync_native_index(fixture.worktree.repo(), fixture.base),
+        super::IndexSync::Synced
+    );
+    assert_native_index_follows(&fixture, second_head, b"second lane blob\n")
+}
+
+#[test]
+// Spec: docs/specs/run-launch.md#admission-and-custody
+fn native_index_record_and_inspection_failures_are_typed_results_that_change_nothing() -> TestResult
+{
+    let mut fixture = Fixture::new("sha1")?;
+    let (_attempt, _scratch) = fixture.overlay()?;
+    fixture.import()?;
+    super::seed_native_index(fixture.worktree.repo(), fixture.base)?;
+    publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
+    let private = fixture.worktree.repo().private_git_dir().to_path_buf();
+    let record = private.join("provenant-native-index.json");
+    let index = private.join("index");
+    let good_record = fs::read(&record)?;
+    let good_index = fs::read(&index)?;
+    // A corrupt record is unknown: nothing advances and nothing is rewritten.
+    fs::write(&record, "{ not json")?;
+    let corrupt = super::sync_native_index(fixture.worktree.repo(), fixture.base);
+    assert!(
+        matches!(corrupt, super::IndexSync::OutOfSync(_)),
+        "{corrupt:?}"
+    );
+    assert_eq!(fs::read(&record)?, b"{ not json");
+    assert_eq!(fs::read(&index)?, good_index);
+    // A missing index is unknown as well.
+    fs::write(&record, &good_record)?;
+    fs::remove_file(&index)?;
+    let missing = super::sync_native_index(fixture.worktree.repo(), fixture.base);
+    assert!(
+        matches!(missing, super::IndexSync::OutOfSync(_)),
+        "{missing:?}"
+    );
+    assert_eq!(fs::read(&record)?, good_record);
+    assert!(!index.exists());
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/run-launch.md#admission-and-custody
 fn sequential_publications_touching_one_path_advance_the_native_index_from_the_recorded_commit()
 -> TestResult {
     let mut fixture = Fixture::new("sha1")?;
@@ -2309,7 +2395,7 @@ fn sequential_publications_touching_one_path_advance_the_native_index_from_the_r
     let first = publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
     assert_eq!(first.previous, fixture.base);
     assert_eq!(
-        super::sync_native_index(fixture.worktree.repo(), first.previous)?,
+        super::sync_native_index(fixture.worktree.repo(), first.previous),
         super::IndexSync::Synced
     );
     let second_head = sibling_commit(&fixture, fixture.head, "second lane blob\n")?;
@@ -2317,7 +2403,7 @@ fn sequential_publications_touching_one_path_advance_the_native_index_from_the_r
     assert_eq!(second.previous, fixture.head);
     // The launch base is stale after the first publication; the record is not.
     assert_eq!(
-        super::sync_native_index(fixture.worktree.repo(), fixture.base)?,
+        super::sync_native_index(fixture.worktree.repo(), fixture.base),
         super::IndexSync::Synced
     );
     assert_native_index_follows(&fixture, second_head, b"second lane blob\n")
@@ -2332,7 +2418,7 @@ fn a_publication_that_crashed_before_the_index_advance_resumes_from_the_recorded
     fixture.import()?;
     super::seed_native_index(fixture.worktree.repo(), fixture.base)?;
     let first = publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
-    super::sync_native_index(fixture.worktree.repo(), first.previous)?;
+    super::sync_native_index(fixture.worktree.repo(), first.previous);
     // B publishes on top of A and dies before advancing the index.
     let second_head = sibling_commit(&fixture, fixture.head, "second lane blob\n")?;
     let b = AttemptId::from_bytes([1; 16]);
@@ -2342,7 +2428,7 @@ fn a_publication_that_crashed_before_the_index_advance_resumes_from_the_recorded
     let resumed = publish_tip(&fixture, second_head, b)?;
     assert_eq!(resumed.previous, second_head);
     assert_eq!(
-        super::sync_native_index(fixture.worktree.repo(), fixture.base)?,
+        super::sync_native_index(fixture.worktree.repo(), fixture.base),
         super::IndexSync::Synced
     );
     assert_native_index_follows(&fixture, second_head, b"second lane blob\n")
@@ -2363,7 +2449,7 @@ fn a_sibling_advancing_past_a_crashed_publication_leaves_nothing_for_it_to_rever
     let b = publish_tip(&fixture, second_head, AttemptId::from_bytes([1; 16]))?;
     assert_eq!(b.previous, fixture.head);
     assert_eq!(
-        super::sync_native_index(fixture.worktree.repo(), b.previous)?,
+        super::sync_native_index(fixture.worktree.repo(), b.previous),
         super::IndexSync::Synced
     );
     assert_native_index_follows(&fixture, second_head, b"second lane blob\n")?;
@@ -2373,7 +2459,7 @@ fn a_sibling_advancing_past_a_crashed_publication_leaves_nothing_for_it_to_rever
     let before = fs::read(&index)?;
     publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
     assert_eq!(
-        super::sync_native_index(fixture.worktree.repo(), fixture.base)?,
+        super::sync_native_index(fixture.worktree.repo(), fixture.base),
         super::IndexSync::Synced
     );
     assert_eq!(fs::read(&index)?, before);
@@ -2421,7 +2507,7 @@ fn native_index_advance_preserves_staged_snapshots_on_conflicts_and_disjoint_upd
             fs::write(&lock, "another Git writer owns this lock\n")?;
         }
         super::seed_native_index(fixture.worktree.repo(), fixture.base)?;
-        let synced = super::sync_native_index(fixture.worktree.repo(), fixture.base)?;
+        let synced = super::sync_native_index(fixture.worktree.repo(), fixture.base);
         assert_eq!(matches!(synced, super::IndexSync::Synced), advances);
         if !advances {
             // A refused merge leaves the index alone, never silently diverges:
@@ -2429,8 +2515,8 @@ fn native_index_advance_preserves_staged_snapshots_on_conflicts_and_disjoint_upd
             let super::IndexSync::OutOfSync(report) = synced else {
                 return Err("a refused merge reports out-of-sync".into());
             };
-            assert_eq!(report.followed, fixture.base);
-            assert_eq!(report.target, fixture.head);
+            assert_eq!(report.followed, Some(fixture.base));
+            assert_eq!(report.target, Some(fixture.head));
             assert_eq!(report.paths, vec!["file".to_owned()]);
             assert_eq!(
                 super::followed_native_index(fixture.worktree.repo())?,

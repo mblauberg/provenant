@@ -609,9 +609,15 @@ impl<'a> Service<'a> {
             if let Some(notice) = out_of_sync
                 && let AttemptState::Terminal { reason, .. } = &mut record.state
             {
+                let paths = if notice.paths.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (check these paths first: {})", notice.paths.join(", "))
+                };
                 let note = format!(
-                    "index_out_of_sync: the worktree's native Git index was left unchanged and no longer follows the published branch tip; run `git status` and `git reset` after checking these paths: {}",
-                    notice.paths.join(", ")
+                    "index_out_of_sync: the worktree's native Git index was left unchanged and may not follow the published branch tip: {}; to resync it run in that worktree{paths}: {}",
+                    notice.reason,
+                    crate::objects::NATIVE_INDEX_REMEDY
                 );
                 *reason = Some(
                     reason

@@ -1129,9 +1129,10 @@ pub(crate) struct IndexOutOfSyncNotice {
     pub extra: provenant_records::ExtraFields,
     pub schema_version: u64,
     pub scope: provenant_records::custody::Scope,
-    pub followed: GitOid,
-    pub target: GitOid,
+    pub followed: Option<GitOid>,
+    pub target: Option<GitOid>,
     pub paths: Vec<String>,
+    pub reason: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -3869,7 +3870,7 @@ impl WriterLaunch {
                 } else {
                     published.previous
                 };
-                self.sync_native_index(attempt, custody.scope(), fallback)?;
+                self.sync_native_index(attempt, custody.scope(), fallback);
             }
             if at_tip {
                 crate::objects::clear_import_refs(
@@ -4140,53 +4141,54 @@ impl WriterLaunch {
         attempt_work().unwrap_or_else(|error| format!("worktree files not restored: {error}"))
     }
 
-    /// Bring the shared native index to the branch tip under the slot admission
-    /// gate, so siblings settling together advance it one after another. A
-    /// refused merge leaves the index alone and seals a typed notice.
+    /// Bring the shared native index to the branch tip. The index is advisory
+    /// state beside the branch, so no failure here fails settlement: a refused,
+    /// uninspectable or externally changed index leaves a typed notice that a
+    /// later settlement replaces or clears, and anything unwritable only warns.
     fn sync_native_index(
         &self,
         attempt: &Directory,
         scope: provenant_records::custody::Scope,
         fallback: GitOid,
-    ) -> Result<()> {
-        use provenant_os::clock::SystemClock;
-        let clock = SystemClock::new();
-        let _gate = self
-            .custody
-            .as_ref()
-            .map(|(slot, _)| {
-                provenant_supervisor::custody::lock_writer_admission(
-                    slot,
-                    provenant_core::WaitBudget::cli(clock.mono_now(), 10)
-                        .map_err(|_| RunError::Validation("native index wait budget"))?,
-                    &CancelToken::new(),
-                    &clock,
-                )
-                .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))
-            })
-            .transpose()?;
-        match crate::objects::sync_native_index(self.worktree.repo(), fallback)? {
-            crate::objects::IndexSync::Synced | crate::objects::IndexSync::Deferred => Ok(()),
+    ) {
+        let warn = |message: String| {
+            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+        };
+        match crate::objects::sync_native_index(self.worktree.repo(), fallback) {
+            crate::objects::IndexSync::Deferred => {}
+            crate::objects::IndexSync::Synced => {
+                match attempt.unlink(std::ffi::OsStr::new(INDEX_OUT_OF_SYNC)) {
+                    Ok(()) => {}
+                    Err(error) if error.is_not_found() => {}
+                    Err(error) => warn(format!("index_out_of_sync notice not cleared: {error}")),
+                }
+            }
             crate::objects::IndexSync::OutOfSync(report) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: index_out_of_sync: native index left unchanged; {} path(s) differ: {}",
+                warn(format!(
+                    "index_out_of_sync: native index left unchanged; {} path(s) differ: {}",
                     report.paths.len(),
                     report.reason
-                );
-                crate::artifacts::seal(
-                    attempt,
-                    INDEX_OUT_OF_SYNC,
-                    &crate::db::bytes(&IndexOutOfSyncNotice {
-                        extra: Default::default(),
-                        schema_version: 1,
-                        scope,
-                        followed: report.followed,
-                        target: report.target,
-                        paths: report.paths,
-                    })?,
-                    crate::RECORD_LIMIT,
-                )
+                ));
+                let sealed = crate::db::bytes(&IndexOutOfSyncNotice {
+                    extra: Default::default(),
+                    schema_version: 1,
+                    scope,
+                    followed: report.followed,
+                    target: report.target,
+                    paths: report.paths,
+                    reason: report.reason,
+                })
+                .and_then(|bytes| {
+                    crate::artifacts::replace(
+                        attempt,
+                        INDEX_OUT_OF_SYNC,
+                        &bytes,
+                        crate::RECORD_LIMIT,
+                    )
+                });
+                if let Err(error) = sealed {
+                    warn(format!("index_out_of_sync notice not recorded: {error}"));
+                }
             }
         }
     }

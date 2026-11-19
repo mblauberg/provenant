@@ -377,6 +377,16 @@ pub(crate) fn seal(dir: &Directory, name: &str, content: &[u8], limit: u64) -> R
         Err(e) => Err(e.into()),
     }
 }
+/// Publish an advisory notice that a later settlement may supersede. Unlike
+/// [`seal`] it never conflicts with an earlier, different notice.
+pub(crate) fn replace(dir: &Directory, name: &str, content: &[u8], limit: u64) -> Result<()> {
+    if content.len() as u64 > limit {
+        return Err(RunError::TooLarge { limit });
+    }
+    dir.atomic_write(OsStr::new(name), ".run-", content, PublishMode::Replace)?
+        .require_durable()
+        .map_err(RunError::Publication)
+}
 #[cfg(test)]
 mod tests {
     use super::*;

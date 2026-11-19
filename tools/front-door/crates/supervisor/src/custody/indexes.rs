@@ -210,8 +210,10 @@ pub fn recorded_attempt_indexes(slot: &Directory) -> Result<Vec<RecordedAttemptI
             StoredWriterBinding::Worktree { branch, .. } => {
                 validate_branch(branch)?;
                 let Some(settlement) = settlement else {
-                    // A lease released before any attempt settled left no
-                    // reservation and no prepared view: no index to inspect.
+                    // No reservation and no settlement: the stale-reservation
+                    // reconcile (run controls) removes a reservation whose
+                    // holder is gone, after settling the attempt as lost, and a
+                    // slot that never prepared a view has no index to inspect.
                     // A view without its settlement proof stays fenced.
                     if index.is_some() || retired.is_some() {
                         return Err(CustodyError::Fenced);
