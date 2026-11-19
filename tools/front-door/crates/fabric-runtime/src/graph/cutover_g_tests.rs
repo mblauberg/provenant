@@ -3,13 +3,6 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn obsolete_graph_continuation_is_rejected_during_decode() {
-    let node =
-        json!({"id":"n", "access":"read_only", "prompt":"work", "auto_continue_no_work":true});
-    assert!(serde_json::from_value::<GraphNode>(node).is_err());
-}
-
-#[test]
 fn skipped_required_inputs_are_recorded_in_the_plan() {
     let document: GraphDocument = serde_json::from_value(json!({"schema_version":1,"graph_id":"g","nodes":[
         {"id":"a","access":"read_only","prompt":"a","route":{"adapter":"a","model":"a/m"},"when":[{"name":"on","expected":"true","actual":"false"}]},

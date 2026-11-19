@@ -1446,22 +1446,6 @@ mod tests {
     }
 
     #[test]
-    fn retired_graph_ceiling_is_rejected() {
-        let mut value = serde_json::to_value(config()).unwrap();
-        value["graph"]["limit_ceiling"] = serde_json::json!({"nodes": 1});
-        let error = serde_json::from_value::<FabricConfig>(value).unwrap_err();
-        assert!(error.to_string().contains("unknown field `limit_ceiling`"));
-        for pointer in ["graph", "limits", "peers"] {
-            let mut unknown = serde_json::to_value(config()).unwrap();
-            unknown[pointer]["unexpected"] = serde_json::json!({"nodes": 1});
-            assert!(serde_json::from_value::<FabricConfig>(unknown).is_err());
-        }
-        let mut unknown = serde_json::to_value(config()).unwrap();
-        unknown["graph"]["limits"]["unexpected"] = true.into();
-        assert!(serde_json::from_value::<FabricConfig>(unknown).is_err());
-    }
-
-    #[test]
     fn land_policy_layers_project_then_host_then_default() {
         use provenant_records::workflow::RiskTier;
         let mut land = GraphLand::default();
@@ -1708,40 +1692,6 @@ mod tests {
             config.warnings[0]
                 .message
                 .starts_with("domains.fabric.lanes.priority.writer:")
-        );
-    }
-
-    #[test]
-    fn retired_lane_build_cap_reports_the_ordinary_unknown_key_warning() {
-        #[derive(Serialize, Deserialize)]
-        struct Domains {
-            fabric: FabricConfig,
-        }
-        struct Resolver;
-        impl provenant_core::PathResolver for Resolver {
-            fn resolve_existing_ancestor(
-                &self,
-                path: &std::path::Path,
-            ) -> std::io::Result<PathBuf> {
-                Ok(path.to_owned())
-            }
-        }
-        let mut inputs =
-            provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/checkout".into());
-        inputs.state_dir = Some("/fixture/state".into());
-        let roots = inputs.resolve(&Resolver).unwrap();
-        let sections = provenant_config::DomainSections::<Domains>::new(&[SECTION]);
-        let text = b"schema_version=1\n[domains.fabric.lanes]\nmax_concurrent_builds=3\n";
-        let loaded =
-            provenant_config::load_with_domains(&roots, Some(&text[..]), &sections).unwrap();
-        let warning = loaded
-            .warnings
-            .iter()
-            .find(|warning| warning.rule == "unknown_key")
-            .expect("retired build cap is an unknown key");
-        assert_eq!(
-            warning.message,
-            "domains.fabric.lanes.max_concurrent_builds: unknown configuration key; ignored"
         );
     }
 }

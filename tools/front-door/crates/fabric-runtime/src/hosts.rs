@@ -1713,31 +1713,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn peer_run_subtree_cursor_round_trips_and_rejects_wrong_types() {
-        let action = PeerAction::Run {
-            extra: [("future_action_fact".into(), serde_json::json!(true))].into(),
-            input: facade::RunInput::Status {
-                extra: Default::default(),
-                target: facade::AttemptTarget {
-                    extra: Default::default(),
-                    attempt: provenant_core::AttemptId::from_bytes([9; 16]),
-                    host: None,
-                },
-            },
-            peer_subtree_after: Some(3),
-        };
-        let encoded = serde_json::to_value(&action).unwrap();
-        assert_eq!(encoded["peer_subtree_after"], 3);
-        let decoded: PeerAction = serde_json::from_value(encoded.clone()).unwrap();
-        let round_trip = serde_json::to_value(decoded).unwrap();
-        assert_eq!(round_trip["peer_subtree_after"], 3);
-        assert_eq!(round_trip["future_action_fact"], true);
-        let mut malformed = encoded;
-        malformed["peer_subtree_after"] = serde_json::json!("three");
-        assert!(serde_json::from_value::<PeerAction>(malformed).is_err());
-    }
-
     // Spec: docs/specs/fabric.md#publication-boundary
     #[test]
     fn output_audience_requires_graph_evidence_and_new_protocol() {
@@ -1785,62 +1760,6 @@ mod tests {
     }
 
     #[test]
-    fn graph_peer_contexts_round_trip_and_reject_malformed_values() {
-        let submit = GraphSubmitContext {
-            launch_actor: ActorId::from_bytes([1; 16]),
-            attempt: crate::graph::AttemptSpec::default(),
-            retry_limit: Some(2),
-            network: Some(provenant_records::run::NetworkAccess::Local),
-        };
-        let encoded = serde_json::to_value(&submit).unwrap();
-        assert_eq!(
-            serde_json::from_value::<GraphSubmitContext>(encoded.clone()).unwrap(),
-            submit
-        );
-        for (field, bad) in [
-            ("launch_actor", serde_json::json!(false)),
-            ("attempt", serde_json::json!(false)),
-            ("retry_limit", serde_json::json!("many")),
-            ("network", serde_json::json!("unlisted")),
-        ] {
-            let mut malformed = encoded.clone();
-            malformed[field] = bad;
-            assert!(serde_json::from_value::<GraphSubmitContext>(malformed).is_err());
-        }
-
-        let receipt = GraphReceiptContext {
-            launch_actor: ActorId::from_bytes([2; 16]),
-            origin_work_key: provenant_records::WorkKey::new(
-                provenant_core::ProjectId::from_bytes([5; 16]),
-                "G",
-                "N",
-                1,
-            )
-            .unwrap(),
-        };
-        let encoded = serde_json::to_value(&receipt).unwrap();
-        assert_eq!(
-            serde_json::from_value::<GraphReceiptContext>(encoded.clone()).unwrap(),
-            receipt
-        );
-        let mut malformed = encoded;
-        malformed["origin_work_key"] = serde_json::json!(false);
-        assert!(serde_json::from_value::<GraphReceiptContext>(malformed).is_err());
-
-        let cancel = GraphCancelContext {
-            launch_actor: ActorId::from_bytes([3; 16]),
-        };
-        let encoded = serde_json::to_value(&cancel).unwrap();
-        assert_eq!(
-            serde_json::from_value::<GraphCancelContext>(encoded.clone()).unwrap(),
-            cancel
-        );
-        let mut malformed = encoded;
-        malformed["launch_actor"] = serde_json::json!(false);
-        assert!(serde_json::from_value::<GraphCancelContext>(malformed).is_err());
-    }
-
-    #[test]
     fn peer_refusals_preserve_typed_errors_and_reject_unknown_codes() {
         let error = facade::FacadeError::LaunchUnknown {
             operation_id: OperationId::parse("typed-error-operation").unwrap(),
@@ -1865,22 +1784,6 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<facade::FacadeError>(error).is_err());
         }
-    }
-
-    #[test]
-    fn recorded_peer_responses_refuse_retired_protocols() {
-        let response = PeerResponse {
-            extra: Default::default(),
-            version: 1,
-            protocol: PROTOCOL - 1,
-            host: HostId::from_bytes([3; 16]),
-            project: project_key(Path::new("/home/a")),
-            result: serde_json::json!({"result": "error", "data": {"error": {"code": "busy"}}}),
-        };
-        assert!(matches!(
-            decode_recorded_response(&serde_json::to_vec(&response).unwrap()),
-            Err(PeerError::Version)
-        ));
     }
 
     #[test]

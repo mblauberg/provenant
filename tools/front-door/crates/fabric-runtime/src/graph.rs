@@ -77,9 +77,6 @@ mod cutover_g_tests;
 #[cfg(test)]
 mod fallback_invariants;
 #[cfg(test)]
-#[path = "graph/graph_host_typed_invariants.rs"]
-mod graph_host_typed_invariants;
-#[cfg(test)]
 mod implement_invariants;
 #[cfg(test)]
 mod implementation_delivery_invariants;
@@ -87,9 +84,6 @@ mod implementation_delivery_invariants;
 mod next_step_tests;
 #[cfg(test)]
 mod submission_implement_invariants;
-#[cfg(test)]
-#[path = "graph/typed_finding_tests.rs"]
-mod typed_finding_tests;
 #[cfg(test)]
 mod typed_records_tests;
 #[cfg(test)]

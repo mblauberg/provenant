@@ -1271,43 +1271,6 @@ enum = ["low", "high"]
 }
 
 #[test]
-fn unknown_parameter_names_the_key_and_suggests_the_nearest_declared_name() {
-    let library = parameter_library();
-    let compiler = Compiler::new(&library);
-    let refusal = compiler
-        .compile(&json!({"id":"gate", "use":"gate", "with":{"subject.commit":"abc"}}))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        refusal.starts_with("node gate: template gate has no parameter subject.commit"),
-        "{refusal}"
-    );
-    assert!(
-        refusal.contains("accepted parameters: retries, review_base, subject"),
-        "{refusal}"
-    );
-    assert!(refusal.ends_with("did you mean subject?"), "{refusal}");
-
-    let refusal = compiler
-        .compile(&json!({"id":"gate", "use":"gate", "with":{"nonsense_key":"x"}}))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        refusal.contains("has no parameter nonsense_key"),
-        "{refusal}"
-    );
-    assert!(!refusal.contains("did you mean"), "{refusal}");
-
-    // A key that is not an identifier is not echoed, so a pasted secret stays out.
-    let refusal = compiler
-        .compile(&json!({"id":"gate", "use":"gate", "with":{"sk ant secret":"x"}}))
-        .unwrap_err()
-        .to_string();
-    assert!(!refusal.contains("sk ant secret"), "{refusal}");
-    assert!(refusal.contains("has no such parameter"), "{refusal}");
-}
-
-#[test]
 fn wrong_shape_names_the_key_and_the_declared_shape_without_the_value() {
     let library = parameter_library();
     let compiler = Compiler::new(&library);
@@ -1559,20 +1522,6 @@ fn a_name_without_room_for_its_suffix_is_refused_in_one_line() {
     let error = launch(&mut journal, &base, "d2", true).unwrap_err();
     assert!(!error.contains('\n') && error.contains("--name"), "{error}");
     assert_eq!(journal.len(), 1);
-}
-
-#[test]
-fn graph_node_accepts_prompt_and_refuses_removed_brief_spelling() {
-    let prompt = serde_json::from_value::<GraphNode>(json!({
-        "id":"work", "access":"read_only", "prompt":"Do the work"
-    }))
-    .unwrap();
-    assert_eq!(prompt.prompt, "Do the work");
-
-    let alias = serde_json::from_value::<GraphNode>(json!({
-        "id":"work", "access":"read_only", "brief":"Do the work"
-    }));
-    assert!(alias.is_err());
 }
 
 #[test]

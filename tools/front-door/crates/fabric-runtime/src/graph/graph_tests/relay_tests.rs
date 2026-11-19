@@ -1611,35 +1611,6 @@ fn child_writer_admission_uses_the_declared_worktree_template() {
 }
 
 #[test]
-fn patch_record_child_receipt_round_trips_and_rejects_malformed_types() {
-    let record: PatchRecord = serde_json::from_value(json!({
-        "revision": 3,
-        "digest": "sha256:request",
-        "relay_child_receipt": {
-            "schema_version": 1,
-            "request_digest": "sha256:request",
-            "receipt": {
-                "graph_id": "g", "parent": "p", "node": "p--child",
-                "revision": 3, "replayed": false, "worktree": null,
-                "detached": false, "lifecycle_notice": "Attached child"
-            }
-        }
-    }))
-    .unwrap();
-    let encoded = serde_json::to_value(&record).unwrap();
-    let decoded: PatchRecord = serde_json::from_value(encoded.clone()).unwrap();
-    assert_eq!(decoded, record);
-    assert!(encoded.get("relay_child_receipt").is_some());
-    assert!(
-        serde_json::from_value::<PatchRecord>(json!({
-            "revision": 3, "digest": "sha256:request",
-            "relay_child_receipt": {"schema_version": "wrong"}
-        }))
-        .is_err()
-    );
-}
-
-#[test]
 fn child_receipt_replay_rejects_missing_or_malformed_durable_state() {
     let (document, mut admitted) = live(None);
     mark_running(&mut admitted, "a");

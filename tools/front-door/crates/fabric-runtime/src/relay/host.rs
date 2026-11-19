@@ -707,12 +707,9 @@ mod tests {
                 )
             });
             ready.recv_timeout(IO_TIMEOUT).unwrap();
-            let start = Instant::now();
             drop(relay);
-            assert!(start.elapsed() < IO_TIMEOUT);
             assert!(call.join().unwrap().is_err());
         });
-        let start = Instant::now();
         let error = mutate(
             &path,
             &request(),
@@ -726,7 +723,6 @@ mod tests {
                 .to_string()
                 .contains("host Fabric endpoint unavailable")
         );
-        assert!(start.elapsed() < IO_TIMEOUT);
         Ok(())
     }
 

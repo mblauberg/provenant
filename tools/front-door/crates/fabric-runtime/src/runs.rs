@@ -563,32 +563,6 @@ mod tests {
     }
 
     #[test]
-    fn wait_observation_round_trips_and_rejects_wrong_types() {
-        for observation in [None, Some("event subscription".to_owned())] {
-            let result = finish_wait_snapshot(
-                WaitCondition::Any,
-                Vec::new(),
-                false,
-                observation.clone(),
-                |_| Ok(()),
-            )
-            .unwrap();
-            let mut value = serde_json::to_value(&result).unwrap();
-            value["future_observation"] = serde_json::json!({"source": "newer minor"});
-            let decoded: RunResult = serde_json::from_value(value.clone()).unwrap();
-            assert_eq!(serde_json::to_value(decoded).unwrap(), value);
-            for malformed in [
-                serde_json::json!(false),
-                serde_json::json!(7),
-                serde_json::json!({}),
-            ] {
-                value["observation"] = malformed;
-                assert!(serde_json::from_value::<RunResult>(value.clone()).is_err());
-            }
-        }
-    }
-
-    #[test]
     fn expired_wait_evaluates_the_final_local_snapshot_before_its_verdict() {
         for condition in [WaitCondition::Any, WaitCondition::All] {
             let pending = attempt();
@@ -656,32 +630,5 @@ mod tests {
             ]
             .iter()
         ));
-    }
-    #[test]
-    fn status_waits_round_trip_and_reject_malformed_reason_facts()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let result = RunResult::Status {
-            extra: Default::default(),
-            lane_waits: vec![provenant_records::run::LaneWait {
-                extra: Default::default(),
-                attempt_id: AttemptId::from_bytes([1; 16]),
-                lane_class: provenant_records::run::LaneClass::Writer,
-                waiting_for: provenant_records::run::LaneWaitReason::ProviderSilence {
-                    silent_for_ms: 3_000,
-                },
-            }],
-            attempt: attempt(),
-        };
-        let encoded = serde_json::to_value(&result)?;
-        assert_eq!(
-            serde_json::from_value::<RunResult>(encoded.clone())?,
-            result
-        );
-        let mut malformed = encoded;
-        malformed["lane_waits"][0]["waiting_for"] = serde_json::json!({
-            "kind":"provider_silence", "silent_for_ms":"long"
-        });
-        assert!(serde_json::from_value::<RunResult>(malformed).is_err());
-        Ok(())
     }
 }

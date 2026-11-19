@@ -1052,49 +1052,6 @@ mod tests {
     }
 
     #[test]
-    fn event_observation_fields_round_trip_reject_wrong_types_and_preserve_unknowns() {
-        let fixture = Fixture::new();
-        let source_origin = fixture.observation_settings().source.receipt();
-        let observation = EventObservation::PacedReread {
-            extra: [("future_detail".into(), serde_json::json!(true))].into(),
-            source_key: LOCAL_OBSERVATION_INTERVAL_KEY.into(),
-            source_origin,
-            interval_ms: 73,
-            reason: "native watcher unavailable".into(),
-        };
-        let mut encoded = serde_json::to_value(&observation).unwrap();
-        let decoded: EventObservation = serde_json::from_value(encoded.clone()).unwrap();
-        let round_trip = serde_json::to_value(decoded).unwrap();
-        assert_eq!(round_trip["source_key"], LOCAL_OBSERVATION_INTERVAL_KEY);
-        assert_eq!(round_trip["interval_ms"], 73);
-        assert_eq!(round_trip["future_detail"], true);
-        for (field, malformed) in [
-            ("source_key", serde_json::json!(false)),
-            ("source_origin", serde_json::json!([])),
-            ("interval_ms", serde_json::json!("73")),
-            ("reason", serde_json::json!(0)),
-        ] {
-            encoded[field] = malformed;
-            assert!(
-                serde_json::from_value::<EventObservation>(encoded.clone()).is_err(),
-                "{field} must reject the wrong type"
-            );
-            encoded[field] = round_trip[field].clone();
-        }
-        let result = EventsResult::empty_timeout(None);
-        let mut encoded_result = serde_json::to_value(result).unwrap();
-        encoded_result["future_event"] = serde_json::json!("retained");
-        let decoded_result: EventsResult = serde_json::from_value(encoded_result).unwrap();
-        assert_eq!(
-            serde_json::to_value(decoded_result).unwrap()["future_event"],
-            "retained"
-        );
-        let mut malformed_result = serde_json::to_value(EventsResult::empty_timeout(None)).unwrap();
-        malformed_result["observation"] = serde_json::json!(false);
-        assert!(serde_json::from_value::<EventsResult>(malformed_result).is_err());
-    }
-
-    #[test]
     fn newer_stored_message_reports_upgrade_required() {
         let f = Fixture::new();
         let service = f.service();

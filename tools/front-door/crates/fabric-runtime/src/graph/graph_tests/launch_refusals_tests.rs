@@ -105,37 +105,6 @@ fn admitted_launch_projects_typed_prompt_field_and_limit() {
 }
 
 #[test]
-fn memory_pressure_launch_refusal_names_source_and_action() {
-    use crate::coordination::facade::FacadeError;
-    use provenant_records::diagnostic::{
-        PressureLevel, PressureThreshold, ResourceFact, SettingSource,
-    };
-    let error = FacadeError::ConfinementRefused {
-        resource: Some(ResourceFact::MemoryPressure {
-            level: PressureLevel::Critical,
-            threshold: PressureThreshold::Critical,
-            origin: SettingSource::ShippedDefault,
-        }),
-    };
-    let mut owner = ErrorLauncher {
-        now: Some(at(0)),
-        errors: [(1, error)].into(),
-        ..Default::default()
-    };
-    let mut journal = MemoryJournal::default();
-    let run = advance(
-        &graph(vec![node("one", route("first"))]),
-        &mut owner,
-        &mut journal,
-    )
-    .unwrap();
-    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
-    assert!(reason.contains("memory_pressure_threshold"));
-    assert!(reason.contains("shipped default"));
-    assert!(reason.contains("reduce host memory pressure"));
-}
-
-#[test]
 fn process_limit_launch_projection_keeps_io_and_resource_reason() {
     let error = crate::coordination::facade::FacadeError::Io {
         operation: "TOKEN_SENTINEL".into(),

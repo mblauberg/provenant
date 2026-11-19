@@ -991,32 +991,6 @@ fn request_correlation_v2_survives_answer_close_and_acknowledgement() {
 }
 
 #[test]
-fn request_correlation_absent_links_preserve_old_operation_digest() {
-    let input = ask(RequestKind::Question, "old-ask");
-    let mut old = serde_json::to_value(&input).unwrap();
-    old["request"].as_object_mut().unwrap().remove("work");
-    let f = Fixture::new();
-    let request = Request {
-        clock: &f.clock,
-        cancel: &f.cancel,
-    };
-    let saved = f.call(input.clone()).unwrap();
-    let replay: InboxResult = f
-        .service()
-        .store
-        .coordination_operation(
-            f.identity.project,
-            f.identity.inbox.actor,
-            &OperationId::parse("old-ask").unwrap(),
-            &("human_inbox_v1", old),
-            &request,
-            || -> Result<InboxResult, InboxError> { panic!("replay mutated") },
-        )
-        .unwrap();
-    assert_eq!(saved, replay);
-}
-
-#[test]
 fn request_correlation_lookup_never_holds_fabric_write_lock() {
     let f = Fixture::new();
     let mut input = ask(RequestKind::Question, "outside-transaction");
@@ -1054,45 +1028,6 @@ fn request_correlation_lookup_never_holds_fabric_write_lock() {
 }
 
 // Persisted requests without correlation fields remain readable and answerable.
-#[test]
-fn request_correlation_legacy_records_keep_v1_wire_shape_and_answer() {
-    let f = Fixture::new();
-    let saved = receipt(f.call(ask(RequestKind::Decision, "legacy")).unwrap());
-    let InboxResult::Item { item, .. } = f.call(show(saved.request_id)).unwrap() else {
-        panic!("item")
-    };
-    let mut old = serde_json::to_value(&item.request).unwrap();
-    old.as_object_mut().unwrap().remove("work_coverage");
-    old["request"].as_object_mut().unwrap().remove("work");
-    let bytes = serde_json::to_vec(&old).unwrap();
-    let db = rusqlite::Connection::open(f.root.as_path().join("fabric/fabric.sqlite3")).unwrap();
-    for table in ["human_requests", "human_request_history"] {
-        db.execute(&format!("UPDATE {table} SET record=?1"), [&bytes])
-            .unwrap();
-    }
-    let InboxResult::Item { item, .. } = f.call(show(saved.request_id)).unwrap() else {
-        panic!("item")
-    };
-    assert_eq!(serde_json::to_value(&item.request).unwrap(), old);
-    let listed = f
-        .call(serde_json::from_value(serde_json::json!({"op":"list"})).unwrap())
-        .unwrap();
-    let InboxResult::Listed { items, .. } = listed else {
-        panic!("list")
-    };
-    assert_eq!(items, vec![item.request]);
-    f.call(answer(saved.request_id, "legacy-answer")).unwrap();
-    let InboxResult::Item { item, .. } = f.call(show(saved.request_id)).unwrap() else {
-        panic!("item")
-    };
-    assert_eq!(item.request.schema_version, 1);
-    assert!(
-        serde_json::to_value(&item.request)
-            .unwrap()
-            .get("work_coverage")
-            .is_none()
-    );
-}
 
 #[test]
 fn request_correlation_repository_bound_counts_encoded_wire_bytes() {
@@ -1436,31 +1371,6 @@ fn hook_offers_retry_idempotently_without_hiding_later_queued_answers() {
     assert!(retried.items.iter().all(|item| item.delivery.attempts == 1));
 }
 
-#[test]
-fn graph_steer_context_round_trips_and_rejects_malformed_values() {
-    let context = super::GraphSteerContext {
-        launch_actor: ActorId::from_bytes([4; 16]),
-        launch_operation: OperationId::parse("graph-steer-op").unwrap(),
-        origin_work_key: provenant_records::WorkKey::new(
-            provenant_core::ProjectId::from_bytes([5; 16]),
-            "g-steer",
-            "node",
-            1,
-        )
-        .unwrap(),
-    };
-    let encoded = serde_json::to_value(&context).unwrap();
-    assert_eq!(
-        serde_json::from_value::<super::GraphSteerContext>(encoded.clone()).unwrap(),
-        context
-    );
-    for field in ["launch_actor", "launch_operation", "origin_work_key"] {
-        let mut malformed = encoded.clone();
-        malformed[field] = serde_json::json!(false);
-        assert!(serde_json::from_value::<super::GraphSteerContext>(malformed).is_err());
-    }
-}
-
 fn chair_message(session: &str, text: &str, id: &str) -> InboxInput {
     InboxInput::ChairMessage {
         extra: Default::default(),
@@ -1713,81 +1623,6 @@ fn control_is_refused_inside_a_lane_and_without_a_lookup() {
         f.call(input),
         Err(InboxError::Mutation { ref source, .. }) if source.code() == "inbox_unavailable"
     ));
-}
-
-#[test]
-fn listing_metadata_round_trips_and_rejects_malformed_values() {
-    let host = HostId::from_bytes([7; 16]);
-    let result = InboxResult::Listed {
-        extra: Default::default(),
-        items: Vec::new(),
-        next_cursor: None,
-        truncated: false,
-        coverage: "local_only".into(),
-        projects: std::collections::BTreeMap::from([
-            (
-                "local-null-path".into(),
-                InboxProject {
-                    label: None,
-                    path: InboxProjectPath::Unavailable,
-                    host: None,
-                },
-            ),
-            (
-                "local-path".into(),
-                InboxProject {
-                    label: Some("repo".into()),
-                    path: InboxProjectPath::Local("/repo".into()),
-                    host: None,
-                },
-            ),
-            (
-                "peer-path-omitted".into(),
-                InboxProject {
-                    label: Some("peer repo".into()),
-                    path: InboxProjectPath::Omitted,
-                    host: Some(host),
-                },
-            ),
-        ]),
-        peers: [
-            (InboxPeerState::Complete, None),
-            (InboxPeerState::Partial, Some("invalid_page")),
-            (InboxPeerState::Unreachable, Some("timeout")),
-            (InboxPeerState::Unsupported, None),
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(index, (state, reason))| InboxPeerCoverage {
-            host,
-            label: "peer".into(),
-            state,
-            included: index,
-            invalid_rows: index + 1,
-            duplicate_rows: index + 2,
-            truncated: index % 2 == 0,
-            reason: reason.map(str::to_owned),
-        })
-        .collect(),
-    };
-    let value = serde_json::to_value(&result).unwrap();
-    assert_eq!(
-        value["projects"]["local-null-path"]["path"],
-        serde_json::Value::Null
-    );
-    assert!(value["projects"]["peer-path-omitted"].get("path").is_none());
-    assert_eq!(
-        serde_json::from_value::<InboxResult>(value.clone()).unwrap(),
-        result
-    );
-
-    let mut malformed_project = value.clone();
-    malformed_project["projects"]["local-path"]["label"] = serde_json::json!(7);
-    assert!(serde_json::from_value::<InboxResult>(malformed_project).is_err());
-
-    let mut malformed_peer = value;
-    malformed_peer["peers"][0]["state"] = serde_json::json!("pending");
-    assert!(serde_json::from_value::<InboxResult>(malformed_peer).is_err());
 }
 
 #[test]

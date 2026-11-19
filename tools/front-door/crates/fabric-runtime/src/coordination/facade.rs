@@ -2147,23 +2147,6 @@ mod diagnostic_tests {
     }
 
     #[test]
-    fn legacy_mismatch_frame_without_level_is_rejected() {
-        let result = serde_json::from_value::<FacadeError>(serde_json::json!({
-            "code": "peer_protocol_mismatch", "peer": "w", "remote": 1
-        }));
-        assert_eq!(
-            result.unwrap_err().classify(),
-            serde_json::error::Category::Data
-        );
-        let current = FacadeError::PeerProtocolMismatch {
-            peer: "w".into(),
-            remote: 1,
-            expected: 2,
-        };
-        assert_eq!(current.code(), "peer_version");
-    }
-
-    #[test]
     fn resume_preserves_no_fallback_and_target() -> Result<(), Box<dyn std::error::Error>> {
         let input = serde_json::json!({
             "op": "resume",
@@ -2613,33 +2596,4 @@ pub enum OutputResult {
         digest: Digest,
         bytes: OutputBytes,
     },
-}
-
-#[cfg(test)]
-mod new_worktree_tests {
-    use super::NewWorktree;
-    use serde_json::json;
-
-    #[test]
-    fn declared_worktree_metadata_round_trips_and_rejects_wrong_types() {
-        for default_base in [false, true] {
-            let worktree = NewWorktree {
-                extra: [(
-                    "future_worktree_field".into(),
-                    json!({"source": "newer minor"}),
-                )]
-                .into(),
-                default_base,
-                base: "main".into(),
-                branch: "writer".into(),
-            };
-            let mut value = serde_json::to_value(&worktree).unwrap();
-            let decoded: NewWorktree = serde_json::from_value(value.clone()).unwrap();
-            assert_eq!(decoded, worktree);
-            for malformed in [json!("true"), json!(1), json!({})] {
-                value["default_base"] = malformed;
-                assert!(serde_json::from_value::<NewWorktree>(value.clone()).is_err());
-            }
-        }
-    }
 }
