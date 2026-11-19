@@ -60,6 +60,12 @@ struct Check {
     bucket: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct FailedCheck {
+    name: String,
+    url: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Line {
     number: u64,
     state: String,
@@ -73,6 +79,9 @@ pub(crate) struct Line {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(default)]
     failing_checks: Vec<String>,
+    /// Links from the same observation, retained for completion reports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    failed_check_details: Vec<FailedCheck>,
     merge: String,
     review: String,
     /// Why no check was reported for this head, when that is known: either
@@ -99,6 +108,7 @@ impl Line {
         self.checks_failed = None;
         self.checks_pending = None;
         self.failing_checks.clear();
+        self.failed_check_details.clear();
     }
     /// The state an operator acts on, most urgent first.
     pub(crate) fn class(&self) -> &'static str {
@@ -140,6 +150,31 @@ impl Line {
             _ => (self.checks_pending.unwrap_or(0) == 0 && self.checks_total.is_some())
                 .then_some(true),
         }
+    }
+    /// Complete waits retain failures as pending until the other checks finish.
+    pub(crate) fn wait_verdict(&self, complete: bool) -> Option<bool> {
+        if complete && self.class() == "failing" && self.checks_pending.unwrap_or(0) > 0 {
+            None
+        } else {
+            self.verdict()
+        }
+    }
+
+    pub(crate) fn failure_lines(&self) -> Vec<String> {
+        self.failed_check_details
+            .iter()
+            .map(|check| {
+                format!(
+                    "#{} failed: {}{}",
+                    self.number,
+                    check.name,
+                    check
+                        .url
+                        .as_deref()
+                        .map_or(String::new(), |url| format!(" {url}"))
+                )
+            })
+            .collect()
     }
     /// True when no check has been observed for this pull request's head.
     pub(crate) fn checks_unreported(&self) -> bool {
@@ -778,6 +813,15 @@ fn status_line(number: u64, view: View, checks: Option<&[super::observer::Check]
             .filter(|check| matches!(check.bucket.as_str(), "fail" | "cancel"))
             .map(|check| check.name.clone())
             .collect(),
+        failed_check_details: checks
+            .unwrap_or(&[])
+            .iter()
+            .filter(|check| matches!(check.bucket.as_str(), "fail" | "cancel"))
+            .map(|check| FailedCheck {
+                name: check.name.clone(),
+                url: check.url.clone(),
+            })
+            .collect(),
         merge: word(&view.merge),
         review: word(view.review.as_deref().unwrap_or_default()),
         state: view.state,
@@ -881,6 +925,7 @@ fn rest_line(project: &Path, state: &Path, number: u64, try_graphql: bool) -> Li
                 checks_failed: None,
                 checks_pending: None,
                 failing_checks: Vec::new(),
+                failed_check_details: Vec::new(),
                 merge: "unknown".into(),
                 review: "unknown".into(),
                 cause: None,
@@ -1019,6 +1064,7 @@ mod tests {
             checks_failed: Some(0),
             checks_pending: Some(0),
             failing_checks: Vec::new(),
+            failed_check_details: Vec::new(),
             merge: "clean".into(),
             review: "approved".into(),
             cause: None,
@@ -1027,6 +1073,56 @@ mod tests {
             error: error.map(str::to_owned),
         }
     }
+    #[test]
+    fn completion_report_retains_every_failed_check_and_link() {
+        let check = |name: &str, bucket: &str, url: &str| super::super::observer::Check {
+            head: "head".into(),
+            name: name.into(),
+            bucket: bucket.into(),
+            app: None,
+            app_slug: None,
+            conclusion: None,
+            registered: None,
+            url: Some(url.into()),
+            excerpt: String::new(),
+        };
+        let view = super::View {
+            state: "OPEN".into(),
+            head: "head".into(),
+            merge: "".into(),
+            review: None,
+            draft: false,
+            url: String::new(),
+        };
+        let checks = [
+            check("one", "fail", "https://ci/one"),
+            check("two", "cancel", "https://ci/two"),
+        ];
+        let line = super::status_line(1668, view, Some(&checks));
+        assert_eq!(
+            line.failure_lines(),
+            [
+                "#1668 failed: one https://ci/one",
+                "#1668 failed: two https://ci/two"
+            ]
+        );
+        let json = serde_json::to_value(line).unwrap();
+        assert_eq!(json["failed_check_details"][1]["url"], "https://ci/two");
+    }
+
+    #[test]
+    fn complete_wait_keeps_failures_pending_until_all_checks_finish() {
+        let mut line = row(1668, "head", None);
+        line.checks_failed = Some(1);
+        line.checks_pending = Some(1);
+        assert_eq!(line.wait_verdict(false), Some(false));
+        assert_eq!(line.wait_verdict(true), None);
+        line.checks_pending = Some(0);
+        assert_eq!(line.wait_verdict(true), Some(false));
+        line.await_head("new");
+        assert_eq!(line.wait_verdict(true), None);
+    }
+
     #[test]
     fn awaiting_an_unreported_head_never_verdicts_the_stale_one() {
         let mut line = row(1668, "stale", None);
