@@ -2,41 +2,6 @@
 # Expiry is limited to 30 days from the day the CI check runs.
 
 [[test]]
-package = "provenant-cli"
-name = "run::provider::tests::writer_plan_stages_scratch_in_private_temporary_directory"
-issue = "#3300"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "writer_cli_branch_binds_the_new_worktree"
-issue = "#3294"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "writer_cli_launches_from_primary_checkout"
-issue = "#3294"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "writer_cli_launches_from_worktree_subdirectory"
-issue = "#3294"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "writer_cli_launches_from_worktree_root"
-issue = "#3294"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
 package = "provenant"
 name = "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks"
 issue = "#3295"
@@ -54,33 +19,5 @@ expires = 2026-12-14
 package = "provenant"
 name = "gc_pressure_collects_only_the_selected_primary_project"
 issue = "#3295"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "lane_prepare_isolates_nested_state"
-issue = "#3299"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "lane_prepare_isolates_nested_publishing_state"
-issue = "#3299"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "lane_prepare_isolates_nested_writer_state"
-issue = "#3299"
-owner = "chair"
-expires = 2026-12-14
-
-[[test]]
-package = "provenant"
-name = "lane_prepare_isolates_nested_claude_state"
-issue = "#3299"
 owner = "chair"
 expires = 2026-12-14
