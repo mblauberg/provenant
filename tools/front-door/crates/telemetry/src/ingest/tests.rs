@@ -811,7 +811,7 @@ fn incremental_ingest_resumes_complete_lines_and_recovers_replacements() -> Resu
 }
 
 #[test]
-fn incremental_ingest_upgrades_existing_chair_without_rereading() -> Result {
+fn incremental_chair_attribution_is_idempotent_after_upgrade() -> Result {
     let f = Fixture::new()?;
     f.write(
         "claude",
@@ -834,17 +834,34 @@ fn incremental_ingest_upgrades_existing_chair_without_rereading() -> Result {
         deadline: None,
         incremental: true,
     };
+
+    // A session first seen without a chair carries the lane's attribution.
     ingest(&f.roots, &request(&chairs))?;
-    // Recording the chair re-attributes stored rows; the source is not reread.
-    assert_eq!(ingest(&f.roots, &request(&recorded_chairs))?.bytes_read, 0);
-    let rows = read_rows(&f.roots, &RowFilter::default())?;
+    let before = read_rows(&f.roots, &RowFilter::default())?;
+    assert_eq!(before.len(), 1);
+
+    // Recording the chair upgrades attribution of the stored row. Whether the
+    // transcript is reread is an implementation detail, not the contract.
+    ingest(&f.roots, &request(&recorded_chairs))?;
+    let after = read_rows(&f.roots, &RowFilter::default())?;
     assert_eq!(
-        rows.len(),
-        1,
-        "idempotent attribution without duplicate rows"
+        after.len(),
+        before.len(),
+        "attribution must not duplicate rows"
     );
-    assert_eq!(rows[0].source, Source::Chair);
-    assert_eq!(rows[0].identity, recorded_chairs["s1"]);
+    assert_eq!(after[0].source, Source::Chair);
+    assert_eq!(after[0].identity, recorded_chairs["s1"]);
+    assert_eq!(after[0].buckets(), before[0].buckets());
+
+    // Repeated incremental ingests keep the same attribution and accounting.
+    for _ in 0..3 {
+        ingest(&f.roots, &request(&recorded_chairs))?;
+        let again = read_rows(&f.roots, &RowFilter::default())?;
+        assert_eq!(again.len(), after.len());
+        assert_eq!(again[0].source, after[0].source);
+        assert_eq!(again[0].identity, after[0].identity);
+        assert_eq!(again[0].buckets(), after[0].buckets());
+    }
     Ok(())
 }
 

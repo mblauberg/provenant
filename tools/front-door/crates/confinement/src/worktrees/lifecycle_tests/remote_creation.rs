@@ -1007,10 +1007,10 @@ fn selected_inventory_observes_only_the_matching_checkout() -> Result<(), Box<dy
 
 #[test]
 fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn Error>> {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
     struct StatusProbe<'a> {
         inner: &'a dyn Executor,
-        observed_status: AtomicBool,
+        status_roots: Mutex<Vec<PathBuf>>,
     }
     impl Executor for StatusProbe<'_> {
         fn execute(
@@ -1018,7 +1018,10 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
             options: provenant_os::exec::ExecOptions<'_>,
         ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
             if options.argv.iter().any(|arg| arg == "status") {
-                self.observed_status.store(true, Ordering::SeqCst);
+                self.status_roots
+                    .lock()
+                    .unwrap()
+                    .push(options.cwd.to_owned());
             }
             self.inner.execute(options)
         }
@@ -1035,7 +1038,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     }
     let git = StatusProbe {
         inner: context.executor,
-        observed_status: AtomicBool::new(false),
+        status_roots: Mutex::new(Vec::new()),
     };
     context.executor = &git;
     let lanes = list_for_gc(&context, &cancel())?;
@@ -1065,7 +1068,14 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
         &cancel(),
     )?;
     assert!(report.worktrees.removed.is_empty());
-    assert!(!git.observed_status.load(Ordering::SeqCst));
+    // Primary output collection is in scope; the foreign checkouts are not.
+    assert!(
+        git.status_roots
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|path| path == &fixture.root)
+    );
     let lanes = list_for_gc(&context, &cancel())?;
     collect(
         &context,
@@ -1089,6 +1099,13 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
         },
         &cancel(),
     )?;
-    assert!(!git.observed_status.load(Ordering::SeqCst));
+    // Primary output collection is in scope; the foreign checkouts are not.
+    assert!(
+        git.status_roots
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|path| path == &fixture.root)
+    );
     Ok(())
 }

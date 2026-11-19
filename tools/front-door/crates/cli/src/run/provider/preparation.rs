@@ -4071,6 +4071,19 @@ pub(super) fn prepare_candidates_inner(
         let build_class =
             provenant_config::ResolvedAdmissionClass::resolve("build", state_root, Some(&source));
         let cargo_target = run::ResolvedCargoTarget::resolve_with_brief(&task.profile, prompt_text);
+        let (cargo_cache_budget, cargo_cache_budget_warning) =
+            match provenant_config::cargo_cache_budget(
+                &task.profile,
+                &run::build_dir_gc::shared_cache_root(&home),
+            ) {
+                Ok(budget) => (Some(budget), None),
+                Err(error) => (
+                    None,
+                    Some(format!(
+                        "Cargo cache budget could not be resolved ({error}); launch continues without eviction"
+                    )),
+                ),
+            };
         let extras = run::PreambleExtras {
             verification: Some(run::VerificationResolution::resolve(
                 &task.profile,
@@ -4078,6 +4091,7 @@ pub(super) fn prepare_candidates_inner(
             )),
             build_cap: Some(run::BuildCap::from(&build_class)),
             cargo_target: Some(cargo_target.clone()),
+            cargo_cache_budget: cargo_cache_budget.clone(),
         };
         let text = format!(
             "{}\n{text}",
@@ -4285,6 +4299,15 @@ pub(super) fn prepare_candidates_inner(
             AccessMode::WorktreeWrite(_) => writer.as_ref().map(|w| w.worktree.path()),
             AccessMode::ReadOnly => None,
         };
+        let common_git_path = repository
+            .as_ref()
+            .map(|path| path.to_path_buf())
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let common_git_dir = match &plan.permissions().mode {
+            AccessMode::WorktreeWrite(authority) => Some(authority.common_git_dir().to_path_buf()),
+            AccessMode::ReadOnly => common_git_path.clone(),
+        };
         let private_cache = match &plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
             AccessMode::ReadOnly => &plan.permissions().scratch.path,
@@ -4486,11 +4509,6 @@ pub(super) fn prepare_candidates_inner(
             alias_temporary_env(&mut spec.env, scratch, &alias.join(&scratch_name));
         }
         apply_lane_capabilities(&mut spec.profile.spec, &task.access);
-        let common_git_path = repository
-            .as_ref()
-            .map(|path| path.to_path_buf())
-            .transpose()
-            .map_err(|error| error.to_string())?;
         let project_paths = super::project_paths::apply(
             &mut spec,
             &plan,
@@ -4769,6 +4787,28 @@ pub(super) fn prepare_candidates_inner(
         if let Some(warning) = &cargo_target_warning {
             push_launch_warning(&mut route, warning.clone());
         }
+        if let Some(warning) = &cargo_cache_budget_warning {
+            push_launch_warning(&mut route, warning.clone());
+        }
+        // A read-only lane builds in its scratch by design; a writer's target
+        // lies in its lane cache or a configured path, never in attempt tmp.
+        if let Some((_, target_val)) = spec
+            .env
+            .iter()
+            .find(|(k, _)| k == "CARGO_TARGET_DIR")
+            .filter(|_| writer.is_some())
+        {
+            let target_path = Path::new(target_val);
+            if target_path.starts_with(scratch) || target_path.starts_with(&paths.temporary) {
+                push_launch_warning(
+                    &mut route,
+                    format!(
+                        "CARGO_TARGET_DIR is set under the attempt's tmp directory ({}); build output bypasses the lane's warm target",
+                        target_path.display()
+                    ),
+                );
+            }
+        }
         for warning in ignore_file_warnings(&route.adapter, task, roots.state.as_path()) {
             push_launch_warning(&mut route, warning);
         }
@@ -5028,6 +5068,18 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(setup_skip(&label, error));
             continue;
         }
+        // Only a writer's launch enforces the cache budget (a read-only lane
+        // returns before reading this snapshot), and the snapshot costs a
+        // registered-project and process census, so a read-only launch skips it.
+        let cargo_target_protection = if writer.is_some() {
+            run::build_dir_gc::target_protection_for_launch(
+                roots,
+                writer.as_ref().map(|writer| writer.worktree.path()),
+                common_git_dir.as_deref(),
+            )
+        } else {
+            Default::default()
+        };
         return Ok(run::PreparedLaunch {
             limits,
             continuation_expectation,
@@ -5048,9 +5100,12 @@ pub(super) fn prepare_candidates_inner(
                 cargo_home,
                 cargo_target_seed: config.domains.fabric.lanes.cargo_seed.enabled,
                 state_root: roots.state.as_path().to_path_buf(),
+                roots: Some(roots.clone()),
                 sandbox,
                 backend: None,
                 cargo_target: cargo_target.clone(),
+                cargo_cache_budget,
+                cargo_target_protection,
             }),
         });
     }

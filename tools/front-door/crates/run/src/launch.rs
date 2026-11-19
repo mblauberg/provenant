@@ -1060,16 +1060,22 @@ impl RunStore {
         for id in ids {
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
             if matches!(self.record(id, call)?.state, AttemptState::Queued { .. }) {
-                self.withdraw(
+                self.withdraw_with_preparation_failure(
                     id,
-                    AttemptState::Queued {
-                        extra: Default::default(),
+                    crate::store::Withdrawal {
+                        expected: AttemptState::Queued {
+                            extra: Default::default(),
+                        },
+                        outcome: Outcome::Rejected,
+                        reason,
+                        finished_at: call
+                            .clock
+                            .wall_now()
+                            .map_err(|_| RunError::Validation("wall clock"))?,
+                        failure: None,
+                        terminal_cause: Some(TerminalCause::AccessPolicyRefused),
+                        terminal_note: None,
                     },
-                    Outcome::Rejected,
-                    reason,
-                    call.clock
-                        .wall_now()
-                        .map_err(|_| RunError::Validation("wall clock"))?,
                     call,
                 )?;
             }
@@ -2964,9 +2970,12 @@ mod policy_reporting_tests {
                 .unwrap(),
                 cargo_target_seed: false,
                 state_root: "/fixture/state".into(),
+                roots: None,
                 sandbox: inherited_sandbox,
                 backend: None,
                 cargo_target: Default::default(),
+                cargo_cache_budget: None,
+                cargo_target_protection: Default::default(),
             }),
         };
         prepared.bind_sandbox_backend(&cancel, &Default::default())?;

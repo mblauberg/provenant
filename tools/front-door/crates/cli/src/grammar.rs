@@ -360,6 +360,14 @@ pub struct Review {
 }
 #[derive(Debug, Subcommand)]
 pub enum Pr {
+    /// Merge each pull request's base into its branch and push the result
+    Sync {
+        #[arg(required = true, catalog_u64_range = 1..)]
+        numbers: Vec<u64>,
+        /// Do not launch an implement lane when a merge conflict occurs
+        #[arg(long)]
+        no_lane: bool,
+    },
     /// List retained local attempt contributions and missing peer coverage
     Contributions {
         #[arg(catalog_u64_range = 1..)]
@@ -464,14 +472,14 @@ pub enum ChairSummary {
 }
 #[derive(Debug, Subcommand)]
 pub enum ChairLog {
-    /// Append an update from a JSON file, or standard input with `-`.
+    /// Append an update from a markdown or JSON file, or standard input with `-`.
     Append {
-        /// Chair session ID
+        /// Chair session ID; defaults to the active host chair session
         #[arg(long)]
-        session: String,
-        /// JSON containing markdown, kind, channel and optional links
+        session: Option<String>,
+        /// Markdown or JSON file; standard input when omitted or `-`
         #[arg(long)]
-        file: String,
+        file: Option<String>,
         /// Stable retry key; generated when omitted
         #[arg(long, catalog_requires = "issued_at", value_parser = explicit_operation_id)]
         operation_id: Option<OperationId>,
@@ -481,9 +489,9 @@ pub enum ChairLog {
     },
     /// List a bounded page of updates in sequence order.
     List {
-        /// Chair session ID
+        /// Chair session ID; defaults to the active host chair session
         #[arg(long)]
-        session: String,
+        session: Option<String>,
         /// Return entries after this sequence
         #[arg(long)]
         after: Option<u64>,
@@ -1334,6 +1342,15 @@ pub struct Status {
     #[arg(long)]
     pub cursor: Option<u64>,
 }
+/// When a PR wait can settle after checks fail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum PrWaitUntil {
+    /// Settle as soon as a check fails.
+    Failure,
+    /// Wait for all observed checks to finish.
+    Complete,
+}
+
 /// `wait`: block until graph work or pull requests settle.
 #[derive(Clone, Debug, Args)]
 pub struct Wait {
@@ -1347,6 +1364,9 @@ pub struct Wait {
     /// Wait until GitHub reports this exact head; never verdict another SHA
     #[arg(long, value_name = "SHA", value_parser = parse_head_oid)]
     pub head: Option<String>,
+    /// PR check settlement: failure (default) or complete
+    #[arg(long, value_enum, requires = "prs")]
+    pub until: Option<PrWaitUntil>,
     /// Wait until every target settles (the default)
     #[arg(long, conflicts_with_all = ["any", "fail_fast"])]
     pub all: bool,

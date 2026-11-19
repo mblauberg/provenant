@@ -13,7 +13,7 @@ so Cargo does not put intermediate build output in a separate cold directory. Th
 Compiling cargo commands and targeted test runs share the host-wide `build`
 admission class, configured through `[admission.build].slots` and derived from
 CPU cores and RAM when unset. Set it to `0` to disable the cap. Busy slots wait
-a bounded time, then warn and proceed. Cargo serialises access to a shared target
+a bounded time, then warn and proceed. Cargo serialises access to one target
 with its own locks. `lanes.local_cargo` can warn when a command exceeds a host's
 preferred scope; it does not refuse the command. By default,
 `lanes.cargo_target` is `private`, the worktree's own target cloned warm from

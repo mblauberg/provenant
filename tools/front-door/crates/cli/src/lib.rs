@@ -1762,6 +1762,11 @@ mod tests {
             invalid(&["run", "task", flag, "example"]);
         }
         valid(&["templates"]);
+        valid(&["upgrade", "--verify", "--dry-run"]);
+        valid(&[
+            "upgrade", "--verify", "--host", "peer-a", "--route", "junior",
+        ]);
+        invalid(&["upgrade", "--dry-run"]);
         valid(&[
             "templates",
             "show",
@@ -2146,13 +2151,34 @@ mod tests {
         assert!(matches!(
             valid(&["ci", "failures", "pr", "12", "--json"]).command,
             Command::Ci(Ci::Failures {
-                target: ci::FailureTarget::Pr { number: 12 }
-            })
+                target: Some(ci::FailureTarget::Pr { numbers }),
+                ..
+            }) if numbers == [12]
+        ));
+        assert!(matches!(
+            valid(&["ci", "failures", "pr", "12", "34", "--json"]).command,
+            Command::Ci(Ci::Failures {
+                target: Some(ci::FailureTarget::Pr { numbers }),
+                ..
+            }) if numbers == [12, 34]
+        ));
+        assert!(matches!(
+            valid(&["ci", "failures", "--pr", "12", "--json"]).command,
+            Command::Ci(Ci::Failures { pr, .. }) if pr == [12]
+        ));
+        assert!(matches!(
+            valid(&["ci", "failures", "--pr", "12", "--pr", "34", "--json"]).command,
+            Command::Ci(Ci::Failures { pr, .. }) if pr == [12, 34]
+        ));
+        assert!(matches!(
+            valid(&["ci", "failures", "--pr", "12", "34", "--json"]).command,
+            Command::Ci(Ci::Failures { pr, .. }) if pr == [12, 34]
         ));
         assert!(matches!(
             valid(&["ci", "failures", "run", "98765", "--json"]).command,
             Command::Ci(Ci::Failures {
-                target: ci::FailureTarget::Run { run: 98765 }
+                target: Some(ci::FailureTarget::Run { run: 98765 }),
+                ..
             })
         ));
     }
@@ -2753,6 +2779,9 @@ mod tests {
             "--any",
         ]);
         valid(&["wait", "--pr", "2721", "--follow", "--timeout", "2m"]);
+        valid(&["wait", "--pr", "2721", "--until", "complete"]);
+        invalid(&["wait", "--until", "complete"]);
+        invalid(&["wait", "--pr", "2721", "--until", "unknown"]);
         let sha = "a".repeat(40);
         let Command::Wait(wait) = valid(&["wait", "--pr", "2721", "--head", &sha]).command else {
             panic!("wait command")
@@ -3248,6 +3277,50 @@ mod tests {
             panic!("byte path")
         };
         assert_eq!(inv.globals.state_dir.map(|v| v.into_os_string()), Some(raw));
+    }
+
+    #[test]
+    fn did_you_mean_suggestions_for_unknown_subcommand_and_flag() {
+        // Unknown subcommand: suggests closest valid subcommand (e.g. lan -> provenant land)
+        let ParseOutcome::Invalid { error, .. } = parsed(&["lan"]) else {
+            panic!("expected invalid outcome for unknown subcommand");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("did you mean `provenant land`?"),
+            "expected suggestion for unknown subcommand, got: {message}"
+        );
+
+        // Unknown subcommand in a group: suggests full command path (e.g. pr syn -> provenant pr sync)
+        let ParseOutcome::Invalid { error, .. } = parsed(&["pr", "syn"]) else {
+            panic!("expected invalid outcome for nested unknown subcommand");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("did you mean `provenant pr sync`?"),
+            "expected suggestion for nested unknown subcommand, got: {message}"
+        );
+
+        // Unknown flag: suggests closest valid flag on the selected command (e.g. --jso -> --json)
+        let ParseOutcome::Invalid { error, .. } = parsed(&["pr", "status", "--jso", "123"]) else {
+            panic!("expected invalid outcome for unknown flag");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("did you mean `--json`?"),
+            "expected suggestion for unknown flag, got: {message}"
+        );
+
+        // Words with edit distance > 2 receive no suggestion
+        let ParseOutcome::Invalid { error, .. } = parsed(&["pr", "completelyunknownsubcommand"])
+        else {
+            panic!("expected invalid outcome");
+        };
+        let message = error.to_string();
+        assert!(
+            !message.contains("did you mean"),
+            "expected no suggestion for distant word, got: {message}"
+        );
     }
 }
 

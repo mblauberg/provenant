@@ -4,6 +4,26 @@ use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
 use std::{convert::Infallible, os::unix::fs::PermissionsExt};
 struct Owner;
 
+fn collect_terminal(
+    root: &StateRoot,
+    project: ProjectId,
+    before_ns: i128,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+) -> Result<usize, JournalError> {
+    FileJournal::collect_terminal(
+        root,
+        project,
+        before_ns,
+        &provenant_core::SweepControl {
+            cancel: cancel.clone(),
+            ..Default::default()
+        },
+        clock,
+    )
+    .map(|report| report.removed)
+}
+
 fn stored_fixture() -> StoredCheckpoint {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -63,6 +83,58 @@ fn stored_fixture() -> StoredCheckpoint {
 fn fixture_plan_digest(document: &GraphDocument) -> String {
     let (plan, _) = validate_replay_plan(document, &plans::generous()).unwrap();
     plan_digest(&plan).unwrap().to_string()
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn save_decodes_each_checkpoint_at_most_once_and_checks_blobs() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let mut fixture = stored_fixture();
+    fixture.execution.directory = inputs.checkout;
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution).unwrap();
+    for expected in [1, 2] {
+        super::journal::CHECKPOINT_DECODES.with(|count| count.set(0));
+        journal.save(&fixture.checkpoint).unwrap();
+        assert_eq!(
+            super::journal::CHECKPOINT_DECODES.with(|count| count.get()),
+            expected
+        );
+    }
+    let directory = journal.directory.current_path().unwrap();
+    let checkpoint_path = directory.join(journal.checkpoint_name());
+    let before = std::fs::read(&checkpoint_path).unwrap();
+    let blob = std::fs::read_dir(directory)
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("graph-g-test.prompt-")
+        })
+        .unwrap()
+        .path();
+    std::fs::write(blob, b"corrupt").unwrap();
+    let mut invalid = fixture.checkpoint.clone();
+    invalid.schema_version = 99;
+    assert!(matches!(
+        journal.save(&invalid).unwrap_err().root_cause(),
+        JournalError::Decode(_)
+    ));
+    assert!(matches!(
+        journal.save(&fixture.checkpoint).unwrap_err().root_cause(),
+        JournalError::BadDigest
+    ));
+    assert_eq!(std::fs::read(checkpoint_path).unwrap(), before);
 }
 
 // Spec: docs/specs/fabric.md#checkpoint-envelope
@@ -579,7 +651,7 @@ fn interrupted_terminal_collection_resumes_derived_cleanup() {
     std::fs::remove_file(directory.join("graph-g-test.json")).unwrap();
 
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         1
     );
     assert_eq!(prompt_blobs(), 0);
@@ -587,8 +659,111 @@ fn interrupted_terminal_collection_resumes_derived_cleanup() {
     assert!(!pending.join("g-test.pending").exists());
     assert!(directory.join("graph-g-test.reserved").exists());
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         0
+    );
+}
+
+#[test]
+fn orphan_prompt_cleanup_resumes_from_the_saved_directory_cookie() {
+    use std::cell::Cell;
+
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let fixture: StoredCheckpoint = stored_fixture();
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution.clone()).unwrap();
+    journal.save(&fixture.checkpoint).unwrap();
+    drop(journal);
+
+    let directory = graph_directory(&root, project).unwrap();
+    let mut prompts = serde_json::json!({
+        "nodes": (0..128)
+            .map(|index| serde_json::json!({"prompt": format!("orphan prompt {index}")}))
+            .collect::<Vec<_>>()
+    });
+    prompt_store::externalise(&directory, "g-test", &mut prompts).unwrap();
+    directory.unlink(OsStr::new("graph-g-test.json")).unwrap();
+    std::fs::write(
+        directory
+            .current_path()
+            .unwrap()
+            .join("graph-g-test.advance-error"),
+        b"stale",
+    )
+    .unwrap();
+    let metadata = directory.metadata().unwrap();
+    let detail = format!(
+        "graph-collection-v1|orphans|-|0|0|0|0|{}|{}|{}|0|0|0",
+        metadata.device, metadata.inode, metadata.modified_ns
+    );
+    let candidate_root = directory.anchored_path();
+    let entries = directory.entries().unwrap().count();
+    let checks = Cell::new(0usize);
+    let keep_going = || {
+        let count = checks.get() + 1;
+        checks.set(count);
+        count <= entries + 1
+    };
+    let first = FileJournal::collect_terminal(
+        &root,
+        project,
+        i128::MAX,
+        &provenant_core::SweepControl {
+            start_at: Some(&candidate_root),
+            detail: Some(&detail),
+            cancel: cancel.clone(),
+            keep_going: Some(&keep_going),
+        },
+        &clock,
+    )
+    .unwrap();
+    assert!(first.interrupted_at.is_some());
+    let candidate = first.interrupted_at.unwrap();
+    let continuation = first.continuation.unwrap();
+    assert!(continuation.contains("|orphan-prompts|"), "{continuation}");
+
+    let resumed = FileJournal::collect_terminal(
+        &root,
+        project,
+        i128::MAX,
+        &provenant_core::SweepControl {
+            start_at: Some(&candidate),
+            detail: Some(&continuation),
+            cancel: CancelToken::new(),
+            ..Default::default()
+        },
+        &clock,
+    )
+    .unwrap();
+    assert!(resumed.interrupted_at.is_none());
+    let remaining_prompts = directory
+        .entries()
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.to_string_lossy().contains(".prompt-"))
+        .count();
+    assert_eq!(remaining_prompts, 0);
+    assert!(
+        !directory
+            .current_path()
+            .unwrap()
+            .join("graph-g-test.advance-error")
+            .exists()
+    );
+    assert!(
+        directory
+            .current_path()
+            .unwrap()
+            .join("graph-g-test.reserved")
+            .exists()
     );
 }
 
@@ -942,14 +1117,14 @@ fn checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names() {
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         0
     );
     let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     fixture.checkpoint.nodes[0].state = NodeState::Succeeded;
     journal.save(&fixture.checkpoint).unwrap();
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         0
     );
     fixture.checkpoint.asks.push(
@@ -961,7 +1136,7 @@ fn checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names() {
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         0
     );
     // Bind the delivery document to its own journal: a resumed journal keeps
@@ -986,7 +1161,7 @@ fn checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names() {
     journal.save(&delivery_checkpoint).unwrap();
     drop(journal);
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         0
     );
     let mut journal =
@@ -995,7 +1170,7 @@ fn checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names() {
     journal.save(&delivery_checkpoint).unwrap();
     drop(journal);
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         1
     );
     fixture.checkpoint.asks.clear();
@@ -1003,11 +1178,11 @@ fn checkpoint_collection_keeps_pending_graphs_and_reserves_collected_names() {
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, 0, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, 0, &cancel, &clock).unwrap(),
         0
     );
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         1
     );
     assert!(
@@ -1076,7 +1251,7 @@ fn checkpoint_collection_removes_matching_scratch_documents() {
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         0
     );
     assert!(generated.exists());
@@ -1085,12 +1260,12 @@ fn checkpoint_collection_removes_matching_scratch_documents() {
     journal.save(&fixture.checkpoint).unwrap();
     drop(journal);
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, 0, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, 0, &cancel, &clock).unwrap(),
         0
     );
     assert!(generated.exists());
     assert_eq!(
-        FileJournal::collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
+        collect_terminal(&root, project, i128::MAX, &cancel, &clock).unwrap(),
         1
     );
     assert!(!generated.exists());
@@ -2099,7 +2274,16 @@ fn prompts_are_stored_by_digest_and_collected_with_the_graph() {
             .collect::<Vec<_>>()
     };
     assert_eq!(blobs(&directory).len(), 8);
-    assert!(prompt_store::collect(&directory, "g-test").unwrap());
+    assert!(
+        prompt_store::collect(
+            &directory,
+            "g-test",
+            &provenant_core::SweepControl::default(),
+            None,
+        )
+        .unwrap()
+        .removed
+    );
     assert!(blobs(&directory).is_empty());
     assert!(load_checkpoint(&directory, "g-test").is_err());
 }

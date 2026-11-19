@@ -399,10 +399,14 @@ impl RunStore {
                 .ok();
             #[cfg(feature = "fixture")]
             hold_seed_for_fixture(&setup_cancel);
-            confinement.seed_cargo(&mut plan.environment, &seed_attempt, &setup_cancel);
+            let evicted =
+                confinement.seed_cargo(&mut plan.environment, &seed_attempt, &setup_cancel);
             drop(seeding);
             if setup_cancel.is_cancelled() || local_or_withdraw!(cancel_requested()) {
                 local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
+            }
+            if !evicted {
+                confinement.enforce_cargo_cache_budget();
             }
             let writer_attempt = local_or_withdraw!(directory());
             if let Some(writer) = &confinement.writer

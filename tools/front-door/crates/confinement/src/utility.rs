@@ -516,7 +516,24 @@ impl UtilityRuntime {
         budget: UtilityBudget,
         cancel: &CancelToken,
     ) -> Result<crate::worktrees::ProjectLayout, UtilityError> {
-        if repo.private_git_dir() == repo.common_git_dir() {
+        if repo.is_bare() {
+            let location = provenant_config::ProjectLocation::new(repo.common_git_dir())
+                .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+            let binding = match bound {
+                Some(binding) => binding.clone(),
+                None if self.host_state_available => {
+                    provenant_config::lookup_project_at_state(&self.host_state, &location)
+                        .map_err(|_| UtilityError::UnreadableGitConfiguration)?
+                        .ok_or(UtilityError::UnreadableGitConfiguration)?
+                }
+                None => return Err(UtilityError::UnreadableGitConfiguration),
+            };
+            if binding.common_dir() != repo.common_git_dir() {
+                return Err(UtilityError::UnreadableGitConfiguration);
+            }
+            return self.project_layout_for_binding(executor, &binding, budget, cancel);
+        }
+        if repo.is_primary_checkout() {
             return crate::worktrees::ProjectLayout::from_repo(repo, true)
                 .map_err(|_| UtilityError::UnreadableGitConfiguration);
         }
@@ -760,8 +777,10 @@ impl UtilityRuntime {
         // A verified checkout whose private directory is the common directory
         // is the primary itself. Linked worktrees need the shared resolver so
         // their own root never becomes the project-configuration owner.
-        let project_root = if repo.private_git_dir() == repo.common_git_dir() {
+        let project_root = if repo.is_primary_checkout() {
             Some(repo.root_path().to_path_buf())
+        } else if repo.is_bare() {
+            None
         } else {
             let layout = self.project_layout_for_repository(executor, repo, budget, cancel)?;
             layout.project().map(Path::to_path_buf)
@@ -818,6 +837,31 @@ impl UtilityRuntime {
         }
         self.revalidate()?;
         VerifiedRepo::open(path, |repo| {
+            probe_repository(executor, repo, self, None, budget, cancel)
+        })
+    }
+
+    /// Open a bare common directory only through an existing host project
+    /// binding whose trusted inventory confirms that it is bare.
+    pub fn open_bound_bare_repo(
+        &self,
+        executor: &dyn Executor,
+        binding: &provenant_config::ProjectBinding,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<VerifiedRepo, UtilityError> {
+        if cancel.is_cancelled() {
+            return Err(UtilityError::Cancelled);
+        }
+        self.revalidate()?;
+        let layout = self.project_layout_for_binding(executor, binding, budget, cancel)?;
+        let common = canonicalize(binding.common_dir())
+            .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+        if layout.project().is_some() || layout.root() != common {
+            return Err(UtilityError::UnreadableGitConfiguration);
+        }
+        let identity = layout.directory().metadata()?;
+        VerifiedRepo::open_bound_bare(&common, identity, |repo| {
             probe_repository(executor, repo, self, None, budget, cancel)
         })
     }
@@ -895,7 +939,7 @@ impl UtilityRuntime {
             match directory.metadata_at(OsStr::new(".git"), false) {
                 Ok(_) => {
                     let repo = self.open_repo(executor, ancestor, budget, cancel)?;
-                    let location = if repo.private_git_dir() == repo.common_git_dir() {
+                    let location = if repo.is_primary_checkout() {
                         provenant_config::ProjectLocation::from_verified_primary_checkout(
                             repo.common_git_dir(),
                             repo.root_path(),
@@ -1219,13 +1263,8 @@ impl<'a> HostGit<'a> {
         if self.cancel.is_cancelled() {
             return Err(UtilityError::Cancelled);
         }
-        let mut argv = vec![
-            self.runtime.git.program()?.into_os_string(),
-            "--git-dir".into(),
-            self.repo.private_git_dir().as_os_str().to_owned(),
-            "--work-tree".into(),
-            self.repo.root_path().as_os_str().to_owned(),
-        ];
+        let mut argv = vec![self.runtime.git.program()?.into_os_string()];
+        argv.extend(repository_args(self.repo));
         argv.extend(transport::config_args());
         argv.extend_from_slice(args);
         validate_outcome(self.runtime.git.execute(self.executor, || {
@@ -1626,17 +1665,26 @@ pub(crate) fn exec_options<'a>(
     options
 }
 
+fn repository_args(repo: &VerifiedRepo) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("--git-dir"),
+        repo.private_git_dir().as_os_str().to_owned(),
+    ];
+    if !repo.is_bare() {
+        args.extend([
+            OsString::from("--work-tree"),
+            repo.root_path().as_os_str().to_owned(),
+        ]);
+    }
+    args
+}
+
 fn git_args(
     operation: GitRead,
     repo: &VerifiedRepo,
     attribute_source: &str,
 ) -> Result<Vec<OsString>, UtilityError> {
-    let mut args = vec![
-        OsString::from("--git-dir"),
-        repo.private_git_dir().as_os_str().to_owned(),
-        OsString::from("--work-tree"),
-        repo.root_path().as_os_str().to_owned(),
-    ];
+    let mut args = repository_args(repo);
     args.extend(GIT_COMMON.iter().map(OsString::from));
     args.push(format!("--attr-source={attribute_source}").into());
     let tail = match operation {
@@ -2014,22 +2062,34 @@ fn environment_with(
             repo.private_git_dir().as_os_str().to_owned(),
         ),
         (
-            "GIT_WORK_TREE".into(),
-            repo.root_path().as_os_str().to_owned(),
-        ),
-        (
             "GIT_COMMON_DIR".into(),
             repo.common_git_dir().as_os_str().to_owned(),
         ),
     ];
+    if !repo.is_bare() {
+        env.push((
+            "GIT_WORK_TREE".into(),
+            repo.root_path().as_os_str().to_owned(),
+        ));
+    }
     let overrides = GIT_CONFIG_OVERRIDES
         .iter()
-        .map(|(key, value)| (*key, *value))
+        .map(|(key, value)| {
+            if repo.is_bare() && *key == "core.bare" {
+                (*key, "true")
+            } else {
+                (*key, *value)
+            }
+        })
         .chain(
             repo_overrides
                 .iter()
+                .filter(|(key, _)| !repo.is_bare() || key != "core.bare")
                 .map(|(key, value)| (key.as_str(), value.as_str())),
-        );
+        )
+        // Keep a scanned local core.bare=false from undoing the bare Git
+        // context established by the binding and worktree inventory.
+        .chain(repo.is_bare().then_some(("core.bare", "true")));
     let mut count = 0;
     for (index, (key, value)) in overrides.enumerate() {
         env.push((format!("GIT_CONFIG_KEY_{index}").into(), key.into()));
@@ -2653,7 +2713,8 @@ fn probe_repository(
 
 /// Resolve the repository object format once without writing an object, then
 /// preflight the global attribute-source option on a submodule-safe status
-/// read. The canonical empty tree need not exist in the object database.
+/// read, or a bare-safe rev-parse. The canonical empty tree need not exist in
+/// the object database.
 fn empty_attribute_source(
     executor: &dyn Executor,
     repo: &VerifiedRepo,
@@ -2679,14 +2740,22 @@ fn empty_attribute_source(
         _ => return Err(UtilityError::AttributeSourceUnsupported),
     };
     let source_option: OsString = format!("--attr-source={source}").into();
-    let preflight_args = [
-        source_option,
-        OsString::from("status"),
-        OsString::from("--porcelain=v2"),
-        OsString::from("-z"),
-        OsString::from("--ignore-submodules=all"),
-        OsString::from("--untracked-files=no"),
-    ];
+    let preflight_args = if repo.is_bare() {
+        vec![
+            source_option,
+            OsString::from("rev-parse"),
+            OsString::from("--show-object-format"),
+        ]
+    } else {
+        vec![
+            source_option,
+            OsString::from("status"),
+            OsString::from("--porcelain=v2"),
+            OsString::from("-z"),
+            OsString::from("--ignore-submodules=all"),
+            OsString::from("--untracked-files=no"),
+        ]
+    };
     let preflight = run_git_probe(
         executor,
         repo,
@@ -2711,13 +2780,8 @@ fn run_git_probe(
     overrides: &[(String, String)],
     command: &[OsString],
 ) -> Result<ExecOutcome, UtilityError> {
-    let mut argv = vec![
-        runtime.git.program()?.into_os_string(),
-        OsString::from("--git-dir"),
-        repo.private_git_dir().as_os_str().to_owned(),
-        OsString::from("--work-tree"),
-        repo.root_path().as_os_str().to_owned(),
-    ];
+    let mut argv = vec![runtime.git.program()?.into_os_string()];
+    argv.extend(repository_args(repo));
     argv.extend(GIT_COMMON.iter().map(OsString::from));
     argv.extend(command.iter().cloned());
     let env = environment_with(runtime, repo, overrides);
@@ -3013,6 +3077,185 @@ pub(crate) mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn bound_bare_repo_is_verified_without_worktree_context() -> Result<(), Box<dyn Error>> {
+        use crate::repo::verify_worktree;
+        use crate::test_support::{fixture_env, run_fixture_git};
+        use provenant_core::RootInputs;
+
+        let fixture = Fixture::new()?;
+        let temp = fixture._temp.path();
+        let bare = temp.join("bound-bare.git");
+        let bare_text = bare.to_str().ok_or("non-UTF8 bare repository")?;
+        let source_text = fixture.root.to_str().ok_or("non-UTF8 source repository")?;
+        let env = fixture_env(&fixture.home, temp);
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            temp,
+            &env,
+            &["clone", "--quiet", "--bare", source_text, bare_text],
+        )?;
+        let linked = temp.join("bound-bare-linked");
+        let linked_text = linked.to_str().ok_or("non-UTF8 linked checkout")?;
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            &bare,
+            &env,
+            &["worktree", "add", "--quiet", "-b", "lane", linked_text],
+        )?;
+
+        let state = temp.join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let mut inputs = RootInputs::new(fixture.home.clone(), bare.clone());
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let binding =
+            provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(&bare)?)?;
+        let runtime = UtilityRuntime::new(&fixture.git, &fixture.home, &state)?;
+        let recorder = RecordsGit {
+            executor: &fixture.executor,
+            calls: Default::default(),
+        };
+        let budget = UtilityBudget::bounded(Duration::from_secs(10))?;
+        let cancel = CancelToken::new();
+        let repo = runtime.open_bound_bare_repo(&recorder, &binding, budget, &cancel)?;
+        assert!(repo.is_bare());
+        assert!(!repo.is_primary_checkout());
+        assert_eq!(repo.root_path(), bare.canonicalize()?);
+        assert_eq!(repo.common_git_dir(), repo.root_path());
+        let bare_environment = environment_with(
+            &runtime,
+            &repo,
+            &[("core.bare".to_owned(), "false".to_owned())],
+        );
+        let config_count = bare_environment
+            .iter()
+            .find(|(key, _)| key == OsStr::new("GIT_CONFIG_COUNT"))
+            .and_then(|(_, value)| value.to_str())
+            .ok_or("missing Git config override count")?
+            .parse::<usize>()?;
+        let mut effective_core_bare = None;
+        for index in 0..config_count {
+            let key_name = format!("GIT_CONFIG_KEY_{index}");
+            let value_name = format!("GIT_CONFIG_VALUE_{index}");
+            let key = bare_environment
+                .iter()
+                .find(|(name, _)| name == OsStr::new(&key_name))
+                .and_then(|(_, value)| value.to_str());
+            if key == Some("core.bare") {
+                effective_core_bare = bare_environment
+                    .iter()
+                    .find(|(name, _)| name == OsStr::new(&value_name))
+                    .and_then(|(_, value)| value.to_str());
+            }
+        }
+        assert_eq!(effective_core_bare, Some("true"));
+
+        let layout = runtime
+            .project_layout_for_bound_repository(&recorder, &repo, &binding, budget, &cancel)?;
+        assert!(layout.project().is_none());
+        assert_eq!(layout.root(), repo.common_git_dir());
+        let linked = verify_worktree(&repo, &linked)?;
+        assert_eq!(linked.project_root(), None);
+
+        let listing = run_utility(
+            &recorder,
+            GitRead::WorktreeListBare,
+            &repo,
+            &runtime,
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(listing.termination, Termination::Exit(0));
+        let calls = recorder.calls.lock().map_err(|_| "Git call log poisoned")?;
+        let bare_calls = calls.iter().filter(|(argv, _)| {
+            argv.windows(2).any(|pair| {
+                pair[0] == OsStr::new("--git-dir") && pair[1] == repo.common_git_dir().as_os_str()
+            })
+        });
+        let mut saw_bare_call = false;
+        for (argv, environment) in bare_calls {
+            saw_bare_call = true;
+            assert!(!argv.iter().any(|arg| arg == OsStr::new("--work-tree")));
+            assert!(
+                !environment
+                    .iter()
+                    .any(|(key, _)| key == OsStr::new("GIT_WORK_TREE"))
+            );
+        }
+        assert!(
+            saw_bare_call,
+            "the bare repository must be probed through its common dir"
+        );
+        drop(calls);
+        assert!(
+            runtime
+                .open_repo(&recorder, &bare, budget, &cancel)
+                .is_err()
+        );
+
+        let primary_binding = fixture.binding()?;
+        assert!(
+            runtime
+                .open_bound_bare_repo(&recorder, &primary_binding, budget, &cancel)
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bound_bare_repo_revalidation_refuses_a_replaced_common_directory()
+    -> Result<(), Box<dyn Error>> {
+        use crate::test_support::{fixture_env, run_fixture_git};
+        use provenant_core::RootInputs;
+
+        let fixture = Fixture::new()?;
+        let temp = fixture._temp.path();
+        let bare = temp.join("replaceable-bare.git");
+        let bare_text = bare.to_str().ok_or("non-UTF8 bare repository")?;
+        let source_text = fixture.root.to_str().ok_or("non-UTF8 source repository")?;
+        let env = fixture_env(&fixture.home, temp);
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            temp,
+            &env,
+            &["clone", "--quiet", "--bare", source_text, bare_text],
+        )?;
+
+        let state = temp.join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let mut inputs = RootInputs::new(fixture.home.clone(), bare.clone());
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let binding =
+            provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(&bare)?)?;
+        let runtime = UtilityRuntime::new(&fixture.git, &fixture.home, &state)?;
+        let repo = runtime.open_bound_bare_repo(
+            &fixture.executor,
+            &binding,
+            UtilityBudget::bounded(Duration::from_secs(10))?,
+            &CancelToken::new(),
+        )?;
+
+        fs::rename(&bare, temp.join("previous-bare.git"))?;
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            temp,
+            &env,
+            &["init", "--quiet", "--bare", bare_text],
+        )?;
+        assert!(matches!(repo.revalidate(), Err(RepoError::IdentityChanged)));
+        assert!(matches!(
+            repo.revalidate_identity(),
+            Err(RepoError::IdentityChanged)
+        ));
         Ok(())
     }
 

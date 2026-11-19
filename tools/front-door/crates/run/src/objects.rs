@@ -125,6 +125,8 @@ pub(crate) fn execute_bounded(
             "gc.auto=0",
             "-c",
             "maintenance.auto=false",
+            "-c",
+            "advice.graftFileDeprecated=false",
         ]))
         .chain(arguments.iter().cloned())
         .collect();
@@ -157,7 +159,7 @@ pub(crate) fn execute_bounded(
         || output.stdout.read_failed
         || output.stderr.read_failed
         || settings.clean_stderr
-            && (output.stderr.truncated || !only_graft_hint(&output.stderr.bytes))
+            && (output.stderr.truncated || !only_git_advice(&output.stderr.bytes))
     {
         if String::from_utf8_lossy(&output.stderr.bytes)
             .contains("pack exceeds maximum allowed size")
@@ -174,12 +176,13 @@ pub(crate) fn execute_bounded(
             ),
         });
     }
-    if !output.stderr.bytes.is_empty() {
+    let non_advice_stderr = strip_git_advice(&output.stderr.bytes);
+    if !non_advice_stderr.is_empty() {
         use std::io::Write as _;
         let _ = writeln!(
             std::io::stderr().lock(),
             "warning: lane Git import: {}",
-            String::from_utf8_lossy(&output.stderr.bytes).trim_end()
+            String::from_utf8_lossy(&non_advice_stderr).trim_end()
         );
     }
     Ok(output.stdout.bytes)
@@ -187,23 +190,35 @@ pub(crate) fn execute_bounded(
 
 // `cat-file --batch` can exit zero for a corrupt object, reporting it as
 // missing on stdout and an error on stderr. Its output is deliberately streamed
-// to discard, so retain the stderr integrity check except for Git's known hint.
-fn only_graft_hint(stderr: &[u8]) -> bool {
+// to discard, so retain the stderr integrity check except for Git's known advice.
+pub(crate) fn only_git_advice(stderr: &[u8]) -> bool {
     let Ok(stderr) = std::str::from_utf8(stderr) else {
         return false;
     };
     stderr.lines().all(|line| {
-        matches!(
-            line,
-            "hint:"
-                | "hint: Support for <GIT_DIR>/info/grafts is deprecated"
-                | "hint: and will be removed in a future Git version."
-                | "hint: Please use \"git replace --convert-graft-file\""
-                | "hint: to convert the grafts into replace refs."
-                | "hint: Turn this message off by running"
-                | "hint: \"git config set advice.graftFileDeprecated false\""
-        )
+        let trimmed = line.trim();
+        trimmed.is_empty() || trimmed.starts_with("hint:")
     })
+}
+
+pub(crate) fn strip_git_advice(stderr: &[u8]) -> Vec<u8> {
+    let Ok(s) = std::str::from_utf8(stderr) else {
+        return stderr.to_vec();
+    };
+    let mut kept = Vec::new();
+    for line in s.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("hint:") {
+            continue;
+        }
+        kept.push(line);
+    }
+    let filtered = kept.join("\n");
+    if filtered.trim().is_empty() {
+        Vec::new()
+    } else {
+        filtered.into_bytes()
+    }
 }
 
 pub(crate) fn quote_alternate(path: &Path) -> String {

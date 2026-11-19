@@ -18,7 +18,7 @@ pub(super) fn reconcile_summary(state: &run::Reconciled) -> String {
             plain_text(&state.to_string(), usize::MAX)
         }
         run::Reconciled::WriterLeaseReleased { locks } => format!(
-            "writer leases released: {}",
+            "warning: writer leases released: {}",
             locks
                 .iter()
                 .map(|lock| plain_text(&lock.to_string_lossy(), usize::MAX))
@@ -26,15 +26,29 @@ pub(super) fn reconcile_summary(state: &run::Reconciled) -> String {
                 .join(", ")
         ),
         run::Reconciled::Uncertain { reason } => {
-            format!("uncertain: {}", plain_text(&reason.to_string(), usize::MAX))
+            format!(
+                "warning: uncertain custody retained: {}",
+                plain_text(&reason.to_string(), usize::MAX)
+            )
         }
         _ => state_tag(state),
     }
 }
 
+pub(super) fn reconcile_blocks(state: &run::Reconciled) -> bool {
+    matches!(
+        state,
+        run::Reconciled::Escaped { .. }
+            | run::Reconciled::Settling {
+                blocking_reason: Some(_),
+                ..
+            }
+    )
+}
+
 /// Recover runs whose guardian or submitter died: commit durable exits,
 /// withdraw launches that never reached a guardian, and start queued work.
-/// Uncertain custody stays fenced, is reported, and fails the command.
+/// Uncertain custody stays fenced and is reported without hiding other results.
 pub fn reconcile(command: Reconcile, edge: &Edge<'_>) -> Reply {
     let mut fenced = false;
     let outcome = reconcile_inner(command, edge, &mut fenced);
@@ -155,8 +169,18 @@ pub(super) fn reconcile_inner(
         {
             Ok(found) => found,
             Err(fail) => {
-                *fenced = true;
-                human.push_str(&format!("{run} error: {}\n", fail.message));
+                if fail.kind != run::ErrorKind::StateCorrupt {
+                    *fenced = true;
+                }
+                human.push_str(&format!(
+                    "{run} {}: {}\n",
+                    if fail.kind == run::ErrorKind::StateCorrupt {
+                        "warning"
+                    } else {
+                        "error"
+                    },
+                    fail.message
+                ));
                 rows.push(json!({ "attempt_id": run, "error": { "code": fail.kind.code(), "message": fail.message } }));
                 continue;
             }
@@ -182,17 +206,7 @@ pub(super) fn reconcile_inner(
         let attempts: Vec<Value> = found
             .iter()
             .map(|(id, state)| {
-                if matches!(
-                    state,
-                    run::Reconciled::Uncertain { .. }
-                        | run::Reconciled::Escaped { .. }
-                        | run::Reconciled::Settling {
-                            blocking_reason: Some(_),
-                            ..
-                        }
-                ) {
-                    *fenced = true;
-                }
+                *fenced |= reconcile_blocks(state);
                 human.push_str(&format!("{id} {}\n", reconcile_summary(state)));
                 json!({ "attempt_id": id, "found": state })
             })
@@ -242,10 +256,9 @@ pub(super) fn reconcile_inner(
     reservations.issues.dedup_by(|left, right| {
         left.reservation == right.reservation && left.reason == right.reason
     });
-    *fenced |= !reservations.issues.is_empty();
     for issue in &reservations.issues {
         human.push_str(&format!(
-            "writer reservation requires recovery: {}: {}\n",
+            "warning: writer reservation requires recovery: {}: {}\n",
             issue.reservation.display(),
             issue.reason
         ));

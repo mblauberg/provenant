@@ -35,21 +35,23 @@ also owns settings and subsystem ownership; adding a class requires collection
 and measurement implementations. Preview bounds cache measurement and may omit
 idle candidates whose recent writes could not be checked within the budget.
 Its byte estimates can be partial; a timed-out process census keeps custody unknown.
-The Cargo profile census is skipped and marked
-in JSON. The preview uses local ref evidence without forge
-reads. Apply takes a fresh full observation. Measurements do not follow links; APFS clones may share physical blocks, so the change in volume
-free space can differ. Apply removes eligible attempt scratch without a separate
+Cargo cache previews are bounded and mark incomplete measurements in JSON.
+The preview uses local ref evidence without forge reads. Apply refreshes custody
+before removal. Measurements do not follow links; APFS clones may share physical
+blocks, so the change in volume free space can differ. Apply removes eligible attempt scratch without a separate
 pre-deletion size walk. Partial observations and failed paths remain visible in
 JSON and text. Byte rows come from each adapter; unavailable observations remain
-explicit rather than appearing as zero.
+explicit rather than appearing as zero. The compact apply summary reports one
+`known bytes` figure, the sum of cache, attempt scratch, discard archive, Cargo
+target and worktree bytes. It is a lower bound: classes without a measurement are
+not counted.
 
 `gc.idle` defaults to `6h` and accepts `0` or a duration in seconds, minutes,
 hours, days or weeks. It applies to ownerless idle artifacts and standalone
-caches. Attempt scratch survives release so a lane can be resumed, steered or
-followed up. Scratch is eligible immediately when its work is finished: its
-branch is merged or its PR closed, its graph is cancelled or superseded, or its
-worktree is removed. Result, handoff, log and process records remain durable.
-Unreleased or busy attempts are never collected.
+caches. Settled attempt scratch becomes eligible after `gc.idle`, regardless of
+its branch, PR, graph or worktree, once terminal effects and custody are complete.
+Collection removes `tmp/` and candidate build targets while retaining results,
+handoffs, logs and process records. Unreleased or busy attempts are never collected.
 
 `gc.stale_graph_age` defaults to `1d` and uses the same duration syntax. A
 paused or pending graph older than this age whose branch has merged or whose PR
@@ -62,21 +64,36 @@ are shown in the warning; `provenant config show --full` shows the key's source.
 After a merge, background cleanup targets only that branch's worktree and its
 attempt scratch. It does not scan the run store or collect shared caches. At lane
 launch, free space below `gc.free_floor` starts a best-effort background full
-sweep; a shared single-flight lock prevents parallel sweeps. Full GC protects
-busy and recently used shared caches and the newest Cargo seed generation. It also
-retires the targets of the removed `lanes.cargo_target = "shared"` mode under
-`~/Library/Caches/provenant-shared-cargo/`: a preview lists them, and
-`--apply` removes each whose Cargo locks are free and that was not written
-within the build-directory grace. Private
-lane caches older than `gc.idle` are also eligible when their owner has settled
-or disappeared. Unknown custody and held Cargo or owner locks keep a cache.
+sweep. Each sweep has an overridable `gc.sweep_budget` (default `5m`; `0`
+checkpoints immediately). Diagnostics show its value and source, and a stopped
+sweep records its position
+for the next pass.
+The single-flight guard is released on exit. Dead or over-budget holders are
+detected and takeover is reported as a warning.
+
+`lanes.cargo_cache_max` budgets private lane and shared Cargo targets together.
+It accepts bytes or a percentage of the cache volume, defaults to 10% of that
+volume and shows its effective source in diagnostics. For example, set
+`"lanes.cargo_cache_max" = "50G"` or `"10%"` in the host configuration
+`[knobs]` table; profile and launch overrides use the same knob. Launch evicts eligible targets in
+least-recently-used order when the cache exceeds the budget. `gc --dry-run`
+shows measured cache size against that budget; incomplete previews say so.
+Targets of the removed `lanes.cargo_target = "shared"` mode under
+`~/Library/Caches/provenant-shared-cargo/` count toward both the budget and the
+free-space sweep until full GC retires them: a preview lists them, and `--apply`
+removes each whose Cargo locks are free and that was not written within the
+build-directory grace. Live attempt custody and held Cargo build
+locks always protect a target. Full GC also protects recent writes and the
+newest Cargo seed generation for each project. Private lane caches older than `gc.idle` are
+eligible when their owner has settled or disappeared. Unknown custody keeps a cache.
 
 `gc.free_floor` is an advisory collection target. Below it, and below
 `gc.critical_free` (2 GiB by default), dispatch, admission and new builds warn
 and continue; diagnostics show the effective thresholds and sources. A host that
 wants a hard floor sets the `policy.DISK_FLOOR` knob to `refuse`. Settlement
 releases private Cargo output without waiting for worktree removal; attempt
-scratch remains available for continuation. Registry and Git downloads live in the host CARGO_HOME and are owned by Cargo,
+read-only scratch follows the idle rule above. Registry and Git downloads live
+in the host CARGO_HOME and are owned by Cargo,
 not lane retention. Lanes fetch into those stores by default; with
 `domains.fabric.lanes.cargo_source_writes = false` they are read-only and a missing
 dependency requires a host fetch.
@@ -90,6 +107,18 @@ Foreign worktrees and local branches are included by default. Their first pass
 previews and records that preview for the repository incarnation. Configure
 `gc.projects.<project>.foreign_worktrees = 'keep'` to opt out, `keep_paths` for
 path/ref patterns, and `integration_branches` for integration-ref patterns.
+Worktree creation records distinguish Provenant-created checkouts from foreign
+ones independently of their location. Older checkouts without creation or lane
+custody evidence remain foreign. Declared ignored output in a verified
+primary or managed worktree remains eligible when foreign cleanup is disabled;
+writer custody and the process census still protect live work. A verified bound
+bare repository can collect its managed linked worktrees without a primary
+checkout. An unbound bare repository cannot grant GC authority.
+A process denied observation with EPERM produces one warning rather than
+blocking every candidate when descriptor inspection is complete and no observed
+path is beneath a candidate. Observed cwd or descriptor use beneath a candidate
+protects that candidate. Incomplete descriptor evidence and other unknown custody
+remain protective.
 Idle clean worktrees with no PR, or a closed unmerged PR at exactly the current
 tip, retire without deleting their branch. Unknown custody, run, forge or census
 feeds keep the affected item. Initialised submodules are checked recursively. Removal requires clean working
@@ -105,8 +134,8 @@ push on the observed tip. Unobserved remote branches are outside this surface.
 Explicit discard first publishes a private state-root archive: exact-tip Git
 bundle, binary working/index patches, NUL-delimited status, untracked and ignored
 files in a no-follow ustar, and a manifest. Unrepresentable paths or changing
-source data keep the original worktree. `gc.discard_archive_days` controls archive
-retention (90 days by default). Clean subsumed removals need no archive.
+source data keep the original worktree. `gc.discard_archive_retention` controls archive
+retention (14 days by default). Clean subsumed removals need no archive.
 
 Record a ref's reported head before recreating it. Configure regenerable and keep
 paths before collecting output; undeclared ignored files such as local databases

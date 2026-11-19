@@ -88,7 +88,13 @@ field using its serde path (for example `verify[0]`) and preserves the decoder
 error. Status and output show that diagnostic rather than claiming no handoff.
 Custody facts such as lost, unsettled or cancelled retain priority; the malformed
 handoff evidence still survives in their sealed stop.
-- Why: unfinished work must not appear complete or lose its handoff.
+A missing writer handoff keeps the census of uncommitted paths and the pinned
+head in the terminal reason and the sealed writer terminal. An empty final
+message is carried by the `empty_result` terminal cause and appended to that
+reason, never substituted for it, so the chair keeps the path list and the graph
+stays continuable.
+- Why: unfinished work must not appear complete or lose its handoff, and the
+  empty-message diagnostic must not hide the edits the writer left behind.
 
 A final answer's handoff is its closed `handoff` fence, which always wins.
 Without one, a `json` fence that ends the answer (only whitespace after it) and

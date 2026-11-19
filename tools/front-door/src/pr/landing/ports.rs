@@ -97,6 +97,10 @@ pub trait Forge {
     fn actor(&mut self) -> Result<String, LandingError>;
     fn head(&mut self, number: u64) -> Result<String, LandingError>;
     fn approvals(&mut self, number: u64, head: &str) -> Result<Vec<Approval>, LandingError>;
+    /// Commit IDs that have approvals for pull request `number`.
+    fn approved_commits(&mut self, _number: u64) -> Result<Vec<String>, LandingError> {
+        Ok(Vec::new())
+    }
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError>;
     /// Adapter-selected cadence for the next observation, if it owns one.
     /// Callers use their declared policy cadence when the adapter has none.
@@ -206,9 +210,14 @@ pub trait Repo {
         Ok(Vec::new())
     }
     fn is_ancestor(&mut self, ancestor: &str, descendant: &str) -> Result<bool, LandingError>;
+    /// Direct parents of one commit, in Git's recorded order.
+    fn parents(&mut self, commit: &str) -> Result<Vec<String>, LandingError>;
     fn tree_of(&mut self, commit: &str) -> Result<String, LandingError>;
     /// The paths that differ between two commits or trees, both names of a rename.
     fn changed_paths(&mut self, from: &str, to: &str) -> Result<Vec<String>, LandingError>;
+    /// Exact PR-side diff text used to prove that a merged base did not alter
+    /// the reviewed change set.
+    fn diff_content(&mut self, from: &str, to: &str) -> Result<String, LandingError>;
     /// The merge base of two commits, or `None` when they share no history.
     fn merge_base(&mut self, left: &str, right: &str) -> Result<Option<String>, LandingError>;
 }

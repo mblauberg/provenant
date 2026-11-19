@@ -826,11 +826,8 @@ fn reconcile_reports_orphan_reservation_issues() -> Result<(), Box<dyn std::erro
                 },
                 edge,
             );
-            assert_eq!(reply.result.status, Status::Failed, "{}", reply.human);
-            assert_eq!(
-                reply.result.error.as_ref().ok_or("missing error")?.code,
-                "RECONCILE_INCOMPLETE"
-            );
+            assert_eq!(reply.result.status, Status::Ok, "{}", reply.human);
+            assert!(reply.human.contains("warning:"), "{}", reply.human);
             assert_eq!(reply.result.data["runs"], json!([]));
             assert_eq!(
                 reply.result.data["writer_reservation_errors"][0]["reservation"],
@@ -1308,9 +1305,14 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                 let state = Directory::open_anchor(edge.roots.state.as_path())?;
                 let later =
                     WallTime::from_micros(clock.wall_now()?.as_micros() + 90 * 86_400_000_000)?;
-                let collected = session
-                    .store
-                    .gc_provider_state(&state, 7, later, false, &call)?;
+                let collected = session.store.gc_provider_state(
+                    &state,
+                    7,
+                    later,
+                    false,
+                    &call,
+                    &provenant_run::RetentionScan::default(),
+                )?;
                 assert!(collected.attempt_tmp.is_empty());
                 assert!(
                     attempt_path
