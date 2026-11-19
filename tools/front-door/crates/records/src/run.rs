@@ -1095,6 +1095,42 @@ impl From<RouteRecord> for crate::RouteFact {
         }
     }
 }
+impl UsageRecord {
+    /// Fresh tokens the writer token budget counts: uncached input, cache
+    /// writes and output (including reasoning). Cache reads are excluded
+    /// because each call re-reads the whole context, so counting them would
+    /// exhaust the budget on rereads instead of new work. `None` means the
+    /// provider reported none of these categories, which is not zero.
+    pub fn fresh_tokens(&self) -> Option<u64> {
+        [
+            self.uncached_input,
+            self.cache_write,
+            self.output_excluding_reasoning,
+            self.reasoning,
+        ]
+        .into_iter()
+        .try_fold(None, |sum: Option<u64>, part| match part {
+            Some(n) => Some(Some(sum.unwrap_or(0).saturating_add(n))),
+            None => Some(sum),
+        })
+        .flatten()
+    }
+
+    /// Input the provider reported, including cached reads and writes. This
+    /// is the provider's own cumulative input figure, not the budget's unit;
+    /// it is reported beside the counted figure so the units cannot be
+    /// confused. `None` when the provider reported no input categories.
+    pub fn input_including_cache(&self) -> Option<u64> {
+        [self.uncached_input, self.cache_read, self.cache_write]
+            .into_iter()
+            .try_fold(None, |sum: Option<u64>, part| match part {
+                Some(n) => Some(Some(sum.unwrap_or(0).saturating_add(n))),
+                None => Some(sum),
+            })
+            .flatten()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageRecord {
     #[serde(flatten)]

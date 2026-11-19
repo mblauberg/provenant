@@ -1358,3 +1358,24 @@ mod provider_tests;
 mod reporting_tests;
 #[path = "tests_submission.rs"]
 mod submission_tests;
+
+#[test]
+fn one_config_deprecation_notice_gives_one_warning_across_channels() {
+    let notice = "[features].multi_agent is deprecated. Use [agents].enabled=false instead.";
+    let events = [ProviderEvent::Warning {
+        message: notice.into(),
+        source: Some("config.toml".into()),
+    }];
+    let stderr = format!(
+        "2026-11-19T01:02:03Z  WARN codex_core::config: /home/u/.codex/config.toml: {notice}\nunrelated\n"
+    );
+    let warnings = config_notice_warnings(&events, stderr.as_bytes(), true);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains(notice) && warnings[0].contains("config.toml"));
+    // The adapter decides whether stderr is read at all.
+    assert!(config_notice_warnings(&[], stderr.as_bytes(), false).is_empty());
+    // Stderr alone still gives one warning, without the log prefix.
+    let alone = config_notice_warnings(&[], stderr.as_bytes(), true);
+    assert_eq!(alone.len(), 1);
+    assert!(!alone[0].contains("WARN codex_core"), "{alone:?}");
+}
