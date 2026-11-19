@@ -531,14 +531,8 @@ fn launch_records_plan_write_grants_and_git_digest() -> TestResult {
         drop(store);
         let store = RunStore::open(&context, &call)?;
         let record = store.record(id, &call)?;
-        // A writer plan without writer authority is refused before applied grants
-        // are recorded. A valid reader plan retains its grants even if handoff fails.
-        if writer {
-            assert!(record.write_grants.is_empty());
-            assert!(record.git_grants_digest.is_none());
-            continue;
-        }
-        let expected = vec![
+        // Applied grants are recorded before handoff for both access modes.
+        let mut expected = vec![
             (
                 WriteSource::StateWrite,
                 "/fixture/state/session",
@@ -556,6 +550,21 @@ fn launch_records_plan_write_grants_and_git_digest() -> TestResult {
                 PathScope::Subtree,
             ),
         ];
+        if writer {
+            expected.extend([
+                (WriteSource::LaneCache, "/fixture/cache", PathScope::Subtree),
+                (
+                    WriteSource::GitState,
+                    "/fixture/git-state/git-common",
+                    PathScope::Subtree,
+                ),
+                (
+                    WriteSource::GitState,
+                    "/fixture/git-state/git-objects",
+                    PathScope::Subtree,
+                ),
+            ]);
+        }
         let expected = expected
             .into_iter()
             .map(|(source, path, scope)| {

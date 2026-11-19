@@ -160,13 +160,31 @@ layer.
 
 ## Lane Git and import
 
-Writers use private Git state; the host does not execute with lane-mutable Git
-configuration. For sandboxed lanes, confinement protects shared Git state.
-Import uses Git's quarantined receive and verification; publication compares
-against the pinned base. The base remains pinned until publication.
+Writers of one verified worktree incarnation share its files and hold
+occupancy together. Each attempt has its own private Git state (HEAD, index,
+refs, objects, configuration and credential setup) in its attempt directory,
+so siblings never see each other's staging or unpublished commits. Contexts
+outlive attempt scratch, and later admissions never reset live Git state.
+The host does not execute with lane-mutable Git configuration. For sandboxed
+lanes, confinement protects the repository's shared Git state.
+Import uses Git's quarantined receive and verification; publication
+compare-and-swaps the host branch against the tip it observed. A lane whose
+history forked from the branch is refused at once and its private Git is
+retained for recovery. The base remains pinned until publication.
+The worktree's native index follows the branch from a recorded commit and the
+digest of the index Provenant left, advanced under a per-worktree native-index
+lock (never the admission gate) after each publication and repeated on every
+settlement or resume until it matches the tip. The advance is advisory and
+never fails settlement. If Git refuses it, the index changed since the record,
+or the record or index cannot be read, the index and record are left unchanged
+and status reports `index_out_of_sync` with the reason, the paths and one
+command that resets the index and the record together.
+Import retention refs belong to each attempt, even for an identical commit;
+publication and cleanup remove only that attempt's pins.
 Lane Git import runs with `-c advice.graftFileDeprecated=false`, and raw git advice
 (such as `hint:` lines) is filtered from stderr before warning so advice lines
 never surface as Provenant warnings.
+
 The GitHub credential receipt governs token delivery even when sandboxing is
 off: `none` withholds host token environment variables, `injected` passes only
 the selected token, and `ambient` preserves the native host environment.

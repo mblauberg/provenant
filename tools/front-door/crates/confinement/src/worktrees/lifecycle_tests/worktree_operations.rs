@@ -202,6 +202,16 @@ fn prune_treats_a_prunable_branch_as_not_checked_out() -> Result<(), Box<dyn Err
         &branch,
         Some(&fixture.root)
     )?);
+    // Even an absent checkout cannot justify deleting its branch while an
+    // occupant still holds its worktree slot.
+    let tip = ref_tip(&context, &branch, &cancel())?.ok_or("stale branch tip")?;
+    let held = cache_writer_guard(context.project_state, &stale.path)
+        .map_err(|occupancy| format!("writer slot unavailable: {occupancy:?}"))?;
+    assert_eq!(
+        delete_ref_leased(&context, &branch, tip, &cancel())?,
+        RefDeletion::CheckedOut
+    );
+    drop(held);
     let integration = common_integration(&context, &cancel())?.0;
     let result = remove_with_port(
         &test_context,
@@ -411,7 +421,7 @@ fn create_refuses_aliases_of_local_and_remote_branches() -> Result<(), Box<dyn E
 
 #[test]
 fn create_list_remove_deletes_landed_branch_and_refuses_primary() -> Result<(), Box<dyn Error>> {
-    // Spec: docs/specs/supervisor.md#one-writer-removal-never-forces
+    // Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
     let fixture = Fixture::new()?;
     fixture.run(&["branch", "-M", "main"])?;
     let test_context = TestContext::new(&fixture)?;
@@ -481,7 +491,7 @@ fn create_list_remove_deletes_landed_branch_and_refuses_primary() -> Result<(), 
 #[test]
 fn named_removal_reports_unproven_landing_without_claiming_identity_changed()
 -> Result<(), Box<dyn Error>> {
-    // Spec: docs/specs/supervisor.md#one-writer-removal-never-forces
+    // Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();

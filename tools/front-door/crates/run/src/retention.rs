@@ -860,6 +860,8 @@ impl RunStore {
         if crate::settlement::abandoned(&attempt, Self::scope(record))?.is_some()
             || crate::settlement::queued_abandonment_pending(&attempt, record)?
             || crate::holder::object_import_refused(&attempt, Self::scope(record))?.is_some()
+            || crate::artifacts::read_sealed(&attempt, "retained-index.json", crate::RECORD_LIMIT)?
+                .is_some()
         {
             return Ok(None);
         }

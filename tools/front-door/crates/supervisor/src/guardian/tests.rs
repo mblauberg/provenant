@@ -449,6 +449,7 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
         scope,
         writer.lease.as_ref().unwrap(),
         &publication.custody,
+        writer.holder.as_ref().unwrap(),
     )
     .unwrap();
     let message = LaunchMessage {
@@ -489,8 +490,10 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
         child.as_fd(),
         writer.lock_directory.handoff_file().as_fd(),
         publication.directory.handoff_file().as_fd(),
+        writer.directory.handoff_file().as_fd(),
         writer.lease.as_ref().unwrap().handoff_file().as_fd(),
         publication.custody.handoff_file().as_fd(),
+        writer.holder.as_ref().unwrap().handoff_file().as_fd(),
     ];
     let args = descriptors
         .iter()
@@ -903,6 +906,7 @@ fn spawn_missing_attempt_guardian(
         scope,
         writer.lease.as_ref().unwrap(),
         &publication.custody,
+        writer.holder.as_ref().unwrap(),
     )
     .unwrap();
     let message = LaunchMessage {
@@ -937,8 +941,10 @@ fn spawn_missing_attempt_guardian(
         child.as_fd(),
         writer.lock_directory.handoff_file().as_fd(),
         publication.directory.handoff_file().as_fd(),
+        writer.directory.handoff_file().as_fd(),
         writer.lease.as_ref().unwrap().handoff_file().as_fd(),
         publication.custody.handoff_file().as_fd(),
+        writer.holder.as_ref().unwrap().handoff_file().as_fd(),
     ];
     let args = descriptors
         .iter()
@@ -1386,6 +1392,7 @@ fn settlement_lock_clone_failure_retains_exclusion_and_returns_reconcile_hint() 
         .unwrap();
     let error = settlement_recovery(
         &mut writer.lease,
+        &mut writer.holder,
         writer.directory.try_clone().unwrap(),
         Err(FsError::Io {
             operation: "clone directory",

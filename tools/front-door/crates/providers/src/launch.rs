@@ -908,7 +908,10 @@ pub(crate) fn private_git_objects(
         return Ok(());
     }
     let scratch = &input.confined.permissions().scratch.path;
-    let private = scratch.join("git-common");
+    // Every provider writes to its attempt's Git metadata. Settlement imports
+    // and compare-and-swaps that private history into the host worktree.
+    let git_common = scratch.join("git-common");
+    let git_objects = scratch.join("git-objects");
     let config = scratch.join("gitconfig");
     // Git normally reads the XDG file before ~/.gitconfig. An explicit host
     // override replaces both, just as it does for Git itself.
@@ -1031,13 +1034,11 @@ pub(crate) fn private_git_objects(
         .filter(|root| input.cwd.starts_with(root))
         .unwrap_or(input.cwd);
     let mut bound = vec![
-        ("GIT_DIR".into(), private.clone().into()),
-        ("GIT_COMMON_DIR".into(), private.into()),
+        ("GIT_DIR".into(), git_common.clone().into()),
+        ("GIT_COMMON_DIR".into(), git_common.clone().into()),
         ("GIT_WORK_TREE".into(), worktree.into()),
-        (
-            "GIT_OBJECT_DIRECTORY".into(),
-            scratch.join("git-objects").into(),
-        ),
+        ("GIT_OBJECT_DIRECTORY".into(), git_objects.into()),
+        ("GIT_INDEX_FILE".into(), git_common.join("index").into()),
     ];
     spec.git_wrapper.identity_config = Some(config);
     spec.env.retain(|(key, value)| {

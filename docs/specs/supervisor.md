@@ -93,7 +93,7 @@ project, using one bounded host process census for the pass. Failed project
 recovery does not prevent other projects or scheduled tasks from running.
 A sealed exit remains settlement evidence when the census is unavailable;
 live attempts retain their automatic fence. Unknown attempts are queued for
-proof-only recovery: the original guardian and custody locks, writer lease and
+proof-only recovery: the original guardian, custody and attempt holder locks and
 a fresh empty worktree census must prove absence before same-boot settlement.
 Unknown evidence itself never clears custody.
 Repeated ticks reuse the recovery driver's backoff, queued-worker marker and
@@ -138,7 +138,7 @@ launch again.
 ### Quiescence before release
 
 A writer stays fenced until the provider is reaped, two complete censuses show
-no surviving member or escapee, and a fresh lock on the original lease inode
+no surviving member or escapee, and a fresh lock on the original holder inode
 succeeds. Failed, racing or incomplete reads keep the fence; only a recorded
 decision with matching authority clears one, and that decision permits no signal.
 - Why: a leftover descendant could still write the worktree.
@@ -398,10 +398,12 @@ inventory; the common Git directory's parent does not establish that owner.
 
 ### Shared Git metadata is read-only
 
-A writer owns a private Git directory with the shared object store as a
-read-only alternate; shared refs, config, hooks and admin metadata stay
-read-only, and the host imports the result and moves the branch by
-compare-and-swap. The lane Git wrapper binds commands implicitly targeting its
+Each writer owns an attempt-private Git view with separate refs, index,
+objects, configuration and credentials, using the repository object store as a
+read-only alternate. The repository's refs, config, alternates, hooks and admin
+metadata stay read-only to lanes. The host imports verified objects and moves
+the branch by compare-and-swap. See [launch custody](run-launch.md#admission-and-custody).
+The lane Git wrapper binds commands implicitly targeting its
 worktree; commands for other repositories, commands with explicit repository
 selectors and Git transport endpoints pass through with their arguments and
 environment intact. Fixture commands remove inherited lane Git selectors and
@@ -518,16 +520,30 @@ refuses credential-bearing URLs.
 - Why: roots differ.
 - Owner: `Context::open`, `bind_launch_controls`, `worktrees::open_primary_repo`
 
-### One writer; removal never forces
+### Shared occupancy; removal never forces
 
-Git's own inventory is the worktree registry. One writer holds each linked
-worktree, and custody outlives the requesting call. `worktree remove` refuses
-the primary, a live writer or observed process, and has no force. Dirty work
-requires explicit discard, with its recoverable archive captured before removal;
-it deletes a branch only with current landing evidence or explicit discard.
+Git's own inventory is the worktree registry. A worktree's owning lane decides
+who else writes in it. Worktree occupancy is a shared lease: any number of lanes
+may hold one worktree simultaneously. By maintainer decision (#3451), path claims
+are advisory and overlapping claims refuse nothing; a live conflicting writer is
+not excluded by Provenant. Attempts own separate Git refs, indexes and object
+stores; ordinary commits cannot take a sibling's staged snapshot. Host publication
+uses expected-old-tip compare-and-swap after verification, retaining divergent
+private commits for recovery. Custody outlives the requesting call. Each attempt
+also holds its own holder lease; proof that a sibling has settled cannot release
+another attempt's custody. An unscoped budget commit requires durable proof that
+no sibling shared the worktree during that attempt, and holds the admission gate
+through the commit. Shared attempts instead report typed leftover paths.
+Removal requires exclusive occupancy with zero live holders and no unresolved
+reservation. Terminal outcome publication alone does not release custody. Under
+exclusion, removal checks native cleanliness and every recorded attempt index;
+staged work or uncertain index identity retains the checkout. `worktree remove`
+refuses the primary, a live writer or observed process, and has no force. Dirty
+work requires explicit discard, with its recoverable archive captured before
+removal; it deletes a branch only with current landing evidence or explicit discard.
 A persisted writer reservation remains a custody fence when its kernel lock is
-absent: read-only occupancy is unknown until run-owned reconciliation settles
-the attempt, and cache guards refuse the slot without clearing its evidence.
+absent until run-owned reconciliation settles the attempt; cache guards and
+actual removal both refuse without clearing its evidence.
 Named removal without current landing or subsumption proof returns
 `WorktreeError::UnprovenLanding`, naming the branch and missing proof, with an
 explicit-discard recovery command. `IdentityChanged` remains a changed-identity

@@ -29,6 +29,7 @@ mod key;
 mod launch;
 mod launch_policy;
 pub use launch_policy::seal_launch_policy;
+pub(crate) mod nested_authority;
 mod output;
 mod provider;
 mod reconcile;
@@ -1867,6 +1868,7 @@ fn safe_cause(error: &run::RunError) -> Option<String> {
             | E::WriterSourceMismatch { .. }
             | E::ReviewAcceptanceRequired
             | E::ObjectImportLimit(_)
+            | E::PublicationDiverged
             | E::Version(_)
             | E::OperationConflict
             | E::NotFound

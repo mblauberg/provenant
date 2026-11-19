@@ -400,7 +400,7 @@ pub fn lane_preamble_with(
                 })
                 .unwrap_or_default();
             format!(
-                "{verification}{cargo_target}{cargo_cache_budget}{}{}{budget}",
+                "{verification}{cargo_target}{cargo_cache_budget}In a shared worktree, commit only your own paths with `git commit -- <paths>`; coordinate overlapping edits with the owning lane.\n{}{}{budget}",
                 slot_guidance(extras.build_cap),
                 scope.preamble()
             )
@@ -449,6 +449,7 @@ mod tests {
         assert!(writer.contains("source: default"));
         assert!(writer.contains("Build slots:"));
         assert!(writer.contains("CI scope:"));
+        assert!(writer.contains("git commit -- <paths>"));
         assert!(writer.contains("Cargo target:"));
         assert!(writer.contains(&format!("Progress handoff JSON: {}", handoff.display())));
         let reader = lane_preamble("Model policy.", &Default::default(), None, Some(handoff));

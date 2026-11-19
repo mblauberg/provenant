@@ -79,8 +79,8 @@ fn peer_wait_views_keep_terminal_and_show_custody_until_released() -> TestResult
     let terminal = store.record(id, &call)?;
     crate::artifacts::seal(
         &attempt,
-        "merge-restored.json",
-        &crate::db::bytes(&crate::writer::MergeRestored {
+        "private-merge-retained.json",
+        &crate::db::bytes(&crate::writer::PrivateMergeRetained {
             extra: Default::default(),
             schema_version: 1,
             scope: RunStore::scope(&terminal),
