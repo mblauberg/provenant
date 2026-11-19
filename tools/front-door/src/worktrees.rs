@@ -1987,7 +1987,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     data.alerts.extend(scan_warnings);
     for graph in &stale {
         data.alerts.push(format!(
-            "graph {} is {} and {} old with {}: run `provenant graph stop {}` or `provenant gc --apply` to stop it (gc.stale_graph_age={stale_age_seconds}s, source: {})",
+            "graph {} is {} and {} old with {}: run `provenant stop {}` or `provenant gc --apply` to stop it (gc.stale_graph_age={stale_age_seconds}s, source: {})",
             graph.name,
             graph.state,
             stale_age_text(graph.age_seconds),

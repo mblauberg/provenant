@@ -1224,7 +1224,8 @@ mod tests {
         let mut elsewhere = route("pool");
         elsewhere.account_key = "other".into();
         assert_eq!(file.get(&elsewhere, 150).state, ReadinessState::Unknown);
-        // A fresh reading with headroom in the pool clears only that pool.
+        // Pool headroom clears that pool's refusal. A model with no pool
+        // remains refused while any reported window lacks headroom (#3450).
         record.snapshot = Some(crate::QuotaSnapshot {
             extra: Default::default(),
             schema_version: 1,
@@ -1235,13 +1236,22 @@ mod tests {
             source_ref: "fixture".into(),
             authority_ref: None,
             details: None,
-            windows: vec![crate::QuotaWindow {
-                extra: Default::default(),
-                window_seconds: None,
-                pool: "pool".into(),
-                used_basis_points: 1000,
-                resets_unix_seconds: Some(900),
-            }],
+            windows: vec![
+                crate::QuotaWindow {
+                    extra: Default::default(),
+                    window_seconds: None,
+                    pool: "pool".into(),
+                    used_basis_points: 1000,
+                    resets_unix_seconds: Some(900),
+                },
+                crate::QuotaWindow {
+                    extra: Default::default(),
+                    window_seconds: None,
+                    pool: "other".into(),
+                    used_basis_points: 9800,
+                    resets_unix_seconds: Some(900),
+                },
+            ],
         });
         file.sync_refusals(&record, LOCAL_HOST, &at(&record, 200))
             .unwrap();
@@ -1249,6 +1259,15 @@ mod tests {
         assert_eq!(
             file.get(&route("claude/other"), 200).state,
             ReadinessState::Unavailable
+        );
+        // Once every window has headroom, the unbound model refusal clears
+        // too. Clearing evidence becomes unknown, never a ready observation.
+        record.snapshot.as_mut().unwrap().windows[1].used_basis_points = 1000;
+        file.sync_refusals(&record, LOCAL_HOST, &at(&record, 210))
+            .unwrap();
+        assert_eq!(
+            file.get(&route("claude/other"), 210).state,
+            ReadinessState::Unknown
         );
         // The file refuses another account's records.
         assert!(ReadinessFile::decode(&bytes, "claude", "other").is_err());

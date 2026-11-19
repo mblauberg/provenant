@@ -118,6 +118,7 @@ use Stability::{Evolving, Internal, Stable};
 
 const EVERY_LANE: &str = "every lane";
 const BUILD_SHIM: &str = "only for the cargo child of the lane's cargo shim";
+const ADMITTED_COMMAND: &str = "only for admitted commands";
 const ADMISSION: &str = "admission port commands";
 
 /// Every declared variable. Order is presentation order only.
@@ -364,71 +365,71 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         ADMISSION_CLASS,
         Lane,
         Internal,
-        "The named admission class.",
-        BUILD_SHIM,
+        "The admission class name (e.g. `build`).",
+        ADMITTED_COMMAND,
     ),
     var(
         ADMISSION_SLOT,
         Lane,
         Internal,
         "Marks a process that holds an admission class slot.",
-        BUILD_SHIM,
+        ADMITTED_COMMAND,
     ),
     var(
         ADMISSION_SLOT_STATE,
         Lane,
         Internal,
-        "The host admission slot state directory.",
-        BUILD_SHIM,
+        "The host admission state directory.",
+        ADMITTED_COMMAND,
     ),
     var(
         ADMISSION_SLOTS,
         Lane,
         Internal,
-        "The admission class slot limit.",
-        BUILD_SHIM,
+        "The host admission class slot count.",
+        ADMITTED_COMMAND,
     ),
     var(
         ADMISSION_WAIT_DIR,
         Lane,
         Internal,
-        "The directory for the admission wait signal.",
-        BUILD_SHIM,
+        "The lane scratch directory for admission wait signal.",
+        ADMITTED_COMMAND,
     ),
     var(
         ADMISSION_BACKEND,
         Lane,
         Internal,
-        "Encoded admission backend.",
-        BUILD_SHIM,
+        "Encoded admission backend selected by the host.",
+        ADMITTED_COMMAND,
     ),
     var(
         ADMISSION_SOURCE,
         Lane,
         Internal,
         "Source of the selected admission backend.",
-        BUILD_SHIM,
+        ADMITTED_COMMAND,
     ),
     var(
         ADMISSION_DISK_LIMITS,
         Lane,
         Internal,
         "Encoded admission disk limits.",
-        BUILD_SHIM,
+        ADMITTED_COMMAND,
     ),
     var(
         ADMISSION_MEMORY_LIMIT,
         Lane,
         Internal,
-        "Admission memory per slot limit.",
-        BUILD_SHIM,
+        "Admission memory limit in bytes.",
+        ADMITTED_COMMAND,
     ),
     var(
         ADMISSION_TRIM_ACTION,
         Lane,
         Internal,
-        "Admission trim action command.",
-        BUILD_SHIM,
+        "Trim action executed on disk floor or memory pressure.",
+        ADMITTED_COMMAND,
     ),
 ];
 

@@ -486,7 +486,17 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
         .find(|row| row["name"] == "broken")
         .ok_or("broken row")?;
     assert_eq!(bad["state"], "unreadable");
-    assert!(rows.iter().any(|row| row["name"] == "healthy"));
+    // #3530 counts settled graphs in the default listing; --full shows them.
+    assert!(!rows.iter().any(|row| row["name"] == "healthy"));
+    let (output, full) = rig.run(&["status", "--full"])?;
+    assert!(output.status.success(), "{full}");
+    assert!(
+        full["data"]["graphs"]
+            .as_array()
+            .ok_or("full graphs")?
+            .iter()
+            .any(|row| row["name"] == "healthy")
+    );
     assert!(!listing.to_string().contains("PRIVATE_CONTENT_SENTINEL"));
     assert!(
         !listing
@@ -509,7 +519,7 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
     let command = words.strip_prefix(&["provenant"]).ok_or("next command")?;
     let (output, stopped) = rig.run(command)?;
     assert!(output.status.success(), "{stopped}");
-    let (_, after) = rig.run(&["status"])?;
+    let (_, after) = rig.run(&["status", "--full"])?;
     let rows = after["data"]["graphs"]
         .as_array()
         .ok_or("graphs after stop")?;
@@ -849,6 +859,19 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
         explained["data"]["document"]["integration_branch"],
         "batch/example"
     );
+    let proposed: Vec<_> = explained["data"]["source_admission"]
+        .as_array()
+        .ok_or("batch source admission")?
+        .iter()
+        .filter(|row| row["status"] == "pending_registration")
+        .collect();
+    assert!(!proposed.is_empty(), "batch slices need proposed worktrees");
+    for row in proposed {
+        assert!(
+            !Path::new(row["path"].as_str().ok_or("proposed worktree path")?).exists(),
+            "explanation must not create a worktree: {row}"
+        );
+    }
     Ok(())
 }
 
