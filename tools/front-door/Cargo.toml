@@ -164,6 +164,18 @@ opt-level = 3
 [profile.dev.package.provenant-redact]
 opt-level = 2
 
+# Graph checkpoints carry whole briefs and are decoded, validated, digested and
+# re-encoded on every save; a frame-limit brief is a megabyte of JSON escapes.
+# Unoptimised serde_json, sha2 and the canonical codec spend seconds per launch.
+[profile.dev.package.serde_json]
+opt-level = 2
+
+[profile.dev.package.sha2]
+opt-level = 2
+
+[profile.dev.package.provenant-records]
+opt-level = 2
+
 # Optimise proc-macros and their dependencies without emitting build-script DWARF.
 [profile.dev.build-override]
 debug = 0
