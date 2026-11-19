@@ -302,8 +302,11 @@ pub(crate) fn tick_graphs(
                 let checkpoint =
                     FileJournal::read_checkpoint_for_tick(&resolved.roots.state, project, &id)?;
                 let Some(checkpoint) = checkpoint else {
-                    // Only an absent checkpoint reaches this branch. Recheck
-                    // under the writer lock before retiring its pending marker.
+                    // An absent checkpoint, or a corrupt one already quarantined
+                    // by an earlier tick, reaches this branch. The strict read
+                    // matches Ok(None) only for the absent case (a corrupt
+                    // record stays an error there), so the pending marker is
+                    // retired only for a genuinely absent checkpoint.
                     if matches!(
                         FileJournal::read_checkpoint(&resolved.roots.state, project, &id),
                         Ok(None)

@@ -1393,12 +1393,17 @@ fn pending_markers_follow_saves_and_rebuild_after_loss() {
         FileJournal::pending_graph_ids(&root, project).unwrap(),
         ["g-test"]
     );
-    assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
+    // Reported once, then skipped until the bytes change.
     assert!(
         FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
             .unwrap_err()
             .to_string()
             .contains("g-test")
+    );
+    assert!(
+        FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
+            .unwrap()
+            .is_none()
     );
 }
 impl AttemptOwner for Owner {
