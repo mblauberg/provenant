@@ -18,7 +18,10 @@
 //! seeds and first builds cannot escape the budget. Explicit GC and launch
 //! admission share the same collector.
 use provenant_confinement::cache::is_cache_digest;
-use provenant_os::fs::{Directory, FileKind, Metadata, PayloadTree, effective_uid};
+use provenant_os::disk::DiskReport;
+use provenant_os::fs::{
+    Directory, FileKind, ForeignLock, LockMode, Metadata, PayloadTree, effective_uid,
+};
 use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
@@ -62,6 +65,7 @@ pub struct Limits {
     pub max_bytes: u64,
     pub free_floor: u64,
     pub grace_seconds: u64,
+    pub idle_seconds: u64,
 }
 
 #[derive(Debug, Default, serde::Serialize)]
@@ -1025,7 +1029,18 @@ pub fn collect_with_progress(
     snapshot.completed = survey.candidates.clone();
     snapshot.measuring = None;
     if survey.satisfied(limits) {
-        return Ok(survey.finish());
+        let mut report = survey.finish();
+        trim_with_custody(
+            host,
+            home,
+            limits.idle_seconds,
+            dry_run,
+            protection,
+            refresh_protection,
+            &mut report,
+            should_stop,
+        )?;
+        return Ok(report);
     }
 
     if dry_run {
@@ -1040,7 +1055,7 @@ pub fn collect_with_progress(
         }
         let mut current_protection = protection.clone();
         current_protection.merge(&refresh_protection());
-        let report = prune_with_progress(
+        let mut report = prune_with_progress(
             survey,
             limits,
             true,
@@ -1050,6 +1065,16 @@ pub fn collect_with_progress(
             should_stop,
             None,
         );
+        trim_with_custody(
+            host,
+            home,
+            limits.idle_seconds,
+            dry_run,
+            protection,
+            refresh_protection,
+            &mut report,
+            should_stop,
+        )?;
         return Ok(report);
     }
 
@@ -1059,7 +1084,7 @@ pub fn collect_with_progress(
         clock: &clock,
         cancel: &cancel,
     };
-    crate::ledger::while_admission_held(
+    let mut aggregate = crate::ledger::while_admission_held(
         host,
         &request,
         || -> Result<Report, Box<dyn std::error::Error>> {
@@ -1150,7 +1175,20 @@ pub fn collect_with_progress(
                 current = next;
             }
         },
-    )?
+    )??;
+    if aggregate.interrupted_at.is_none() {
+        trim_with_custody(
+            host,
+            home,
+            limits.idle_seconds,
+            false,
+            protection,
+            refresh_protection,
+            &mut aggregate,
+            should_stop,
+        )?;
+    }
+    Ok(aggregate)
 }
 
 fn merge_report(into: &mut Report, mut next: Report) {
@@ -1441,9 +1479,358 @@ fn wall_ns() -> Result<i128, Box<dyn std::error::Error>> {
     Ok(i128::from(now.as_micros()) * 1_000)
 }
 
-/// The collection itself, with free space and the time injected. The caller
-/// holds whatever excludes new admissions.
-pub fn sweep(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Admission and target custody are independent inputs"
+)]
+fn trim_with_custody(
+    host: &Path,
+    home: &Path,
+    idle_seconds: u64,
+    dry_run: bool,
+    protection: &TargetProtection,
+    refresh: &mut dyn FnMut() -> TargetProtection,
+    report: &mut Report,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !dry_run {
+        let mut preview = Report {
+            removed: report.removed.clone(),
+            ..Report::default()
+        };
+        let now = wall_ns().map_err(|e| io::Error::other(e.to_string()))?;
+        trim_stale_incremental_sessions_at(
+            home,
+            idle_seconds,
+            true,
+            now,
+            protection,
+            &mut preview,
+            should_stop,
+        )?;
+        if preview.removed.len() == report.removed.len() || preview.interrupted_at.is_some() {
+            for path in preview.busy {
+                if !report.busy.contains(&path) {
+                    report.busy.push(path);
+                }
+            }
+            report.errors.extend(preview.errors);
+            report.interrupted_at = preview.interrupted_at;
+            return Ok(());
+        }
+    }
+    let mut action = || {
+        let mut current = protection.clone();
+        current.merge(&refresh());
+        let now = wall_ns().map_err(|e| io::Error::other(e.to_string()))?;
+        trim_stale_incremental_sessions_at(
+            home,
+            idle_seconds,
+            dry_run,
+            now,
+            &current,
+            report,
+            should_stop,
+        )
+    };
+    if dry_run {
+        action()?;
+    } else {
+        let clock = provenant_os::clock::SystemClock::new();
+        let cancel = provenant_core::CancelToken::new();
+        let request = crate::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        crate::ledger::while_admission_held(host, &request, action)??;
+    }
+    Ok(())
+}
+
+pub(crate) fn trim_stale_incremental_sessions_at(
+    home: &Path,
+    idle_seconds: u64,
+    dry_run: bool,
+    now_ns: i128,
+    protection: &TargetProtection,
+    report: &mut Report,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> io::Result<()> {
+    let idle_ns = i128::from(idle_seconds) * 1_000_000_000;
+    let shared_root_path = shared_cache_root(home);
+    let shared_root = match Directory::open_anchor(&shared_root_path) {
+        Ok(dir) => dir,
+        Err(e) if e.is_not_found() => return Ok(()),
+        Err(e) => return Err(io::Error::other(e)),
+    };
+    let entries = match shared_root.entries() {
+        Ok(entries) => entries,
+        Err(e) => return Err(io::Error::other(e)),
+    };
+    for entry in entries {
+        if should_stop() {
+            report.interrupted_at = Some(shared_root_path.clone());
+            return Ok(());
+        }
+        let name = match entry {
+            Ok(name) => name,
+            Err(_) => continue,
+        };
+        let Some(digest) = name.to_str().filter(|name| is_cache_digest(name)) else {
+            continue;
+        };
+        let digest_dir = match shared_root.open_verified_directory(&name) {
+            Ok(dir) => dir,
+            Err(_) => continue,
+        };
+        for target_name in TARGETS {
+            if should_stop() {
+                report.interrupted_at = Some(shared_root_path.join(digest));
+                return Ok(());
+            }
+            let display_target = shared_root_path.join(digest).join(target_name);
+            let target_dir = match digest_dir.open_verified_directory(OsStr::new(target_name)) {
+                Ok(dir) => dir,
+                Err(error) if error.is_not_found() => continue,
+                Err(_) => {
+                    report.busy.push(display_target);
+                    continue;
+                }
+            };
+
+            if protection.protects(CacheKind::Shared, &name, None) {
+                if !report.busy.contains(&display_target) {
+                    report.busy.push(display_target);
+                }
+                continue;
+            }
+
+            // The enclosing target may already be selected by the census.
+            // A preview must not count its incremental children a second time.
+            if report
+                .removed
+                .iter()
+                .any(|path| display_target.starts_with(path))
+            {
+                continue;
+            }
+
+            let Some(_target_guards) =
+                provenant_confinement::cache::lock_cargo_profiles(&digest_dir, &|| true)
+            else {
+                if !report.busy.contains(&display_target) {
+                    report.busy.push(display_target);
+                }
+                continue;
+            };
+
+            let debug_dir = match target_dir.open_verified_directory(OsStr::new("debug")) {
+                Ok(dir) => dir,
+                Err(_) => continue,
+            };
+            let incremental_dir = match debug_dir.open_verified_directory(OsStr::new("incremental"))
+            {
+                Ok(dir) => dir,
+                Err(_) => continue,
+            };
+            let crate_entries = match incremental_dir.entries() {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for crate_entry in crate_entries {
+                if should_stop() {
+                    report.interrupted_at = Some(display_target.clone());
+                    return Ok(());
+                }
+                let crate_name = match crate_entry {
+                    Ok(name) => name,
+                    Err(_) => continue,
+                };
+                let display_crate = display_target.join("debug/incremental").join(&crate_name);
+                let crate_meta = match incremental_dir.metadata_at(&crate_name, false) {
+                    Ok(meta) => meta,
+                    Err(_) => {
+                        report.busy.push(display_crate);
+                        continue;
+                    }
+                };
+                if crate_meta.kind != FileKind::Directory {
+                    continue;
+                }
+                let crate_dir = match incremental_dir.open_verified_directory(&crate_name) {
+                    Ok(dir) => dir,
+                    Err(_) => {
+                        report.busy.push(display_crate);
+                        continue;
+                    }
+                };
+                let file_entries = match crate_dir.entries() {
+                    Ok(entries) => entries,
+                    Err(_) => {
+                        report.busy.push(display_crate);
+                        continue;
+                    }
+                };
+                let mut crate_busy = false;
+                let mut _session_guards = Vec::new();
+                let mut session_names = Vec::new();
+                for file_entry in file_entries {
+                    if should_stop() {
+                        report.interrupted_at = Some(display_crate.clone());
+                        return Ok(());
+                    }
+                    let file_name = match file_entry {
+                        Ok(name) => name,
+                        Err(_) => {
+                            crate_busy = true;
+                            break;
+                        }
+                    };
+                    let file_str = file_name.to_string_lossy();
+                    if file_str.ends_with(".lock") {
+                        match crate_dir.try_flock_foreign(&file_name, LockMode::Exclusive) {
+                            Ok(ForeignLock::Held) | Err(_) => {
+                                crate_busy = true;
+                                break;
+                            }
+                            Ok(ForeignLock::Acquired(guard)) => _session_guards.push(guard),
+                            Ok(ForeignLock::Absent) => {}
+                        }
+                    } else if file_str.starts_with("s-") || file_str.starts_with(".provenant-gc-s-")
+                    {
+                        session_names.push(file_name);
+                    }
+                }
+                if crate_busy {
+                    if !report.busy.contains(&display_crate) {
+                        report.busy.push(display_crate);
+                    }
+                    continue;
+                }
+
+                for session_name in session_names {
+                    if should_stop() {
+                        report.interrupted_at = Some(display_crate.clone());
+                        return Ok(());
+                    }
+                    let meta = match crate_dir.metadata_at(&session_name, false) {
+                        Ok(meta) if meta.kind == FileKind::Directory => meta,
+                        _ => continue,
+                    };
+                    let age_ns = now_ns.saturating_sub(meta.modified_ns);
+                    let tombstone = session_name
+                        .to_string_lossy()
+                        .starts_with(".provenant-gc-s-");
+                    if !tombstone && age_ns < idle_ns {
+                        continue;
+                    }
+                    let session_display = display_crate.join(&session_name);
+                    if meta.uid != effective_uid() {
+                        report.busy.push(session_display);
+                        continue;
+                    }
+                    let mut disk_report = DiskReport::new(PathBuf::new(), 0);
+                    disk_report.measure_at(
+                        "incremental_session",
+                        &crate_dir,
+                        &session_name,
+                        &session_display,
+                    );
+                    if !disk_report.errors.is_empty() {
+                        report.errors.push(format!(
+                            "incremental session {} could not be measured completely",
+                            session_display.display()
+                        ));
+                        report.busy.push(session_display);
+                        continue;
+                    }
+                    let bytes = disk_report.entries.iter().fold(0_u64, |sum, entry| {
+                        sum.saturating_add(entry.allocated_bytes)
+                    });
+
+                    if dry_run {
+                        if !report.removed.contains(&session_display) {
+                            report.removed.push(session_display);
+                            report.bytes = report.bytes.saturating_add(bytes);
+                            report.cache_bytes = report.cache_bytes.saturating_sub(bytes);
+                        }
+                    } else {
+                        let Ok(session_dir) = crate_dir.open_verified_directory(&session_name)
+                        else {
+                            report.busy.push(session_display);
+                            continue;
+                        };
+                        if session_dir.make_private().is_err() {
+                            report.busy.push(session_display);
+                            continue;
+                        }
+                        drop(session_dir);
+                        let removal_name = if tombstone {
+                            session_name.clone()
+                        } else {
+                            let mut name = OsString::from(".provenant-gc-");
+                            name.push(&session_name);
+                            if crate_dir
+                                .rename_noreplace(&session_name, &crate_dir, &name)
+                                .is_err()
+                            {
+                                report.busy.push(session_display);
+                                continue;
+                            }
+                            name
+                        };
+                        let removal_path = display_crate.join(&removal_name);
+                        let Ok(tree) = PayloadTree::claim(&crate_dir, &removal_name, &meta) else {
+                            report.errors.push(format!(
+                                "cannot claim incremental session {}",
+                                removal_path.display()
+                            ));
+                            continue;
+                        };
+                        let mut remaining = MAX_ENTRIES;
+                        let removed = remove_contents_until(&tree, 0, &mut remaining, should_stop);
+                        drop(tree);
+                        match removed {
+                            Ok(true) if crate_dir.rmdir(&removal_name).is_ok() => {
+                                report.removed.push(session_display);
+                                report.bytes = report.bytes.saturating_add(bytes);
+                                report.cache_bytes = report.cache_bytes.saturating_sub(bytes);
+                            }
+                            result => {
+                                let mut rest = DiskReport::new(PathBuf::new(), 0);
+                                rest.measure_at(
+                                    "incremental_session",
+                                    &crate_dir,
+                                    &removal_name,
+                                    &removal_path,
+                                );
+                                let left = rest.entries.iter().fold(0_u64, |sum, entry| {
+                                    sum.saturating_add(entry.allocated_bytes)
+                                });
+                                let reclaimed = bytes.saturating_sub(left);
+                                report.bytes = report.bytes.saturating_add(reclaimed);
+                                report.cache_bytes = report.cache_bytes.saturating_sub(reclaimed);
+                                report.interrupted_at = Some(removal_path.clone());
+                                if let Err(error) = result {
+                                    report.errors.push(format!(
+                                        "incremental session {}: {error}",
+                                        removal_path.display()
+                                    ));
+                                }
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Test helper with injected free space and time.
+#[cfg(test)]
+fn sweep(
     home: &Path,
     limits: Limits,
     dry_run: bool,
@@ -1451,17 +1838,28 @@ pub fn sweep(
     free_space: &mut dyn FnMut() -> io::Result<u64>,
 ) -> Report {
     let survey = survey(home, free_space, dry_run);
-    if !survey.complete {
-        return survey.finish();
-    }
-    prune(
-        survey,
-        limits,
+    let mut report = if !survey.complete {
+        survey.finish()
+    } else {
+        prune(
+            survey,
+            limits,
+            dry_run,
+            now_ns,
+            free_space,
+            &TargetProtection::default(),
+        )
+    };
+    let _ = trim_stale_incremental_sessions_at(
+        home,
+        limits.idle_seconds,
         dry_run,
         now_ns,
-        free_space,
         &TargetProtection::default(),
-    )
+        &mut report,
+        &mut || false,
+    );
+    report
 }
 
 /// Measure every managed target directory and sample free space. No lock is needed:
@@ -2819,6 +3217,7 @@ mod tests {
             max_bytes,
             free_floor,
             grace_seconds: 0,
+            idle_seconds: 6 * 3600,
         }
     }
     fn graced(max_bytes: u64, grace_seconds: u64) -> Limits {
@@ -4189,5 +4588,117 @@ mod tests {
             &mut plenty,
         );
         assert!(report.cache_bytes < (1 << 24), "{}", report.cache_bytes);
+    }
+
+    #[test]
+    fn launch_budget_collection_does_not_trim_incremental_sessions() {
+        let state = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let fixture = Fixture::new();
+        let target = fixture.shared_profile('a', "debug", 4096, 100);
+        let session = target.join("debug/incremental/crate-a/s-live");
+        fs::create_dir_all(&session).unwrap();
+        fs::write(session.join("payload"), b"incremental").unwrap();
+        let report = collect(
+            state.path(),
+            fixture.home.path(),
+            limits(u64::MAX, 0),
+            false,
+        )
+        .unwrap();
+        assert!(report.removed.is_empty());
+        assert!(session.exists());
+    }
+
+    #[test]
+    fn stale_incremental_session_dirs_trimmed_and_held_spared() {
+        let fixture = Fixture::new();
+        let target = fixture.shared_profile('a', "debug", 4096, 100);
+        let inc_dir = target.join("debug/incremental/crate_a-12345");
+        fs::create_dir_all(&inc_dir).unwrap();
+
+        let old_session = inc_dir.join("s-old-1234");
+        fs::create_dir_all(&old_session).unwrap();
+        fs::write(old_session.join("dep-graph.bin"), vec![2; 2048]).unwrap();
+        fs::write(inc_dir.join("s-old.lock"), b"").unwrap();
+
+        let recent_session = inc_dir.join("s-recent-5678");
+        fs::create_dir_all(&recent_session).unwrap();
+        fs::write(recent_session.join("dep-graph.bin"), vec![3; 2048]).unwrap();
+        fs::write(inc_dir.join("s-recent.lock"), b"").unwrap();
+
+        let old_time = fixed_time() - std::time::Duration::from_secs(36000);
+        fs::File::open(&old_session)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+        let recent_time = fixed_time() - std::time::Duration::from_secs(3600);
+        fs::File::open(&recent_session)
+            .unwrap()
+            .set_modified(recent_time)
+            .unwrap();
+
+        let mut test_limits = limits(u64::MAX, 0);
+        test_limits.idle_seconds = 6 * 3600;
+
+        let mut protected = TargetProtection::default();
+        protected.shared_projects.insert("a".repeat(64));
+        let mut protected_report = Report::default();
+        trim_stale_incremental_sessions_at(
+            fixture.home.path(),
+            test_limits.idle_seconds,
+            false,
+            now(),
+            &protected,
+            &mut protected_report,
+            &mut || false,
+        )
+        .unwrap();
+        assert!(protected_report.busy.contains(&target));
+        assert!(old_session.exists());
+
+        fs::write(target.join("debug/.cargo-lock"), b"").unwrap();
+        let profile_guard = hold(&target.join("debug"), CARGO_LOCK);
+        let locked_target = sweep(fixture.home.path(), test_limits, true, now(), &mut plenty);
+        assert!(locked_target.busy.contains(&target));
+        assert!(!locked_target.removed.contains(&old_session));
+        drop(profile_guard);
+
+        let preview = sweep(fixture.home.path(), test_limits, true, now(), &mut plenty);
+        assert!(preview.removed.contains(&old_session));
+        assert!(!preview.removed.contains(&recent_session));
+        assert!(old_session.exists());
+        assert!(recent_session.exists());
+
+        let report = sweep(fixture.home.path(), test_limits, false, now(), &mut plenty);
+        assert!(report.removed.contains(&old_session));
+        assert_eq!(preview.bytes, report.bytes);
+        assert!(!report.removed.contains(&recent_session));
+        assert!(!old_session.exists());
+        assert!(recent_session.exists());
+
+        let locked_session = inc_dir.join("s-locked-9999");
+        fs::create_dir_all(&locked_session).unwrap();
+        fs::write(locked_session.join("dep-graph.bin"), vec![4; 1024]).unwrap();
+        fs::write(inc_dir.join("s-locked.lock"), b"").unwrap();
+        fs::File::open(&locked_session)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+
+        let _guard = hold(&inc_dir, "s-locked.lock");
+        let locked_preview = sweep(fixture.home.path(), test_limits, true, now(), &mut plenty);
+        assert!(locked_preview.busy.contains(&inc_dir));
+        assert!(!locked_preview.removed.contains(&locked_session));
+        let locked_report = sweep(fixture.home.path(), test_limits, false, now(), &mut plenty);
+        assert!(locked_report.busy.contains(&inc_dir));
+        assert!(locked_session.exists());
+        drop(_guard);
+        let tombstone = inc_dir.join(".provenant-gc-s-interrupted");
+        fs::create_dir_all(&tombstone).unwrap();
+        fs::write(tombstone.join("remaining"), b"remaining").unwrap();
+        let resumed = sweep(fixture.home.path(), test_limits, false, now(), &mut plenty);
+        assert!(resumed.removed.contains(&tombstone));
+        assert!(!tombstone.exists());
     }
 }

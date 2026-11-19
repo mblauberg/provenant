@@ -41,9 +41,19 @@ deletion authority: GC revalidates its own conditions.
 ## Scratch and cache custody
 
 Released read-only attempt scratch becomes collectable after `gc.idle`, without
-branch, PR, graph or worktree conditions. Writer scratch retains finished-work
-owner checks. Busy or unreleased attempts remain protected, and collection
+branch, PR, graph or worktree conditions. Settled attempt `tmp/` scratch becomes
+collectable after `gc.idle` once the attempt is terminal with all terminal
+effects complete and no live holder, writer slot or Cargo lock holds the files;
+live attempts are never touched. Busy or unreleased attempts remain protected, and collection
 preserves durable results, handoffs, logs and process records.
+
+Lanes steer build output to the shared project target (`lanes.cargo_target = "shared"`).
+When a lane configures `CARGO_TARGET_DIR` under an attempt's `tmp/` directory,
+launch and handoff output emit a warning. Discard archives exclude ignored build output
+at creation (`target/` and any directory marked with `CACHEDIR.TAG`), and expire
+after `gc.discard_archive_retention` (defaults to 14 days). In shared targets,
+stale incremental session directories (`debug/incremental/*`) older than `gc.idle`
+and not locked are trimmed; held or unprobeable locks report as busy and are spared.
 
 `lanes.cargo_cache_max` covers both private lane and shared Cargo targets. It
 accepts bytes or a percentage of the volume and defaults to 10% of the cache volume.

@@ -4230,9 +4230,14 @@ pub(super) fn prepare_candidates_inner(
             task,
             &plan,
         );
+        let common_git_path = repository
+            .as_ref()
+            .map(|path| path.to_path_buf())
+            .transpose()
+            .map_err(|error| error.to_string())?;
         let common_git_dir = match &plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => Some(authority.common_git_dir().to_path_buf()),
-            AccessMode::ReadOnly => None,
+            AccessMode::ReadOnly => common_git_path.clone(),
         };
         let private_cache = match &plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
@@ -4433,11 +4438,6 @@ pub(super) fn prepare_candidates_inner(
             alias_temporary_env(&mut spec.env, scratch, &alias.join(&scratch_name));
         }
         apply_lane_capabilities(&mut spec.profile.spec, &task.access);
-        let common_git_path = repository
-            .as_ref()
-            .map(|path| path.to_path_buf())
-            .transpose()
-            .map_err(|error| error.to_string())?;
         let project_paths = super::project_paths::apply(
             &mut spec,
             &plan,
@@ -4659,7 +4659,7 @@ pub(super) fn prepare_candidates_inner(
             spec.argv
                 .splice(1..1, [argument.into(), scratch.as_os_str().to_owned()]);
         }
-        if writer.is_none() {
+        if writer.is_none() && !cargo_target.value.is_shared() {
             super::command::scratch_cargo_output(&mut spec.env, scratch);
         }
         spec.complete_tool_requirements(&plan, &cwd)?;
@@ -4718,6 +4718,18 @@ pub(super) fn prepare_candidates_inner(
         }
         if let Some(warning) = &cargo_cache_budget_warning {
             push_launch_warning(&mut route, warning.clone());
+        }
+        if let Some((_, target_val)) = spec.env.iter().find(|(k, _)| k == "CARGO_TARGET_DIR") {
+            let target_path = Path::new(target_val);
+            if target_path.starts_with(scratch) || target_path.starts_with(&paths.temporary) {
+                push_launch_warning(
+                    &mut route,
+                    format!(
+                        "CARGO_TARGET_DIR is set under the attempt's tmp directory ({}); build output bypasses the shared target",
+                        target_path.display()
+                    ),
+                );
+            }
         }
         for warning in ignore_file_warnings(&route.adapter, task, roots.state.as_path()) {
             push_launch_warning(&mut route, warning);

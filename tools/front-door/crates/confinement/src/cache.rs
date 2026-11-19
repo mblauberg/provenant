@@ -1362,7 +1362,8 @@ pub fn lock_cargo_profiles(
                 Ok(ForeignLock::Absent) => {}
             }
         }
-        if profile || depth == 2 {
+        // A target-root lock does not cover a nested profile lock.
+        if (profile && depth > 0) || depth == 2 {
             return Some(());
         }
         let entries = dir.entries().ok()?;
@@ -1407,6 +1408,58 @@ pub fn lock_cargo_profiles(
             Err(_) => return None,
         }
     }
+    Some(guards)
+}
+
+/// Probe every directory in attempt scratch, holding discovered Cargo locks until
+/// collection completes. An exhausted walk or inaccessible directory is busy.
+pub fn lock_scratch_cargo_profiles(
+    root: &Directory,
+    keep_going: &dyn Fn() -> bool,
+) -> Option<Vec<LockGuard>> {
+    fn visit(
+        dir: &Directory,
+        depth: usize,
+        remaining: &mut usize,
+        guards: &mut Vec<LockGuard>,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<()> {
+        if !keep_going() || *remaining == 0 {
+            return None;
+        }
+        *remaining -= 1;
+        for name in [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"] {
+            match dir.try_flock_foreign(OsStr::new(name), LockMode::Exclusive) {
+                Ok(ForeignLock::Held) | Err(_) => return None,
+                Ok(ForeignLock::Acquired(guard)) => {
+                    guards.push(guard);
+                }
+                Ok(ForeignLock::Absent) => {}
+            }
+        }
+        for entry in dir.entries().ok()? {
+            if !keep_going() || *remaining == 0 {
+                return None;
+            }
+            *remaining -= 1;
+            let name = entry.ok()?;
+            if dir.metadata_at(&name, false).ok()?.kind == FileKind::Directory {
+                if depth == 32 {
+                    return None;
+                }
+                visit(
+                    &dir.open_verified_directory(&name).ok()?,
+                    depth + 1,
+                    remaining,
+                    guards,
+                    keep_going,
+                )?;
+            }
+        }
+        Some(())
+    }
+    let mut guards = Vec::new();
+    visit(root, 0, &mut 1_000_000, &mut guards, keep_going)?;
     Some(guards)
 }
 

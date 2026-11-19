@@ -45,10 +45,8 @@ explicit rather than appearing as zero.
 
 `gc.idle` defaults to `6h` and accepts `0` or a duration in seconds, minutes,
 hours, days or weeks. It applies to ownerless idle artifacts and standalone
-caches. A released read-only attempt becomes eligible for scratch collection
-after `gc.idle`, regardless of its branch, PR, graph or worktree. Writer scratch
-remains eligible immediately when its work is finished: its branch is merged or
-its PR closed, its graph is cancelled or superseded, or its worktree is removed.
+caches. Settled attempt scratch becomes eligible after `gc.idle`, regardless of
+its branch, PR, graph or worktree, once terminal effects and custody are complete.
 Collection removes `tmp/` and candidate build targets while retaining results,
 handoffs, logs and process records. Unreleased or busy attempts are never collected.
 
@@ -122,8 +120,8 @@ push on the observed tip. Unobserved remote branches are outside this surface.
 Explicit discard first publishes a private state-root archive: exact-tip Git
 bundle, binary working/index patches, NUL-delimited status, untracked and ignored
 files in a no-follow ustar, and a manifest. Unrepresentable paths or changing
-source data keep the original worktree. `gc.discard_archive_days` controls archive
-retention (90 days by default). Clean subsumed removals need no archive.
+source data keep the original worktree. `gc.discard_archive_retention` controls archive
+retention (14 days by default). Clean subsumed removals need no archive.
 
 Record a ref's reported head before recreating it. Configure regenerable and keep
 paths before collecting output; undeclared ignored files such as local databases

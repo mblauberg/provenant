@@ -295,7 +295,7 @@ retention_classes! {
         adapter: discard_archives,
         eligibility: Declared,
         detail: "published discard archive older than the configured recovery window",
-        settings: ["gc.discard_archive_days"],
+        settings: ["gc.discard_archive_retention"],
         triggers: GC
     },
 }
@@ -709,7 +709,7 @@ pub struct GcSettings {
     /// Maximum wall time for one host-wide collection pass.
     pub sweep_budget: String,
     pub graph_checkpoint_days: u64,
-    pub discard_archive_days: u64,
+    pub discard_archive_retention: String,
     pub free_floor: Option<String>,
     /// Only this small critical threshold may stop new builds; free_floor warns.
     pub critical_free: Option<String>,
@@ -724,7 +724,7 @@ impl Default for GcSettings {
             idle: "6h".into(),
             sweep_budget: "5m".into(),
             graph_checkpoint_days: 90,
-            discard_archive_days: 90,
+            discard_archive_retention: "14d".into(),
             free_floor: None,
             critical_free: None,
             alert_below: None,
@@ -831,6 +831,11 @@ impl GcSettings {
         parse_gc_idle_duration(&self.sweep_budget)
     }
 
+    /// Resolve the retention duration for discard archives, expressed in seconds.
+    pub fn discard_archive_retention_seconds(&self) -> Result<u64, &'static str> {
+        parse_gc_idle_duration(&self.discard_archive_retention)
+    }
+
     pub fn disk_limits(&self, state: &Path) -> std::io::Result<DiskLimits> {
         use provenant_records::diagnostic::SettingSource::{Configuration, ShippedDefault};
         Ok(DiskLimits {
@@ -893,9 +898,7 @@ impl GcSettings {
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         self.idle_seconds()?;
         self.sweep_budget_seconds()?;
-        if !(1..=3650).contains(&self.discard_archive_days) {
-            return Err("discard_archive_days_range");
-        }
+        self.discard_archive_retention_seconds()?;
         if !(1..=3650).contains(&self.graph_checkpoint_days) {
             return Err("graph_checkpoint_days_range");
         }
@@ -1657,5 +1660,24 @@ mod disk_limit_tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn discard_archive_retention_parses_duration_and_defaults_to_14_days() {
+        let defaults = GcSettings::default();
+        assert_eq!(defaults.discard_archive_retention, "14d");
+        assert_eq!(
+            defaults.discard_archive_retention_seconds(),
+            Ok(14 * 86_400)
+        );
+
+        let mut custom = GcSettings {
+            discard_archive_retention: "48h".into(),
+            ..GcSettings::default()
+        };
+        assert_eq!(custom.discard_archive_retention_seconds(), Ok(48 * 3600));
+
+        custom.discard_archive_retention = "invalid".into();
+        assert!(custom.discard_archive_retention_seconds().is_err());
     }
 }

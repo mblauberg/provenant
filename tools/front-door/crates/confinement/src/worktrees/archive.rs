@@ -204,6 +204,7 @@ pub(super) fn capture(
         let bundle = stage.open_read(OsStr::new("tip.bundle"))?;
         bundle.sync()?;
         let mut captured = Vec::new();
+        let mut status_output = None;
         for (name, operation) in [
             ("worktree.patch", GitRead::DirtyPatch),
             ("index.patch", GitRead::IndexPatch),
@@ -217,6 +218,9 @@ pub(super) fn capture(
                 || result.stdout.sink_failed
             {
                 return Err(WorktreeError::InvalidOutput);
+            }
+            if name == "status.porcelain-v2.z" {
+                status_output = Some(result.stdout.bytes.clone());
             }
             captured.push((operation, result.stdout.bytes.clone()));
             stage
@@ -238,9 +242,28 @@ pub(super) fn capture(
         {
             return Err(WorktreeError::InvalidOutput);
         }
+        let ignored_dirs: std::collections::BTreeSet<PathBuf> =
+            crate::status::parse_porcelain_v2_z(
+                status_output
+                    .as_deref()
+                    .ok_or(WorktreeError::InvalidOutput)?,
+            )
+            .map_err(|_| WorktreeError::InvalidOutput)?
+            .into_iter()
+            .filter(|record| record.kind == crate::status::StatusKind::Ignored)
+            .map(|record| {
+                let mut bytes = record.path;
+                while bytes.last() == Some(&b'/') {
+                    bytes.pop();
+                }
+                PathBuf::from(OsString::from_vec(bytes))
+            })
+            .collect();
         let mut tar = stage.create_new(OsStr::new("untracked.tar"))?;
         let source = Directory::open_anchor(repo.root_path())?;
         let mut observed = Vec::new();
+        let mut cachedir_tag_dirs = std::collections::BTreeSet::new();
+        let mut clean_dirs = std::collections::BTreeSet::new();
         for path in paths
             .stdout
             .bytes
@@ -248,6 +271,15 @@ pub(super) fn capture(
             .filter(|p| !p.is_empty())
         {
             let path = PathBuf::from(OsString::from_vec(path.to_vec()));
+            if is_build_output_or_cache(
+                &path,
+                &source,
+                &ignored_dirs,
+                &mut cachedir_tag_dirs,
+                &mut clean_dirs,
+            ) {
+                continue;
+            }
             let (parent, name) = source_parent(&source, &path)
                 .map_err(|e| failure("inspect untracked", &repo.root_path().join(&path), e))?;
             let metadata = parent.metadata_at(&name, false)?;
@@ -357,6 +389,57 @@ fn source_parent(root: &Directory, path: &Path) -> io::Result<(Directory, OsStri
         .as_os_str()
         .to_os_string();
     Ok((directory, name))
+}
+
+fn is_build_output_or_cache(
+    path: &Path,
+    source: &Directory,
+    ignored_dirs: &std::collections::BTreeSet<PathBuf>,
+    cachedir_tag_dirs: &mut std::collections::BTreeSet<PathBuf>,
+    clean_dirs: &mut std::collections::BTreeSet<PathBuf>,
+) -> bool {
+    if source
+        .metadata_at(OsStr::new("CACHEDIR.TAG"), false)
+        .is_ok()
+    {
+        return true;
+    }
+    let mut current = PathBuf::new();
+    let components: Vec<_> = path.components().collect();
+    for (i, comp) in components.iter().enumerate() {
+        if i == components.len() - 1 && comp.as_os_str() != "CACHEDIR.TAG" {
+            break;
+        }
+        current.push(comp.as_os_str());
+        if comp.as_os_str() == "target"
+            && ignored_dirs
+                .iter()
+                .any(|ignored| current.starts_with(ignored))
+        {
+            return true;
+        }
+        if cachedir_tag_dirs.contains(&current) {
+            return true;
+        }
+        if !clean_dirs.contains(&current) {
+            let has_tag = match source_parent(source, &current.join("CACHEDIR.TAG")) {
+                Ok((dir, name)) => dir.metadata_at(name.as_os_str(), false).is_ok(),
+                Err(_) => false,
+            };
+            if has_tag {
+                cachedir_tag_dirs.insert(current.clone());
+                return true;
+            } else {
+                clean_dirs.insert(current.clone());
+            }
+        }
+    }
+    for tag_dir in cachedir_tag_dirs.iter() {
+        if path.starts_with(tag_dir) {
+            return true;
+        }
+    }
+    false
 }
 
 fn append_path(root: &Directory, path: &Path, out: &mut FileHandle) -> io::Result<()> {

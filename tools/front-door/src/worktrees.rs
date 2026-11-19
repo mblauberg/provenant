@@ -450,6 +450,9 @@ struct GcData {
     #[serde(skip)]
     retention_observations: Vec<provenant_config::RetentionBytes>,
     discard_archives: worktrees::ArchiveReport,
+    discard_archive_retention_seconds: u64,
+    discard_archive_retention_setting: String,
+    discard_archive_retention_source: String,
     staging_busy: Vec<PathBuf>,
     worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
     alerts: Vec<String>,
@@ -477,6 +480,25 @@ fn gc_cache_bytes(data: &GcData) -> u64 {
         }
     }
     bytes
+}
+
+// These disjoint collectors report allocated bytes. Other classes may be
+// unknown or use apparent bytes, so this is a lower bound rather than a census.
+fn gc_known_reclaimed_bytes(data: &GcData) -> u64 {
+    let worktrees = data
+        .worktree_cleanup
+        .iter()
+        .map(|r| r.bytes)
+        .fold(0_u64, u64::saturating_add);
+    [
+        gc_cache_bytes(data),
+        data.provider_state.temporary_bytes(),
+        data.discard_archives.bytes,
+        data.build_dirs.bytes,
+        worktrees,
+    ]
+    .into_iter()
+    .fold(0_u64, u64::saturating_add)
 }
 
 fn gc_retention_bytes(data: &GcData) -> Vec<provenant_config::RetentionBytes> {
@@ -769,6 +791,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 worktree_cleanup,
                 alerts,
                 notice: None,
+                ..Default::default()
             };
             let result = gc_failure(&data, &failure, globals.json);
             emit(&result, globals, "", command.dry_run)
@@ -785,21 +808,20 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
 }
 
 fn gc_compact_summary(data: &GcData) -> String {
-    let scratch_bytes = data.provider_state.temporary_bytes();
     let trees: usize = data
         .worktree_cleanup
         .iter()
         .map(|entry| entry.worktrees.removed.len())
         .sum();
     let mut summary = format!(
-        "{}: {trees} worktrees, {} attempt scratch directories, {} cache/scratch bytes; {} retention errors\nGC sweep budget: {}s (source: {})\n",
+        "{}: {trees} worktrees, {} attempt scratch directories, {} known bytes; {} retention errors\nGC sweep budget: {}s (source: {})\n",
         if data.report.dry_run {
             "would collect"
         } else {
             "collected"
         },
         data.provider_state.attempt_tmp.len(),
-        gc_cache_bytes(data).saturating_add(scratch_bytes),
+        gc_known_reclaimed_bytes(data),
         data.retention_errors.len() + data.provider_state.errors.len(),
         data.sweep_budget_seconds,
         data.sweep_budget_source
@@ -841,6 +863,15 @@ fn gc_data_summary(data: &GcData) -> String {
         data.provider_state.kept.len(),
         data.provider_state.errors.len(),
     );
+    human.push_str(&format!(
+        "{} known allocated bytes {} (other classes may be unmeasured)\n",
+        gc_known_reclaimed_bytes(data),
+        if data.report.dry_run {
+            "reclaimable"
+        } else {
+            "reclaimed"
+        }
+    ));
     let trees: usize = data
         .worktree_cleanup
         .iter()
@@ -872,6 +903,26 @@ fn gc_data_summary(data: &GcData) -> String {
             "removed"
         }
     ));
+    let archives_count = if data.report.dry_run {
+        data.discard_archives.would_remove.len()
+    } else {
+        data.discard_archives.removed.len()
+    };
+    human.push_str(&format!(
+        "{} discard archive(s), {} bytes {} (retention {}; source: {})\n",
+        archives_count,
+        data.discard_archives.bytes,
+        if data.report.dry_run {
+            "reclaimable"
+        } else {
+            "reclaimed"
+        },
+        data.discard_archive_retention_setting,
+        data.discard_archive_retention_source,
+    ));
+    for archive in &data.discard_archives.busy {
+        human.push_str(&format!("busy discard archive {}\n", archive.display()));
+    }
     if data.build_dirs.measurement_skipped {
         human.push_str(&format!(
             "Cargo target census partial: {} known bytes / {} byte budget (setting {}; source: {}); resumes at {}\n",
@@ -908,6 +959,12 @@ fn gc_data_summary(data: &GcData) -> String {
     }
     for error in &data.build_dirs.errors {
         human.push_str(&format!("lane build output: {error}\n"));
+    }
+    for target in &data.build_dirs.busy {
+        human.push_str(&format!("busy Cargo target {}\n", target.display()));
+    }
+    for kept in &data.provider_state.kept {
+        human.push_str(&format!("kept {}: {}\n", kept.path.display(), kept.reason));
     }
     for temporary in &data.provider_state.attempt_tmp {
         human.push_str(&format!(
@@ -1143,6 +1200,7 @@ enum GcOutput<'a> {
         removed: usize,
         kept: usize,
         bytes_freed: u64,
+        known_reclaimed_bytes: u64,
         provider_state_removed: usize,
         build_dirs_removed: usize,
         build_dir_bytes_reclaimed: u64,
@@ -1153,6 +1211,11 @@ enum GcOutput<'a> {
         build_dir_measurement_skipped: bool,
         build_dir_interrupted_at: &'a Option<PathBuf>,
         graph_checkpoints_removed: usize,
+        discard_archives_reclaimed: usize,
+        discard_archive_bytes: u64,
+        discard_archives_busy: &'a [PathBuf],
+        discard_archive_retention_setting: &'a str,
+        discard_archive_retention_source: &'a str,
         sweep_budget_seconds: u64,
         sweep_budget_source: &'a str,
         sweep_cursor: &'a Option<crate::gc_sweep::Cursor>,
@@ -1208,6 +1271,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         removed: data.report.removed.len(),
         kept: data.report.kept.len(),
         bytes_freed: data.report.bytes_freed,
+        known_reclaimed_bytes: gc_known_reclaimed_bytes(data),
         provider_state_removed: data.provider_state.removed.len(),
         build_dirs_removed: data.build_dirs.removed.len(),
         build_dir_bytes_reclaimed: data.build_dirs.bytes,
@@ -1218,6 +1282,15 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         build_dir_measurement_skipped: data.build_dirs.measurement_skipped,
         build_dir_interrupted_at: &data.build_dirs.interrupted_at,
         graph_checkpoints_removed: data.graph_checkpoints_removed,
+        discard_archives_reclaimed: if data.report.dry_run {
+            data.discard_archives.would_remove.len()
+        } else {
+            data.discard_archives.removed.len()
+        },
+        discard_archive_bytes: data.discard_archives.bytes,
+        discard_archives_busy: &data.discard_archives.busy,
+        discard_archive_retention_setting: &data.discard_archive_retention_setting,
+        discard_archive_retention_source: &data.discard_archive_retention_source,
         sweep_budget_seconds: data.sweep_budget_seconds,
         sweep_budget_source: &data.sweep_budget_source,
         sweep_cursor: &data.sweep_cursor,
@@ -2278,6 +2351,16 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             sweep_warning,
             unobserved_projects,
             skipped_transient,
+            discard_archive_retention_seconds: config
+                .gc
+                .discard_archive_retention_seconds()
+                .unwrap_or(14 * 86_400),
+            discard_archive_retention_setting: config.gc.discard_archive_retention.clone(),
+            discard_archive_retention_source: config
+                .origins
+                .get("gc.discard_archive_retention")
+                .map(gc_origin_source)
+                .unwrap_or_else(|| "compiled default".into()),
             ..Default::default()
         },
     };
@@ -3020,7 +3103,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let command = self.command;
         let roots = self.roots;
         let home = self.home;
-        let config = self.config;
+        let _config = self.config;
         let workers = self.workers;
         let facts = self.facts;
         let now_ns = self.now_ns;
@@ -3075,7 +3158,8 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                     Ok(worktrees::collect_archives(
                         context,
                         now_ns
-                            - i128::from(config.gc.discard_archive_days) * 86_400 * 1_000_000_000,
+                            - i128::from(self.data.discard_archive_retention_seconds)
+                                * 1_000_000_000,
                         command.dry_run,
                         cancel,
                         candidate_path.as_deref(),
@@ -3310,6 +3394,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                         .lanes
                         .build_settings()
                         .build_dir_grace_seconds(),
+                    idle_seconds: self.data.idle_seconds,
                 },
                 command.dry_run,
                 &budget,
@@ -3931,6 +4016,25 @@ mod human_tests {
 mod gc_preview_tests {
     #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
     use super::*;
+    #[test]
+    fn gc_known_total_includes_scratch_archives_and_cargo_reclamation() {
+        let mut data = GcData::default();
+        data.report.dry_run = true;
+        data.report.bytes_freed = 11;
+        data.discard_archives.bytes = 13;
+        data.build_dirs.bytes = 17;
+        data.provider_state
+            .attempt_tmp
+            .push(provenant_run::AttemptTmpRemoval {
+                path: "/tmp/attempt".into(),
+                bytes: 19,
+            });
+        assert_eq!(gc_known_reclaimed_bytes(&data), 60);
+        let summary = serde_json::to_value(gc_result_data(&data, false)).unwrap();
+        assert_eq!(summary["known_reclaimed_bytes"], 60);
+        assert!(gc_data_summary(&data).contains("60 known allocated bytes reclaimable"));
+    }
+
     #[test]
     fn gc_summary_reports_build_output_reclaimed_and_remaining() {
         let mut data = GcData::default();

@@ -491,40 +491,68 @@ impl RunStore {
                         )?
                         .ok_or(RunError::Validation("scratch request unavailable"))?;
                         let request: CanonicalRequest = crate::db::decode(&raw)?;
-                        let owner = if request.task.writer.is_none() {
-                            // Read-only scratch ages out independently of the
-                            // graph/worktree retention callback used for writers.
-                            ScratchOwner::Unowned
-                        } else {
-                            policy.owner.map_or_else(
-                                || scratch_owner(&record, &request),
-                                |owner| owner(&record, &request),
-                            )
-                        };
+                        // Settlement and custody are checked separately; every
+                        // attempt observes the same minimum scratch idle period.
+                        let _ = request;
                         !continuing
-                            && match owner {
-                                ScratchOwner::Finished => true,
-                                ScratchOwner::Owned => false,
-                                ScratchOwner::Unowned => {
-                                    age >= i64::try_from(policy.idle_seconds)
-                                        .unwrap_or(i64::MAX)
-                                        .saturating_mul(1_000_000)
-                                }
-                            }
+                            && age
+                                >= i64::try_from(policy.idle_seconds)
+                                    .unwrap_or(i64::MAX)
+                                    .saturating_mul(1_000_000)
                     } else {
                         false
                     };
-                    if scratch_eligible && !uncertain_loss {
+                    // The sealed effect list names the effects that apply. The
+                    // mutable receipts are authoritative for their completion.
+                    let effects_done = if scratch_eligible {
+                        match crate::artifacts::read_sealed(
+                            &attempt,
+                            "terminal-effects.json",
+                            crate::RECORD_LIMIT,
+                        )? {
+                            Some(raw) => {
+                                let effects: crate::store::TerminalEffects =
+                                    crate::db::decode(&raw)?;
+                                if effects.schema_version != 1
+                                    || effects.scope != Self::scope(&record)
+                                {
+                                    return Err(RunError::Conflict);
+                                }
+                                let raw: Option<Vec<u8>> = rusqlite::OptionalExtension::optional(self.db.query_row(
+                                    "SELECT record FROM settlement_receipts WHERE attempt=?1 AND generation=?2",
+                                    rusqlite::params![id, crate::db::sql_int(record.generation)?], |row| row.get(0),
+                                ))?;
+                                let receipts: Option<provenant_records::run::SettlementReceipts> =
+                                    raw.as_deref().map(crate::db::decode_column).transpose()?;
+                                match receipts {
+                                    Some(receipts) => effects.effects.iter().all(|(effect, _)| {
+                                        use provenant_records::run::{
+                                            EffectDisposition, SettlementEffect,
+                                        };
+                                        let disposition = match effect {
+                                            SettlementEffect::GitImport => &receipts.git_import,
+                                            SettlementEffect::ManifestConflict => {
+                                                &receipts.manifest_conflict
+                                            }
+                                            SettlementEffect::CleanupCustodyRelease => {
+                                                &receipts.cleanup_custody_release
+                                            }
+                                            SettlementEffect::Delivery => &receipts.delivery,
+                                        };
+                                        *disposition == EffectDisposition::Done
+                                    }),
+                                    None => false,
+                                }
+                            }
+                            // Unlaunched attempts have no provider effects.
+                            None => record.provider_launched == Some(false),
+                        }
+                    } else {
+                        false
+                    };
+                    if scratch_eligible && effects_done && !uncertain_loss {
                         let temporary = path.with_file_name("tmp");
                         let collection = (|| -> Result<()> {
-                            collect_temporary(
-                                &attempt,
-                                &temporary,
-                                dry_run,
-                                &mut report,
-                                &mut temporary_sizes,
-                                &|| scan.permits(call),
-                            )?;
                             let pending_writer_cleanup = if record.provider_launched == Some(false)
                                 && matches!(
                                     record.state,
@@ -563,7 +591,26 @@ impl RunStore {
                             } else {
                                 false
                             };
-                            if !dry_run && !pending_writer_cleanup {
+                            if pending_writer_cleanup {
+                                report.kept.push(ProviderStateIssue {
+                                    path: temporary.clone(),
+                                    reason: "writer cleanup remains pending".into(),
+                                });
+                                return Ok(());
+                            }
+                            collect_temporary(
+                                &attempt,
+                                &temporary,
+                                dry_run,
+                                &mut report,
+                                &mut temporary_sizes,
+                                &|| scan.permits(call),
+                            )?;
+                            if !dry_run
+                                && attempt
+                                    .metadata_at(OsStr::new("tmp"), false)
+                                    .is_err_and(|error| error.is_not_found())
+                            {
                                 self.write(call, |tx| {
                                 tx.execute(
                                     "UPDATE attempts SET tmp_retained=0 WHERE id=?1 AND project=?2 AND terminal=1",
@@ -1518,9 +1565,8 @@ fn collect_temporary(
     }
 
     let name = OsStr::new("tmp");
-    match attempt.metadata_at(name, false) {
-        Ok(_) => {}
-        // A crash after removing `tmp` can leave its short alias dangling.
+    let metadata = match attempt.metadata_at(name, false) {
+        Ok(metadata) => metadata,
         Err(error) if error.is_not_found() => {
             if !dry_run {
                 crate::short_temporary::remove(attempt);
@@ -1528,7 +1574,23 @@ fn collect_temporary(
             return Ok(());
         }
         Err(error) => return Err(error.into()),
-    }
+    };
+    let _cargo_guards = if metadata.kind == FileKind::Directory {
+        let tmp_dir = attempt.open_verified_directory(name)?;
+        match provenant_confinement::cache::lock_scratch_cargo_profiles(&tmp_dir, keep_going) {
+            Some(guards) => guards,
+            None if !keep_going() => return Err(RunError::Cancelled),
+            None => {
+                report.kept.push(ProviderStateIssue {
+                    path: path.into(),
+                    reason: "Cargo lock held or tmp could not be probed".into(),
+                });
+                return Ok(());
+            }
+        }
+    } else {
+        Vec::new()
+    };
     let bytes = if dry_run {
         // A preview must not repair permissions or restart its walk budget for
         // each attempt. Size errors are explicit lower bounds only.
@@ -2873,6 +2935,77 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn settled_writer_attempt_tmp_collected_after_idle_while_writer_worktree_present() -> TestResult
+    {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let mut input = input();
+        let worktree = temp.path().join("writer-worktree");
+        fs::create_dir(&worktree)?;
+        input.request.task.writer = Some(provenant_records::run::WriterRequest {
+            extra: Default::default(),
+            custody_project: Some(context.project_id),
+            project: temp.path().join("project"),
+            worktree: worktree.clone(),
+        });
+        store.create(&input, &call)?;
+        let attempt = context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{}", input.attempt_id));
+        let temporary = attempt.join("tmp/candidate-0/warm-target");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&temporary)?;
+        fs::write(temporary.join("artifact"), b"warm target build output")?;
+
+        let root = Directory::open_anchor(context.state_root.as_path())?;
+        let idle = 6 * 3600;
+        let policy = ScratchPolicy::new(idle);
+
+        let live_sweep = store.gc_temporary(
+            &root,
+            &policy,
+            WallTime::from_micros(200 + i64::try_from(idle)? * 1_000_000)?,
+            false,
+            &call,
+            &RetentionScan::default(),
+        )?;
+        assert!(live_sweep.attempt_tmp.is_empty());
+        assert!(temporary.exists(), "live writer attempt retains scratch");
+
+        withdraw(&store, &input, &call)?;
+
+        let before_idle = store.gc_temporary(
+            &root,
+            &policy,
+            WallTime::from_micros(200 + i64::try_from(idle)? * 1_000_000 - 1)?,
+            false,
+            &call,
+            &RetentionScan::default(),
+        )?;
+        assert!(before_idle.attempt_tmp.is_empty());
+        assert!(temporary.exists(), "scratch remains until gc.idle");
+
+        let after_idle = store.gc_temporary(
+            &root,
+            &policy,
+            WallTime::from_micros(200 + i64::try_from(idle)? * 1_000_000)?,
+            false,
+            &call,
+            &RetentionScan::default(),
+        )?;
+        assert_eq!(after_idle.attempt_tmp.len(), 1, "{after_idle:?}");
+        assert!(!attempt.join("tmp").exists());
+        assert!(worktree.exists(), "writer worktree is preserved");
+        Ok(())
+    }
+
     // Spec: docs/specs/disk.md#bounded-sweeps
     #[test]
     fn scratch_budget_stops_inside_an_attempt_and_resumes_remaining_files() -> TestResult {
@@ -2890,7 +3023,7 @@ mod tests {
         let budget_clock = std::sync::Mutex::new(clock.clone());
         let deadline = clock
             .mono_now()
-            .checked_add(DurationMicros::from_micros(120))?;
+            .checked_add(DurationMicros::from_micros(420))?;
         let keep_going = || {
             let mut clock = budget_clock
                 .lock()
@@ -3090,7 +3223,96 @@ mod tests {
     }
 
     #[test]
-    fn gc_incomplete_tmp_measurement_does_not_block_removal_or_provider_retention() -> TestResult {
+    fn scratch_waits_for_declared_terminal_effects() -> TestResult {
+        use provenant_records::run::{EffectDisposition, SettlementEffect};
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let dir = Directory::open_anchor(&attempt)?;
+        let record = store.record(input.attempt_id, &call)?;
+        crate::artifacts::seal(
+            &dir,
+            "terminal-effects.json",
+            &crate::db::bytes(&crate::store::TerminalEffects {
+                schema_version: 1,
+                scope: RunStore::scope(&record),
+                effects: vec![(SettlementEffect::Delivery, EffectDisposition::Pending)],
+            })?,
+            crate::RECORD_LIMIT,
+        )?;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(attempt.join("tmp"))?;
+        fs::write(attempt.join("tmp/payload"), b"scratch")?;
+        withdraw(&store, &input, &call)?;
+        let before = sweep(&store, &context, 7, 7 * DAY_MICROS, true, &call)?;
+        assert!(before.attempt_tmp.is_empty());
+        assert!(attempt.join("tmp/payload").exists());
+        let mut receipts = store
+            .record(input.attempt_id, &call)?
+            .settlement_receipts
+            .ok_or("missing receipts")?;
+        receipts.delivery = EffectDisposition::Done;
+        store.db.execute(
+            "UPDATE settlement_receipts SET record=?1 WHERE attempt=?2",
+            rusqlite::params![crate::db::bytes(&receipts)?, input.attempt_id.to_string()],
+        )?;
+        let after = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
+        assert_eq!(after.attempt_tmp.len(), 1, "{after:?}");
+        assert!(!attempt.join("tmp").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn collect_temporary_spares_tmp_when_cargo_lock_is_held() -> TestResult {
+        let fixture = tempfile::tempdir()?;
+        let temporary = fixture.path().join("tmp");
+        std::fs::create_dir(&temporary)?;
+        let cargo_dir = temporary.join("candidate-0/target");
+        std::fs::create_dir_all(&cargo_dir)?;
+        let lock_path = cargo_dir.join(".cargo-lock");
+        std::fs::write(&lock_path, b"")?;
+
+        let attempt = Directory::open_anchor(fixture.path())?;
+        let mut report = ProviderStateGc::default();
+        let mut sizes = provenant_os::disk::DiskReport::with_walk_budget(
+            fixture.path().into(),
+            0,
+            100,
+            std::time::Duration::from_secs(1),
+        );
+
+        let target_dir = Directory::open_anchor(&cargo_dir)?;
+        let _guard = match target_dir
+            .try_flock_foreign(std::ffi::OsStr::new(".cargo-lock"), LockMode::Exclusive)?
+        {
+            provenant_os::fs::ForeignLock::Acquired(g) => g,
+            other => panic!("expected acquired, got {other:?}"),
+        };
+
+        collect_temporary(&attempt, &temporary, true, &mut report, &mut sizes, &|| {
+            true
+        })?;
+        assert!(report.attempt_tmp.is_empty());
+        assert_eq!(report.kept.len(), 1);
+        report.kept.clear();
+        collect_temporary(
+            &attempt,
+            &temporary,
+            false,
+            &mut report,
+            &mut sizes,
+            &|| true,
+        )?;
+        assert_eq!(report.kept.len(), 1);
+        assert!(report.kept[0].reason.contains("Cargo lock"));
+        assert!(temporary.exists());
+        assert!(report.attempt_tmp.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn gc_unprobeable_tmp_is_kept_without_blocking_provider_retention() -> TestResult {
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -3108,19 +3330,13 @@ mod tests {
         fs::create_dir(candidate.join("cache"))?;
         fs::write(candidate.join("cache/payload"), "regenerable")?;
         let preview = sweep_with_days(&store, &context, 30, 7, 7 * DAY_MICROS, true, &call)?;
-        assert_eq!(preview.attempt_tmp.len(), 1);
-        assert!(preview.attempt_tmp[0].bytes >= 8192);
-        assert!(!preview.errors.is_empty());
+        assert!(preview.attempt_tmp.is_empty());
+        assert!(!preview.kept.is_empty());
         assert!(temporary.exists());
         let applied = sweep_with_days(&store, &context, 30, 7, 7 * DAY_MICROS, false, &call)?;
-        assert_eq!(applied.attempt_tmp.len(), 1);
-        assert!(applied.attempt_tmp[0].bytes >= 8192);
-        assert!(
-            applied.errors.is_empty(),
-            "deletion accounts bytes in its removal walk: {:?}",
-            applied.errors
-        );
-        assert!(!temporary.exists());
+        assert!(applied.attempt_tmp.is_empty());
+        assert!(!applied.kept.is_empty());
+        assert!(temporary.exists());
         assert!(!candidate.join("auth.json").exists());
         assert!(!candidate.join("cache").exists());
         assert_eq!(
@@ -3491,7 +3707,7 @@ mod tests {
     }
 
     #[test]
-    fn gc_removes_unreadable_owned_tmp_directories_without_following_links() -> TestResult {
+    fn gc_keeps_unprobeable_tmp_without_following_links() -> TestResult {
         use std::os::unix::fs::{PermissionsExt, symlink};
 
         let (_temp, context, store, input, attempt) = seeded()?;
@@ -3511,11 +3727,10 @@ mod tests {
         symlink(outside.path(), temporary.join("candidate-0/.tmpX/escape"))?;
 
         let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
-        assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert_eq!(report.attempt_tmp.len(), 1);
-        assert_eq!(report.attempt_tmp[0].path, temporary);
-        assert!(report.attempt_tmp[0].bytes > 0);
-        assert!(!temporary.exists());
+        assert!(report.attempt_tmp.is_empty());
+        assert!(!report.kept.is_empty());
+        assert!(temporary.exists());
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o700))?;
         assert_eq!(fs::read_to_string(outside.path().join("keep"))?, "outside");
         Ok(())
     }

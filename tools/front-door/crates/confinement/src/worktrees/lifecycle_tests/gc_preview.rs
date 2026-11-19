@@ -60,6 +60,48 @@ fn archive_candidate_resumes_after_parent_root_change() -> Result<(), Box<dyn Er
 }
 
 #[test]
+fn archive_expiry_preview_matches_sweep_at_retention_cutoff() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let root = test.project_state.current_path()?.join("discard-archives");
+    fs::create_dir(&root)?;
+    let old = root.join("archive-old");
+    let recent = root.join("archive-recent");
+    for path in [&old, &recent] {
+        fs::create_dir(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        fs::write(path.join("tip.bundle"), b"recovery")?;
+    }
+    fs::File::open(&old)?.set_modified(std::time::UNIX_EPOCH)?;
+    let cutoff = 1_000_000_000_000_i128;
+    let preview = super::super::archive::collect_archives(
+        &context,
+        cutoff,
+        true,
+        &cancel(),
+        None,
+        None,
+        &mut || false,
+    );
+    assert!(preview.would_remove.contains(&old));
+    assert!(!preview.would_remove.contains(&recent));
+    let applied = super::super::archive::collect_archives(
+        &context,
+        cutoff,
+        false,
+        &cancel(),
+        None,
+        None,
+        &mut || false,
+    );
+    assert_eq!(preview.would_remove, applied.removed);
+    assert_eq!(preview.bytes, applied.bytes);
+    assert!(recent.exists());
+    Ok(())
+}
+
+#[test]
 fn gc_preview_keeps_custody_unknown_when_census_times_out() -> Result<(), Box<dyn Error>> {
     struct TimedOut;
     impl WorkerObserver for TimedOut {
