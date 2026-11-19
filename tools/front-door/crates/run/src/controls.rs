@@ -585,21 +585,8 @@ pub fn release_progress(
         })
         .collect::<Vec<_>>();
     let holder = exit.retention.map(|retention| {
-        let age = now.and_then(|now| retention.age(now));
-        let pid = retention.guardian.pid;
-        match (retention.ended, age) {
-            (None, Some(age)) => format!("; held by guardian pid {pid} for {age}"),
-            (None, None) => format!("; held by guardian pid {pid}"),
-            (Some(end), _) => format!(
-                "; guardian pid {pid} stopped retaining after {} s ({}): {}; run `provenant reconcile`",
-                end.retained_ms / 1_000,
-                match end.reason {
-                    custody::RetentionEndReason::LimitReached => "limit reached",
-                    custody::RetentionEndReason::SupervisorSignal => "supervisor signal",
-                },
-                end.blocker,
-            ),
-        }
+        let guardian = custody::GuardianLiveness::observe(census, &retention.guardian);
+        format!("; {}", retention.describe(guardian, now))
     });
     Some(format!(
         "releasing ({} survivors: {}){}",

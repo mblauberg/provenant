@@ -183,13 +183,18 @@ config. `provenant config show --full` shows the value and its source, and
 unreadable run settings warn and keep the default
 (`LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT`). The unresolved exit carries
 a `retention` record: the holding guardian's identity, when retention began
-and the limit. `provenant status` names that guardian's PID and age. When
+and the limit. `provenant status` names that guardian's PID and age only while
+its census shows that exact identity alive; otherwise it says the guardian is
+gone and points to `provenant reconcile`. A settled exit drops the record. When
 retention ends with the exit still unresolved, whether by signal or by limit,
 the guardian adds `retention.ended` to the record. This records the reason, the
 time retained and the blocker (`stop_refused`, `protected_owner`,
 `census_incomplete`, `survived_stop` or `settlement_unproven`) beside the
-unresolved PIDs. Past the limit it then exits with the typed
-`RetentionLimit` failure. Ending retention signals nothing and removes nothing.
+unresolved PIDs. `stop_refused` means a live candidate this pass was not
+allowed to be signalled; a withheld permission with nothing to stop refuses
+nothing. Past the limit it then exits with the typed `RetentionLimit`
+failure: status `timeout` (exit 124), error code `RETENTION_LIMIT`, where
+other guardian faults exit `error` (3) with `SUPERVISOR`. Ending retention signals nothing and removes nothing.
 The unresolved exit and reservation keep the writer fenced. Once the guardian
 is gone, `provenant reconcile` ends only proven orphans, through the orphan
 recovery path.
@@ -197,8 +202,13 @@ recovery path.
   not the guardian, is what protects the worktree.
 
 Reaping the leader under the fenced lease backs off from 25 ms to 1 s and stops
-after about 5 s. The provider group is then dropped unsignalled, and its
-bounded reaper permit takes over.
+at a 5 s monotonic deadline, since a pause ends early on any reactor edge. The
+provider group is then dropped unsignalled, and its bounded reaper permit
+takes over. Retrying an undurable cleanup reservation or exit publication
+continues while the disk may recover, but once a supervisor signal has
+latched it stops after 5 s and the guardian exits with an error. The previous
+reservation, or the exit's `publication_pending` marker, stays the durable
+fence for reconcile, as after a crash.
 - Why: a retry loop with no bound or backoff could keep a guardian alive.
 
 ### Durable exit publication

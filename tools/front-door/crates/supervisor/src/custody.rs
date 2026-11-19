@@ -122,6 +122,15 @@ pub enum CustodyError {
 }
 
 impl CustodyError {
+    /// The envelope status and stable error code that `internal supervise`
+    /// reports, so the guardian's exit code distinguishes a retention limit
+    /// (`timeout`, 124) from a supervisor fault (`error`, 3).
+    pub fn outcome(&self) -> (provenant_records::Outcome, &'static str) {
+        match self {
+            Self::RetentionLimit(_) => (provenant_records::Outcome::Timeout, "RETENTION_LIMIT"),
+            _ => (provenant_records::Outcome::Error, "SUPERVISOR"),
+        }
+    }
     /// A stored record that is present but does not decode, whether or not the
     /// decoder kept its path and type. Callers that classify a malformed
     /// record (as an invalid stop intent, a replaceable stale record or an
@@ -1547,6 +1556,61 @@ impl Retention {
     pub fn age(&self, now: provenant_core::WallTime) -> Option<String> {
         self.since
             .map(|since| format_age_ns(i128::from(since.as_micros()) * 1_000, now))
+    }
+    /// The status clause for this record. Only a census that shows the
+    /// recorded guardian identity alive proves it still holds the lane.
+    pub fn describe(
+        &self,
+        guardian: GuardianLiveness,
+        now: Option<provenant_core::WallTime>,
+    ) -> String {
+        let pid = self.guardian.pid;
+        if let Some(end) = &self.ended {
+            return format!(
+                "guardian pid {pid} stopped retaining after {} s ({}): {}; run `provenant reconcile`",
+                end.retained_ms / 1_000,
+                match end.reason {
+                    RetentionEndReason::LimitReached => "limit reached",
+                    RetentionEndReason::SupervisorSignal => "supervisor signal",
+                },
+                end.blocker,
+            );
+        }
+        match (guardian, now.and_then(|now| self.age(now))) {
+            (GuardianLiveness::Live, Some(age)) => format!("held by guardian pid {pid} for {age}"),
+            (GuardianLiveness::Live, None) => format!("held by guardian pid {pid}"),
+            (GuardianLiveness::Gone, _) => format!(
+                "guardian pid {pid} is gone with the exit unresolved; run `provenant reconcile`"
+            ),
+            (GuardianLiveness::Unknown, _) => {
+                format!("guardian pid {pid} retained custody; its liveness is unknown")
+            }
+        }
+    }
+}
+/// Whether a census shows a retention record's guardian identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuardianLiveness {
+    /// The exact recorded identity is present and not a zombie.
+    Live,
+    /// The PID is absent, a zombie, or reused by another process.
+    Gone,
+    /// No census, or the census could not observe the PID.
+    Unknown,
+}
+impl GuardianLiveness {
+    pub fn observe(census: Option<&crate::census::Census>, guardian: &ProcessIdentity) -> Self {
+        match census.map(|census| census.process(guardian.pid)) {
+            Some(crate::census::ProcessLookup::Present(fact))
+                if fact.identity == *guardian && !fact.zombie =>
+            {
+                Self::Live
+            }
+            Some(
+                crate::census::ProcessLookup::Present(_) | crate::census::ProcessLookup::Absent,
+            ) => Self::Gone,
+            Some(crate::census::ProcessLookup::Unknown) | None => Self::Unknown,
+        }
     }
 }
 /// Why retained custody ended while processes were still unresolved.

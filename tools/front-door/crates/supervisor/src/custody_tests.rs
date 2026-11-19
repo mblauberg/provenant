@@ -446,7 +446,10 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
         // A retention record that ended counts against the same bound.
         retention: Some(Retention {
             guardian: identity.clone(),
-            since: Some(provenant_core::WallTime::from_micros(i64::MAX / 2)?),
+            // The latest wall time the wire allows: 9999-12-30T22:00:00.999999Z.
+            since: Some(provenant_core::WallTime::from_micros(
+                253_402_207_200_999_999,
+            )?),
             limit_ms: u64::MAX,
             ended: Some(RetentionEnd {
                 reason: RetentionEndReason::LimitReached,
@@ -2248,5 +2251,82 @@ fn reservation_holder_presence_is_independent_of_settlement_phase() -> TestResul
         reservation_holder_live(&record, &EmptyNativeWorld),
         Some(false)
     );
+    Ok(())
+}
+
+/// Status names a retaining guardian as the holder only while a census shows
+/// that exact identity alive; otherwise it says the guardian is gone (#3585).
+#[test]
+fn retention_names_its_holder_only_while_the_census_shows_it_alive()
+-> std::result::Result<(), Box<dyn Error>> {
+    use crate::census::{Census, ProcessFact};
+    let guardian = ProcessIdentity {
+        boot: "test-boot".into(),
+        pid: 40,
+        native_start: 7,
+        group_id: 40,
+        session_id: 40,
+    };
+    let fact = |identity: ProcessIdentity, zombie| ProcessFact {
+        identity,
+        parent_pid: 1,
+        zombie,
+        cpu_micros: Some(0),
+        command: None,
+    };
+    let census = |facts: Vec<ProcessFact>, absent: Vec<i64>| {
+        Census::from_observations(facts, [], absent, true, false, 16)
+    };
+    let live = census(vec![fact(guardian.clone(), false)], vec![])?;
+    let zombie = census(vec![fact(guardian.clone(), true)], vec![])?;
+    let reused = census(
+        vec![fact(
+            ProcessIdentity {
+                native_start: 8,
+                ..guardian.clone()
+            },
+            false,
+        )],
+        vec![],
+    )?;
+    let absent = census(vec![], vec![guardian.pid])?;
+    let unobserved = census(vec![], vec![])?;
+    let observe = |census: Option<&Census>| GuardianLiveness::observe(census, &guardian);
+    assert_eq!(observe(Some(&live)), GuardianLiveness::Live);
+    for gone in [&zombie, &reused, &absent] {
+        assert_eq!(observe(Some(gone)), GuardianLiveness::Gone);
+    }
+    assert_eq!(observe(Some(&unobserved)), GuardianLiveness::Unknown);
+    assert_eq!(observe(None), GuardianLiveness::Unknown);
+
+    let now = provenant_core::WallTime::from_micros(90_000_000)?;
+    let retention = Retention {
+        guardian: guardian.clone(),
+        since: Some(provenant_core::WallTime::from_micros(0)?),
+        limit_ms: 3_600_000,
+        ended: None,
+    };
+    let held = retention.describe(GuardianLiveness::Live, Some(now));
+    assert!(held.starts_with("held by guardian pid 40 for "), "{held}");
+    let gone = retention.describe(GuardianLiveness::Gone, Some(now));
+    assert!(!gone.contains("held by"), "{gone}");
+    assert!(gone.contains("guardian pid 40 is gone"), "{gone}");
+    assert!(gone.contains("provenant reconcile"), "{gone}");
+    let unknown = retention.describe(GuardianLiveness::Unknown, Some(now));
+    assert!(!unknown.contains("held by"), "{unknown}");
+    let ended = Retention {
+        ended: Some(RetentionEnd {
+            reason: RetentionEndReason::LimitReached,
+            retained_ms: 3_600_000,
+            blocker: RetentionBlocker::StopRefused,
+        }),
+        ..retention
+    };
+    let ended = ended.describe(GuardianLiveness::Live, Some(now));
+    assert!(
+        ended.contains("stopped retaining after 3600 s (limit reached)"),
+        "{ended}"
+    );
+    assert!(ended.contains("provenant reconcile"), "{ended}");
     Ok(())
 }

@@ -1525,6 +1525,29 @@ mod tests {
         Ok(())
     }
 
+    /// A supervisor signal stays visible after a loop takes its event, so a
+    /// later loop that never saw the edge still ends (#3585).
+    #[test]
+    fn a_supervisor_signal_stays_latched_after_its_event_is_taken() -> io::Result<()> {
+        let mut reactor = GuardianReactor::install()?;
+        // Thread-directed and blocked here, the signal stays pending on this
+        // test thread and ends with it; kqueue still records it.
+        // SAFETY: pthread_self has no preconditions and returns this thread.
+        let thread = unsafe { libc::pthread_self() };
+        // SAFETY: thread names the live calling thread, which blocks SIGTERM.
+        let sent = unsafe { libc::pthread_kill(thread, libc::SIGTERM) };
+        if sent != 0 {
+            return Err(io::Error::from_raw_os_error(sent));
+        }
+        let _ = reactor.wait(&[], Duration::ZERO)?;
+        assert!(reactor.signalled());
+        assert!(reactor.take_events().supervisor_signal);
+        assert!(reactor.signalled());
+        assert_eq!(reactor.take_events(), ReactorEvent::default());
+        assert!(reactor.signalled());
+        Ok(())
+    }
+
     #[test]
     fn reactor_reports_pipe_work_only_for_readiness_including_eof() -> io::Result<()> {
         let root = tempfile::tempdir()?;

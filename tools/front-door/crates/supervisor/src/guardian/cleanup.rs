@@ -725,16 +725,24 @@ impl Driver<'_> {
             // signal re-observes the exact identity. Without a native child
             // registry, an actual host holder must affirm that no graph
             // child remains; an absent holder is not that proof.
-            if self.descendant_stop_allowed || (self.registry.is_none() && self.holder.is_some()) {
-                candidates.extend(child.owned_cleanup_targets(census, spared));
+            let owned = child.owned_cleanup_targets(census, spared);
+            let descendants_allowed =
+                self.descendant_stop_allowed || (self.registry.is_none() && self.holder.is_some());
+            // A live candidate this pass may not signal can settle only by its
+            // own exit. Only actual candidates count: a withheld permission
+            // with nothing to stop refuses nothing.
+            let mut refused = (!descendants_allowed && !owned.is_empty())
+                || (!self.escapee_stop_allowed && !marked.is_empty());
+            if descendants_allowed {
+                candidates.extend(owned);
             }
             if self.escapee_stop_allowed {
                 candidates.extend(marked);
             }
             let had_candidates = !candidates.is_empty();
             let targets = host_authorised_targets(self.holder, &self.holder_context, candidates);
-            // Candidates the host refused can settle only by their own exit.
-            self.host_stop_refused = had_candidates && targets.is_empty();
+            refused |= had_candidates && targets.is_empty();
+            self.stop_refused = refused;
             for delivery in child.stop_owned_targets(escalation, &targets) {
                 if delivery.outcome == DeliveryOutcome::Delivered {
                     self.stopped_descendants.insert(delivery.identity.clone());

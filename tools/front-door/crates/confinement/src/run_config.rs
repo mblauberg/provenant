@@ -758,6 +758,15 @@ impl DomainConfig for RunConfig {
                 });
             }
         }
+        if !(1..=provenant_supervisor::custody::MAX_RETAINED_CUSTODY_SECONDS)
+            .contains(&self.retained_custody_seconds)
+        {
+            errors.push(SectionError {
+                detail: None,
+                field: "retained_custody_seconds".into(),
+                code: "range",
+            });
+        }
         valid_patterns("review_exempt", &self.review_exempt, &mut errors);
         valid_writer_writes("writer_writes", &self.writer_writes, &mut errors);
         valid_writer_writes(
@@ -984,6 +993,42 @@ mod tests {
                 .iter()
                 .any(|error| error.field == "grant_limit")
         );
+        Ok(())
+    }
+    /// The guardian refuses a plan whose retention limit is out of range, so
+    /// the run settings refuse it first: an unreadable setting warns and the
+    /// launcher keeps the shipped limit, and the lane still starts.
+    #[test]
+    fn retained_custody_seconds_is_range_checked_where_the_launcher_reads_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let max = provenant_supervisor::custody::MAX_RETAINED_CUSTODY_SECONDS;
+        let defaults: RunConfig = toml_edit::de::from_str("")?;
+        assert_eq!(
+            defaults.retained_custody_seconds,
+            provenant_supervisor::custody::DEFAULT_RETAINED_CUSTODY_SECONDS
+        );
+        for valid in [1, max] {
+            let config: RunConfig =
+                toml_edit::de::from_str(&format!("retained_custody_seconds = {valid}"))?;
+            assert!(config.validate().is_empty(), "{valid}");
+        }
+        for invalid in [0, max + 1, 700_000] {
+            let config: RunConfig =
+                toml_edit::de::from_str(&format!("retained_custody_seconds = {invalid}"))?;
+            assert!(
+                config
+                    .validate()
+                    .iter()
+                    .any(|error| error.field == "retained_custody_seconds"),
+                "{invalid}"
+            );
+            let state = tempfile::tempdir()?;
+            std::fs::write(
+                state.path().join("config.toml"),
+                format!("schema_version=1\n[domains.run]\nretained_custody_seconds={invalid}\n"),
+            )?;
+            assert!(RunConfig::read(state.path()).is_err(), "{invalid}");
+        }
         Ok(())
     }
     fn lane_input(route: &str) -> SandboxInputs<'_> {

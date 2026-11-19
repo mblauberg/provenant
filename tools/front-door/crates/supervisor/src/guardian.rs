@@ -68,6 +68,30 @@ const RETAINED_ESCALATION_MS: u64 = 30_000;
 const FINISH_FENCED_FIRST_MS: u64 = 25;
 const FINISH_FENCED_CAP_MS: u64 = 1_000;
 const FINISH_FENCED_BUDGET_MS: u64 = 5_000;
+// Durable-publication retries are unbounded while the disk may recover, but a
+// supervisor signal gives them this long before the guardian exits, leaving
+// the durable fence for reconcile as a crash would.
+const SIGNALLED_RETRY_BUDGET_MS: u64 = 5_000;
+
+/// Bounds an otherwise unbounded retry loop once a supervisor signal latches.
+/// The deadline starts at the first retry that sees the signal and is
+/// monotonic, because reactor pauses end early on any edge.
+#[derive(Default)]
+struct SignalledRetry {
+    deadline: Option<Instant>,
+}
+impl SignalledRetry {
+    #[allow(clippy::disallowed_methods)]
+    fn exhausted(&mut self, signalled: bool) -> bool {
+        if !signalled {
+            return false;
+        }
+        let now = Instant::now();
+        now >= *self
+            .deadline
+            .get_or_insert(now + Duration::from_millis(SIGNALLED_RETRY_BUDGET_MS))
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RetainedStep {
@@ -778,7 +802,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         registry: hooks.children,
         descendant_stop_allowed: false,
         escapee_stop_allowed: false,
-        host_stop_refused: false,
+        stop_refused: false,
         attempt: inherited.attempt_directory,
         writer_dir: evidence,
         lock_dir: inherited.writer_directory,
@@ -862,8 +886,9 @@ struct Driver<'a> {
     /// Unproven registered owners stay protected. Independent of
     /// `descendant_stop_allowed`.
     escapee_stop_allowed: bool,
-    /// The last stop pass had candidates and the host graph refused them all.
-    host_stop_refused: bool,
+    /// The last stop pass had live candidates it was not allowed to signal:
+    /// withheld descendant or escapee permission, or a host graph refusal.
+    stop_refused: bool,
 }
 /// Whether a writer's latest reported context has reached its context handoff
 /// threshold (`lanes.context_handoff_tokens`). 0 turns the threshold off, and a provider with no context figure
@@ -1931,10 +1956,12 @@ impl Driver<'_> {
             // replacement followed by failed directory sync is not a durable
             // transition; retain the locks and retry the same proven facts.
             // A linked evidence directory may recover from ENOSPC or a sync
-            // error, so keep custody and retry indefinitely. An unlinked one
-            // cannot accept a reservation at all. In that case only, finish
-            // the same full-census and fresh-lease proof before retiring; do
-            // not publish an exit or clear a fence without its reservation.
+            // error, so keep custody and retry until a supervisor signal
+            // bounds the wait. An unlinked one cannot accept a reservation at
+            // all. In that case only, finish the same full-census and
+            // fresh-lease proof before retiring; do not publish an exit or
+            // clear a fence without its reservation.
+            let mut signalled_retry = SignalledRetry::default();
             while !self.persist_reservation() {
                 if writer_evidence_identity.is_some_and(|identity| {
                     attempt_removed(&self.writer_dir, writer_evidence_path.as_deref(), identity)
@@ -1963,6 +1990,13 @@ impl Driver<'_> {
                             "writer evidence directory removed before exit publication",
                         )));
                     }
+                }
+                if signalled_retry.exhausted(self.reactor.signalled()) {
+                    // The previous reservation stays the durable fence, as
+                    // after a crash; reconcile recovers it.
+                    return Err(CustodyError::Io(io::Error::other(
+                        "cleanup reservation still not durable after a supervisor signal",
+                    )));
                 }
                 self.reactor.pause(Duration::from_millis(25));
             }
@@ -2234,7 +2268,7 @@ impl Driver<'_> {
     }
     /// What kept the exit unresolved when retention ended, most specific first.
     fn retention_blocker(&self) -> RetentionBlocker {
-        if self.host_stop_refused || !self.descendant_stop_allowed || !self.escapee_stop_allowed {
+        if self.stop_refused {
             RetentionBlocker::StopRefused
         } else if !self.protected.is_empty() {
             RetentionBlocker::ProtectedOwner
@@ -2288,15 +2322,17 @@ impl Driver<'_> {
             .map(|publication| publication.require_durable());
     }
     /// Reap the leader while the writer lease stays held. Retries back off and
-    /// are bounded; past the bound the provider group is dropped unsignalled
-    /// and the lease falls with the guardian.
+    /// are bounded by a monotonic deadline, since a pause ends early on any
+    /// reactor edge; past it the provider group is dropped unsignalled and the
+    /// lease falls with the guardian.
+    #[allow(clippy::disallowed_methods)]
     fn finish_fenced(&mut self, mut child: crate::process_os::provider::ProviderGroup) {
         let backoff = provenant_core::retry::Backoff::new(
             Duration::from_millis(FINISH_FENCED_FIRST_MS),
             2,
             Duration::from_millis(FINISH_FENCED_CAP_MS),
         );
-        let mut waited = Duration::ZERO;
+        let deadline = Instant::now() + Duration::from_millis(FINISH_FENCED_BUDGET_MS);
         let mut attempt = 0;
         loop {
             match child.finish_fenced() {
@@ -2304,12 +2340,12 @@ impl Driver<'_> {
                 Err(failure) => {
                     let (retained, _) = *failure;
                     child = retained;
-                    if waited >= Duration::from_millis(FINISH_FENCED_BUDGET_MS) {
+                    let now = Instant::now();
+                    if now >= deadline {
                         return;
                     }
-                    let delay = backoff.delay(attempt);
+                    let delay = backoff.delay(attempt).min(deadline - now);
                     attempt = attempt.saturating_add(1);
-                    waited = waited.saturating_add(delay);
                     self.reactor.pause(delay);
                 }
             }
@@ -2332,6 +2368,8 @@ impl Driver<'_> {
         record.unresolved_cleanup = false;
         record.unresolved_pids = Vec::new();
         record.unresolved_identities = Vec::new();
+        // A settled exit holds nothing, so it names no retaining guardian.
+        record.retention = None;
         record.settlement_evidence = self.settlement_evidence;
         record.reaped = self.reaped.clone();
         record.omitted_reaped = self.omitted_reaped;
@@ -2532,8 +2570,9 @@ impl Driver<'_> {
         Ok(())
     }
     /// Retry until the exit is durable or the attempt is provably removed.
-    /// Custody survives ENOSPC and signals; process.json exposes
-    /// publication_pending. A removed attempt keeps its held descriptor usable,
+    /// Custody survives ENOSPC; a supervisor signal bounds the retries to
+    /// `SIGNALLED_RETRY_BUDGET_MS`, then the guardian exits with an error.
+    /// process.json exposes publication_pending. A removed attempt keeps its held descriptor usable,
     /// so removal is judged by directory identity, never by a pathname or an
     /// errno alone.
     fn publish_until_durable(&mut self, record: &ProcessExit, state: &mut State) -> Result<bool> {
@@ -2550,6 +2589,7 @@ impl Driver<'_> {
         let system_exit_publisher = SystemExitPublisher;
         let exit_publisher: &dyn ExitPublisher =
             self.exit_publisher.unwrap_or(&system_exit_publisher);
+        let mut signalled_retry = SignalledRetry::default();
         loop {
             let result = if visible {
                 exit_publisher
@@ -2645,6 +2685,12 @@ impl Driver<'_> {
                 },
                 PublishMode::Replace,
             );
+            if signalled_retry.exhausted(self.reactor.signalled()) {
+                // publication_pending stays on disk for reconcile.
+                return Err(CustodyError::Io(io::Error::other(
+                    "exit publication still pending after a supervisor signal",
+                )));
+            }
             self.reactor.pause(Duration::from_millis(50));
         }
     }

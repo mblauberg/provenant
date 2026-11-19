@@ -408,8 +408,11 @@ impl provenant_os::capture::FrameDecoder for Decoder {
     }
 }
 fn budget(clock: &SystemClock) -> Result<WaitBudget> {
+    budget_seconds(clock, 5)
+}
+fn budget_seconds(clock: &SystemClock, seconds: u64) -> Result<WaitBudget> {
     use provenant_core::Clock;
-    Ok(WaitBudget::cli(clock.mono_now(), 5)?)
+    Ok(WaitBudget::cli(clock.mono_now(), seconds)?)
 }
 fn start(
     root: &Path,
@@ -1822,6 +1825,28 @@ fn retain_unstoppable_escapee(
     name: &str,
     plan: CapturePlan,
 ) -> Result<(UnixStream, ProcessIdentity)> {
+    let (stream, escapee, handle) = launch_unstoppable_escapee(
+        root,
+        name,
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..plan
+        },
+    )?;
+    let exit = exited(&handle)?;
+    assert!(exit.unresolved_cleanup, "{exit:?}");
+    assert_eq!(exit.unresolved_pids, vec![escapee.pid], "{exit:?}");
+    Ok((stream, escapee))
+}
+/// Start that lane with `plan` as given and return once the escapee reports,
+/// before the guardian's cleanup has published an exit.
+#[cfg(target_os = "macos")]
+fn launch_unstoppable_escapee(
+    root: &Path,
+    name: &str,
+    plan: CapturePlan,
+) -> Result<(UnixStream, ProcessIdentity, CustodyHandle)> {
     let home = root.join("HOME");
     std::fs::create_dir_all(&home)?;
     std::fs::write(home.join(S2_PRODUCTION_SHAPE), b"no registry")?;
@@ -1837,20 +1862,13 @@ fn retain_unstoppable_escapee(
             ready_path.into_os_string(),
             scope().attempt.sandbox_lookup_name().into(),
         ],
-        CapturePlan {
-            root_flush_ms: 30,
-            descendant_grace_ms: 10,
-            ..plan
-        },
+        plan,
     )?;
     drop(writer);
     let mut stream = fixture::fixture_accept(&ready_listener, Duration::from_secs(5))?;
     byte(&mut stream, b'R')?;
     let escapee = process_identity(read_pid_line(&mut stream)?)?;
-    let exit = exited(&handle)?;
-    assert!(exit.unresolved_cleanup, "{exit:?}");
-    assert_eq!(exit.unresolved_pids, vec![escapee.pid], "{exit:?}");
-    Ok((stream, escapee))
+    Ok((stream, escapee, handle))
 }
 /// The retention record the guardian last published on the unresolved exit.
 #[cfg(target_os = "macos")]
@@ -1878,7 +1896,7 @@ fn sigterm_during_retained_custody_ends_the_guardian_and_releases_the_writer(
     let released = Directory::open_anchor(&writer)?.lock(
         OsStr::new("writer.lock"),
         LockMode::Exclusive,
-        budget(&clock)?,
+        budget_seconds(&clock, GUARDIAN_SIGNAL_RELEASE.as_secs() + 5)?,
         &CancelToken::new(),
         &clock,
     )?;
@@ -1909,6 +1927,67 @@ fn sigterm_during_retained_custody_ends_the_guardian_and_releases_the_writer(
     wait_for_identity_absence(&escapee)?;
     Ok(())
 }
+/// A SIGTERM that lands during cleanup, after the provider exits and before
+/// the exit is published, still ends the guardian within the bound: cleanup's
+/// pacing pauses drain the signal edge, and the reactor keeps it (#3585).
+#[cfg(target_os = "macos")]
+fn sigterm_during_cleanup_ends_the_guardian_and_releases_the_writer(root: &Path) -> Result<()> {
+    let (stream, escapee, handle) = launch_unstoppable_escapee(
+        root,
+        "midclean",
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: MID_CLEANUP_GRACE_MS,
+            ..CapturePlan::default()
+        },
+    )?;
+    let writer = root.join("midclean-writer");
+    let guardian = reservation_identity(&writer, "guardian")?;
+    let provider = reservation_identity(&writer, "provider")?;
+    // The guardian reaps the provider only after cleanup, so its zombie marks
+    // the cleanup window; the exit is not yet published.
+    wait_for_zombie(&provider)?;
+    assert!(
+        !root.join("midclean-attempt/process-exit.json").exists(),
+        "the exit was published before the signal"
+    );
+    let signalled = Instant::now();
+    fixture::signal_recorded_process(&guardian, libc::SIGTERM)?;
+    let clock = SystemClock::new();
+    let released = Directory::open_anchor(&writer)?.lock(
+        OsStr::new("writer.lock"),
+        LockMode::Exclusive,
+        budget_seconds(&clock, GUARDIAN_SIGNAL_RELEASE.as_secs() + 5)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+    let waited = signalled.elapsed();
+    assert!(
+        waited < GUARDIAN_SIGNAL_RELEASE,
+        "writer released {waited:?} after a mid-cleanup SIGTERM"
+    );
+    drop(released);
+    let status =
+        fixture::guardian_exit_status(u32::try_from(guardian.pid)?, Duration::from_secs(5))?;
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "guardian exited abnormally: {status}"
+    );
+    wait_for_identity_absence(&guardian)?;
+    let exit = exited(&handle)?;
+    assert!(exit.unresolved_cleanup, "{exit:?}");
+    let retention = published_retention(root, "midclean")?;
+    assert_eq!(
+        retention["ended"]["reason"], "supervisor_signal",
+        "{retention}"
+    );
+    assert_eq!(retention["ended"]["blocker"], "stop_refused", "{retention}");
+    assert_eq!(process_identity(escapee.pid)?, escapee);
+    drop(stream);
+    wait_for_identity_absence(&escapee)?;
+    Ok(())
+}
 /// Retention past its configured limit records the unresolved processes and
 /// the blocker on the exit, then the guardian exits with the typed failure and
 /// its writer lock falls. Nothing is signalled or removed (#3585).
@@ -1926,9 +2005,10 @@ fn retention_past_its_limit_exits_with_the_typed_outcome(root: &Path) -> Result<
     let guardian = reservation_identity(&writer, "guardian")?;
     let status =
         fixture::guardian_exit_status(u32::try_from(guardian.pid)?, Duration::from_secs(10))?;
-    assert!(
-        !status.success(),
-        "guardian exited cleanly past its limit: {status}"
+    assert_eq!(
+        status.code(),
+        Some(i32::from(provenant_records::Outcome::Timeout.exit_code())),
+        "a retention limit exits as a timeout, not a supervisor fault: {status}"
     );
     wait_for_identity_absence(&guardian)?;
     let clock = SystemClock::new();
@@ -1964,9 +2044,15 @@ fn retention_past_its_limit_exits_with_the_typed_outcome(root: &Path) -> Result<
     wait_for_identity_absence(&escapee)?;
     Ok(())
 }
-/// A signalled guardian runs one bounded stop, publishes and exits.
+/// A signalled guardian runs one bounded stop, publishes and exits. Loaded CI
+/// hosts stretch the stop's census passes, so the bound is generous; the
+/// defect it guards against held the lock for hours.
 #[cfg(target_os = "macos")]
-const GUARDIAN_SIGNAL_RELEASE: Duration = Duration::from_millis(3_000);
+const GUARDIAN_SIGNAL_RELEASE: Duration = Duration::from_millis(10_000);
+/// The descendant grace for the mid-cleanup signal test: long enough that a
+/// SIGTERM sent once the provider has exited lands inside cleanup.
+#[cfg(target_os = "macos")]
+const MID_CLEANUP_GRACE_MS: u64 = 2_000;
 #[cfg(target_os = "macos")]
 const RETENTION_LIMIT_MS: u64 = 300;
 /// Retained custody releases the writer soon after the last process blocking
@@ -3269,6 +3355,11 @@ const CASES: &[Case] = &[
     ),
     #[cfg(target_os = "macos")]
     (
+        "sigterm_during_cleanup_ends_the_guardian_and_releases_the_writer",
+        sigterm_during_cleanup_ends_the_guardian_and_releases_the_writer,
+    ),
+    #[cfg(target_os = "macos")]
+    (
         "retention_past_its_limit_exits_with_the_typed_outcome",
         retention_past_its_limit_exits_with_the_typed_outcome,
     ),
@@ -3460,7 +3551,7 @@ fn main() -> Result<()> {
             }),
             Err(_) => None,
         };
-        provenant_supervisor::supervise(
+        let supervised = provenant_supervisor::supervise(
             &args[2..],
             GuardianHooks {
                 holder: refusal
@@ -3482,7 +3573,12 @@ fn main() -> Result<()> {
                 stdout_decoder: Some(&Decoder),
                 ..Default::default()
             },
-        )?;
+        );
+        // Exit as `internal supervise` does: by the typed error's status.
+        if let Err(error) = supervised {
+            let _ = writeln!(io::stderr(), "supervise: {error}");
+            std::process::exit(i32::from(error.outcome().0.exit_code()));
+        }
         return Ok(());
     }
     if args.first().is_some_and(|a| a == "--fixture")
