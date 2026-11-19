@@ -698,11 +698,11 @@
     },
     "lanes.cargo_target": {
       "type": "cargo_target",
-      "default": "shared",
+      "default": "project",
       "status": "wired",
       "reader": "tools/front-door/crates/run/src/cargo_target.rs",
-      "effect": "CARGO_TARGET_DIR for lanes: shared (default; one target per project under the host cache), private (today's copy-on-write seed clone per worktree, under ~/Library/Caches/provenant-lane-cargo/<digest>) or an absolute path. The value and its source appear in the lane preamble and in provenant config show.",
-      "trade_off": "shared avoids cold builds across lanes of the same project. private isolates artifacts per worktree at the cost of disk and compile time."
+      "effect": "CARGO_TARGET_DIR for lanes: project (default; the writer worktree's own target/ beside its Cargo workspace, the one a person building in that checkout uses), private (a copy-on-write seed clone per worktree under the lane cache) or an absolute path. The value and its source appear in the lane preamble and in provenant config show.",
+      "trade_off": "project shares artifacts with builds in the same checkout and is removed with the worktree, but a new worktree starts cold. private starts warm from a host seed at the cost of a second target per worktree. Never point several worktrees at one absolute path: Cargo decides member freshness by source mtimes, so one worktree reuses another branch's artifacts."
     },
     "lanes.ci_scope": {
       "type": "enum",

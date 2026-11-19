@@ -35,9 +35,9 @@ shim names the knob, its source and suggests fetching on the host. Cargo credent
 `credentials.toml`) remain mandatory read/write denials, including relocated homes.
 Host `config` and `config.toml` are read-only data; target seeding checks them with
 the same compiler-selection validation as checked-in Cargo configuration.
-Build directories and lane-specific tool configuration default to a shared host
-cache target (`lanes.cargo_target = "shared"`), or remain private to the lane
-cache (or attempt scratch for read-only lanes) when `private` is configured.
+Build directories default to the writer worktree's own Cargo target
+(`lanes.cargo_target = "project"`), or remain private to the lane cache (or
+attempt scratch for read-only lanes) when `private` is configured.
 No separate lane download store, Cargo home or symlink setup exists.
 The host's own build output supplies target seed generations.
 - Why: Cargo fingerprints dependency source paths; changing the home path defeats reuse even when symlinks reach the same content.
@@ -45,13 +45,15 @@ The host's own build output supplies target seed generations.
 ## Cargo target directory
 
 The `lanes.cargo_target` knob configures how lanes acquire their Cargo target:
-- `shared` (default): one target directory per project under the host cache (`~/Library/Caches/provenant-shared-cargo/<project_key>/target`), avoiding cold builds and skipping seed cloning. Lanes for the same repository share the warm target and Cargo serialises concurrent access with its build lock.
-- `private`: preserves the per-worktree copy-on-write seed clone under `~/Library/Caches/provenant-lane-cargo/<digest>/target`.
-- Absolute path: uses the path directly. It comes only from host or project configuration or the launch knob; a `Cargo target:` line in a brief can pick `shared` or `private` but never a path, because a path grants the lane read, write and exec there and a brief is requester text.
+- `project` (default): the writer worktree's own target, `target/` beside the Cargo workspace the verify port selects, with lint-only runs in `target/provenant-lint`. Builds by a person or chair in that checkout share it, and it goes with the worktree. The host neither creates it nor grants it separately: it lies in the writer-controlled worktree, which the lane may already write and execute. Read-only lanes and projects without a Cargo manifest use the lane cache.
+- `private`: the per-worktree copy-on-write seed clone under `~/Library/Caches/provenant-lane-cargo/<digest>/target`.
+- Absolute path: uses the path directly. It comes only from host or project configuration or the launch knob; a `Cargo target:` line in a brief can pick `project` or `private` but never a path, because a path grants the lane read, write and exec there and a brief is requester text.
+
+No mode shares one target between worktrees of a repository.
+- Why: Cargo hashes a workspace member's units by its workspace-relative path, so every worktree maps to the same units, and it decides their freshness by comparing source mtimes with the last build's dep-info. A worktree whose sources are older than another worktree's build reuses that build's artifacts and reports symbols missing that exist in its source (#3561). Content-hash freshness (`-Zchecksum-freshness`) would remove the mtime dependence but is nightly-only.
 
 The preamble and `provenant config show` report the resolved target directory and its source, e.g. `(source: default; lanes.cargo_target)` or `(source: host; lanes.cargo_target)`.
-Target seeding and clone machinery are skipped when `shared` or an absolute target is selected; seeding is used only for `private`.
-- Why: lanes run as the same user, so a per-lane target guards no real boundary while it costs a cold build and its own disk per lane.
+Target seeding and clone machinery are used only for `private`.
 
 ## Cargo target seed
 
@@ -70,7 +72,10 @@ project if no own generation exists. The seed builder and writer preparation
 use the same lane profile defaults and preserve explicit environment values;
 incompatible profile generations are skipped. Refresh currentness requires the
 recorded verify-base commit to match; writer selection uses compatible
-generations and Cargo's normal per-unit freshness checks before reusing artifacts. Published generations are
+generations and Cargo's normal per-unit freshness checks before reusing artifacts. A clone ages every
+dep-info file to the epoch before it is published, so each unit that lists source files (workspace
+members) rebuilds once against the worktree's sources while registry packages, which list none, stay
+fresh. Published generations are
 immutable, and collection cannot race an active clone. `max_generations` keeps
 history per project; `max_bytes` is a host-wide allocated-byte collection target.
 Collection always keeps each project's newest complete generation, even when

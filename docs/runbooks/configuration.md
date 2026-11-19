@@ -71,6 +71,16 @@ project `shared_paths` and `exec_roots` for writer access, or
 `provenant fabric identity` to find the project ID and `provenant config schema`
 to inspect the settings.
 
+## Lane Cargo target
+
+`lanes.cargo_target` picks each writer lane's `CARGO_TARGET_DIR`. The default,
+`project`, is the worktree's own `target/`; choose `private` for a warm start
+from a host seed. An absolute path is used as given: never point several
+worktrees of one repository at it, because Cargo then serves one branch's
+artifacts to another ([run spec](../specs/run.md#cargo-target-directory)). A
+`shared` value from an older release is reported by `provenant config check`
+and the default applies.
+
 ## Git pre-push hook and local gate
 
 Connect the Git pre-push hook to Provenant so it checks pushes, including its

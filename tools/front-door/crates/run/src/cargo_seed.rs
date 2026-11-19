@@ -184,6 +184,7 @@ fallback_reasons! {
     TARGET_CONTAINS_UNSUPPORTED_ENTRY = "target_contains_unsupported_entry",
     CLONE_FAILED = "clone_failed",
     TOOLCHAIN_UNVERIFIED = "toolchain_unverified",
+    FRESHNESS_RESET_FAILED = "freshness_reset_failed",
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -511,6 +512,7 @@ fn seed_target_cancellable(
             .open_verified_directory(&stage)
             .map_err(|_| fallback_reasons::STAGING_UNAVAILABLE)?;
         clone(&source, &staging, deadline)?;
+        age_dep_info(&cache.join(&stage)).map_err(|_| fallback_reasons::FRESHNESS_RESET_FAILED)?;
         if deadline.expired() {
             return Err(fallback_reasons::SEED_BUDGET_EXHAUSTED);
         }
@@ -561,6 +563,47 @@ fn seed_target_cancellable(
             Outcome::fallback(reason)
         }
     }
+}
+
+/// A seed was built from another checkout. Cargo hashes a workspace member's
+/// units by its workspace-relative path and treats them as fresh while every
+/// source listed in their dep-info is older than that dep-info, so a worktree
+/// checked out before the seed was built would reuse the seed's member
+/// artifacts for different sources (#3561). Ageing every dep-info file to the
+/// epoch makes each unit that lists source files rebuild once in its new
+/// worktree; registry packages list none and stay fresh.
+#[cfg(any(unix, test))]
+fn age_dep_info(target: &Path) -> std::io::Result<()> {
+    // Fingerprints sit under <target>/<profile>/ or <target>/<triple>/<profile>/.
+    fn visit(directory: &Path, depth: usize) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            if entry.file_name() == ".fingerprint" {
+                for unit in std::fs::read_dir(entry.path())? {
+                    let unit = unit?;
+                    if !unit.file_type()?.is_dir() {
+                        continue;
+                    }
+                    for file in std::fs::read_dir(unit.path())? {
+                        let file = file?;
+                        if file.file_type()?.is_file()
+                            && file.file_name().as_encoded_bytes().starts_with(b"dep-")
+                        {
+                            std::fs::File::open(file.path())?
+                                .set_modified(std::time::SystemTime::UNIX_EPOCH)?;
+                        }
+                    }
+                }
+            } else if depth < 2 {
+                visit(&entry.path(), depth + 1)?;
+            }
+        }
+        Ok(())
+    }
+    visit(target, 0)
 }
 
 #[cfg(all(target_os = "macos", test))]
@@ -795,6 +838,47 @@ mod tests {
             );
             assert!(seen.insert(*code), "{code} is listed twice");
         }
+    }
+
+    #[test]
+    fn seeded_dep_info_is_aged_so_worktree_sources_decide_freshness()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let target = root.path().join("target");
+        let host_unit = target.join("debug/.fingerprint/member-0123456789abcdef");
+        let cross_unit =
+            target.join("aarch64-apple-darwin/debug/.fingerprint/member-fedcba9876543210");
+        let deps = target.join("debug/deps");
+        for directory in [&host_unit, &cross_unit, &deps] {
+            std::fs::create_dir_all(directory)?;
+        }
+        let aged = [
+            host_unit.join("dep-lib-member"),
+            cross_unit.join("dep-lib-member"),
+        ];
+        let kept = [
+            host_unit.join("lib-member.json"),
+            deps.join("libmember.rmeta"),
+        ];
+        for path in aged.iter().chain(&kept) {
+            std::fs::write(path, b"x")?;
+        }
+        age_dep_info(&target)?;
+        for path in &aged {
+            assert_eq!(
+                std::fs::metadata(path)?.modified()?,
+                std::time::UNIX_EPOCH,
+                "{path:?}"
+            );
+        }
+        for path in &kept {
+            assert_ne!(
+                std::fs::metadata(path)?.modified()?,
+                std::time::UNIX_EPOCH,
+                "{path:?}"
+            );
+        }
+        Ok(())
     }
 
     #[test]

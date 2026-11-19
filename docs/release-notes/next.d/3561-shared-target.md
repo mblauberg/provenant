@@ -1,0 +1,3 @@
+## Fixes
+### Lanes and settlement
+- Stop worktrees serving each other stale Cargo artifacts. `lanes.cargo_target` now defaults to `project`, the writer worktree's own `target/`, and the `shared` value, which gave every worktree of a repository one target, is removed: Cargo maps each workspace member to the same units in every worktree and judges them fresh by source mtimes, so a worktree with older sources reused another branch's artifacts and reported symbols missing that exist in its source. A `shared` setting is now reported by `provenant config check` and the default applies. `private` seed clones also age their dep-info, so workspace members rebuild once against the worktree's sources while registry packages stay warm. (#3561)

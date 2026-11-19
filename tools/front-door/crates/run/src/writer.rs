@@ -1396,17 +1396,20 @@ impl LaunchConfinement {
         if cancel.is_cancelled() {
             return;
         }
-        let common_git_dir = match &self.plan.permissions().mode {
-            AccessMode::WorktreeWrite(authority) => Some(authority.common_git_dir()),
+        let worktree = match &self.plan.permissions().mode {
+            AccessMode::WorktreeWrite(_) => self.writer.as_ref().map(|w| w.worktree.path()),
             AccessMode::ReadOnly => None,
         };
         let private_cache = match &self.plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
             AccessMode::ReadOnly => &self.plan.permissions().scratch.path,
         };
-        let (target, lint_target) =
-            self.cargo_target
-                .target_paths(&self.home, common_git_dir, private_cache);
+        let workspace = self
+            .cargo_target
+            .project_workspace(worktree, &self.state_root);
+        let (target, lint_target) = self
+            .cargo_target
+            .target_paths(workspace.as_deref(), private_cache);
         self.cargo_home
             .lane_cargo_environment_with_target(&self.home, &target, environment);
         if matches!(&self.plan.permissions().mode, AccessMode::WorktreeWrite(_)) {
@@ -1422,13 +1425,13 @@ impl LaunchConfinement {
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
         let target_outcome = match (&self.plan.permissions().mode, writer) {
             (AccessMode::WorktreeWrite(authority), Some((worktree, _))) => {
-                if !self.cargo_target.value.is_private() {
+                if self.cargo_target.value.is_project() {
+                    // The worktree's own target: Cargo creates it inside the
+                    // writer-controlled tree; the host never writes there.
+                    crate::cargo_seed::Outcome::skipped("project_target")
+                } else if self.cargo_target.value.is_custom() {
                     let _ = std::fs::create_dir_all(&target);
-                    if self.cargo_target.value.is_shared() {
-                        crate::cargo_seed::Outcome::skipped("shared_target")
-                    } else {
-                        crate::cargo_seed::Outcome::skipped("custom_target")
-                    }
+                    crate::cargo_seed::Outcome::skipped("custom_target")
                 } else {
                     self.seed_cargo_target(
                         worktree,
@@ -1517,13 +1520,15 @@ impl LaunchConfinement {
                 &self.plan.permissions().credential_roots,
             )
             .map_err(RunError::Confinement)?;
-            let (target, lint_target) = self.cargo_target.target_paths(
-                &self.home,
-                Some(authority.common_git_dir()),
-                &authority.cargo_cache().path,
-            );
-            let _ = std::fs::create_dir_all(&target);
-            let _ = std::fs::create_dir_all(&lint_target);
+            // A project target lies in the writer-controlled worktree, where
+            // Cargo creates it; the host creates only targets outside it.
+            if !self.cargo_target.value.is_project() {
+                let (target, lint_target) = self
+                    .cargo_target
+                    .target_paths(None, &authority.cargo_cache().path);
+                let _ = std::fs::create_dir_all(&target);
+                let _ = std::fs::create_dir_all(&lint_target);
+            }
         }
         Ok(())
     }

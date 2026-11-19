@@ -4281,22 +4281,24 @@ pub(super) fn prepare_candidates_inner(
             task,
             &plan,
         );
-        let common_git_dir = match &plan.permissions().mode {
-            AccessMode::WorktreeWrite(authority) => Some(authority.common_git_dir()),
+        let lane_worktree = match &plan.permissions().mode {
+            AccessMode::WorktreeWrite(_) => writer.as_ref().map(|w| w.worktree.path()),
             AccessMode::ReadOnly => None,
         };
         let private_cache = match &plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
             AccessMode::ReadOnly => &plan.permissions().scratch.path,
         };
+        let cargo_workspace = cargo_target.project_workspace(lane_worktree, state_root);
         let (cargo_target_dir, cargo_target_lint) =
-            cargo_target.target_paths(&home, common_git_dir, private_cache);
-        // A shared or configured target lies outside the lane cache. Create it
-        // here so a sandboxed lane's grants can anchor to it; Cargo would
-        // create it itself only after the profile is fixed.
+            cargo_target.target_paths(cargo_workspace.as_deref(), private_cache);
+        // A configured target lies outside the lane cache. Create it here so a
+        // sandboxed lane's grants can anchor to it; Cargo would create it
+        // itself only after the profile is fixed. A project target lies in the
+        // writer-controlled worktree, where the host never creates anything.
         let cargo_target_warning = [&cargo_target_dir, &cargo_target_lint]
             .into_iter()
-            .filter(|path| !path.starts_with(private_cache))
+            .filter(|path| !path.starts_with(private_cache) && cargo_workspace.is_none())
             .find_map(|path| {
                 std::fs::create_dir_all(path)
                     .err()

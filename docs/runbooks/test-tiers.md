@@ -4,7 +4,7 @@ Anchor: scripts/verify-tier
 
 The tiers describe what each place runs; they are not a checklist for a lane.
 A lane runs `cargo check` and clippy for touched crates on the configured
-`CARGO_TARGET_DIR` (shared and warm by default), plus tests filtered to changed
+`CARGO_TARGET_DIR` (the worktree's own target by default), plus tests filtered to changed
 code only when that target is warm. It never starts a cold build. Set `CARGO_BUILD_BUILD_DIR` to the same warm directory when it is set,
 so Cargo does not put intermediate build output in a separate cold directory. The whole workspace suite runs in CI. `lanes.verification` defaults to
 `targeted` and may be overridden by host or project configuration or a brief's
@@ -16,9 +16,9 @@ CPU cores and RAM when unset. Set it to `0` to disable the cap. Busy slots wait
 a bounded time, then warn and proceed. Cargo serialises access to a shared target
 with its own locks. `lanes.local_cargo` can warn when a command exceeds a host's
 preferred scope; it does not refuse the command. By default,
-`lanes.cargo_target` is `shared`, so lanes share a single per-project warm target
-under the host cache. Setting it to `private` preserves per-worktree copy-on-write
-seeding, or an absolute path can be provided.
+`lanes.cargo_target` is `project`, the worktree's own target. Setting it to
+`private` uses per-worktree copy-on-write seeding, or an absolute path can be
+provided; never give several worktrees one target (see the run spec).
 
 `scripts/verify-tier` runs the built-in `0` tier (format, check and unit tests
 for touched crates), `1` adds mapped integration binaries, `2` runs the
