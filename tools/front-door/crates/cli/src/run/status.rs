@@ -450,7 +450,7 @@ fn project_lane_inner(
     }
     if host_artifacts
         && let Some(releasing) =
-            run::release_progress(root, lane, census.and_then(|census| census.ok()))
+            run::release_progress(root, lane, census.and_then(|census| census.ok()), now_wall)
     {
         let outcome = state_and_reason(&lane.state).0;
         projected.reason = Some(match projected.reason.take() {

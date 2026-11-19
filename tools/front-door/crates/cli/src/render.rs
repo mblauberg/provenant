@@ -215,17 +215,7 @@ pub enum RenderError {
     Write(#[source] io::Error),
 }
 pub fn exit_status(outcome: &Outcome) -> u8 {
-    match outcome {
-        Outcome::Ok => 0,
-        Outcome::Failed | Outcome::Refused => 1,
-        Outcome::Invalid => 2,
-        Outcome::Error => 3,
-        Outcome::Unavailable => 4,
-        Outcome::Pending => 5,
-        Outcome::Waiting => 0,
-        Outcome::Timeout => 124,
-        Outcome::Cancelled => 130,
-    }
+    outcome.exit_code()
 }
 /// At most cap bytes are retained even if an owner's Serialize floods output.
 struct Buffer {

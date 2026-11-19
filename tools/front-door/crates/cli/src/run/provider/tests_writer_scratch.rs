@@ -1183,6 +1183,7 @@ printf 'agy 1.0.0\n'
             user: "fixture".as_ref(),
             host_var: &|_| None,
             skill_stage_max_bytes: 16 * 1024 * 1024,
+            git_config_allow: &[],
             account: Some(&codex_account),
             token: None,
             cwd: &project.join(".worktrees/writer"),
@@ -1308,13 +1309,28 @@ printf 'agy 1.0.0\n'
         .join(binding.project_id().to_string());
     std::fs::create_dir_all(&policy_dir)?;
     std::fs::write(policy_dir.join("github.json"), r#"{"deny_labels":["ci"]}"#)?;
-    phase("linked git config grants");
-    // Both a linked global file and an XDG config beneath a linked directory
-    // must survive preparation and the launcher's canonical anchor checks.
+    phase("linked git config allowlist");
+    // A linked global file and an XDG config beneath a linked directory both
+    // reach a sandboxed lane only through the allowlist: identity and aliases
+    // pass, while a token in an extra header, a rewrite URL or an inline
+    // helper never does, and neither host file is granted to the lane.
+    const HOST_TOKEN: &str = "ghp_fixtureHostConfigToken";
     let dotfiles = base.join("dotfiles");
     std::fs::create_dir_all(dotfiles.join("xdg/git"))?;
-    std::fs::write(dotfiles.join("global"), "[fixture]\n global = true\n")?;
-    std::fs::write(dotfiles.join("xdg/git/config"), "[fixture]\n xdg = true\n")?;
+    std::fs::write(
+        dotfiles.join("global"),
+        format!(
+            "[user]\n name = Host Name\n email = host@example.com\n[alias]\n st = status --short\n\
+             pub = !git push https://x-access-token:{HOST_TOKEN}@github.com/o/r\n\
+             [http \"https://github.com/\"]\n extraHeader = AUTHORIZATION: bearer {HOST_TOKEN}\n\
+             [url \"https://x-access-token:{HOST_TOKEN}@github.com/\"]\n insteadOf = https://github.com/\n\
+             [credential]\n helper = \"!f() {{ echo password={HOST_TOKEN}; }}; f\"\n"
+        ),
+    )?;
+    std::fs::write(
+        dotfiles.join("xdg/git/config"),
+        "[fixture]\n xdg = true\n[alias]\n xdg-log = log --oneline\n",
+    )?;
     std::fs::write(dotfiles.join("xdg/git/ignore"), "fixture-ignore\n")?;
     std::fs::write(dotfiles.join("xdg/git/attributes"), "*.fixture text\n")?;
     std::os::unix::fs::symlink(dotfiles.join("global"), home.join(".gitconfig"))?;
@@ -1346,8 +1362,22 @@ printf 'agy 1.0.0\n'
         .profile
         .knobs
         .insert("lanes.publish".into(), serde_json::json!(true));
+    // The host's Git configuration selection comes from the host context, so
+    // the runner's own system file and environment cannot reach this check.
+    let mut git_host = run::HostLaunchContext::from_environment(&state, &project, git.clone());
+    git_host
+        .provider_path_environment
+        .retain(|name, _| !name.starts_with("GIT_CONFIG") && name != "XDG_CONFIG_HOME");
+    git_host
+        .provider_path_environment
+        .insert("GIT_CONFIG_NOSYSTEM".into(), "1".into());
+    let publishing_registry = Registry {
+        host: Some(&git_host),
+        repo_facts: registry.repo_facts.clone(),
+        ..registry
+    };
     let publishing = prepare_with(
-        &registry,
+        &publishing_registry,
         &publishing_task,
         "publishing policy fixture",
         &publishing_paths,
@@ -1455,17 +1485,47 @@ printf 'agy 1.0.0\n'
     let config = std::fs::read_to_string(publishing_paths.temporary.join("candidate-0/gitconfig"))?;
     for target in [dotfiles.join("global"), dotfiles.join("xdg/git/config")] {
         let target = target.canonicalize()?;
-        assert!(config.contains(target.to_str().ok_or("config path")?));
         assert!(
-            profile
+            !profile
                 .spec
                 .runtime_reads
                 .iter()
                 .any(|grant| grant.path == target)
         );
-        provenant_confinement::permissions::AnchoredDirectory::open_canonical(
-            target.parent().ok_or("config parent")?,
-        )?;
+        if sandbox_effective {
+            assert!(!config.contains(target.to_str().ok_or("config path")?));
+        }
+    }
+    let git_config = publishing.route.git_config.as_ref();
+    if sandbox_effective {
+        assert!(!config.contains(HOST_TOKEN), "{config}");
+        assert!(!config.contains("[include"), "{config}");
+        for kept in [
+            "\tname = \"Host Name\"\n",
+            "\temail = \"host@example.com\"\n",
+            "\tst = \"status --short\"\n",
+            "\txdg-log = \"log --oneline\"\n",
+            "\tuseConfigOnly = true\n",
+        ] {
+            assert!(config.contains(kept), "{kept} missing from {config}");
+        }
+        let receipt = git_config.ok_or("git config receipt")?;
+        assert_eq!(
+            receipt.dropped,
+            [
+                "fixture.xdg",
+                "alias.pub",
+                "http.*.extraheader",
+                "url.*.insteadof",
+                "credential.helper",
+            ]
+        );
+        assert_eq!(receipt.key, "domains.lanes.git_config_allow");
+        assert!(!serde_json::to_string(receipt)?.contains(HOST_TOKEN));
+    } else {
+        // An unsandboxed lane reads the host configuration in full.
+        assert!(git_config.is_none());
+        assert!(config.contains("[include]"));
     }
     // The original spelling really is unsuitable for the launcher's canonical
     // anchor boundary: a plan containing it would fail before provider launch.

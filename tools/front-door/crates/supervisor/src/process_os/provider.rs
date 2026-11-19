@@ -65,14 +65,18 @@ pub(crate) struct ProcessWatches {
     pub(crate) failures: usize,
 }
 
+/// Edge facts the reactor drained from kqueue that no caller has taken yet.
+/// kqueue reports each edge once (`EV_CLEAR`), so the reactor keeps them, not
+/// the caller of `wait`: a wait whose result is ignored loses nothing (#3585).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReactorEvent {
+    /// TERM, INT or HUP arrived since the last take. `GuardianReactor::signalled`
+    /// stays set after this edge is taken.
     pub(crate) supervisor_signal: bool,
     pub(crate) cancel_changed: bool,
     pub(crate) cancel_watch_failed: bool,
     pub(crate) process_changed: bool,
     pub(crate) process_overflow: bool,
-    pub(crate) io_ready: bool,
 }
 
 /// Guardian-only signal/event source. Install before spawning a provider.
@@ -86,6 +90,10 @@ pub(crate) struct GuardianReactor {
     exited: BTreeSet<i64>,
     pollfds: Vec<libc::pollfd>,
     cancellation_directory: Option<std::fs::File>,
+    /// Drained events not yet taken by a caller.
+    pending: ReactorEvent,
+    /// A supervisor signal has arrived. Never cleared: every loop sees it.
+    signalled: bool,
     #[cfg(feature = "fixture")]
     injected_watch_failures: usize,
 }
@@ -132,6 +140,8 @@ impl GuardianReactor {
             exited: BTreeSet::new(),
             pollfds: Vec::with_capacity(4),
             cancellation_directory: None,
+            pending: ReactorEvent::default(),
+            signalled: false,
             #[cfg(feature = "fixture")]
             injected_watch_failures: 0,
         })
@@ -227,12 +237,14 @@ impl GuardianReactor {
     }
 
     /// Waits for at most the requested duration, capped to one second per
-    /// turn. EINTR retries consume the same monotonic budget.
+    /// turn, and returns whether a watched descriptor is ready. Every kqueue
+    /// event it drains is latched for `take_events` and `signalled`, so no
+    /// caller can drop one. EINTR retries consume the same monotonic budget.
     pub(crate) fn wait(
         &mut self,
         watches: &[Option<Watch<'_>>],
         timeout: Duration,
-    ) -> io::Result<ReactorEvent> {
+    ) -> io::Result<bool> {
         if watches.len() > 256 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -240,7 +252,6 @@ impl GuardianReactor {
             ));
         }
         let started = Instant::now();
-        let mut event = ReactorEvent::default();
         let mut attempts = 0;
         loop {
             let remaining = timeout
@@ -284,17 +295,43 @@ impl GuardianReactor {
             }
             // HUP and errors also require a read/write to observe EOF or
             // failure. Directory and timer wakes do not touch provider pipes.
-            event.io_ready = pollfds.iter().skip(1).any(|fd| fd.revents != 0);
+            let io_ready = pollfds.iter().skip(1).any(|fd| fd.revents != 0);
             if let Some(signal_ready) = pollfds.first().map(|fd| fd.revents != 0)
                 && signal_ready
             {
-                self.read_kqueue(&mut event)?;
+                self.read_kqueue()?;
             }
-            return Ok(event);
+            return Ok(io_ready);
         }
     }
 
-    fn read_kqueue(&mut self, event: &mut ReactorEvent) -> io::Result<()> {
+    /// Pace a retry or poll loop: block on the reactor alone for up to
+    /// `timeout`, latching whatever arrives. A failed reactor sleeps out the
+    /// rest instead of spinning; the next `wait` reports the failure.
+    pub(crate) fn pause(&mut self, timeout: Duration) {
+        let started = Instant::now();
+        if self.wait(&[], timeout).is_err() {
+            provenant_os::sys::wait_pause(timeout.saturating_sub(started.elapsed()));
+        }
+    }
+
+    /// Take the edges drained since the last take. `signalled` is unaffected.
+    pub(crate) fn take_events(&mut self) -> ReactorEvent {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Drained edges not yet taken.
+    pub(crate) fn pending(&self) -> &ReactorEvent {
+        &self.pending
+    }
+
+    /// Whether a supervisor signal has ever arrived.
+    pub(crate) fn signalled(&self) -> bool {
+        self.signalled
+    }
+
+    fn read_kqueue(&mut self) -> io::Result<()> {
+        let event = &mut self.pending;
         let timeout = libc::timespec {
             tv_sec: 0,
             tv_nsec: 0,
@@ -352,7 +389,10 @@ impl GuardianReactor {
                 }
                 match item.ident as i32 {
                     libc::SIGCHLD => {}
-                    libc::SIGTERM | libc::SIGINT | libc::SIGHUP => event.supervisor_signal = true,
+                    libc::SIGTERM | libc::SIGINT | libc::SIGHUP => {
+                        event.supervisor_signal = true;
+                        self.signalled = true;
+                    }
                     _ => {}
                 }
             }
@@ -1445,7 +1485,8 @@ mod tests {
         reactor.watch_cancellation_directory(&directory)?;
         std::fs::write(watched.join("cancel.new"), b"request")?;
         std::fs::rename(watched.join("cancel.new"), watched.join("cancel.json"))?;
-        let event = reactor.wait(&[], Duration::ZERO)?;
+        reactor.wait(&[], Duration::ZERO)?;
+        let event = reactor.take_events();
         assert!(event.cancel_changed);
         assert!(!event.cancel_watch_failed);
         assert!(!event.process_changed);
@@ -1454,11 +1495,84 @@ mod tests {
         // Losing the watched pathname requests the cancellation polling
         // fallback without triggering a process census.
         std::fs::rename(&watched, root.path().join("moved-attempt"))?;
-        let event = reactor.wait(&[], Duration::ZERO)?;
+        reactor.wait(&[], Duration::ZERO)?;
+        let event = reactor.take_events();
         assert!(event.cancel_changed);
         assert!(event.cancel_watch_failed);
         assert!(!event.process_changed);
         assert!(!event.process_overflow);
+        Ok(())
+    }
+
+    /// kqueue reports an edge once. A wait whose caller discards its result,
+    /// as a pacing pause does, must leave that edge for the next taker (#3585).
+    #[test]
+    fn a_discarded_wait_keeps_every_drained_edge_for_the_next_take() -> io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let directory =
+            provenant_os::fs::Directory::open_anchor(root.path()).map_err(io::Error::other)?;
+        let mut reactor = GuardianReactor::install()?;
+        reactor.watch_cancellation_directory(&directory)?;
+        std::fs::write(root.path().join("cancel.json"), b"request")?;
+        let _ = reactor.wait(&[], Duration::ZERO);
+        reactor.pause(Duration::ZERO);
+        assert!(reactor.pending().cancel_changed);
+        let event = reactor.take_events();
+        assert!(event.cancel_changed);
+        assert!(!event.supervisor_signal);
+        assert!(!reactor.signalled());
+        assert_eq!(reactor.take_events(), ReactorEvent::default());
+        Ok(())
+    }
+
+    /// A supervisor signal stays visible after a loop takes its event, so a
+    /// later loop that never saw the edge still ends (#3585).
+    #[test]
+    fn a_supervisor_signal_stays_latched_after_its_event_is_taken() -> io::Result<()> {
+        // EVFILT_SIGNAL records only process-directed signals, and one sent to
+        // this process would reach every reactor in it. A child process runs
+        // this test alone and signals itself.
+        const CHILD: &str = "PROVENANT_TEST_LATCHED_SIGNAL_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "process_os::provider::tests::a_supervisor_signal_stays_latched_after_its_event_is_taken",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .status()?;
+            assert!(status.success(), "latched-signal child failed: {status}");
+            return Ok(());
+        }
+        extern "C" fn absorb(_: libc::c_int) {}
+        let mut reactor = GuardianReactor::install()?;
+        // The reactor blocks SIGTERM on this thread only; the handler absorbs
+        // delivery on the harness's other threads instead of the default exit.
+        // SAFETY: a zeroed sigaction is an empty mask with no flags; the
+        // handler set below is a valid async-signal-safe function.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = absorb as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        action.sa_flags = libc::SA_RESTART;
+        // SAFETY: action is initialised and outlives the call; no previous
+        // action is requested.
+        if unsafe { libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: getpid has no preconditions and names this process.
+        let pid = unsafe { libc::getpid() };
+        // SAFETY: the signal targets this child process alone, whose SIGTERM
+        // handler is installed above.
+        if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let _ = reactor.wait(&[], Duration::from_secs(5))?;
+        assert!(reactor.signalled());
+        assert!(reactor.take_events().supervisor_signal);
+        assert!(reactor.signalled());
+        assert_eq!(reactor.take_events(), ReactorEvent::default());
+        assert!(reactor.signalled());
         Ok(())
     }
 
@@ -1472,22 +1586,21 @@ mod tests {
         let (mut reader, mut writer) = UnixStream::pair()?;
         reader.set_nonblocking(true)?;
         let watches = [Some(Watch::read(reader.as_fd())), None, None];
-        assert!(!reactor.wait(&watches, Duration::ZERO)?.io_ready);
+        assert!(!reactor.wait(&watches, Duration::ZERO)?);
         std::fs::write(root.path().join("checkpoint"), b"changed")?;
-        let event = reactor.wait(&watches, Duration::ZERO)?;
-        assert!(event.cancel_changed);
-        assert!(!event.io_ready);
+        assert!(!reactor.wait(&watches, Duration::ZERO)?);
+        assert!(reactor.take_events().cancel_changed);
         writer.write_all(b"x")?;
-        assert!(reactor.wait(&watches, Duration::ZERO)?.io_ready);
+        assert!(reactor.wait(&watches, Duration::ZERO)?);
         let mut byte = [0];
         reader.read_exact(&mut byte)?;
         let watches = [Some(Watch::read(reader.as_fd())), None, None];
-        assert!(!reactor.wait(&watches, Duration::ZERO)?.io_ready);
+        assert!(!reactor.wait(&watches, Duration::ZERO)?);
         drop(writer);
-        assert!(reactor.wait(&watches, Duration::ZERO)?.io_ready);
+        assert!(reactor.wait(&watches, Duration::ZERO)?);
         assert_eq!(reader.read(&mut byte)?, 0);
         // A later wait with no pipe must not reuse its old readiness.
-        assert!(!reactor.wait(&[], Duration::ZERO)?.io_ready);
+        assert!(!reactor.wait(&[], Duration::ZERO)?);
         Ok(())
     }
 
