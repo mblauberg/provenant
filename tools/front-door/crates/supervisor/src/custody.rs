@@ -88,6 +88,10 @@ pub enum CustodyError {
     UnknownIdentity,
     #[error("record is invalid or belongs to another generation")]
     InvalidRecord,
+    #[error(
+        "attempt evidence was written before shared worktree leases and is not upgraded in place; finish or stop that writer on the previous Provenant version, then reconcile it"
+    )]
+    LegacyEvidence,
     #[error("launch handoff is unconfirmed; reservation remains fenced")]
     HandoffUnknown,
     /// This host cannot hold provider custody; nothing was handed off.
@@ -2726,6 +2730,11 @@ pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationL
             validate_anchor(&child, &reservation)?;
             if attempt != OsStr::new(&reservation.scope.attempt.to_string()) {
                 return Err(CustodyError::InvalidRecord);
+            }
+            // Reported with the reservation's other issues, so reconcile warns
+            // and names the attempt instead of leaving it silently fenced.
+            if liveness::is_legacy_record(&child)? {
+                return Err(CustodyError::LegacyEvidence);
             }
             let branch = match &reservation.binding {
                 StoredWriterBinding::Worktree { branch, .. } => Some(branch.clone()),

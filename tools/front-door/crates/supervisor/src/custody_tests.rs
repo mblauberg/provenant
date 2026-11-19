@@ -1741,7 +1741,7 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
         "lease_missing",
         "guardian_replaced",
         "holder_replaced",
-        "holder_proof_missing",
+        "legacy_holder_record",
         "holder_proof_missing_after_exclusive_recovery",
         "custody_replaced",
         "writer_replaced",
@@ -1846,13 +1846,14 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
             }
             "guardian_replaced" => replace_lock(&evidence, "guardian.lock")?,
             "holder_replaced" => replace_lock(&evidence, "holder.lock")?,
-            "holder_proof_missing" => {
+            "legacy_holder_record" => {
                 let mut record: serde_json::Value =
                     read_record(&evidence, "guardian-lock.json", RECORD_LIMIT)?;
                 record
                     .as_object_mut()
                     .ok_or(CustodyError::InvalidRecord)?
                     .remove("holder");
+                record["schema_version"] = 1.into();
                 write_record(
                     &evidence,
                     "guardian-lock.json",
@@ -1860,6 +1861,15 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                     PublishMode::Replace,
                 )?
                 .require_durable()?;
+                // Evidence from before per-attempt holder locks is refused and
+                // reported, never read as a half-proof.
+                assert!(liveness::is_legacy_record(&evidence)?);
+                assert!(
+                    recovery
+                        .after_guardian_loss(&attempt, &world, || Ok(true))
+                        .is_err()
+                );
+                continue;
             }
             "holder_proof_missing_after_exclusive_recovery" => {
                 drop(recovery.lease.take());
@@ -1870,20 +1880,9 @@ fn same_boot_loss_requires_original_locks_and_positive_census_proof() -> TestRes
                     &CancelToken::new(),
                     &clock,
                 )?);
+                // Recovery without its own holder lock never substitutes the
+                // shared occupancy it now holds.
                 drop(recovery.holder.take());
-                let mut record: serde_json::Value =
-                    read_record(&evidence, "guardian-lock.json", RECORD_LIMIT)?;
-                record
-                    .as_object_mut()
-                    .ok_or(CustodyError::InvalidRecord)?
-                    .remove("holder");
-                write_record(
-                    &evidence,
-                    "guardian-lock.json",
-                    &record,
-                    PublishMode::Replace,
-                )?
-                .require_durable()?;
             }
             "custody_replaced" => replace_lock(&attempt, "custody.lock")?,
             "writer_replaced" => replace_lock(&recovery.lock_directory, "writer.lock")?,

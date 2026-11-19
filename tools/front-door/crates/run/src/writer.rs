@@ -1188,6 +1188,10 @@ pub(crate) fn cleanup_git_pins(
     if remove_import_pin && let Some(head) = head {
         refs.push(crate::objects::import_pin(scope.attempt, head));
     }
+    if remove_import_pin && let Some(head) = head {
+        // Pins written before per-attempt import refs were never attempt-scoped.
+        refs.push(format!("refs/provenant/import/{head}"));
+    }
     for reference in refs {
         crate::objects::command(
             utility.git_program_path(),

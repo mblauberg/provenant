@@ -4,6 +4,23 @@ use super::*;
 const LOCK: &str = "guardian.lock";
 const RECORD: &str = "guardian-lock.json";
 const HOLDER_LOCK: &str = "holder.lock";
+/// Schema 2 adds the per-attempt holder lock identity. Schema 1 evidence was
+/// written before shared worktree occupancy and is not migrated: drain writers
+/// on the old version before upgrading.
+const SCHEMA: u64 = 2;
+
+/// Whether this attempt's guardian record predates the per-attempt holder lock.
+pub(crate) fn is_legacy_record(attempt: &Directory) -> Result<bool> {
+    #[derive(Deserialize)]
+    struct Version {
+        schema_version: u64,
+    }
+    match read_record::<Version>(attempt, RECORD, RECORD_LIMIT) {
+        Ok(version) => Ok(version.schema_version < SCHEMA),
+        Err(CustodyError::Filesystem(error)) if error.is_not_found() => Ok(false),
+        Err(error) => Err(error),
+    }
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct Identity {
@@ -34,15 +51,14 @@ struct GuardianLock {
     guardian: Identity,
     writer: Identity,
     custody: Identity,
-    #[serde(default)]
-    holder: Option<Identity>,
+    holder: Identity,
 }
 impl GuardianLock {
     fn names_match(&self, recovery: &Recovery, attempt: &Directory) -> Result<bool> {
-        let holder_matches = match (self.holder, recovery.holder.as_ref()) {
-            (Some(identity), Some(holder)) => {
-                identity.matches_lock(holder.metadata()?)
-                    && identity.matches_lock(
+        let holder_matches = match recovery.holder.as_ref() {
+            Some(holder) => {
+                self.holder.matches_lock(holder.metadata()?)
+                    && self.holder.matches_lock(
                         recovery
                             .directory
                             .metadata_at(OsStr::new(HOLDER_LOCK), false)?,
@@ -50,7 +66,7 @@ impl GuardianLock {
             }
             // Missing per-attempt proof never substitutes another holder's
             // shared occupancy, even during exclusive recovery.
-            _ => false,
+            None => false,
         };
         Ok(self.attempt.matches(attempt.metadata()?)
             && self
@@ -80,14 +96,14 @@ pub(crate) fn prepare_guardian_lifetime(
 ) -> Result<()> {
     let guardian = evidence.try_lock(OsStr::new(LOCK), LockMode::Exclusive)?;
     let record = GuardianLock {
-        schema_version: 1,
+        schema_version: SCHEMA,
         scope,
         guardian_process: None,
         attempt: Identity::of(attempt.metadata()?),
         guardian: Identity::of(guardian.metadata()?),
         writer: Identity::of(writer.metadata()?),
         custody: Identity::of(custody.metadata()?),
-        holder: Some(Identity::of(holder.metadata()?)),
+        holder: Identity::of(holder.metadata()?),
     };
     write_record(evidence, RECORD, &record, PublishMode::NoReplace)?.require_durable()?;
     Ok(())
@@ -116,16 +132,14 @@ pub(crate) fn hold_guardian_lifetime(
     }
     let guardian = evidence.try_lock_existing(OsStr::new(LOCK), LockMode::Exclusive)?;
     let mut record: GuardianLock = read_record(evidence, RECORD, RECORD_LIMIT)?;
-    if record.schema_version != 1
+    if record.schema_version != SCHEMA
         || record.scope != scope
         || record.guardian_process.is_some()
         || !record.attempt.matches(attempt.metadata()?)
         || !record.guardian.matches_lock(guardian.metadata()?)
         || !record.writer.matches_lock(writer.metadata()?)
         || !record.custody.matches_lock(custody.metadata()?)
-        || !record
-            .holder
-            .is_some_and(|identity| identity.matches_lock(holder_metadata))
+        || !record.holder.matches_lock(holder_metadata)
     {
         return Err(CustodyError::Fenced);
     }
@@ -207,7 +221,7 @@ impl Recovery {
             Err(error) => return Err(error),
         };
         let metadata = attempt.metadata()?;
-        if record.schema_version != 1
+        if record.schema_version != SCHEMA
             || record.scope != self.scope()
             || record.guardian_process.as_ref().is_some_and(|guardian| {
                 guardian.validate().is_err()
