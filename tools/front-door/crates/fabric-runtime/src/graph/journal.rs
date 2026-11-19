@@ -31,6 +31,9 @@ pub use events::{GraphEvent, GraphEventKind};
 #[cfg(test)]
 thread_local! { pub(super) static CHECKPOINT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
+#[cfg(test)]
+thread_local! { pub(super) static CHECKPOINT_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 #[cfg(feature = "fixture")]
 thread_local! { static READ_GRAPH_IDS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) }; }
 
@@ -227,9 +230,6 @@ impl FileJournal {
         project: ProjectId,
         graph_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_records::lane_contract::{
-            Coverage, ObservationCursor, ObservationEvent, ObservationKind, ObservationLineage,
-        };
         if !valid_identifier(graph_id) {
             return Err(JournalError::InvalidGraphId.into());
         }
@@ -237,9 +237,22 @@ impl FileJournal {
         let Some(stored) = load_checkpoint(&directory, graph_id)? else {
             return Ok(());
         };
+        Self::index_stored_observation(root, project, graph_id, &directory, &stored)
+    }
+
+    fn index_stored_observation(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+        directory: &Directory,
+        stored: &StoredCheckpoint,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_records::lane_contract::{
+            Coverage, ObservationCursor, ObservationEvent, ObservationKind, ObservationLineage,
+        };
         let source_digest =
             CanonicalV1::record_digest("fabric-graph-event", 1, &stored.checkpoint)?.to_string();
-        let source_index = events::read(&directory, graph_id)?
+        let source_index = events::read(directory, graph_id)?
             .iter()
             .enumerate()
             .rev()
@@ -1346,7 +1359,7 @@ impl GraphJournal for FileJournal {
                 execution: execution.clone(),
             };
             let inline = CanonicalV1::bytes(&stored)?;
-            decode_checkpoint_limited(
+            let validated = decode_checkpoint_limited(
                 inline.as_bytes(),
                 &self.graph_id,
                 inline.as_bytes().len() as u64,
@@ -1354,9 +1367,13 @@ impl GraphJournal for FileJournal {
             // Prompts live in the store, so the limit applies to the digest form.
             let mut compact = serde_json::to_value(&stored)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            let original = compact.clone();
             prompt_store::externalise(&self.directory, &self.graph_id, &mut compact)?;
             let bytes = CanonicalV1::bytes(&compact)?;
-            decode_checkpoint_in(&self.directory, bytes.as_bytes(), &self.graph_id)?;
+            prompt_store::rehydrate_value(&self.directory, &self.graph_id, &mut compact)?;
+            if compact != original {
+                return Err(JournalError::BadDigest);
+            }
             if bytes.as_bytes().len() as u64 > MAX_CHECKPOINT_BYTES {
                 return Err(JournalError::TooLarge);
             }
@@ -1393,9 +1410,13 @@ impl GraphJournal for FileJournal {
             // Index only after authoritative checkpoint publication. Failed
             // hints are healed by the host tick and waiter gap reconciliation.
             #[allow(clippy::disallowed_methods)]
-            if let Err(error) =
-                Self::index_observation(&self.state_root, self.project, &self.graph_id)
-            {
+            if let Err(error) = Self::index_stored_observation(
+                &self.state_root,
+                self.project,
+                &self.graph_id,
+                &self.directory,
+                &validated,
+            ) {
                 use std::io::Write;
                 let _ = writeln!(
                     std::io::stderr().lock(),
@@ -1625,6 +1646,8 @@ fn decode_verified_checkpoint(
     graph_id: &str,
     max_bytes: u64,
 ) -> Result<StoredCheckpoint, JournalError> {
+    #[cfg(test)]
+    CHECKPOINT_DECODES.with(|decodes| decodes.set(decodes.get() + 1));
     let stored: StoredCheckpoint = provenant_records::decode(
         bytes,
         Limits {

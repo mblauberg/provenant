@@ -547,7 +547,11 @@ Content-addressed storage only externalises bytes and never rewrites digested
 content. The journal strictly validates the stored representation before
 publishing it. The strict checkpoint decoder verifies both the envelope digest
 and the base plan digest, so publication and landing review reads reject the same
-corrupt state. `graph::checkpoint_digest` owns the envelope payload and domain;
+corrupt state. Save validates the inline checkpoint before externalising text,
+then verifies that durable blobs reconstruct the same representation before
+publication. The observation index uses the validated published value; recovery
+independently loads and validates the committed checkpoint.
+`graph::checkpoint_digest` owns the envelope payload and domain;
 `graph::graph_plan_digest` derives the shared plan identity from a persisted
 document. Hand-built journal fixtures use `FileJournal::prepare_fixture_checkpoint`
 to assign that identity before save; production saves never repair a supplied
