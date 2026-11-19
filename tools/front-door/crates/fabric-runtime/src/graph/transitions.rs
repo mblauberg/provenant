@@ -1658,30 +1658,46 @@ pub(super) fn apply_loop_extensions(
     Ok(())
 }
 
+fn recovery_pending(checkpoint: &GraphCheckpoint) -> bool {
+    checkpoint
+        .nodes
+        .iter()
+        .any(|node| next_step::stop_cause(node, checkpoint).is_some())
+        || checkpoint.nodes.iter().any(|node| {
+            node.state == NodeState::Failed
+                && node.advance_error_code.as_deref() == Some("review_verdict_invalid")
+                && node.review_verdict_correction_refused.is_none()
+                && !checkpoint
+                    .expansions
+                    .iter()
+                    .filter_map(|expansion| expansion.patch.as_ref())
+                    .any(|patch| {
+                        patch.reason.as_deref()
+                            == Some(format!("correct review verdict {}", node.id).as_str())
+                    })
+        })
+}
+
 pub(super) fn refresh_structure_pause(
     checkpoint: &mut GraphCheckpoint,
     expanded: &GraphDocument,
     plan: &PlannedGraph,
     limits: &crate::config::GraphLimits,
 ) -> Option<String> {
-    if let Some((index, reason)) = checkpoint
-        .nodes
-        .iter()
-        .enumerate()
-        .find_map(|(index, node)| {
-            node.expansion_pause
-                .as_ref()
-                .map(|reason| (index, reason.clone()))
-        })
-    {
-        checkpoint.activate_expansion_pause(index);
-        checkpoint.set_pause(PauseCause::InvalidPlanExpansion, &reason);
+    // Node expansion pauses are activated by their owning transitions. Replaying
+    // them here would undo apply_resume before a continuation can be retried.
+    if checkpoint.cancelled {
+        return None;
     }
-    let structural_pause = if checkpoint.nodes.iter().all(|node| node.state.settled()) {
-        None
-    } else {
-        structural_limit_reason(expanded, plan, limits)
-    };
+    // A settled failed lens or stopped writer may still owe a recovery patch.
+    // Its existing topology must be paused before that patch is planned.
+    let recovery_pending = recovery_pending(checkpoint);
+    let structural_pause =
+        if checkpoint.nodes.iter().all(|node| node.state.settled()) && !recovery_pending {
+            None
+        } else {
+            structural_limit_reason(expanded, plan, limits)
+        };
     if let Some(reason) = &structural_pause {
         checkpoint.deactivate_expansion_pauses();
         checkpoint.set_pause(PauseCause::StructuralLimit, reason);
@@ -1755,6 +1771,7 @@ pub(super) fn record_separation(progress: &mut NodeProgress, record: FamilySepar
 
 pub(super) fn clear_settled_pause(checkpoint: &mut GraphCheckpoint) -> bool {
     if checkpoint.nodes.iter().all(|node| node.state.settled())
+        && !recovery_pending(checkpoint)
         && checkpoint
             .nodes
             .iter()

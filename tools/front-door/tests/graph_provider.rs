@@ -823,6 +823,11 @@ fn register_opencode_plans(rig: &TestRig) -> Result {
 
 fn policy_codex_fixture() -> Result<TestRig> {
     let mut rig = TestRig::new()?;
+    rig.env.push((
+        "FIXTURE_API_KEY".into(),
+        "ghp_abcdefghijklmnopqrstuvwxyz0123456789".into(),
+    ));
+
     for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
         fs::create_dir_all(rig.home.join(path))?;
     }
@@ -1683,6 +1688,11 @@ fn write_opencode_session(args: &[String]) -> Result {
 
 fn claude_fixture() -> Result<TestRig> {
     let mut rig = TestRig::new()?;
+    rig.env.push((
+        "FIXTURE_API_KEY".into(),
+        "ghp_abcdefghijklmnopqrstuvwxyz0123456789".into(),
+    ));
+
     let bin = rig.root.join("provider/bin");
     fs::create_dir_all(&bin)?;
     rig.copy_executable(&std::env::current_exe()?, &bin.join("claude"))?;
@@ -4348,7 +4358,7 @@ fn declared_stop_writer_retry_uses_the_public_cli() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
-    let rig = policy_codex_fixture()?;
+    let mut rig = policy_codex_fixture()?;
     let _cleanup = rig.process_cleanup();
     let account =
         provenant_providers::identity::codex_account(br#"{"tokens":{"account_id":"fixture-one"}}"#)
@@ -4381,7 +4391,59 @@ fn declared_stop_writer_retry_uses_the_public_cli() -> Result {
         "30s",
     )?;
     assert_eq!(lane["state"], "review_required", "{lane}");
-    let out = rig.command(&["retry", "retry-stop/writer", "--json"])?;
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let identity = provenant_cli::fabric::Context::open(roots, &rig.home, &rig.project)?.identity;
+    let directory = rig
+        .state
+        .join("fabric/graphs")
+        .join(identity.project.to_string());
+    let snapshot = || -> Result<std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>> {
+        let mut files = std::collections::BTreeMap::new();
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if (name.starts_with("graph-retry-stop.") && !name.ends_with(".lock"))
+                || name == "retry-stop.events.jsonl"
+            {
+                files.insert(entry.path(), fs::read(entry.path())?);
+            }
+        }
+        let pending = directory.join("pending/retry-stop.pending");
+        if pending.exists() {
+            files.insert(pending.clone(), fs::read(pending)?);
+        }
+        Ok(files)
+    };
+    let before = snapshot()?;
+    let brief = rig.root.join("retry-brief.md");
+    let saved_env = rig.env.clone();
+    for (k, v) in &mut rig.env {
+        if k == "PATH" {
+            *v = std::ffi::OsString::from("/fixture/changed/path");
+        }
+    }
+    // Also assert that a refused retry with invalid extension from a changed PATH leaves checkpoint unchanged
+    let out = rig.command(&[
+        "retry",
+        "retry-stop",
+        "--extend",
+        "limits.unconfigured=1",
+        "--json",
+    ])?;
+    assert_ne!(code(&out), 0, "{out:?}");
+    assert_eq!(snapshot()?, before);
+
+    rig.env = saved_env;
+    fs::write(&brief, "Complete the original task.")?;
+    let out = rig.command(&[
+        "retry",
+        "retry-stop/writer",
+        "--brief-file",
+        brief.to_str().ok_or("brief")?,
+        "--json",
+    ])?;
     let reply: Value = serde_json::from_slice(&out.stdout.bytes)?;
     assert_eq!(code(&out), 0, "{reply}; {out:?}");
     let rows = reply["data"]["rows"].as_array().ok_or("retry rows")?;

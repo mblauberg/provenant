@@ -747,9 +747,6 @@ pub(crate) fn dispatch_refused(fail: provenant_cli::run::Fail) -> FacadeError {
 fn run_kind_next(kind: provenant_run::ErrorKind) -> &'static str {
     use provenant_run::ErrorKind as E;
     match kind {
-        E::SecretInput => {
-            "remove the secret from the input or pass it through a credential root, then retry"
-        }
         E::Refused => "read the named refusal cause, change the request or policy, then retry",
         E::Unsupported => "use a route and adapter that support this launch",
         E::WriterScope => {
@@ -1337,7 +1334,7 @@ impl BinaryRunOwner<'_> {
                 budget,
                 cancel,
             )
-            .map_err(|failure| failure.error)
+            .map_err(|failure| *failure.error)
     }
 }
 impl BinaryRunOwner<'_> {
@@ -2618,7 +2615,6 @@ mod facade_kind_tests {
     // Spec: docs/specs/cli.md#each-refusal-has-a-stable-code
     fn formerly_collapsed_kinds_have_typed_codes_and_actions() {
         for (kind, code, action) in [
-            (E::SecretInput, "SECRET_INPUT", "credential root"),
             (E::Refused, "REFUSED", "named refusal cause"),
             (E::Unsupported, "UNSUPPORTED", "route and adapter"),
             (E::WriterScope, "WRITER_SCOPE", "managed worktree layout"),

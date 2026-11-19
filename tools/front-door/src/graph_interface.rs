@@ -240,6 +240,11 @@ fn run_human(data: &Value, input: &Value, announced: bool) -> String {
         .unwrap_or_default();
     let mut lanes = String::new();
     lanes += &refusal_lines(&data["checkpoint"]);
+    if let Some(warnings) = data["warnings"].as_array() {
+        for warning in warnings.iter().filter_map(Value::as_str) {
+            lanes += &format!("warning: {warning}\n");
+        }
+    }
     if announced {
         format!("{lanes}next: {next}\n")
     } else {
@@ -1187,6 +1192,21 @@ mod tests {
                 );
                 assert!(human.lines().count() <= provenant_cli::limits::SUMMARY_ROWS + 4);
             }
+        }
+    }
+
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    #[test]
+    fn compact_run_prints_field_only_policy_warnings() {
+        let input = json!({"brief":"password=example-compact-3391"});
+        let warnings =
+            provenant_fabric_runtime::graph::refusal::input_warnings(&input, &Default::default());
+        let data = json!({"checkpoint":{"graph_id":"example","nodes":[]},"status":"pending","warnings":warnings});
+        for announced in [false, true] {
+            let output = run_human(&data, &json!({"op":"run"}), announced);
+            assert!(output.contains("warning: [SECRET_SHAPED_INPUT]"));
+            assert!(output.contains("brief looks like a credential"));
+            assert!(!output.contains("example-compact-3391"));
         }
     }
 

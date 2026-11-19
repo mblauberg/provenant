@@ -1046,7 +1046,18 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
         let _ = writeln!(io::stderr().lock(),
             "resource sampling interval: {}ms (source: {})",
             effective_interval.as_millis(), resource_sample_interval_source);
+        let bind_publication = |environment: &[(Vec<u8>, Vec<u8>)],
+                                secret: Option<&provenant_os::exec::SecretInput>,
+                                inherited: &provenant_os::exec::SecretValues| {
+            let mut values = provenant_redact::launch_values(environment, secret.map(|value| value.bytes.as_slice()))
+                .map_err(|_| provenant_os::exec::FilterError)?;
+            values.extend(inherited.0.iter().cloned());
+            let scope = provenant_redact::publication_scope(values)
+                .map_err(|_| provenant_os::exec::FilterError)?;
+            Ok(Box::new(scope) as Box<dyn std::any::Any>)
+        };
         let hooks = provenant_supervisor::GuardianHooks {
+            publication_scope: Some(&bind_publication),
             disk: Some(&disk),
             resource_sample_interval,
             holder: Some(&holder),

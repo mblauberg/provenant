@@ -725,7 +725,6 @@ error_kinds! {
     UnknownAccount => "UNKNOWN_ACCOUNT", "The requested account is not registered.";
     DuplicatePacingProfile => "DUPLICATE_PACING_PROFILE", "Multiple pacing profiles resolve to the same account.";
     Git => "GIT", "Git is unavailable or a Git query failed.";
-    SecretInput => "SECRET_INPUT", "The prompt or input appears to contain a secret.";
     WorktreeRequired => "WORKTREE_REQUIRED", "The requested mode needs a worktree.";
     WorktreeNotApplicable => "WORKTREE_NOT_APPLICABLE", "A worktree was given for a mode that does not use one.";
     ParentAttempt => "PARENT_ATTEMPT", "The parent attempt is missing or cannot start children.";
@@ -825,7 +824,6 @@ impl ErrorKind {
             | Self::Conflict
             | Self::LaneDepth
             | Self::QueueFull
-            | Self::SecretInput
             | Self::Unsupported
             | Self::ContinuationUnsupported => "refused",
             _ => "error",

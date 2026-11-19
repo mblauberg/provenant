@@ -765,7 +765,9 @@ fn provider_error_from_result(bytes: &[u8]) -> Option<String> {
     if joined.is_empty() {
         return None;
     }
-    Some(crate::bounded_text(&joined, PROVIDER_ERROR_BYTES))
+    let redacted =
+        String::from_utf8(provenant_redact::known_shapes(joined.as_bytes()).ok()?).ok()?;
+    Some(crate::bounded_text(&redacted, PROVIDER_ERROR_BYTES))
 }
 
 /// Select a cause from captured stderr without promoting known Codex skill
@@ -776,7 +778,8 @@ fn provider_error_from_stderr(bytes: &[u8]) -> Option<String> {
         .lines()
         .rev()
         .find(|line| !line.trim().is_empty() && !warning_level_stderr_line(line))?;
-    Some(crate::bounded_text(line, 160))
+    let redacted = String::from_utf8(provenant_redact::known_shapes(line.as_bytes()).ok()?).ok()?;
+    Some(crate::bounded_text(&redacted, 160))
 }
 
 /// Warning-level lines start with `warn`/`warning` (optionally bracketed or
@@ -1207,15 +1210,33 @@ mod tests {
         assert_eq!(fallback_reason_for_graph(&checkpoint), None);
     }
 
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
     #[test]
-    fn provider_error_from_result_keeps_the_whole_multiline_message() {
+    fn provider_errors_mask_credential_shapes_and_registered_values() {
+        let secret = b"descriptor-credential-3391";
+        let _scope = provenant_redact::publication_scope([secret.to_vec()]).unwrap();
+        let text = b"provider failed: descriptor-credential-3391 sk-abcdefghijklmnopqrstuvwxyz password=\"printed-value\"";
+        for reason in [
+            provider_error_from_result(text),
+            provider_error_from_stderr(text),
+        ] {
+            let reason = reason.unwrap();
+            assert!(reason.contains("[REDACTED]"));
+            assert!(!reason.contains("descriptor-credential-3391"));
+            assert!(!reason.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+            assert!(!reason.contains("printed-value"));
+        }
+    }
+
+    #[test]
+    fn provider_error_keeps_multiline_context_while_masking_assignments() {
         let message = provider_error_from_result(
             b"Model not recognized: gemini-3.8-pro\npass: fix the code\nAvailable models:\nGemini 2.5 Flash\nGPT-OSS 120B (Medium)\n",
         )
         .unwrap();
         assert!(message.starts_with("Model not recognized: gemini-3.8-pro; "));
         assert!(message.ends_with("GPT-OSS 120B (Medium)"));
-        assert!(message.contains("pass: fix the code"));
+        assert!(message.contains("pass: [REDACTED] the code"));
         assert_eq!(provider_error_from_result(b"\n  \n"), None);
     }
 
@@ -1233,7 +1254,7 @@ mod tests {
     fn provider_error_keeps_non_warning_lines_that_mention_warn() {
         assert_eq!(
             provider_error_from_stderr(b"test-failed WARN: pass: fix the code\n").as_deref(),
-            Some("test-failed WARN: pass: fix the code")
+            Some("test-failed WARN: pass: [REDACTED] the code")
         );
     }
 

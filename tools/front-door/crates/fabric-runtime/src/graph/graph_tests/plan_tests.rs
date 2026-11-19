@@ -639,6 +639,7 @@ fn restart_after_invalid_fragment_fallback_reuses_the_persisted_expansion() {
 
 #[test]
 fn restart_rejects_a_fallback_expansion_that_differs_from_the_spec() {
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     let document = two_step_fallback_document();
     let mut journal = MemoryJournal::default();
     let mut owner = FakeOwner {
@@ -688,7 +689,7 @@ fn fallback_expansion_over_a_structural_limit_pauses_with_a_reason() {
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
         run.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidPlanExpansion)
+        Some(PauseCause::StructuralLimit)
     );
     let reason = run.checkpoint.pause_reason().unwrap();
     assert!(
@@ -724,13 +725,14 @@ fn missing_fragment_fallback_retries_after_raising_the_structural_limit() {
     )
     .unwrap();
     assert_eq!(paused.status, GraphStatus::Paused);
+    assert_eq!(paused.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
     let reason = paused.checkpoint.pause_reason().unwrap();
     assert!(
         reason.contains("planner fragment invalid: fragment block missing"),
         "{reason}"
     );
     assert!(
-        reason.contains("fallback expansion paused: limits.nodes=3"),
+        reason.contains("fallback expansion paused: limits.nodes"),
         "{reason}"
     );
     assert!(reason.find("fragment block missing") < reason.find("fallback expansion paused"));
@@ -1217,6 +1219,7 @@ fn oversized_nested_fragment_id_names_the_source_and_child() {
 
 #[test]
 fn plan_rejects_invalid_and_over_bound_fragments_without_admitting_consumers() {
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     let mut cyclic = slice("cycle", &["src"]);
     cyclic["depends_on"] = json!(["cycle"]);
     let mut undeclared = slice("unexpected", &["src"]);
@@ -1257,6 +1260,12 @@ fn plan_rejects_invalid_and_over_bound_fragments_without_admitting_consumers() {
                 .status,
             GraphStatus::Paused
         );
+        assert_eq!(owner.calls.len(), 1, "consumer admitted after resume: {output}");
+        assert!(journal.0.as_ref().unwrap().expansions.is_empty());
+        assert_eq!(
+            journal.0.as_ref().unwrap().pause_cause(),
+            Some(PauseCause::InvalidPlanExpansion)
+        );
     }
 }
 
@@ -1279,7 +1288,7 @@ fn plan_validates_host_limits_before_saving() {
         assert_eq!(run.status, GraphStatus::Paused);
         assert_eq!(
             run.checkpoint.pause_cause(),
-            Some(PauseCause::InvalidPlanExpansion)
+            Some(PauseCause::StructuralLimit)
         );
         assert!(run.checkpoint.expansions.is_empty());
         assert_eq!(owner.calls.len(), 1);
@@ -1502,7 +1511,7 @@ fn pattern_expansion_counts_against_the_graph_node_limit() {
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
         run.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidPlanExpansion)
+        Some(PauseCause::StructuralLimit)
     );
     assert!(run.checkpoint.expansions.is_empty());
 }
@@ -1691,7 +1700,7 @@ fn pattern_expansion_respects_plan_max_nodes_boundary() {
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(
         run.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidPlanExpansion)
+        Some(PauseCause::StructuralLimit)
     );
     assert!(
         run.checkpoint
@@ -3473,6 +3482,7 @@ fn split_credentials_are_retained_after_live_and_captured_patch_compilation() {
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
 fn captured_patch_normalises_once_before_storage_and_replays_unchanged() {
+    let _scope = provenant_redact::publication_scope([b"AKIAIOSFODNN7EXAMPLE".to_vec()]).unwrap();
     let prompt = "captured patch prompt AKIAIOSFODNN7EXAMPLE";
     let doc = "captured template doc AKIAIOSFODNN7EXAMPLE";
     let patch = json!({"schema_version":1,
@@ -3966,6 +3976,7 @@ fn planner_admits_bundled_delivery_composites_without_rewriting_them() {
 #[test]
 fn ordinary_agent_patch_refusal_retains_raw_text_and_replays_without_growth() {
     let secret = "sk-abcdefghijklmnopqrstuvwx";
+    let _scope = provenant_redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
     for payload in [
         json!({"schema_version":1, "nodes":[{"id":"child", "use":"task.typo"}]}),
         json!({"schema_version":secret, "nodes":[{"id":"child", "use":"task"}]}),
@@ -3978,11 +3989,7 @@ fn ordinary_agent_patch_refusal_retains_raw_text_and_replays_without_growth() {
         assert_eq!(run.status, GraphStatus::Paused);
         assert!(run.checkpoint.expansions.is_empty());
         let refusal = run.checkpoint.pause_reason().unwrap();
-        assert_eq!(
-            refusal.contains(secret),
-            payload.to_string().contains(secret),
-            "{refusal}"
-        );
+        assert!(refusal.contains("invalid fragment"), "{refusal}");
         assert_eq!(
             serde_json::to_string(&run.checkpoint)
                 .unwrap()
@@ -4068,6 +4075,7 @@ fn ordinary_agent_final_patch_follows_earlier_live_children_once() {
         Some(&capture(&output)),
         &plans::generous(),
         &provenant_config::PortTable::builtin().worktree_layout,
+        &Default::default(),
     )
     .expect("final patch must follow the live patch");
     assert_eq!(checkpoint.expansions.len(), 2);
@@ -4083,6 +4091,7 @@ fn ordinary_agent_final_patch_follows_earlier_live_children_once() {
             Some(&capture(&output)),
             &plans::generous(),
             &provenant_config::PortTable::builtin().worktree_layout,
+        &Default::default(),
         )
         .is_none()
     );

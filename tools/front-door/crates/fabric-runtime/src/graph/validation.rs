@@ -283,6 +283,11 @@ fn plan_error(reason: &str) -> AdmissionError {
 }
 
 fn node_plan_error(node: &GraphNode, reason: impl std::fmt::Display) -> AdmissionError {
+    if reason.to_string() == "writer worktree"
+        && let Ok(node) = node.id.clone().try_into()
+    {
+        return AdmissionError::WriterWorktree { node };
+    }
     AdmissionError::Plan(format!("node {}: {reason}", node.id))
 }
 
@@ -841,9 +846,9 @@ pub(super) fn validate_flat_plan(
             .find(|(index, _)| indegree[*index] > 0)
             .map(|(_, node)| node.id.as_str())
             .unwrap_or("unknown");
-        return Err(AdmissionError::Plan(format!(
-            "node {node}: dependency cycle"
-        )));
+        return Err(AdmissionError::Cycle {
+            node: node.to_owned().try_into().map_err(plan_error)?,
+        });
     }
     land::validate_relations(&nodes, &positions).map_err(AdmissionError::Plan)?;
 
@@ -1258,8 +1263,15 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         })
         .count();
     if active_expansions > 1
-        || (active_expansions == 1)
-            != (checkpoint.pause_cause() == Some(PauseCause::InvalidPlanExpansion))
+        || (active_expansions == 1
+            && !checkpoint.nodes.iter().any(|node| {
+                matches!(
+                    node.expansion_cause,
+                    Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
+                ) && Some(plans::expansion_pause_cause(node)) == checkpoint.pause_cause()
+            }))
+        || (active_expansions == 0
+            && checkpoint.pause_cause() == Some(PauseCause::InvalidPlanExpansion))
     {
         return Err(GraphError::BadCheckpoint {
             node: checkpoint.graph_id.clone(),
@@ -1338,11 +1350,13 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     active,
                     fallback,
                     fragment_error,
+                    structural_limit,
                 }),
                 pause,
             ) => {
                 plans::agent(node)
                     && (pause.is_some() || (*active && *fallback))
+                    && structural_limit.is_none_or(|limit| limit.actual > limit.max)
                     && fragment_error.is_none_or(|fact| match fact {
                         PlanFailureFact::Structural(limit) => limit.actual > limit.max,
                         PlanFailureFact::Envelope(limit) => {
