@@ -10,7 +10,7 @@ use provenant_supervisor::census::{ProcessIdentity, ProcessObservation, SystemPr
 use serde::{Deserialize, Serialize};
 use std::{ffi::OsStr, sync::mpsc, time::Duration};
 
-const LIMIT: u32 = 3;
+pub(crate) const LIMIT: u32 = 3;
 const UNKNOWN_OWNER_LIMIT_MS: u64 = 10 * 60 * 1000;
 const STALLED_RETRY_MS: u64 = 3 * 60 * 1000;
 const CLAIM_BACKOFF: Backoff = Backoff::new(Duration::from_secs(5), 6, Duration::from_secs(120));
@@ -188,6 +188,30 @@ pub(crate) fn blocked(
     journal.recovery_failures = journal.recovery_failures.saturating_add(1).min(LIMIT);
     journal.blocking_reason = Some(provenant_core::bounded_line(reason, 4096));
     journal.retry_after_ms = now.saturating_add(backoff_ms(journal.recovery_failures));
+    write(attempt, &journal)
+}
+
+/// Record that settlement waits on a contended lock. The reason names the
+/// holder for status; contention never consumes the recovery budget, so a
+/// busy holder cannot exhaust settlement into a blocked state. The first
+/// wait's deadline is kept, so a wait that outlives its holder ages into a
+/// stalled diagnostic instead of hiding behind a fresh deadline.
+pub(crate) fn waiting(
+    attempt: &Directory,
+    scope: Scope,
+    reason: &str,
+    clock: &dyn Clock,
+) -> Result<()> {
+    let _lock = journal_lock(attempt)?;
+    let mut journal = read(attempt, scope)?;
+    let now = now_ms(clock)?;
+    if owner_active(attempt, &journal, now)? {
+        return Ok(());
+    }
+    journal.blocking_reason = Some(provenant_core::bounded_line(reason, 4096));
+    if journal.retry_after_ms == 0 {
+        journal.retry_after_ms = now;
+    }
     write(attempt, &journal)
 }
 
@@ -645,11 +669,21 @@ impl Driver<'_> {
             Ok(())
         })
     }
-    pub(crate) fn record_failure(&mut self, reason: &str) -> Result<()> {
+    /// Record a failed settlement step. Writer-lock contention is recorded as
+    /// a wait naming its holder and never consumes the recovery budget.
+    pub(crate) fn record_failure(&mut self, error: &RunError) -> Result<()> {
+        let reason = provenant_core::bounded_line(&error.to_string(), 4096);
+        let contention = error.is_writer_contention();
         let now = now_ms(self.clock)?;
         self.update(|journal| {
+            journal.blocking_reason = Some(reason);
+            if contention {
+                if journal.retry_after_ms == 0 {
+                    journal.retry_after_ms = now;
+                }
+                return Ok(());
+            }
             journal.recovery_failures = journal.recovery_failures.saturating_add(1).min(LIMIT);
-            journal.blocking_reason = Some(provenant_core::bounded_line(reason, 4096));
             journal.retry_after_ms = now.saturating_add(backoff_ms(journal.recovery_failures));
             Ok(())
         })
@@ -2174,10 +2208,10 @@ mod tests {
             times.push(now_ms(&clock)?);
             let mut driver = Guard::claim(&attempt, scope(), &clock)?
                 .ok_or(RunError::Validation("deadline not honoured"))?;
-            driver.record_failure("preimport step failed")?;
+            driver.record_failure(&RunError::Validation("preimport step failed"))?;
             assert_eq!(driver.attempts(), 0);
             drop(driver);
-            Ok(true)
+            Ok(Pass::Pending)
         })?;
         assert_eq!(times.len(), LIMIT as usize);
         assert!(times[0] >= 30_000);
@@ -2214,7 +2248,7 @@ mod tests {
         resume_reconcile(&attempt, scope(), &clock, || {
             times.push(now_ms(&clock)?);
             // Model a step that leaves the same already-expired deadline.
-            Ok(true)
+            Ok(Pass::Pending)
         })?;
         assert_eq!(times.len(), LIMIT as usize);
         assert!(
@@ -2247,7 +2281,7 @@ mod tests {
         )?;
         let scope = crate::RunStore::scope(&record);
         let attempt = store.attempt_dir(record.attempt_id, false)?;
-        blocked(&attempt, scope, "writer recovery lock busy", &clock)?;
+        blocked(&attempt, scope, "custody reattach failed", &clock)?;
         let journal = read(&attempt, scope)?;
         assert!(journal.owner.is_none());
         assert_eq!(journal.owner_since_ms, 0);
@@ -2276,9 +2310,9 @@ mod tests {
         )
         .ok_or("stalled diagnostic")?;
         assert!(reason.contains("retry stalled"));
-        assert!(reason.contains("writer recovery lock busy"));
+        assert!(reason.contains("custody reattach failed"));
         for _ in 1..LIMIT {
-            blocked(&attempt, scope, "writer recovery lock busy", &clock)?;
+            blocked(&attempt, scope, "custody reattach failed", &clock)?;
         }
         assert!(
             diagnostic_for(context.state_root.as_path(), &record, None)
@@ -2295,6 +2329,75 @@ mod tests {
             .is_none()
         );
         Ok(())
+    }
+
+    // Spec: docs/specs/run-settlement.md#settlement
+    #[test]
+    fn writer_lock_contention_never_counts_as_a_recovery_failure() -> TestResult {
+        let clock = clock();
+        let temp = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(temp.path())?;
+        let reason = "waiting for writer lock /slot/writer.lock, held by attempt X (guardian live, reserved 2s ago)";
+        for _ in 0..=LIMIT {
+            waiting(&attempt, scope(), reason, &clock)?;
+        }
+        let journal = read(&attempt, scope())?;
+        assert_eq!(journal.recovery_failures, 0);
+        let status = diagnostic(&journal, Some(now_ms(&clock)?)).ok_or("status reason")?;
+        assert!(status.contains("retry pending"), "{status}");
+        assert!(status.contains("held by attempt X"), "{status}");
+
+        let mut passes = 0;
+        resume_reconcile(&attempt, scope(), &clock, || {
+            passes += 1;
+            Ok(Pass::Contended)
+        })?;
+        assert_eq!(passes, LIMIT);
+        assert_eq!(read(&attempt, scope())?.recovery_failures, 0);
+
+        let mut driver = Guard::claim(&attempt, scope(), &clock)?.ok_or("driver")?;
+        for _ in 0..=LIMIT {
+            driver.record_failure(&RunError::WriterExclusionBusy {
+                lock: "/slot/writer.lock".into(),
+                holder: "attempt Y (guardian live, reserved 1s ago)".into(),
+            })?;
+        }
+        drop(driver);
+        let journal = read(&attempt, scope())?;
+        assert_eq!(journal.recovery_failures, 0);
+        let status = diagnostic(&journal, Some(now_ms(&clock)?)).ok_or("status reason")?;
+        assert!(!status.contains("settlement blocked"), "{status}");
+        assert!(status.contains("held by attempt Y"), "{status}");
+        assert!(!matches!(
+            Guard::claim(&attempt, scope(), &clock),
+            Err(RunError::ObjectImportLimit(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_pass_is_contended_only_when_every_pending_step_waits_on_a_writer_lock() {
+        use crate::{Reconciled, UncertainReason};
+        let id = provenant_core::AttemptId::from_bytes([7; 16]);
+        let busy = Reconciled::Uncertain {
+            reason: UncertainReason::WriterLockBusy {
+                lock: "writer.lock".into(),
+                holder: "attempt X".into(),
+            },
+        };
+        let failed = Reconciled::Uncertain {
+            reason: UncertainReason::ReconcileFailed {
+                error: "custody reattach failed".into(),
+            },
+        };
+        assert_eq!(Pass::of(&[]), Pass::Settled);
+        assert_eq!(Pass::of(&[(id, Reconciled::Finished)]), Pass::Settled);
+        assert_eq!(Pass::of(&[(id, busy.clone())]), Pass::Contended);
+        assert_eq!(
+            Pass::of(&[(id, busy.clone()), (id, failed.clone())]),
+            Pass::Pending
+        );
+        assert_eq!(Pass::of(&[(id, failed), (id, busy)]), Pass::Pending);
     }
 
     #[test]
@@ -3521,22 +3624,59 @@ pub fn resume(raw: &str, providers: &dyn crate::Providers) -> Result<()> {
             &call,
             &SystemProcessObserver,
         )?;
-        Ok(found.iter().any(|(_, state)| {
-            matches!(state, crate::Reconciled::Settling { .. })
-                || matches!(state, crate::Reconciled::Uncertain { reason }
-                    if !matches!(reason, crate::UncertainReason::HostStalled))
-        }))
+        Ok(Pass::of(&found))
     })
+}
+
+/// What one reconcile pass left behind for the worker's retry budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pass {
+    /// Nothing is left for this worker to retry.
+    Settled,
+    /// A step is still pending or failed; the pass spends retry budget.
+    Pending,
+    /// Every pending step waits on a contended writer lock. The holder is
+    /// progressing, so the pass spends no retry budget.
+    Contended,
+}
+
+impl Pass {
+    fn of(found: &[(provenant_core::AttemptId, crate::Reconciled)]) -> Self {
+        use crate::{Reconciled, UncertainReason};
+        let pending = found.iter().filter(|(_, state)| {
+            matches!(state, Reconciled::Settling { .. })
+                || matches!(state, Reconciled::Uncertain { reason }
+                    if !matches!(reason, UncertainReason::HostStalled))
+        });
+        let mut contended = false;
+        for (_, state) in pending {
+            match state {
+                Reconciled::Uncertain {
+                    reason: UncertainReason::WriterLockBusy { .. },
+                } => contended = true,
+                _ => return Self::Pending,
+            }
+        }
+        if contended {
+            Self::Contended
+        } else {
+            Self::Settled
+        }
+    }
 }
 
 /// Every failed pass waits even when its stored deadline has already elapsed.
 /// The durable failure budget also covers errors before object import begins.
+/// Writer-lock contention is never a failure: the worker exhausts the budget
+/// only when every pass left a step pending for another cause. Otherwise it
+/// leaves the retry pending for the next queued worker.
 fn resume_reconcile(
     attempt: &Directory,
     scope: Scope,
     clock: &dyn Clock,
-    mut reconcile: impl FnMut() -> Result<bool>,
+    mut reconcile: impl FnMut() -> Result<Pass>,
 ) -> Result<()> {
+    let mut contended = false;
     for pass in 0..LIMIT {
         let journal = read(attempt, scope)?;
         if journal.recovery_failures >= LIMIT {
@@ -3559,9 +3699,14 @@ fn resume_reconcile(
                 .wait_until(deadline)
                 .map_err(|_| RunError::Admission(AdmissionError::Clock))?;
         }
-        if !reconcile()? {
-            return Ok(());
+        match reconcile()? {
+            Pass::Settled => return Ok(()),
+            Pass::Pending => {}
+            Pass::Contended => contended = true,
         }
+    }
+    if contended {
+        return Ok(());
     }
     let _lock = journal_lock(attempt)?;
     let mut journal = read(attempt, scope)?;

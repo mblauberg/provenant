@@ -714,7 +714,13 @@ fn publication_cleanup_never_removes_another_import_pin()
         .ok_or("old driver")?;
     driver.set_head(head)?;
     drop(driver);
-    assert!(store.retry_git_cleanup(&record, &call).is_err());
+    // The live lease holds the writer lock; cleanup waits boundedly, then refuses.
+    assert!(
+        provenant_sqlite::with_busy_timeout(std::time::Duration::from_millis(50), || {
+            store.retry_git_cleanup(&record, &call)
+        })
+        .is_err()
+    );
     fixture.git(&["show-ref", "--verify", &reference])?;
     lease.withdraw_unlaunched()?;
     assert!(matches!(

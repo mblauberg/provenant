@@ -2019,17 +2019,17 @@ impl RunStore {
                     .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?,
                 _ => false,
             };
-            // Refuse while another holder owns the writer lock.
+            // Wait boundedly for another holder of the writer lock.
             let _lock = match &slot {
-                Some(slot) if !held => {
-                    let observation = provenant_supervisor::custody::writer_admission_guard(slot)
-                        .map_err(|error| {
-                        RunError::Io(std::io::Error::other(error.to_string()))
-                    })?;
-                    let writer = slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
-                    drop(observation);
-                    Some(writer)
-                }
+                Some(slot) if !held => Some(
+                    provenant_supervisor::custody::lock_writer_exclusion(
+                        slot,
+                        call.lock_budget(),
+                        call.cancel,
+                        call.clock,
+                    )
+                    .map_err(|error| crate::controls::writer_exclusion_error(slot, error))?,
+                ),
                 _ => None,
             };
             let attempt = self.attempt_dir(record.attempt_id, false)?;
@@ -2069,6 +2069,10 @@ impl RunStore {
         })();
         let disposition = match cleanup {
             Ok(()) => EffectDisposition::Done,
+            // Contention past the wait is returned unrecorded: it names the
+            // holder and settlement retries, so a busy holder never seals the
+            // cleanup as failed.
+            Err(error) if error.is_writer_contention() => return Err(error),
             Err(error) => EffectDisposition::Failed {
                 reason: error.to_string().chars().take(1024).collect(),
                 retryable: false,

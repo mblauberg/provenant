@@ -629,6 +629,19 @@ pub enum RunError {
     Capacity,
     #[error("run store stayed contended past its busy timeout")]
     Contention,
+    /// Another holder kept a writer worktree's exclusion lock past the bounded
+    /// wait. Settlement retries; contention is never a recovery failure.
+    #[error("waiting for writer lock {}, held by {holder}", lock.display())]
+    WriterExclusionBusy {
+        lock: std::path::PathBuf,
+        holder: String,
+    },
+    /// A steered writer's successor waits until settlement releases the
+    /// predecessor's worktree custody; the accepted steering stays queued.
+    #[error(
+        "steer continuation waits for the steered writer's settlement to release its worktree custody"
+    )]
+    SteerAwaitingCustody,
     #[error("run-store call was cancelled")]
     Cancelled,
     #[error("publication is visible but not durably synced")]
@@ -704,6 +717,12 @@ impl RunError {
             self,
             Self::ObjectImportLimit(_) | Self::LaneTipUnrooted { .. }
         )
+    }
+
+    /// Writer-lock contention outlived its bounded wait. Settlement records it
+    /// as a wait naming the holder, never as a recovery failure.
+    pub(crate) fn is_writer_contention(&self) -> bool {
+        matches!(self, Self::WriterExclusionBusy { .. })
     }
 
     /// A generic code can wrap multiple guards; classify the typed cause rather
