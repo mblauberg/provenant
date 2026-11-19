@@ -86,7 +86,9 @@ syntax), including targets of chair-made and hand-made worktrees, and any
 tombstone an interrupted removal left. A target's last use is the newer of its
 `.provenant-last-used` stamp, written at each launch and by
 `worktree seed-target`, and its newest file time; `target-lint` shares its
-cache's worktree. `gc --dry-run` shows measured allocated bytes against the
+cache's worktree. Just before removing a target or a lane cache, `--apply`
+rechecks that last use with the Cargo locks held; a launch or seed that
+stamped it meanwhile keeps it, and a later pass decides again. `gc --dry-run` shows measured allocated bytes against the
 budget with the budget and idle settings and their sources, and names each
 target it would remove with its worktree, reason (`worktree gone`,
 `worktree replaced`, `idle`, `over budget`, `tombstone`) and the evidence

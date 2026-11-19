@@ -66,7 +66,12 @@ worktree is gone or replaced after the build-directory grace, and one unused for
 foreign, replaced or gone) serves both lane caches and targets; a foreign cache
 waits for `gc.cargo_target_idle`. Last use is the newer of the launch and seed
 stamp and the newest file time, and every GC removal names its target, owning
-worktree, reason and the evidence that dated it. A preview names exactly what
+worktree, reason and the evidence that dated it. Every removal of a target or
+a lane cache rechecks its last use with the Cargo locks held, immediately before
+it detaches anything: the newest file time under those locks, the stamps, and
+the cache root's activity marker, which each launch and seed replaces after its
+stamp. Any use newer than the cutoff, or a marker that changed, keeps it for a
+later pass. A preview names exactly what
 apply removes from the same state. Measurement stops only at the sweep
 deadline, preview included; a stopped census reports partial measurements
 explicitly and resumes. Cargo build locks and live attempt custody protect

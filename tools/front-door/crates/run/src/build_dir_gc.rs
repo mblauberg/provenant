@@ -24,7 +24,10 @@
 //! are counted, including payload outside a recognised profile, so incomplete
 //! seeds and first builds cannot escape the budget. Explicit GC and launch
 //! admission share the same collector.
-use provenant_confinement::cache::{CargoLockProbe, OwnerStatus, is_cache_digest};
+use provenant_confinement::cache::{
+    CACHE_ACTIVITY_MARKER, CARGO_TARGET_NAMES, CargoLockProbe, LastUseRecheck, OwnerStatus,
+    TARGET_LAST_USED, is_cache_digest, read_last_use_stamp,
+};
 use provenant_os::disk::DiskReport;
 use provenant_os::fs::{
     Directory, FileKind, ForeignLock, LockMode, Metadata, PayloadTree, effective_uid,
@@ -32,7 +35,7 @@ use provenant_os::fs::{
 use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
-    io::{self, Read, Write},
+    io::{self, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -43,7 +46,7 @@ use std::{
 const CARGO_LOCK: &str = ".cargo-lock";
 #[cfg(test)]
 const LOCKS: [&str; 3] = [CARGO_LOCK, ".cargo-build-lock", ".cargo-artifact-lock"];
-const TARGETS: [&str; 2] = ["target", "target-lint"];
+const TARGETS: [&str; 2] = CARGO_TARGET_NAMES;
 const GC_TOMBSTONES: [(&str, &str); 2] = [
     (".provenant-gc-target", "target"),
     (".provenant-gc-target-lint", "target-lint"),
@@ -59,8 +62,6 @@ const SURVEY_SNAPSHOT_LIMIT: u64 = 16 * 1024 * 1024;
 const SURVEY_SNAPSHOT_PREFIX: &str = "gc-cache-survey-";
 const SURVEY_SNAPSHOT_VERSION: u8 = 6;
 const MAX_SNAPSHOT_FILES_PER_SWEEP: usize = 128;
-const TARGET_LAST_USED: &str = ".provenant-last-used";
-const CACHE_ACTIVITY_MARKER: &str = ".provenant-cache-activity";
 /// How far ahead of now a modification time may be and still count as a
 /// recent write.
 const FUTURE_SKEW_NS: i128 = 5 * 60 * 1_000_000_000;
@@ -939,8 +940,9 @@ pub fn shared_cache_root(home: &Path) -> PathBuf {
 }
 
 /// Publish managed-target recency even when Cargo reuses every artifact. The
-/// root marker also invalidates an in-progress census after a launch. Custom
-/// paths have no cache authority and are left untouched.
+/// root marker, replaced after the stamp, also invalidates an in-progress
+/// census and tells a removal rechecking its stamps that one may have landed
+/// since. Custom paths have no cache authority and are left untouched.
 pub fn mark_managed_target_use(home: &Path, target: &Path) -> io::Result<bool> {
     let roots = [cache_root(home), shared_cache_root(home)];
     let Some(managed_root) = roots
@@ -953,6 +955,24 @@ pub fn mark_managed_target_use(home: &Path, target: &Path) -> io::Result<bool> {
         .map_err(io::Error::other)?;
     let bytes = format!("{}\n", timestamp.as_micros());
     let root = Directory::open_anchor(managed_root).map_err(io::Error::other)?;
+    let stamped = match Directory::open_anchor(target) {
+        Ok(directory) => {
+            directory
+                .atomic_write(
+                    OsStr::new(TARGET_LAST_USED),
+                    ".provenant-target-use-",
+                    bytes.as_bytes(),
+                    provenant_os::fs::PublishMode::Replace,
+                )
+                .and_then(|publication| publication.require_durable())
+                .map_err(io::Error::other)?;
+            true
+        }
+        Err(error) if error.is_not_found() => false,
+        Err(error) => return Err(io::Error::other(error)),
+    };
+    // After the stamp: a removal that read the stamps before this write sees
+    // the marker change and keeps the target (`LastUseRecheck`).
     root.atomic_write(
         OsStr::new(CACHE_ACTIVITY_MARKER),
         ".provenant-cache-activity-",
@@ -961,21 +981,7 @@ pub fn mark_managed_target_use(home: &Path, target: &Path) -> io::Result<bool> {
     )
     .and_then(|publication| publication.require_durable())
     .map_err(io::Error::other)?;
-    let directory = match Directory::open_anchor(target) {
-        Ok(directory) => directory,
-        Err(error) if error.is_not_found() => return Ok(false),
-        Err(error) => return Err(io::Error::other(error)),
-    };
-    directory
-        .atomic_write(
-            OsStr::new(TARGET_LAST_USED),
-            ".provenant-target-use-",
-            bytes.as_bytes(),
-            provenant_os::fs::PublishMode::Replace,
-        )
-        .and_then(|publication| publication.require_durable())
-        .map_err(io::Error::other)?;
-    Ok(true)
+    Ok(stamped)
 }
 
 /// Stamp every target under a private lane cache as used now: `target` and,
@@ -1022,15 +1028,6 @@ fn last_use(cache: &PayloadTree, target: &str, file_newest: i128) -> (i128, Last
         Some(stamp) if stamp >= file_newest => (stamp, LastUse::Stamp),
         _ => (file_newest, LastUse::FileTimes),
     }
-}
-
-/// The stamp holds microseconds since the epoch; anything else is ignored.
-fn read_last_use_stamp(directory: &Directory) -> Option<i128> {
-    let file = directory.open_read(OsStr::new(TARGET_LAST_USED)).ok()?;
-    let mut text = String::new();
-    file.take(64).read_to_string(&mut text).ok()?;
-    let micros: u64 = text.trim().parse().ok()?;
-    Some(i128::from(micros).saturating_mul(1_000))
 }
 
 fn managed_target_relative(target: &Path, root: &Path) -> bool {
@@ -3587,11 +3584,13 @@ fn remove(
         return Ok(removed);
     }
 
-    let (bytes, newest) =
+    let (bytes, recheck) =
         match measure_resumable(&cache, candidate, &target_metadata, resumed, should_stop)? {
-            MeasureOutcome::Complete { bytes, newest } => {
-                (bytes, last_use(&cache, &candidate.target, newest).0)
-            }
+            MeasureOutcome::Complete { bytes, newest } => (
+                bytes,
+                LastUseRecheck::read(root, cache.directory(), &[&candidate.target], newest)
+                    .map_err(io::Error::other)?,
+            ),
             MeasureOutcome::Interrupted(state) => {
                 return Ok(Outcome::Interrupted {
                     rechecking: Some(state),
@@ -3600,6 +3599,7 @@ fn remove(
             }
             MeasureOutcome::Changed => return Ok(Outcome::Recent(None)),
         };
+    let newest = recheck.newest();
     if bytes != candidate.bytes || newest != candidate.newest || within_grace(newest, now_ns, grace)
     {
         return Ok(Outcome::Recent(Some((bytes, newest))));
@@ -3617,6 +3617,11 @@ fn remove(
         Ok(_) => return Ok(Outcome::Busy(None)),
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(io::Error::other(error)),
+    }
+    // A launch or seed that stamped the target after the recheck read its
+    // stamp keeps it for a later pass.
+    if !recheck.still_current(root).map_err(io::Error::other)? {
+        return Ok(Outcome::Recent(None));
     }
     cache
         .directory()

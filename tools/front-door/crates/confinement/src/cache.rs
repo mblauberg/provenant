@@ -52,6 +52,93 @@ pub fn tag_cache_directory(directory: &Directory) -> Result<(), FsError> {
         Err(error) => Err(error),
     }
 }
+/// A Cargo target's last-use stamp. Launches and seeds replace it with the
+/// wall time in microseconds since the epoch; GC reads that content.
+pub const TARGET_LAST_USED: &str = ".provenant-last-used";
+/// The activity marker under each managed Cargo cache root. Every launch and
+/// seed replaces it after stamping its targets.
+pub const CACHE_ACTIVITY_MARKER: &str = ".provenant-cache-activity";
+/// The directories Cargo builds into under a private lane cache.
+pub const CARGO_TARGET_NAMES: [&str; 2] = ["target", "target-lint"];
+
+/// A target's last-use stamp in nanoseconds; `None` when it is absent or
+/// holds anything but microseconds.
+pub fn read_last_use_stamp(target: &Directory) -> Option<i128> {
+    let file = target.open_read(OsStr::new(TARGET_LAST_USED)).ok()?;
+    let mut text = String::new();
+    file.take(64).read_to_string(&mut text).ok()?;
+    let micros: u64 = text.trim().parse().ok()?;
+    Some(i128::from(micros).saturating_mul(1_000))
+}
+
+/// Which activity marker a cache root held. Writers replace the marker after
+/// their stamps, so an unchanged marker means no stamp landed after it was
+/// read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CacheActivity(Option<(u64, u64, i128)>);
+
+impl CacheActivity {
+    fn read(root: &Directory) -> Result<Self, FsError> {
+        match root.metadata_at(OsStr::new(CACHE_ACTIVITY_MARKER), false) {
+            Ok(marker) => Ok(Self(Some((
+                marker.device,
+                marker.inode,
+                marker.modified_ns,
+            )))),
+            Err(error) if error.is_not_found() => Ok(Self(None)),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// The last use a removal rechecks just before it detaches a target or a lane
+/// cache. Lane cache GC and Cargo target GC both decide through it.
+#[derive(Debug)]
+pub struct LastUseRecheck {
+    newest: i128,
+    activity: CacheActivity,
+}
+
+impl LastUseRecheck {
+    /// The newer of `file_newest` and the stamp of each named target under
+    /// `cache`. `file_newest` must come from a measurement taken with the
+    /// cache's Cargo locks held, which keep Cargo out; the stamps and the
+    /// activity marker of `root`, read first, cover launches and seeds,
+    /// which write without those locks.
+    pub fn read(
+        root: &Directory,
+        cache: &Directory,
+        targets: &[&str],
+        file_newest: i128,
+    ) -> Result<Self, FsError> {
+        let activity = CacheActivity::read(root)?;
+        let mut newest = file_newest;
+        for target in targets {
+            match cache.open_verified_directory(OsStr::new(target)) {
+                Ok(target) => {
+                    if let Some(stamp) = read_last_use_stamp(&target) {
+                        newest = newest.max(stamp);
+                    }
+                }
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(Self { newest, activity })
+    }
+
+    pub fn newest(&self) -> i128 {
+        self.newest
+    }
+
+    /// Whether no launch or seed has published activity under `root` since
+    /// the stamps were read. Call it immediately before detaching: a removal
+    /// that finds it false keeps the target for a later pass.
+    pub fn still_current(&self, root: &Directory) -> Result<bool, FsError> {
+        Ok(CacheActivity::read(root)? == self.activity)
+    }
+}
+
 const MAX_CACHE_SWEEP_DEPTH: usize = 32;
 const MAX_TREE_CURSOR_BYTES: usize = 14 * 1024;
 const MAX_CACHE_CURSOR_BYTES: usize = 14 * 1024;
@@ -1277,16 +1364,33 @@ fn prune_worktree_cache(
                 return Ok(());
             }
             // Measurement may take time. Recheck the marker, owner and last
-            // write immediately before detaching the cache from the lane path.
+            // use immediately before detaching the cache from the lane path.
             if read_cache_owner(&cache, Path::new(name))? != owner {
                 return Ok(());
             }
-            let newest = measured.map_or(i128::MIN, |stats| stats.newest_modified_ns);
+            cache_gc_operation("recheck", Path::new(name), || Ok(()))
+                .map_err(cache_fs_error("recheck", Path::new(name)))?;
+            // This pass has held the Cargo locks since before it measured, so
+            // Cargo wrote nothing since. A measurement resumed from an earlier
+            // pass was partly taken without them and is repeated here.
+            let file_newest = if detail.is_some() {
+                let progress = measure_cache(&cache, &cache_root.join(name), None, scan)?;
+                let Some(stats) = progress.stats else {
+                    report.interrupted_at = Some(cache_root.join(name));
+                    report.continuation = None;
+                    return Ok(());
+                };
+                stats.newest_modified_ns
+            } else {
+                measured.map_or(i128::MIN, |stats| stats.newest_modified_ns)
+            };
+            let recheck = LastUseRecheck::read(root, &cache, &CARGO_TARGET_NAMES, file_newest)
+                .map_err(cache_fs_error("recheck last use", Path::new(name)))?;
             let current_reason = cache_gc_reason_with_newest(
                 &cache_root.join(name),
                 original_owner,
                 policy,
-                || Ok(newest),
+                || Ok(recheck.newest()),
             )?;
             if current_reason == Some(CacheGcReason::Foreign) {
                 report.kept.push(CacheGcEntry {
@@ -1296,6 +1400,14 @@ fn prune_worktree_cache(
                 });
             }
             if current_reason != Some(reason) {
+                return Ok(());
+            }
+            // A launch or seed that stamped a target after the recheck read
+            // the stamps keeps the cache for a later pass.
+            if !recheck
+                .still_current(root)
+                .map_err(cache_fs_error("recheck cache activity", Path::new(name)))?
+            {
                 return Ok(());
             }
             cache_gc_operation("before rename", Path::new(name), || {
@@ -1487,7 +1599,7 @@ pub fn lock_cargo_profiles(
         return Err(CargoLockProbe::Stopped);
     }
     lock(cache, Path::new(""), CARGO_CACHE_OWNER, &mut guards)?;
-    for target_name in ["target", "target-lint"] {
+    for target_name in CARGO_TARGET_NAMES {
         if !keep_going() {
             return Err(CargoLockProbe::Stopped);
         }
@@ -2311,6 +2423,79 @@ mod tests {
             std::fs::write(path.join(CARGO_CACHE_OWNER), marker)?;
             std::fs::write(path.join("artifact"), b"cached build")?;
             Ok(path)
+        }
+
+        /// A launch that stamps a cache's target between GC's measurement and
+        /// its removal keeps the cache: the recheck reads the stamp under the
+        /// held Cargo locks. Its twin, never stamped, goes in the same pass.
+        #[test]
+        fn a_stamp_written_after_the_measurement_keeps_an_idle_foreign_cache()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let temporary = tempfile::tempdir()?;
+            let home = temporary.path();
+            let owner = home.join("other-project");
+            std::fs::create_dir(&owner)?;
+            let now = std::time::SystemTime::now();
+            let old = now - std::time::Duration::from_secs(31 * 86_400);
+            let mut caches = Vec::new();
+            for letter in ["a", "b"] {
+                let path = cache(home, &letter.repeat(64), &owner)?;
+                std::fs::create_dir(path.join("target"))?;
+                std::fs::write(path.join("target/payload"), b"o")?;
+                for entry in [
+                    path.join("target/payload"),
+                    path.join("target"),
+                    path.join("artifact"),
+                    path.join(CARGO_CACHE_OWNER),
+                    path.clone(),
+                ] {
+                    std::fs::File::open(&entry)?.set_modified(old)?;
+                }
+                caches.push(path);
+            }
+            let (stamped, unstamped) = (caches[0].clone(), caches[1].clone());
+            let cutoff = i128::try_from(now.duration_since(std::time::UNIX_EPOCH)?.as_nanos())?
+                - 86_400 * 1_000_000_000;
+            let policy = CacheGcPolicy {
+                foreign_idle_before_ns: Some(cutoff),
+                ..CacheGcPolicy::default()
+            };
+            let stamp = stamped.join("target").join(TARGET_LAST_USED);
+            let late_stamp = stamp.clone();
+            let launched = stamped.clone();
+            let report = sweep(
+                home,
+                &policy,
+                Arc::new(move |event, path| {
+                    if event == "recheck" && path == launched {
+                        let micros = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_err(io::Error::other)?
+                            .as_micros();
+                        std::fs::write(&late_stamp, format!("{micros}\n"))?;
+                    }
+                    Ok(())
+                }),
+            )?;
+            let entries = |entries: &[CacheGcEntry]| {
+                entries
+                    .iter()
+                    .map(|entry| (entry.path.clone(), entry.reason))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                entries(&report.kept),
+                vec![(stamped.clone(), CacheGcReason::Foreign)],
+                "{report:?}"
+            );
+            assert_eq!(
+                entries(&report.removed),
+                vec![(unstamped.clone(), CacheGcReason::ForeignIdle)],
+                "{report:?}"
+            );
+            assert!(stamp.is_file() && stamped.join("target/payload").is_file());
+            assert!(!unstamped.exists());
+            Ok(())
         }
 
         #[test]
