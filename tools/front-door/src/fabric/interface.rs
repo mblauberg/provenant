@@ -3631,6 +3631,11 @@ mod tests {
     // Spec: docs/specs/supervisor.md#native-environment-and-sandbox-tool-stores
     #[test]
     fn graph_advance_uses_requester_path_after_submission_and_retry() -> Result {
+        if super::super::peer_tests::host_test(
+            "fabric::interface::tests::graph_advance_uses_requester_path_after_submission_and_retry",
+        )? {
+            return Ok(());
+        }
         use std::os::unix::ffi::OsStrExt;
         let rig = TestRig::new()?;
         let mut factory = factory(&rig)?;
@@ -3727,27 +3732,46 @@ mod tests {
             &document.graph_id,
         )?
         .ok_or("bound graph execution")?;
-        let mut unavailable_git = requester.clone();
-        unavailable_git.git = rig.root.join("missing-git");
-        factory.host_launch = Some(unavailable_git);
-        let error = factory
-            .graph_document(
-                json!({"op":"retry", "id":document.graph_id}),
-                budget,
-                &cancel,
-            )
-            .expect_err("PATH capture failure must refuse retry");
-        assert!(matches!(
-            error,
-            FacadeError::Io { ref operation, .. } if operation == "capture requester PATH"
-        ));
-        let after = FileJournal::execution(
+        let before_checkpoint = FileJournal::read_checkpoint(
             &factory.context.roots.state,
             factory.context.identity.project,
             &document.graph_id,
-        )?
-        .ok_or("bound graph execution after refused retry")?;
-        assert_eq!(after, before);
+        )?;
+        let mut unavailable_git = requester.clone();
+        unavailable_git.git = rig.root.join("missing-git");
+        factory.host_launch = Some(unavailable_git);
+        for request in [
+            json!({"op":"retry", "id":document.graph_id}),
+            json!({"op":"retry", "id":document.graph_id, "node":"review"}),
+            json!({"op":"retry", "id":document.graph_id, "node":"review", "brief":"repair review"}),
+            json!({"op":"retry", "id":document.graph_id, "extend":["budget.per_graph.tokens=30"]}),
+        ] {
+            let error = factory
+                .graph_document(request.clone(), budget, &cancel)
+                .expect_err("PATH capture failure must refuse retry");
+            assert!(
+                matches!(
+                    error,
+                    FacadeError::Io { ref operation, .. } if operation == "capture requester PATH"
+                ),
+                "unexpected retry error for {request}: {error:?}"
+            );
+            let after = FileJournal::execution(
+                &factory.context.roots.state,
+                factory.context.identity.project,
+                &document.graph_id,
+            )?
+            .ok_or("bound graph execution after refused retry")?;
+            assert_eq!(after, before);
+            assert_eq!(
+                FileJournal::read_checkpoint(
+                    &factory.context.roots.state,
+                    factory.context.identity.project,
+                    &document.graph_id,
+                )?,
+                before_checkpoint
+            );
+        }
 
         requester.lane_path = Some(Vec::new());
         factory.host_launch = Some(requester);

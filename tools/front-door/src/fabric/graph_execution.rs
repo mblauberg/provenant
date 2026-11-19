@@ -1014,18 +1014,6 @@ impl Factory {
                 GraphInput::Resume { extend, .. } => extend.as_slice(),
                 _ => &[],
             };
-            let mut retry_changed = false;
-            if let Some((target, request)) = retry {
-                let brief_given = request.get("brief").is_some_and(|v| !v.is_null());
-                let node_given = target.node.is_some();
-                retry_changed = brief_given || node_given || !extensions.is_empty();
-                self.prepare_retry(
-                    target,
-                    request,
-                    document,
-                    checkpoint.as_mut().ok_or(FacadeError::NotFound)?,
-                )?;
-            }
             // A graph name holds one launch input. A new launch that finds the
             // name bound to another digest lost a race for it; never resume or
             // patch the other launch's graph.
@@ -1049,7 +1037,21 @@ impl Factory {
                     return Ok(run);
                 }
             }
+            // Capture before retry validation or staged resets, including no-op
+            // retries of settled graphs. Failure must preserve the bound execution.
             let requester_path = self.requester_lane_path()?;
+            let mut retry_changed = false;
+            if let Some((target, request)) = retry {
+                let brief_given = request.get("brief").is_some_and(|v| !v.is_null());
+                let node_given = target.node.is_some();
+                retry_changed = brief_given || node_given || !extensions.is_empty();
+                self.prepare_retry(
+                    target,
+                    request,
+                    document,
+                    checkpoint.as_mut().ok_or(FacadeError::NotFound)?,
+                )?;
+            }
             let candidate = match checkpoint.as_ref().filter(|_| !retry_changed) {
                 Some(checkpoint) => provenant_fabric_runtime::graph::admit_running_candidate(
                     document,
