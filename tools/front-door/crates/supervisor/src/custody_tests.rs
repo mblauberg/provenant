@@ -443,6 +443,17 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
         omitted_reaped: 2,
         spared: vec![identity.clone(); 16],
         omitted_spared: 3,
+        // A retention record that ended counts against the same bound.
+        retention: Some(Retention {
+            guardian: identity.clone(),
+            since: Some(provenant_core::WallTime::from_micros(i64::MAX / 2)?),
+            limit_ms: u64::MAX,
+            ended: Some(RetentionEnd {
+                reason: RetentionEndReason::LimitReached,
+                retained_ms: u64::MAX,
+                blocker: RetentionBlocker::SettlementUnproven,
+            }),
+        }),
         failed_deliveries: vec![
             FailedSignalDelivery {
                 identity: Some(identity),

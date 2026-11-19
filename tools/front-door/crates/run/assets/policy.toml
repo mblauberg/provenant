@@ -219,6 +219,14 @@ knob = "policy.LAUNCH_PROCESS_TREE_INTERVAL_OR_WARN_NONE"
 justification = "Unreadable run settings warn and launch the lane without a process-tree sampler; admission then skips its memory limit with a warning."
 
 [[rule]]
+code = "LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT"
+site = "run/src/launch.rs#retained_custody_ms"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT"
+justification = "Unreadable run settings warn and launch the lane with the shipped retained-custody limit."
+
+[[rule]]
 code = "PORT_BLOCKS"
 site = "supervisor/src/guardian.rs#Driver::run"
 boundary = "none"

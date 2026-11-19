@@ -250,7 +250,7 @@ impl Driver<'_> {
                 escalation = true;
                 continue;
             }
-            let _ = self.reactor.wait(&[], Duration::from_millis(20));
+            self.reactor.pause(Duration::from_millis(20));
         }
     }
 
@@ -595,7 +595,7 @@ impl Driver<'_> {
                     self.warn_cleanup_holders(None, warnings, omitted);
                     return Ok(false);
                 }
-                let _ = self.reactor.wait(&[], Duration::from_millis(20));
+                self.reactor.pause(Duration::from_millis(20));
                 continue;
             };
             census_warning_active = false;
@@ -615,10 +615,8 @@ impl Driver<'_> {
                 self.warn_cleanup_holders(Some(&census), warnings, omitted);
                 return Ok(false);
             }
-            let _ = self.reactor.wait(
-                &[],
-                Duration::from_millis(plan.descendant_grace_ms.clamp(1, 20)),
-            );
+            self.reactor
+                .pause(Duration::from_millis(plan.descendant_grace_ms.clamp(1, 20)));
         }
     }
 
@@ -733,7 +731,10 @@ impl Driver<'_> {
             if self.escapee_stop_allowed {
                 candidates.extend(marked);
             }
+            let had_candidates = !candidates.is_empty();
             let targets = host_authorised_targets(self.holder, &self.holder_context, candidates);
+            // Candidates the host refused can settle only by their own exit.
+            self.host_stop_refused = had_candidates && targets.is_empty();
             for delivery in child.stop_owned_targets(escalation, &targets) {
                 if delivery.outcome == DeliveryOutcome::Delivered {
                     self.stopped_descendants.insert(delivery.identity.clone());
@@ -792,10 +793,10 @@ impl Driver<'_> {
     }
 
     /// Block on exit watches until every identity is gone or `grace` ends.
-    /// Each wake checks only these identities, never a host census. Signal
-    /// and cancellation wakes are kept for the retained loop, as is any
-    /// process event: it may be the exit of an identity outside `identities`
-    /// that blocks settlement.
+    /// Each wake checks only these identities, never a host census. The
+    /// reactor keeps every edge it drains for the retained loop, including
+    /// process events: one may be the exit of an identity outside
+    /// `identities` that blocks settlement. A supervisor signal ends the wait.
     #[allow(clippy::disallowed_methods)]
     fn await_exits(&mut self, identities: &[ProcessIdentity], grace: Duration) {
         let pids = identities.iter().map(|identity| identity.pid).collect();
@@ -817,12 +818,9 @@ impl Driver<'_> {
                 remaining.min(Duration::from_millis(CENSUS_INTERVAL_MS))
             };
             match self.reactor.wait(&[], wait) {
-                Ok(event) => {
-                    self.deferred_cancel |= event.cancel_changed;
-                    self.deferred_process_event |= event.process_changed;
-                    watched &= !event.process_overflow;
-                    if event.supervisor_signal {
-                        self.deferred_signal = true;
+                Ok(_) => {
+                    watched &= !self.reactor.pending().process_overflow;
+                    if self.reactor.signalled() {
                         return;
                     }
                 }

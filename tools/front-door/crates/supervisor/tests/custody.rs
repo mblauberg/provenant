@@ -1813,23 +1813,25 @@ fn escapee_is_ended_only_when_the_host_reports_no_nested_runs(root: &Path) -> Re
 /// misses the last blocker's exit wakes only on that backstop.
 #[cfg(target_os = "macos")]
 const RELEASE_AFTER_LAST_BLOCKER: Duration = Duration::from_millis(2_500);
-/// Retained custody releases the writer soon after the last process blocking
-/// settlement exits. Its exit must wake the guardian whether it lands in a
-/// stop's exit wait, between a census and its watch, or in the idle wait.
+/// Start a lane whose sandbox escapee outlives cleanup and may not be stopped,
+/// so its guardian retains custody. Returns the escapee's socket, which ends
+/// it when dropped, and its identity, once the unresolved exit is published.
 #[cfg(target_os = "macos")]
-fn retained_custody_releases_the_writer_soon_after_the_last_blocker_exits(
+fn retain_unstoppable_escapee(
     root: &Path,
-) -> Result<()> {
+    name: &str,
+    plan: CapturePlan,
+) -> Result<(UnixStream, ProcessIdentity)> {
     let home = root.join("HOME");
     std::fs::create_dir_all(&home)?;
     std::fs::write(home.join(S2_PRODUCTION_SHAPE), b"no registry")?;
     // Live graph children forbid the escapee stop: only its own exit settles.
     std::fs::write(home.join("live-graph-children"), b"pending")?;
-    let ready_path = root.join("release.sock");
+    let ready_path = root.join(format!("{name}.sock"));
     let ready_listener = UnixListener::bind(&ready_path)?;
     let (writer, handle) = start(
         root,
-        "release",
+        name,
         "s2-detach-provider",
         &[
             ready_path.into_os_string(),
@@ -1838,7 +1840,7 @@ fn retained_custody_releases_the_writer_soon_after_the_last_blocker_exits(
         CapturePlan {
             root_flush_ms: 30,
             descendant_grace_ms: 10,
-            ..CapturePlan::default()
+            ..plan
         },
     )?;
     drop(writer);
@@ -1848,6 +1850,133 @@ fn retained_custody_releases_the_writer_soon_after_the_last_blocker_exits(
     let exit = exited(&handle)?;
     assert!(exit.unresolved_cleanup, "{exit:?}");
     assert_eq!(exit.unresolved_pids, vec![escapee.pid], "{exit:?}");
+    Ok((stream, escapee))
+}
+/// The retention record the guardian last published on the unresolved exit.
+#[cfg(target_os = "macos")]
+fn published_retention(root: &Path, name: &str) -> Result<serde_json::Value> {
+    let exit: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        root.join(format!("{name}-attempt/process-exit.json")),
+    )?)?;
+    assert_eq!(exit["unresolved_cleanup"], true, "{exit}");
+    Ok(exit["retention"].clone())
+}
+/// A supervisor signal that arrives while the guardian retains custody, and so
+/// after or during its cleanup, ends the guardian within a bound: the reactor
+/// keeps the signal even when a pacing wait drains it (#3585). The exit stays
+/// unresolved, names why and keeps the escapee for reconcile.
+#[cfg(target_os = "macos")]
+fn sigterm_during_retained_custody_ends_the_guardian_and_releases_the_writer(
+    root: &Path,
+) -> Result<()> {
+    let (stream, escapee) = retain_unstoppable_escapee(root, "sigterm", CapturePlan::default())?;
+    let writer = root.join("sigterm-writer");
+    let guardian = reservation_identity(&writer, "guardian")?;
+    let signalled = Instant::now();
+    fixture::signal_recorded_process(&guardian, libc::SIGTERM)?;
+    let clock = SystemClock::new();
+    let released = Directory::open_anchor(&writer)?.lock(
+        OsStr::new("writer.lock"),
+        LockMode::Exclusive,
+        budget(&clock)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+    let waited = signalled.elapsed();
+    assert!(
+        waited < GUARDIAN_SIGNAL_RELEASE,
+        "writer released {waited:?} after SIGTERM"
+    );
+    drop(released);
+    let status =
+        fixture::guardian_exit_status(u32::try_from(guardian.pid)?, Duration::from_secs(5))?;
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "guardian exited abnormally: {status}"
+    );
+    wait_for_identity_absence(&guardian)?;
+    let retention = published_retention(root, "sigterm")?;
+    assert_eq!(retention["guardian"]["pid"], guardian.pid, "{retention}");
+    assert_eq!(
+        retention["ended"]["reason"], "supervisor_signal",
+        "{retention}"
+    );
+    assert_eq!(retention["ended"]["blocker"], "stop_refused", "{retention}");
+    // Ending retention signals nothing: the escapee is left for reconcile.
+    assert_eq!(process_identity(escapee.pid)?, escapee);
+    drop(stream);
+    wait_for_identity_absence(&escapee)?;
+    Ok(())
+}
+/// Retention past its configured limit records the unresolved processes and
+/// the blocker on the exit, then the guardian exits with the typed failure and
+/// its writer lock falls. Nothing is signalled or removed (#3585).
+#[cfg(target_os = "macos")]
+fn retention_past_its_limit_exits_with_the_typed_outcome(root: &Path) -> Result<()> {
+    let (stream, escapee) = retain_unstoppable_escapee(
+        root,
+        "limit",
+        CapturePlan {
+            retained_custody_ms: RETENTION_LIMIT_MS,
+            ..CapturePlan::default()
+        },
+    )?;
+    let writer = root.join("limit-writer");
+    let guardian = reservation_identity(&writer, "guardian")?;
+    let status =
+        fixture::guardian_exit_status(u32::try_from(guardian.pid)?, Duration::from_secs(10))?;
+    assert!(
+        !status.success(),
+        "guardian exited cleanly past its limit: {status}"
+    );
+    wait_for_identity_absence(&guardian)?;
+    let clock = SystemClock::new();
+    let _released = Directory::open_anchor(&writer)?.lock(
+        OsStr::new("writer.lock"),
+        LockMode::Exclusive,
+        budget(&clock)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+    let retention = published_retention(root, "limit")?;
+    assert_eq!(retention["guardian"]["pid"], guardian.pid, "{retention}");
+    assert_eq!(retention["limit_ms"], RETENTION_LIMIT_MS, "{retention}");
+    assert_eq!(retention["ended"]["reason"], "limit_reached", "{retention}");
+    assert_eq!(retention["ended"]["blocker"], "stop_refused", "{retention}");
+    assert!(
+        retention["ended"]["retained_ms"]
+            .as_u64()
+            .is_some_and(|retained| retained >= RETENTION_LIMIT_MS),
+        "{retention}"
+    );
+    let exit: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        root.join("limit-attempt/process-exit.json"),
+    )?)?;
+    assert_eq!(
+        exit["unresolved_pids"],
+        serde_json::json!([escapee.pid]),
+        "{exit}"
+    );
+    // The escapee is left for reconcile, unsignalled.
+    assert_eq!(process_identity(escapee.pid)?, escapee);
+    drop(stream);
+    wait_for_identity_absence(&escapee)?;
+    Ok(())
+}
+/// A signalled guardian runs one bounded stop, publishes and exits.
+#[cfg(target_os = "macos")]
+const GUARDIAN_SIGNAL_RELEASE: Duration = Duration::from_millis(3_000);
+#[cfg(target_os = "macos")]
+const RETENTION_LIMIT_MS: u64 = 300;
+/// Retained custody releases the writer soon after the last process blocking
+/// settlement exits. Its exit must wake the guardian whether it lands in a
+/// stop's exit wait, between a census and its watch, or in the idle wait.
+#[cfg(target_os = "macos")]
+fn retained_custody_releases_the_writer_soon_after_the_last_blocker_exits(
+    root: &Path,
+) -> Result<()> {
+    let (stream, escapee) = retain_unstoppable_escapee(root, "release", CapturePlan::default())?;
     // Its socket closing ends the escapee, at once and with no signal.
     drop(stream);
     wait_for_identity_absence(&escapee)?;
@@ -3132,6 +3261,16 @@ const CASES: &[Case] = &[
     (
         "retained_custody_releases_the_writer_soon_after_the_last_blocker_exits",
         retained_custody_releases_the_writer_soon_after_the_last_blocker_exits,
+    ),
+    #[cfg(target_os = "macos")]
+    (
+        "sigterm_during_retained_custody_ends_the_guardian_and_releases_the_writer",
+        sigterm_during_retained_custody_ends_the_guardian_and_releases_the_writer,
+    ),
+    #[cfg(target_os = "macos")]
+    (
+        "retention_past_its_limit_exits_with_the_typed_outcome",
+        retention_past_its_limit_exits_with_the_typed_outcome,
     ),
     #[cfg(target_os = "macos")]
     (

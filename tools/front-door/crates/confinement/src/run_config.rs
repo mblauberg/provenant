@@ -35,6 +35,7 @@ continuation_copy_depth = 32
 source_view_seconds = 300
 source_view_entries = 100000
 source_view_bytes = 536870912
+retained_custody_seconds = 3600
 sandboxed_routes = []
 sandbox_cache_reads = []
 
@@ -117,6 +118,11 @@ pub struct RunConfig {
     /// sampler runs and lanes get no `PROVENANT_PROCESS_TREE`.
     #[serde(default)]
     pub resource_sample_interval_ms: u64,
+    /// How long a guardian retains custody of a lane whose processes outlived
+    /// cleanup before it records why and exits, leaving the unresolved exit
+    /// to `provenant reconcile`.
+    #[serde(default = "default_retained_custody_seconds")]
+    pub retained_custody_seconds: u64,
     /// Route prefixes (`adapter/model`) whose lanes run sandboxed under default
     /// configuration. Empty by default; users can add routes (e.g. OpenCode Zen tier
     /// `opencode/opencode/`). An explicit `lanes.sandbox = "off"` / `--no-sandbox`
@@ -301,6 +307,9 @@ fn default_source_view_entries() -> u32 {
 fn default_source_view_bytes() -> u64 {
     512 << 20
 }
+fn default_retained_custody_seconds() -> u64 {
+    provenant_supervisor::custody::DEFAULT_RETAINED_CUSTODY_SECONDS
+}
 fn default_true() -> bool {
     true
 }
@@ -365,6 +374,7 @@ impl Default for RunConfig {
             source_view_entries: default_source_view_entries(),
             source_view_bytes: default_source_view_bytes(),
             resource_sample_interval_ms: 0,
+            retained_custody_seconds: default_retained_custody_seconds(),
             sandboxed_routes: default_sandboxed_routes(),
             sandbox_cache_reads: Vec::new(),
             projects: BTreeMap::new(),
@@ -847,6 +857,11 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("source_view_entries", "int"),
     FieldMetadata::new("source_view_bytes", "int"),
     FieldMetadata::int("resource_sample_interval_ms", 0, 60000),
+    FieldMetadata::int(
+        "retained_custody_seconds",
+        1,
+        provenant_supervisor::custody::MAX_RETAINED_CUSTODY_SECONDS as i64,
+    ),
     FieldMetadata::new("push_conflict_markers", "bool"),
     FieldMetadata::new("admission_seconds", "integer"),
     FieldMetadata::new("writer_writes", "array"),

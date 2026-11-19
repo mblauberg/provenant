@@ -2656,6 +2656,30 @@ fn process_tree_interval(
         .then_some(provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL)
 }
 
+/// How long the guardian may retain custody of an unresolved exit, resolved
+/// here for the same reason as the sampling cadence. Unreadable run settings
+/// warn and keep the shipped limit; `provenant config show --full` shows
+/// `domains.run.retained_custody_seconds` and its source.
+fn retained_custody_ms(state: &std::path::Path, policy: &provenant_records::policy::Policy) -> u64 {
+    let seconds = match provenant_confinement::run_config::RunConfig::read(state) {
+        Ok(config) => config.retained_custody_seconds,
+        Err(error) => {
+            let seconds = provenant_supervisor::custody::DEFAULT_RETAINED_CUSTODY_SECONDS;
+            if let provenant_records::policy::Effect::Warn(message) = policy.check(
+                "LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT",
+                provenant_records::policy::Facts::violation(format!(
+                    "domains.run settings unavailable ({error}); retained custody keeps the shipped {seconds} s limit"
+                )),
+            ) {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            }
+            seconds
+        }
+    };
+    seconds.saturating_mul(1_000)
+}
+
 fn lane_port_plan_or_warn(
     state: &std::path::Path,
     policy: &provenant_records::policy::Policy,
