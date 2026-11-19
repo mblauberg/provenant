@@ -417,14 +417,6 @@ impl Driver<'_> {
                     self.history_complete = false;
                 }
             }
-            if fact
-                .command
-                .as_ref()
-                .is_some_and(|name| self.protected_commands.contains(name))
-                && (self.tracked.contains(&fact.identity) || fact.identity.group_id == child.id())
-            {
-                self.protected.insert(fact.identity.clone());
-            }
         }
         self.tracked
             .retain(|identity| identity_still_possible(&census, identity));

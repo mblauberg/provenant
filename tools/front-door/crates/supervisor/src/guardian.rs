@@ -233,17 +233,6 @@ fn settlement_recovery(
     })
 }
 
-/// Advisory identity snapshot only; confinement does not yet supply an executable pin.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExecutableSnapshot {
-    device: u64,
-    inode: u64,
-    length: u64,
-    modified_seconds: i64,
-    modified_nanoseconds: i64,
-}
-
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LaunchMessage {
@@ -256,8 +245,6 @@ struct LaunchMessage {
     key: provenant_records::WorkKey,
     requester: provenant_core::ActorId,
     binding: StoredWriterBinding,
-    executable_snapshot: ExecutableSnapshot,
-    protected_commands: Vec<String>,
     profile: Option<crate::ProfileIdentity>,
     argv: Vec<Vec<u8>>,
     environment: Vec<(Vec<u8>, Vec<u8>)>,
@@ -279,27 +266,21 @@ pub(crate) fn handoff(
     capture: CapturePlan,
     publication: &PublicationReservation,
 ) -> Result<()> {
-    if owned.command.protected_commands.len() > 128
-        || owned
-            .command
-            .protected_commands
-            .iter()
-            .any(|name| name.is_empty() || name.len() > 512)
-        || owned.command.config_environment.len() > 128
+    if owned.command.config_environment.len() > 128
         || owned.command.holder_context.len() > HOLDER_CONTEXT_LIMIT
         || !valid_resolved_route(&owned.command.resolved_route)
     {
         return Err(CustodyError::InvalidRecord);
     }
     validate_profile_command(owned.command.profile_file.as_ref(), &owned.command.argv)?;
-    let executable_snapshot = snapshot_executable(
-        owned
-            .command
-            .argv
-            .first()
-            .ok_or(CustodyError::InvalidRecord)?
-            .as_os_str(),
-    )?;
+    if !owned
+        .command
+        .argv
+        .first()
+        .is_some_and(|executable| Path::new(executable).is_absolute())
+    {
+        return Err(CustodyError::InvalidRecord);
+    }
     let message = LaunchMessage {
         policy: owned.command.policy,
         schema_version: 1,
@@ -315,8 +296,6 @@ pub(crate) fn handoff(
         key: owned.command.key,
         requester: owned.command.requester,
         binding: owned.lease.reservation.binding.clone(),
-        executable_snapshot,
-        protected_commands: owned.command.protected_commands,
         argv: owned
             .command
             .argv
@@ -683,7 +662,6 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         permission_plan_digest: &'a provenant_core::Digest,
         requester: provenant_core::ActorId,
         binding: &'a StoredWriterBinding,
-        executable_snapshot: ExecutableSnapshot,
         profile: Option<&'a crate::ProfileIdentity>,
         executable_native_bytes: &'a [u8],
         environment_names_native_bytes: Vec<&'a [u8]>,
@@ -698,7 +676,6 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         permission_plan_digest: &message.permission_plan_digest,
         requester: message.requester,
         binding: &message.binding,
-        executable_snapshot: message.executable_snapshot,
         profile: profile_file.as_ref().map(crate::ProfileFile::identity),
         executable_native_bytes: argv
             .first()
@@ -749,7 +726,6 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         history_complete: true,
         last_tracking: None,
         journal_warning_active: false,
-        protected_commands: message.protected_commands,
         settlement_evidence: SettlementEvidence::Unresolved,
         reaped: Vec::new(),
         omitted_reaped: 0,
@@ -772,7 +748,6 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         _custody: Some(inherited.custody),
         guardian,
         requester: message.requester,
-        executable_snapshot: message.executable_snapshot,
         reactor,
         observer,
         exit_publisher,
@@ -804,7 +779,6 @@ struct Driver<'a> {
     _custody: Option<provenant_os::fs::LockGuard>,
     guardian: ProcessIdentity,
     requester: provenant_core::ActorId,
-    executable_snapshot: ExecutableSnapshot,
     reactor: crate::process_os::provider::GuardianReactor,
     observer: &'a dyn ProcessObserver,
     exit_publisher: Option<&'a dyn ExitPublisher>,
@@ -822,7 +796,6 @@ struct Driver<'a> {
     history_complete: bool,
     last_tracking: Option<Vec<u8>>,
     journal_warning_active: bool,
-    protected_commands: Vec<String>,
     settlement_evidence: SettlementEvidence,
     reaped: Vec<ProcessIdentity>,
     omitted_reaped: u64,
@@ -1124,8 +1097,6 @@ impl Driver<'_> {
                 return self.never_spawned(
                     if crate::process_os::profile::is_transport_error(&error) {
                         "sandbox profile transport refused before provider launch"
-                    } else if error.kind() == io::ErrorKind::InvalidData {
-                        "provider executable snapshot changed"
                     } else {
                         "provider spawn failed"
                     },
@@ -2182,43 +2153,34 @@ impl Driver<'_> {
         ports: Option<&provenant_os::fs::LockGuard>,
     ) -> io::Result<crate::process_os::provider::ProviderGroup> {
         validate_profile_command(self.profile_file.as_ref(), argv)?;
-        match argv.first() {
-            Some(executable) => match snapshot_executable(executable.as_os_str()) {
-                Ok(snapshot) if snapshot == self.executable_snapshot => {
-                    crate::process_os::provider::ProviderGroup::spawn(
-                        provenant_os::sys::raw_exec::SpawnSpec {
-                            argv,
-                            env: Some(env),
-                            cwd,
-                            input: !input.is_empty(),
-                            secret_input: self.secret_input.as_ref(),
-                            inherited_lease: None,
-                            inherited_profile: self.profile_file.as_ref().map(|profile| {
-                                profile as &dyn provenant_os::sys::profile::LimitSource
-                            }),
-                            inherited_ports: ports,
-                            process_group: false,
-                            capture_stdout: plan.stdout.piped(),
-                            capture_stderr: plan.stderr.piped(),
-                        },
-                        self.writer
-                            .as_ref()
-                            .ok_or_else(|| io::Error::other("writer custody missing"))?,
-                        &self.reservation.boot,
-                        self.priority,
-                    )
-                }
-                Ok(_) => Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "provider executable snapshot changed",
-                )),
-                Err(error) => Err(error),
-            },
-            None => Err(io::Error::new(
+        if argv.is_empty() {
+            return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "provider executable path is missing",
-            )),
+            ));
         }
+        crate::process_os::provider::ProviderGroup::spawn(
+            provenant_os::sys::raw_exec::SpawnSpec {
+                argv,
+                env: Some(env),
+                cwd,
+                input: !input.is_empty(),
+                secret_input: self.secret_input.as_ref(),
+                inherited_lease: None,
+                inherited_profile: self.profile_file.as_ref().map(|profile| {
+                    profile as &dyn provenant_os::sys::profile::LimitSource
+                }),
+                inherited_ports: ports,
+                process_group: false,
+                capture_stdout: plan.stdout.piped(),
+                capture_stderr: plan.stderr.piped(),
+            },
+            self.writer
+                .as_ref()
+                .ok_or_else(|| io::Error::other("writer custody missing"))?,
+            &self.reservation.boot,
+            self.priority,
+        )
     }
     /// Publish a launch refusal while retaining the scoped custody proof. If
     /// the attempt directory is provably removed there is no exit to publish
@@ -2556,37 +2518,6 @@ fn push_warning(warnings: &mut Vec<String>, omitted: &mut u64, label: &str) {
     } else {
         *omitted = omitted.saturating_add(1);
     }
-}
-
-fn snapshot_executable(path: &OsStr) -> io::Result<ExecutableSnapshot> {
-    if !Path::new(path).is_absolute() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "provider executable path must be absolute",
-        ));
-    }
-    let file = std::fs::File::open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "provider executable is not a regular file",
-        ));
-    }
-    let modified_nanoseconds = metadata.mtime_nsec();
-    if !(0..1_000_000_000).contains(&modified_nanoseconds) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "provider executable timestamp is invalid",
-        ));
-    }
-    Ok(ExecutableSnapshot {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        length: metadata.len(),
-        modified_seconds: metadata.mtime(),
-        modified_nanoseconds,
-    })
 }
 
 fn valid_resolved_route(route: &str) -> bool {

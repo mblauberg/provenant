@@ -330,13 +330,6 @@ pub fn config_environment() -> Vec<OsString> {
     .collect()
 }
 
-pub fn protected_commands() -> Vec<String> {
-    ["codex-code-mode-host", "codex-code-mode"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
-}
-
 pub fn environment(root: &Path) -> Vec<(OsString, OsString)> {
     let mut env = vec![
         ("PATH".into(), "/usr/bin:/bin".into()),

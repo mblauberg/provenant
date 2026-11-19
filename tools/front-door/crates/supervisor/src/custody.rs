@@ -1040,8 +1040,6 @@ pub struct ProviderCommand {
     /// The attempt's work identity; the guardian names the launch by it.
     pub key: provenant_records::WorkKey,
     pub requester: ActorId,
-    /// Native diagnostic command names that must be spared during cleanup.
-    pub protected_commands: Vec<String>,
     /// Caller-owned config variables passed to the same-binary guardian.
     pub config_environment: Vec<OsString>,
     pub argv: Vec<OsString>,

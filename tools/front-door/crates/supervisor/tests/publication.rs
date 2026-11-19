@@ -53,7 +53,6 @@ fn start(root: &Path, name: &str, scenario: &str) -> Result<(CustodyLease, Custo
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
         key: provenant_supervisor::custody::fixture_key(13),
-        protected_commands: fixture::protected_commands(),
         config_environment: fixture::config_environment(),
         argv: fixture::argv(scenario)?,
         environment: fixture::environment(root),

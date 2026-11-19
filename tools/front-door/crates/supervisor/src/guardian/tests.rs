@@ -363,8 +363,6 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
         key: crate::custody::fixture_key(33),
         requester: provenant_core::ActorId::from_bytes([34; 16]),
         binding: writer.reservation.binding.clone(),
-        executable_snapshot: snapshot_executable(OsStr::new("/bin/sh")).unwrap(),
-        protected_commands: Vec::new(),
         argv: vec![
             b"/bin/sh".to_vec(),
             b"-c".to_vec(),
@@ -798,7 +796,6 @@ fn spawn_missing_attempt_guardian(
         &clock,
     )
     .unwrap();
-    let executable_snapshot = snapshot_executable(OsStr::from_bytes(&argv[0])).unwrap();
     crate::custody::liveness::prepare_guardian_lifetime(
         &writer.directory,
         &publication.directory,
@@ -819,8 +816,6 @@ fn spawn_missing_attempt_guardian(
         key: crate::custody::fixture_key(43),
         requester: provenant_core::ActorId::from_bytes([44; 16]),
         binding: writer.reservation.binding.clone(),
-        executable_snapshot,
-        protected_commands: Vec::new(),
         argv,
         environment: Vec::new(),
         lane_ports: None,
@@ -1354,14 +1349,6 @@ fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
         binding: StoredWriterBinding::ReadOnly {
             extra: Default::default(),
         },
-        executable_snapshot: ExecutableSnapshot {
-            device: 1,
-            inode: 2,
-            length: 1024,
-            modified_seconds: 1,
-            modified_nanoseconds: 0,
-        },
-        protected_commands: vec!["provenant".into(), "git".into()],
         argv: [
             "/fixture/claude/bin/claude",
             "-p",

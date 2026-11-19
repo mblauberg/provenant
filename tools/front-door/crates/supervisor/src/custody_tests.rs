@@ -886,7 +886,6 @@ fn never_executed_command(root: &std::path::Path) -> ProviderCommand {
         permission_plan_digest: Digest::from_bytes([0; 32]),
         key: crate::custody::fixture_key(3),
         requester: ActorId::from_bytes([4; 16]),
-        protected_commands: vec![],
         config_environment: vec![],
         argv: vec!["/nonexistent-never-executed".into()],
         environment: crate::fixture::environment(root),

@@ -481,7 +481,6 @@ impl RunStore {
             permission_plan_digest: task.authority_digest,
             key,
             requester,
-            protected_commands: vec![],
             // OpenCode stores answering-model evidence in its shared XDG data
             // directory. The guardian otherwise starts with an empty environment
             // and no Registry home; retain the absolute path selected at launch.
