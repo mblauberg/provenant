@@ -818,9 +818,9 @@ while :; do
     _provenant_git_stderr_tail_pid=$!
     tail -c 1 < "$_provenant_git_tmp/out-capture" > "$_provenant_git_tmp/stdout" &
     _provenant_git_stdout_tail_pid=$!
-    tee /dev/fd/3 "$_provenant_git_tmp/err-capture" < "$_provenant_git_tmp/err" 3>&2 > /dev/null &
+    tee "$_provenant_git_tmp/err-capture" < "$_provenant_git_tmp/err" >&2 &
     _provenant_git_stderr_tee_pid=$!
-    tee /dev/fd/3 "$_provenant_git_tmp/out-capture" < "$_provenant_git_tmp/out" 3>&1 > /dev/null &
+    tee "$_provenant_git_tmp/out-capture" < "$_provenant_git_tmp/out" &
     _provenant_git_stdout_tee_pid=$!
     "$_provenant_git_program" "$@" 2> "$_provenant_git_tmp/err" 1> "$_provenant_git_tmp/out" &
     _provenant_git_child=$!
@@ -3287,6 +3287,26 @@ mod tests {
                 .status
                 .success()
         );
+        // Forwarding must not reopen and truncate the caller's output files.
+        let stdout_path = dir.path().join("stdout");
+        let stderr_path = dir.path().join("stderr");
+        std::fs::write(&stdout_path, b"existing stdout\n")?;
+        std::fs::write(&stderr_path, b"existing stderr\n")?;
+        let stdout_file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&stdout_path)?;
+        let stderr_file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&stderr_path)?;
+        assert!(
+            wrapped(&["add", "--", "one"])
+                .stdout(Stdio::from(stdout_file))
+                .stderr(Stdio::from(stderr_file))
+                .status()?
+                .success()
+        );
+        assert_eq!(std::fs::read(&stdout_path)?, b"existing stdout\n");
+        assert_eq!(std::fs::read(&stderr_path)?, b"existing stderr\n");
         assert!(
             wrapped(&["commit", "-m", "first", "--", "one"])
                 .output()?

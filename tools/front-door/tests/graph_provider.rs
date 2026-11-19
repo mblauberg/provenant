@@ -2458,6 +2458,9 @@ fn shared_worktree_writers_commit_disjoint_paths() -> Result {
 
 /// Distinct branch launches start directly without repository-wide waiting.
 fn distinct_branch_writer_launches_start_without_shared_waits() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
     let rig = writer_registry_fixture()?;
     let _cleanup = rig.process_cleanup();
     let binary = option_env!("CARGO_BIN_EXE_provenant").ok_or("binary")?;
