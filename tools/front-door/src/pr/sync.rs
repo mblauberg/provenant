@@ -511,16 +511,9 @@ fn sync_one(
             }
             None => git.remote_of(&path, &pull.head.name)?,
         };
-        let expected_remote_head = format!(
-            "--force-with-lease=refs/heads/{}:{}",
-            pull.head.name, pull.head.sha
-        );
-        let remote_branch = format!("{}:{}", pull.head.name, pull.head.name);
+        let push = push_args(&pull.head.name, &pull.head.sha, &push_remote, &current_head);
         if !git
-            .run(
-                &path,
-                &["push", &expected_remote_head, &push_remote, &remote_branch],
-            )?
+            .run(&path, &push.iter().map(String::as_str).collect::<Vec<_>>())?
             .0
         {
             return Err("push of synchronised pull request branch failed".into());
@@ -555,6 +548,18 @@ fn sync_one(
             Err(format!("{error}; pull request writer custody cleanup failed: {cleanup}").into())
         }
     }
+}
+
+/// Arguments for publishing the validated head. The source is the captured
+/// object id, never the branch name, so a local ref that moves after validation
+/// cannot change what is pushed; the lease pins the remote tip we observed.
+fn push_args(branch: &str, expected_remote: &str, remote: &str, head: &str) -> Vec<String> {
+    vec![
+        "push".into(),
+        format!("--force-with-lease=refs/heads/{branch}:{expected_remote}"),
+        remote.into(),
+        format!("{head}:refs/heads/{branch}"),
+    ]
 }
 
 fn launch_repair(
@@ -819,4 +824,77 @@ fn acquire_writer(
     )
     .map_err(|error| format!("writer custody: {error:?}"))?;
     Ok(Some(lease))
+}
+
+#[cfg(test)]
+#[allow(unused_imports, dead_code)] // The custom worktree driver compiles without a test harness.
+mod tests {
+    use super::push_args;
+    use provenant_os::exec::Termination;
+    use std::path::Path;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let exe = provenant_os::git::git_executable().unwrap();
+        let mut argv = vec![
+            exe.to_str().unwrap(),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+        ];
+        argv.extend_from_slice(args);
+        let output =
+            super::super::execute_with(dir, &argv, super::super::git::GIT_TIMEOUT, false, None)
+                .unwrap();
+        assert_eq!(output.termination, Termination::Exit(0), "{args:?}");
+        String::from_utf8(output.stdout.bytes)
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    #[test]
+    fn push_source_is_the_validated_oid_with_a_qualified_destination() {
+        let args = push_args("feature", "aaaa", "origin", "bbbb");
+        assert_eq!(
+            args,
+            [
+                "push",
+                "--force-with-lease=refs/heads/feature:aaaa",
+                "origin",
+                "bbbb:refs/heads/feature"
+            ]
+        );
+    }
+
+    #[test]
+    fn local_branch_moving_after_validation_never_reaches_the_remote() {
+        let root = tempfile::tempdir().unwrap();
+        let bare = root.path().join("remote.git");
+        let work = root.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(
+            root.path(),
+            &["init", "-q", "--bare", bare.to_str().unwrap()],
+        );
+        git(&work, &["init", "-q", "-b", "feature"]);
+        git(&work, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let observed = git(&work, &["rev-parse", "HEAD"]);
+        git(&work, &["push", "-q", bare.to_str().unwrap(), "feature"]);
+        git(&work, &["commit", "-q", "--allow-empty", "-m", "validated"]);
+        let validated = git(&work, &["rev-parse", "HEAD"]);
+
+        // The local branch moves after validation and before the push resolves.
+        let args = push_args("feature", &observed, bare.to_str().unwrap(), &validated);
+        git(
+            &work,
+            &["commit", "-q", "--allow-empty", "-m", "unvalidated"],
+        );
+        let moved = git(&work, &["rev-parse", "feature"]);
+        assert_ne!(moved, validated);
+
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        git(&work, &args);
+        assert_eq!(git(&bare, &["rev-parse", "refs/heads/feature"]), validated);
+    }
 }
