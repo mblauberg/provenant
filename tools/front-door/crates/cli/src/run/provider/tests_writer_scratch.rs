@@ -52,6 +52,8 @@ fn writer_preparation_fixture(fence_only: bool, gate_only: bool) -> Result<(), B
             #[allow(clippy::disallowed_methods)]
             let output = std::process::Command::new(std::env::current_exe()?)
                 .arg(test)
+                .env_clear()
+                .envs(provenant_os::fixture::git_env())
                 .env(CHILD, layout)
                 .env("GH_TOKEN", "fixture-host-token")
                 .env_remove("GIT_CONFIG_GLOBAL")
@@ -1657,18 +1659,11 @@ printf 'agy 1.0.0\n'
         executor.execute(options)
     };
     // Project github.json denials are advisory: the shim forwards the call and
-    // warns with its source, it does not refuse the invocation (the same
-    // contract providers::lane::github_policy_warns_and_preserves_invocations
-    // pins for the generated wrapper).
+    // warns with its source; it does not refuse the invocation.
     let warned = run_shim("ci")?;
-    assert_eq!(
-        warned.termination,
-        provenant_os::exec::Termination::Exit(0)
-    );
-    assert_eq!(
-        warned.stderr.bytes,
-        b"warning: github.deny_labels (advisory)\n"
-    );
+    assert_eq!(warned.termination, provenant_os::exec::Termination::Exit(0));
+    assert_eq!(warned.stdout.bytes, b"forwarded\n");
+    assert!(String::from_utf8_lossy(&warned.stderr.bytes).contains("github.deny_labels"));
     let allowed = run_shim("docs")?;
     assert_eq!(
         allowed.termination,
