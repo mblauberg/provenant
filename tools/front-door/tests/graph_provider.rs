@@ -2363,7 +2363,8 @@ fn writer_fixture_diagnostics(rig: &TestRig) -> String {
 
 // Spec: docs/specs/run-launch.md#admission-and-custody
 /// Two related graph lanes hold one checkout at once, then commit separate
-/// paths while each commit leaves the other lane's staged change untouched.
+/// paths from private Git views. One history publishes; the divergent sibling
+/// is refused and retained, never replacing the winner.
 fn shared_worktree_writers_commit_disjoint_paths() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -2395,6 +2396,9 @@ fn shared_worktree_writers_commit_disjoint_paths() -> Result {
     assert_eq!(code(&base), 0, "{base:?}");
     let base = rig.execute(&git, &["commit", "-qm", "shared writer base"], None)?;
     assert_eq!(code(&base), 0, "{base:?}");
+    let base_tip = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
+    assert_eq!(code(&base_tip), 0, "{base_tip:?}");
+    let base_tip = String::from_utf8(base_tip.stdout.bytes)?.trim().to_owned();
 
     let worktree = rig.project.join(".worktrees/shared-writer");
     let added = rig.execute(
@@ -2447,11 +2451,9 @@ fn shared_worktree_writers_commit_disjoint_paths() -> Result {
         )
         .map_err(|error| format!("{error}; {}", writer_fixture_diagnostics(&rig)))?;
     let checkpoint = &settled.checkpoint;
-    assert_eq!(settled.exit(), 0, "{}", writer_fixture_diagnostics(&rig));
     let nodes = checkpoint["nodes"].as_array().ok_or("graph nodes")?;
     assert_eq!(nodes.len(), 2, "{checkpoint}");
     for node in nodes {
-        assert_eq!(node["state"], "succeeded", "{node}");
         assert!(node["attempts"][0]["attempt_ref"].is_string(), "{node}");
     }
     for marker in [
@@ -2464,58 +2466,68 @@ fn shared_worktree_writers_commit_disjoint_paths() -> Result {
     ] {
         assert!(
             barrier.join(marker).is_file(),
-            "provider did not reach {marker}"
+            "provider did not reach {marker}: {}",
+            writer_fixture_diagnostics(&rig)
         );
     }
 
+    // Both lanes ran concurrently from the same tip. Publication is a
+    // compare-and-swap of the host branch: one lane's history lands, the other
+    // diverges, is refused, and keeps its commits in its private Git. Neither
+    // replaces the other, and there is no automatic rebase.
+    let succeeded = nodes
+        .iter()
+        .filter(|node| node["state"] == "succeeded")
+        .count();
+    assert_eq!(
+        succeeded,
+        1,
+        "{checkpoint}; {}",
+        writer_fixture_diagnostics(&rig)
+    );
+    let mut retained = 0;
+    for entry in fs::read_dir(rig.state.join("attempts"))?.flatten() {
+        let Ok(bytes) = fs::read(entry.path().join("terminal-pending.json")) else {
+            continue;
+        };
+        let record: Value = serde_json::from_slice(&bytes)?;
+        if record["state"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("retained in the attempt's private Git"))
+        {
+            retained += 1;
+        }
+    }
+    assert_eq!(retained, 1, "{}", writer_fixture_diagnostics(&rig));
+
     let worktree_arg = worktree.to_str().ok_or("worktree path")?;
-    let second_commit = rig.execute(
-        &git,
-        &[
-            "-C",
-            worktree_arg,
-            "show",
-            "--pretty=format:",
-            "--name-only",
-            "HEAD",
-        ],
-        None,
-    )?;
-    assert_eq!(code(&second_commit), 0, "{second_commit:?}");
-    assert_eq!(
-        String::from_utf8(second_commit.stdout.bytes)?.trim(),
-        "second-owned.txt"
-    );
-    let first_commit = rig.execute(
-        &git,
-        &[
-            "-C",
-            worktree_arg,
-            "show",
-            "--pretty=format:",
-            "--name-only",
-            "HEAD^",
-        ],
-        None,
-    )?;
-    assert_eq!(code(&first_commit), 0, "{first_commit:?}");
-    assert_eq!(
-        String::from_utf8(first_commit.stdout.bytes)?.trim(),
-        "first-owned.txt"
-    );
-    let status = rig.execute(&git, &["-C", worktree_arg, "status", "--short"], None)?;
-    assert_eq!(code(&status), 0, "{status:?}");
+    let show = |revision: &str| -> Result<String> {
+        let output = rig.execute(
+            &git,
+            &[
+                "-C",
+                worktree_arg,
+                "show",
+                "--pretty=format:",
+                "--name-only",
+                revision,
+            ],
+            None,
+        )?;
+        assert_eq!(code(&output), 0, "{output:?}");
+        Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
+    };
+    let winner = show("HEAD")?;
     assert!(
-        status.stdout.bytes.is_empty(),
-        "uncommitted shared-worktree changes: {status:?}"
+        ["first-owned.txt", "second-owned.txt"].contains(&winner.as_str()),
+        "the published commit holds exactly one lane's path: {winner}"
     );
+    let parent = rig.execute(&git, &["-C", worktree_arg, "rev-parse", "HEAD^"], None)?;
+    assert_eq!(code(&parent), 0, "{parent:?}");
     assert_eq!(
-        fs::read_to_string(worktree.join("first-owned.txt"))?,
-        "first lane change\n"
-    );
-    assert_eq!(
-        fs::read_to_string(worktree.join("second-owned.txt"))?,
-        "second lane change\n"
+        String::from_utf8(parent.stdout.bytes)?.trim(),
+        base_tip,
+        "the published commit sits directly on the shared base"
     );
     Ok(())
 }

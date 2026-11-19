@@ -1084,6 +1084,9 @@ impl RunStore {
             Err(RunError::Filesystem(error)) if retired && error.is_not_found() => None,
             Err(error) => return Err(error),
         };
+        // A refused import keeps its private Git as evidence whatever the
+        // index holds, and its tip may be absent from the objects.
+        let import_refused = object_import_refused(attempt, recovery.scope())?.is_some();
         if let Some(writer) = &launch
             && let Some(source) = &source
             && let Some((slot, _)) = &writer.custody
@@ -1094,18 +1097,27 @@ impl RunStore {
                 .and_then(std::path::Path::file_name)
                 .and_then(std::ffi::OsStr::to_str)
                 .ok_or(RunError::Validation("private Git candidate identity"))?;
-            custody::register_attempt_index(
+            let registered = custody::register_attempt_index(
                 slot,
                 recovery.scope(),
                 attempt,
                 candidate,
                 writer.branch.as_str(),
-            )
-            .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
+            );
+            match registered {
+                Ok(()) => {}
+                // The private Git is retained whole, so an index that cannot be
+                // registered must not keep a refused import unsettled forever.
+                Err(error) if import_refused => {
+                    use std::io::Write as _;
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: private attempt index not registered; retaining the private Git: {error}"
+                    );
+                }
+                Err(error) => return Err(RunError::Io(std::io::Error::other(error))),
+            }
         }
-        // A refused import keeps its private Git as evidence whatever the
-        // index holds, and its tip may be absent from the objects.
-        let import_refused = object_import_refused(attempt, recovery.scope())?.is_some();
         // Staged paths that cannot be read (a tip missing from the objects, say)
         // are not proof of a clean index: keep the private Git rather than
         // discard what may hold staged work.
@@ -6662,7 +6674,14 @@ mod writer_recovery_tests {
                     ..Default::default()
                 },
             )?;
-            fixture.lane_git(&["add", "budget-work.txt"])?;
+            // Stage in the attempt's private index: it, not the host's native
+            // index, is the writer's staging area.
+            crate::delivery_tests::private_git(
+                &fixture,
+                &candidate,
+                &git,
+                &["add", "budget-work.txt"],
+            )?;
             std::fs::remove_file(fixture.writer.worktree.join("budget-work.txt"))?;
             assert!(
                 !launch.budget_clean_point(&attempt)?,

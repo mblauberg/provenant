@@ -584,32 +584,36 @@ pub(super) fn writer_backend_available() -> Result<bool> {
     }
 }
 
-/// Run Git against the writer's shared ref and object view, bound to its worktree.
+/// Run Git against a live attempt's private ref and object view, bound to its
+/// worktree. Every writer attempt commits to its own candidate Git; settlement
+/// verifies and publishes it into the host branch.
 fn lane_git(
     rig: &TestRig,
     context: &provenant_run::ExecutionContext,
+    attempt: provenant_core::AttemptId,
     worktree: &Path,
     args: &[&str],
 ) -> Result<String> {
     let git =
         provenant_os::git::resolve_git_executable(None).ok_or("Git executable unavailable")?;
-    let request =
-        provenant_run::resolve_writer(context.state_root.as_path(), &rig.project, worktree)?;
-    let writer =
-        provenant_run::prepare_writer(&request, context.state_root.as_path(), context.project_id)?;
-    let shared = provenant_confinement::permissions::worktree_git_state_path(
-        &fs::canonicalize(&rig.home)?,
-        &writer.worktree,
-        &writer.branch,
-    )?;
-    let common = shared.join("git-common");
+    let candidate = context
+        .state_root
+        .as_path()
+        .join("attempts")
+        .join(attempt.to_string())
+        .join("tmp/candidate-0");
+    let common = candidate.join("git-common");
     let binding = [
         format!("GIT_DIR={}", common.display()),
         format!("GIT_COMMON_DIR={}", common.display()),
         format!("GIT_WORK_TREE={}", worktree.display()),
         format!(
             "GIT_OBJECT_DIRECTORY={}",
-            shared.join("git-objects").display()
+            candidate.join("git-objects").display()
+        ),
+        format!(
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES={}",
+            rig.project.join(".git/objects").display()
         ),
         "GIT_AUTHOR_NAME=Lane".to_owned(),
         "GIT_AUTHOR_EMAIL=lane@example.invalid".to_owned(),
