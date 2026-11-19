@@ -13,11 +13,21 @@
 //! probe covers that case. A write dated more than a few minutes in the future
 //! is clock skew, not recent activity, and does not earn the grace.
 //!
+//! A GC pass also removes, whatever the budget allows, a target nothing wrote
+//! within `gc.cargo_target_idle` (30 days by default) and any tombstone an
+//! interrupted removal left. Launch admission removes by budget and floor
+//! alone. Each removal names its path, owning worktree and reason. The census
+//! stops only at the caller's deadline, a preview included, and resumes from
+//! its saved cursor.
+//!
 //! Sizes are allocated bytes (`st_blocks * 512`) throughout. Both target roots
 //! are counted, including payload outside a recognised profile, so incomplete
 //! seeds and first builds cannot escape the budget. Explicit GC and launch
 //! admission share the same collector.
-use provenant_confinement::cache::is_cache_digest;
+use provenant_confinement::cache::{
+    CACHE_ACTIVITY_MARKER, CARGO_TARGET_NAMES, CargoLockProbe, LastUseRecheck, OwnerStatus,
+    TARGET_LAST_USED, is_cache_digest, read_last_use_stamp,
+};
 use provenant_os::disk::DiskReport;
 use provenant_os::fs::{
     Directory, FileKind, ForeignLock, LockMode, Metadata, PayloadTree, effective_uid,
@@ -36,7 +46,7 @@ use std::{
 const CARGO_LOCK: &str = ".cargo-lock";
 #[cfg(test)]
 const LOCKS: [&str; 3] = [CARGO_LOCK, ".cargo-build-lock", ".cargo-artifact-lock"];
-const TARGETS: [&str; 2] = ["target", "target-lint"];
+const TARGETS: [&str; 2] = CARGO_TARGET_NAMES;
 const GC_TOMBSTONES: [(&str, &str); 2] = [
     (".provenant-gc-target", "target"),
     (".provenant-gc-target-lint", "target-lint"),
@@ -50,10 +60,8 @@ const PREVIEW_ENTRIES: usize = 4096;
 const PREVIEW_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
 const SURVEY_SNAPSHOT_LIMIT: u64 = 16 * 1024 * 1024;
 const SURVEY_SNAPSHOT_PREFIX: &str = "gc-cache-survey-";
-const SURVEY_SNAPSHOT_VERSION: u8 = 5;
+const SURVEY_SNAPSHOT_VERSION: u8 = 6;
 const MAX_SNAPSHOT_FILES_PER_SWEEP: usize = 128;
-const TARGET_LAST_USED: &str = ".provenant-last-used";
-const CACHE_ACTIVITY_MARKER: &str = ".provenant-cache-activity";
 /// How far ahead of now a modification time may be and still count as a
 /// recent write.
 const FUTURE_SKEW_NS: i128 = 5 * 60 * 1_000_000_000;
@@ -66,11 +74,84 @@ pub struct Limits {
     pub free_floor: u64,
     pub grace_seconds: u64,
     pub idle_seconds: u64,
+    /// Collect a target nothing wrote for this long, whatever the budget
+    /// allows. GC passes `gc.cargo_target_idle`; launch admission passes
+    /// `None` and removes only what the budget and floor require.
+    pub target_idle_seconds: Option<u64>,
+}
+
+/// Why GC removed a target, or would remove it on a dry run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetReason {
+    /// Nothing under the target was written within `gc.cargo_target_idle`.
+    Idle,
+    /// The least recently used target while the cache exceeded its budget or
+    /// the volume was below its free-space floor.
+    OverBudget,
+    /// A detached target left by an interrupted removal.
+    Tombstone,
+    /// The worktree the target was made for no longer exists.
+    WorktreeGone,
+    /// Another directory stands where the worktree was; the cache key records
+    /// the original, so nothing builds in this target again.
+    WorktreeReplaced,
+    /// An incremental session older than `gc.idle` inside a kept target.
+    StaleSession,
+}
+
+/// Which evidence dated a target's last use: the `.provenant-last-used`
+/// stamp a launch or seed writes, or the newest file time under the target.
+/// The newer wins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LastUse {
+    Stamp,
+    FileTimes,
+}
+
+impl LastUse {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stamp => "last-use stamp",
+            Self::FileTimes => "file times",
+        }
+    }
+}
+
+impl TargetReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::OverBudget => "over budget",
+            Self::Tombstone => "tombstone",
+            Self::WorktreeGone => "worktree gone",
+            Self::WorktreeReplaced => "worktree replaced",
+            Self::StaleSession => "stale incremental session",
+        }
+    }
+}
+
+/// One removed target or incremental session and the worktree that owned it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct TargetRemoval {
+    pub path: PathBuf,
+    /// The recorded owner of a private lane cache; `None` for a retired shared
+    /// target, which several worktrees used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<PathBuf>,
+    pub reason: TargetReason,
+    /// Which evidence dated the target's last use; `None` for a tombstone or
+    /// an incremental session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_use: Option<LastUse>,
+    /// Allocated bytes, which include blocks shared with APFS clones.
+    pub bytes: u64,
 }
 
 #[derive(Debug, Default, serde::Serialize)]
 pub struct Report {
-    pub removed: Vec<PathBuf>,
+    pub removed: Vec<TargetRemoval>,
     /// Bytes reclaimed, or reclaimable on a dry run.
     pub bytes: u64,
     /// Allocated bytes under managed target roots after the sweep.
@@ -78,6 +159,12 @@ pub struct Report {
     pub budget_bytes: u64,
     pub budget_setting: String,
     pub budget_source: String,
+    /// `gc.cargo_target_idle` as configured and where it came from; empty when
+    /// the caller collects by budget alone.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub target_idle_setting: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub target_idle_source: String,
     /// Target trees kept because custody or any profile lock is held or unprobeable.
     pub busy: Vec<PathBuf>,
     /// Target trees kept because they were written within the grace.
@@ -94,6 +181,24 @@ pub struct Report {
     pub cursor_detail: Option<String>,
     #[serde(skip)]
     more_candidates: bool,
+    /// The batch ended on an idle target while older-first candidates remain
+    /// unsurveyed, so the next batch may hold more idle targets.
+    #[serde(skip)]
+    idle_pending: bool,
+}
+
+impl Report {
+    /// The removed paths, in removal order.
+    pub fn removed_paths(&self) -> Vec<PathBuf> {
+        self.removed
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect()
+    }
+
+    fn removed_contains(&self, path: &Path) -> bool {
+        self.removed.iter().any(|entry| entry.path == path)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -103,9 +208,24 @@ struct Candidate {
     target: String,
     display: PathBuf,
     bytes: u64,
+    /// Last use: the newer of the stamp and the newest file time.
     newest: i128,
     target_modified_ns: i128,
     identity: (u64, u64),
+    /// What became of a private target's worktree; `None` for a shared target
+    /// or an unreadable owner.
+    owner: Option<OwnerStatus>,
+    last_use: LastUse,
+}
+
+impl Candidate {
+    /// Tombstones and targets whose worktree is gone or replaced sort before
+    /// every other target, so the oldest-first walk meets every target a GC
+    /// pass removes unconditionally before the first one it may keep.
+    fn rank(&self) -> u8 {
+        let orphaned = matches!(self.owner, Some(OwnerStatus::Gone | OwnerStatus::Replaced));
+        u8::from(!(is_gc_tombstone(&self.target) || orphaned))
+    }
 }
 
 impl serde::Serialize for Candidate {
@@ -115,7 +235,7 @@ impl serde::Serialize for Candidate {
     {
         use serde::ser::SerializeTuple;
 
-        let mut tuple = serializer.serialize_tuple(7)?;
+        let mut tuple = serializer.serialize_tuple(9)?;
         tuple.serialize_element(&self.kind)?;
         tuple.serialize_element(&self.cache)?;
         tuple.serialize_element(&self.target)?;
@@ -123,6 +243,10 @@ impl serde::Serialize for Candidate {
         tuple.serialize_element(&self.newest)?;
         tuple.serialize_element(&self.target_modified_ns)?;
         tuple.serialize_element(&self.identity)?;
+        // One digit each: names would grow a 100k-key census past its
+        // sidecar limit.
+        tuple.serialize_element(&owner_code(self.owner))?;
+        tuple.serialize_element(&last_use_code(self.last_use))?;
         tuple.end()
     }
 }
@@ -168,6 +292,28 @@ impl<'de> serde::Deserialize<'de> for Candidate {
                 let identity = sequence
                     .next_element()?
                     .ok_or_else(|| A::Error::invalid_length(6, &self))?;
+                let owner = sequence
+                    .next_element::<u8>()?
+                    .ok_or_else(|| A::Error::invalid_length(7, &self))
+                    .and_then(|code| {
+                        owner_from_code(code).ok_or_else(|| {
+                            A::Error::invalid_value(
+                                serde::de::Unexpected::Unsigned(code.into()),
+                                &"an owner code from 0 to 4",
+                            )
+                        })
+                    })?;
+                let last_use = sequence
+                    .next_element::<u8>()?
+                    .ok_or_else(|| A::Error::invalid_length(8, &self))
+                    .and_then(|code| {
+                        last_use_from_code(code).ok_or_else(|| {
+                            A::Error::invalid_value(
+                                serde::de::Unexpected::Unsigned(code.into()),
+                                &"a last-use code of 0 or 1",
+                            )
+                        })
+                    })?;
                 Ok(Candidate {
                     kind,
                     cache,
@@ -177,12 +323,45 @@ impl<'de> serde::Deserialize<'de> for Candidate {
                     newest,
                     target_modified_ns,
                     identity,
+                    owner,
+                    last_use,
                 })
             }
         }
 
-        deserializer.deserialize_tuple(7, CandidateVisitor)
+        deserializer.deserialize_tuple(9, CandidateVisitor)
     }
+}
+
+const OWNER_CODES: [Option<OwnerStatus>; 5] = [
+    None,
+    Some(OwnerStatus::Live),
+    Some(OwnerStatus::Foreign),
+    Some(OwnerStatus::Replaced),
+    Some(OwnerStatus::Gone),
+];
+const LAST_USE_CODES: [LastUse; 2] = [LastUse::FileTimes, LastUse::Stamp];
+
+fn owner_code(owner: Option<OwnerStatus>) -> u8 {
+    match owner {
+        None => 0,
+        Some(OwnerStatus::Live) => 1,
+        Some(OwnerStatus::Foreign) => 2,
+        Some(OwnerStatus::Replaced) => 3,
+        Some(OwnerStatus::Gone) => 4,
+    }
+}
+
+fn owner_from_code(code: u8) -> Option<Option<OwnerStatus>> {
+    OWNER_CODES.get(usize::from(code)).copied()
+}
+
+fn last_use_code(last_use: LastUse) -> u8 {
+    u8::from(last_use == LastUse::Stamp)
+}
+
+fn last_use_from_code(code: u8) -> Option<LastUse> {
+    LAST_USE_CODES.get(usize::from(code)).copied()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -210,6 +389,7 @@ struct SurveySnapshot {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct PruneCursor {
+    rank: u8,
     kind: CacheKind,
     cache: String,
     target: String,
@@ -703,8 +883,12 @@ impl TargetProtection {
 }
 
 enum Outcome {
-    Removed,
-    Busy,
+    Removed {
+        worktree: Option<PathBuf>,
+    },
+    /// Kept; the cause is set when a lock probe failed rather than found a
+    /// live build.
+    Busy(Option<String>),
     Recent(Option<(u64, i128)>),
     Interrupted {
         rechecking: Option<MeasureProgress>,
@@ -726,8 +910,15 @@ struct Survey {
 }
 
 impl Survey {
-    fn satisfied(&self, limits: Limits) -> bool {
-        self.total <= limits.max_bytes && self.free >= limits.free_floor
+    /// Nothing to collect: the cache is within budget and floor, and no
+    /// candidate is idle or a tombstone.
+    fn satisfied(&self, limits: Limits, now_ns: i128) -> bool {
+        self.total <= limits.max_bytes
+            && self.free >= limits.free_floor
+            && !self
+                .candidates
+                .iter()
+                .any(|candidate| unconditional_reason(candidate, limits, now_ns).is_some())
     }
     /// The report when nothing is removed.
     fn finish(mut self) -> Report {
@@ -749,8 +940,9 @@ pub fn shared_cache_root(home: &Path) -> PathBuf {
 }
 
 /// Publish managed-target recency even when Cargo reuses every artifact. The
-/// root marker also invalidates an in-progress census after a launch. Custom
-/// paths have no cache authority and are left untouched.
+/// root marker, replaced after the stamp, also invalidates an in-progress
+/// census and tells a removal rechecking its stamps that one may have landed
+/// since. Custom paths have no cache authority and are left untouched.
 pub fn mark_managed_target_use(home: &Path, target: &Path) -> io::Result<bool> {
     let roots = [cache_root(home), shared_cache_root(home)];
     let Some(managed_root) = roots
@@ -763,6 +955,24 @@ pub fn mark_managed_target_use(home: &Path, target: &Path) -> io::Result<bool> {
         .map_err(io::Error::other)?;
     let bytes = format!("{}\n", timestamp.as_micros());
     let root = Directory::open_anchor(managed_root).map_err(io::Error::other)?;
+    let stamped = match Directory::open_anchor(target) {
+        Ok(directory) => {
+            directory
+                .atomic_write(
+                    OsStr::new(TARGET_LAST_USED),
+                    ".provenant-target-use-",
+                    bytes.as_bytes(),
+                    provenant_os::fs::PublishMode::Replace,
+                )
+                .and_then(|publication| publication.require_durable())
+                .map_err(io::Error::other)?;
+            true
+        }
+        Err(error) if error.is_not_found() => false,
+        Err(error) => return Err(io::Error::other(error)),
+    };
+    // After the stamp: a removal that read the stamps before this write sees
+    // the marker change and keeps the target (`LastUseRecheck`).
     root.atomic_write(
         OsStr::new(CACHE_ACTIVITY_MARKER),
         ".provenant-cache-activity-",
@@ -771,21 +981,53 @@ pub fn mark_managed_target_use(home: &Path, target: &Path) -> io::Result<bool> {
     )
     .and_then(|publication| publication.require_durable())
     .map_err(io::Error::other)?;
-    let directory = match Directory::open_anchor(target) {
-        Ok(directory) => directory,
-        Err(error) if error.is_not_found() => return Ok(false),
-        Err(error) => return Err(io::Error::other(error)),
-    };
-    directory
-        .atomic_write(
-            OsStr::new(TARGET_LAST_USED),
-            ".provenant-target-use-",
-            bytes.as_bytes(),
-            provenant_os::fs::PublishMode::Replace,
-        )
-        .and_then(|publication| publication.require_durable())
-        .map_err(io::Error::other)?;
-    Ok(true)
+    Ok(stamped)
+}
+
+/// Stamp every target under a private lane cache as used now: `target` and,
+/// when present, `target-lint`, which shares the cache and its owner.
+/// Seeding stamps the targets it fills so GC dates them from the seed rather
+/// than from cloned file times.
+pub fn mark_cache_targets_used(home: &Path, cache: &Path) -> io::Result<usize> {
+    let mut stamped = 0;
+    for target in TARGETS {
+        stamped += usize::from(mark_managed_target_use(home, &cache.join(target))?);
+    }
+    Ok(stamped)
+}
+
+/// The owner status of a private lane cache; `None` for a shared cache or an
+/// owner that cannot be read, which is reported.
+fn owner_status_of(
+    cache: &PayloadTree,
+    kind: CacheKind,
+    display: &Path,
+    report: &mut Report,
+) -> Option<OwnerStatus> {
+    if kind != CacheKind::Lane {
+        return None;
+    }
+    match provenant_confinement::cache::lane_cargo_cache_owner(cache.directory()) {
+        Ok(owner) => owner.map(|(_, status)| status),
+        Err(error) => {
+            report
+                .errors
+                .push(format!("{}: {error}", display.display()));
+            None
+        }
+    }
+}
+
+/// A target's last use: the newer of its stamp and its newest file time.
+fn last_use(cache: &PayloadTree, target: &str, file_newest: i128) -> (i128, LastUse) {
+    let stamp = cache
+        .child(OsStr::new(target))
+        .ok()
+        .and_then(|directory| read_last_use_stamp(directory.directory()));
+    match stamp {
+        Some(stamp) if stamp >= file_newest => (stamp, LastUse::Stamp),
+        _ => (file_newest, LastUse::FileTimes),
+    }
 }
 
 fn managed_target_relative(target: &Path, root: &Path) -> bool {
@@ -806,33 +1048,81 @@ fn managed_target_relative(target: &Path, root: &Path) -> bool {
 /// The retired shared targets a GC pass found and what it did with them.
 #[derive(Debug, Default, serde::Serialize)]
 pub struct SharedRetirement {
-    /// Every project directory under the retired root. A preview lists them
-    /// without measuring or changing anything.
+    /// Every project directory, and every tombstone an interrupted pass left,
+    /// under the retired root.
     pub found: Vec<PathBuf>,
+    /// Removed, or removable on a dry run.
     pub removed: Vec<PathBuf>,
-    /// Allocated bytes removed.
+    /// Allocated bytes removed, or removable on a dry run.
     pub bytes: u64,
-    /// Kept because a Cargo lock is held or a write falls within the grace:
-    /// a lane launched by an older binary may still build there.
-    pub busy: Vec<PathBuf>,
+    /// Kept, each with its cause: a held Cargo lock, a write within the grace
+    /// (a lane launched by an older binary may still build there) or a probe
+    /// that could not run.
+    pub kept: Vec<RetirementKept>,
     pub errors: Vec<String>,
+    /// The directory the sweep deadline stopped at; the next pass resumes
+    /// with any tombstone first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interrupted_at: Option<PathBuf>,
+    /// The measurement cursor for `interrupted_at`, to hand back through
+    /// `retire_shared_targets`'s `resume` so the next pass continues the walk
+    /// instead of starting it again.
+    #[serde(skip)]
+    pub cursor_detail: Option<String>,
+}
+
+/// Marks a sweep cursor detail as a retirement measurement cursor rather than
+/// a target census epoch; both resume the same retention class.
+const RETIREMENT_CURSOR_PREFIX: &str = "retire:";
+
+/// Whether a sweep cursor detail belongs to shared-target retirement.
+pub fn is_retirement_detail(detail: &str) -> bool {
+    detail.starts_with(RETIREMENT_CURSOR_PREFIX)
+}
+
+/// A retired shared target left in place and why.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RetirementKept {
+    pub path: PathBuf,
+    pub cause: String,
 }
 
 impl SharedRetirement {
     pub fn is_empty(&self) -> bool {
-        self.found.is_empty() && self.errors.is_empty()
+        self.found.is_empty() && self.errors.is_empty() && self.interrupted_at.is_none()
     }
 }
 
-/// Retire the shared targets of the removed `shared` mode. A dry run only
-/// lists them. Otherwise each project directory goes whole once every Cargo
-/// profile lock in it is free and nothing in it was written within the grace;
-/// the locks stay held until it is gone.
+/// Prefix of a retired project directory detached for deletion. Cargo never
+/// builds under it, so a later pass removes it without probing.
+const RETIRED_TOMBSTONE_PREFIX: &str = ".provenant-retired-";
+
+enum Retired {
+    Removed(u64),
+    Kept(String),
+    /// Stopped; the measurement cursor, when the stop came mid-walk.
+    Interrupted(Option<String>),
+}
+
+/// Retire the shared targets of the removed `shared` mode. Tombstones left by
+/// an interrupted pass go first. Each project directory goes whole once every
+/// Cargo profile lock in it is free and nothing in it was written within the
+/// grace; it is renamed to a tombstone under the held locks before deletion,
+/// so an interrupted deletion never leaves a partial target where Cargo looks.
+/// A dry run probes and measures the same way and changes nothing.
+/// `should_stop` is the sweep deadline and lease; the pass stops between and
+/// within directories and the next one resumes: a tombstone is deleted where
+/// the last pass left it, without measuring, and a project directory's
+/// measurement continues from `resume`, the path and cursor detail the last
+/// pass reported. Every pass therefore makes progress, however large one
+/// directory is.
 pub fn retire_shared_targets(
     home: &Path,
     grace_seconds: u64,
     dry_run: bool,
     now_ns: i128,
+    resume: Option<(&Path, &str)>,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> SharedRetirement {
     let mut report = SharedRetirement::default();
     let base = shared_cache_root(home);
@@ -852,31 +1142,87 @@ pub fn retire_shared_targets(
             return report;
         }
     };
-    let grace = i128::from(grace_seconds).saturating_mul(1_000_000_000);
+    // Only project-key directories and their tombstones; anything else here
+    // is not ours to retire.
+    let mut tombstones = Vec::new();
+    let mut projects = Vec::new();
     for name in names {
-        // Only project-key directories; anything else here is not ours to retire.
-        if !name.to_str().is_some_and(is_cache_digest) {
-            continue;
+        let Some(text) = name.to_str() else { continue };
+        if text
+            .strip_prefix(RETIRED_TOMBSTONE_PREFIX)
+            .is_some_and(is_cache_digest)
+        {
+            tombstones.push(name);
+        } else if is_cache_digest(text) {
+            projects.push(name);
         }
+    }
+    tombstones.sort();
+    projects.sort();
+    let grace = i128::from(grace_seconds).saturating_mul(1_000_000_000);
+    for (name, tombstone) in tombstones
+        .into_iter()
+        .map(|name| (name, true))
+        .chain(projects.into_iter().map(|name| (name, false)))
+    {
         let display = base.join(&name);
-        let Ok(metadata) = root.metadata_at(&name, false) else {
-            continue;
+        if should_stop() {
+            report.interrupted_at = Some(display);
+            break;
+        }
+        let metadata = match root.metadata_at(&name, false) {
+            Ok(metadata) => metadata,
+            Err(error) if error.is_not_found() => continue,
+            Err(error) => {
+                report.kept.push(RetirementKept {
+                    path: display,
+                    cause: error.to_string(),
+                });
+                continue;
+            }
         };
+        // A link, file or another user's directory is never followed or retired.
         if metadata.kind != FileKind::Directory || metadata.uid != effective_uid() {
             continue;
         }
         report.found.push(display.clone());
-        if dry_run {
-            continue;
-        }
-        match retire_one(&root, &name, &metadata, now_ns, grace) {
-            Ok(Some(bytes)) => {
+        let cursor = resume
+            .filter(|(path, _)| *path == display)
+            .and_then(|(_, detail)| detail.strip_prefix(RETIREMENT_CURSOR_PREFIX));
+        let retired = retire_one(
+            &root,
+            &name,
+            &metadata,
+            RetireStep {
+                display: &display,
+                tombstone,
+                dry_run,
+                now_ns,
+                grace,
+                cursor,
+            },
+            should_stop,
+        );
+        match retired {
+            Ok(Retired::Removed(bytes)) => {
                 report.bytes = report.bytes.saturating_add(bytes);
                 report.removed.push(display);
             }
-            Ok(None) => report.busy.push(display),
+            Ok(Retired::Kept(cause)) => report.kept.push(RetirementKept {
+                path: display,
+                cause,
+            }),
+            Ok(Retired::Interrupted(cursor)) => {
+                report.interrupted_at = Some(display);
+                report.cursor_detail =
+                    cursor.map(|cursor| format!("{RETIREMENT_CURSOR_PREFIX}{cursor}"));
+                break;
+            }
             Err(error) => {
-                report.busy.push(display.clone());
+                report.kept.push(RetirementKept {
+                    path: display.clone(),
+                    cause: error.to_string(),
+                });
                 report
                     .errors
                     .push(format!("{}: {error}", display.display()));
@@ -886,43 +1232,91 @@ pub fn retire_shared_targets(
     report
 }
 
-/// Remove one retired project directory, or `None` when it is in use.
+#[derive(Clone, Copy)]
+struct RetireStep<'a> {
+    display: &'a Path,
+    tombstone: bool,
+    dry_run: bool,
+    now_ns: i128,
+    grace: i128,
+    /// Where the last pass's measurement of this directory stopped.
+    cursor: Option<&'a str>,
+}
+
+/// Probe, measure and, unless previewing, remove one retired directory. A
+/// tombstone is already committed to removal, so it is deleted without being
+/// measured; its size is not reported.
 fn retire_one(
     root: &Directory,
     name: &OsStr,
     metadata: &Metadata,
-    now_ns: i128,
-    grace: i128,
-) -> io::Result<Option<u64>> {
-    // The shared mode created these group-readable; narrow through the held
-    // descriptor so the payload claim's privacy check holds.
+    step: RetireStep<'_>,
+    should_stop: &mut dyn FnMut() -> bool,
+) -> io::Result<Retired> {
     let opened = root
         .open_verified_directory(name)
         .map_err(io::Error::other)?;
     if !metadata.same_identity(&opened.metadata().map_err(io::Error::other)?) {
-        return Err(io::Error::other("directory replaced during retirement"));
+        return Ok(Retired::Kept("directory replaced during retirement".into()));
     }
-    opened.make_private().map_err(io::Error::other)?;
-    let metadata = opened.metadata().map_err(io::Error::other)?;
-    drop(opened);
-    let tree = PayloadTree::claim(root, name, &metadata).map_err(io::Error::other)?;
+    let should_stop = std::cell::RefCell::new(should_stop);
+    let keep_going = || !(*should_stop.borrow_mut())();
     // Every Cargo profile lock under the directory, held until it is gone; an
-    // old directory may lack either target.
-    let Some(guards) =
-        provenant_confinement::cache::lock_cargo_profiles(tree.directory(), &|| true)
-    else {
-        return Ok(None);
+    // old directory may lack either target. A tombstone is detached already.
+    let guards = if step.tombstone {
+        Vec::new()
+    } else {
+        match provenant_confinement::cache::lock_cargo_profiles(&opened, &keep_going) {
+            Ok(guards) => guards,
+            Err(CargoLockProbe::Stopped) => return Ok(Retired::Interrupted(None)),
+            Err(probe) => return Ok(Retired::Kept(probe.to_string())),
+        }
     };
-    let (bytes, newest) = measure(&tree, 0, &mut MeasureBudget::new(false))?;
-    if within_grace(newest, now_ns, grace) {
-        return Ok(None);
+    let bytes = if step.tombstone {
+        0
+    } else {
+        let measured = provenant_confinement::cache::measure_tree_with_progress(
+            &opened,
+            step.display,
+            step.cursor,
+            &keep_going,
+        )
+        .map_err(io::Error::other)?;
+        let Some(stats) = measured.stats else {
+            return Ok(Retired::Interrupted(measured.continuation));
+        };
+        if within_grace(stats.newest_modified_ns, step.now_ns, step.grace) {
+            return Ok(Retired::Kept("written within the grace".into()));
+        }
+        stats.allocated_bytes
+    };
+    if step.dry_run {
+        return Ok(Retired::Removed(bytes));
     }
+    // The shared mode created these group-readable; narrow through the held
+    // descriptor so the payload claim's privacy check holds.
+    opened.make_private().map_err(io::Error::other)?;
+    let private = opened.metadata().map_err(io::Error::other)?;
+    drop(opened);
+    let tombstone_name = if step.tombstone {
+        name.to_owned()
+    } else {
+        let mut tombstone = OsString::from(RETIRED_TOMBSTONE_PREFIX);
+        tombstone.push(name);
+        root.rename_noreplace(name, root, &tombstone)
+            .map_err(io::Error::other)?;
+        tombstone
+    };
+    let tree = PayloadTree::claim(root, &tombstone_name, &private).map_err(io::Error::other)?;
     let mut remaining = MAX_ENTRIES;
-    remove_contents_until(&tree, 0, &mut remaining, &mut || false)?;
+    let mut stop = || !keep_going();
+    if !remove_contents_until(&tree, 0, &mut remaining, &mut stop)? {
+        return Ok(Retired::Interrupted(None));
+    }
     drop(tree);
-    root.rmdir(name).map_err(io::Error::other)?;
+    root.rmdir(&tombstone_name).map_err(io::Error::other)?;
     drop(guards);
-    Ok(Some(bytes))
+    Ok(Retired::Removed(bytes))
 }
 
 /// Collect. The walk that measures every profile directory runs without any
@@ -997,7 +1391,7 @@ pub fn collect_with_protection_refresh(
     if !survey.complete {
         return Ok(survey.finish());
     }
-    if survey.satisfied(limits) {
+    if survey.satisfied(limits, wall_ns()?) {
         return Ok(survey.finish());
     }
     if dry_run {
@@ -1065,7 +1459,7 @@ pub fn collect_with_progress(
         return Ok(report);
     }
     let mut snapshot = load_survey_snapshot(host, home, resume_detail, epoch, &mut report);
-    let mut survey = survey_with_progress(home, &mut free, dry_run, &mut snapshot, should_stop);
+    let mut survey = survey_with_progress(home, &mut free, &mut snapshot, should_stop);
     survey.report.budget_bytes = budget.bytes;
     survey.report.budget_setting = budget.setting.clone();
     survey.report.budget_source = budget.source.as_str().to_owned();
@@ -1088,7 +1482,7 @@ pub fn collect_with_progress(
 
     snapshot.completed = survey.candidates.clone();
     snapshot.measuring = None;
-    if survey.satisfied(limits) {
+    if survey.satisfied(limits, wall_ns()?) {
         let mut report = survey.finish();
         trim_with_custody(
             host,
@@ -1187,13 +1581,17 @@ pub fn collect_with_progress(
                     should_stop,
                     Some(&mut snapshot),
                 );
+                let idle_pending = batch.idle_pending;
                 merge_report(&mut aggregate, batch);
                 if aggregate.interrupted_at.is_some() {
                     save_survey_snapshot(host, &mut snapshot, epoch, &mut aggregate);
                     return Ok(aggregate);
                 }
                 let free_now = free().unwrap_or(0);
-                if aggregate.cache_bytes <= limits.max_bytes && free_now >= limits.free_floor {
+                if aggregate.cache_bytes <= limits.max_bytes
+                    && free_now >= limits.free_floor
+                    && !idle_pending
+                {
                     snapshot.prune_cursor = None;
                     snapshot.census_complete = false;
                     snapshot.root_cursor = None;
@@ -1218,8 +1616,7 @@ pub fn collect_with_progress(
                 snapshot.root_cursor = None;
                 snapshot.measuring = None;
                 snapshot.rechecking = None;
-                let mut next =
-                    survey_with_progress(home, &mut free, false, &mut snapshot, should_stop);
+                let mut next = survey_with_progress(home, &mut free, &mut snapshot, should_stop);
                 let next_report = std::mem::take(&mut next.report);
                 aggregate.warnings.extend(next_report.warnings);
                 aggregate.errors.extend(next_report.errors);
@@ -1670,19 +2067,26 @@ pub(crate) fn trim_stale_incremental_sessions_at(
             if report
                 .removed
                 .iter()
-                .any(|path| display_target.starts_with(path))
+                .any(|entry| display_target.starts_with(&entry.path))
             {
                 continue;
             }
 
-            let Some(_target_guards) =
-                provenant_confinement::cache::lock_cargo_profiles(&digest_dir, &|| true)
-            else {
-                if !report.busy.contains(&display_target) {
-                    report.busy.push(display_target);
-                }
-                continue;
-            };
+            let _target_guards =
+                match provenant_confinement::cache::lock_cargo_profiles(&digest_dir, &|| true) {
+                    Ok(guards) => guards,
+                    Err(probe) => {
+                        if let CargoLockProbe::Failed { .. } = probe {
+                            report
+                                .warnings
+                                .push(format!("kept {}: {probe}", display_target.display()));
+                        }
+                        if !report.busy.contains(&display_target) {
+                            report.busy.push(display_target);
+                        }
+                        continue;
+                    }
+                };
 
             let debug_dir = match target_dir.open_verified_directory(OsStr::new("debug")) {
                 Ok(dir) => dir,
@@ -1809,8 +2213,14 @@ pub(crate) fn trim_stale_incremental_sessions_at(
                     });
 
                     if dry_run {
-                        if !report.removed.contains(&session_display) {
-                            report.removed.push(session_display);
+                        if !report.removed_contains(&session_display) {
+                            report.removed.push(TargetRemoval {
+                                path: session_display,
+                                worktree: None,
+                                reason: TargetReason::StaleSession,
+                                last_use: None,
+                                bytes,
+                            });
                             report.bytes = report.bytes.saturating_add(bytes);
                             report.cache_bytes = report.cache_bytes.saturating_sub(bytes);
                         }
@@ -1852,7 +2262,13 @@ pub(crate) fn trim_stale_incremental_sessions_at(
                         drop(tree);
                         match removed {
                             Ok(true) if crate_dir.rmdir(&removal_name).is_ok() => {
-                                report.removed.push(session_display);
+                                report.removed.push(TargetRemoval {
+                                    path: session_display,
+                                    worktree: None,
+                                    reason: TargetReason::StaleSession,
+                                    last_use: None,
+                                    bytes,
+                                });
                                 report.bytes = report.bytes.saturating_add(bytes);
                                 report.cache_bytes = report.cache_bytes.saturating_sub(bytes);
                             }
@@ -1990,7 +2406,6 @@ fn survey(home: &Path, free_space: &mut dyn FnMut() -> io::Result<u64>, preview:
 fn survey_with_progress(
     home: &Path,
     free_space: &mut dyn FnMut() -> io::Result<u64>,
-    preview: bool,
     snapshot: &mut SurveySnapshot,
     should_stop: &mut dyn FnMut() -> bool,
 ) -> Survey {
@@ -2050,8 +2465,10 @@ fn survey_with_progress(
         };
     }
 
-    let mut measurement_budget = MeasureBudget::new(preview);
-    let mut stop = || should_stop() || !measurement_budget.consume();
+    // Only the caller's deadline bounds the census, preview or not: a fixed
+    // entry cap would stop every preview on a real host before it named a
+    // target.
+    let mut stop = || should_stop();
     let mut candidates = snapshot.completed.clone();
     let mut interrupted = None;
     for (root, cache_path, kind) in [
@@ -2077,7 +2494,7 @@ fn survey_with_progress(
         }
     }
     drop(stop);
-    let complete = interrupted.is_none() && !measurement_budget.limited && report.errors.is_empty();
+    let complete = interrupted.is_none() && report.errors.is_empty();
     report.measurement_skipped = !complete;
     if let Some(path) = interrupted {
         report.interrupted_at = Some(path);
@@ -2253,6 +2670,7 @@ fn discover_with_progress(
         let Ok(cache) = PayloadTree::claim(root, &name, &metadata) else {
             continue;
         };
+        let owner = owner_status_of(&cache, kind, &cache_root.join(digest), report);
         let target_start = saved_cursor
             .filter(|cursor| cursor.kind == kind && cursor.offset == entry_offset)
             .map_or(0, |cursor| usize::from(cursor.target_index));
@@ -2299,6 +2717,8 @@ fn discover_with_progress(
                 },
                 target_modified_ns: target_metadata.modified_ns,
                 identity: (target_metadata.device, target_metadata.inode),
+                owner,
+                last_use: LastUse::FileTimes,
             };
             let resumed = snapshot
                 .measuring
@@ -2306,9 +2726,11 @@ fn discover_with_progress(
                 .filter(|state| state_matches(state, &candidate));
             match measure_resumable(&cache, &candidate, &target_metadata, resumed, should_stop) {
                 Ok(MeasureOutcome::Complete { bytes, newest }) => {
+                    let (newest, last_use) = last_use(&cache, &candidate.target, newest);
                     let measured = Candidate {
                         bytes,
                         newest,
+                        last_use,
                         ..candidate
                     };
                     snapshot.census_bytes = snapshot.census_bytes.saturating_add(bytes);
@@ -2400,12 +2822,19 @@ fn retain_lru_candidate(
 }
 
 fn compare_candidates(a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
-    (a.newest, &a.display, a.kind, &a.cache, &a.target)
-        .cmp(&(b.newest, &b.display, b.kind, &b.cache, &b.target))
+    (a.rank(), a.newest, &a.display, a.kind, &a.cache, &a.target).cmp(&(
+        b.rank(),
+        b.newest,
+        &b.display,
+        b.kind,
+        &b.cache,
+        &b.target,
+    ))
 }
 
 fn compare_candidate_cursor(candidate: &Candidate, cursor: &PruneCursor) -> std::cmp::Ordering {
     (
+        candidate.rank(),
         candidate.newest,
         &candidate.display,
         candidate.kind,
@@ -2413,6 +2842,7 @@ fn compare_candidate_cursor(candidate: &Candidate, cursor: &PruneCursor) -> std:
         &candidate.target,
     )
         .cmp(&(
+            cursor.rank,
             cursor.newest,
             &cursor.display,
             cursor.kind,
@@ -2457,7 +2887,9 @@ fn measure_resumable(
             modified_ns: target_metadata.modified_ns,
             offset: Default::default(),
             bytes: target_metadata.allocated,
-            newest: target_metadata.modified_ns,
+            // The root's own time moves whenever the stamp is replaced, so
+            // only its entries date the target; an empty root dates itself.
+            newest: i128::MIN,
         }],
     });
     while !progress.stack.is_empty() {
@@ -2499,9 +2931,14 @@ fn measure_resumable(
                 parent.bytes = parent.bytes.saturating_add(completed.bytes);
                 parent.newest = parent.newest.max(completed.newest);
             } else {
+                let newest = if completed.newest == i128::MIN {
+                    completed.modified_ns
+                } else {
+                    completed.newest
+                };
                 return Ok(MeasureOutcome::Complete {
                     bytes: completed.bytes,
-                    newest: completed.newest,
+                    newest,
                 });
             }
             continue;
@@ -2516,7 +2953,10 @@ fn measure_resumable(
         let current = &mut progress.stack[frame_index];
         current.offset = next_offset;
         current.bytes = current.bytes.saturating_add(child_metadata.allocated);
-        current.newest = current.newest.max(child_metadata.modified_ns);
+        // The stamp dates the target through its content, not its file time.
+        if !(frame_path.is_empty() && name == OsStr::new(TARGET_LAST_USED)) {
+            current.newest = current.newest.max(child_metadata.modified_ns);
+        }
         if child_metadata.kind == FileKind::Directory {
             let mut path = current.path.clone();
             path.push(encode_component(&name));
@@ -2629,8 +3069,15 @@ fn prune_with_progress(
                 0
             }
         });
+    let mut last_reason = None;
+    let mut drained = true;
     for candidate in candidates.into_iter().skip(start) {
-        if total <= limits.max_bytes && free >= limits.free_floor {
+        // Oldest first, so once a candidate is neither idle nor a tombstone
+        // none after it is, and only the budget and floor can select it.
+        let unconditional = unconditional_reason(&candidate, limits, now_ns);
+        last_reason = unconditional;
+        if unconditional.is_none() && total <= limits.max_bytes && free >= limits.free_floor {
+            drained = false;
             break;
         }
         if should_stop() {
@@ -2639,6 +3086,7 @@ fn prune_with_progress(
                 snapshot.prune_cursor = Some(prune_cursor(&candidate, true));
             }
             report.interrupted_at = Some(candidate.display);
+            drained = false;
             break;
         }
         let tombstone = is_gc_tombstone(&candidate.target);
@@ -2663,6 +3111,7 @@ fn prune_with_progress(
         match remove(
             root,
             &candidate,
+            unconditional,
             dry_run,
             now_ns,
             grace,
@@ -2670,7 +3119,7 @@ fn prune_with_progress(
             should_stop,
             resumed,
         ) {
-            Ok(Outcome::Removed) => {
+            Ok(Outcome::Removed { worktree }) => {
                 if let Some(snapshot) = snapshot.as_deref_mut()
                     && snapshot
                         .rechecking
@@ -2687,7 +3136,14 @@ fn prune_with_progress(
                         .retain(|saved| !same_candidate(saved, &candidate));
                 }
                 report.bytes = report.bytes.saturating_add(candidate.bytes);
-                report.removed.push(candidate.display.clone());
+                let reason = unconditional.unwrap_or(TargetReason::OverBudget);
+                report.removed.push(TargetRemoval {
+                    path: candidate.display.clone(),
+                    worktree,
+                    reason,
+                    last_use: (reason != TargetReason::Tombstone).then_some(candidate.last_use),
+                    bytes: candidate.bytes,
+                });
                 free = if dry_run {
                     free.saturating_add(candidate.bytes)
                 } else {
@@ -2695,7 +3151,7 @@ fn prune_with_progress(
                 };
                 advance_prune_cursor(snapshot.as_deref_mut(), &candidate);
             }
-            Ok(Outcome::Busy) => {
+            Ok(Outcome::Busy(cause)) => {
                 if let Some(snapshot) = snapshot.as_deref_mut()
                     && snapshot
                         .rechecking
@@ -2703,6 +3159,11 @@ fn prune_with_progress(
                         .is_some_and(|state| state_matches(state, &candidate))
                 {
                     snapshot.rechecking = None;
+                }
+                if let Some(cause) = cause {
+                    report
+                        .warnings
+                        .push(format!("kept {}: {cause}", candidate.display.display()));
                 }
                 report.busy.push(candidate.display.clone());
                 advance_prune_cursor(snapshot.as_deref_mut(), &candidate);
@@ -2739,6 +3200,7 @@ fn prune_with_progress(
                     None => {
                         report.measurement_skipped = true;
                         report.interrupted_at = Some(candidate.display.clone());
+                        drained = false;
                         if let Some(snapshot) = snapshot.as_deref_mut() {
                             snapshot.completed.clear();
                             snapshot.census_bytes = 0;
@@ -2774,6 +3236,7 @@ fn prune_with_progress(
                 }
                 report.measurement_skipped = true;
                 report.interrupted_at = Some(candidate.display);
+                drained = false;
                 break;
             }
             Err(error) => {
@@ -2793,12 +3256,14 @@ fn prune_with_progress(
             }
         }
     }
+    report.idle_pending = more_candidates && drained && last_reason.is_some();
     report.cache_bytes = total;
     report
 }
 
 fn prune_cursor(candidate: &Candidate, inclusive: bool) -> PruneCursor {
     PruneCursor {
+        rank: candidate.rank(),
         kind: candidate.kind,
         cache: candidate.cache.clone(),
         target: candidate.target.clone(),
@@ -2823,6 +3288,26 @@ fn advance_prune_cursor(snapshot: Option<&mut SurveySnapshot>, candidate: &Candi
         None => snapshot.prune_cursor = Some(candidate_cursor),
         _ => {}
     }
+}
+
+/// Why a GC pass removes this candidate whatever the budget allows, if it does.
+/// Launch admission passes no idle age and removes by budget alone.
+fn unconditional_reason(
+    candidate: &Candidate,
+    limits: Limits,
+    now_ns: i128,
+) -> Option<TargetReason> {
+    let idle = limits.target_idle_seconds?;
+    if is_gc_tombstone(&candidate.target) {
+        return Some(TargetReason::Tombstone);
+    }
+    match candidate.owner {
+        Some(OwnerStatus::Gone) => return Some(TargetReason::WorktreeGone),
+        Some(OwnerStatus::Replaced) => return Some(TargetReason::WorktreeReplaced),
+        _ => {}
+    }
+    let idle_ns = i128::from(idle).saturating_mul(1_000_000_000);
+    (now_ns.saturating_sub(candidate.newest) >= idle_ns).then_some(TargetReason::Idle)
 }
 
 fn grace_ns(limits: Limits) -> i128 {
@@ -2882,6 +3367,7 @@ fn discover(
         let Ok(cache) = PayloadTree::claim(root, &name, &metadata) else {
             continue;
         };
+        let owner = owner_status_of(&cache, kind, &cache_root.join(digest), report);
         for (target_name, logical_name) in TARGETS
             .into_iter()
             .map(|name| (name, name))
@@ -2902,20 +3388,25 @@ fn discover(
             };
             let display = cache_root.join(digest).join(logical_name);
             match measure(&target_tree, 0, budget) {
-                Ok((bytes, newest)) => candidates.push(Candidate {
-                    kind,
-                    cache: digest.to_owned(),
-                    target: target_name.to_owned(),
-                    display,
-                    bytes,
-                    newest: if target_name == logical_name {
-                        newest
-                    } else {
-                        i128::MIN
-                    },
-                    target_modified_ns: metadata.modified_ns,
-                    identity: (metadata.device, metadata.inode),
-                }),
+                Ok((bytes, newest)) => {
+                    let (newest, last_use) = last_use(&cache, target_name, newest);
+                    candidates.push(Candidate {
+                        kind,
+                        cache: digest.to_owned(),
+                        target: target_name.to_owned(),
+                        display,
+                        bytes,
+                        newest: if target_name == logical_name {
+                            newest
+                        } else {
+                            i128::MIN
+                        },
+                        target_modified_ns: metadata.modified_ns,
+                        identity: (metadata.device, metadata.inode),
+                        owner,
+                        last_use,
+                    });
+                }
                 Err(error) => report
                     .errors
                     .push(format!("{}: {error}", display.display())),
@@ -2957,7 +3448,13 @@ fn measure(
     }
     let metadata = directory.metadata().map_err(io::Error::other)?;
     let mut bytes = if depth == 0 { metadata.allocated } else { 0 };
-    let mut newest = metadata.modified_ns;
+    // As in `measure_resumable`: the root's own time and the stamp's file time
+    // do not date the target.
+    let mut newest = if depth == 0 {
+        i128::MIN
+    } else {
+        metadata.modified_ns
+    };
     for name in directory_names(directory, budget)? {
         if budget.preview_limited() {
             return Ok((bytes, i128::MAX));
@@ -2968,7 +3465,9 @@ fn measure(
             Err(error) => return Err(io::Error::other(error)),
         };
         bytes = bytes.saturating_add(metadata.allocated);
-        newest = newest.max(metadata.modified_ns);
+        if !(depth == 0 && name == OsStr::new(TARGET_LAST_USED)) {
+            newest = newest.max(metadata.modified_ns);
+        }
         if metadata.kind == FileKind::Directory {
             let child = match directory.child(&name) {
                 Ok(child) => child,
@@ -2980,6 +3479,9 @@ fn measure(
             newest = newest.max(child_newest);
         }
     }
+    if depth == 0 && newest == i128::MIN {
+        newest = metadata.modified_ns;
+    }
     Ok((bytes, newest))
 }
 
@@ -2989,6 +3491,7 @@ fn measure(
 fn remove(
     root: &Directory,
     candidate: &Candidate,
+    expected: Option<TargetReason>,
     dry_run: bool,
     now_ns: i128,
     grace: i128,
@@ -3001,12 +3504,32 @@ fn remove(
         .map_err(io::Error::other)?;
     let cache = PayloadTree::claim(root, OsStr::new(&candidate.cache), &metadata)
         .map_err(io::Error::other)?;
-    let owner = if candidate.kind == CacheKind::Lane {
-        provenant_confinement::cache::lane_cargo_cache_owner_path(cache.directory())
+    let (owner, status) = if candidate.kind == CacheKind::Lane {
+        provenant_confinement::cache::lane_cargo_cache_owner(cache.directory())
             .map_err(io::Error::other)?
+            .unzip()
     } else {
-        None
+        (None, None)
     };
+    // An owner-based reason holds only while the owner is still gone or
+    // replaced; a worktree that came back keeps its target.
+    let owner_reason = match expected {
+        Some(TargetReason::WorktreeGone) => Some(OwnerStatus::Gone),
+        Some(TargetReason::WorktreeReplaced) => Some(OwnerStatus::Replaced),
+        _ => None,
+    };
+    if let Some(required) = owner_reason
+        && status != Some(required)
+    {
+        return Ok(Outcome::Busy(Some(format!(
+            "its worktree is no longer {}",
+            if required == OwnerStatus::Gone {
+                "gone"
+            } else {
+                "replaced"
+            }
+        ))));
+    }
     if (candidate.kind == CacheKind::Lane && owner.is_none())
         || protection.protects(
             candidate.kind,
@@ -3014,41 +3537,38 @@ fn remove(
             owner.as_deref(),
         )
     {
-        return Ok(Outcome::Busy);
+        return Ok(Outcome::Busy(None));
     }
     let name = OsStr::new(&candidate.target);
     let target_metadata = match cache.metadata_at(name) {
         Ok(metadata) => metadata,
-        Err(error) if error.is_not_found() => return Ok(Outcome::Busy),
+        Err(error) if error.is_not_found() => return Ok(Outcome::Busy(None)),
         Err(error) => return Err(io::Error::other(error)),
     };
     if target_metadata.kind != FileKind::Directory
         || (target_metadata.device, target_metadata.inode) != candidate.identity
     {
-        return Ok(Outcome::Busy);
+        return Ok(Outcome::Busy(None));
     }
-    let interrupted = std::cell::Cell::new(false);
     let guards = {
         let should_stop = std::cell::RefCell::new(&mut *should_stop);
-        let keep_going = || {
-            let stop = (*should_stop.borrow_mut())();
-            interrupted.set(interrupted.get() || stop);
-            !interrupted.get()
-        };
+        let keep_going = || !(*should_stop.borrow_mut())();
         provenant_confinement::cache::lock_cargo_profiles(cache.directory(), &keep_going)
     };
-    let Some(_guards) = guards else {
-        return Ok(if interrupted.get() {
-            Outcome::Interrupted {
+    let _guards = match guards {
+        Ok(guards) => guards,
+        Err(CargoLockProbe::Stopped) => {
+            return Ok(Outcome::Interrupted {
                 rechecking: None,
                 detached: false,
-            }
-        } else {
-            Outcome::Busy
-        });
+            });
+        }
+        Err(CargoLockProbe::Held(_)) => return Ok(Outcome::Busy(None)),
+        Err(probe) => return Ok(Outcome::Busy(Some(probe.to_string()))),
     };
+    let removed = Outcome::Removed { worktree: owner };
     if dry_run {
-        return Ok(Outcome::Removed);
+        return Ok(removed);
     }
     let target = cache.child(name).map_err(io::Error::other)?;
     if is_gc_tombstone(&candidate.target) {
@@ -3061,12 +3581,16 @@ fn remove(
         }
         drop(target);
         cache.rmdir(name).map_err(io::Error::other)?;
-        return Ok(Outcome::Removed);
+        return Ok(removed);
     }
 
-    let (bytes, newest) =
+    let (bytes, recheck) =
         match measure_resumable(&cache, candidate, &target_metadata, resumed, should_stop)? {
-            MeasureOutcome::Complete { bytes, newest } => (bytes, newest),
+            MeasureOutcome::Complete { bytes, newest } => (
+                bytes,
+                LastUseRecheck::read(root, cache.directory(), &[&candidate.target], newest)
+                    .map_err(io::Error::other)?,
+            ),
             MeasureOutcome::Interrupted(state) => {
                 return Ok(Outcome::Interrupted {
                     rechecking: Some(state),
@@ -3075,6 +3599,7 @@ fn remove(
             }
             MeasureOutcome::Changed => return Ok(Outcome::Recent(None)),
         };
+    let newest = recheck.newest();
     if bytes != candidate.bytes || newest != candidate.newest || within_grace(newest, now_ns, grace)
     {
         return Ok(Outcome::Recent(Some((bytes, newest))));
@@ -3089,9 +3614,14 @@ fn remove(
     let tombstone = gc_tombstone_for(&candidate.target)
         .ok_or_else(|| io::Error::other("unknown Cargo target name"))?;
     match cache.metadata_at(OsStr::new(tombstone)) {
-        Ok(_) => return Ok(Outcome::Busy),
+        Ok(_) => return Ok(Outcome::Busy(None)),
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(io::Error::other(error)),
+    }
+    // A launch or seed that stamped the target after the recheck read its
+    // stamp keeps it for a later pass.
+    if !recheck.still_current(root).map_err(io::Error::other)? {
+        return Ok(Outcome::Recent(None));
     }
     cache
         .directory()
@@ -3113,7 +3643,7 @@ fn remove(
     cache
         .rmdir(OsStr::new(tombstone_name))
         .map_err(io::Error::other)?;
-    Ok(Outcome::Removed)
+    Ok(removed)
 }
 
 fn gc_tombstone_for(target: &str) -> Option<&'static str> {
@@ -3179,7 +3709,7 @@ mod tests {
         fs,
         os::unix::{
             ffi::OsStrExt,
-            fs::{DirBuilderExt, PermissionsExt},
+            fs::{DirBuilderExt, MetadataExt, PermissionsExt},
         },
     };
 
@@ -3278,6 +3808,7 @@ mod tests {
             free_floor,
             grace_seconds: 0,
             idle_seconds: 6 * 3600,
+            target_idle_seconds: None,
         }
     }
     fn graced(max_bytes: u64, grace_seconds: u64) -> Limits {
@@ -3319,8 +3850,26 @@ mod tests {
         dir
     }
 
+    fn retire(home: &Path, grace_seconds: u64, dry_run: bool) -> SharedRetirement {
+        retire_shared_targets(home, grace_seconds, dry_run, now(), None, &mut || false)
+    }
+
+    fn kept_paths(report: &SharedRetirement) -> Vec<PathBuf> {
+        let mut kept = report
+            .kept
+            .iter()
+            .map(|kept| kept.path.clone())
+            .collect::<Vec<_>>();
+        kept.sort();
+        kept
+    }
+
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
     #[test]
-    fn retired_shared_targets_are_listed_in_preview_and_removed_on_apply_unless_busy() {
+    fn retired_shared_targets_preview_what_apply_removes_unless_busy() {
         let fixture = Fixture::new();
         let home = fixture.home.path();
         let (idle, busy, recent) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
@@ -3332,29 +3881,171 @@ mod tests {
         for key in [&idle, &busy, &recent] {
             fs::set_permissions(root.join(key), fs::Permissions::from_mode(0o755)).unwrap();
         }
-
-        let preview = retire_shared_targets(home, 60, true, now());
-        assert_eq!(preview.found.len(), 3);
-        assert!(preview.removed.is_empty() && preview.busy.is_empty());
-        assert!(root.join(&idle).exists());
-
         let _held = hold(&busy_profile, CARGO_LOCK);
-        let applied = retire_shared_targets(home, 60, false, now());
+
+        // The preview probes and measures exactly as apply does and changes
+        // nothing, not even the group bits apply narrows.
+        let preview = retire(home, 60, true);
+        assert_eq!(preview.found.len(), 3);
+        assert_eq!(preview.removed, vec![root.join(&idle)]);
+        assert!(preview.bytes > 0);
+        assert_eq!(
+            kept_paths(&preview),
+            vec![root.join(&busy), root.join(&recent)]
+        );
+        assert!(root.join(&idle).exists());
+        assert_eq!(mode(&root.join(&idle)), 0o755);
+
+        let applied = retire(home, 60, false);
         assert_eq!(applied.removed, vec![root.join(&idle)]);
-        assert!(applied.bytes > 0);
+        assert_eq!(applied.bytes, preview.bytes);
         assert!(!root.join(&idle).exists());
-        let mut kept = applied.busy.clone();
-        kept.sort();
-        assert_eq!(kept, vec![root.join(&busy), root.join(&recent)]);
+        assert_eq!(
+            kept_paths(&applied),
+            vec![root.join(&busy), root.join(&recent)]
+        );
+        let cause = |key: &str| {
+            applied
+                .kept
+                .iter()
+                .find(|kept| kept.path == root.join(key))
+                .unwrap()
+                .cause
+                .clone()
+        };
+        assert!(cause(&busy).contains("is held"), "{}", cause(&busy));
+        assert!(cause(&recent).contains("grace"), "{}", cause(&recent));
         assert!(busy_profile.exists() && recent_profile.exists());
         assert!(root.join("not-a-project-key").exists());
         assert!(applied.errors.is_empty(), "{:?}", applied.errors);
+        assert!(fs::read_dir(&root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(RETIRED_TOMBSTONE_PREFIX)
+        }));
+    }
+
+    #[test]
+    fn a_held_lock_under_target_lint_or_a_nested_triple_profile_keeps_the_project() {
+        let fixture = Fixture::new();
+        let home = fixture.home.path();
+        let root = shared_cache_root(home);
+        for (key, profile) in [
+            ("d".repeat(64), "target-lint/debug"),
+            ("e".repeat(64), "target/aarch64-apple-darwin/debug"),
+        ] {
+            let dir = root.join(&key).join(profile);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(CARGO_LOCK), b"").unwrap();
+            let _held = hold(&dir, CARGO_LOCK);
+            for dry_run in [true, false] {
+                let report = retire(home, 0, dry_run);
+                assert!(report.removed.is_empty(), "{profile}: {report:?}");
+                assert_eq!(kept_paths(&report), vec![root.join(&key)], "{profile}");
+                assert!(
+                    report.kept[0].cause.contains("is held"),
+                    "{profile}: {report:?}"
+                );
+            }
+            assert!(dir.exists(), "{profile}");
+            drop(_held);
+            assert_eq!(
+                retire(home, 0, false).removed,
+                vec![root.join(&key)],
+                "{profile}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_project_without_targets_is_retired_and_an_unreadable_one_is_kept_with_its_cause() {
+        let fixture = Fixture::new();
+        let home = fixture.home.path();
+        let root = shared_cache_root(home);
+        let empty = "f".repeat(64);
+        fs::create_dir_all(root.join(&empty)).unwrap();
+        fs::write(root.join(&empty).join("stray"), b"x").unwrap();
+        let unreadable = "1".repeat(64);
+        let target = root.join(&unreadable).join("target");
+        fs::create_dir_all(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o000)).unwrap();
+        // A superuser reads any mode, so the probe cannot fail there.
+        let probe_fails = effective_uid() != 0;
+
+        let report = retire(home, 0, false);
+        // Restore access for the tempdir cleanup; a superuser run removed it.
+        let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o700));
+        assert!(report.removed.contains(&root.join(&empty)), "{report:?}");
+        assert!(!root.join(&empty).exists());
+        if probe_fails {
+            assert_eq!(kept_paths(&report), vec![root.join(&unreadable)]);
+            assert!(
+                report.kept[0].cause.contains("probe failed"),
+                "{}",
+                report.kept[0].cause
+            );
+            assert!(target.exists());
+        }
+    }
+
+    #[test]
+    fn a_symlinked_project_key_is_never_followed_or_retired() {
+        let fixture = Fixture::new();
+        let home = fixture.home.path();
+        let root = shared_cache_root(home);
+        fs::create_dir_all(&root).unwrap();
+        let outside = home.join("outside");
+        fs::create_dir_all(outside.join("target/debug")).unwrap();
+        fs::write(outside.join("target/debug/payload"), b"keep").unwrap();
+        let key = "2".repeat(64);
+        std::os::unix::fs::symlink(&outside, root.join(&key)).unwrap();
+        for dry_run in [true, false] {
+            let report = retire(home, 0, dry_run);
+            assert!(
+                report.found.is_empty() && report.removed.is_empty(),
+                "{report:?}"
+            );
+        }
+        assert!(outside.join("target/debug/payload").exists());
+        assert!(
+            fs::symlink_metadata(root.join(&key))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn retirement_stops_at_the_sweep_deadline_and_resumes_tombstones_first() {
+        let fixture = Fixture::new();
+        let home = fixture.home.path();
+        let root = shared_cache_root(home);
+        let key = "3".repeat(64);
+        shared_profile(home, &key, 600);
+        // An interrupted pass left this detached; it goes first and unprobed.
+        let tombstone = root.join(format!("{RETIRED_TOMBSTONE_PREFIX}{}", "4".repeat(64)));
+        fs::create_dir_all(tombstone.join("target/debug")).unwrap();
+        fs::write(tombstone.join("target/debug/payload"), vec![1; 4096]).unwrap();
+
+        let stopped = retire_shared_targets(home, 60, false, now(), None, &mut || true);
+        assert_eq!(stopped.interrupted_at, Some(tombstone.clone()));
+        assert!(stopped.removed.is_empty() && !stopped.is_empty());
+        assert!(tombstone.exists() && root.join(&key).exists());
+
+        let preview = retire(home, 60, true);
+        assert_eq!(preview.removed, vec![tombstone.clone(), root.join(&key)]);
+        let resumed = retire(home, 60, false);
+        assert_eq!(resumed.interrupted_at, None);
+        assert_eq!(resumed.removed, vec![tombstone.clone(), root.join(&key)]);
+        assert!(!tombstone.exists() && !root.join(&key).exists());
     }
 
     #[test]
     fn no_retired_root_reports_nothing() {
         let fixture = Fixture::new();
-        assert!(retire_shared_targets(fixture.home.path(), 0, false, now()).is_empty());
+        assert!(retire(fixture.home.path(), 0, false).is_empty());
     }
 
     #[test]
@@ -3376,7 +4067,7 @@ mod tests {
         )
         .unwrap();
         assert!(!report.measurement_skipped);
-        assert_eq!(report.removed, vec![profile.clone()]);
+        assert_eq!(report.removed_paths(), vec![profile.clone()]);
         assert!(report.bytes >= 4096);
         assert_eq!(report.budget_bytes, 1024);
         assert_eq!(report.budget_setting, "1K");
@@ -3547,6 +4238,8 @@ mod tests {
                 newest: 1_700_000_000_000_000_000,
                 target_modified_ns: 1_700_000_000_000_000_000,
                 identity: (1_234_567, index as u64),
+                owner: Some(OwnerStatus::Live),
+                last_use: LastUse::FileTimes,
             })
             .collect::<Vec<_>>();
         let snapshot = SurveySnapshot {
@@ -3563,6 +4256,18 @@ mod tests {
 
         assert_eq!(decoded.completed.len(), 100_002);
         assert!(encoded.len() < SURVEY_SNAPSHOT_LIMIT as usize);
+        for owner in OWNER_CODES {
+            for last_use in LAST_USE_CODES {
+                let candidate = Candidate {
+                    owner,
+                    last_use,
+                    ..snapshot.completed[0].clone()
+                };
+                let decoded: Candidate =
+                    serde_json::from_slice(&serde_json::to_vec(&candidate).unwrap()).unwrap();
+                assert_eq!((decoded.owner, decoded.last_use), (owner, last_use));
+            }
+        }
     }
 
     #[test]
@@ -3830,6 +4535,523 @@ mod tests {
         assert!(report.busy.iter().any(|path| path == &target), "{report:?}");
         assert!(target.join("deps/payload").is_file());
         Ok(())
+    }
+
+    fn target_idle(max_bytes: u64, idle_seconds: Option<u64>) -> Limits {
+        Limits {
+            target_idle_seconds: idle_seconds,
+            ..limits(max_bytes, 0)
+        }
+    }
+
+    /// Thirty days, as `gc.cargo_target_idle` ships.
+    const IDLE: Option<u64> = Some(30 * 86_400);
+    /// Longer than the fixtures' age, so only an owner reason can apply.
+    const NEVER_IDLE: Option<u64> = Some(200 * 365 * 86_400);
+
+    /// Date every entry of a fixture target at the real wall clock, which
+    /// `collect_with_progress` reads, so it is not idle.
+    fn touch_now(dir: &Path) {
+        let now = std::time::UNIX_EPOCH
+            + std::time::Duration::from_nanos(u64::try_from(wall_ns().unwrap()).unwrap());
+        for path in [
+            dir.join("deps/payload"),
+            dir.join("deps"),
+            dir.to_path_buf(),
+            dir.join(LOCKS[0]),
+            dir.join(LOCKS[1]),
+            dir.join(LOCKS[2]),
+        ] {
+            fs::File::open(path).unwrap().set_modified(now).unwrap();
+        }
+    }
+
+    fn collect_once(
+        state: &Path,
+        home: &Path,
+        limits: Limits,
+        dry_run: bool,
+        budget_bytes: u64,
+        protection: &TargetProtection,
+    ) -> Report {
+        let budget = provenant_config::CargoCacheBudget {
+            bytes: budget_bytes,
+            setting: budget_bytes.to_string(),
+            source: provenant_records::LimitSource::Default,
+        };
+        collect_with_progress(
+            state,
+            home,
+            limits,
+            dry_run,
+            &budget,
+            protection,
+            None,
+            "0000000000000001",
+            &mut || false,
+            &mut || protection.clone(),
+        )
+        .unwrap()
+    }
+
+    fn private_state() -> tempfile::TempDir {
+        let state = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        state
+    }
+
+    fn write_owner(cache: &Path, worktree: &Path, identity: (u64, u64)) {
+        let mut owner = b"provenant-lane-cargo-owner-v2\n".to_vec();
+        owner.extend_from_slice(&identity.0.to_le_bytes());
+        owner.extend_from_slice(&identity.1.to_le_bytes());
+        owner.extend_from_slice(worktree.as_os_str().as_bytes());
+        fs::write(cache.join(".provenant-worktree-owner"), owner).unwrap();
+    }
+
+    impl Fixture {
+        /// Make an existing directory the owner of cache `digit`; `replaced`
+        /// records another identity, as if the worktree was removed and a new
+        /// directory took its path.
+        fn owner(&self, digit: char, replaced: bool) -> PathBuf {
+            let worktree = self.home.path().join(format!("worktree-{digit}"));
+            fs::create_dir_all(&worktree).unwrap();
+            let metadata = fs::metadata(&worktree).unwrap();
+            let inode = metadata.ino() + u64::from(replaced);
+            write_owner(&self.cache(digit), &worktree, (metadata.dev(), inode));
+            worktree
+        }
+        /// A target an interrupted removal detached in cache `digit`.
+        fn tombstone(&self, digit: char) -> PathBuf {
+            let tombstone = self.cache(digit).join(GC_TOMBSTONES[0].0);
+            fs::create_dir_all(tombstone.join("deps")).unwrap();
+            fs::write(tombstone.join("deps/payload"), vec![1; 4096]).unwrap();
+            tombstone
+        }
+    }
+
+    fn reasons(report: &Report) -> Vec<(PathBuf, TargetReason)> {
+        let mut reasons = report
+            .removed
+            .iter()
+            .map(|entry| (entry.path.clone(), entry.reason))
+            .collect::<Vec<_>>();
+        reasons.sort_by(|left, right| left.0.cmp(&right.0));
+        reasons
+    }
+
+    #[test]
+    fn an_idle_target_goes_whatever_the_budget_allows_and_names_its_worktree() {
+        let fixture = Fixture::new();
+        let state = private_state();
+        let idle = fixture.profile('a', "debug", 4096, 100);
+        let worktree = fixture.owner('a', false);
+        let fresh = fixture.profile('b', "debug", 4096, 0);
+        fixture.owner('b', false);
+        touch_now(&fresh);
+        let home = fixture.home.path();
+        let open = TargetProtection::default();
+
+        // Launch admission collects by budget alone: within budget, nothing goes.
+        let admission = collect_once(
+            state.path(),
+            home,
+            target_idle(u64::MAX, None),
+            true,
+            u64::MAX,
+            &open,
+        );
+        assert!(admission.removed.is_empty(), "{admission:?}");
+
+        let preview = collect_once(
+            state.path(),
+            home,
+            target_idle(u64::MAX, IDLE),
+            true,
+            u64::MAX,
+            &open,
+        );
+        assert_eq!(
+            preview.removed,
+            vec![TargetRemoval {
+                path: idle.clone(),
+                worktree: Some(worktree),
+                reason: TargetReason::Idle,
+                last_use: Some(LastUse::FileTimes),
+                bytes: preview.removed[0].bytes,
+            }]
+        );
+        assert!(preview.removed[0].bytes >= 4096);
+        assert!(idle.exists());
+
+        let applied = collect_once(
+            state.path(),
+            home,
+            target_idle(u64::MAX, IDLE),
+            false,
+            u64::MAX,
+            &open,
+        );
+        assert_eq!(applied.removed, preview.removed);
+        assert!(!idle.exists() && fresh.exists());
+    }
+
+    /// A target whose worktree is gone or replaced goes within budget and
+    /// before it is idle, but only after the grace.
+    #[test]
+    fn a_target_whose_worktree_is_gone_or_replaced_goes_within_budget_after_the_grace() {
+        let fixture = Fixture::new();
+        let state = private_state();
+        let gone = fixture.profile('a', "debug", 4096, 100);
+        let replaced = fixture.profile('b', "debug", 4096, 100);
+        fixture.owner('b', true);
+        let live = fixture.profile('c', "debug", 4096, 100);
+        fixture.owner('c', false);
+        let home = fixture.home.path();
+        let open = TargetProtection::default();
+        for target in [&gone, &replaced, &live] {
+            touch_now(target);
+        }
+        let graced = Limits {
+            grace_seconds: 3600,
+            ..target_idle(u64::MAX, NEVER_IDLE)
+        };
+        let report = collect_once(state.path(), home, graced, false, u64::MAX, &open);
+        assert!(report.removed.is_empty(), "{report:?}");
+        assert!(report.recent.contains(&gone) && report.recent.contains(&replaced));
+
+        for (digit, target) in [('a', &gone), ('b', &replaced), ('c', &live)] {
+            let aged = fixture.profile(digit, "debug", 4096, 100);
+            assert_eq!(&aged, target);
+        }
+        let preview = collect_once(state.path(), home, graced, true, u64::MAX, &open);
+        let applied = collect_once(state.path(), home, graced, false, u64::MAX, &open);
+        let expected = vec![
+            (gone.clone(), TargetReason::WorktreeGone),
+            (replaced.clone(), TargetReason::WorktreeReplaced),
+        ];
+        assert_eq!(reasons(&preview), expected);
+        assert_eq!(reasons(&applied), expected);
+        assert!(!gone.exists() && !replaced.exists() && live.exists());
+    }
+
+    #[test]
+    fn over_budget_removals_are_labelled_apart_from_idle_ones() {
+        let fixture = Fixture::new();
+        let state = private_state();
+        let idle = fixture.profile('a', "debug", 4096, 100);
+        fixture.owner('a', false);
+        let fresh = fixture.profile('b', "debug", 4096, 0);
+        fixture.owner('b', false);
+        touch_now(&fresh);
+        let report = collect_once(
+            state.path(),
+            fixture.home.path(),
+            target_idle(0, IDLE),
+            true,
+            0,
+            &TargetProtection::default(),
+        );
+        assert_eq!(
+            reasons(&report),
+            vec![
+                (idle, TargetReason::Idle),
+                (fresh, TargetReason::OverBudget)
+            ]
+        );
+    }
+
+    /// The last-use stamp dates a target whose files are old, and the removal
+    /// says which evidence won.
+    #[test]
+    fn a_newer_last_use_stamp_dates_the_target_over_older_file_times() {
+        let fixture = Fixture::new();
+        let state = private_state();
+        let home = fixture.home.path();
+        let stamped = fixture.profile('a', "debug", 4096, 100);
+        fixture.owner('a', false);
+        let unstamped = fixture.profile('b', "debug", 4096, 100);
+        fixture.owner('b', false);
+        assert!(mark_managed_target_use(home, &stamped).unwrap());
+        let open = TargetProtection::default();
+
+        let idle_only = collect_once(
+            state.path(),
+            home,
+            target_idle(u64::MAX, IDLE),
+            true,
+            u64::MAX,
+            &open,
+        );
+        assert_eq!(
+            reasons(&idle_only),
+            vec![(unstamped.clone(), TargetReason::Idle)]
+        );
+        assert_eq!(idle_only.removed[0].last_use, Some(LastUse::FileTimes));
+
+        let over_budget = collect_once(state.path(), home, target_idle(0, IDLE), true, 0, &open);
+        let stamped_removal = over_budget
+            .removed
+            .iter()
+            .find(|entry| entry.path == stamped)
+            .unwrap();
+        assert_eq!(stamped_removal.reason, TargetReason::OverBudget);
+        assert_eq!(stamped_removal.last_use, Some(LastUse::Stamp));
+    }
+
+    /// `worktree seed-target` stamps every target of the cache it fills,
+    /// `target-lint` included, so the clone's file times do not date it.
+    #[test]
+    fn seeding_stamps_every_target_of_the_cache() {
+        let fixture = Fixture::new();
+        let home = fixture.home.path();
+        let cache = fixture.cache('a');
+        for target in TARGETS {
+            fs::create_dir_all(cache.join(target)).unwrap();
+        }
+        let before = wall_ns().unwrap();
+        assert_eq!(mark_cache_targets_used(home, &cache).unwrap(), 2);
+        for target in TARGETS {
+            let directory = Directory::open_anchor(&cache.join(target)).unwrap();
+            let stamp = read_last_use_stamp(&directory).unwrap();
+            assert!(stamp >= before - 1_000, "{target}: {stamp} < {before}");
+        }
+        // A cache without targets has nothing to stamp, and that is not an error.
+        assert_eq!(
+            mark_cache_targets_used(home, &fixture.cache('b')).unwrap(),
+            0
+        );
+    }
+
+    /// On one fixture holding every reason and every kind of kept target, the
+    /// preview's removals are exactly apply's.
+    #[test]
+    fn the_preview_names_exactly_what_apply_removes() {
+        let fixture = Fixture::new();
+        let state = private_state();
+        let home = fixture.home.path();
+        let gone = fixture.profile('a', "debug", 4096, 100);
+        let replaced = fixture.profile('b', "debug", 4096, 100);
+        fixture.owner('b', true);
+        let idle = fixture.profile('c', "debug", 4096, 100);
+        fixture.owner('c', false);
+        let fresh = fixture.profile('d', "debug", 4096, 0);
+        fixture.owner('d', false);
+        touch_now(&fresh);
+        let held = fixture.profile('e', "debug", 4096, 100);
+        fixture.owner('e', false);
+        let _lock = hold(&held, CARGO_LOCK);
+        fixture.owner('f', false);
+        fixture.tombstone('f');
+        let tombstone_display = cache_root(home).join("f".repeat(64)).join("target");
+        let open = TargetProtection::default();
+        let limits = target_idle(u64::MAX, IDLE);
+
+        let preview = collect_once(state.path(), home, limits, true, u64::MAX, &open);
+        let applied = collect_once(state.path(), home, limits, false, u64::MAX, &open);
+        let expected = {
+            let mut expected = vec![
+                (gone.clone(), TargetReason::WorktreeGone),
+                (replaced.clone(), TargetReason::WorktreeReplaced),
+                (idle.clone(), TargetReason::Idle),
+                (tombstone_display, TargetReason::Tombstone),
+            ];
+            expected.sort_by(|left, right| left.0.cmp(&right.0));
+            expected
+        };
+        assert_eq!(reasons(&preview), expected, "{preview:?}");
+        assert_eq!(reasons(&applied), expected, "{applied:?}");
+        assert_eq!(preview.busy, applied.busy);
+        assert!(fresh.exists() && held.exists());
+    }
+
+    /// Every removal reason yields to the same proofs: a held profile lock, a
+    /// census that finds the worktree occupied, and custody GC could not
+    /// observe each keep the target. Without a hold, each case is removed, so
+    /// the table cannot pass vacuously.
+    #[test]
+    fn every_removal_reason_yields_to_a_held_lock_an_occupied_worktree_and_unknown_custody() {
+        #[derive(Clone, Copy, Debug)]
+        enum Hold {
+            None,
+            Lock,
+            Census,
+            Unknown,
+        }
+        for reason in [
+            TargetReason::WorktreeGone,
+            TargetReason::WorktreeReplaced,
+            TargetReason::Idle,
+            TargetReason::OverBudget,
+            TargetReason::Tombstone,
+        ] {
+            for hold_kind in [Hold::None, Hold::Lock, Hold::Census, Hold::Unknown] {
+                let fixture = Fixture::new();
+                let state = private_state();
+                let home = fixture.home.path();
+                let target = fixture.profile('a', "debug", 4096, 100);
+                let worktree = match reason {
+                    TargetReason::WorktreeGone => PathBuf::from("/fixture/worktree-a"),
+                    TargetReason::WorktreeReplaced => fixture.owner('a', true),
+                    _ => fixture.owner('a', false),
+                };
+                let (limits, budget) = match reason {
+                    TargetReason::OverBudget => {
+                        touch_now(&target);
+                        (target_idle(0, IDLE), 0)
+                    }
+                    TargetReason::Idle => (target_idle(u64::MAX, IDLE), u64::MAX),
+                    _ => (target_idle(u64::MAX, NEVER_IDLE), u64::MAX),
+                };
+                // A tombstone sits beside a live target whose lock guards the cache.
+                let candidate = if reason == TargetReason::Tombstone {
+                    touch_now(&target);
+                    fixture.tombstone('a');
+                    cache_root(home).join("a".repeat(64)).join("target")
+                } else {
+                    target.clone()
+                };
+                let mut protection = TargetProtection::default();
+                let _lock = match hold_kind {
+                    Hold::Lock => Some(hold(&target, CARGO_LOCK)),
+                    Hold::Census => {
+                        protection.worktrees.insert(worktree.clone());
+                        None
+                    }
+                    Hold::Unknown => {
+                        protection.unobserved = true;
+                        None
+                    }
+                    Hold::None => None,
+                };
+                let report = collect_once(state.path(), home, limits, false, budget, &protection);
+                let removed = report
+                    .removed
+                    .iter()
+                    .any(|entry| entry.path == candidate && entry.reason == reason);
+                match hold_kind {
+                    Hold::None => assert!(removed, "{reason:?} not removed: {report:?}"),
+                    _ => {
+                        assert!(
+                            !removed,
+                            "{reason:?} removed despite {hold_kind:?}: {report:?}"
+                        );
+                        assert!(
+                            report.busy.contains(&candidate),
+                            "{reason:?} {hold_kind:?}: {report:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn idle_collection_continues_past_one_lru_batch_within_budget() {
+        let fixture = Fixture::new();
+        let state = private_state();
+        let root = cache_root(fixture.home.path());
+        let count = MAX_LRU_BATCH + 3;
+        for index in 0..count {
+            let cache = root.join(format!("{index:064x}"));
+            fs::create_dir(&cache).unwrap();
+            fs::set_permissions(&cache, fs::Permissions::from_mode(0o700)).unwrap();
+            let worktree = fixture.home.path().join(format!("worktree-{index}"));
+            fs::create_dir(&worktree).unwrap();
+            let metadata = fs::metadata(&worktree).unwrap();
+            write_owner(&cache, &worktree, (metadata.dev(), metadata.ino()));
+            let target = cache.join("target");
+            fs::create_dir_all(&target).unwrap();
+            fs::write(target.join(CARGO_LOCK), b"").unwrap();
+            for path in [target.join(CARGO_LOCK), target] {
+                fs::File::open(path)
+                    .unwrap()
+                    .set_modified(fixed_time())
+                    .unwrap();
+            }
+        }
+        let report = collect_once(
+            state.path(),
+            fixture.home.path(),
+            target_idle(u64::MAX, Some(1)),
+            false,
+            u64::MAX,
+            &TargetProtection::default(),
+        );
+        assert_eq!(report.removed.len(), count, "{report:?}");
+        assert!(
+            report
+                .removed
+                .iter()
+                .all(|entry| entry.reason == TargetReason::Idle)
+        );
+    }
+
+    /// The preview census stops only at the caller's deadline: a fixed entry
+    /// cap once ended every real-host preview before it named a target.
+    #[test]
+    fn a_preview_census_of_a_large_target_completes_and_names_it() {
+        let fixture = Fixture::new();
+        let state = private_state();
+        let target = fixture.profile('a', "debug", 1, 100);
+        for index in 0..5000 {
+            fs::write(target.join(format!("deps/unit-{index:05}")), b"o").unwrap();
+        }
+        let report = collect_once(
+            state.path(),
+            fixture.home.path(),
+            limits(0, 0),
+            true,
+            0,
+            &TargetProtection::default(),
+        );
+        assert!(!report.measurement_skipped, "{report:?}");
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.removed_paths(), vec![target.clone()], "{report:?}");
+        assert_eq!(report.removed[0].reason, TargetReason::OverBudget);
+        assert!(target.exists());
+    }
+
+    /// Each pass continues the last one's measurement or deletion, so a
+    /// retired directory larger than any one pass still goes.
+    #[test]
+    fn a_retired_directory_larger_than_one_pass_is_gone_after_several_passes() {
+        let fixture = Fixture::new();
+        let home = fixture.home.path();
+        let key = "5".repeat(64);
+        let profile = shared_profile(home, &key, 600);
+        for index in 0..600 {
+            fs::write(profile.join(format!("deps/unit-{index:04}")), b"o").unwrap();
+        }
+        let project = shared_cache_root(home).join(&key);
+        let mut resume: Option<(PathBuf, String)> = None;
+        let mut passes = 0;
+        while passes < 60 {
+            passes += 1;
+            let mut calls = 0;
+            let mut stop = || {
+                calls += 1;
+                calls > 150
+            };
+            let report = retire_shared_targets(
+                home,
+                60,
+                false,
+                now(),
+                resume
+                    .as_ref()
+                    .map(|(path, detail)| (path.as_path(), detail.as_str())),
+                &mut stop,
+            );
+            assert!(report.errors.is_empty(), "{report:?}");
+            match report.interrupted_at {
+                Some(path) => resume = report.cursor_detail.map(|detail| (path, detail)),
+                None => break,
+            }
+        }
+        assert!(passes > 2, "the fixture must need several passes");
+        assert!(passes < 60, "retirement made no progress across passes");
+        let root = shared_cache_root(home);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0, "{project:?}");
     }
 
     #[test]
@@ -4134,7 +5356,7 @@ mod tests {
         )
         .unwrap();
         assert!(!resumed.measurement_skipped);
-        assert!(resumed.removed.iter().any(|path| path == &target));
+        assert!(resumed.removed_contains(&target));
         assert!(!cache.join(GC_TOMBSTONES[0].0).exists());
     }
 
@@ -4208,7 +5430,7 @@ mod tests {
         )
         .unwrap();
         assert!(!resumed.measurement_skipped);
-        assert!(resumed.removed.iter().any(|path| path == &target));
+        assert!(resumed.removed_contains(&target));
         assert!(!target.exists());
     }
 
@@ -4239,7 +5461,7 @@ mod tests {
             assert!(debug.join("deps/payload").exists(), "{lock}");
             drop(guard);
             let report = sweep(fixture.home.path(), limits(0, 0), false, now(), &mut plenty);
-            assert_eq!(report.removed, vec![debug.clone()], "{lock}");
+            assert_eq!(report.removed_paths(), vec![debug.clone()], "{lock}");
             assert!(!debug.exists(), "{lock}");
         }
     }
@@ -4267,7 +5489,7 @@ mod tests {
             now(),
             &mut plenty,
         );
-        assert_eq!(report.removed, vec![oldest.clone()]);
+        assert_eq!(report.removed_paths(), vec![oldest.clone()]);
         assert!(!oldest.exists() && middle.exists() && newest.exists());
     }
 
@@ -4340,7 +5562,7 @@ mod tests {
         assert!(preview.cache_bytes >= 8192);
 
         let apply = sweep(fixture.home.path(), limits(0, 0), false, now(), &mut plenty);
-        assert_eq!(apply.removed, vec![target]);
+        assert_eq!(apply.removed_paths(), vec![target]);
         assert!(apply.cache_bytes < preview.cache_bytes);
         assert!(!payload.exists());
     }
@@ -4370,7 +5592,7 @@ mod tests {
             now(),
             &mut plenty,
         );
-        assert_eq!(report.removed, vec![oldest.clone()]);
+        assert_eq!(report.removed_paths(), vec![oldest.clone()]);
         assert!(!oldest.exists() && middle.exists() && newest.exists());
         assert_eq!(report.bytes, oldest_bytes);
         assert!(report.cache_bytes <= before.cache_bytes - oldest_bytes);
@@ -4382,7 +5604,7 @@ mod tests {
             now(),
             &mut plenty,
         );
-        assert_eq!(report.removed, vec![middle.clone()]);
+        assert_eq!(report.removed_paths(), vec![middle.clone()]);
         assert!(newest.exists());
     }
 
@@ -4496,7 +5718,7 @@ mod tests {
         let fixture = Fixture::new();
         let debug = fixture.profile('a', "debug", 4096, 100);
         let report = sweep(fixture.home.path(), limits(0, 0), true, now(), &mut plenty);
-        assert_eq!(report.removed, vec![debug.clone()]);
+        assert_eq!(report.removed_paths(), vec![debug.clone()]);
         assert!(report.bytes >= 4096);
         assert!(debug.join("deps/payload").exists());
         let _free = hold(&debug, CARGO_LOCK);
@@ -4536,7 +5758,7 @@ mod tests {
         let loose = fixture.profile('b', "debug", 4096, 100);
         fs::set_permissions(fixture.cache('b'), fs::Permissions::from_mode(0o755)).unwrap();
         let report = sweep(fixture.home.path(), limits(0, 0), false, now(), &mut plenty);
-        assert_eq!(report.removed, vec![debug.clone()]);
+        assert_eq!(report.removed_paths(), vec![debug.clone()]);
         assert!(outside.path().join("keep").exists());
         assert!(loose.exists());
     }
@@ -4547,7 +5769,7 @@ mod tests {
         let debug = fixture.profile('a', "debug", 4096, 100);
         fs::set_permissions(debug.join("deps"), fs::Permissions::from_mode(0o500)).unwrap();
         let report = sweep(fixture.home.path(), limits(0, 0), false, now(), &mut plenty);
-        assert_eq!(report.removed, vec![debug.clone()]);
+        assert_eq!(report.removed_paths(), vec![debug.clone()]);
         assert!(!debug.exists());
     }
 
@@ -4572,7 +5794,7 @@ mod tests {
             assert!(outcome);
             assert!(debug.exists());
             let report = collect(state.path(), fixture.home.path(), limits(0, 0), false).unwrap();
-            assert_eq!(report.removed, vec![debug.clone()]);
+            assert_eq!(report.removed_paths(), vec![debug.clone()]);
         })
     }
 
@@ -4589,7 +5811,7 @@ mod tests {
             now(),
             &mut plenty,
         );
-        assert_eq!(report.removed, vec![settled.clone()]);
+        assert_eq!(report.removed_paths(), vec![settled.clone()]);
         assert_eq!(report.recent, vec![running.clone()]);
         assert!(report.busy.is_empty());
         assert!(running.join("deps/payload").exists() && !settled.exists());
@@ -4610,7 +5832,7 @@ mod tests {
             now(),
             &mut plenty,
         );
-        assert_eq!(report.removed, vec![running.clone()]);
+        assert_eq!(report.removed_paths(), vec![running.clone()]);
     }
 
     #[test]
@@ -4695,7 +5917,7 @@ mod tests {
             now(),
             &mut plenty,
         );
-        assert_eq!(report.removed, vec![idle_a.clone(), idle_b.clone()]);
+        assert_eq!(report.removed_paths(), vec![idle_a.clone(), idle_b.clone()]);
         assert_eq!(report.busy, vec![busy_a.clone(), busy_b.clone()]);
         assert!(busy_a.exists() && busy_b.exists());
         assert!(report.cache_bytes > cap, "stays over the cap");
@@ -4830,19 +6052,19 @@ mod tests {
         let profile_guard = hold(&target.join("debug"), CARGO_LOCK);
         let locked_target = sweep(fixture.home.path(), test_limits, true, now(), &mut plenty);
         assert!(locked_target.busy.contains(&target));
-        assert!(!locked_target.removed.contains(&old_session));
+        assert!(!locked_target.removed_contains(&old_session));
         drop(profile_guard);
 
         let preview = sweep(fixture.home.path(), test_limits, true, now(), &mut plenty);
-        assert!(preview.removed.contains(&old_session));
-        assert!(!preview.removed.contains(&recent_session));
+        assert!(preview.removed_contains(&old_session));
+        assert!(!preview.removed_contains(&recent_session));
         assert!(old_session.exists());
         assert!(recent_session.exists());
 
         let report = sweep(fixture.home.path(), test_limits, false, now(), &mut plenty);
-        assert!(report.removed.contains(&old_session));
+        assert!(report.removed_contains(&old_session));
         assert_eq!(preview.bytes, report.bytes);
-        assert!(!report.removed.contains(&recent_session));
+        assert!(!report.removed_contains(&recent_session));
         assert!(!old_session.exists());
         assert!(recent_session.exists());
 
@@ -4858,7 +6080,7 @@ mod tests {
         let _guard = hold(&inc_dir, "s-locked.lock");
         let locked_preview = sweep(fixture.home.path(), test_limits, true, now(), &mut plenty);
         assert!(locked_preview.busy.contains(&inc_dir));
-        assert!(!locked_preview.removed.contains(&locked_session));
+        assert!(!locked_preview.removed_contains(&locked_session));
         let locked_report = sweep(fixture.home.path(), test_limits, false, now(), &mut plenty);
         assert!(locked_report.busy.contains(&inc_dir));
         assert!(locked_session.exists());
@@ -4867,7 +6089,7 @@ mod tests {
         fs::create_dir_all(&tombstone).unwrap();
         fs::write(tombstone.join("remaining"), b"remaining").unwrap();
         let resumed = sweep(fixture.home.path(), test_limits, false, now(), &mut plenty);
-        assert!(resumed.removed.contains(&tombstone));
+        assert!(resumed.removed_contains(&tombstone));
         assert!(!tombstone.exists());
     }
 }

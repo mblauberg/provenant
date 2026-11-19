@@ -479,6 +479,15 @@ fn concurrent_writers_prepare_their_caches_in_one_home() -> Result<(), Box<dyn s
                     .join(crate::cache::CARGO_CACHE_OWNER)
                     .is_file()
             );
+            assert_eq!(
+                std::fs::read(
+                    authority
+                        .cargo_cache
+                        .path
+                        .join(crate::cache::CACHE_DIRECTORY_TAG)
+                )?,
+                crate::cache::CACHE_DIRECTORY_TAG_CONTENT
+            );
         }
     }
     Ok(())

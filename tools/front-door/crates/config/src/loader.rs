@@ -644,6 +644,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
         "gc.stale_graph_age",
         "gc.graph_checkpoint_days",
         "gc.discard_archive_retention",
+        "gc.cargo_target_idle",
         "gc.free_floor",
         "gc.critical_free",
         "gc.alert_below",
