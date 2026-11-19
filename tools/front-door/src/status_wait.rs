@@ -379,6 +379,7 @@ fn read(
                 *number,
                 &forge_request(deadline, cancel, pr_read_timeout),
                 crate::pr::observer::POLL,
+                *complete,
             ) {
                 Ok(line) => {
                     let line = gate_line(line, watch_head.as_deref());
@@ -1727,9 +1728,9 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                 if detail["status"].is_object() {
                                     let event =
                                         reading_pr_event(*number, watch_head, complete, detail);
-                                    if complete && event.settle == Settle::Unsuccessful {
-                                        // Journal records are bounded. Reconcile through the same
-                                        // observer to obtain every failure and its URL.
+                                    if complete {
+                                        // Journal records are bounded and omit Actions runs.
+                                        // Reconcile through the observer before settling.
                                         read(
                                             source,
                                             edge,
