@@ -2303,7 +2303,7 @@ mod tests {
     #[test]
     fn a_skip_reason_from_a_newer_writer_does_not_make_the_seed_result_unreadable() {
         use crate::target_seed_build::SkipReason;
-        let newer = br#"{"state":"complete","at":"2026-11-19T01:00:00Z","error":null,"projects":[
+        let newer = br#"{"state":"complete","at":"2026-11-19T01:00:00.000000Z","error":null,"projects":[
             {"project":"/a","project_key":"a","state":"skipped","reason":"from_a_newer_build","detail":"d","repair":"r"},
             {"project":"/b","project_key":"b","state":"built"}]}"#;
         let result: SeedResult = serde_json::from_slice(newer).unwrap();
