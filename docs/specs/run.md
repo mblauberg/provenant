@@ -110,8 +110,8 @@ records is bounded, with the omitted count kept.
 `provenant tick` summarises the saved result as counts, for example `seed=ok:1 skipped:1`,
 and adds a bounded note with the cause category and the repair step. The note does not
 expose persisted command output, repository paths or environment values, and does not
-change the tick outcome or retry schedule. Because seeding follows a completed
-collection, an interrupted collection is retried promptly (see
+change the tick outcome or retry schedule. Because seeding follows a complete or partial
+collection and never a failed one, an interrupted collection is retried promptly (see
 [scheduled collection](state.md#retention-keeps-evidence)) and seeding resumes with it.
 - Why: reuse must not introduce incompatible or partially collected build output.
 

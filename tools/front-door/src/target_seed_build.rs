@@ -98,6 +98,10 @@ pub enum SkipReason {
     VerifyBaseUnresolved,
     /// The verify base has no Cargo manifest at the selected workspace.
     WorkspaceAbsentAtBase,
+    /// A reason a newer writer recorded. It decodes so one unknown skip cannot
+    /// make the whole result unreadable.
+    #[serde(other)]
+    Unrecognised,
 }
 
 impl SkipReason {
@@ -106,6 +110,7 @@ impl SkipReason {
             Self::VerifyBaseUnset => "verify.base is unset and cannot be inferred",
             Self::VerifyBaseUnresolved => "its verify base does not resolve to a commit",
             Self::WorkspaceAbsentAtBase => "its verify base has no Cargo manifest at the workspace",
+            Self::Unrecognised => "of a reason this build does not recognise",
         }
     }
 
@@ -119,6 +124,9 @@ impl SkipReason {
             }
             Self::WorkspaceAbsentAtBase => {
                 "Set verify.workspace to a directory that holds a Cargo.toml at the verify base, or land the workspace on the base, then run `provenant worktree seed-build` in that repository."
+            }
+            Self::Unrecognised => {
+                "Run `provenant worktree seed-build` in that repository to see the current cause."
             }
         }
     }

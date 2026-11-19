@@ -160,7 +160,8 @@ On macOS the tick agent schedules collection; other installs schedule
 `provenant tick` themselves. A sweep that fails or is interrupted is retried
 within 15 minutes, then after 1 hour, 4 hours and 16 hours; tick shows
 `gc=retry_pending` with the failure's age and next retry until it completes, and
-the daily deadline moves only on completion. Inspect the tick logs when a sweep
+the daily deadline moves only on completion. A sweep that stopped at its
+budget ends as `partial`, which counts as progress and resumes next sweep. Inspect the tick logs when a sweep
 fails.
 
 ## Detached services and unsettled lanes

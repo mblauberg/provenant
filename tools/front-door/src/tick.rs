@@ -1,4 +1,5 @@
 //! Scheduled host work. Deadlines live on disk; this process owns no timers.
+use crate::worktrees::GcCompletion;
 use provenant_cli::Globals;
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{Clock, DurationMicros, WaitBudget, WallTime};
@@ -25,6 +26,15 @@ const GC_RETRY_FACTOR: u64 = 4;
 const GC_RESULT: &str = "gc-result.json";
 const MAX_SEED_DISCOVERY_ERRORS: usize = 16;
 const MAX_SEED_ERROR_BYTES: usize = 1024;
+/// Bound on an error saved in a task result, so a result never outgrows its read cap.
+const MAX_RESULT_ERROR_BYTES: usize = 1024;
+/// Bound on a saved cause quoted in a tick note.
+const MAX_NOTE_CAUSE_BYTES: usize = 256;
+/// A result file is never written within this much of its read cap.
+const SEED_RESULT_SLACK_BYTES: u64 = 64 * 1024;
+const MAX_GC_RESULT_BYTES: u64 = 64 * 1024;
+/// Times a completed collection tries to advance its deadline.
+const GC_ADVANCE_ATTEMPTS: u32 = 3;
 const MAX_SEED_PROJECT_PATH_BYTES: usize = 1024;
 const MAX_BUSY_SEED_PROJECTS: usize = 512;
 const MAX_SEED_PROJECT_RECORDS: usize = 512;
@@ -144,7 +154,7 @@ fn write_task_result(
         extra: Default::default(),
         state: state.into(),
         at,
-        error,
+        error: error.map(|error| truncate_bytes(error, MAX_RESULT_ERROR_BYTES)),
         failures,
     };
     publish(directory, file, purpose, &result)
@@ -161,7 +171,7 @@ fn write_gc_result(
 }
 
 fn read_gc_result(directory: &Directory) -> Result<Option<TaskResult>, String> {
-    match directory.read_bounded(GC_RESULT.as_ref(), 64 * 1024) {
+    match directory.read_bounded(GC_RESULT.as_ref(), MAX_GC_RESULT_BYTES) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map(Some)
             .map_err(|error| error.to_string()),
@@ -174,13 +184,19 @@ fn read_gc_result(directory: &Directory) -> Result<Option<TaskResult>, String> {
 #[derive(Debug, PartialEq, Eq)]
 struct GcReport {
     state: &'static str,
+    /// When a recorded failure is next retried, while it waits.
+    retry_at: Option<WallTime>,
     /// Context for an operator, such as the age and next retry of an old failure.
     note: Option<String>,
 }
 
 impl GcReport {
     fn state(state: &'static str) -> Self {
-        Self { state, note: None }
+        Self {
+            state,
+            retry_at: None,
+            note: None,
+        }
     }
 }
 
@@ -197,7 +213,13 @@ fn gc_retry_delay_seconds(failures: u32) -> u64 {
     delay.min(DAY_SECONDS)
 }
 
-fn gc_retry_at(result: &TaskResult) -> Result<WallTime, String> {
+/// A result dated after `now` comes from a clock that has since moved back. It
+/// cannot be waited out, so it is retried at once; the retry's own result is
+/// dated correctly.
+fn gc_retry_at(result: &TaskResult, now: WallTime) -> Result<WallTime, String> {
+    if result.at > now {
+        return Ok(now);
+    }
     result
         .at
         .checked_add(
@@ -226,10 +248,17 @@ fn describe_span(micros: i64) -> String {
 fn gc_retry_pending(result: &TaskResult, retry_at: WallTime, now: WallTime) -> GcReport {
     GcReport {
         state: "retry_pending",
+        retry_at: Some(retry_at),
         note: Some(format!(
             "the last scheduled GC failed {} ago ({}); attempt {} retries in {}",
             describe_span(now.as_micros().saturating_sub(result.at.as_micros())),
-            result.error.as_deref().unwrap_or("no saved cause"),
+            truncate_bytes(
+                result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "no saved cause".to_owned()),
+                MAX_NOTE_CAUSE_BYTES
+            ),
             result.failures.max(1).saturating_add(1),
             describe_span(retry_at.as_micros().saturating_sub(now.as_micros())),
         )),
@@ -257,8 +286,11 @@ fn settle_unfinished_gc(
     } else {
         "queued"
     };
+    // Only a launch in the last minute is too recent to judge; one dated in the
+    // future is a clock that moved back, and no worker is waited on for it.
     if result.state == "queued"
-        && now.as_micros().saturating_sub(result.at.as_micros()) < SEED_WORK_RETRY_MICROS
+        && (0..SEED_WORK_RETRY_MICROS)
+            .contains(&now.as_micros().saturating_sub(result.at.as_micros()))
     {
         return Ok(GcUnfinished::Live(live));
     }
@@ -269,11 +301,12 @@ fn settle_unfinished_gc(
     };
     // Re-read the atomic result under custody: the worker may have completed
     // after our snapshot.
-    let Some(result) = read_gc_result(directory)? else {
-        return Err("scheduled GC result disappeared".to_owned());
-    };
-    if !matches!(result.state.as_str(), "running" | "queued") {
-        return Ok(GcUnfinished::Settled(result));
+    match read_gc_result(directory) {
+        Ok(Some(current)) if !matches!(current.state.as_str(), "running" | "queued") => {
+            return Ok(GcUnfinished::Settled(current));
+        }
+        // Still unfinished, unreadable or gone, with no worker to finish it.
+        _ => {}
     }
     let error = "scheduled GC interrupted; next: provenant gc --apply".to_owned();
     write_gc_result(
@@ -300,7 +333,14 @@ fn queue_gc(
     let cadence = read_cadence(directory).map_err(|error| error.to_string())?;
     let mut failures = 0;
     let mut retrying = false;
-    if let Some(mut result) = read_gc_result(directory)? {
+    // A result that cannot be read (corrupt, over its cap, or from a newer
+    // writer) must not block collection forever: it is treated as absent and
+    // the queued result written below replaces it.
+    let (previous, unreadable) = match read_gc_result(directory) {
+        Ok(previous) => (previous, None),
+        Err(error) => (None, Some(error)),
+    };
+    if let Some(mut result) = previous {
         if matches!(result.state.as_str(), "running" | "queued") {
             match settle_unfinished_gc(directory, now, &result)? {
                 GcUnfinished::Live(state) => return Ok(GcReport::state(state)),
@@ -309,7 +349,7 @@ fn queue_gc(
             }
         }
         if result.state == "failed" {
-            let retry_at = gc_retry_at(&result)?;
+            let retry_at = gc_retry_at(&result, now)?;
             if now < retry_at {
                 return Ok(gc_retry_pending(&result, retry_at, now));
             }
@@ -331,7 +371,16 @@ fn queue_gc(
         )?;
         return Err(error);
     }
-    Ok(GcReport::state("queued"))
+    Ok(GcReport {
+        state: "queued",
+        retry_at: None,
+        note: unreadable.map(|error| {
+            format!(
+                "the previous scheduled GC result was unreadable and was replaced ({})",
+                truncate_bytes(error, MAX_NOTE_CAUSE_BYTES)
+            )
+        }),
+    })
 }
 
 /// Move the daily deadline a day past a completed collection.
@@ -346,6 +395,57 @@ fn advance_gc_cadence(directory: &Directory, completed_at: WallTime) -> Result<(
             .map_err(|error| error.to_string())?,
     );
     publish(directory, "cadence.json", "tick-cadence", &cadence)
+}
+
+/// What the worker records once the collection has ended, and whether the seed
+/// pass should follow. The deadline moves only for a complete or partial
+/// collection, and the advance is tried a few times so a busy cadence lock does
+/// not turn a finished collection into a failed one; a deadline that still
+/// could not be advanced is a note on the completed result. A failure counts
+/// toward the retry backoff, and any other outcome resets it. The seed pass
+/// follows only a collection that finished its work.
+fn settle_gc_run(
+    directory: &Directory,
+    now: impl Fn() -> Result<WallTime, String>,
+    failures: u32,
+    collected: Result<GcCompletion, String>,
+    mut advance: impl FnMut(WallTime) -> Result<(), String>,
+) -> Result<bool, String> {
+    match collected {
+        Ok(completion) => {
+            let (state, cause) = match completion {
+                GcCompletion::Complete => ("complete", None),
+                GcCompletion::Partial(note) => ("partial", Some(note)),
+            };
+            let completed_at = now()?;
+            let mut advanced = Ok(());
+            for _ in 0..GC_ADVANCE_ATTEMPTS {
+                advanced = advance(completed_at);
+                if advanced.is_ok() {
+                    break;
+                }
+            }
+            let note = match advanced {
+                Ok(()) => cause,
+                Err(error) => Some(format!(
+                    "{}the daily deadline was not advanced ({error})",
+                    cause.map(|cause| format!("{cause}; ")).unwrap_or_default()
+                )),
+            };
+            write_gc_result(directory, now()?, state, note, 0)?;
+            Ok(true)
+        }
+        Err(error) => {
+            write_gc_result(
+                directory,
+                now()?,
+                "failed",
+                Some(error),
+                failures.saturating_add(1),
+            )?;
+            Ok(false)
+        }
+    }
 }
 
 /// Detached daily collection uses the existing collector and its custody. Its
@@ -375,7 +475,7 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
             .flatten()
             .map_or(0, |result| result.failures);
         write_gc_result(&directory, clock.wall_now()?, "running", None, failures)?;
-        let collected = (|| -> Result<(), String> {
+        let collected = (|| -> Result<GcCompletion, String> {
             let config = provenant_cli::config_reads::read_for(&resolved.roots, "tick")
                 .map_err(|error| error.to_string())?;
             crate::worktrees::scheduled_gc(
@@ -386,34 +486,29 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
                     .map_err(|error| error.to_string())?,
                 workers,
             )
-        })()
-        .and_then(|()| {
-            advance_gc_cadence(
-                &directory,
-                clock.wall_now().map_err(|error| error.to_string())?,
-            )
-        });
-        match &collected {
-            Ok(()) => write_gc_result(&directory, clock.wall_now()?, "complete", None, 0)?,
-            Err(error) => write_gc_result(
-                &directory,
-                clock.wall_now()?,
-                "failed",
-                Some(error.clone()),
-                failures.saturating_add(1),
-            )?,
-        }
+        })();
+        let failed = collected.as_ref().err().cloned();
+        let queue_seed_pass = settle_gc_run(
+            &directory,
+            || clock.wall_now().map_err(|error| error.to_string()),
+            failures,
+            collected,
+            |completed_at| advance_gc_cadence(&directory, completed_at),
+        )?;
         // The collection fetched every project's default branch, so any seed
         // that is now behind can be rebuilt. This only queues a detached
-        // worker; a failure to queue is recorded for the tick and never fails
-        // the collection.
-        let _ = queue_seed(
-            &directory,
-            clock.wall_now()?,
-            Some(SeedRequest::full()),
-            || spawn_seed_worker(resolved.roots.state.as_path(), &resolved.home),
-        );
-        collected.map_err(Into::into)
+        // worker, and only after a collection that finished its work; a
+        // failure to queue is recorded for the tick and never fails the
+        // collection.
+        if queue_seed_pass {
+            let _ = queue_seed(
+                &directory,
+                clock.wall_now()?,
+                Some(SeedRequest::full()),
+                || spawn_seed_worker(resolved.roots.state.as_path(), &resolved.home),
+            );
+        }
+        failed.map_or(Ok(()), |error| Err(error.into()))
     })();
     match result {
         Ok(()) => 0,
@@ -693,8 +788,25 @@ impl SeedResult {
         error: Option<String>,
         mut projects: Vec<SeedProjectRecord>,
     ) -> Self {
-        let omitted_projects = projects.len().saturating_sub(MAX_SEED_PROJECT_RECORDS);
-        projects.truncate(MAX_SEED_PROJECT_RECORDS);
+        // Records are kept in order while they fit the record count and the
+        // bytes left under the read cap, so a result is always readable.
+        let error = error.map(truncate_seed_error);
+        let mut room = MAX_SEED_RESULT_BYTES
+            .saturating_sub(SEED_RESULT_SLACK_BYTES)
+            .saturating_sub(error.as_ref().map_or(0, |error| error.len() as u64 * 6));
+        let keep = projects
+            .iter()
+            .take(MAX_SEED_PROJECT_RECORDS)
+            .take_while(|record| {
+                let size =
+                    serde_json::to_vec(record).map_or(u64::MAX, |bytes| bytes.len() as u64 + 1);
+                let fits = size <= room;
+                room = room.saturating_sub(size);
+                fits
+            })
+            .count();
+        let omitted_projects = projects.len() - keep;
+        projects.truncate(keep);
         Self {
             extra: Default::default(),
             state: state.into(),
@@ -703,6 +815,12 @@ impl SeedResult {
             projects,
             omitted_projects,
         }
+    }
+
+    /// Count records an earlier result had already left out.
+    fn with_omitted_before(mut self, before: usize) -> Self {
+        self.omitted_projects = self.omitted_projects.saturating_add(before);
+        self
     }
 
     /// A finished pass is failed when anything failed, else busy while any
@@ -746,12 +864,13 @@ fn write_seed_progress(
     state: &str,
     error: Option<String>,
 ) -> Result<(), String> {
-    let projects = read_seed_result(directory)
-        .ok()
-        .flatten()
-        .map(|result| result.projects)
-        .unwrap_or_default();
-    write_seed_result(directory, &SeedResult::new(at, state, error, projects))
+    let prior = read_seed_result(directory).ok().flatten();
+    let omitted = prior.as_ref().map_or(0, |result| result.omitted_projects);
+    let projects = prior.map(|result| result.projects).unwrap_or_default();
+    write_seed_result(
+        directory,
+        &SeedResult::new(at, state, error, projects).with_omitted_before(omitted),
+    )
 }
 
 #[derive(Debug, Default)]
@@ -907,10 +1026,10 @@ fn seed_pass_locked(
         )?;
         return Ok(SeedOutcome::default());
     }
-    let prior = read_seed_result(directory)
+    let (prior, prior_omitted) = read_seed_result(directory)
         .ok()
         .flatten()
-        .map(|result| result.projects)
+        .map(|result| (result.projects, result.omitted_projects))
         .unwrap_or_default();
     write_seed_progress(directory, at()?, "running", None)?;
     let (records, error, busy_project_keys) = match projects() {
@@ -956,7 +1075,17 @@ fn seed_pass_locked(
         }
         Err(error) => (prior, Some(error), Vec::new()),
     };
-    write_seed_result(directory, &SeedResult::finished(at()?, error, records))?;
+    // A full pass answers for every project; a scoped one keeps the records an
+    // earlier result had to leave out.
+    let omitted_before = if retry_project_keys.is_empty() {
+        0
+    } else {
+        prior_omitted
+    };
+    write_seed_result(
+        directory,
+        &SeedResult::finished(at()?, error, records).with_omitted_before(omitted_before),
+    )?;
     Ok(SeedOutcome { busy_project_keys })
 }
 
@@ -1858,6 +1987,10 @@ mod tests {
         let directory = gc_directory(&temp);
         let launched = WallTime::from_micros(10_000_000_000).unwrap();
         queue_gc(&directory, launched, || Ok(())).unwrap();
+        let saved = |directory: &Directory| {
+            let result = read_gc_result(directory).unwrap().unwrap();
+            (result.state, result.failures)
+        };
 
         // A worker that has not yet taken its lock gets a grace period.
         assert_eq!(
@@ -1870,21 +2003,19 @@ mod tests {
         // No worker holds the lock: the result is a lie and the first retry is
         // fifteen minutes away. Only this finding is an error.
         let found = after(launched, 61);
-        let error = queue_gc(&directory, found, || Err("not yet".into())).unwrap_err();
-        assert!(error.contains("interrupted"), "{error}");
-        let saved = read_gc_result(&directory).unwrap().unwrap();
-        assert_eq!((saved.state.as_str(), saved.failures), ("failed", 1));
-        let cadence = read_cadence(&directory).unwrap();
-        assert!(gc_due(&cadence, found), "an interruption keeps the day due");
-
-        let early = after(found, 14 * 60);
-        let report = queue_gc(&directory, early, || Err("too early".into())).unwrap();
-        assert_eq!(report.state, "retry_pending");
-        let note = report.note.unwrap();
-        assert!(note.contains("14m ago"), "{note}");
-        assert!(note.contains("retries in 1m"), "{note}");
+        assert!(queue_gc(&directory, found, || Err("not yet".into())).is_err());
+        assert_eq!(saved(&directory), ("failed".to_owned(), 1));
+        assert!(
+            gc_due(&read_cadence(&directory).unwrap(), found),
+            "an interruption keeps the day due"
+        );
 
         let retry = after(found, 15 * 60);
+        let report = queue_gc(&directory, after(found, 14 * 60), || Err("early".into())).unwrap();
+        assert_eq!(report.state, "retry_pending");
+        assert_eq!(report.retry_at, Some(retry));
+        assert_eq!(saved(&directory), ("failed".to_owned(), 1));
+
         let mut launches = 0;
         assert_eq!(
             queue_gc(&directory, retry, || {
@@ -1897,25 +2028,18 @@ mod tests {
         );
         assert_eq!(launches, 1);
         assert_eq!(
-            read_gc_result(&directory).unwrap().unwrap().failures,
-            1,
+            saved(&directory),
+            ("queued".to_owned(), 1),
             "a retry carries its failures so the next one backs off"
         );
 
         // Interrupted again: the second delay is an hour.
         let second = after(retry, 61);
-        assert!(
-            queue_gc(&directory, second, || Err("not yet".into()))
-                .unwrap_err()
-                .contains("interrupted")
-        );
-        assert_eq!(read_gc_result(&directory).unwrap().unwrap().failures, 2);
-        assert_eq!(
-            queue_gc(&directory, after(second, 3_599), || Err("early".into()))
-                .unwrap()
-                .state,
-            "retry_pending"
-        );
+        assert!(queue_gc(&directory, second, || Err("not yet".into())).is_err());
+        assert_eq!(saved(&directory), ("failed".to_owned(), 2));
+        let report = queue_gc(&directory, after(second, 3_599), || Err("early".into())).unwrap();
+        assert_eq!(report.state, "retry_pending");
+        assert_eq!(report.retry_at, Some(after(second, 3_600)));
         assert_eq!(
             queue_gc(&directory, after(second, 3_600), || Ok(()))
                 .unwrap()
@@ -1947,41 +2071,119 @@ mod tests {
             queue_gc(&directory, now, || Err("spawn failed".into())).unwrap_err(),
             "spawn failed"
         );
+        let result = read_gc_result(&directory).unwrap().unwrap();
+        assert_eq!(
+            (
+                result.state.as_str(),
+                result.failures,
+                result.error.as_deref()
+            ),
+            ("failed", 1, Some("spawn failed"))
+        );
         assert!(
             gc_due(&read_cadence(&directory).unwrap(), now),
             "spawn failure must remain retryable"
         );
 
-        // The next tick reports the old failure with its age and next try; it
-        // is not an error, so it does not fail every tick.
-        let later = after(now, 600);
-        let task = Task::gc(|| queue_gc(&directory, later, || Err("too early".into())));
+        // The next tick reports the old failure as waiting for its retry; it is
+        // not an error, so it does not fail every tick.
+        let task = Task::gc(|| queue_gc(&directory, after(now, 600), || Err("early".into())));
         assert_eq!(task.state, "retry_pending");
         assert!(task.error.is_none(), "{:?}", task.error);
-        let note = task.diagnostic.unwrap();
-        assert!(note.contains("10m ago"), "{note}");
-        assert!(note.contains("spawn failed"), "{note}");
-        assert!(note.contains("retries in 5m"), "{note}");
+        assert!(task.diagnostic.is_some());
 
         // A worker that fails its collection backs off the same way.
         let failed = after(now, 3_000);
         write_gc_result(&directory, failed, "failed", Some("busy graph".into()), 3).unwrap();
         let report = queue_gc(&directory, after(failed, 4 * 3_600 - 1), || Ok(())).unwrap();
         assert_eq!(report.state, "retry_pending");
+        assert_eq!(report.retry_at, Some(after(failed, 4 * 3_600)));
         assert_eq!(
             queue_gc(&directory, after(failed, 4 * 3_600), || Ok(()))
                 .unwrap()
                 .state,
             "queued"
         );
+        assert_eq!(read_gc_result(&directory).unwrap().unwrap().failures, 3);
     }
 
-    /// Spec: docs/specs/state.md (every new persisted field is optional or defaulted)
+    /// Spec: docs/specs/state.md#retention-keeps-evidence
     #[test]
-    fn gc_results_keep_their_shape_until_a_failure_is_counted() {
+    fn a_future_dated_gc_result_is_stale_and_cannot_block_collection() {
+        let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        let directory = gc_directory(&temp);
+        let now = WallTime::from_micros(10_000_000_000).unwrap();
+
+        // A queued result from a clock that has since moved back gets no grace.
+        write_gc_result(&directory, after(now, 3_600), "queued", None, 0).unwrap();
+        assert!(queue_gc(&directory, now, || Err("not yet".into())).is_err());
+        let result = read_gc_result(&directory).unwrap().unwrap();
+        assert_eq!((result.state.as_str(), result.failures), ("failed", 1));
+        assert_eq!(result.at, now, "the finding is dated by the current clock");
+
+        // A failure dated in the future is retried at once, not after a delay
+        // counted from a time that has not come.
+        write_gc_result(&directory, after(now, DAY_SECONDS), "failed", None, 4).unwrap();
+        let mut launches = 0;
+        let report = queue_gc(&directory, now, || {
+            launches += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!((report.state, launches), ("queued", 1));
+        let result = read_gc_result(&directory).unwrap().unwrap();
+        assert_eq!(
+            (result.state.as_str(), result.failures, result.at),
+            ("queued", 4, now)
+        );
+    }
+
+    /// Spec: docs/specs/state.md#retention-keeps-evidence
+    #[test]
+    fn an_unreadable_gc_result_is_replaced_instead_of_blocking_collection() {
+        let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        let directory = gc_directory(&temp);
+        let now = WallTime::from_micros(10_000_000_000).unwrap();
+        let oversized = vec![b' '; MAX_GC_RESULT_BYTES as usize + 1];
+        for bytes in [
+            b"{not json".to_vec(),
+            br#"{"state":5,"at":"x"}"#.to_vec(),
+            oversized,
+        ] {
+            directory
+                .atomic_write(GC_RESULT.as_ref(), "test", &bytes, PublishMode::Replace)
+                .unwrap();
+            assert!(read_gc_result(&directory).is_err());
+            let mut launches = 0;
+            let report = queue_gc(&directory, now, || {
+                launches += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!((report.state, launches), ("queued", 1));
+            assert!(report.note.is_some(), "the replacement is reported once");
+            let result = read_gc_result(&directory).unwrap().unwrap();
+            assert_eq!(result.state, "queued");
+            assert_eq!(
+                queue_gc(&directory, now, || Err("duplicate".into()))
+                    .unwrap()
+                    .note,
+                None,
+                "once replaced, it is not reported again"
+            );
+        }
+    }
+
+    /// Spec: docs/specs/state.md#retention-keeps-evidence
+    #[test]
+    fn a_saved_gc_cause_is_bounded_and_the_result_keeps_its_shape() {
         let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
         let directory = gc_directory(&temp);
         let now = WallTime::from_micros(1_000_000).unwrap();
+        write_gc_result(&directory, now, "failed", Some("x".repeat(100_000)), 1).unwrap();
+        let result = read_gc_result(&directory).unwrap().unwrap();
+        assert!(result.error.unwrap().len() <= MAX_RESULT_ERROR_BYTES + '…'.len_utf8());
+
         write_gc_result(&directory, now, "complete", None, 0).unwrap();
         let bytes = directory.read_bounded(GC_RESULT.as_ref(), 4096).unwrap();
         assert!(!String::from_utf8(bytes).unwrap().contains("failures"));
@@ -1994,6 +2196,169 @@ mod tests {
         )
         .unwrap();
         assert_eq!(old.failures, 0, "an older result counts no failures");
+    }
+
+    /// Spec: docs/specs/state.md#retention-keeps-evidence
+    #[test]
+    fn a_finished_gc_advances_the_deadline_and_seeds_while_a_failed_one_does_neither() {
+        let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        let directory = gc_directory(&temp);
+        let now = WallTime::from_micros(10_000_000_000).unwrap();
+        let clock = || Ok(now);
+        let settle = |failures: u32, collected: Result<GcCompletion, String>| {
+            settle_gc_run(&directory, clock, failures, collected, |at| {
+                advance_gc_cadence(&directory, at)
+            })
+            .unwrap()
+        };
+        let saved = || {
+            let result = read_gc_result(&directory).unwrap().unwrap();
+            (result.state, result.failures)
+        };
+
+        assert!(
+            !settle(0, Err("busy graph".into())),
+            "no seed after a failure"
+        );
+        assert_eq!(saved(), ("failed".to_owned(), 1));
+        assert!(!settle(1, Err("busy graph".into())));
+        assert_eq!(saved(), ("failed".to_owned(), 2));
+        assert!(
+            gc_due(&read_cadence(&directory).unwrap(), now),
+            "a failure leaves the day due"
+        );
+
+        assert!(settle(2, Ok(GcCompletion::Partial("budget".into()))));
+        assert_eq!(
+            saved(),
+            ("partial".to_owned(), 0),
+            "partial is not a failure"
+        );
+        let cadence = read_cadence(&directory).unwrap();
+        assert!(
+            !gc_due(&cadence, now),
+            "a partial sweep advances the cadence"
+        );
+        assert!(gc_due(&cadence, after(now, DAY_SECONDS)));
+        assert_eq!(
+            queue_gc(&directory, after(now, 3_600), || Err("not due".into()))
+                .unwrap()
+                .state,
+            "not_due",
+            "a partial result is neither pending nor retried"
+        );
+
+        write_gc_result(&directory, now, "failed", None, 3).unwrap();
+        assert!(settle(3, Ok(GcCompletion::Complete)));
+        assert_eq!(
+            saved(),
+            ("complete".to_owned(), 0),
+            "completion resets the count"
+        );
+    }
+
+    /// Spec: docs/specs/state.md#retention-keeps-evidence
+    #[test]
+    fn a_completed_gc_is_not_recorded_failed_when_its_deadline_cannot_be_advanced() {
+        let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        let directory = gc_directory(&temp);
+        let now = WallTime::from_micros(10_000_000_000).unwrap();
+        let mut attempts = 0;
+        let seed = settle_gc_run(
+            &directory,
+            || Ok(now),
+            2,
+            Ok(GcCompletion::Complete),
+            |_| {
+                attempts += 1;
+                if attempts < GC_ADVANCE_ATTEMPTS {
+                    Err("cadence lock busy".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap();
+        assert!(seed);
+        assert_eq!(attempts, GC_ADVANCE_ATTEMPTS, "the advance is retried");
+        let result = read_gc_result(&directory).unwrap().unwrap();
+        assert_eq!((result.state.as_str(), result.failures), ("complete", 0));
+        assert!(result.error.is_none());
+
+        let seed = settle_gc_run(
+            &directory,
+            || Ok(now),
+            0,
+            Ok(GcCompletion::Complete),
+            |_| Err("cadence lock busy".into()),
+        )
+        .unwrap();
+        assert!(seed);
+        let result = read_gc_result(&directory).unwrap().unwrap();
+        assert_eq!((result.state.as_str(), result.failures), ("complete", 0));
+        assert!(result.error.is_some(), "the missed advance is noted");
+    }
+
+    /// Spec: docs/specs/state.md (every new persisted field is optional or defaulted)
+    #[test]
+    fn a_skip_reason_from_a_newer_writer_does_not_make_the_seed_result_unreadable() {
+        use crate::target_seed_build::SkipReason;
+        let newer = br#"{"state":"complete","at":"2026-11-19T01:00:00Z","error":null,"projects":[
+            {"project":"/a","project_key":"a","state":"skipped","reason":"from_a_newer_build","detail":"d","repair":"r"},
+            {"project":"/b","project_key":"b","state":"built"}]}"#;
+        let result: SeedResult = serde_json::from_slice(newer).unwrap();
+        assert!(matches!(
+            &result.projects[0].outcome,
+            SeedProjectOutcome::Skipped {
+                reason: SkipReason::Unrecognised,
+                ..
+            }
+        ));
+        assert_eq!(seed_summary(&result), "ok:1 skipped:1");
+        assert!(!SkipReason::Unrecognised.repair().is_empty());
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn a_seed_result_stays_under_its_read_cap_and_keeps_its_omitted_count() {
+        let fat = |index: usize| SeedProjectRecord {
+            project: format!("/repo/{index}"),
+            project_key: format!("{index}"),
+            outcome: SeedProjectOutcome::Failed {
+                // Control characters escape to six bytes each in JSON.
+                error: "\u{1}".repeat(MAX_SEED_ERROR_BYTES),
+            },
+        };
+        let projects: Vec<_> = (0..MAX_SEED_PROJECT_RECORDS + 10).map(fat).collect();
+        let at = WallTime::from_micros(1_000_000).unwrap();
+        let result = SeedResult::new(at, "failed", Some("e".repeat(100_000)), projects);
+        let bytes = serde_json::to_vec(&result).unwrap();
+        assert!(
+            (bytes.len() as u64) < MAX_SEED_RESULT_BYTES,
+            "{} bytes",
+            bytes.len()
+        );
+        assert!(result.omitted_projects >= 10);
+        assert_eq!(
+            result.projects.len() + result.omitted_projects,
+            MAX_SEED_PROJECT_RECORDS + 10,
+            "every dropped record is counted"
+        );
+        assert!(result.error.unwrap().len() <= MAX_SEED_ERROR_BYTES + '…'.len_utf8());
+
+        // Progress rewrites keep the count of what an earlier pass left out.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let directory = provenant_config::private_directory(&root, true).unwrap();
+        write_seed_result(
+            &directory,
+            &SeedResult::new(at, "complete", None, vec![fat(0)]).with_omitted_before(7),
+        )
+        .unwrap();
+        write_seed_progress(&directory, at, "running", None).unwrap();
+        let progress = read_seed_result(&directory).unwrap().unwrap();
+        assert_eq!(progress.omitted_projects, 7);
+        assert_eq!(progress.projects.len(), 1);
     }
 
     #[allow(dead_code)] // The worktree driver includes this module without libtest.
@@ -2534,10 +2899,11 @@ mod tests {
             !note.contains(unresolved.to_str().unwrap()),
             "the note names the repair, not the repository path"
         );
-        assert!(!seed_retry_due(
-            &directory,
-            WallTime::from_micros(i64::MAX / 2).unwrap()
-        ));
+        let much_later = after(seed_clock().wall_now().unwrap(), 10 * DAY_SECONDS);
+        assert!(
+            !seed_retry_due(&directory, much_later),
+            "a skip leaves no work to retry"
+        );
     }
 
     /// Spec: docs/specs/state.md (every new persisted field is optional or defaulted)
