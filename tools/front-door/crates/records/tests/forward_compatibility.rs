@@ -346,7 +346,7 @@ fn attempt_record_preserves_digest() -> TestResult {
 #[test]
 fn lane_wait_preserves_digest() -> TestResult {
     let mut value = normalise::<run::LaneWait>(
-        json!({"attempt_id":ID,"lane_class":"writer","waiting_for":{"kind":"provider_silence","silent_for_ms":5}}),
+        json!({"attempt_id":ID,"lane_class":"writer","waiting_for":{"kind":"recovery_worker_refused","used":5,"limit":10}}),
     )?;
     // LaneWaitReason is a closed display sum; like WorkKey it discards unknown fields.
     let reason = value["waiting_for"].clone();

@@ -419,30 +419,6 @@ fn ownership_journal_uses_bounded_decode_and_rejects_invalid_scope() -> TestResu
 }
 
 #[test]
-fn capture_plan_without_silence_uses_registry_default() -> TestResult {
-    let mut stored = serde_json::to_value(CapturePlan::default())?;
-    stored
-        .as_object_mut()
-        .ok_or("capture plan object")?
-        .remove("silence_ms");
-    let plan: CapturePlan = serde_json::from_value(stored)?;
-    assert_eq!(plan.silence_ms, 1_800_000);
-    assert!(!plan.silent(1_799_999, Some(0)));
-    assert!(plan.silent(1_800_000, Some(0)));
-    assert!(!plan.silent(1_800_000, Some(1)));
-    assert!(plan.silent_for_ms(1_800_000, Some(0)).is_some());
-    assert!(
-        CapturePlan {
-            silence_ms: 3_600_001,
-            ..plan
-        }
-        .validate()
-        .is_err()
-    );
-    Ok(())
-}
-
-#[test]
 fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResult {
     let identity = ProcessIdentity {
         boot: "ffffffff-ffff-ffff-ffff-ffffffffffff".into(),

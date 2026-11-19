@@ -221,12 +221,6 @@ fn encode_attempt(record: &AttemptRecord) -> Result<serde_json::Value, serde_jso
     })?;
     object.remove("provider_ms");
     object.insert("provider_seconds".into(), serde_json::to_value(seconds)?);
-    if let Some(silent_for_ms) = record.provider_silent_for_ms.0 {
-        object.insert(
-            "provider_silent_for_ms".into(),
-            serde_json::json!(silent_for_ms),
-        );
-    }
     Ok(value)
 }
 
@@ -235,9 +229,6 @@ fn decode_attempt(mut value: serde_json::Value) -> Result<AttemptRecord, String>
     if object.contains_key("provider_ms") {
         return Err("provider_ms is not a wire field".into());
     }
-    let silent_for_ms = object
-        .remove("provider_silent_for_ms")
-        .and_then(|value| value.as_u64());
     let seconds = object
         .remove("provider_seconds")
         .ok_or("missing provider_seconds")?;
@@ -259,10 +250,7 @@ fn decode_attempt(mut value: serde_json::Value) -> Result<AttemptRecord, String>
         "provider_ms".into(),
         serde_json::to_value(millis).map_err(|error| error.to_string())?,
     );
-    let mut record: AttemptRecord =
-        serde_json::from_value(value).map_err(|error| error.to_string())?;
-    record.provider_silent_for_ms.0 = silent_for_ms;
-    Ok(record)
+    serde_json::from_value(value).map_err(|error| error.to_string())
 }
 
 pub(crate) mod attempt_wire {
@@ -418,28 +406,6 @@ mod tests {
             "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"},"digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
         }))
         .unwrap()
-    }
-
-    #[test]
-    fn live_wire_carries_silence_without_persisting_it() {
-        let mut record = attempt();
-        record.provider_silent_for_ms.0 = Some(1_800_000);
-        let mut other_read = record.clone();
-        other_read.provider_silent_for_ms.0 = None;
-        other_read.process_observation_valid.0 = true;
-        assert_eq!(record, other_read);
-        assert!(
-            serde_json::to_value(&record)
-                .unwrap()
-                .get("provider_silent_for_ms")
-                .is_none()
-        );
-        let wire = encode_attempt(&record).unwrap();
-        assert_eq!(wire["provider_silent_for_ms"], 1_800_000);
-        assert_eq!(
-            decode_attempt(wire).unwrap().provider_silent_for_ms.0,
-            Some(1_800_000)
-        );
     }
 
     #[test]
@@ -666,8 +632,9 @@ mod tests {
                 extra: Default::default(),
                 attempt_id: AttemptId::from_bytes([1; 16]),
                 lane_class: provenant_records::run::LaneClass::Writer,
-                waiting_for: provenant_records::run::LaneWaitReason::ProviderSilence {
-                    silent_for_ms: 3_000,
+                waiting_for: provenant_records::run::LaneWaitReason::RecoveryWorkerRefused {
+                    used: 3,
+                    limit: 10,
                 },
             }],
             attempt: attempt(),
@@ -679,7 +646,7 @@ mod tests {
         );
         let mut malformed = encoded;
         malformed["lane_waits"][0]["waiting_for"] = serde_json::json!({
-            "kind":"provider_silence", "silent_for_ms":"long"
+            "kind":"recovery_worker_refused", "used":"long", "limit":10
         });
         assert!(serde_json::from_value::<RunResult>(malformed).is_err());
         Ok(())

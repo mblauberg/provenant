@@ -1539,7 +1539,6 @@ pub(super) fn safe_input_field(field: &str) -> Option<String> {
         "ci_scope",
         "preset",
         "isolation",
-        "supervision",
         "receipts",
         "write_roots",
         "digest",

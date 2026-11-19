@@ -80,22 +80,6 @@ pub fn capture_plan(task: &TaskRequest, limits: &provenant_records::LaneLimits) 
             CapturePlan::default().stdout
         },
         wall_ms: enforced(&limits.deadline_seconds).saturating_mul(1000),
-        // Minimal supervision (the `light` preset) marks silence at the
-        // longest interval the registry allows; it still never kills for it.
-        silence_ms: if task
-            .profile
-            .knobs
-            .get("lanes.supervision")
-            .and_then(serde_json::Value::as_str)
-            == Some("minimal")
-        {
-            3_600_000
-        } else {
-            task.profile
-                .knob_u64("lanes.silence_seconds")
-                .unwrap_or(1800)
-                .saturating_mul(1000)
-        },
         token_budget: enforced(&limits.token_budget),
         budget_action: limits.budget_policy.clone().unwrap_or_default().action,
         // Writers only: a fresh attempt continues a writer's retained

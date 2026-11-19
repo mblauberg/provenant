@@ -1048,12 +1048,6 @@ impl Driver<'_> {
     ) -> Result<()> {
         let mut warnings = Vec::new();
         let mut omitted_warnings = 0_u64;
-        let resource_sample_interval = hooks
-            .resource_sample_interval
-            .unwrap_or(crate::process_tree::DEFAULT_SAMPLE_INTERVAL)
-            .max(Duration::from_millis(1));
-        let resource_sample_interval_ms =
-            u64::try_from(resource_sample_interval.as_millis()).unwrap_or(u64::MAX);
         // Keep the original inode and path even if the caller later removes
         // its state. A rename alone must not end a publication retry.
         let writer_evidence_identity = DirectoryIdentity::of(&self.writer_dir).ok();
@@ -1165,7 +1159,10 @@ impl Driver<'_> {
                     self.reservation.scope.attempt,
                     // Without a profile the lane has no sandbox mark to test.
                     self.profile_file.is_some(),
-                    resource_sample_interval,
+                    hooks
+                        .resource_sample_interval
+                        .unwrap_or(crate::process_tree::DEFAULT_SAMPLE_INTERVAL)
+                        .max(Duration::from_millis(1)),
                 )
             });
         if write_record(
@@ -1238,7 +1235,6 @@ impl Driver<'_> {
         let mut capture_drain_truncated = false;
         let mut last_checkpoint = None;
         let mut last_observation_ms: Option<u64> = None;
-        let mut last_cpu_observation_ms = 0;
         let mut last_disk_sample_ms = None;
         let mut disk_warning_active = false;
         let mut last_cancel_ms = None;
@@ -1248,14 +1244,9 @@ impl Driver<'_> {
             .watch_cancellation_directory(&self.attempt)
             .is_ok();
         let mut signal_pending = false;
-        let mut last_stdout_bytes = 0_u64;
-        let mut last_stderr_bytes = 0_u64;
-        let mut last_output_ms = None;
+        let mut last_output_bytes = 0_u64;
         let mut last_output_checkpoint_ms = None;
         let mut last_output_at: Option<WallTime> = None;
-        let mut provider_cpu_micros = None;
-        let mut previous_cpu_micros = None;
-        let mut last_cpu_progress_ms = None;
         let mut census_warning_active = false;
         let mut last_full_census_ms: Option<u64> = None;
         let mut last_census_ms: Option<u64> = None;
@@ -1309,37 +1300,18 @@ impl Driver<'_> {
                 out.read(&mut child.stdout);
                 err.read(&mut child.stderr);
             }
-            let stdout_bytes = out.outcome().total_bytes;
-            let stderr_bytes = err.outcome().total_bytes;
-            let output_progress =
-                stdout_bytes > last_stdout_bytes || stderr_bytes > last_stderr_bytes;
-            if output_progress {
-                last_output_ms = Some(now);
-                if last_output_checkpoint_ms.is_none_or(|last| now.saturating_sub(last) >= 5_000) {
-                    last_output_at = wall_now();
-                    last_output_checkpoint_ms = Some(now);
-                }
+            // The board shows when a lane last wrote output, at 5 s granularity.
+            let output_bytes = out
+                .outcome()
+                .total_bytes
+                .saturating_add(err.outcome().total_bytes);
+            if output_bytes != last_output_bytes
+                && last_output_checkpoint_ms.is_none_or(|last| now.saturating_sub(last) >= 5_000)
+            {
+                last_output_bytes = output_bytes;
+                last_output_at = wall_now();
+                last_output_checkpoint_ms = Some(now);
             }
-            last_stdout_bytes = stdout_bytes;
-            last_stderr_bytes = stderr_bytes;
-            let cpu_sample_due =
-                now.saturating_sub(last_cpu_observation_ms) >= resource_sample_interval_ms;
-            let cpu_progress = if cpu_sample_due {
-                last_cpu_observation_ms = now;
-                provider_cpu_micros = self.provider_cpu_micros();
-                let progressed = provider_cpu_micros
-                    .zip(previous_cpu_micros)
-                    .is_some_and(|(current, previous)| current > previous);
-                if let Some(current) = provider_cpu_micros {
-                    previous_cpu_micros = Some(current);
-                    if progressed {
-                        last_cpu_progress_ms = Some(now);
-                    }
-                }
-                progressed
-            } else {
-                false
-            };
             if io_ready && let Some(stdin) = child.stdin.as_mut() {
                 if input_offset == input.len() {
                     child.stdin = None;
@@ -1526,8 +1498,6 @@ impl Driver<'_> {
                 Event::ContextHandoff
             } else if newly_terminal {
                 Event::Terminal
-            } else if output_progress || cpu_progress {
-                Event::Progress
             } else {
                 Event::Silence
             };
@@ -1781,19 +1751,10 @@ impl Driver<'_> {
                     census_complete: bool,
                     priority: Option<i32>,
                     phase: Phase,
-                    stdout_bytes: u64,
-                    stderr_bytes: u64,
-                    last_output_ms: Option<u64>,
                     last_output_at: Option<WallTime>,
                     observed_at: Option<WallTime>,
-                    last_progress_ms: Option<u64>,
-                    silent: bool,
-                    silent_for_ms: Option<u64>,
-                    provider_cpu_micros: Option<u64>,
-                    last_cpu_progress_ms: Option<u64>,
                     publication_pending: bool,
                 }
-                let silent_for_ms = plan.silent_for_ms(now, state.last_progress_ms());
                 let mut observed = Observed {
                     schema_version: 1,
                     scope: self.reservation.scope,
@@ -1804,16 +1765,8 @@ impl Driver<'_> {
                         && self.reservation.omitted_descendants == 0,
                     priority: child.priority,
                     phase: state.phase(),
-                    stdout_bytes: out.outcome().total_bytes,
-                    stderr_bytes: err.outcome().total_bytes,
-                    last_output_ms,
                     last_output_at,
                     observed_at: None,
-                    last_progress_ms: state.last_progress_ms(),
-                    silent: silent_for_ms.is_some(),
-                    silent_for_ms,
-                    provider_cpu_micros,
-                    last_cpu_progress_ms,
                     publication_pending: false,
                 };
                 let system_publisher = SystemExitPublisher;
@@ -1845,16 +1798,14 @@ impl Driver<'_> {
             }
             let watches = child.watches();
             // Pipes, signals and process events wake the reactor. Timer-only
-            // work wakes at its next deadline: the cancellation backstop,
-            // the one-second CPU sample and the five-second full census.
+            // work wakes at its next deadline: the cancellation backstop
+            // and the five-second full census.
             let wait_now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let wall_ms = wall_started.zip(wall_now()).map_or(0, |(began, current)| {
                 u64::try_from(current.as_micros().saturating_sub(began.as_micros()) / 1000)
                     .unwrap_or(0)
             });
-            let mut wait_ms = last_cpu_observation_ms
-                .saturating_add(resource_sample_interval_ms)
-                .saturating_sub(wait_now);
+            let mut wait_ms = FULL_CENSUS_INTERVAL_MS;
             if let Some(last) = last_full_census_ms {
                 wait_ms = wait_ms.min(
                     last.saturating_add(FULL_CENSUS_INTERVAL_MS)

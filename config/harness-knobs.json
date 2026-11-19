@@ -5,7 +5,6 @@
       "lanes.max_concurrency",
       "lanes.max_concurrency_read_only",
       "lanes.max_depth",
-      "lanes.silence_seconds",
       "lanes.context_handoff_tokens",
       "lanes.token_budget",
       "lanes.budget_action",
@@ -18,7 +17,6 @@
       "lanes.writer_dirty",
       "lanes.gh_budget",
       "lanes.isolation",
-      "lanes.supervision",
       "lanes.receipts",
       "routing.exclude",
       "routing.graph_exclude",
@@ -645,12 +643,6 @@
       "effect": "Maximum graph launch retry delay, at least the first delay.",
       "trade_off": "A longer cap reduces repeated load but slows recovery."
     },
-    "lanes.silence_seconds": {
-      "type": "int", "min": 1, "max": 3600, "default": 1800, "status": "wired",
-      "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/custody.rs, tools/front-door/crates/supervisor/src/guardian.rs",
-      "effect": "Mark a provider observation silent after this many seconds without output or CPU progress; never kill it for silence.",
-      "trade_off": "Lower marks silence sooner; the process census and observation cadence stays unchanged."
-    },
     "lanes.context_handoff_tokens": {
       "type": "int", "min": 0, "max": 2000000, "default": 0, "status": "wired",
       "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/guardian.rs",
@@ -748,15 +740,6 @@
       "reader": "tools/front-door/src/fabric/owner.rs",
       "effect": "Whether an unpinned read-only graph node reads its bound checkout live (shared). A read-only lane pinned to a commit always gets an immutable source view, under every setting. Writers always keep one writer per worktree, so shared is refused on a writer node. Set per graph node with `attempt.isolation` or the `light` preset (`attempt.preset`),.",
       "trade_off": "shared starts faster but the lane sees edits made while it runs. Secret redaction and object integrity are unchanged."
-    },
-    "lanes.supervision": {
-      "type": "enum",
-      "values": ["standard", "minimal"],
-      "default": "standard",
-      "status": "wired",
-      "reader": "tools/front-door/crates/run/src/launch.rs",
-      "effect": "minimal marks a silent provider only after the longest silence interval (one hour) instead of lanes.silence_seconds. Set per graph node with `attempt.supervision` or the `light` preset.",
-      "trade_off": "minimal reports a stalled lane later; deadlines, custody and confinement are unchanged."
     },
     "lanes.receipts": {
       "type": "enum",

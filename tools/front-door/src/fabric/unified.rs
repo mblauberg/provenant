@@ -3658,8 +3658,9 @@ mod tests {
             extra: Default::default(),
             attempt_id: attempt.attempt_id,
             lane_class: provenant_records::run::LaneClass::Writer,
-            waiting_for: provenant_records::run::LaneWaitReason::ProviderSilence {
-                silent_for_ms: 123_000,
+            waiting_for: provenant_records::run::LaneWaitReason::RecoveryWorkerRefused {
+                used: 5,
+                limit: 10,
             },
         }];
         let response = RunResult::Status {

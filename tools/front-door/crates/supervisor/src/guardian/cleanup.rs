@@ -270,16 +270,6 @@ impl Driver<'_> {
         }
     }
 
-    pub(super) fn provider_cpu_micros(&self) -> Option<u64> {
-        let expected = self.reservation.provider.as_ref()?;
-        match self.observer.observe(expected.pid) {
-            ProcessObservation::Present(fact) if fact.identity == *expected => fact.cpu_micros,
-            ProcessObservation::Present(_)
-            | ProcessObservation::Absent
-            | ProcessObservation::Unknown(_) => None,
-        }
-    }
-
     pub(super) fn refresh_census(
         &mut self,
         child: &mut crate::process_os::provider::ProviderGroup,

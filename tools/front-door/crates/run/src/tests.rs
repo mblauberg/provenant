@@ -1775,22 +1775,13 @@ fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
 }
 
 #[test]
-fn invalid_or_stale_process_checkpoint_has_unknown_silence() -> TestResult {
+fn process_checkpoint_for_another_scope_is_refused() -> TestResult {
     for checkpoint in [
         serde_json::json!({
             "schema_version": 1,
-            "scope": {"run": AttemptId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 9},
-            "silent": true,
-            "silent_for_ms": 1_800_000
+            "scope": {"run": AttemptId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 9}
         }),
-        serde_json::json!({"schema_version": 1, "scope": "invalid", "silent": true}),
-        serde_json::json!({
-            "schema_version": 1,
-            "scope": {"run": AttemptId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 0},
-            "observed_at": WallTime::from_micros(1_000_000)?,
-            "silent": true,
-            "silent_for_ms": 1_800_000
-        }),
+        serde_json::json!({"schema_version": 1, "scope": "invalid"}),
     ] {
         let temp = tempfile::tempdir()?;
         let context = context(temp.path())?;
@@ -1808,40 +1799,10 @@ fn invalid_or_stale_process_checkpoint_has_unknown_silence() -> TestResult {
             RECORD_LIMIT,
         )?;
         let id = input.attempt_id;
-        assert!(
-            store
-                .record_observed(id, &call)?
-                .provider_silent_for_ms
-                .0
-                .is_none()
-        );
-        // Recovery and mutation reads still refuse a checkpoint for another scope.
-        if checkpoint["observed_at"].is_null() {
-            assert!(store.record(id, &call).is_err());
-        }
+        assert!(!store.record_observed(id, &call)?.process_observation_valid.0);
+        // Recovery and mutation reads refuse a checkpoint for another scope.
+        assert!(store.record(id, &call).is_err());
     }
-    Ok(())
-}
-
-#[test]
-fn process_checkpoint_freshness_allows_one_second_of_clock_skew() -> TestResult {
-    let now = WallTime::from_micros(10_000_000)?;
-    assert!(crate::reader::process_observation_fresh(
-        WallTime::from_micros(11_000_000)?,
-        now
-    ));
-    assert!(!crate::reader::process_observation_fresh(
-        WallTime::from_micros(11_000_001)?,
-        now
-    ));
-    assert!(crate::reader::process_observation_fresh(
-        WallTime::from_micros(5_000_000)?,
-        now
-    ));
-    assert!(!crate::reader::process_observation_fresh(
-        WallTime::from_micros(4_999_999)?,
-        now
-    ));
     Ok(())
 }
 

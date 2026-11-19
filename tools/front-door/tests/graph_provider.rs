@@ -4974,10 +4974,6 @@ fn light_graph_delivers_and_applies_preset_per_node() -> Result {
                 record.profile.knobs.get("lanes.receipts"),
                 Some(&json!("none"))
             );
-            assert_ne!(
-                record.profile.knobs.get("lanes.supervision"),
-                Some(&json!("minimal"))
-            );
         }
     }
     cleanup.disarm();
