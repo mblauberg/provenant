@@ -134,7 +134,15 @@ use provenant_supervisor::settlement_progress::{Abandonment, FILE, Journal};
 
 fn read(attempt: &Directory, scope: Scope) -> Result<Journal> {
     let journal = match read_sealed(attempt, FILE, RECORD_LIMIT)? {
-        Some(raw) => crate::db::decode::<Journal>(&raw)?,
+        Some(raw) => provenant_records::decode_stored_record_v1(
+            raw.as_slice(),
+            provenant_records::Limits {
+                max_bytes: RECORD_LIMIT,
+                ..Default::default()
+            },
+            attempt.current_path()?.join(FILE),
+            "Journal",
+        )?,
         None => Journal::new(scope),
     };
     if journal.schema_version != 1 || journal.scope != scope || journal.attempts > LIMIT {
@@ -2012,6 +2020,20 @@ mod tests {
             attempt: AttemptId::from_bytes([2; 16]),
             generation: 1,
         }
+    }
+
+    #[test]
+    fn malformed_settlement_journal_names_its_record() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(temp.path())?;
+        crate::artifacts::seal(&attempt, FILE, br#"{"schema_version":1}"#, RECORD_LIMIT)?;
+        let error = read(&attempt, scope())
+            .expect_err("missing journal fields")
+            .to_string();
+        for fact in [FILE, "Journal", "schema version 1"] {
+            assert!(error.contains(fact), "missing {fact}: {error}");
+        }
+        Ok(())
     }
 
     #[test]
