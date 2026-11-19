@@ -1250,7 +1250,7 @@ fn recover_provisioning(
                     | WorktreeError::BaseUnverified { .. }
                     | WorktreeError::StaleRegistration
                     | WorktreeError::CreateFailed {
-                        rolled_back: true,
+                        artifacts_absent: true,
                         ..
                     }
             );

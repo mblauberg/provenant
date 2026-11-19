@@ -380,8 +380,8 @@ fn list_impl(
     Ok(result)
 }
 
-/// Create a clean linked checkout at a pinned commit. A failed or killed
-/// `worktree add` is rolled back (see `roll_back_failed_add`). Failed
+/// Create a clean linked checkout at a pinned commit. The destination's
+/// custody is acquired before registration and collision checks. Failed
 /// verification after Git succeeds leaves a visible tree for inspection.
 pub fn create(
     context: &WorktreeContext<'_>,
@@ -495,7 +495,60 @@ fn create_with_default(
         ..*context
     };
     context.repo.revalidate()?;
+
+    // Derive the allocation before observing branch or registration state, then
+    // take its exclusive custody before any check that decides whether it is
+    // free. A second creator must recheck only after the first releases it.
+    let current = context
+        .project_state
+        .current_path()
+        .map_err(|_| WorktreeError::InvalidRequest)?;
+    let state = current
+        .parent()
+        .and_then(Path::parent)
+        .ok_or(WorktreeError::InvalidRequest)?;
+    let ports = provenant_config::PortTable::read_for(context.layout.project(), state)
+        .map_err(WorktreeError::PortConfiguration)?;
+    let target_relative = ports
+        .managed_writer_path(&request.branch)
+        .map_err(WorktreeError::PortConfiguration)?;
+    let parent_relative = target_relative
+        .parent()
+        .ok_or(WorktreeError::InvalidRequest)?;
+    let path_name = target_relative
+        .file_name()
+        .ok_or(WorktreeError::InvalidRequest)?;
+    let layout_device = context.layout.directory().metadata()?.device;
+    let worktree_parent = open_or_create_layout_directory(
+        context.layout.directory(),
+        parent_relative,
+        true,
+        layout_device,
+    )?;
+    let parent_identity = worktree_parent.metadata()?;
+    let target = context.layout.root().join(&target_relative);
+    let _writer = cache_writer_guard(context.project_state, &target).map_err(custody_refusal)?;
+    context.repo.revalidate()?;
+    let named_parent = open_or_create_layout_directory(
+        context.layout.directory(),
+        parent_relative,
+        false,
+        layout_device,
+    )?;
+    if !parent_identity.same_identity(&named_parent.metadata()?) {
+        return Err(WorktreeError::UnknownWriter);
+    }
+    match worktree_parent.metadata_at(path_name, false) {
+        Ok(_) => return Err(WorktreeError::InvalidRequest),
+        Err(error) if error.is_not_found() => {}
+        Err(_) => return Err(WorktreeError::UnknownWriter),
+    }
     let entries = context.facts.fresh_inventory(context, cancel)?;
+    for (path, _) in canonical_worktree_paths(&entries)? {
+        if path == target {
+            return Err(WorktreeError::UnknownWriter);
+        }
+    }
     let checked_out = entries
         .iter()
         .filter(|entry| !entry.prunable)
@@ -542,6 +595,9 @@ fn create_with_default(
         // Network discovery does not own Git mutations. Re-enter all
         // inventory, collision and branch checks after it completes, retaining
         // only the exact commit the remote fetch proved.
+        // Network discovery does not need to hold this worktree's custody.
+        // The recursive call reacquires it before repeating every collision check.
+        drop(_writer);
         let default = default_creation_base(context, facts, cancel)?;
         return create_with_default(context, request, cancel, Some(default), naming_warnings);
     }
@@ -578,54 +634,6 @@ fn create_with_default(
     } else {
         default.as_ref().ok_or(WorktreeError::InvalidRequest)?.0
     };
-    let current = context
-        .project_state
-        .current_path()
-        .map_err(|_| WorktreeError::InvalidRequest)?;
-    let state = current
-        .parent()
-        .and_then(Path::parent)
-        .ok_or(WorktreeError::InvalidRequest)?;
-    let ports = provenant_config::PortTable::read_for(context.layout.project(), state)
-        .map_err(WorktreeError::PortConfiguration)?;
-    let target_relative = ports
-        .managed_writer_path(&request.branch)
-        .map_err(WorktreeError::PortConfiguration)?;
-    let parent_relative = target_relative
-        .parent()
-        .ok_or(WorktreeError::InvalidRequest)?;
-    let path_name = target_relative
-        .file_name()
-        .ok_or(WorktreeError::InvalidRequest)?;
-    let layout_device = context.layout.directory().metadata()?.device;
-    let worktree_parent = open_or_create_layout_directory(
-        context.layout.directory(),
-        parent_relative,
-        true,
-        layout_device,
-    )?;
-    let parent_identity = worktree_parent.metadata()?;
-    let target = context.layout.root().join(&target_relative);
-    match worktree_parent.metadata_at(path_name, false) {
-        Ok(_) => return Err(WorktreeError::InvalidRequest),
-        Err(error) if error.is_not_found() => {}
-        Err(_) => return Err(WorktreeError::UnknownWriter),
-    }
-    for (path, _) in canonical_worktree_paths(&entries)? {
-        if path == target {
-            return Err(WorktreeError::UnknownWriter);
-        }
-    }
-    let _writer = cache_writer_guard(context.project_state, &target).map_err(custody_refusal)?;
-    let named_parent = open_or_create_layout_directory(
-        context.layout.directory(),
-        parent_relative,
-        false,
-        layout_device,
-    )?;
-    if !parent_identity.same_identity(&named_parent.metadata()?) {
-        return Err(WorktreeError::UnknownWriter);
-    }
     let common_head = common_head(context, facts, cancel)?;
     if let Err(cause) = execute_mutation(
         context,
@@ -637,7 +645,7 @@ fn create_with_default(
         },
         cancel,
     ) {
-        let rolled_back = roll_back_failed_add(
+        let artifacts_absent = failed_add_artifacts_absent(
             context,
             &target,
             create_branch.then_some((&branch, base)),
@@ -645,7 +653,7 @@ fn create_with_default(
         );
         return Err(WorktreeError::CreateFailed {
             cause: Box::new(cause),
-            rolled_back,
+            artifacts_absent,
         });
     }
     // Creating a linked worktree must leave the primary's HEAD, branch or
@@ -767,82 +775,63 @@ pub(super) fn write_default_base_warning(
     writeln!(output, "warning: {}", default_base_warning(oid))
 }
 
-/// Undo a `worktree add` that failed or was killed part-way. Only what this
-/// call made is touched: `target` was verified absent before the add, its
-/// admin entry is found by the `gitdir` file that points at it, and the branch
-/// goes only when this call created it, it still points at `base` and no
-/// worktree has it checked out. Anything that cannot be confirmed is left and
-/// reported as not rolled back. Returns whether nothing of ours remains.
-pub(super) fn roll_back_failed_add(
+/// Report whether a failed `worktree add` left no observable artifacts.
+///
+/// The command can fail after another creator has populated the destination.
+/// A prior absence check cannot identify who created files after the check, so
+/// ambiguous destination, registration and branch artifacts are retained for
+/// inspection instead of recursively deleting them.
+pub(super) fn failed_add_artifacts_absent(
     context: &WorktreeContext<'_>,
     target: &Path,
     created_branch: Option<(&GitRefName, GitOid)>,
     cancel: &CancelToken,
 ) -> bool {
-    let mut clean = remove_admin_entry(context.repo.common_git_dir(), target);
-    clean &= match std::fs::remove_dir_all(target) {
-        Ok(()) => true,
-        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    let target_absent = match std::fs::symlink_metadata(target) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Ok(_) | Err(_) => false,
     };
-    let Some((branch, base)) = created_branch else {
-        return clean;
+    let admin_absent = match has_admin_entry_for_target(context.repo.common_git_dir(), target) {
+        Some(present) => !present,
+        None => false,
     };
-    let Ok(entries) = context.facts.fresh_inventory(context, cancel) else {
-        return false;
+    let branch_absent = match created_branch {
+        None => true,
+        Some((branch, _)) => read_branch_tips(context, cancel)
+            .map(|tips| !tips.contains_key(branch))
+            .unwrap_or(false),
     };
-    if entries
-        .iter()
-        .any(|entry| entry.branch.as_ref() == Some(branch))
-    {
-        return false;
-    }
-    match read_branch_tips(context, cancel) {
-        Ok(tips) => match tips.get(branch) {
-            None => clean,
-            Some(tip) if *tip == base => {
-                clean
-                    && execute_mutation(
-                        context,
-                        GitMutation::DeleteRef {
-                            name: branch.clone(),
-                            expected_old_oid: base,
-                        },
-                        cancel,
-                    )
-                    .is_ok()
-            }
-            Some(_) => false,
-        },
-        Err(_) => false,
-    }
+    target_absent && admin_absent && branch_absent
 }
 
-/// Remove the `<common git dir>/worktrees/<name>` entry whose `gitdir` names
-/// `target`. Returns false when a matching entry could not be removed.
-pub(super) fn remove_admin_entry(common_git_dir: &Path, target: &Path) -> bool {
-    let wanted = target.join(".git");
-    let Ok(entries) = std::fs::read_dir(common_git_dir.join("worktrees")) else {
-        return true;
+/// Return whether a worktree admin entry names `target`; unreadable state is
+/// unknown so callers retain all artifacts.
+fn has_admin_entry_for_target(common_git_dir: &Path, target: &Path) -> Option<bool> {
+    let directory = common_git_dir.join("worktrees");
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(false),
+        Err(_) => return None,
     };
-    let Ok(entries) = entries
+    let entries = entries
         .take(MAX_WORKTREES + 1)
         .collect::<std::io::Result<Vec<_>>>()
-    else {
-        return false;
-    };
+        .ok()?;
     if entries.len() > MAX_WORKTREES {
-        return false;
+        return None;
     }
-    let mut removed = true;
+    let wanted = target.join(".git");
     for entry in entries {
-        let Ok(text) = std::fs::read(entry.path().join("gitdir")) else {
-            continue;
+        let bytes = match std::fs::read(entry.path().join("gitdir")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
         };
-        if text.trim_ascii_end() == wanted.as_os_str().as_encoded_bytes() {
-            removed &= std::fs::remove_dir_all(entry.path()).is_ok();
+        if bytes.trim_ascii_end() == wanted.as_os_str().as_encoded_bytes() {
+            return Some(true);
         }
     }
-    removed
+    Some(false)
 }
 
 /// The shared common-directory `HEAD` file and, when symbolic, the commit it

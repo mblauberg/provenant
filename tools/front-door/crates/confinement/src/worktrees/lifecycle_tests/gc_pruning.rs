@@ -798,7 +798,7 @@ fn gc_settlement_error_retains_ref_and_continues() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn timed_out_add_rolls_back_only_the_branch_it_created() -> Result<(), Box<dyn Error>> {
+fn timed_out_add_retains_unproven_partial_artifacts() -> Result<(), Box<dyn Error>> {
     #[derive(Clone, Copy)]
     struct Case {
         branch: &'static str,
@@ -830,36 +830,144 @@ fn timed_out_add_rolls_back_only_the_branch_it_created() -> Result<(), Box<dyn E
             },
             &cancel(),
         );
-        let Err(WorktreeError::CreateFailed { cause, rolled_back }) = failed else {
+        let Err(WorktreeError::CreateFailed {
+            cause,
+            artifacts_absent,
+        }) = failed
+        else {
             return Err(format!("expected CreateFailed, got {failed:?}").into());
         };
-        assert!(rolled_back);
+        assert!(!artifacts_absent);
         assert!(matches!(
             *cause,
             WorktreeError::Utility(UtilityError::TimedOut)
         ));
+        let path = fixture
+            .root
+            .join(".worktrees")
+            .join(case.branch.replace('/', "-"));
+        assert!(path.is_dir());
+        assert!(branch_exists(&fixture, case.branch));
+        let listing = fixture.run(&["worktree", "list", "--porcelain"])?;
         assert!(
-            !fixture
-                .root
-                .join(".worktrees")
-                .join(case.branch.replace('/', "-"))
-                .exists()
+            String::from_utf8_lossy(&listing.stdout.bytes)
+                .contains(path.to_str().ok_or("non-UTF8 path")?)
         );
-        assert_eq!(branch_exists(&fixture, case.branch), case.existed_before);
-        let admin = fixture.repo.common_git_dir().join("worktrees");
-        assert!(!admin.exists() || fs::read_dir(&admin)?.next().is_none());
+        fixture.run(&[
+            "worktree",
+            "remove",
+            "--",
+            path.to_str().ok_or("non-UTF8 path")?,
+        ])?;
         if !case.existed_before {
-            let retried = create(
-                &test_context.context(),
-                WorktreeCreate {
-                    branch: case.branch.to_owned(),
-                    base: Some("HEAD".to_owned()),
-                },
-                &cancel(),
-            )?;
-            assert!(retried.path.is_dir());
+            fixture.run(&["branch", "-D", case.branch])?;
         }
     }
+    Ok(())
+}
+
+#[test]
+fn failed_add_keeps_a_worktree_created_after_validation() -> Result<(), Box<dyn Error>> {
+    struct CompetesAtAdd<'a> {
+        fixture: &'a Fixture,
+        executor: &'a provenant_os::exec::SystemExecutor,
+        target: PathBuf,
+        branch: &'static str,
+        raced: std::sync::atomic::AtomicBool,
+    }
+
+    impl Executor for CompetesAtAdd<'_> {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            let is_worktree_add = options
+                .argv
+                .windows(2)
+                .any(|args| args[0] == "worktree" && args[1] == "add");
+            if is_worktree_add && !self.raced.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let target = self.target.to_string_lossy();
+                self.fixture
+                    .run(&[
+                        "worktree",
+                        "add",
+                        "-b",
+                        self.branch,
+                        "--",
+                        target.as_ref(),
+                        "HEAD",
+                    ])
+                    .map_err(|error| provenant_os::exec::ExecError::Io {
+                        operation: "race fixture worktree add",
+                        source: std::io::Error::other(error.to_string()),
+                    })?;
+            }
+            self.executor.execute(options)
+        }
+
+        fn execute_prepared_ref_transaction(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+            commands: &[u8],
+            commit: &mut dyn FnMut() -> bool,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            self.executor
+                .execute_prepared_ref_transaction(options, commands, commit)
+        }
+    }
+
+    let fixture = Fixture::new()?;
+    let test_context = TestContext::new(&fixture)?;
+    let branch = "feature/raced-add";
+    let current = test_context.project_state.current_path()?;
+    let state = current
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("missing state parent")?;
+    let ports = provenant_config::PortTable::read_for(test_context.layout.project(), state)?;
+    let target = test_context
+        .layout
+        .root()
+        .join(ports.managed_writer_path(branch)?);
+    let competing = CompetesAtAdd {
+        fixture: &fixture,
+        executor: &fixture.executor,
+        target: target.clone(),
+        branch,
+        raced: std::sync::atomic::AtomicBool::new(false),
+    };
+    let mut context = test_context.context();
+    context.executor = &competing;
+    let failed = create(
+        &context,
+        WorktreeCreate {
+            branch: branch.to_owned(),
+            base: Some("HEAD".to_owned()),
+        },
+        &cancel(),
+    );
+    let Err(WorktreeError::CreateFailed {
+        artifacts_absent, ..
+    }) = failed
+    else {
+        return Err(format!("expected CreateFailed, got {failed:?}").into());
+    };
+    assert!(competing.raced.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!artifacts_absent);
+    assert!(target.is_dir());
+    assert!(branch_exists(&fixture, branch));
+    let listing = fixture.run(&["worktree", "list", "--porcelain"])?;
+    assert!(
+        String::from_utf8_lossy(&listing.stdout.bytes)
+            .contains(target.to_str().ok_or("non-UTF8 path")?)
+    );
+    fixture.run(&[
+        "worktree",
+        "remove",
+        "--",
+        target.to_str().ok_or("non-UTF8 path")?,
+    ])?;
+    fixture.run(&["branch", "-D", branch])?;
     Ok(())
 }
 

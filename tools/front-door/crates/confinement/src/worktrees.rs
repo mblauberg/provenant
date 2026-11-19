@@ -287,14 +287,14 @@ pub enum WorktreeError {
     PathEncoding,
     #[error("durable retirement authority could not be read or advanced")]
     Retirement(#[source] Box<dyn std::error::Error + Send + Sync>),
-    #[error("worktree creation failed: {cause}; {}", if *.rolled_back {
-        "the partial checkout and new branch were removed, so it is safe to retry"
+    #[error("worktree creation failed: {cause}; {}", if *.artifacts_absent {
+        "no checkout or new branch remains, so it is safe to retry"
     } else {
-        "the partial checkout or branch it made could not be fully removed; inspect the configured worktree layout and branch before retrying"
+        "checkout or branch state remains or could not be verified; inspect the configured worktree layout and branch before retrying"
     })]
     CreateFailed {
         cause: Box<WorktreeError>,
-        rolled_back: bool,
+        artifacts_absent: bool,
     },
     #[error(transparent)]
     Filesystem(#[from] FsError),
@@ -985,31 +985,6 @@ mod tests {
             WorktreeError::InvalidRequest.admission_cause(),
             Some(AdmissionCause::PermanentFailure)
         );
-    }
-
-    #[test]
-    fn remove_admin_entry_handles_large_directory_and_keeps_other_targets()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temporary = tempfile::tempdir()?;
-        let common = temporary.path();
-        let admin = common.join("worktrees");
-        std::fs::create_dir(&admin)?;
-        let target = common.join("target");
-        for index in 0..1024 {
-            let entry = admin.join(format!("entry-{index:04}"));
-            std::fs::create_dir(&entry)?;
-            std::fs::write(
-                entry.join("gitdir"),
-                target.join(".git").as_os_str().as_encoded_bytes(),
-            )?;
-        }
-        let keep = admin.join("keep");
-        std::fs::create_dir(&keep)?;
-        std::fs::write(keep.join("gitdir"), b"/another/worktree/.git")?;
-        assert!(remove_admin_entry(common, &target));
-        assert_eq!(std::fs::read_dir(&admin)?.count(), 1);
-        assert!(keep.is_dir());
-        Ok(())
     }
 
     const WORKTREE_LIST: &str = include_str!(concat!(
