@@ -1214,31 +1214,12 @@ impl Registry<'_> {
         // naming the config file the provider reported. The same notice can
         // also arrive on stderr; collapsing both channels here keeps one
         // warning even when Codex prints the key twice.
-        let mut seen_notices = std::collections::BTreeSet::new();
-        let mut config_notice = |message: &str, source: Option<&str>| {
-            let source = source.unwrap_or("config.toml");
-            let text = format!(
-                "warning: provider config deprecation ({source}): {}; fix the key or use providers.codex.clean_config",
-                crate::bounded_text(message, 512)
-            );
-            if seen_notices.insert(text.clone())
-                && let Some(route) = decoded.observed_route.as_mut()
-            {
-                route.launch_warnings.push(text);
-            }
-        };
-        for event in &events {
-            if let ProviderEvent::Warning { message, source } = event {
-                config_notice(message, source.as_deref());
-            }
-        }
-        if adapter.id() == "codex" {
-            for line in stderr.split(|&byte| byte == b'\n') {
-                let line = String::from_utf8_lossy(line);
-                if provenant_providers::codex::config_deprecation_notice(&line) {
-                    config_notice(line.trim(), None);
-                }
-            }
+        let scan_stderr = provenant_records::AdapterSpec::get(adapter.id())
+            .is_some_and(|spec| spec.stderr_config_notices);
+        if let Some(route) = decoded.observed_route.as_mut() {
+            route
+                .launch_warnings
+                .extend(config_notice_warnings(&events, stderr, scan_stderr));
         }
         if provenant_records::AdapterSpec::get(adapter.id())
             .is_some_and(|spec| spec.deduplicate_result)
@@ -2332,6 +2313,47 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
         }
     }
     Ok((context.project_id, lanes))
+}
+
+/// One warning per distinct provider config-deprecation notice. The notice
+/// can arrive as a decoded event and again on stderr with a different prefix
+/// and source, so both are keyed by the notice text alone.
+fn config_notice_warnings(
+    events: &[ProviderEvent],
+    stderr: &[u8],
+    scan_stderr: bool,
+) -> Vec<String> {
+    use provenant_providers::codex::{
+        config_deprecation_notice, config_notice_key, config_notice_source,
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut warnings = Vec::new();
+    let mut note = |message: &str, source: String| {
+        let key = config_notice_key(message);
+        if seen.insert(key.clone()) {
+            warnings.push(format!(
+                "warning: provider config deprecation ({source}): {}; fix the key or use providers.codex.clean_config",
+                crate::bounded_text(&key, 512)
+            ));
+        }
+    };
+    for event in events {
+        if let ProviderEvent::Warning { message, source } = event {
+            note(
+                message,
+                source.clone().unwrap_or_else(|| "config.toml".into()),
+            );
+        }
+    }
+    if scan_stderr {
+        for line in stderr.split(|&byte| byte == b'\n') {
+            let line = String::from_utf8_lossy(line);
+            if config_deprecation_notice(&line) {
+                note(&line, config_notice_source(&line));
+            }
+        }
+    }
+    warnings
 }
 
 #[cfg(test)]

@@ -374,6 +374,7 @@ impl LaneLimits {
         provider: Option<&str>,
     ) -> Option<TokenBudgetUsage> {
         let budget = self.token_budget.as_ref()?;
+        let spec = provider.and_then(crate::AdapterSpec::get);
         Some(TokenBudgetUsage {
             unit: "fresh_tokens".into(),
             unit_detail:
@@ -382,13 +383,14 @@ impl LaneLimits {
             source: budget.source,
             counted: usage.fresh_tokens(),
             reported_input: usage.input_including_cache(),
-            basis: if provider == Some("codex") && usage.per_attempt != Some(true) {
+            basis: if spec.is_some_and(|spec| spec.session_wide_usage)
+                && usage.per_attempt != Some(true)
+            {
                 "session".into()
             } else {
                 "attempt".into()
             },
-            notice: provider
-                .and_then(crate::AdapterSpec::get)
+            notice: spec
                 .and_then(|spec| spec.token_budget_notice)
                 .map(str::to_owned),
         })
@@ -550,6 +552,43 @@ mod tests {
         assert_eq!(limit.extend(10).unwrap().value, 800);
         let ceiling = Limit::new(60, LimitSource::Host, LimitStrength::Ceiling);
         assert_eq!(ceiling.extend(120), Err(CeilingError { value: 60 }));
+    }
+
+    #[test]
+    fn budget_usage_names_the_unit_beside_the_provider_totals() {
+        let limits = LaneLimits {
+            token_budget: Some(Limit::new(1_000, LimitSource::Host, LimitStrength::Default)),
+            ..LaneLimits::default()
+        };
+        let usage = crate::run::UsageRecord {
+            uncached_input: Some(100),
+            cache_read: Some(5_000),
+            cache_write: Some(20),
+            output_excluding_reasoning: Some(30),
+            reasoning: Some(10),
+            ..Default::default()
+        };
+        let codex = limits.budget_usage(&usage, Some("codex")).unwrap();
+        assert_eq!(codex.unit, "fresh_tokens");
+        assert_eq!((codex.limit, codex.source), (1_000, LimitSource::Host));
+        // Cache reads are in the provider's figure and out of the budget's.
+        assert_eq!(codex.counted, Some(160));
+        assert_eq!(codex.reported_input, Some(5_120));
+        assert_eq!(codex.basis, "session");
+        assert!(codex.notice.is_some());
+
+        let marked = crate::run::UsageRecord {
+            per_attempt: Some(true),
+            ..usage.clone()
+        };
+        let marked = limits.budget_usage(&marked, Some("codex")).unwrap();
+        assert_eq!(marked.basis, "attempt");
+
+        let absent = limits
+            .budget_usage(&crate::run::UsageRecord::default(), Some("codex"))
+            .unwrap();
+        assert_eq!((absent.counted, absent.reported_input), (None, None));
+        assert!(LaneLimits::default().budget_usage(&usage, None).is_none());
     }
 
     #[test]

@@ -478,7 +478,7 @@ pub fn config_deprecation_notice(message: &str) -> bool {
 /// The config file a deprecation notice is about, when it names one. Codex
 /// reads its settings from `config.toml` in its home, so that conventional
 /// name is reported when the message gives no fuller path.
-fn config_notice_source(message: &str) -> String {
+pub fn config_notice_source(message: &str) -> String {
     message
         .split_whitespace()
         .map(|word| {
@@ -486,6 +486,27 @@ fn config_notice_source(message: &str) -> String {
         })
         .find(|word| word.ends_with(".toml"))
         .map_or_else(|| "config.toml".into(), str::to_owned)
+}
+
+/// The notice text without its log prefix or any config path, so the same
+/// notice read from the event stream and from stderr gives one key. The text
+/// starts at the first bracketed config key when there is one.
+pub fn config_notice_key(message: &str) -> String {
+    let words: Vec<&str> = message.split_whitespace().collect();
+    let start = words
+        .iter()
+        .position(|word| word.starts_with('['))
+        .unwrap_or(0);
+    words[start..]
+        .iter()
+        .filter(|word| {
+            let word = word
+                .trim_matches(|ch: char| matches!(ch, '"' | '\'' | ',' | ';' | ')' | '(' | ':'));
+            !(word.ends_with(".toml") || word.contains('/'))
+        })
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A deprecation notice as a warning event, keeping the provider's text and
@@ -739,6 +760,19 @@ mod model_refusal_tests {
         let other = serde_json::json!({"type": "error", "message": "stream disconnected"});
         let events = decode(other.to_string().as_bytes()).expect("decoded");
         assert!(matches!(events.as_slice(), [E::Error]));
+    }
+
+    #[test]
+    fn one_notice_has_one_key_across_event_and_stderr_text() {
+        use super::config_notice_key;
+        let event = "[features].multi_agent is deprecated. Use [agents].enabled=false instead.";
+        let stderr = "2026-11-19T01:02:03Z  WARN codex_core::config: /home/u/.codex/config.toml: [features].multi_agent is deprecated. Use [agents].enabled=false instead.";
+        assert_eq!(config_notice_key(event), config_notice_key(stderr));
+        assert_eq!(config_notice_key(event), event);
+        assert_ne!(
+            config_notice_key(event),
+            config_notice_key("[features].other is deprecated.")
+        );
     }
 
     #[test]

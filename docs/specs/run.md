@@ -136,8 +136,6 @@ The host pushes the lane's own branch only when the persisted `lanes.publish`
 grant is enabled and the launch-bound host transport is available. A failed or
 unavailable push leaves the committed head and unpushed count visible.
 
-| Record field | Reader compatibility |
-| --- | --- |
 `status` and `result` report the budget's unit beside the provider's totals: the
 unit name (`fresh_tokens`: uncached input, cache writes and output/reasoning,
 with cache reads excluded because each call rereads the context), the limit's
@@ -149,10 +147,12 @@ that cannot interrupt a turn names that caveat in the same receipt, and the
 receipt is projected from the same limit and usage record enforcement reads,
 so the two outputs cannot disagree about the unit.
 
+| Record field | Reader compatibility |
+| --- | --- |
 | `AttemptRecord.stop_work` | Optional; older records read as absent, and older readers retain it as an unknown field. |
 | `status.budget_usage`, `result.budget_usage` | Optional; older readers retain them as unknown fields. |
 
-- Why: a budget that excludes cache reads must not look like an unenforced budget when the provider reports a much larger cumulative input.
+- Why: budget enforcement must preserve completed work and report its evidence; a budget that excludes cache reads must not look unenforced beside a larger provider-reported input.
 
 ## Lane verification and build admission
 
