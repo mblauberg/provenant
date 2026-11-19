@@ -606,7 +606,9 @@ mod tests {
             let mileage = summary.mileage.as_ref().unwrap().microdollars;
             let capacity = summary.capacity.as_ref().unwrap().microdollars;
             assert_eq!(mileage, cost * 100 / rise);
-            assert!(capacity.abs_diff(mileage * 100) <= 100);
+            // Capacity is 100 percentage points: exact, with no tolerance.
+            assert_eq!(capacity, cost * 100 * 100 / rise);
+            assert_eq!(capacity, mileage * 100);
         }
     }
 
@@ -655,6 +657,17 @@ mod tests {
                 reasons: vec![None],
             },
             Case {
+                name: "reset a full window after jittering resets",
+                readings: vec![
+                    reading(0, 1_000, Some(0)),
+                    with_reset(reading(100, 2_000, Some(1_000_000)), 10_000_040),
+                    with_reset(reading(200, 3_000, Some(1_000_000)), 10_000_080),
+                    with_reset(reading(300, 4_000, Some(1_000_000)), 10_000_120),
+                    with_reset(reading(400, 4_500, Some(1_000_000)), 10_018_000),
+                ],
+                reasons: vec![None, Some("reported")],
+            },
+            Case {
                 name: "plan change",
                 readings: vec![
                     reading(0, 1_000, Some(0)),
@@ -686,7 +699,8 @@ mod tests {
                 );
                 assert!(run.priced_segments <= run.segments);
                 if run.segments > 0 {
-                    assert!(run.mileage.is_some(), "{name}: priced rises have mileage");
+                    let mileage = run.mileage.as_ref().expect("priced rises have mileage");
+                    assert!(mileage.microdollars > 0, "{name}: mileage must be positive");
                 }
                 offset += run.readings as usize;
             }
@@ -696,6 +710,31 @@ mod tests {
                 "{name}: runs must partition readings"
             );
         }
+    }
+
+    #[test]
+    fn null_reset_times_segment_by_a_drop_and_are_inferred() {
+        let without_reset = |mut reading: Reading| {
+            reading.resets_unix_seconds = None;
+            reading
+        };
+        // The drop to 500 starts a new run; its one rising pair costs
+        // `cost` for `rise` basis points, so capacity is cost * 100 / rise
+        // percentage points times 100.
+        let (cost, rise) = (9_000_000u64, 1_000u64);
+        let report = analyse(
+            &series(vec![
+                without_reset(reading(0, 5_000, Some(0))),
+                without_reset(reading(100, 500, Some(4_000_000))),
+                without_reset(reading(200, 500 + rise, Some(cost))),
+            ]),
+            options(1),
+        );
+        assert_eq!(report.runs.len(), 2);
+        assert_eq!(report.runs[1].reset, Some("inferred"));
+        let capacity = report.runs[1].capacity.as_ref().unwrap().microdollars;
+        assert_eq!(capacity, cost * 100 * 100 / rise);
+        assert_eq!(capacity, 90_000_000);
     }
 
     #[test]
@@ -729,6 +768,7 @@ mod tests {
     fn step_change_flags_only_sufficient_falls() {
         struct Case {
             costs: (u64, u64),
+            // Readings in the prior and recent groups.
             counts: (usize, usize),
             status: &'static str,
             percent: Option<f64>,
@@ -766,6 +806,14 @@ mod tests {
             let report = analyse(&series(readings), options(10));
             let change = &report.step_change;
             assert_eq!(change.status, case.status, "costs {:?}", case.costs);
+            // n readings give n - 1 prior segments; the first recent reading
+            // rises from the last prior one, so recent keeps all n segments.
+            assert_eq!(
+                (change.prior_n as usize, change.recent_n as usize),
+                (case.counts.0 - 1, case.counts.1),
+                "costs {:?}",
+                case.costs
+            );
             match case.percent {
                 Some(expected) => {
                     let actual = change.percent.expect("percent present");
@@ -818,7 +866,7 @@ mod tests {
             .to_vec();
             let fitted = fit(&rows, 10).unwrap();
             assert_eq!(fitted.n, rows.len() as u64);
-            assert!(fitted.r_squared >= MIN_FIT_R2);
+            assert!(fitted.r_squared > 0.99);
             assert!(
                 fitted
                     .weights_basis_points_per_million_tokens
