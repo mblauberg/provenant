@@ -2299,6 +2299,27 @@ pub fn prepare_writer_observation(directory: &Directory) -> Result<()> {
     Ok(())
 }
 
+/// Wait for the slot admission gate within a budget. For short serialised
+/// work the caller must finish under the gate, such as advancing the shared
+/// native index; admission itself never waits (see `writer_admission_guard`).
+#[allow(clippy::disallowed_methods)] // The bounded wait must expire even with a stopped caller clock.
+pub fn lock_writer_admission(
+    directory: &Directory,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+) -> Result<LockGuard> {
+    directory
+        .lock(
+            OsStr::new("writer-probe.lock"),
+            LockMode::Exclusive,
+            budget,
+            cancel,
+            clock,
+        )
+        .map_err(observation_error)
+}
+
 /// Try admission once. An observer is busy evidence, never a reason to wait.
 pub fn writer_admission_guard(directory: &Directory) -> Result<LockGuard> {
     directory

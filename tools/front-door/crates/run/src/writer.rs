@@ -1119,6 +1119,21 @@ pub(crate) struct PrivateMergeRetained {
     pub scope: provenant_records::custody::Scope,
 }
 
+/// Sealed beside the attempt when the host's native index could not follow the
+/// published branch tip. Status surfaces it; the index was left unchanged.
+pub(crate) const INDEX_OUT_OF_SYNC: &str = "index-out-of-sync.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct IndexOutOfSyncNotice {
+    #[serde(default, flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub schema_version: u64,
+    pub scope: provenant_records::custody::Scope,
+    pub followed: GitOid,
+    pub target: GitOid,
+    pub paths: Vec<String>,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct GitPins {
     #[serde(default, flatten)]
@@ -1154,9 +1169,10 @@ fn launch_bases(attempt: &Directory, fallback: GitOid) -> Result<LaunchBases> {
     })
 }
 
-/// Remove only this attempt's host-owned retention ref after terminal commit.
-/// The head-keyed import ref belongs to publish_branch's custody-protected CAS;
-/// a delayed cleanup must never delete another lane's in-progress import.
+/// Remove this attempt's host-owned retention refs after terminal commit: its
+/// lane-base ref and attempt-scoped import pin. Legacy head-keyed pins from
+/// before attempt-scoped refs are removed with the last of them; they are
+/// never written now, so no current lane's in-progress import shares the name.
 pub(crate) fn cleanup_git_pins(
     state: &Path,
     writer: &WriterRequest,
@@ -3830,23 +3846,32 @@ impl WriterLaunch {
                     )
                     .and_then(|publication| publication.require_durable());
             }
-            if let Some(source) = &source
-                && crate::objects::private_tip(source, self.branch.as_str())? == verified_tip
-                && crate::objects::resolve_ref(
-                    &git_executable,
-                    self.worktree.repo(),
-                    self.branch.as_str(),
-                )? == verified_tip
-            {
+            let at_tip = match &source {
+                Some(source) => {
+                    crate::objects::private_tip(source, self.branch.as_str())? == verified_tip
+                        && crate::objects::resolve_ref(
+                            &git_executable,
+                            self.worktree.repo(),
+                            self.branch.as_str(),
+                        )? == verified_tip
+                }
+                None => false,
+            };
+            if at_tip {
                 self.advance_files(attempt, verified_tip)?;
-                // A resumed publication finds the branch already at its tip, so
-                // its replaced tip is gone; fall back to the launch base.
-                let from = if published.previous == verified_tip {
+            }
+            if source.is_some() {
+                // Every settlement and resume runs this: it advances from the
+                // recorded commit to the branch tip, whichever lane moved it,
+                // and does nothing when the index already follows the tip.
+                let fallback = if published.previous == verified_tip {
                     base
                 } else {
                     published.previous
                 };
-                crate::objects::advance_native_index(self.worktree.repo(), from)?;
+                self.sync_native_index(attempt, custody.scope(), fallback)?;
+            }
+            if at_tip {
                 crate::objects::clear_import_refs(
                     &git_executable,
                     self.worktree.repo(),
@@ -4118,6 +4143,57 @@ impl WriterLaunch {
             Ok(note)
         };
         attempt_work().unwrap_or_else(|error| format!("worktree files not restored: {error}"))
+    }
+
+    /// Bring the shared native index to the branch tip under the slot admission
+    /// gate, so siblings settling together advance it one after another. A
+    /// refused merge leaves the index alone and seals a typed notice.
+    fn sync_native_index(
+        &self,
+        attempt: &Directory,
+        scope: provenant_records::custody::Scope,
+        fallback: GitOid,
+    ) -> Result<()> {
+        use provenant_os::clock::SystemClock;
+        let clock = SystemClock::new();
+        let _gate = self
+            .custody
+            .as_ref()
+            .map(|(slot, _)| {
+                provenant_supervisor::custody::lock_writer_admission(
+                    slot,
+                    provenant_core::WaitBudget::cli(clock.mono_now(), 10)
+                        .map_err(|_| RunError::Validation("native index wait budget"))?,
+                    &CancelToken::new(),
+                    &clock,
+                )
+                .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))
+            })
+            .transpose()?;
+        match crate::objects::sync_native_index(self.worktree.repo(), fallback)? {
+            crate::objects::IndexSync::Synced | crate::objects::IndexSync::Deferred => Ok(()),
+            crate::objects::IndexSync::OutOfSync(report) => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: index_out_of_sync: native index left unchanged; {} path(s) differ: {}",
+                    report.paths.len(),
+                    report.reason
+                );
+                crate::artifacts::seal(
+                    attempt,
+                    INDEX_OUT_OF_SYNC,
+                    &crate::db::bytes(&IndexOutOfSyncNotice {
+                        extra: Default::default(),
+                        schema_version: 1,
+                        scope,
+                        followed: report.followed,
+                        target: report.target,
+                        paths: report.paths,
+                    })?,
+                    crate::RECORD_LIMIT,
+                )
+            }
+        }
     }
 
     /// After a revert, publication moves the files forward again so the files,

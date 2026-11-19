@@ -589,6 +589,36 @@ impl<'a> Service<'a> {
                 .is_some_and(|marker| {
                     marker.schema_version == 1 && marker.scope == crate::RunStore::scope(&record)
                 });
+            let out_of_sync = self
+                .store
+                .attempt_dir(record.attempt_id, false)
+                .ok()
+                .and_then(|attempt| {
+                    crate::artifacts::read_sealed_observed(
+                        &attempt,
+                        crate::writer::INDEX_OUT_OF_SYNC,
+                        crate::RECORD_LIMIT,
+                    )
+                    .ok()
+                    .flatten()
+                })
+                .and_then(|raw| crate::db::decode::<crate::writer::IndexOutOfSyncNotice>(&raw).ok())
+                .filter(|notice| {
+                    notice.schema_version == 1 && notice.scope == crate::RunStore::scope(&record)
+                });
+            if let Some(notice) = out_of_sync
+                && let AttemptState::Terminal { reason, .. } = &mut record.state
+            {
+                let note = format!(
+                    "index_out_of_sync: the worktree's native Git index was left unchanged and no longer follows the published branch tip; run `git status` and `git reset` after checking these paths: {}",
+                    notice.paths.join(", ")
+                );
+                *reason = Some(
+                    reason
+                        .take()
+                        .map_or_else(|| note.clone(), |old| format!("{old}; {note}")),
+                );
+            }
             if merge_retained && let AttemptState::Terminal { reason, .. } = &mut record.state {
                 let note = "merge index and parents were retained in attempt-private Git; working files remain in the worktree";
                 *reason = Some(

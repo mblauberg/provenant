@@ -142,6 +142,10 @@ Import uses Git's quarantined receive and verification; publication
 compare-and-swaps the host branch against the tip it observed. A lane whose
 history forked from the branch is refused at once and its private Git is
 retained for recovery. The base remains pinned until publication.
+The worktree's native index follows the branch from a recorded commit, advanced
+under the admission gate after each publication and repeated on every
+settlement or resume until it matches the tip. If Git refuses the advance, the
+index is left unchanged and status reports `index_out_of_sync` with the paths.
 Import retention refs belong to each attempt, even for an identical commit;
 publication and cleanup remove only that attempt's pins.
 The GitHub credential receipt governs token delivery even when sandboxing is

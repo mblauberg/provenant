@@ -2085,7 +2085,7 @@ fn stopped_merge_retains_private_state_without_adoption_by_a_new_attempt() -> Te
         },
         &provenant_records::policy::Policy::default(),
     )?;
-    super::advance_native_index(fixture.worktree.repo(), fixture.base)?;
+    super::sync_native_index(fixture.worktree.repo(), fixture.base)?;
     let import_attempt = provenant_core::AttemptId::from_bytes([0; 16]);
     super::clear_import_refs(
         &fixture.git,
@@ -2215,7 +2215,7 @@ fn native_index_advance_keeps_private_flags_and_exposes_worktree_edits() -> Test
             },
             &provenant_records::policy::Policy::default(),
         )?;
-        super::advance_native_index(fixture.worktree.repo(), fixture.base)?;
+        super::sync_native_index(fixture.worktree.repo(), fixture.base)?;
         assert_eq!(
             fixture.git_overlay(&scratch, &["ls-files", "-v"])?.stdout,
             expected
@@ -2241,70 +2241,143 @@ fn native_index_advance_keeps_private_flags_and_exposes_worktree_edits() -> Test
     Ok(())
 }
 
-#[test]
-// Spec: docs/specs/run-launch.md#admission-and-custody
-fn sequential_publications_touching_one_path_advance_the_native_index_from_the_prior_tip()
--> TestResult {
-    let mut fixture = Fixture::new("sha1")?;
-    let (_attempt, _scratch) = fixture.overlay()?;
-    fixture.import()?;
-    let first = super::publish_branch(
+fn publish_tip(
+    fixture: &Fixture,
+    head: GitOid,
+    attempt: AttemptId,
+) -> TestResult<super::Published> {
+    Ok(super::publish_branch(
         &fixture.git,
         fixture.worktree.repo(),
         super::BranchPublication {
             branch: "refs/heads/lane",
             base: fixture.base,
             launch_ref: None,
-            head: fixture.head,
-            attempt: fixture.import_attempt,
+            head,
+            attempt,
         },
         &provenant_records::policy::Policy::default(),
-    )?;
-    assert_eq!(first.previous, fixture.base);
-    assert!(super::advance_native_index(
-        fixture.worktree.repo(),
-        first.previous
-    )?);
+    )?)
+}
 
-    // A second lane, launched at the same base, publishes a commit that
-    // changes the same path on top of the first lane's tip.
+/// A sibling lane's commit changing `file`, built through the native index and
+/// worktree, which are restored so the test controls where the index stands.
+fn sibling_commit(fixture: &Fixture, parent: GitOid, content: &str) -> TestResult<GitOid> {
     let native = |args: &[&str]| git(&fixture.git, &fixture.home, &fixture.lane, None, args);
-    fs::write(fixture.lane.join("file"), "second lane blob\n")?;
+    let index = fixture.worktree.repo().private_git_dir().join("index");
+    let saved_index = fs::read(&index)?;
+    let saved_file = fs::read(fixture.lane.join("file"))?;
+    fs::write(fixture.lane.join("file"), content)?;
     native(&["add", "file"])?;
     let tree = String::from_utf8(native(&["write-tree"])?.stdout)?;
-    let second_head = oid(native(&[
+    let commit = oid(native(&[
         "commit-tree",
         tree.trim(),
         "-p",
-        &fixture.head.to_string(),
+        &parent.to_string(),
         "-m",
-        "second lane",
+        "sibling lane",
     ])?)?;
-    native(&["reset", "-q", "--mixed", &fixture.head.to_string()])?;
-    let second = super::publish_branch(
-        &fixture.git,
-        fixture.worktree.repo(),
-        super::BranchPublication {
-            branch: "refs/heads/lane",
-            base: fixture.base,
-            launch_ref: None,
-            head: second_head,
-            attempt: AttemptId::from_bytes([1; 16]),
-        },
-        &provenant_records::policy::Policy::default(),
-    )?;
-    assert_eq!(second.previous, fixture.head);
-    assert!(super::advance_native_index(
-        fixture.worktree.repo(),
-        second.previous
-    )?);
+    fs::write(&index, saved_index)?;
+    fs::write(fixture.lane.join("file"), saved_file)?;
+    Ok(commit)
+}
+
+fn assert_native_index_follows(fixture: &Fixture, tip: GitOid, content: &[u8]) -> TestResult {
+    let native = |args: &[&str]| git(&fixture.git, &fixture.home, &fixture.lane, None, args);
     assert_eq!(
         native(&["diff", "--cached", "--name-only"])?.stdout,
         Vec::<u8>::new(),
         "the native index must match the published tip"
     );
-    assert_eq!(native(&["show", ":file"])?.stdout, b"second lane blob\n");
+    assert_eq!(native(&["show", ":file"])?.stdout, content);
+    assert_eq!(
+        super::followed_native_index(fixture.worktree.repo())?,
+        Some(tip)
+    );
     Ok(())
+}
+
+#[test]
+// Spec: docs/specs/run-launch.md#admission-and-custody
+fn sequential_publications_touching_one_path_advance_the_native_index_from_the_recorded_commit()
+-> TestResult {
+    let mut fixture = Fixture::new("sha1")?;
+    let (_attempt, _scratch) = fixture.overlay()?;
+    fixture.import()?;
+    super::seed_native_index(fixture.worktree.repo(), fixture.base)?;
+    let first = publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
+    assert_eq!(first.previous, fixture.base);
+    assert_eq!(
+        super::sync_native_index(fixture.worktree.repo(), first.previous)?,
+        super::IndexSync::Synced
+    );
+    let second_head = sibling_commit(&fixture, fixture.head, "second lane blob\n")?;
+    let second = publish_tip(&fixture, second_head, AttemptId::from_bytes([1; 16]))?;
+    assert_eq!(second.previous, fixture.head);
+    // The launch base is stale after the first publication; the record is not.
+    assert_eq!(
+        super::sync_native_index(fixture.worktree.repo(), fixture.base)?,
+        super::IndexSync::Synced
+    );
+    assert_native_index_follows(&fixture, second_head, b"second lane blob\n")
+}
+
+#[test]
+// Spec: docs/specs/run-launch.md#admission-and-custody
+fn a_publication_that_crashed_before_the_index_advance_resumes_from_the_recorded_commit()
+-> TestResult {
+    let mut fixture = Fixture::new("sha1")?;
+    let (_attempt, _scratch) = fixture.overlay()?;
+    fixture.import()?;
+    super::seed_native_index(fixture.worktree.repo(), fixture.base)?;
+    let first = publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
+    super::sync_native_index(fixture.worktree.repo(), first.previous)?;
+    // B publishes on top of A and dies before advancing the index.
+    let second_head = sibling_commit(&fixture, fixture.head, "second lane blob\n")?;
+    let b = AttemptId::from_bytes([1; 16]);
+    publish_tip(&fixture, second_head, b)?;
+    // On resume the branch is already at B's tip, so the replaced tip is gone
+    // and the launch base is the only fallback. The record still drives it.
+    let resumed = publish_tip(&fixture, second_head, b)?;
+    assert_eq!(resumed.previous, second_head);
+    assert_eq!(
+        super::sync_native_index(fixture.worktree.repo(), fixture.base)?,
+        super::IndexSync::Synced
+    );
+    assert_native_index_follows(&fixture, second_head, b"second lane blob\n")
+}
+
+#[test]
+// Spec: docs/specs/run-launch.md#admission-and-custody
+fn a_sibling_advancing_past_a_crashed_publication_leaves_nothing_for_it_to_revert() -> TestResult {
+    let mut fixture = Fixture::new("sha1")?;
+    let (_attempt, _scratch) = fixture.overlay()?;
+    fixture.import()?;
+    super::seed_native_index(fixture.worktree.repo(), fixture.base)?;
+    // A's compare-and-swap lands, then A dies before advancing the index.
+    publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
+    // B publishes on A's tip and advances the index; it started at A's tip,
+    // but the index never followed A, so B's advance must start from the record.
+    let second_head = sibling_commit(&fixture, fixture.head, "second lane blob\n")?;
+    let b = publish_tip(&fixture, second_head, AttemptId::from_bytes([1; 16]))?;
+    assert_eq!(b.previous, fixture.head);
+    assert_eq!(
+        super::sync_native_index(fixture.worktree.repo(), b.previous)?,
+        super::IndexSync::Synced
+    );
+    assert_native_index_follows(&fixture, second_head, b"second lane blob\n")?;
+    // A resumes: its publication is already contained, and there is nothing
+    // left to advance or to revert.
+    let index = fixture.worktree.repo().private_git_dir().join("index");
+    let before = fs::read(&index)?;
+    publish_tip(&fixture, fixture.head, fixture.import_attempt)?;
+    assert_eq!(
+        super::sync_native_index(fixture.worktree.repo(), fixture.base)?,
+        super::IndexSync::Synced
+    );
+    assert_eq!(fs::read(&index)?, before);
+    assert_native_index_follows(&fixture, second_head, b"second lane blob\n")
 }
 
 #[test]
@@ -2347,11 +2420,22 @@ fn native_index_advance_preserves_staged_snapshots_on_conflicts_and_disjoint_upd
         if busy {
             fs::write(&lock, "another Git writer owns this lock\n")?;
         }
-        assert_eq!(
-            super::advance_native_index(fixture.worktree.repo(), fixture.base)?,
-            advances
-        );
+        super::seed_native_index(fixture.worktree.repo(), fixture.base)?;
+        let synced = super::sync_native_index(fixture.worktree.repo(), fixture.base)?;
+        assert_eq!(matches!(synced, super::IndexSync::Synced), advances);
         if !advances {
+            // A refused merge leaves the index alone, never silently diverges:
+            // it reports the paths the branch moved and keeps the record.
+            let super::IndexSync::OutOfSync(report) = synced else {
+                return Err("a refused merge reports out-of-sync".into());
+            };
+            assert_eq!(report.followed, fixture.base);
+            assert_eq!(report.target, fixture.head);
+            assert_eq!(report.paths, vec!["file".to_owned()]);
+            assert_eq!(
+                super::followed_native_index(fixture.worktree.repo())?,
+                Some(fixture.base)
+            );
             assert_eq!(fs::read(&index)?, staged_index);
         }
         if busy {
