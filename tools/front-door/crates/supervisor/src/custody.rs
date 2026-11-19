@@ -966,7 +966,9 @@ fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
             ))
             || reservation.launch_state == LaunchState::Settling
         {
-            match child.try_lock_existing(OsStr::new(HOLDER_LOCK), LockMode::Exclusive) {
+            // Probe shared: concurrent observers never read each other's probe as a
+            // live holder, while a holder's exclusive lock still refuses it.
+            match child.try_lock_existing(OsStr::new(HOLDER_LOCK), LockMode::Shared) {
                 Err(FsError::LockTimeout { .. }) => {}
                 Ok(_live_holder) => return Err(CustodyError::Fenced),
                 Err(_) => return Err(CustodyError::Fenced),
@@ -2201,7 +2203,8 @@ pub fn other_holders_live(
             }
             Err(error) => return Err(error),
         };
-        match child.try_lock_existing(OsStr::new(HOLDER_LOCK), LockMode::Exclusive) {
+        // Shared probe: another observer's probe must not read as a live holder.
+        match child.try_lock_existing(OsStr::new(HOLDER_LOCK), LockMode::Shared) {
             Err(FsError::LockTimeout { .. }) => return Ok(true),
             Ok(_free) => {}
             Err(error) if error.is_not_found() => {}
