@@ -2291,6 +2291,13 @@ mod selected_node_prefix_tests {
         (opt.join("node@22/bin"), cellar_bin)
     }
 
+    /// The product reports the canonical installation prefix for nvm and npm-cli
+    /// layouts, so fixtures must live under a canonical root: the macOS temp
+    /// directory is reached through the `/var` -> `/private/var` symlink.
+    fn canonical_root(root: &tempfile::TempDir) -> PathBuf {
+        std::fs::canonicalize(root.path()).unwrap()
+    }
+
     fn nvm_node(prefix: &Path) -> PathBuf {
         let bin = prefix.join("bin");
         executable(&bin.join("node"));
@@ -2339,7 +2346,7 @@ mod selected_node_prefix_tests {
     #[test]
     fn canonical_npm_cli_package_layout_is_a_supported_node_prefix() {
         let root = tempfile::tempdir().unwrap();
-        let prefix = root.path().join("node-install");
+        let prefix = canonical_root(&root).join("node-install");
         let bin = prefix.join("bin");
         let npm_cli = prefix.join("lib/node_modules/npm/bin/npm-cli.js");
         executable(&bin.join("node"));
@@ -2354,9 +2361,10 @@ mod selected_node_prefix_tests {
     #[test]
     fn first_nvm_installation_wins_over_a_later_homebrew_opt_installation() {
         let root = tempfile::tempdir().unwrap();
-        let nvm_prefix = root.path().join("nvm/versions/node/v24.0.1");
+        let root = canonical_root(&root);
+        let nvm_prefix = root.join("nvm/versions/node/v24.0.1");
         let nvm_bin = nvm_node(&nvm_prefix);
-        let homebrew_prefix = root.path().join("homebrew");
+        let homebrew_prefix = root.join("homebrew");
         let (homebrew_bin, cellar_bin) = homebrew_node(&homebrew_prefix);
         let npm = std::fs::canonicalize(cellar_bin.join("npm")).unwrap();
         let node = std::fs::canonicalize(cellar_bin.join("node")).unwrap();
