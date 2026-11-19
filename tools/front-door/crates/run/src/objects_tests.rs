@@ -1223,21 +1223,23 @@ fn shared_branch_publication_compares_base_and_is_idempotent_for_the_same_head()
             &fixture.head.to_string(),
         ],
     )?;
-    assert!(
-        super::publish_branch(
-            &fixture.git,
-            fixture.worktree.repo(),
-            super::BranchPublication {
-                branch: "refs/heads/lane",
-                base: fixture.base,
-                launch_ref: None,
-                head: fixture.head,
-                attempt: fixture.import_attempt,
-            },
-            &provenant_records::policy::Policy::default(),
-        )
-        .is_err()
-    );
+    let refusal = super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: fixture.base,
+            launch_ref: None,
+            head: fixture.head,
+            attempt: fixture.import_attempt,
+        },
+        &provenant_records::policy::Policy::default(),
+    )
+    .expect_err("a forked lane history is refused");
+    // Typed and final: settlement retains the private history at once instead
+    // of retrying a refusal no retry can change.
+    assert!(matches!(refusal, crate::RunError::PublicationDiverged));
+    assert!(refusal.import_refusal_is_final() && refusal.is_publication_refusal());
     let actual = oid(git(
         &fixture.git,
         &fixture.home,
@@ -2788,8 +2790,8 @@ fn publication_can_refuse_an_unrooted_tip_under_strict_policy() -> TestResult {
     assert!(message.contains(&orphan.to_string()), "{message}");
     assert!(message.contains(&fixture.base.to_string()), "{message}");
     assert!(message.contains("launch ref integration"), "{message}");
-    // The other publication refusal depends on a branch that can move, so a
-    // retry can change its answer: it must stay retryable.
+    // A lost branch CAS depends on a branch that can move, so a retry can
+    // change its answer: it must stay retryable.
     assert!(!super::invalid().import_refusal_is_final());
     Ok(())
 }

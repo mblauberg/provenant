@@ -574,6 +574,12 @@ pub enum RunError {
     ReviewAcceptanceRequired,
     #[error("lane object import refused: {0}")]
     ObjectImportLimit(&'static str),
+    /// The lane's history forked from the host branch. Its commits stay in the
+    /// attempt's private Git; there is no automatic rebase or two-tree retry.
+    #[error(
+        "lane history diverged from the host branch; its commits are retained in the attempt's private Git for host recovery"
+    )]
+    PublicationDiverged,
     #[error(
         "lane tip {tip} descends from none of: its launch base {base}, the origin default branch, {}, or any pushed remote-tracking branch; push the branch it was rebased onto, or rebuild the lane from its launch base",
         .launch_ref.as_deref().map_or_else(|| "its launch ref".to_owned(), |name| format!("its launch ref {name}"))
@@ -701,8 +707,14 @@ impl RunError {
     pub(crate) fn import_refusal_is_final(&self) -> bool {
         matches!(
             self,
-            Self::ObjectImportLimit(_) | Self::LaneTipUnrooted { .. }
+            Self::ObjectImportLimit(_) | Self::LaneTipUnrooted { .. } | Self::PublicationDiverged
         )
+    }
+
+    /// A publication the host refuses on the lane's own history. Retrying the
+    /// same tip cannot change it, and waiting only fences the worktree.
+    pub(crate) fn is_publication_refusal(&self) -> bool {
+        matches!(self, Self::LaneTipUnrooted { .. } | Self::PublicationDiverged)
     }
 
     /// A generic code can wrap multiple guards; classify the typed cause rather

@@ -1266,6 +1266,14 @@ impl RunStore {
                         call,
                     )?;
                 }
+                // A diverged or unrooted lane tip cannot publish on retry, and the
+                // retry cycles would leave the worktree fenced meanwhile.
+                Err(error) if error.is_publication_refusal() => {
+                    let reason = format!(
+                        "publication refused; private Git retained for host recovery: {error}"
+                    );
+                    self.refuse_pending_import(&record, attempt, &reason, call)?;
+                }
                 Err(error) if driver.exhausted() => {
                     let reason = format!(
                         "settlement exhausted three attempts; private Git retained for host recovery: {error}"

@@ -518,7 +518,7 @@ pub(crate) fn publish_branch(
     let advances_current = current == base
         || (is_ancestor(git, repo, current, head) && !is_ancestor(git, repo, current, base));
     if !advances_current && !is_ancestor(git, repo, head, current) {
-        return Err(invalid());
+        return Err(RunError::PublicationDiverged);
     }
     let ancestor = match known_ancestor(git, repo, base, launch_ref, head)? {
         Some(ancestor) => ancestor,
