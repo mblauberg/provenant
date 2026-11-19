@@ -818,7 +818,7 @@ fn lane_with_git_view(
     Ok((fixture, scratch, git))
 }
 
-fn private_git(
+pub(crate) fn private_git(
     fixture: &PrepareFixture,
     scratch: &Path,
     git: &Path,
@@ -830,6 +830,10 @@ fn private_git(
         .env("GIT_DIR", scratch.join("git-common"))
         .env("GIT_COMMON_DIR", scratch.join("git-common"))
         .env("GIT_OBJECT_DIRECTORY", scratch.join("git-objects"))
+        .env(
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            fixture.writer.project.join(".git/objects"),
+        )
         .env("GIT_WORK_TREE", &fixture.writer.worktree)
         .current_dir(&fixture.writer.worktree)
         .args(args)

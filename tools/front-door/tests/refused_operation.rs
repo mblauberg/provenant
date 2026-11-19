@@ -393,14 +393,13 @@ fn wip_preflight_does_not_change_head_under_writer_custody() -> Result {
         )?,
     )?;
     let output = rig.command(&["run", "--file", graph.to_str().ok_or("graph")?, "--json"])?;
-    assert_ne!(code(&output), 0, "{output:?}");
-    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    // A held lease no longer refuses the run: the worktree is shared. What
+    // must hold is that the preflight leaves another lane's edits alone and
+    // says why it skipped the dirty check.
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
     assert!(
-        matches!(
-            value["error"]["code"].as_str(),
-            Some("writer_lock_busy" | "writer_lease_held")
-        ),
-        "{value}"
+        stderr.contains("skipping the dirty-worktree preflight"),
+        "{stderr}"
     );
     assert_eq!(head()?, before);
     assert_eq!(fs::read_to_string(writer.join("tracked"))?, "draft");
