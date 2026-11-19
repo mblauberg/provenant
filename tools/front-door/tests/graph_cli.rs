@@ -570,6 +570,17 @@ impl GraphProject {
             .map_err(|error| format!("{error}: {output:?}"))?;
         Ok((output, value))
     }
+    /// The same fixture without `--json`, so the compact human view is on stdout.
+    fn human_command(&self) -> Command {
+        let mut command = fixture_cli();
+        command
+            .current_dir(&self.project)
+            .env("PROVENANT_ROOT", &self.root)
+            .env("XDG_CONFIG_HOME", self.temp.path().join("config"))
+            .args(["--state-dir"])
+            .arg(self.state());
+        command
+    }
     fn document(&self, document: &Value) -> Result<PathBuf> {
         let path = self.project.join("graph.json");
         std::fs::write(&path, serde_json::to_vec(document)?)?;
@@ -628,7 +639,17 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
         .find(|row| row["name"] == "broken")
         .ok_or("broken row")?;
     assert_eq!(bad["state"], "unreadable");
-    assert!(rows.iter().any(|row| row["name"] == "healthy"));
+    // #3530 counts settled graphs in the default listing; --full shows them.
+    assert!(!rows.iter().any(|row| row["name"] == "healthy"));
+    let (output, full) = rig.run(&["status", "--full"])?;
+    assert!(output.status.success(), "{full}");
+    assert!(
+        full["data"]["graphs"]
+            .as_array()
+            .ok_or("full graphs")?
+            .iter()
+            .any(|row| row["name"] == "healthy")
+    );
     assert!(!listing.to_string().contains("PRIVATE_CONTENT_SENTINEL"));
     assert!(
         !listing
@@ -651,7 +672,7 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
     let command = words.strip_prefix(&["provenant"]).ok_or("next command")?;
     let (output, stopped) = rig.run(command)?;
     assert!(output.status.success(), "{stopped}");
-    let (_, after) = rig.run(&["status"])?;
+    let (_, after) = rig.run(&["status", "--full"])?;
     let rows = after["data"]["graphs"]
         .as_array()
         .ok_or("graphs after stop")?;
@@ -991,6 +1012,19 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
         explained["data"]["document"]["integration_branch"],
         "batch/example"
     );
+    let proposed: Vec<_> = explained["data"]["source_admission"]
+        .as_array()
+        .ok_or("batch source admission")?
+        .iter()
+        .filter(|row| row["status"] == "pending_registration")
+        .collect();
+    assert!(!proposed.is_empty(), "batch slices need proposed worktrees");
+    for row in proposed {
+        assert!(
+            !Path::new(row["path"].as_str().ok_or("proposed worktree path")?).exists(),
+            "explanation must not create a worktree: {row}"
+        );
+    }
     Ok(())
 }
 
@@ -1351,7 +1385,7 @@ fn a_named_run_replays_its_input_and_a_changed_input_takes_the_next_name() -> Re
     // Changed input takes the next free name and leaves the first graph alone.
     let changed = run(&["--name", "once", "--set", "tag=b"])?;
     assert_eq!(changed["checkpoint"]["graph_id"], "once-2");
-    assert_eq!(changed["named"]["taken"], "once");
+    assert_eq!(changed["named"]["superseded"], "once");
     assert_eq!(graph_count()?, 2);
     // Each input finds its own graph.
     for (tag, id) in [("a", "once"), ("b", "once-2")] {
@@ -1389,6 +1423,132 @@ fn a_named_run_replays_its_input_and_a_changed_input_takes_the_next_name() -> Re
         assert!(handles.insert(id), "handles are unique");
     }
     assert_eq!(graph_count()?, 6);
+    Ok(())
+}
+
+#[test]
+fn a_changed_brief_leads_the_launch_with_the_new_handle_and_json_field() -> Result {
+    let rig = GraphProject::new()?;
+    let templates = rig.project.join(".provenant/templates");
+    std::fs::create_dir_all(&templates)?;
+    std::fs::write(
+        templates.join("stamp.toml"),
+        "kind='gate'\n[node.condition]\ntype='budget'\n[parameters.tag]\ntype='string'\ndefault='none'\n",
+    )?;
+    let json_run = |args: &[&str]| -> Result<Value> {
+        let mut command = vec!["run", "stamp"];
+        command.extend_from_slice(args);
+        let (output, result) = rig.run(&command)?;
+        assert!(output.status.success(), "{args:?}: {result}");
+        Ok(result["data"].clone())
+    };
+    let first = json_run(&["--name", "once", "--set", "tag=a"])?;
+    assert_eq!(first["checkpoint"]["graph_id"], "once");
+    // The JSON form names the prior handle under `superseded`.
+    let second = json_run(&["--name", "once", "--set", "tag=b"])?;
+    assert_eq!(second["checkpoint"]["graph_id"], "once-2");
+    assert_eq!(second["named"]["superseded"], "once");
+    // The human form leads with the new handle and the reason, not a headline.
+    let output = rig
+        .human_command()
+        .args(["run", "stamp", "--name", "once", "--set", "tag=c"])
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.starts_with("started once-3 (once exists with a different input)\n"),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("next: provenant ") && line.ends_with("once-3")),
+        "{text}"
+    );
+    Ok(())
+}
+
+#[test]
+fn waiting_on_a_superseded_name_points_at_the_newer_handle() -> Result {
+    let rig = GraphProject::new()?;
+    let templates = rig.project.join(".provenant/templates");
+    std::fs::create_dir_all(&templates)?;
+    std::fs::write(
+        templates.join("stamp.toml"),
+        "kind='gate'\n[node.condition]\ntype='budget'\n[parameters.tag]\ntype='string'\ndefault='none'\n",
+    )?;
+    for tag in ["a", "b", "c"] {
+        let (output, result) = rig.run(&[
+            "run",
+            "stamp",
+            "--name",
+            "wait-once",
+            "--set",
+            &format!("tag={tag}"),
+        ])?;
+        assert!(output.status.success(), "{result}");
+    }
+    let output = rig
+        .human_command()
+        .args(["wait", "wait-once", "--timeout", "2"])
+        .output()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let warning = String::from_utf8_lossy(&output.stderr);
+    assert!(text.contains("; provenant wait wait-once-3\n"), "{text}");
+    assert!(
+        warning.contains("wait-once") && warning.contains("wait-once-3"),
+        "{warning}"
+    );
+    Ok(())
+}
+
+#[test]
+fn status_on_a_superseded_name_points_at_the_newer_handle() -> Result {
+    let rig = GraphProject::new()?;
+    let templates = rig.project.join(".provenant/templates");
+    std::fs::create_dir_all(&templates)?;
+    std::fs::write(
+        templates.join("stamp.toml"),
+        "kind='gate'\n[node.condition]\ntype='budget'\n[parameters.tag]\ntype='string'\ndefault='none'\n",
+    )?;
+    for tag in ["a", "b"] {
+        let (output, result) = rig.run(&[
+            "run",
+            "stamp",
+            "--name",
+            "status-once",
+            "--set",
+            &format!("tag={tag}"),
+        ])?;
+        assert!(output.status.success(), "{result}");
+    }
+    let output = rig
+        .human_command()
+        .args(["status", "status-once"])
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    let warning = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        text.contains("next: provenant status status-once-2\n"),
+        "{text}"
+    );
+    assert!(
+        warning.contains("status-once") && warning.contains("status-once-2"),
+        "{warning}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_bad_name_refusal_suggests_a_valid_handle() -> Result {
+    let rig = GraphProject::new()?;
+    let output = rig
+        .human_command()
+        .args(["run", "stamp", "--name", "Foo-", "--set", "tag=a"])
+        .output()?;
+    assert!(!output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert!(text.contains("try `foo`"), "{text}");
     Ok(())
 }
 

@@ -3813,7 +3813,7 @@ mod provisioned_writer_submission_tests {
                 serde_json::from_value(serde_json::json!({"preset":"light"}))?
             };
             let node = graph::NodeInput {
-                review_launch: false,
+                writer_dirty_preflight: false, review_launch: false,
                 require_skill_location: false,
                 settlement_retries: Some(1),
                 prior_attempts: &[],

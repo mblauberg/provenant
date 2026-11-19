@@ -5,6 +5,11 @@
 //! library errors retain their typed cause; CLI classifies inspected defects.
 #![forbid(unsafe_code)]
 
+pub mod admission;
+pub use admission::{
+    AdmissionClassConfig, AdmissionSource, DEFAULT_CLASS, DEFAULT_WAIT_SECONDS,
+    ResolvedAdmissionClass,
+};
 mod account_sync;
 mod domains;
 mod edit;
@@ -52,9 +57,10 @@ pub use ports::{
     PortCommandReceiptEntry, PortCommandReceiptInventory, PortCommandReceiptProof, PortError,
     PortEvidenceError, PortExecution, PortReceiptIssue, PortReceiptLifetime, PortSource, PortTable,
     VerifyPort, VerifySelection, VerifyTier, WorktreeLayoutPort, dispatch_port_backend,
-    execute_port_command, execute_port_command_with_input, land_backend, port_command_environment,
-    port_command_receipt_proof, port_command_receipts, record_port_command,
-    remove_port_command_receipt, try_lock_port_command_receipts,
+    execute_port_command, execute_port_command_with_input, infer_verify_base, land_backend,
+    port_command_environment, port_command_receipt_proof, port_command_receipts, port_source_layer,
+    record_port_command, remove_port_command_receipt, try_lock_port_command_receipts,
+    verify_base_unset_error,
 };
 mod release;
 pub mod repository_files;

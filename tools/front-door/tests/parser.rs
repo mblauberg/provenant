@@ -329,6 +329,51 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
 }
 
 #[test]
+fn config_show_names_verify_port_layers_and_survives_a_malformed_project_layer() -> Result {
+    let rig = TestRig::new()?;
+    let shown = rig.command(&["config", "show", "--json"])?;
+    assert_eq!(code(&shown), 0, "{shown:?}");
+    let value: serde_json::Value = serde_json::from_slice(&shown.stdout.bytes)?;
+    let ports = &value["data"]["ports"];
+    assert_eq!(ports["verify.remote"]["value"], "origin");
+    assert_eq!(ports["verify.remote"]["source"], "builtin");
+    assert!(
+        ports["verify.base"]["source"]
+            .as_str()
+            .is_some_and(|source| source.starts_with("inferred from") || source == "unresolved"),
+        "{ports}"
+    );
+
+    // A partial project overlay sets only verify.base and keeps its source.
+    std::fs::create_dir_all(rig.project.join(".provenant"))?;
+    std::fs::write(
+        rig.project.join(".provenant/ports.json"),
+        r#"{"verify":{"base":"origin/master"}}"#,
+    )?;
+    let shown = rig.command(&["config", "show", "--json"])?;
+    assert_eq!(code(&shown), 0, "{shown:?}");
+    let value: serde_json::Value = serde_json::from_slice(&shown.stdout.bytes)?;
+    assert_eq!(
+        value["data"]["ports"]["verify.base"]["value"],
+        "origin/master"
+    );
+    assert_eq!(value["data"]["ports"]["verify.base"]["source"], "project");
+
+    // A malformed project layer is warned and skipped: config show needs no
+    // verify port and still runs, with the file and key in the warning.
+    std::fs::write(
+        rig.project.join(".provenant/ports.json"),
+        r#"{"verify":false}"#,
+    )?;
+    let shown = rig.command(&["config", "show", "--json"])?;
+    assert_eq!(code(&shown), 0, "{shown:?}");
+    let stderr = String::from_utf8_lossy(&shown.stderr.bytes);
+    assert!(stderr.contains("ports.json"), "{stderr}");
+    assert!(stderr.contains("verify"), "{stderr}");
+    Ok(())
+}
+
+#[test]
 fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_restricts_authority_input_without_writes()
 -> Result {
     let rig = TestRig::new()?.without_state()?;

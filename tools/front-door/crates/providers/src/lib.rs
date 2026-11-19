@@ -37,6 +37,36 @@ pub use launch::{
 };
 pub use stream::*;
 
+#[cfg(feature = "fixture")]
+pub fn bare_spec(path: &str) -> LaunchSpec {
+    LaunchSpec {
+        argv: Vec::new(),
+        env: vec![("PATH".into(), path.into())],
+        stdin: Stdin::Null,
+        secret_input: None,
+        cwd: std::path::PathBuf::from("/"),
+        setup: Vec::new(),
+        omitted_discovery: Vec::new(),
+        user_skills: Default::default(),
+        tool_requirements: Default::default(),
+        git_wrapper: Default::default(),
+        policy: provenant_records::policy::Policy::default(),
+        credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
+            "/fixture/home",
+        )),
+        session_state: SessionStateLocation::AttemptPrivate,
+        profile: provenant_confinement::permissions::ProviderProfile {
+            spec: provenant_confinement::permissions::ProviderProfileSpec::default(),
+            observations: Default::default(),
+        },
+        stream: StreamState::new(
+            "claude",
+            |_| Ok(Vec::new()),
+            &provenant_records::policy::Policy::default(),
+        ),
+    }
+}
+
 pub trait QuotaSource: Sync {
     fn adapter_id(&self) -> &'static str;
     fn probe(

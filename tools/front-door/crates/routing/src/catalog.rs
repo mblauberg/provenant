@@ -2407,7 +2407,7 @@ mod tests {
     }
 
     #[test]
-    fn bundled_pools_prefer_free_flash_and_exclude_other_opencode_models()
+    fn bundled_pools_are_weight_neutral_and_exclude_other_opencode_models()
     -> Result<(), Box<dyn std::error::Error>> {
         let catalogue = Catalogue::bundled()?;
         let junior = &catalogue.pools["junior"];
@@ -2437,13 +2437,51 @@ mod tests {
             };
             let paid = ModelId::parse(&format!("opencode/opencode-go/{name}"))?;
             if let Some(paid) = junior.iter().find(|member| member.model == paid) {
-                assert!(free.weight > paid.weight);
+                assert_eq!(
+                    free.weight, paid.weight,
+                    "bundled weights must stay capability-neutral, not provider- or plan-specific"
+                );
                 pairs += 1;
             }
         }
         assert!(
             pairs > 0,
-            "a free flash model should outweigh its paid counterpart"
+            "a free flash model and its paid counterpart should both be pooled"
+        );
+        Ok(())
+    }
+
+    /// Bundled pools carry no owner, account, plan or provider annotations:
+    /// every weight stays at the neutral default and the source rows have no
+    /// comments or per-member weight overrides.
+    #[test]
+    fn bundled_pools_have_no_owner_or_plan_annotations() -> Result<(), Box<dyn std::error::Error>> {
+        let catalogue = Catalogue::bundled()?;
+        for (pool, members) in &catalogue.pools {
+            for member in members {
+                assert_eq!(
+                    member.weight,
+                    default_weight(),
+                    "bundled pool {pool} member {} has a non-neutral weight",
+                    member.model.as_str()
+                );
+            }
+        }
+        let text = include_str!("../assets/catalogue.toml");
+        let rows: Vec<&str> = text
+            .lines()
+            .skip_while(|line| *line != "[pools]")
+            .skip(1)
+            .take_while(|line| !line.starts_with(['[', '#']))
+            .collect();
+        assert!(!rows.is_empty(), "catalogue has no pools table");
+        assert!(
+            rows.iter().all(|row| !row.contains('#')),
+            "bundled [pools] rows must not carry owner or plan comments"
+        );
+        assert!(
+            rows.iter().all(|row| !row.contains("weight")),
+            "bundled [pools] rows must not override the neutral weight"
         );
         Ok(())
     }

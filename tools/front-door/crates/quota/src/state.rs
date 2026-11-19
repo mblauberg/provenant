@@ -234,6 +234,9 @@ pub struct AccountRecord {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auth_retry_pending: bool,
     pub refusals: Vec<crate::Refusal>,
+    /// Refusals that stopped holding, with the source that cleared each one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cleared_refusals: Vec<crate::RefusalClearing>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capacity_cooldowns: Vec<crate::CapacityCooldown>,
 }
@@ -267,6 +270,7 @@ impl AccountRecord {
             credential_metadata: Vec::new(),
             auth_retry_pending: false,
             refusals: Vec::new(),
+            cleared_refusals: Vec::new(),
             capacity_cooldowns: Vec::new(),
         }
     }
@@ -282,6 +286,9 @@ impl AccountRecord {
         }
         for refusal in &mut self.refusals {
             refusal.account = refusal.account.updated_from(current);
+        }
+        for clearing in &mut self.cleared_refusals {
+            clearing.account = clearing.account.updated_from(current);
         }
         for cooldown in &mut self.capacity_cooldowns {
             cooldown.account = cooldown.account.updated_from(current);
@@ -339,6 +346,19 @@ impl AccountRecord {
             })
         {
             return Err(QuotaError::Invalid("refusal scope or bounds"));
+        }
+        if self.cleared_refusals.len() > MAX_WINDOWS
+            || self.cleared_refusals.iter().any(|clearing| {
+                !clearing.account.same_scope(&self.account)
+                    || clearing.model.is_empty()
+                    || clearing.model.len() > 256
+                    || clearing
+                        .pool
+                        .as_ref()
+                        .is_some_and(|p| p.is_empty() || p.len() > 256)
+            })
+        {
+            return Err(QuotaError::Invalid("refusal clearing scope or bounds"));
         }
         if self.capacity_cooldowns.len() > MAX_WINDOWS
             || self.capacity_cooldowns.iter().any(|c| {

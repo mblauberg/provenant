@@ -215,6 +215,7 @@ impl BoundGraphOwner<'_> {
         directory: &Path,
         path: &Path,
         head: provenant_core::GitOid,
+        dirty_preflight: bool,
     ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
         let budget = self.writer_launch_budget.unwrap_or(self.budget);
         if budget.remaining(self.factory.clock.mono_now()).as_micros() == 0 {
@@ -237,7 +238,18 @@ impl BoundGraphOwner<'_> {
                     lock_budget: budget,
                     ..*context
                 };
-                provenant_confinement::worktrees::fast_forward(&context, path, head, self.cancel)
+                let edits = if dirty_preflight {
+                    provenant_confinement::worktrees::WriterEdits::ContinueInPlace
+                } else {
+                    provenant_confinement::worktrees::WriterEdits::Refuse
+                };
+                provenant_confinement::worktrees::fast_forward(
+                    &context,
+                    path,
+                    head,
+                    edits,
+                    self.cancel,
+                )
             },
         )
     }
@@ -253,6 +265,64 @@ impl BoundGraphOwner<'_> {
             chair: None,
         }
         .store_with_facts(self.cancel, &self.repo_facts)
+    }
+
+    /// Retain a submission-time dirty writer refusal under the graph attempt's
+    /// stable identity, before the scheduler can start any node.
+    pub(crate) fn retain_submission_refusal(
+        &self,
+        graph_id: &str,
+        node_id: &str,
+        worktree: &str,
+        reason: &str,
+    ) -> Result<(), FacadeError> {
+        let key = provenant_fabric_runtime::graph::AttemptKey {
+            extra: Default::default(),
+            retry_generation: None,
+            previous_attempt_ref: None,
+            graph_id: graph_id.to_owned(),
+            node_id: node_id.to_owned(),
+            attempt: 1,
+            route_index: 0,
+        };
+        let digest =
+            provenant_records::CanonicalV1::record_digest("graph-submission-refusal", 1, &key)
+                .map_err(|_| FacadeError::StateCorrupt)?;
+        let scope = GraphRefusalScope {
+            operation: graph_operation("graph-attempt-operation", &key)?,
+            actor: self.factory.context.identity.inbox.actor,
+            digest,
+            worktree: Path::new(worktree)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned),
+            chair: (!provenant_cli::fabric::in_lane()
+                && provenant_cli::workflow::session_actor(&self.factory.context, None).ok()
+                    == Some(self.factory.context.identity.inbox.actor))
+            .then(|| provenant_records::custody::Chair {
+                process: provenant_cli::fabric::chair_process(),
+                extra: Default::default(),
+                host: self.factory.context.identity.inbox.host,
+                actor: self.factory.context.identity.inbox.actor,
+                session: provenant_workflow::session::chair_session_for(
+                    &self.factory.context.roots.state,
+                    self.factory.context.identity.project,
+                    self.factory.context.identity.inbox.actor,
+                )
+                .map(|session| session.as_str().to_owned()),
+            }),
+            work: key.work_key(self.factory.context.identity.project).ok(),
+        };
+        let error = FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: reason.to_owned(),
+        };
+        let diagnostic = provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
+            .category("refused")
+            .detail(reason)
+            .next("commit or preserve the worktree changes before retrying");
+        self.retain_graph_refusal(&scope, &error, diagnostic)
     }
 
     fn post_graph_refusal(
@@ -807,6 +877,23 @@ pub(crate) fn graph_journal_error(
     error: provenant_fabric_runtime::graph::JournalError,
 ) -> FacadeError {
     use provenant_fabric_runtime::graph::JournalError;
+    let unsupported_version = match error.root_cause() {
+        JournalError::Decode(decode) => match decode.root_cause() {
+            provenant_records::DecodeError::UnsupportedVersion { found, .. } if *found > 1 => {
+                Some(*found)
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(version) = unsupported_version {
+        return FacadeError::UpgradeRequired {
+            reader_release: env!("CARGO_PKG_VERSION").into(),
+            writer_release: "unknown".into(),
+            record: "graph checkpoint schema".into(),
+            version,
+        };
+    }
     if let JournalError::Graph { ref source, .. } = error {
         return match source.root_cause() {
             JournalError::TooLarge => FacadeError::DispatchRefused {
@@ -818,15 +905,6 @@ pub(crate) fn graph_journal_error(
             JournalError::Filesystem(_)
             | JournalError::Io(_)
             | JournalError::DurabilityUnconfirmed(_) => FacadeError::io("access graph journal"),
-            JournalError::Decode(provenant_records::DecodeError::UnsupportedVersion {
-                found,
-                ..
-            }) if *found > 1 => FacadeError::UpgradeRequired {
-                reader_release: env!("CARGO_PKG_VERSION").into(),
-                writer_release: "unknown".into(),
-                record: "graph checkpoint schema".into(),
-                version: *found,
-            },
             _ if source.is_unreadable() => FacadeError::DispatchRefused {
                 fact: None,
                 disk: None,
@@ -836,14 +914,6 @@ pub(crate) fn graph_journal_error(
         };
     }
     match error {
-        JournalError::Decode(provenant_records::DecodeError::UnsupportedVersion {
-            found, ..
-        }) if found > 1 => FacadeError::UpgradeRequired {
-            reader_release: env!("CARGO_PKG_VERSION").into(),
-            writer_release: "unknown".into(),
-            record: "graph checkpoint schema".into(),
-            version: found,
-        },
         JournalError::TooLarge => FacadeError::DispatchRefused {
             fact: None,
             disk: None,
@@ -2660,6 +2730,7 @@ impl BoundGraphOwner<'_> {
             // even when both heads agree so preparation checks dirty remnants.
             let mut submission_prompt = node.prompt.to_owned();
             let mut writer_predecessor = None;
+            let mut repin_warning = None;
             let (mut source_head, mut successor_head) = if !accepted
                 && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
                 && let Some(previous) = key.previous_attempt_ref.as_deref()
@@ -2729,10 +2800,49 @@ impl BoundGraphOwner<'_> {
                     .head
                     .map(|head| head.to_string())
                     .or_else(|| previous_task.head.clone());
-                (original, current)
+                // A manual retry keeps the predecessor pin. When the worktree
+                // head has advanced through the writer's own commits, adopt it
+                // and warn with both ids; any other head is a hard refusal.
+                if let Some(pinned) = current
+                    .as_deref()
+                    .and_then(|head| provenant_core::GitOid::parse(head).ok())
+                {
+                    let git = provenant_os::git::git_executable()
+                        .ok_or_else(|| FacadeError::io("git for retry re-pin"))?;
+                    let launch = provenant_run::prepare_writer_with_facts(
+                        &writer,
+                        self.factory.context.roots.state.as_path(),
+                        self.factory.context.identity.project,
+                        &self.repo_facts,
+                    )
+                    .map_err(run_error)?;
+                    match launch.repin_head(&git, pinned).map_err(run_error)? {
+                        provenant_run::RepinOutcome::Unchanged { .. } => (original, current),
+                        outcome @ provenant_run::RepinOutcome::Repinned { head, .. } => {
+                            repin_warning = outcome.warning();
+                            (original, Some(head.to_string()))
+                        }
+                        outcome @ provenant_run::RepinOutcome::NotDescendant { .. } => {
+                            return Err(FacadeError::DispatchRefused {
+                                fact: None,
+                                disk: None,
+                                reason: outcome.refusal().unwrap_or_else(|| {
+                                    "writer head does not descend from its pinned commit".into()
+                                }),
+                            });
+                        }
+                    }
+                } else {
+                    (original, current)
+                }
             } else {
                 (None, None)
             };
+            if let Some(warning) = repin_warning.take() {
+                let _ = writeln!(std::io::stderr().lock(), "{warning}");
+                submission_prompt.push_str("\n\n");
+                submission_prompt.push_str(&warning);
+            }
 
             // A crash can leave an accepted operation without a checkpoint
             // reference. Preserve its immutable labels, including legacy None.
@@ -2965,27 +3075,32 @@ impl BoundGraphOwner<'_> {
                 let head = commit
                     .parse()
                     .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-                self.fast_forward_writer(writer_directory, Path::new(path), head)
-                    .map_err(|error| {
-                        let diagnostic = matches!(
-                            error,
-                            provenant_confinement::worktrees::WorktreeError::Dirty(_)
-                        )
-                        .then(|| {
-                            provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
-                                .category("refused")
-                                .detail("the writer worktree has uncommitted edits")
-                                .next("commit or preserve the worktree changes before retrying")
-                        });
-                        let error = graph_writer_initialisation_error(commit, error);
-                        match diagnostic {
-                            Some(diagnostic) => self
-                                .retain_graph_refusal(refusal, &error, diagnostic)
-                                .err()
-                                .unwrap_or(error),
-                            None => error,
-                        }
-                    })?;
+                self.fast_forward_writer(
+                    writer_directory,
+                    Path::new(path),
+                    head,
+                    node.writer_dirty_preflight,
+                )
+                .map_err(|error| {
+                    let diagnostic = matches!(
+                        error,
+                        provenant_confinement::worktrees::WorktreeError::Dirty(_)
+                    )
+                    .then(|| {
+                        provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
+                            .category("refused")
+                            .detail("the writer worktree has uncommitted edits")
+                            .next("commit or preserve the worktree changes before retrying")
+                    });
+                    let error = graph_writer_initialisation_error(commit, error);
+                    match diagnostic {
+                        Some(diagnostic) => self
+                            .retain_graph_refusal(refusal, &error, diagnostic)
+                            .err()
+                            .unwrap_or(error),
+                        None => error,
+                    }
+                })?;
             }
             // Delivery is a writer obligation independent of the receipt preset.
             let delivery = if let Some(mode) = replay.delivery {
@@ -3512,7 +3627,11 @@ impl BoundGraphOwner<'_> {
                 && let Some(model) = route.model.as_deref()
                 && let Ok(model) =
                     provenant_routing::ModelId::parse(&exact_model(route.adapter.as_deref(), model))
-                && let Ok(catalogue) = provenant_routing::Catalogue::bundled()
+                // Resolve against the same effective (bundled + discovered)
+                // catalogue and revision that `route list` uses, not just the
+                // bundled catalogue. One lookup shared with the CLI warning.
+                && let Ok(catalogue) =
+                    provenant_cli::route::effective_catalogue(&self.factory.context.roots)
                 && catalogue.model(&model).is_none()
             {
                 let warning = format!(
@@ -3682,6 +3801,33 @@ impl BoundGraphOwner<'_> {
                     }
                 } else {
                     (None, None)
+                };
+                let result_warning = result_warning.or_else(|| {
+                    if let Some(delivery) = effective_delivery
+                        && let provenant_records::run::WriterDeliveryState::Failed {
+                            stage: provenant_records::run::WriterDeliveryStage::Integrate,
+                            reason: Some(reason),
+                            ..
+                        } = &delivery.state
+                    {
+                        Some(reason.clone())
+                    } else {
+                        None
+                    }
+                });
+                let stop = if effective_delivery.as_ref().is_some_and(|delivery| {
+                    matches!(
+                        &delivery.state,
+                        provenant_records::run::WriterDeliveryState::Failed {
+                            stage: provenant_records::run::WriterDeliveryStage::Integrate,
+                            reason: Some(reason),
+                            ..
+                        } if reason.contains("integration_conflict") || reason.contains("merge conflict")
+                    )
+                }) {
+                    Some(provenant_records::StopCause::Blocked)
+                } else {
+                    stop
                 };
                 // An unverifiable artifact is an integrity failure regardless
                 // of the provider outcome. In particular, it must not trigger
@@ -4301,6 +4447,7 @@ mod journal_error_tests {
             &rig.project,
             &rig.project.join(".worktrees/later"),
             source.trim().parse()?,
+            false,
         )?;
         assert_eq!(
             owner.writer_launch_budget.ok_or("budget")?.deadline(),
@@ -4370,6 +4517,7 @@ mod journal_error_tests {
             attempt: 1,
         };
         let node = |prompt| graph::NodeInput {
+            writer_dirty_preflight: false,
             review_launch: false,
             require_skill_location: false,
             settlement_retries: Some(1),
@@ -4528,10 +4676,10 @@ mod journal_error_tests {
                 replay,
             )
             .unwrap_err();
-        assert!(matches!(
-            &service_refusal,
-            FacadeError::ConfinementRefused { .. }
-        ));
+        assert!(
+            matches!(&service_refusal, FacadeError::RunKind { .. }),
+            "{service_refusal:?}"
+        );
         let operation = graph_operation("graph-attempt-operation", &service_key)?;
         let saved = store
             .operation(&operation, &call)?
@@ -4599,6 +4747,21 @@ mod journal_error_tests {
         assert!(super::repair_touches_risk(&review, &paths));
         assert!(!super::repair_touches_risk(&review, &[]));
         assert!(!super::repair_touches_risk(&review, &["README.md".into()]));
+    }
+
+    #[test]
+    fn graph_journal_future_context_requires_upgrade() {
+        let source = provenant_records::DecodeError::UnsupportedVersion {
+            found: 2,
+            line: 1,
+            column: 1,
+        }
+        .with_context("/fixture/checkpoint.json", "GraphRecord");
+        let error = provenant_fabric_runtime::graph::JournalError::Decode(source);
+        assert!(matches!(
+            super::graph_journal_error(error),
+            super::FacadeError::UpgradeRequired { version: 2, .. }
+        ));
     }
 
     #[test]

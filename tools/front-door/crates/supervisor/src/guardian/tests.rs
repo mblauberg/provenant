@@ -1528,9 +1528,8 @@ fn admission_setting_names_follow_each_typed_cause() {
         (
             AdmissionCause::BuildSettings,
             Some(&[
-                "domains.fabric.lanes.max_concurrent_builds",
-                "cargo_build_jobs",
-                "cargo_debug",
+                "domains.fabric.lanes.cargo_build_jobs",
+                "domains.fabric.lanes.cargo_debug",
             ]),
         ),
         (AdmissionCause::GuardianIdentity, Some(&[])),
