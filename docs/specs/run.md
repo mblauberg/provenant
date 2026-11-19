@@ -95,15 +95,24 @@ immutable, and collection cannot race an active clone. `max_generations` keeps
 history per project; `max_bytes` is a host-wide allocated-byte collection target.
 Collection always keeps each project's newest complete generation, even when
 that generation alone exceeds the target; busy stores and active clones remain
-protected. Failed refreshes
-retry at the next scheduled collection, while busy projects retry on the next
-tick without rebuilding other failed projects. Full requests supersede queued
-busy retries and reevaluate prior failures. Detached pending and active scopes
-survive process interruption and are retried after a minute.
-When a scheduled refresh fails, `provenant tick` reports a bounded cause category
-and a next step from the saved result. This note does not expose persisted
-command output, repository paths or environment values, and does not change the
-tick outcome or retry schedule.
+protected. Seeding is per project. Each project
+resolves its own verify base and gets its own outcome in `seed-result.json`: `built`, `current`,
+`busy`, `not_cargo`, `failed` with its cause, or `skipped` with a typed reason
+(`verify_base_unset`, `verify_base_unresolved`, `workspace_absent_at_base`) and a repair step.
+A skipped or failed project never stops or hides another project's seed, and a skip is
+not a failed pass. Failed projects retry at the next scheduled collection, while busy
+projects retry on the next tick without rebuilding the others: a busy retry replaces
+only its own projects' outcomes and keeps every other record. Full requests supersede
+queued busy retries and reevaluate every project. Detached pending and active scopes
+survive process interruption and are retried after a minute. Pass-level failures
+(an unreadable registry) are recorded beside the projects, and the number of project
+records is bounded, with the omitted count kept.
+`provenant tick` summarises the saved result as counts, for example `seed=ok:1 skipped:1`,
+and adds a bounded note with the cause category and the repair step. The note does not
+expose persisted command output, repository paths or environment values, and does not
+change the tick outcome or retry schedule. Because seeding follows a completed
+collection, an interrupted collection is retried promptly (see
+[scheduled collection](state.md#retention-keeps-evidence)) and seeding resumes with it.
 - Why: reuse must not introduce incompatible or partially collected build output.
 
 ## Publication order

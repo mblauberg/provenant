@@ -157,7 +157,11 @@ prompt blobs, sidecars and pending markers. The name reservation remains so a
 collected identity is never reused. A busy graph is skipped for a later pass.
 
 On macOS the tick agent schedules collection; other installs schedule
-`provenant tick` themselves. Inspect the tick logs when a sweep fails.
+`provenant tick` themselves. A sweep that fails or is interrupted is retried
+within 15 minutes, then after 1 hour, 4 hours and 16 hours; tick shows
+`gc=retry_pending` with the failure's age and next retry until it completes, and
+the daily deadline moves only on completion. Inspect the tick logs when a sweep
+fails.
 
 ## Detached services and unsettled lanes
 
