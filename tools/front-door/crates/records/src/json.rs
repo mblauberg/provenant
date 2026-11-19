@@ -98,6 +98,9 @@ impl<'de> Deserialize<'de> for RecordHeader {
                 let mut extra = crate::ExtraFields::new();
                 while let Some(key) = map.next_key::<String>()? {
                     if key == "schema_version" {
+                        if schema_version.is_some() {
+                            return Err(M::Error::duplicate_field("schema_version"));
+                        }
                         schema_version = Some(map.next_value::<u64>()?);
                     } else {
                         extra.insert(key, map.next_value::<serde_json::Value>()?);
@@ -894,6 +897,18 @@ mod tests {
             serde_json::to_value(&header).unwrap(),
             wire,
             "unknown fields survive the round trip"
+        );
+    }
+
+    #[test]
+    fn header_rejects_duplicate_known_fields() {
+        let error =
+            serde_json::from_str::<RecordHeader>(r#"{"schema_version":1,"schema_version":1}"#)
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate field `schema_version`")
         );
     }
 
