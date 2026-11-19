@@ -1,6 +1,6 @@
 //! Host-owned Cargo target seed store, shared by publication, cloning and GC.
 #[cfg(any(unix, test))]
-use crate::cargo_seed::codes;
+use crate::cargo_seed::{Refusal, codes};
 use provenant_os::fs::{Directory, LockGuard, LockMode};
 use sha2::{Digest, Sha256};
 use std::{
@@ -227,14 +227,15 @@ pub fn rustc_metadata(worktree: &Path) -> io::Result<(String, String)> {
 /// Inspect the lane's selected build directory's pin as data, then run only the
 /// corresponding host-owned compiler directly, outside the writer tree.
 /// Rustup overrides and non-release/custom toolchains are deliberately refused.
-/// A refusal is a stable snake_case code: it names the path taken and never
-/// carries an environment value, so it is safe to record.
+/// A refusal is a stable snake_case code, with what was expected and found when
+/// it is a mismatch. It names the path taken and never carries a path or an
+/// environment value, so it is safe to record.
 #[cfg(test)]
 pub(crate) fn lane_rustc_metadata(
     worktree: &Path,
     home: &Path,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
-) -> Result<(String, String), &'static str> {
+) -> Result<(String, String), Refusal> {
     lane_rustc_metadata_cancellable(worktree, home, home, environment, None)
 }
 
@@ -245,25 +246,45 @@ pub(crate) fn lane_rustc_metadata_cancellable(
     host_state: &Path,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
     cancel: Option<&provenant_core::CancelToken>,
-) -> Result<(String, String), &'static str> {
+) -> Result<(String, String), Refusal> {
     let rustup_home = home.join(".rustup");
     let mut saw_home = false;
     for (key, value) in environment {
         if key == "RUSTUP_HOME" {
             if saw_home || Path::new(value) != rustup_home {
-                return Err(codes::RUSTUP_HOME_UNEXPECTED);
+                return Err(Refusal::differs(
+                    codes::RUSTUP_HOME_UNEXPECTED,
+                    "RUSTUP_HOME unset or $HOME/.rustup",
+                    if saw_home {
+                        "RUSTUP_HOME set more than once"
+                    } else {
+                        "RUSTUP_HOME set to another directory"
+                    },
+                ));
             }
             saw_home = true;
         } else if key == "RUSTUP_AUTO_INSTALL" {
             if value != "0" {
-                return Err(codes::RUSTUP_AUTO_INSTALL_UNEXPECTED);
+                return Err(Refusal::differs(
+                    codes::RUSTUP_AUTO_INSTALL_UNEXPECTED,
+                    "RUSTUP_AUTO_INSTALL unset or 0",
+                    "RUSTUP_AUTO_INSTALL set to another value",
+                ));
             }
-        } else if unsupported_seed_build_environment_key(key).is_some() {
-            return Err(codes::TOOLCHAIN_ENV_OVERRIDE);
+        } else if let Some(class) = unsupported_seed_build_environment_key(key) {
+            return Err(Refusal::differs(
+                codes::TOOLCHAIN_ENV_OVERRIDE,
+                "no compiler, target or build-flag override",
+                format!("{class} is set"),
+            ));
         }
     }
     if !saw_home {
-        return Err(codes::RUSTUP_HOME_MISSING);
+        return Err(Refusal::differs(
+            codes::RUSTUP_HOME_MISSING,
+            "RUSTUP_HOME=$HOME/.rustup",
+            "RUSTUP_HOME unset",
+        ));
     }
     let channel = lane_release_pin(worktree, home, host_state)?;
     let toolchains = home.join(".rustup/toolchains");
@@ -278,11 +299,23 @@ pub(crate) fn lane_rustc_metadata_cancellable(
         })
         .collect::<Vec<_>>();
     if candidates.len() != 1 {
-        return Err(codes::RELEASE_TOOLCHAIN_AMBIGUOUS_OR_MISSING);
+        let names: Vec<_> = candidates
+            .iter()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        return Err(Refusal::differs(
+            codes::RELEASE_TOOLCHAIN_AMBIGUOUS_OR_MISSING,
+            format!("one installed toolchain named {channel}-<host>"),
+            if names.is_empty() {
+                "none installed".to_owned()
+            } else {
+                names.join(", ")
+            },
+        ));
     }
     let candidate = candidates.pop().ok_or(codes::RELEASE_TOOLCHAIN_MISSING)?;
     if !candidate.file_type().is_ok_and(|kind| kind.is_dir()) {
-        return Err(codes::TOOLCHAIN_NOT_DIRECTORY);
+        return Err(codes::TOOLCHAIN_NOT_DIRECTORY.into());
     }
     let rustc = candidate.path().join("bin/rustc");
     let resolved = rustc
@@ -299,7 +332,7 @@ pub(crate) fn lane_rustc_metadata_cancellable(
         || candidate_path.starts_with(&worktree_path)
         || worktree_path.starts_with(&candidate_path)
     {
-        return Err(codes::COMPILER_ESCAPES_HOST_TOOLCHAIN);
+        return Err(codes::COMPILER_ESCAPES_HOST_TOOLCHAIN.into());
     }
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
     let argv = [resolved.into_os_string(), "-vV".into()];
@@ -316,7 +349,7 @@ pub(crate) fn lane_rustc_metadata_cancellable(
         || output.stdout.truncated
         || output.stdout.read_failed
     {
-        return Err(codes::COMPILER_PROBE_FAILED);
+        return Err(codes::COMPILER_PROBE_FAILED.into());
     }
     let version =
         String::from_utf8(output.stdout.bytes).map_err(|_| codes::COMPILER_PROBE_INVALID)?;
@@ -324,25 +357,33 @@ pub(crate) fn lane_rustc_metadata_cancellable(
         .lines()
         .any(|line| line == format!("release: {channel}"))
     {
-        return Err(codes::COMPILER_PIN_MISMATCH);
+        return Err(Refusal::differs(
+            codes::COMPILER_PIN_MISMATCH,
+            format!("release: {channel}"),
+            version
+                .lines()
+                .find(|line| line.starts_with("release: "))
+                .unwrap_or("no release line"),
+        ));
     }
     let host = version
         .lines()
         .find_map(|line| line.strip_prefix("host: "))
         .ok_or(codes::COMPILER_HOST_MISSING)?
         .to_owned();
-    if candidate.file_name() != std::ffi::OsStr::new(&format!("{channel}-{host}")) {
-        return Err(codes::COMPILER_HOST_MISMATCH);
+    let expected = format!("{channel}-{host}");
+    if candidate.file_name() != std::ffi::OsStr::new(&expected) {
+        return Err(Refusal::differs(
+            codes::COMPILER_HOST_MISMATCH,
+            expected,
+            candidate.file_name().to_string_lossy(),
+        ));
     }
     Ok((version, host))
 }
 
 #[cfg(any(unix, test))]
-fn lane_release_pin(
-    worktree: &Path,
-    home: &Path,
-    host_state: &Path,
-) -> Result<String, &'static str> {
+fn lane_release_pin(worktree: &Path, home: &Path, host_state: &Path) -> Result<String, Refusal> {
     fn read(path: &Path, unreadable: &'static str) -> Result<String, &'static str> {
         use std::io::Read;
         let mut bytes = Vec::new();
@@ -373,7 +414,7 @@ fn lane_release_pin(
         .and_then(|v| v.as_table())
         .is_none_or(|t| !t.is_empty())
     {
-        return Err(codes::RUSTUP_OVERRIDES_PRESENT);
+        return Err(codes::RUSTUP_OVERRIDES_PRESENT.into());
     }
     let build = cargo_build_directory(worktree, host_state)
         .map_err(|_| codes::CARGO_WORKSPACE_UNREADABLE)?
@@ -393,17 +434,17 @@ fn lane_release_pin(
     let modern = dir.join("rust-toolchain.toml");
     // A second pin could select a different compiler, so do not seed in its presence.
     match std::fs::symlink_metadata(dir.join("rust-toolchain")) {
-        Ok(_) => return Err(codes::TOOLCHAIN_PIN_ABSENT_OR_AMBIGUOUS),
+        Ok(_) => return Err(codes::TOOLCHAIN_PIN_ABSENT_OR_AMBIGUOUS.into()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => return Err(codes::TOOLCHAIN_PIN_UNREADABLE),
+        Err(_) => return Err(codes::TOOLCHAIN_PIN_UNREADABLE.into()),
     }
     match std::fs::symlink_metadata(&modern) {
-        Ok(metadata) if !metadata.is_file() => return Err(codes::TOOLCHAIN_PIN_NON_REGULAR),
+        Ok(metadata) if !metadata.is_file() => return Err(codes::TOOLCHAIN_PIN_NON_REGULAR.into()),
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(codes::TOOLCHAIN_PIN_ABSENT_OR_AMBIGUOUS);
+            return Err(codes::TOOLCHAIN_PIN_ABSENT_OR_AMBIGUOUS.into());
         }
-        Err(_) => return Err(codes::TOOLCHAIN_PIN_UNREADABLE),
+        Err(_) => return Err(codes::TOOLCHAIN_PIN_UNREADABLE.into()),
     }
     let doc = parse(&modern, codes::TOOLCHAIN_PIN_UNREADABLE)?;
     let toolchain = doc
@@ -411,7 +452,7 @@ fn lane_release_pin(
         .and_then(|v| v.as_table())
         .ok_or(codes::TOOLCHAIN_PIN_INVALID)?;
     if toolchain.contains_key("path") {
-        return Err(codes::TOOLCHAIN_PIN_CUSTOM);
+        return Err(codes::TOOLCHAIN_PIN_CUSTOM.into());
     }
     let channel = toolchain
         .get("channel")
@@ -424,7 +465,11 @@ fn lane_release_pin(
             .iter()
             .any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()))
     {
-        return Err(codes::TOOLCHAIN_NOT_FIXED_RELEASE);
+        return Err(Refusal::differs(
+            codes::TOOLCHAIN_NOT_FIXED_RELEASE,
+            "a fixed release such as 1.100.0",
+            format!("channel {channel}"),
+        ));
     }
     Ok(channel)
 }
@@ -711,5 +756,74 @@ mod lane_probe_tests {
                 "{key}"
             );
         }
+    }
+
+    /// A refusal that is a mismatch says what was expected and what was found,
+    /// without a path or an environment value.
+    #[test]
+    fn mismatched_toolchains_name_expected_and_found() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let worktree = root.path().join("writer");
+        let bin = home.join(".rustup/toolchains/1.99.1-test-host/bin");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(worktree.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(home.join(".rustup/settings.toml"), "[overrides]\n").unwrap();
+        let pin = worktree.join("rust-toolchain.toml");
+        std::fs::write(&pin, "[toolchain]\nchannel = '1.99.1'\n").unwrap();
+        let rustc = bin.join("rustc");
+        // The directory is named for the pin but its compiler is another release.
+        std::fs::write(
+            &rustc,
+            "#!/bin/sh\nprintf 'rustc 1.98.0\\nhost: test-host\\nrelease: 1.98.0\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&rustc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let env = [("RUSTUP_HOME".into(), home.join(".rustup").into_os_string())];
+        let refusal =
+            |env: &[(OsString, OsString)]| lane_rustc_metadata(&worktree, &home, env).unwrap_err();
+        assert_eq!(
+            refusal(&env),
+            Refusal::differs(
+                codes::COMPILER_PIN_MISMATCH,
+                "release: 1.99.1",
+                "release: 1.98.0"
+            )
+        );
+        std::fs::write(&pin, "[toolchain]\nchannel = '1.97.0'\n").unwrap();
+        assert_eq!(
+            refusal(&env),
+            Refusal::differs(
+                codes::RELEASE_TOOLCHAIN_AMBIGUOUS_OR_MISSING,
+                "one installed toolchain named 1.97.0-<host>",
+                "none installed"
+            )
+        );
+        std::fs::write(&pin, "[toolchain]\nchannel = 'stable'\n").unwrap();
+        assert_eq!(
+            refusal(&env),
+            Refusal::differs(
+                codes::TOOLCHAIN_NOT_FIXED_RELEASE,
+                "a fixed release such as 1.100.0",
+                "channel stable"
+            )
+        );
+        std::fs::write(&pin, "[toolchain]\nchannel = '1.99.1'\n").unwrap();
+        let mut overridden = env.to_vec();
+        overridden.push(("RUSTFLAGS".into(), "-C secret".into()));
+        let refused = refusal(&overridden);
+        assert_eq!(refused.code, codes::TOOLCHAIN_ENV_OVERRIDE);
+        let named = format!("{:?}", refused.differs);
+        assert!(named.contains("RUSTFLAGS is set") && !named.contains("secret"));
+        assert_eq!(
+            refusal(&[]),
+            Refusal::differs(
+                codes::RUSTUP_HOME_MISSING,
+                "RUSTUP_HOME=$HOME/.rustup",
+                "RUSTUP_HOME unset"
+            )
+        );
     }
 }

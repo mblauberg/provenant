@@ -1,0 +1,3 @@
+## Fixes
+### Lanes and settlement
+- Age seeded Cargo dep-info under every build layout. Cargo 1.100 moved fingerprints from `.fingerprint/<unit>/` to `build/<package>/<hash>/fingerprint/`, so the aging pass found nothing and a seeded worktree could again reuse another branch's artifacts (#3561). The pass now walks the seed within a bounded depth and ages every `dep-*` file in a `fingerprint` or `.fingerprint` directory. A non-empty seed in which it finds none is not published: the lane builds cold and reports `seed_layout_unrecognised`. A test builds with the pinned Cargo and checks that members rebuild while registry-style dependencies stay fresh. (#3578)

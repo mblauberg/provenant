@@ -90,6 +90,10 @@ To build warm in a checkout outside a lane, seed its private target and use it:
 export CARGO_TARGET_DIR="$(provenant worktree seed-target .worktrees/my-branch)"
 ```
 
+The command needs no lane environment: unset `RUSTUP_HOME` and `CARGO_HOME` mean
+the defaults under `$HOME`. When it cannot seed, it names what differed (for
+example the pinned and the seeded compiler) and what to run next.
+
 ## Git pre-push hook and local gate
 
 Connect the Git pre-push hook to Provenant so it checks pushes, including its
