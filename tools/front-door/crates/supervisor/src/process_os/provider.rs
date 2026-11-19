@@ -1529,17 +1529,45 @@ mod tests {
     /// later loop that never saw the edge still ends (#3585).
     #[test]
     fn a_supervisor_signal_stays_latched_after_its_event_is_taken() -> io::Result<()> {
-        let mut reactor = GuardianReactor::install()?;
-        // Thread-directed and blocked here, the signal stays pending on this
-        // test thread and ends with it; kqueue still records it.
-        // SAFETY: pthread_self has no preconditions and returns this thread.
-        let thread = unsafe { libc::pthread_self() };
-        // SAFETY: thread names the live calling thread, which blocks SIGTERM.
-        let sent = unsafe { libc::pthread_kill(thread, libc::SIGTERM) };
-        if sent != 0 {
-            return Err(io::Error::from_raw_os_error(sent));
+        // EVFILT_SIGNAL records only process-directed signals, and one sent to
+        // this process would reach every reactor in it. A child process runs
+        // this test alone and signals itself.
+        const CHILD: &str = "PROVENANT_TEST_LATCHED_SIGNAL_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "process_os::provider::tests::a_supervisor_signal_stays_latched_after_its_event_is_taken",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .status()?;
+            assert!(status.success(), "latched-signal child failed: {status}");
+            return Ok(());
         }
-        let _ = reactor.wait(&[], Duration::ZERO)?;
+        extern "C" fn absorb(_: libc::c_int) {}
+        let mut reactor = GuardianReactor::install()?;
+        // The reactor blocks SIGTERM on this thread only; the handler absorbs
+        // delivery on the harness's other threads instead of the default exit.
+        // SAFETY: a zeroed sigaction is an empty mask with no flags; the
+        // handler set below is a valid async-signal-safe function.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = absorb as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        action.sa_flags = libc::SA_RESTART;
+        // SAFETY: action is initialised and outlives the call; no previous
+        // action is requested.
+        if unsafe { libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: getpid has no preconditions and names this process.
+        let pid = unsafe { libc::getpid() };
+        // SAFETY: the signal targets this child process alone, whose SIGTERM
+        // handler is installed above.
+        if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let _ = reactor.wait(&[], Duration::from_secs(5))?;
         assert!(reactor.signalled());
         assert!(reactor.take_events().supervisor_signal);
         assert!(reactor.signalled());

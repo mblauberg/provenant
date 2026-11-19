@@ -446,9 +446,10 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
         // A retention record that ended counts against the same bound.
         retention: Some(Retention {
             guardian: identity.clone(),
-            // The latest wall time the wire allows: 9999-12-30T22:00:00.999999Z.
+            // The latest wall time from_micros accepts, 9999-12-30T22:00:00Z;
+            // the wire's six fractional digits keep its length at the maximum.
             since: Some(provenant_core::WallTime::from_micros(
-                253_402_207_200_999_999,
+                253_402_207_200_000_000,
             )?),
             limit_ms: u64::MAX,
             ended: Some(RetentionEnd {
