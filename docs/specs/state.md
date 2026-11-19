@@ -62,6 +62,19 @@ A value that can normalise two ways is rejected at the wire boundary.
 - Why: two spellings let one record alias another.
 - Owner: `crates/core/src/`
 
+### Wall time has one stated bound
+
+`WallTime::MAX` is the single greatest instant the wire accepts:
+`253_402_207_200_000_000` microseconds (`9999-12-30T22:00:00.000000Z`).
+Jiff's `Timestamp::MAX` carries nanoseconds past that whole second, so the
+bound comes from the constant and not a documented spelling; anything above it
+is out of range. A consumer that needs the latest representable instant,
+including the graph checkpoint envelope, derives it from `WallTime::MAX` and
+has no epoch fallback.
+- Why: a bound naming a value the constructor rejects invites silent fallbacks
+  that hide the mismatch.
+- Owner: `crates/core/src/time.rs`, `crates/fabric-runtime/src/graph/envelope.rs`
+
 ### Graph names retain one identity
 
 A graph name identifies one graph generation for its project's lifetime.
