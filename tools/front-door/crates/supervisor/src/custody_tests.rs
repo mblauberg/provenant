@@ -2277,6 +2277,18 @@ fn retention_names_its_holder_only_while_the_census_shows_it_alive()
     let census = |facts: Vec<ProcessFact>, absent: Vec<i64>| {
         Census::from_observations(facts, [], absent, true, false, 16)
     };
+    let partial = |unknown: Vec<i64>, listing_complete| {
+        Census::from_observations(
+            [],
+            unknown
+                .into_iter()
+                .map(|pid| (pid, crate::census::ObservationIssue::Io)),
+            [],
+            listing_complete,
+            false,
+            16,
+        )
+    };
     let live = census(vec![fact(guardian.clone(), false)], vec![])?;
     let zombie = census(vec![fact(guardian.clone(), true)], vec![])?;
     let reused = census(
@@ -2290,13 +2302,17 @@ fn retention_names_its_holder_only_while_the_census_shows_it_alive()
         vec![],
     )?;
     let absent = census(vec![], vec![guardian.pid])?;
-    let unobserved = census(vec![], vec![])?;
+    let unlisted = census(vec![], vec![])?;
+    let undescribed = partial(vec![guardian.pid], true)?;
+    let partial_listing = partial(vec![], false)?;
     let observe = |census: Option<&Census>| GuardianLiveness::observe(census, &guardian);
     assert_eq!(observe(Some(&live)), GuardianLiveness::Live);
-    for gone in [&zombie, &reused, &absent] {
+    for gone in [&zombie, &reused, &absent, &unlisted] {
         assert_eq!(observe(Some(gone)), GuardianLiveness::Gone);
     }
-    assert_eq!(observe(Some(&unobserved)), GuardianLiveness::Unknown);
+    for unknown in [&undescribed, &partial_listing] {
+        assert_eq!(observe(Some(unknown)), GuardianLiveness::Unknown);
+    }
     assert_eq!(observe(None), GuardianLiveness::Unknown);
 
     let now = provenant_core::WallTime::from_micros(90_000_000)?;

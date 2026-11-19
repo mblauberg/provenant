@@ -1593,23 +1593,32 @@ impl Retention {
 pub enum GuardianLiveness {
     /// The exact recorded identity is present and not a zombie.
     Live,
-    /// The PID is absent, a zombie, or reused by another process.
+    /// The PID is absent or missing from a whole listing, a zombie, or reused
+    /// by another process.
     Gone,
-    /// No census, or the census could not observe the PID.
+    /// No census, a partial listing, or a PID the census could not describe.
     Unknown,
 }
 impl GuardianLiveness {
     pub fn observe(census: Option<&crate::census::Census>, guardian: &ProcessIdentity) -> Self {
-        match census.map(|census| census.process(guardian.pid)) {
-            Some(crate::census::ProcessLookup::Present(fact))
-                if fact.identity == *guardian && !fact.zombie =>
-            {
+        use crate::census::ProcessLookup;
+        let Some(census) = census else {
+            return Self::Unknown;
+        };
+        match census.process(guardian.pid) {
+            ProcessLookup::Present(fact) if fact.identity == *guardian && !fact.zombie => {
                 Self::Live
             }
-            Some(
-                crate::census::ProcessLookup::Present(_) | crate::census::ProcessLookup::Absent,
-            ) => Self::Gone,
-            Some(crate::census::ProcessLookup::Unknown) | None => Self::Unknown,
+            ProcessLookup::Present(_) | ProcessLookup::Absent => Self::Gone,
+            // A whole listing that omits the PID shows it was not running.
+            // This only words status; it never grants settlement authority.
+            ProcessLookup::Unknown
+                if census.listing_is_complete()
+                    && !census.unknown_pids().contains_key(&guardian.pid) =>
+            {
+                Self::Gone
+            }
+            ProcessLookup::Unknown => Self::Unknown,
         }
     }
 }
