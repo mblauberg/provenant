@@ -20,16 +20,46 @@ mkdir -p "$dir"
 printf 'Release introduction.\n' > "$dir/_intro.md"
 printf '## Additions\n\n- A valid fragment.\n### Details\n' > "$dir/valid.md"
 "$script" --check
-for heading in '## Fixes' '## Unexpected'; do
+# One section per fragment: a later section heading, known or not, is content
+# collation would drop, so --check, collation and a version cut all refuse it,
+# naming file:line, and a cut leaves the fragments in place.
+for heading in '## Fixes' '## Unexpected' '## Features'; do
   printf '## Additions\n\n- First section.\n%s\n- Second section.\n' "$heading" > "$dir/invalid.md"
-  "$script" --check > "$tmp/out" 2> "$tmp/err"
-  grep -F 'later section heading ignored' "$tmp/err" > /dev/null
-  # The ignored heading is left out of the rendered notes; its bullets stay.
-  "$script" > "$tmp/out"
-  if grep -xF -- "$heading" "$tmp/out" > /dev/null; then exit 1; fi
-  grep -xF -- '- Second section.' "$tmp/out" > /dev/null
+  if "$script" --check > "$tmp/out" 2> "$tmp/err"; then
+    echo "--check accepted a later heading: $heading" >&2
+    exit 1
+  fi
+  grep -F "$dir/invalid.md:4:" "$tmp/err" > /dev/null
+  grep -F 'one section per fragment; use two fragments for two sections' "$tmp/err" > /dev/null
+  if "$script" > "$tmp/out" 2> /dev/null; then exit 1; fi
+  if "$script" v9.9.9 > /dev/null 2>&1; then exit 1; fi
+  [ -f "$dir/invalid.md" ]
+  [ ! -e docs/release-notes/v9.9.9.md ]
 done
+# Content before the first heading is dropped too, and so is a bare bullet list.
+for first in 'Stray text.' '# Title' '- A bullet.'; do
+  printf '%s\n## Fixes\n\n- Bullet.\n' "$first" > "$dir/invalid.md"
+  if "$script" --check > "$tmp/out" 2> "$tmp/err"; then
+    echo "--check accepted content before the heading: $first" >&2
+    exit 1
+  fi
+  grep -F "$dir/invalid.md:1: content before the first section heading" "$tmp/err" > /dev/null
+done
+printf '%s\n' '- A bullet.' > "$dir/invalid.md"
+if "$script" --check > "$tmp/out" 2> "$tmp/err"; then exit 1; fi
+grep -F "$dir/invalid.md:1: content before the first section heading" "$tmp/err" > /dev/null
 rm -f "$dir/invalid.md"
+
+# Collation drops no line of an accepted fragment: every bullet it holds is in
+# the notes, whatever the heading and area spelling around it.
+printf '## fIxEs  \n\n### FABRIC\n\n- Spaced bullet.\n\n  Continued paragraph.\n\n- Second bullet.\n' > "$dir/shape.md"
+printf '## Unknown section\n### Unknown area\n- Recovered bullet.\n' > "$dir/recovered.md"
+"$script" --check > "$tmp/out" 2> "$tmp/err"
+"$script" > "$tmp/out" 2> /dev/null
+for line in '- Spaced bullet.' '  Continued paragraph.' '- Second bullet.' '- Recovered bullet.'; do
+  grep -xF -- "$line" "$tmp/out" > /dev/null || { echo "collation dropped: $line" >&2; exit 1; }
+done
+rm -f "$dir/shape.md" "$dir/recovered.md"
 printf 'See [policy](../../release-notes/README.md).\n' > "$dir/_intro.md"
 "$script" | grep -F '(../release-notes/README.md)' > /dev/null
 if "$script" | sed -n '1,/^## /p' | grep -F '../../' > /dev/null; then exit 1; fi
@@ -90,6 +120,11 @@ printf '## Unlisted section\n\n- Defaults to additions.\n' > "$dir/f.md"
 "$script" --check > "$tmp/out" 2> "$tmp/err"
 grep -F 'unknown area' "$tmp/err" > /dev/null
 grep -F 'unknown section' "$tmp/err" > /dev/null
+# Both warnings list the canonical choices and name file:line.
+grep -F 'choose one of: Breaking changes, Behaviour changes, Additions, Fixes' "$tmp/err" > /dev/null
+grep -F 'choose one of: CLI and install, Lanes and settlement, Git and safety, Accounts, quota and routing, Pipelines and graphs, Chair, inbox and console, Fabric, Telemetry and providers' "$tmp/err" > /dev/null
+grep -F "$dir/f.md:1: warning: unknown section" "$tmp/err" > /dev/null
+grep -F "$dir/e.md:2: warning: unknown area" "$tmp/err" > /dev/null
 "$script" > "$tmp/out" 2> "$tmp/err"
 grep -q '^## Fixes$' "$tmp/out"
 grep -q '^- Bad\.' "$tmp/out"

@@ -1,6 +1,8 @@
 #!/bin/sh
 # Prepare a release: bump member versions, refresh the lock and the bug
-# template, warn about merges without a fragment, then collate the notes.
+# template, warn about merges without a fragment, then collate the notes. The
+# fragments are checked first, so a malformed one stops the release before it
+# changes anything.
 #   prepare-release vX.Y.Z
 set -eu
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
@@ -20,6 +22,7 @@ case "${1:-}" in
   *) usage ;;
 esac
 version=${1#v}
+"$script_dir/collate-release-notes" --check
 tmp=$(mktemp "${TMPDIR:-/tmp}/prepare-release.XXXXXX")
 trap 'rm -f "$tmp"' EXIT HUP INT TERM
 
@@ -94,7 +97,7 @@ fragment_check() {
   done
 }
 
-# Check before collating: a release cut consumes the fragments.
+# Collation checks the fragments again; a release cut consumes them.
 fragment_check
 "$script_dir/collate-release-notes" "$1"
 
