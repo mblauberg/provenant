@@ -55,8 +55,8 @@ Unreleased or busy attempts are never collected.
 paused or pending graph older than this age whose branch has merged or whose PR
 is closed is reported as a warning with the age and its evidence. GC warns
 rather than refuses: a preview never stops a graph. `gc --apply` requests a
-stop for those graphs through the same cancellation path as `provenant graph
-stop`. The effective age and its origin (shipped default or host configuration)
+stop for those graphs through the same cancellation path as `provenant stop`.
+The effective age and its origin (shipped default or host configuration)
 are shown in the warning; `provenant config show --full` shows the key's source.
 
 After a merge, background cleanup targets only that branch's worktree and its

@@ -2337,10 +2337,11 @@ impl Factory {
             // A proposed writer does not yet have a registered worktree.
             // Inspect its declared boundary now; registration is verified once
             // the worktree owner provisions it at launch.
-            let proposed = node
-                .attempt
-                .as_ref()
-                .is_some_and(|attempt| attempt.new_worktree.is_some())
+            let proposed = (node.provision_worktree
+                || node
+                    .attempt
+                    .as_ref()
+                    .is_some_and(|attempt| attempt.new_worktree.is_some()))
                 && !path.exists();
             let mode = if proposed {
                 SourceAdmissionMode::Proposed
