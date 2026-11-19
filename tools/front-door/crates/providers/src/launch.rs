@@ -1870,9 +1870,11 @@ fn lane_targets(input: &PrepareInput<'_>) -> (PathBuf, PathBuf) {
     (target, lint)
 }
 
-/// A shared or configured target lies outside the lane cache, so its grants
-/// are not covered by the cache's. The host creates it before launch; the lane
-/// reads, writes and runs what it builds there.
+/// A configured target lies outside the lane cache, so its grants are not
+/// covered by the cache's. The host creates it before launch; the lane reads,
+/// writes and runs what it builds there. A writer's project target lies in its
+/// worktree, already writable and executable, and a grant derived from a
+/// writer-controlled path could be redirected by a symlink, so it gets none.
 fn external_target_grants(
     input: &PrepareInput<'_>,
     access: Access,
@@ -1881,8 +1883,19 @@ fn external_target_grants(
     let cache = lane_cache(input);
     let (target, lint) = lane_targets(input);
     let lint = (access == Access::WorktreeWrite).then_some(lint);
+    // The project target is resolved from the canonical workspace; compare
+    // both spellings of the worktree.
+    let worktree = (access == Access::WorktreeWrite).then(|| {
+        let canonical = input.cwd.canonicalize().ok();
+        (input.cwd, canonical)
+    });
+    let in_worktree = |path: &Path| {
+        worktree.as_ref().is_some_and(|(cwd, canonical)| {
+            path.starts_with(cwd) || canonical.as_ref().is_some_and(|c| path.starts_with(c))
+        })
+    };
     for path in std::iter::once(target).chain(lint) {
-        if path.starts_with(cache) {
+        if path.starts_with(cache) || in_worktree(&path) {
             continue;
         }
         requirements.reads.push(subtree(&path));

@@ -162,6 +162,7 @@ impl Error {
 #[serde(untagged)]
 enum Data {
     SeedBuilt(String),
+    SeedTarget(provenant_run::WorktreeSeed),
     Created(Box<worktrees::WorktreeInfo>),
     Listed(Vec<worktrees::WorktreeInfo>),
     Diagnosed(worktrees::WorktreeDiagnosis),
@@ -174,6 +175,7 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
     }
     let name = match &command {
         Worktree::SeedBuild => "worktree seed-build",
+        Worktree::SeedTarget { .. } => "worktree seed-target",
         Worktree::Create { .. } => "worktree create",
         Worktree::List => "worktree list",
         Worktree::Doctor { .. } => "worktree doctor",
@@ -183,12 +185,19 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
     let read_only = matches!(command, Worktree::List | Worktree::Doctor { .. });
     match execute(command, globals, workers) {
         Ok(data) => match serde_json::to_value(&data) {
-            Ok(value) => emit(
-                &CommandResult::new(name, Outcome::Ok, data),
-                globals,
-                &human(value),
-                read_only,
-            ),
+            Ok(value) => {
+                let human = match &data {
+                    // Only the path on stdout, for `CARGO_TARGET_DIR=$(...)`.
+                    Data::SeedTarget(seed) => seed_target_human(seed),
+                    _ => human(value),
+                };
+                emit(
+                    &CommandResult::new(name, Outcome::Ok, data),
+                    globals,
+                    &human,
+                    read_only,
+                )
+            }
             Err(_) => fail(
                 name,
                 Outcome::Error,
@@ -210,6 +219,24 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
             globals,
         ),
     }
+}
+
+/// The target path alone; how it was seeded goes to stderr.
+#[allow(clippy::print_stderr)]
+fn seed_target_human(seed: &provenant_run::WorktreeSeed) -> String {
+    match &seed.warning {
+        Some(warning) => eprintln!("{warning}"),
+        None => eprintln!(
+            "Cargo target {} ({}{})",
+            seed.status,
+            seed.reason,
+            seed.generation
+                .as_deref()
+                .map(|generation| format!(" from seed generation {generation}"))
+                .unwrap_or_default()
+        ),
+    }
+    seed.target.display().to_string()
 }
 
 /// The terse human form. `--json` keeps the structured path envelope; here a
@@ -272,6 +299,29 @@ fn execute(
         |context, cancel| {
             Ok(match command {
                 Worktree::SeedBuild => unreachable!(),
+                Worktree::SeedTarget { path } => {
+                    let path = if path.is_absolute() {
+                        path
+                    } else {
+                        context.repo.root_path().join(path)
+                    };
+                    let verified = provenant_confinement::verify_worktree(context.repo, &path)
+                        .map_err(WorktreeError::from)?;
+                    let cache = provenant_confinement::permissions::prepare_worktree_cargo_cache(
+                        home,
+                        &verified,
+                        &provenant_core::CredentialRoots::for_home(home),
+                    )?;
+                    let environment: Vec<_> = std::env::vars_os().collect();
+                    Data::SeedTarget(provenant_run::seed_worktree_target(
+                        roots.state.as_path(),
+                        home,
+                        verified.path(),
+                        verified.repo().common_git_dir(),
+                        &cache,
+                        &environment,
+                    ))
+                }
                 Worktree::Create { branch, base } => {
                     let info = worktrees::create(context, WorktreeCreate { branch, base }, cancel)?;
                     let verified = provenant_confinement::verify_worktree(context.repo, &info.path)
@@ -440,6 +490,11 @@ struct GcData {
     chair_logs: crate::chair_log_retention::Report,
     target_seeds: provenant_run::target_seed_gc::Report,
     build_dirs: provenant_run::build_dir_gc::Report,
+    #[serde(
+        default,
+        skip_serializing_if = "provenant_run::build_dir_gc::SharedRetirement::is_empty"
+    )]
+    shared_targets: provenant_run::build_dir_gc::SharedRetirement,
     graph_checkpoints_removed: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     stale_graphs: Vec<crate::gc_support::StaleGraph>,
@@ -782,6 +837,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 chair_logs: Default::default(),
                 target_seeds: Default::default(),
                 build_dirs: Default::default(),
+                shared_targets: Default::default(),
                 graph_checkpoints_removed: 0,
                 stale_graphs: Vec::new(),
                 graph_bytes: None,
@@ -968,6 +1024,25 @@ fn gc_data_summary(data: &GcData) -> String {
     }
     for kept in &data.provider_state.kept {
         human.push_str(&format!("kept {}: {}\n", kept.path.display(), kept.reason));
+    }
+    let shared = &data.shared_targets;
+    if !shared.found.is_empty() {
+        human.push_str(&if data.report.dry_run {
+            format!(
+                "{} retired shared Cargo target(s) would be removed\n",
+                shared.found.len()
+            )
+        } else {
+            format!(
+                "{} retired shared Cargo target(s), {} bytes removed; {} in use kept\n",
+                shared.removed.len(),
+                shared.bytes,
+                shared.busy.len()
+            )
+        });
+    }
+    for error in &shared.errors {
+        human.push_str(&format!("retired shared Cargo target: {error}\n"));
     }
     for temporary in &data.provider_state.attempt_tmp {
         human.push_str(&format!(
@@ -3384,6 +3459,17 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let home = self.home;
         let config = self.config;
         let free_floor = self.free_floor;
+        self.data.shared_targets = provenant_run::build_dir_gc::retire_shared_targets(
+            home,
+            config
+                .domains
+                .fabric
+                .lanes
+                .build_settings()
+                .build_dir_grace_seconds(),
+            command.dry_run,
+            self.now_ns,
+        );
         let profile = config.dispatch_profile(&[])?;
         let cache_root = provenant_run::build_dir_gc::shared_cache_root(home);
         let budget = match provenant_config::cargo_cache_budget(&profile, &cache_root) {

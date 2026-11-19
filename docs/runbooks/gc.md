@@ -78,8 +78,11 @@ volume and shows its effective source in diagnostics. For example, set
 `[knobs]` table; profile and launch overrides use the same knob. Launch evicts eligible targets in
 least-recently-used order when the cache exceeds the budget. `gc --dry-run`
 shows measured cache size against that budget; incomplete previews say so.
-Shared targets under `~/Library/Caches/provenant-shared-cargo/` participate in
-both the budget and free-space sweep. Live attempt custody and held Cargo build
+Targets of the removed `lanes.cargo_target = "shared"` mode under
+`~/Library/Caches/provenant-shared-cargo/` count toward both the budget and the
+free-space sweep until full GC retires them: a preview lists them, and `--apply`
+removes each whose Cargo locks are free and that was not written within the
+build-directory grace. Live attempt custody and held Cargo build
 locks always protect a target. Full GC also protects recent writes and the
 newest Cargo seed generation for each project. Private lane caches older than `gc.idle` are
 eligible when their owner has settled or disappeared. Unknown custody keeps a cache.

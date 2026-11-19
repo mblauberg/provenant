@@ -4295,6 +4295,10 @@ pub(super) fn prepare_candidates_inner(
             task,
             &plan,
         );
+        let lane_worktree = match &plan.permissions().mode {
+            AccessMode::WorktreeWrite(_) => writer.as_ref().map(|w| w.worktree.path()),
+            AccessMode::ReadOnly => None,
+        };
         let common_git_path = repository
             .as_ref()
             .map(|path| path.to_path_buf())
@@ -4308,14 +4312,16 @@ pub(super) fn prepare_candidates_inner(
             AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
             AccessMode::ReadOnly => &plan.permissions().scratch.path,
         };
+        let cargo_workspace = cargo_target.project_workspace(lane_worktree, state_root);
         let (cargo_target_dir, cargo_target_lint) =
-            cargo_target.target_paths(&home, common_git_dir.as_deref(), private_cache);
-        // A shared or configured target lies outside the lane cache. Create it
-        // here so a sandboxed lane's grants can anchor to it; Cargo would
-        // create it itself only after the profile is fixed.
+            cargo_target.target_paths(cargo_workspace.as_deref(), private_cache);
+        // A configured target lies outside the lane cache. Create it here so a
+        // sandboxed lane's grants can anchor to it; Cargo would create it
+        // itself only after the profile is fixed. A project target lies in the
+        // writer-controlled worktree, where the host never creates anything.
         let cargo_target_warning = [&cargo_target_dir, &cargo_target_lint]
             .into_iter()
-            .filter(|path| !path.starts_with(private_cache))
+            .filter(|path| !path.starts_with(private_cache) && cargo_workspace.is_none())
             .find_map(|path| {
                 std::fs::create_dir_all(path)
                     .err()
@@ -4724,7 +4730,7 @@ pub(super) fn prepare_candidates_inner(
             spec.argv
                 .splice(1..1, [argument.into(), scratch.as_os_str().to_owned()]);
         }
-        if writer.is_none() && !cargo_target.value.is_shared() {
+        if writer.is_none() {
             super::command::scratch_cargo_output(&mut spec.env, scratch);
         }
         spec.complete_tool_requirements(&plan, &cwd)?;
@@ -4784,13 +4790,20 @@ pub(super) fn prepare_candidates_inner(
         if let Some(warning) = &cargo_cache_budget_warning {
             push_launch_warning(&mut route, warning.clone());
         }
-        if let Some((_, target_val)) = spec.env.iter().find(|(k, _)| k == "CARGO_TARGET_DIR") {
+        // A read-only lane builds in its scratch by design; a writer's target
+        // lies in its lane cache or a configured path, never in attempt tmp.
+        if let Some((_, target_val)) = spec
+            .env
+            .iter()
+            .find(|(k, _)| k == "CARGO_TARGET_DIR")
+            .filter(|_| writer.is_some())
+        {
             let target_path = Path::new(target_val);
             if target_path.starts_with(scratch) || target_path.starts_with(&paths.temporary) {
                 push_launch_warning(
                     &mut route,
                     format!(
-                        "CARGO_TARGET_DIR is set under the attempt's tmp directory ({}); build output bypasses the shared target",
+                        "CARGO_TARGET_DIR is set under the attempt's tmp directory ({}); build output bypasses the lane's warm target",
                         target_path.display()
                     ),
                 );

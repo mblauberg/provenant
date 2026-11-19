@@ -1680,7 +1680,7 @@ fn set_rejects_out_of_range_values_and_unknown_knobs() {
     assert!(!roots.state.as_path().join("config.toml").exists());
 }
 #[test]
-fn cargo_target_knob_accepts_shared_private_and_absolute_paths_and_rejects_relative() {
+fn cargo_target_knob_accepts_project_private_and_absolute_paths_and_rejects_relative() {
     let dir = tempfile::tempdir().unwrap();
     let roots = state_roots(dir.path());
     let set = |name, value| knob_edit(&roots, KnobEdit::Set { name, value });
@@ -1691,7 +1691,15 @@ fn cargo_target_knob_accepts_shared_private_and_absolute_paths_and_rejects_relat
             ..
         })
     ));
-    assert!(set("lanes.cargo_target", "shared").is_ok());
+    // One target shared by every worktree served stale artifacts (#3561).
+    assert!(matches!(
+        set("lanes.cargo_target", "shared"),
+        Err(ConfigError::KnobValue {
+            rule: "unknown_value",
+            ..
+        })
+    ));
+    assert!(set("lanes.cargo_target", "project").is_ok());
     assert!(set("lanes.cargo_target", "private").is_ok());
     assert!(set("lanes.cargo_target", "/var/cache/cargo-target").is_ok());
 }

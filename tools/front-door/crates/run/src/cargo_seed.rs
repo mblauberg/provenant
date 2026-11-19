@@ -184,6 +184,7 @@ fallback_reasons! {
     TARGET_CONTAINS_UNSUPPORTED_ENTRY = "target_contains_unsupported_entry",
     CLONE_FAILED = "clone_failed",
     TOOLCHAIN_UNVERIFIED = "toolchain_unverified",
+    FRESHNESS_RESET_FAILED = "freshness_reset_failed",
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -246,6 +247,8 @@ impl Outcome {
     }
     /// One line for the host's stderr when a seed was wanted and not used, so
     /// a lane that builds its dependencies from scratch is not a surprise.
+    /// Where the filesystem cannot clone, the reason is `clone_failed`: the
+    /// target stays unseeded and its first build is cold.
     pub(crate) fn fallback_warning(&self, what: &str) -> Option<String> {
         (self.status == "fallback").then(|| {
             format!(
@@ -269,6 +272,64 @@ impl Outcome {
     }
     pub(crate) fn is_seeded(&self) -> bool {
         self.status == "seeded"
+    }
+}
+
+/// What `provenant worktree seed-target` did for one checkout.
+#[derive(Debug, serde::Serialize)]
+pub struct WorktreeSeed {
+    /// The directory to use as `CARGO_TARGET_DIR`.
+    pub target: std::path::PathBuf,
+    pub status: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The host seed generation cloned, when one was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+/// Seed a checkout's private target, the one a writer lane in that checkout
+/// uses, from the newest compatible host seed generation, with dep-info aged.
+/// An existing target is kept. Runs on the host with the caller's environment,
+/// so the caller's Cargo profile overrides choose the generation.
+pub fn seed_worktree_target(
+    state: &Path,
+    home: &Path,
+    worktree: &Path,
+    common_git_dir: &Path,
+    cache: &Path,
+    environment: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> WorktreeSeed {
+    let outcome = match crate::target_seed::cargo_build_directory(worktree, state) {
+        Ok(Some(_)) => seed_target_with_reservation(
+            state,
+            cache,
+            worktree,
+            &crate::target_seed::project_key(common_git_dir),
+            home,
+            environment,
+            &provenant_core::CancelToken::new(),
+            |_| {},
+        ),
+        Ok(None) => Outcome::skipped("non_cargo_project"),
+        Err(_) => Outcome::fallback_detail(
+            fallback_reasons::TOOLCHAIN_UNVERIFIED,
+            codes::CARGO_WORKSPACE_UNREADABLE,
+        ),
+    };
+    WorktreeSeed {
+        target: cache.join("target"),
+        warning: outcome.fallback_warning("the Cargo target"),
+        generation: outcome
+            .seed_source
+            .as_ref()
+            .and_then(|source| source.generation_id.clone()),
+        status: outcome.status,
+        reason: outcome.reason,
+        detail: outcome.detail,
     }
 }
 
@@ -527,6 +588,7 @@ fn seed_target_cancellable(
             .open_verified_directory(&stage)
             .map_err(|_| fallback_reasons::STAGING_UNAVAILABLE)?;
         clone(&source, &staging, deadline)?;
+        age_dep_info(&cache.join(&stage)).map_err(|_| fallback_reasons::FRESHNESS_RESET_FAILED)?;
         if deadline.expired() {
             return Err(fallback_reasons::SEED_BUDGET_EXHAUSTED);
         }
@@ -558,12 +620,18 @@ fn seed_target_cancellable(
             if reason == fallback_reasons::CANCELLED
                 || reason == fallback_reasons::SEED_BUDGET_EXHAUSTED =>
         {
+            // The clone's own budget or token is spent; remove the partial
+            // stage with a fresh bounded budget so it does not linger for the
+            // next seed to spend its budget on. One that does not finish is
+            // retried by the next seed under the store lock.
+            let _ = remove_seed_tree(&cache_dir, &stage, None, &SeedBudget::new());
             Outcome::fallback(reason)
         }
         Err(reason) => {
             match remove_seed_tree(&cache_dir, &stage, cancel, deadline) {
                 Ok(true) => {}
                 Ok(false) => {
+                    let _ = remove_seed_tree(&cache_dir, &stage, None, &SeedBudget::new());
                     return Outcome::fallback(
                         if cancel.is_some_and(|token| token.is_cancelled()) {
                             fallback_reasons::CANCELLED
@@ -577,6 +645,47 @@ fn seed_target_cancellable(
             Outcome::fallback(reason)
         }
     }
+}
+
+/// A seed was built from another checkout. Cargo hashes a workspace member's
+/// units by its workspace-relative path and treats them as fresh while every
+/// source listed in their dep-info is older than that dep-info, so a worktree
+/// checked out before the seed was built would reuse the seed's member
+/// artifacts for different sources (#3561). Ageing every dep-info file to the
+/// epoch makes each unit that lists source files rebuild once in its new
+/// worktree; registry packages list none and stay fresh.
+#[cfg(any(unix, test))]
+fn age_dep_info(target: &Path) -> std::io::Result<()> {
+    // Fingerprints sit under <target>/<profile>/ or <target>/<triple>/<profile>/.
+    fn visit(directory: &Path, depth: usize) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            if entry.file_name() == ".fingerprint" {
+                for unit in std::fs::read_dir(entry.path())? {
+                    let unit = unit?;
+                    if !unit.file_type()?.is_dir() {
+                        continue;
+                    }
+                    for file in std::fs::read_dir(unit.path())? {
+                        let file = file?;
+                        if file.file_type()?.is_file()
+                            && file.file_name().as_encoded_bytes().starts_with(b"dep-")
+                        {
+                            std::fs::File::open(file.path())?
+                                .set_modified(std::time::SystemTime::UNIX_EPOCH)?;
+                        }
+                    }
+                }
+            } else if depth < 2 {
+                visit(&entry.path(), depth + 1)?;
+            }
+        }
+        Ok(())
+    }
+    visit(target, 0)
 }
 
 #[cfg(unix)]
@@ -749,6 +858,8 @@ fn clone_entries(
             }
             FileKind::Regular => {
                 let file = source.open_read(&name).map_err(|_| store.read_failed)?;
+                // Off APFS or a reflink filesystem the clone fails and the
+                // target stays unseeded: a copy cannot fit the seed budget.
                 destination
                     .clone_file_from(&file, &name)
                     .map_err(|_| fallback_reasons::CLONE_FAILED)?;
@@ -771,6 +882,25 @@ fn clone_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_spent_budget_or_cancelled_clone_removes_its_stage() {
+        for reason in [
+            fallback_reasons::SEED_BUDGET_EXHAUSTED,
+            fallback_reasons::CANCELLED,
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let cache = tmp.path().join("cache");
+            std::fs::create_dir(&cache).unwrap();
+            generation(tmp.path(), "001", "v1", "host");
+            let outcome = seed_target_with(tmp.path(), &cache, "v1", "host", |_, stage| {
+                stage.mkdir(std::ffi::OsStr::new("partial"), 0o700).unwrap();
+                Err(reason)
+            });
+            assert_eq!(outcome, Outcome::fallback(reason));
+            assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
+        }
+    }
 
     fn generation(state: &Path, name: &str, version: &str, triple: &str) {
         generation_for_project(state, name, version, triple, "");
@@ -843,6 +973,47 @@ mod tests {
             );
             assert!(seen.insert(*code), "{code} is listed twice");
         }
+    }
+
+    #[test]
+    fn seeded_dep_info_is_aged_so_worktree_sources_decide_freshness()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let target = root.path().join("target");
+        let host_unit = target.join("debug/.fingerprint/member-0123456789abcdef");
+        let cross_unit =
+            target.join("aarch64-apple-darwin/debug/.fingerprint/member-fedcba9876543210");
+        let deps = target.join("debug/deps");
+        for directory in [&host_unit, &cross_unit, &deps] {
+            std::fs::create_dir_all(directory)?;
+        }
+        let aged = [
+            host_unit.join("dep-lib-member"),
+            cross_unit.join("dep-lib-member"),
+        ];
+        let kept = [
+            host_unit.join("lib-member.json"),
+            deps.join("libmember.rmeta"),
+        ];
+        for path in aged.iter().chain(&kept) {
+            std::fs::write(path, b"x")?;
+        }
+        age_dep_info(&target)?;
+        for path in &aged {
+            assert_eq!(
+                std::fs::metadata(path)?.modified()?,
+                std::time::UNIX_EPOCH,
+                "{path:?}"
+            );
+        }
+        for path in &kept {
+            assert_ne!(
+                std::fs::metadata(path)?.modified()?,
+                std::time::UNIX_EPOCH,
+                "{path:?}"
+            );
+        }
+        Ok(())
     }
 
     #[test]

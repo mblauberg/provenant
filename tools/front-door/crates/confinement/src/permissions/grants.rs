@@ -80,51 +80,74 @@ pub fn prepare_writer_directories(
         })
         .collect();
     for path in paths {
-        let mut directory =
-            Directory::open_anchor(Path::new("/")).map_err(PermissionError::Filesystem)?;
-        let mut traversed = PathBuf::from("/");
-        for component in path.components() {
-            let Component::Normal(name) = component else {
-                continue;
-            };
-            directory = match directory.open_directory(name) {
-                Ok(child) => child,
-                Err(error) if error.is_not_found() => {
-                    match directory.mkdir(name, 0o700) {
-                        Ok(()) => {}
-                        Err(error) if error.is_exists() => {}
-                        Err(error) => return Err(PermissionError::Filesystem(error)),
-                    }
-                    directory
-                        .open_directory(name)
-                        .map_err(PermissionError::Filesystem)?
+        create_derived_directory(path, &authority.cargo_cache.path, worktree)?;
+    }
+    Ok(())
+}
+
+/// Create `path` one verified component at a time, never following links. On
+/// the way, the lane cache and its parent must be private to this user, and the
+/// cache gets the owner marker GC reads to tie it to `worktree`.
+fn create_derived_directory(
+    path: &Path,
+    cache: &Path,
+    worktree: &VerifiedWorktree,
+) -> Result<(), PermissionError> {
+    let mut directory =
+        Directory::open_anchor(Path::new("/")).map_err(PermissionError::Filesystem)?;
+    let mut traversed = PathBuf::from("/");
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        directory = match directory.open_directory(name) {
+            Ok(child) => child,
+            Err(error) if error.is_not_found() => {
+                match directory.mkdir(name, 0o700) {
+                    Ok(()) => {}
+                    Err(error) if error.is_exists() => {}
+                    Err(error) => return Err(PermissionError::Filesystem(error)),
                 }
-                Err(error) => return Err(PermissionError::Filesystem(error)),
-            };
-            traversed.push(name);
-            if traversed == authority.cargo_cache.path
-                || Some(traversed.as_path()) == authority.cargo_cache.path.parent()
-            {
-                verify_cache_metadata(&directory.metadata().map_err(PermissionError::Filesystem)?)?;
-            }
-            if traversed == authority.cargo_cache.path {
-                let identity = worktree.identity();
-                let marker = encode_cache_owner(&CacheOwner {
-                    path: worktree.path().to_path_buf(),
-                    identity: (identity.device, identity.inode),
-                });
                 directory
-                    .atomic_write(
-                        OsStr::new(CARGO_CACHE_OWNER),
-                        ".provenant-owner-",
-                        &marker,
-                        PublishMode::Replace,
-                    )
-                    .map_err(PermissionError::Filesystem)?;
+                    .open_directory(name)
+                    .map_err(PermissionError::Filesystem)?
             }
+            Err(error) => return Err(PermissionError::Filesystem(error)),
+        };
+        traversed.push(name);
+        if traversed == cache || Some(traversed.as_path()) == cache.parent() {
+            verify_cache_metadata(&directory.metadata().map_err(PermissionError::Filesystem)?)?;
+        }
+        if traversed == cache {
+            let identity = worktree.identity();
+            let marker = encode_cache_owner(&CacheOwner {
+                path: worktree.path().to_path_buf(),
+                identity: (identity.device, identity.inode),
+            });
+            directory
+                .atomic_write(
+                    OsStr::new(CARGO_CACHE_OWNER),
+                    ".provenant-owner-",
+                    &marker,
+                    PublishMode::Replace,
+                )
+                .map_err(PermissionError::Filesystem)?;
         }
     }
     Ok(())
+}
+
+/// Create a worktree's lane cache with its owner marker for a host command
+/// outside any lane, such as `provenant worktree seed-target`. The writer path
+/// uses [`prepare_writer_directories`]; both derive the same directory.
+pub fn prepare_worktree_cargo_cache(
+    home: &Path,
+    worktree: &VerifiedWorktree,
+    credentials: &provenant_core::CredentialRoots,
+) -> Result<PathBuf, PermissionError> {
+    let grant = worktree_cargo_cache(home, worktree, credentials)?;
+    create_derived_directory(&grant.path, &grant.path, worktree)?;
+    Ok(grant.path)
 }
 
 pub(super) fn validate_writer_cache(

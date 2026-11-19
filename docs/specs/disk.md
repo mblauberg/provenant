@@ -47,10 +47,10 @@ effects complete and no live holder, writer slot or Cargo lock holds the files;
 live attempts are never touched. Busy or unreleased attempts remain protected, and collection
 preserves durable results, handoffs, logs and process records.
 
-Lanes, read-only and writer alike, steer build output to the shared project target
-(`lanes.cargo_target = "shared"`); the host creates it before launch.
-When a lane configures `CARGO_TARGET_DIR` under an attempt's `tmp/` directory,
-launch and handoff output emit a warning. Discard archives exclude ignored build output
+Writer lanes build in the worktree's own private target (`lanes.cargo_target`,
+[run spec](run.md#cargo-target-directory)); read-only lanes build in their
+attempt scratch. When a writer's `CARGO_TARGET_DIR` is under an attempt's
+`tmp/` directory, launch emits a warning. Discard archives exclude ignored build output
 at creation (`target/` and any directory marked with `CACHEDIR.TAG`), and expire
 after `gc.discard_archive_retention` (defaults to 14 days). In shared targets,
 stale incremental session directories (`debug/incremental/*`) older than `gc.idle`

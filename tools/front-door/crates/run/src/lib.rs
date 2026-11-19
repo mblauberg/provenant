@@ -53,6 +53,7 @@ pub use service::{DispatchRequest, DispatchTask, ErrorKind, RefusalContext, Serv
 pub use transcript::locate as locate_transcript;
 pub mod build_dir_gc;
 mod cargo_seed;
+pub use cargo_seed::{WorktreeSeed, seed_worktree_target};
 pub mod target_seed;
 pub mod target_seed_gc;
 mod writer;

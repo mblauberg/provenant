@@ -740,6 +740,10 @@ pub fn cache_root(home: &Path) -> PathBuf {
     home.join("Library/Caches/provenant-lane-cargo")
 }
 
+/// Where the removed `lanes.cargo_target = "shared"` mode kept one target per
+/// project. Several worktrees shared each one, and Cargo served one worktree's
+/// stale artifacts to another (#3561). No lane is pointed here now; GC
+/// retires it, and until then its targets count toward the cache budget.
 pub fn shared_cache_root(home: &Path) -> PathBuf {
     home.join("Library/Caches/provenant-shared-cargo")
 }
@@ -797,6 +801,128 @@ fn managed_target_relative(target: &Path, root: &Path) -> bool {
     parts.next().is_none()
         && cache.to_str().is_some_and(is_cache_digest)
         && matches!(target.to_str(), Some("target" | "target-lint"))
+}
+
+/// The retired shared targets a GC pass found and what it did with them.
+#[derive(Debug, Default, serde::Serialize)]
+pub struct SharedRetirement {
+    /// Every project directory under the retired root. A preview lists them
+    /// without measuring or changing anything.
+    pub found: Vec<PathBuf>,
+    pub removed: Vec<PathBuf>,
+    /// Allocated bytes removed.
+    pub bytes: u64,
+    /// Kept because a Cargo lock is held or a write falls within the grace:
+    /// a lane launched by an older binary may still build there.
+    pub busy: Vec<PathBuf>,
+    pub errors: Vec<String>,
+}
+
+impl SharedRetirement {
+    pub fn is_empty(&self) -> bool {
+        self.found.is_empty() && self.errors.is_empty()
+    }
+}
+
+/// Retire the shared targets of the removed `shared` mode. A dry run only
+/// lists them. Otherwise each project directory goes whole once every Cargo
+/// profile lock in it is free and nothing in it was written within the grace;
+/// the locks stay held until it is gone.
+pub fn retire_shared_targets(
+    home: &Path,
+    grace_seconds: u64,
+    dry_run: bool,
+    now_ns: i128,
+) -> SharedRetirement {
+    let mut report = SharedRetirement::default();
+    let base = shared_cache_root(home);
+    let root = match Directory::open_anchor(&base) {
+        Ok(root) => root,
+        Err(error) => {
+            if !error.is_not_found() {
+                report.errors.push(format!("{}: {error}", base.display()));
+            }
+            return report;
+        }
+    };
+    let names = match provenant_os::fs::entry_names(&root, MAX_ENTRIES) {
+        Ok(names) => names,
+        Err(error) => {
+            report.errors.push(format!("{}: {error}", base.display()));
+            return report;
+        }
+    };
+    let grace = i128::from(grace_seconds).saturating_mul(1_000_000_000);
+    for name in names {
+        // Only project-key directories; anything else here is not ours to retire.
+        if !name.to_str().is_some_and(is_cache_digest) {
+            continue;
+        }
+        let display = base.join(&name);
+        let Ok(metadata) = root.metadata_at(&name, false) else {
+            continue;
+        };
+        if metadata.kind != FileKind::Directory || metadata.uid != effective_uid() {
+            continue;
+        }
+        report.found.push(display.clone());
+        if dry_run {
+            continue;
+        }
+        match retire_one(&root, &name, &metadata, now_ns, grace) {
+            Ok(Some(bytes)) => {
+                report.bytes = report.bytes.saturating_add(bytes);
+                report.removed.push(display);
+            }
+            Ok(None) => report.busy.push(display),
+            Err(error) => {
+                report.busy.push(display.clone());
+                report
+                    .errors
+                    .push(format!("{}: {error}", display.display()));
+            }
+        }
+    }
+    report
+}
+
+/// Remove one retired project directory, or `None` when it is in use.
+fn retire_one(
+    root: &Directory,
+    name: &OsStr,
+    metadata: &Metadata,
+    now_ns: i128,
+    grace: i128,
+) -> io::Result<Option<u64>> {
+    // The shared mode created these group-readable; narrow through the held
+    // descriptor so the payload claim's privacy check holds.
+    let opened = root
+        .open_verified_directory(name)
+        .map_err(io::Error::other)?;
+    if !metadata.same_identity(&opened.metadata().map_err(io::Error::other)?) {
+        return Err(io::Error::other("directory replaced during retirement"));
+    }
+    opened.make_private().map_err(io::Error::other)?;
+    let metadata = opened.metadata().map_err(io::Error::other)?;
+    drop(opened);
+    let tree = PayloadTree::claim(root, name, &metadata).map_err(io::Error::other)?;
+    // Every Cargo profile lock under the directory, held until it is gone; an
+    // old directory may lack either target.
+    let Some(guards) =
+        provenant_confinement::cache::lock_cargo_profiles(tree.directory(), &|| true)
+    else {
+        return Ok(None);
+    };
+    let (bytes, newest) = measure(&tree, 0, &mut MeasureBudget::new(false))?;
+    if within_grace(newest, now_ns, grace) {
+        return Ok(None);
+    }
+    let mut remaining = MAX_ENTRIES;
+    remove_contents_until(&tree, 0, &mut remaining, &mut || false)?;
+    drop(tree);
+    root.rmdir(name).map_err(io::Error::other)?;
+    drop(guards);
+    Ok(Some(bytes))
 }
 
 /// Collect. The walk that measures every profile directory runs without any
@@ -3172,6 +3298,63 @@ mod tests {
             ForeignLock::Acquired(guard) => guard,
             other => panic!("lock {name} is not free: {other:?}"),
         }
+    }
+
+    fn shared_profile(home: &Path, key: &str, age: u64) -> PathBuf {
+        let dir = shared_cache_root(home).join(key).join("target/debug");
+        fs::create_dir_all(dir.join("deps")).unwrap();
+        fs::write(dir.join(CARGO_LOCK), b"").unwrap();
+        fs::write(dir.join("deps/payload"), vec![1; 4096]).unwrap();
+        let when = fixed_time() - std::time::Duration::from_secs(age);
+        for path in [
+            dir.join("deps/payload"),
+            dir.join("deps"),
+            dir.join(CARGO_LOCK),
+            dir.clone(),
+            dir.parent().unwrap().to_path_buf(),
+            dir.parent().unwrap().parent().unwrap().to_path_buf(),
+        ] {
+            fs::File::open(path).unwrap().set_modified(when).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn retired_shared_targets_are_listed_in_preview_and_removed_on_apply_unless_busy() {
+        let fixture = Fixture::new();
+        let home = fixture.home.path();
+        let (idle, busy, recent) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+        shared_profile(home, &idle, 600);
+        let busy_profile = shared_profile(home, &busy, 600);
+        let recent_profile = shared_profile(home, &recent, 10);
+        let root = shared_cache_root(home);
+        fs::create_dir(root.join("not-a-project-key")).unwrap();
+        for key in [&idle, &busy, &recent] {
+            fs::set_permissions(root.join(key), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let preview = retire_shared_targets(home, 60, true, now());
+        assert_eq!(preview.found.len(), 3);
+        assert!(preview.removed.is_empty() && preview.busy.is_empty());
+        assert!(root.join(&idle).exists());
+
+        let _held = hold(&busy_profile, CARGO_LOCK);
+        let applied = retire_shared_targets(home, 60, false, now());
+        assert_eq!(applied.removed, vec![root.join(&idle)]);
+        assert!(applied.bytes > 0);
+        assert!(!root.join(&idle).exists());
+        let mut kept = applied.busy.clone();
+        kept.sort();
+        assert_eq!(kept, vec![root.join(&busy), root.join(&recent)]);
+        assert!(busy_profile.exists() && recent_profile.exists());
+        assert!(root.join("not-a-project-key").exists());
+        assert!(applied.errors.is_empty(), "{:?}", applied.errors);
+    }
+
+    #[test]
+    fn no_retired_root_reports_nothing() {
+        let fixture = Fixture::new();
+        assert!(retire_shared_targets(fixture.home.path(), 0, false, now()).is_empty());
     }
 
     #[test]

@@ -335,7 +335,7 @@ fn check(spec: &Spec, value: &Value) -> Result<(), &'static str> {
             .then_some(())
             .ok_or("unknown_value"),
         Value::String(text) if spec.kind == Kind::CargoTarget => {
-            if text == "shared"
+            if text == "project"
                 || text == "private"
                 || (std::path::Path::new(text).is_absolute() && !text.contains('\0'))
             {
