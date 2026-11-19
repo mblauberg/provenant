@@ -2140,13 +2140,12 @@ impl Factory {
         let bound_document =
             serde_json::to_string(&document).map_err(|_| FacadeError::StateCorrupt)?;
         patch::warn_for_secrets("graph.bound_document", &bound_document);
+        // Static admission is the single compile gate: a launch no longer seals
+        // the submission patch above, so admit here to keep every entry on the
+        // same typed (redacted) refusal.
         let expanded_for_warnings = document
-            .expanded(&self.context.config.graph.limits)
-            .map_err(|error| FacadeError::DispatchRefused {
-                fact: None,
-                disk: None,
-                reason: error.to_string(),
-            })?;
+            .admit_expanded(&self.context.config.graph.limits)
+            .map_err(FacadeError::graph_admission)?;
         let mut warnings = implementation_warnings(
             &expanded_for_warnings.nodes,
             input,
