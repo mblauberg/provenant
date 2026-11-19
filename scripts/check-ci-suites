@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """Check that workflow job bindings agree with the CI suite manifest."""
+import glob
 import importlib.machinery
 import importlib.util
 import os
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 loader = importlib.machinery.SourceFileLoader('ci_selector', str(Path(__file__).with_name('select-ci-suites')))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 selector = importlib.util.module_from_spec(spec)
 loader.exec_module(selector)
+PACKAGE = re.compile(r'package\(=([A-Za-z0-9_-]+)\)')
 
 
-def check(config, workflow):
+def check(config, workflow, packages):
     jobs = workflow['jobs']
     if not isinstance(jobs, dict):
         raise ValueError('workflow jobs must be a mapping')
@@ -43,7 +46,45 @@ def check(config, workflow):
     for job in always | ungated:
         if 'needs.scope.outputs.suites' in str(jobs.get(job, {}).get('if', '')):
             errors.append(f'{job} must not bind a suite')
+    return errors + unwatched_packages(config, jobs, packages)
+
+
+def unwatched_packages(config, jobs, packages):
+    """A main-tier suite runs on a pull request only when its pr_paths match, so
+    every package its jobs test by name needs a pr_paths entry inside that
+    package's directory. An entry may be the whole directory or the narrow
+    files those tests cover; a glob shared with other packages does not count."""
+    errors = []
+    for suite in config['suite']:
+        if suite['tier'] != 'main':
+            continue
+        named = set()
+        for job in suite['jobs']:
+            for step in jobs.get(job, {}).get('steps') or []:
+                named.update(PACKAGE.findall(str(step.get('run', ''))))
+        prefixes = [re.split(r'[*?]', pattern, maxsplit=1)[0] for pattern in suite.get('pr_paths', [])]
+        for package in sorted(named):
+            directory = packages.get(package)
+            if directory is None:
+                errors.append(f"{suite['name']} tests unknown package {package}")
+            elif not any(prefix.startswith(directory + '/') for prefix in prefixes):
+                errors.append(f"{suite['name']} tests package {package} but no pr_paths entry lies in {directory}")
     return errors
+
+
+def workspace_packages(root):
+    """Cargo package name to repository-relative directory, for each workspace member."""
+    packages = {}
+    for workspace in root.glob('tools/*/Cargo.toml'):
+        with workspace.open('rb') as f:
+            members = tomllib.load(f).get('workspace', {}).get('members', [])
+        for member in members:
+            for manifest in sorted(map(Path, glob.glob(str(workspace.parent / member / 'Cargo.toml')))):
+                with manifest.open('rb') as f:
+                    name = tomllib.load(f).get('package', {}).get('name')
+                if name:
+                    packages[name] = manifest.parent.resolve().relative_to(root.resolve()).as_posix()
+    return packages
 
 
 def main():
@@ -52,11 +93,11 @@ def main():
         config = selector.manifest()
         workflow_path = Path(os.environ.get('CI_WORKFLOW', selector.ROOT / '.github/workflows/ci.yml'))
         workflow = yaml.safe_load(workflow_path.read_text())
-        errors = check(config, workflow)
+        errors = check(config, workflow, workspace_packages(selector.ROOT))
         if errors:
             print('\n'.join(errors), file=sys.stderr); return 1
         print('CI workflow matches suite manifest.'); return 0
-    except (ImportError, OSError, ValueError, KeyError, TypeError) as error:
+    except (ImportError, OSError, ValueError, KeyError, TypeError, tomllib.TOMLDecodeError) as error:
         print(f'CI suite check failed: {error}', file=sys.stderr); return 1
 
 

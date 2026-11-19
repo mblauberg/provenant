@@ -90,6 +90,7 @@ pub(super) fn fixture_input<'a>(
         user: std::ffi::OsStr::new("fixture"),
         host_var: &|_| None,
         skill_stage_max_bytes: 16 * 1024 * 1024,
+        git_config_allow: &[],
         account: None,
         token,
         cwd,
@@ -1333,5 +1334,123 @@ fn codex_configuration_is_a_writer_preference_and_read_only_authority()
             }
         }
     }
+    Ok(())
+}
+
+/// A sandboxed writer's private Git configuration carries host identity and
+/// aliases only through the allowlist. A token in the host configuration, in
+/// an extra header, a rewrite URL or an inline helper, never reaches the
+/// written configuration or a read grant, and only key names are recorded.
+#[test]
+fn sandboxed_private_git_config_withholds_host_credentials() -> Result<(), Box<dyn std::error::Error>> {
+    const TOKEN: &str = "ghp_fixtureLaneConfigToken";
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let repo = home.join("repo");
+    std::fs::create_dir_all(&repo)?;
+    let host_config = home.join(".gitconfig");
+    std::fs::write(
+        &host_config,
+        format!(
+            "[user]\n name = Host Name\n email = host@example.com\n[alias]\n st = status --short\n\
+             pub = !git push https://x-access-token:{TOKEN}@github.com/o/r\n\
+             [http \"https://github.com/\"]\n extraHeader = AUTHORIZATION: bearer {TOKEN}\n\
+             [url \"https://x-access-token:{TOKEN}@github.com/\"]\n insteadOf = https://github.com/\n\
+             [url \"https://mirror.example/\"]\n insteadOf = mirror:\n\
+             [credential]\n helper = \"!f() {{ echo password={TOKEN}; }}; f\"\n\
+             [core]\n askPass = /bin/echo-{TOKEN}\n"
+        ),
+    )?;
+    // The host system file is read through the same allowlist; the lane's
+    // Git never reads it directly.
+    let system_config = home.join("system.gitconfig");
+    std::fs::write(
+        &system_config,
+        "[credential]\n helper = osxkeychain\n[alias]\n sys = log -1\n\
+         [filter \"lfs\"]\n clean = git-lfs clean -- %f\n required = true\n",
+    )?;
+    let host_var = |key: &str| {
+        (key == "GIT_CONFIG_SYSTEM").then(|| system_config.clone().into_os_string())
+    };
+    let git = provenant_os::git::git_executable()
+        .ok_or("Git unavailable")?
+        .canonicalize()?;
+    let prompt = Prompt::new("fixture".into());
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+    let mut input = fixture_input(&route, &plan, &prompt, &repo, None);
+    input.home = &home;
+    input.provenant.git = &git;
+    input.credential_roots = provenant_core::CredentialRoots::for_home(&home);
+    input.host_var = &host_var;
+    let spec = codex::Codex.prepare(input)?;
+    let config = spec
+        .setup
+        .iter()
+        .find_map(|step| match step {
+            SetupStep::WriteFile { path, bytes } if path.ends_with("gitconfig") => {
+                Some(String::from_utf8_lossy(bytes).into_owned())
+            }
+            _ => None,
+        })
+        .ok_or("private gitconfig")?;
+    assert!(!config.contains(TOKEN), "{config}");
+    assert!(!config.contains("[include"), "{config}");
+    assert!(!config.contains(host_config.to_str().ok_or("path")?), "{config}");
+    for kept in [
+        "[user]\n\tname = \"Host Name\"\n",
+        "[user]\n\temail = \"host@example.com\"\n",
+        "[alias]\n\tst = \"status --short\"\n",
+        "[url \"https://mirror.example/\"]\n\tinsteadof = \"mirror:\"\n",
+        "[alias]\n\tsys = \"log -1\"\n",
+        "[filter \"lfs\"]\n\tclean = \"git-lfs clean -- %f\"\n",
+        "[filter \"lfs\"]\n\trequired = \"true\"\n",
+        "[user]\n\tuseConfigOnly = true\n",
+    ] {
+        assert!(config.contains(kept), "{kept} missing from {config}");
+    }
+    assert!(!config.contains("osxkeychain"), "{config}");
+    for host_file in [&host_config, &system_config] {
+        assert!(
+            !spec
+                .profile
+                .spec
+                .runtime_reads
+                .iter()
+                .any(|grant| &grant.path == host_file)
+        );
+    }
+    assert_eq!(
+        spec.env
+            .iter()
+            .filter(|(key, value)| key == "GIT_CONFIG_NOSYSTEM" && value == "1")
+            .count(),
+        1,
+        "the lane's Git never reads the host system file directly"
+    );
+    // A Git build may read its own file before the system one (Apple's
+    // Xcode gitconfig); its withheld names come first.
+    let builtin = provenant_os::sys::git_system_config(
+        &git,
+        &repo,
+        Some(std::ffi::OsStr::new("/dev/null")),
+        None,
+    )?;
+    let mut expected = crate::git_config::lane_view(&builtin, &[])
+        .map_err(|_| "built-in Git identity")?
+        .dropped;
+    for name in [
+        "credential.helper",
+        "alias.pub",
+        "http.*.extraheader",
+        "url.*.insteadof",
+        "core.askpass",
+    ] {
+        if !expected.iter().any(|dropped| dropped == name) {
+            expected.push(name.to_owned());
+        }
+    }
+    assert_eq!(spec.git_config_dropped(), Some(&expected[..]));
     Ok(())
 }

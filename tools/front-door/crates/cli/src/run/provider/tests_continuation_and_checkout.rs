@@ -728,6 +728,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
                 user: "fixture".as_ref(),
                 host_var: &|_| None,
                 skill_stage_max_bytes: 16 * 1024 * 1024,
+                git_config_allow: &[],
                 account: Some(&account),
                 token: None,
                 cwd: &cwd,

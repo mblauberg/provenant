@@ -338,6 +338,13 @@ impl LaunchSpec {
     }
 
     /// Selected executable facts, after the requirements resolver ran.
+    /// Host Git configuration key names, subsections redacted, that the
+    /// allowlist withheld from a sandboxed lane. `None` when the lane's Git
+    /// view was not built from the allowlist.
+    pub fn git_config_dropped(&self) -> Option<&[String]> {
+        self.git_wrapper.host_config_dropped.as_deref()
+    }
+
     pub fn prepared_tools(&self) -> &[PreparedToolRequirement] {
         &self.tool_requirements.selected
     }
@@ -409,6 +416,9 @@ pub struct PrepareInput<'a> {
     /// depend on the runner.
     pub host_var: &'a dyn Fn(&str) -> Option<OsString>,
     pub skill_stage_max_bytes: u64,
+    /// Extra host Git configuration keys a person passes deliberately to
+    /// sandboxed lanes (`domains.lanes.git_config_allow`).
+    pub git_config_allow: &'a [String],
     /// Claude's login token, read by the host outside the sandbox.
     /// Selected registered identity. Absent preserves the default login source.
     pub account: Option<&'a crate::identity::RegisteredAccount>,
@@ -903,11 +913,6 @@ pub(crate) fn private_git_objects(
     let git_common = scratch.join("git-common");
     let git_objects = scratch.join("git-objects");
     let config = scratch.join("gitconfig");
-    let identity = provenant_os::sys::git_global_identity(input.provenant.git);
-    let identity = identity
-        .iter()
-        .filter(|(key, _)| matches!(key.to_str(), Some("GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL")))
-        .collect::<Vec<_>>();
     // Git normally reads the XDG file before ~/.gitconfig. An explicit host
     // override replaces both, just as it does for Git itself.
     let globals = if let Some(path) = (input.host_var)("GIT_CONFIG_GLOBAL") {
@@ -920,74 +925,90 @@ pub(crate) fn private_git_objects(
         vec![xdg.join("git/config"), input.home.join(".gitconfig")]
     };
     let mut config_text = String::new();
-    for path in globals.iter().filter(|path| path.is_file()) {
-        // Both Git's include and the exact sandbox grant must name the same
-        // physical file: anchor validation rejects symlink spellings.
-        let path = std::fs::canonicalize(path).map_err(|_| {
-            input.policy.boundary_error(
-                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
-                Facts::violation("the host Git configuration could not be bound into the private writer Git view"),
-                ProviderError::InvalidPath,
-            )
-        })?;
-        let value = path.to_str().ok_or_else(|| {
-            input.policy.boundary_error(
-                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
-                Facts::violation("the host Git configuration path cannot be represented for the private writer Git view"),
-                ProviderError::InvalidPath,
-            )
-        })?;
-        if value.chars().any(char::is_control) {
-            return Err(input.policy.boundary_error(
-                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
-                Facts::violation("the host Git configuration path contains control characters"),
-                ProviderError::InvalidPath,
+    if input.sandboxed() {
+        // Credentials reach a sandboxed lane only through its token helper:
+        // host entries are copied through the allowlist, and the lane gets
+        // neither an include nor a read grant on the host files. The system
+        // file comes first, as Git reads it; the lane's Git never reads it
+        // directly because `GIT_CONFIG_NOSYSTEM` stays set.
+        let mut entries = match provenant_os::sys::git_system_config(
+            input.provenant.git,
+            input.cwd,
+            (input.host_var)("GIT_CONFIG_SYSTEM").as_deref(),
+            (input.host_var)("GIT_CONFIG_NOSYSTEM").as_deref(),
+        ) {
+            Ok(entries) => entries,
+            Err(_) => {
+                policy_warning(
+                    input.policy,
+                    "LAUNCH_PRIVATE_GIT_OBJECTS_NONE_2",
+                    "the host system Git configuration could not be read; the lane receives none of its settings",
+                )?;
+                Vec::new()
+            }
+        };
+        for path in globals.iter().filter(|path| path.is_file()) {
+            match provenant_os::sys::git_config_file(input.provenant.git, path, input.cwd) {
+                Ok(read) => entries.extend(read),
+                Err(_) => policy_warning(
+                    input.policy,
+                    "LAUNCH_PRIVATE_GIT_OBJECTS_NONE_2",
+                    format!(
+                        "the host Git configuration {} could not be read; the lane receives none of its settings",
+                        path.display()
+                    ),
+                )?,
+            }
+        }
+        let view =
+            crate::git_config::lane_view(&entries, input.git_config_allow).map_err(|_| {
+                input.policy.boundary_error(
+                    "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
+                    Facts::violation("the host Git identity contains control characters"),
+                    ProviderError::InvalidPath,
+                )
+            })?;
+        for name in &view.required_filters {
+            policy_warning(
+                input.policy,
+                "LAUNCH_PRIVATE_GIT_OBJECTS_NONE_3",
+                format!(
+                    "the host marks Git filter {name} required, but its driver is withheld from the lane, so Git applies no filter there; pass it with {}",
+                    crate::git_config::ALLOW_KEY
+                ),
+            )?;
+        }
+        config_text.push_str(&view.text);
+        spec.git_wrapper.host_config_dropped = Some(view.dropped);
+    } else {
+        // An unsandboxed lane can read the host files directly, so it gets
+        // the host configuration in full, as Git run by hand would.
+        for path in globals.iter().filter(|path| path.is_file()) {
+            let value = path
+                .to_str()
+                .filter(|value| !value.chars().any(char::is_control))
+                .ok_or_else(|| {
+                    input.policy.boundary_error(
+                        "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
+                        Facts::violation("the host Git configuration path cannot be represented for the private Git view"),
+                        ProviderError::InvalidPath,
+                    )
+                })?;
+            config_text.push_str(&format!(
+                "[include]\n\tpath = {}\n",
+                git_config_quote(value)
             ));
         }
-        config_text.push_str(&format!(
-            "[include]\n\tpath = {}\n",
-            git_config_quote(value)
-        ));
-        spec.profile.spec.runtime_reads.push(exact(&path));
     }
     config_text.push_str("[user]\n\tuseConfigOnly = true\n");
-    for (key, value) in &identity {
-        let name = match key.to_str() {
-            Some("GIT_AUTHOR_NAME") => "name",
-            Some("GIT_AUTHOR_EMAIL") => "email",
-            _ => continue,
-        };
-        let value = value.to_str().ok_or_else(|| {
-            input.policy.boundary_error(
-                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
-                Facts::violation("the selected Git identity cannot be represented in the private writer Git view"),
-                ProviderError::InvalidPath,
-            )
-        })?;
-        if value.chars().any(char::is_control) {
-            return Err(input.policy.boundary_error(
-                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
-                Facts::violation("the selected Git identity contains control characters"),
-                ProviderError::InvalidPath,
-            ));
-        }
-        config_text.push_str(&format!("\t{name} = {}\n", git_config_quote(value)));
-    }
     spec.setup.push(SetupStep::WriteFile {
         path: config.clone(),
         bytes: config_text.into_bytes(),
     });
+    // Only a sandboxed lane is under the credential boundary; a host-native
+    // lane keeps the host's own Git environment.
     if input.sandboxed() {
-        spec.env.retain(|(key, _)| key != "GIT_CONFIG_NOSYSTEM");
-        crate::lane::install_token_config(&mut spec.env).map_err(|error| {
-            input.policy.boundary_error(
-                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
-                Facts::violation(
-                    "Git credentials could not be isolated in the private writer Git environment",
-                ),
-                error,
-            )
-        })?;
+        crate::lane::install_token_config(&mut spec.env);
     }
     if let Some((_, current)) = spec
         .env
@@ -1064,7 +1085,7 @@ pub(crate) fn private_git_objects(
 /// Quote a value for a Git config file. The config always enables
 /// `user.useConfigOnly`, so an absent or malformed host identity cannot fall
 /// back to Git's generated username and hostname.
-fn git_config_quote(value: &str) -> String {
+pub(crate) fn git_config_quote(value: &str) -> String {
     let mut quoted = String::from("\"");
     for character in value.chars() {
         match character {

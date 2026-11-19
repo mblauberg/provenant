@@ -219,6 +219,14 @@ knob = "policy.LAUNCH_PROCESS_TREE_INTERVAL_OR_WARN_NONE"
 justification = "Unreadable run settings warn and launch the lane without a process-tree sampler; admission then skips its memory limit with a warning."
 
 [[rule]]
+code = "LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT"
+site = "run/src/launch.rs#retained_custody_ms"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT"
+justification = "Unreadable run settings warn and launch the lane with the shipped retained-custody limit."
+
+[[rule]]
 code = "PORT_BLOCKS"
 site = "supervisor/src/guardian.rs#Driver::run"
 boundary = "none"
@@ -841,6 +849,22 @@ boundary = "none"
 strength = "warn"
 knob = "policy.LAUNCH_PRIVATE_GIT_OBJECTS_NONE"
 justification = "A read-only Git launcher whose directory cannot be encoded in PATH is omitted with a warning; the selected Git executable remains explicitly granted."
+
+[[rule]]
+code = "LAUNCH_PRIVATE_GIT_OBJECTS_NONE_2"
+site = "providers/src/launch.rs#private_git_objects"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_PRIVATE_GIT_OBJECTS_NONE_2"
+justification = "A host Git configuration file that cannot be located or read contributes no settings to a sandboxed lane's private Git configuration; the lane launches with a warning."
+
+[[rule]]
+code = "LAUNCH_PRIVATE_GIT_OBJECTS_NONE_3"
+site = "providers/src/launch.rs#private_git_objects"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_PRIVATE_GIT_OBJECTS_NONE_3"
+justification = "A filter driver the host marks required but the allowlist withholds leaves the lane's Git without that filter; the lane launches with a warning naming the key, and domains.lanes.git_config_allow can pass the driver."
 
 [[rule]]
 code = "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION"

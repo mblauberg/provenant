@@ -177,10 +177,10 @@ fn pr_timeout_details(sources: &[Source], latest: &[Option<Reading>]) -> Vec<Str
         .iter()
         .zip(latest)
         .filter_map(|(source, reading)| match (source, reading) {
-            (Source::Pr { .. }, Some(reading)) => {
+            (Source::Pr { complete, .. }, Some(reading)) => {
                 serde_json::from_value::<crate::pr::status::Line>(reading.data.clone())
                     .ok()
-                    .filter(|line| line.verdict().is_none())
+                    .filter(|line| line.wait_verdict(*complete).is_none())
                     .map(|line| {
                         let next = if line.checks_unreported() {
                             format!(
@@ -217,6 +217,70 @@ impl Reading {
                 provenant_cli::limits::SUMMARY_ROW_BYTES,
             ),
             data: Value::Null,
+        }
+    }
+}
+
+/// Holds a settling PR reading pending, for a bounded period, while Actions has
+/// reported no run for its head. A push's checks start after the push, so the
+/// first reading of a new head can look settled before its workflows exist.
+struct ActionsGrace {
+    limit: Duration,
+    /// The head last read and when it was first read.
+    head: Option<(String, Instant)>,
+    /// When the last reading was held, the moment the hold ends. The waiter
+    /// must read again then: no event or timer of its own would wake it.
+    held_until: Option<Instant>,
+}
+impl ActionsGrace {
+    fn new(limit: Duration) -> Self {
+        Self {
+            limit,
+            head: None,
+            held_until: None,
+        }
+    }
+
+    /// How long until the hold on the last reading ends; `None` when the last
+    /// reading was not held.
+    fn due_in(&self) -> Option<Duration> {
+        self.held_until
+            .map(|end| end.saturating_duration_since(Instant::now()))
+    }
+
+    /// Whether a held reading's grace period has ended and it needs a fresh read.
+    fn is_due(&self) -> bool {
+        self.due_in().is_some_and(|left| left.is_zero())
+    }
+
+    fn apply(&mut self, reading: Reading, label: &str, complete: bool) -> Reading {
+        self.held_until = None;
+        let Ok(mut line) = serde_json::from_value::<crate::pr::status::Line>(reading.data.clone())
+        else {
+            return reading;
+        };
+        let first_read = match &self.head {
+            Some((head, at)) if *head == line.head => *at,
+            _ => {
+                let now = Instant::now();
+                self.head = Some((line.head.clone(), now));
+                now
+            }
+        };
+        if first_read.elapsed() >= self.limit || !line.awaits_actions(complete) {
+            return reading;
+        }
+        line.hold_for_actions();
+        self.held_until = Some(first_read + self.limit);
+        Reading {
+            settle: Settle::Pending,
+            line: format!(
+                "{label} {}{} head={}",
+                line.class(),
+                line.cause_suffix(),
+                watched_head(&line)
+            ),
+            data: json!(line),
         }
     }
 }
@@ -379,7 +443,6 @@ fn read(
                 *number,
                 &forge_request(deadline, cancel, pr_read_timeout),
                 crate::pr::observer::POLL,
-                *complete,
             ) {
                 Ok(line) => {
                     let line = gate_line(line, watch_head.as_deref());
@@ -1335,6 +1398,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     prs.sort_unstable();
     prs.dedup();
     let pr_read_timeout = Duration::from_secs(settings.pr_read_timeout_seconds);
+    let actions_grace = Duration::from_secs(settings.actions_grace_seconds);
     if sources.len() + prs.len() > settings.max_targets as usize {
         return crate::fail(
             "wait",
@@ -1720,13 +1784,18 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         None
                     }
                 };
-                let initial = read(
-                    source,
-                    edge,
-                    &mut session,
-                    deadline,
-                    pr_read_timeout,
-                    &stop.cancel,
+                let mut grace = ActionsGrace::new(actions_grace);
+                let initial = grace.apply(
+                    read(
+                        source,
+                        edge,
+                        &mut session,
+                        deadline,
+                        pr_read_timeout,
+                        &stop.cancel,
+                    ),
+                    &source.label(),
+                    complete,
                 );
                 let done = initial.done();
                 if sender
@@ -1759,7 +1828,8 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             *number,
                             Duration::from_secs(60)
                                 .saturating_sub(last_reconcile.elapsed())
-                                .min(deadline.saturating_duration_since(Instant::now())),
+                                .min(deadline.saturating_duration_since(Instant::now()))
+                                .min(grace.due_in().unwrap_or(Duration::MAX)),
                             &stop.cancel,
                         ) {
                             Ok(Some(detail)) => {
@@ -1767,7 +1837,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                 if detail["status"].is_object() {
                                     let event =
                                         reading_pr_event(*number, watch_head, complete, detail);
-                                    if complete {
+                                    if complete || event.settle == Settle::Succeeded {
                                         // Journal records are bounded and omit Actions runs.
                                         // Reconcile through the observer before settling.
                                         read(
@@ -1794,11 +1864,18 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                     )
                                 }
                             }
-                            Ok(None) if last_reconcile.elapsed() >= Duration::from_secs(60) => {
+                            Ok(None)
+                                if last_reconcile.elapsed() >= Duration::from_secs(60)
+                                    || grace.is_due() =>
+                            {
                                 last_reconcile = Instant::now();
-                                if journal
-                                    .source_current(repository, *number, None)
-                                    .unwrap_or(false)
+                                // A held reading whose grace period ended needs a
+                                // fresh read even when the journal is current:
+                                // nothing else would settle it.
+                                if !grace.is_due()
+                                    && journal
+                                        .source_current(repository, *number, None)
+                                        .unwrap_or(false)
                                 {
                                     continue;
                                 }
@@ -1824,7 +1901,8 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             if !stop.pause(
                                 interval
                                     .saturating_sub(last_reconcile.elapsed())
-                                    .min(deadline.saturating_duration_since(Instant::now())),
+                                    .min(deadline.saturating_duration_since(Instant::now()))
+                                    .min(grace.due_in().unwrap_or(Duration::MAX)),
                             ) {
                                 break;
                             }
@@ -1839,6 +1917,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             )
                         }
                     };
+                    let reading = grace.apply(reading, &source.label(), complete);
                     let finished = reading.done();
                     if sender
                         .send(Update {
@@ -2689,6 +2768,96 @@ mod tests {
         );
     }
 
+    fn settled_pr_reading(head: &str, passed: bool, workflows: Option<bool>) -> Reading {
+        let mut data = json!({
+            "number": 7, "state": "OPEN", "head": head, "draft": false,
+            "merge": "clean", "review": "unknown", "error": null,
+            "checks_passed": u32::from(passed), "checks_total": 1,
+            "checks_failed": u32::from(!passed), "checks_pending": 0
+        });
+        if let Some(active) = workflows {
+            data["active_workflows"] = json!(active);
+        }
+        Reading {
+            settle: if passed {
+                Settle::Succeeded
+            } else {
+                Settle::Unsuccessful
+            },
+            line: "#7 settled".into(),
+            data,
+        }
+    }
+
+    #[test]
+    fn a_new_head_stays_pending_until_actions_runs_exist_or_the_grace_ends() {
+        let mut grace = ActionsGrace::new(Duration::from_secs(3600));
+        let held = grace.apply(settled_pr_reading("a", true, None), "#7", false);
+        assert_eq!(held.settle, Settle::Pending);
+        assert!(held.line.starts_with("#7 pending"), "{}", held.line);
+        assert!(held.line.contains("head=a"), "{}", held.line);
+
+        // Runs for the head end the hold.
+        for active in [true, false] {
+            let seen = grace.apply(settled_pr_reading("a", true, Some(active)), "#7", false);
+            assert_eq!(seen.settle, Settle::Succeeded);
+        }
+
+        // A default wait still settles on a failure at once; a complete one holds.
+        let failed = settled_pr_reading("a", false, None);
+        assert_eq!(
+            grace.apply(failed.clone(), "#7", false).settle,
+            Settle::Unsuccessful
+        );
+        assert_eq!(grace.apply(failed, "#7", true).settle, Settle::Pending);
+
+        // An unreadable reading carries no line to hold.
+        let unreadable = Reading::unavailable("#7", "boom");
+        assert_eq!(grace.apply(unreadable.clone(), "#7", true), unreadable);
+    }
+
+    #[test]
+    fn the_grace_period_is_bounded_and_restarts_for_a_new_head() {
+        let mut ended = ActionsGrace::new(Duration::ZERO);
+        assert_eq!(
+            ended
+                .apply(settled_pr_reading("a", true, None), "#7", false)
+                .settle,
+            Settle::Succeeded,
+            "a zero grace period never holds"
+        );
+
+        let mut grace = ActionsGrace::new(Duration::from_secs(3600));
+        assert_eq!(
+            grace
+                .apply(settled_pr_reading("a", true, None), "#7", false)
+                .settle,
+            Settle::Pending
+        );
+        assert!(!grace.is_due());
+        let left = grace.due_in().expect("a held reading has a deadline");
+        assert!(left > Duration::from_secs(3000), "{left:?}");
+        // Age the head: the period has run out, so the reading settles.
+        let (_, first_read) = grace.head.as_mut().unwrap();
+        *first_read = Instant::now()
+            .checked_sub(Duration::from_secs(7200))
+            .expect("monotonic clock far enough from its origin");
+        assert_eq!(
+            grace
+                .apply(settled_pr_reading("a", true, None), "#7", false)
+                .settle,
+            Settle::Succeeded
+        );
+        assert_eq!(grace.due_in(), None, "a settled reading is not held");
+        // A later push is a new head with its own period.
+        assert_eq!(
+            grace
+                .apply(settled_pr_reading("b", true, None), "#7", false)
+                .settle,
+            Settle::Pending
+        );
+    }
+
     #[test]
     fn a_pinned_wait_ignores_the_verdict_of_another_head() {
         let line: crate::pr::status::Line = serde_json::from_value(json!({
@@ -2745,5 +2914,35 @@ mod tests {
             details[0].contains(crate::pr::status::NO_CHECKS_NEXT),
             "{details:?}"
         );
+    }
+
+    #[test]
+    fn a_timed_out_complete_wait_keeps_its_last_known_line() {
+        // A failure with checks still running settles a default wait but keeps a
+        // complete wait pending, so only the complete wait has a last known line.
+        let reading = Reading {
+            settle: Settle::Pending,
+            line: "#7 failing".into(),
+            data: json!({
+                "number": 7, "state": "OPEN", "head": "abc", "draft": false,
+                "merge": "clean", "review": "unknown", "error": null,
+                "checks_passed": 0, "checks_total": 2,
+                "checks_failed": 1, "checks_pending": 1,
+                "failing_checks": ["lint"]
+            }),
+        };
+        let source = |complete| {
+            vec![Source::Pr {
+                number: 7,
+                repository: Ok("owner/repo".into()),
+                watch_head: None,
+                complete,
+            }]
+        };
+        let complete = pr_timeout_details(&source(true), &[Some(reading.clone())]);
+        assert_eq!(complete.len(), 1, "{complete:?}");
+        assert!(complete[0].contains("fail=1"), "{complete:?}");
+        assert!(complete[0].contains("pending=1"), "{complete:?}");
+        assert!(pr_timeout_details(&source(false), &[Some(reading)]).is_empty());
     }
 }

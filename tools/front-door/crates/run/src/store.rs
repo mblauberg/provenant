@@ -1162,8 +1162,7 @@ impl RunStore {
                 reason,
                 finished_at,
                 failure: None,
-                terminal_cause: (outcome == Outcome::Rejected)
-                    .then_some(TerminalCause::AccessPolicyRefused),
+                terminal_cause: None,
                 terminal_note: None,
             },
             call,
@@ -1205,9 +1204,10 @@ impl RunStore {
             terminal_cause,
             terminal_note,
         } = withdrawal;
-        let terminal_cause = terminal_cause.or_else(|| {
-            (outcome == Outcome::Rejected).then_some(TerminalCause::AccessPolicyRefused)
-        });
+        // A refusal whose producer named no cause is recorded as unrecorded,
+        // never as a cause the host did not observe.
+        let terminal_cause = terminal_cause
+            .or_else(|| (outcome == Outcome::Rejected).then_some(TerminalCause::Unrecorded));
         if failure.is_some()
             && !matches!(
                 expected,

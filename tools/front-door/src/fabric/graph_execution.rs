@@ -92,7 +92,10 @@ fn preflight_writer_worktrees(
     let mut refusals = Vec::new();
     let mut pending_wip = Vec::new();
     for node in &expanded.nodes {
+        // A node whose launch condition fails never runs, so it needs no
+        // writer scope: its worktree is not inspected, and may be unset.
         if node.access != AccessMode::WorktreeWrite
+            || !provenant_fabric_runtime::graph::when::holds(&node.when)
             || node
                 .attempt
                 .as_ref()
@@ -872,7 +875,7 @@ impl Factory {
                         if document.nodes.iter().any(
                             provenant_fabric_runtime::graph::GraphNode::has_host_writer_preflight,
                         ) {
-                            return Err(FacadeError::InvalidInput { detail: None });
+                            return Err(FacadeError::field("worktree"));
                         }
                         provenant_fabric_runtime::graph::patch::validate_submission_snapshot(
                             &document,
@@ -938,6 +941,9 @@ impl Factory {
                             .to_owned())
                     };
                     for node in &expanded.nodes {
+                        if !provenant_fabric_runtime::graph::when::holds(&node.when) {
+                            continue;
+                        }
                         if let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
                             &node.delivery
                         {
@@ -952,7 +958,7 @@ impl Factory {
                             let path = node
                                 .worktree
                                 .as_deref()
-                                .ok_or(FacadeError::InvalidInput { detail: None })?;
+                                .ok_or_else(|| FacadeError::field("worktree"))?;
                             provenant_run::HostDeliveryContext::check_delivery_branch(
                                 &self.cwd,
                                 &writer_branch(node, path)?,
@@ -987,7 +993,7 @@ impl Factory {
             GraphInput::Status { id, .. } | GraphInput::Cancel { id, .. } => id.as_str(),
             _ => document
                 .as_ref()
-                .ok_or(FacadeError::InvalidInput { detail: None })?
+                .ok_or_else(|| FacadeError::field("document"))?
                 .graph_id
                 .as_str(),
         };
@@ -1320,7 +1326,7 @@ impl Factory {
                     None => format!("refs/heads/{branch}"),
                 };
                 let git = provenant_os::git::git_executable()
-                    .ok_or(FacadeError::InvalidInput { detail: None })?;
+                    .ok_or_else(|| FacadeError::io("locate git"))?;
                 // A missing local integration branch starts where the batch is
                 // measured from, rather than refusing the graph.
                 // The shared ref ledger records whether this graph made the
@@ -1473,13 +1479,13 @@ impl Factory {
             let run = run.map_err(|error| match error {
                 provenant_fabric_runtime::graph::GraphError::Run(error) => error,
                 provenant_fabric_runtime::graph::GraphError::Invalid(_) => {
-                    FacadeError::InvalidInput { detail: None }
+                    FacadeError::field("document")
                 }
                 provenant_fabric_runtime::graph::GraphError::Admission(reason) => match reason {
                     provenant_fabric_runtime::graph::AdmissionError::Schema(_) => {
                         FacadeError::invalid(provenant_fabric_runtime::coordination::facade::InvalidInputDetail::Schema)
                     }
-                    _ => FacadeError::InvalidInput { detail: None },
+                    _ => FacadeError::field("document"),
                 },
                 provenant_fabric_runtime::graph::GraphError::Candidate(error) => FacadeError::graph_candidate(error),
                 provenant_fabric_runtime::graph::GraphError::Refused(reason) => {
@@ -1531,7 +1537,7 @@ impl Factory {
                 &execution.document,
                 &mut checkpoint,
             )
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+            .map_err(|_| FacadeError::field("id"))?;
             provenant_fabric_runtime::graph::mark_cancelled_nodes_without_live_attempts(
                 &mut checkpoint,
             );
@@ -1841,9 +1847,9 @@ pub(super) fn graph_operation(
     key: &provenant_fabric_runtime::graph::AttemptKey,
 ) -> Result<provenant_core::OperationId, FacadeError> {
     let digest = provenant_records::CanonicalV1::record_digest(domain, 1, key)
-        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        .map_err(|_| FacadeError::field("key"))?;
     provenant_core::OperationId::parse(&format!("graph-{}", provenant_core::hex(digest.as_bytes())))
-        .map_err(|_| FacadeError::InvalidInput { detail: None })
+        .map_err(|_| FacadeError::field("key"))
 }
 
 #[cfg(test)]

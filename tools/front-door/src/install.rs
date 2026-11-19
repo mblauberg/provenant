@@ -1969,11 +1969,13 @@ fn verify_smoke_with(
         .as_deref()
         .is_some_and(|host| !matches!(host, "" | "local" | "localhost"));
     if !remote {
+        // The writer node needs a linked worktree, which a primary checkout
+        // is not; ask the launch to create one on a branch of the fixture.
         run.extend([
-            "--set".into(),
-            format!("worktree={}", project.path().display()).into(),
-            "--set".into(),
-            "smoke-write=true".into(),
+            "--branch".into(),
+            format!("smoke/{graph}").into(),
+            "--base".into(),
+            "HEAD".into(),
         ]);
     }
     if let Some(host) = &args.host {

@@ -4325,6 +4325,7 @@ pub(super) fn prepare_candidates_inner(
                     }
                 },
                 skill_stage_max_bytes: config.domains.lanes.skill_stage_max_bytes,
+                git_config_allow: &config.domains.lanes.git_config_allow,
                 account: account.as_ref(),
                 token,
                 cwd: &cwd,
@@ -4889,6 +4890,19 @@ pub(super) fn prepare_candidates_inner(
             extra: Default::default(),
         });
         provider.user_skills = Some(skills);
+        provider.git_config =
+            spec.git_config_dropped()
+                .map(|dropped| provenant_records::run::GitConfigReceipt {
+                    dropped: dropped.to_vec(),
+                    allow: config.domains.lanes.git_config_allow.clone(),
+                    key: provenant_providers::git_config::ALLOW_KEY.into(),
+                    origin: origin_receipt(
+                        config
+                            .origins
+                            .get(provenant_providers::git_config::ALLOW_KEY),
+                    ),
+                    extra: Default::default(),
+                });
         provider.cargo_home = serde_json::from_value(spec.cargo_home_receipt())?;
         provider.tool_closure = Some(serde_json::from_value(serde_json::Value::Array(
             spec.prepared_tools()
@@ -5569,6 +5583,7 @@ mod user_skills_tests {
                         user: "fixture".as_ref(),
                         host_var: &|_| None,
                         skill_stage_max_bytes: 16 * 1024 * 1024,
+                        git_config_allow: &[],
                         account: None,
                         token: Some(&token),
                         cwd: &root.join("repo"),

@@ -75,7 +75,11 @@ Owner: repository CI.
 ## Skips are named
 
 A main-tier suite is deferred on a pull request unless the delta touches its
-declared pull-request paths or a full run is requested. The run summary names
+declared pull-request paths or a full run is requested. Every Cargo package a
+main-tier suite's jobs name in a `package(=NAME)` test filter has at least one
+pull-request path inside that package's directory, either the whole crate or
+the narrow files its filtered tests cover; a glob shared across crates does not
+count. `scripts/check-ci-suites` refuses a manifest that leaves one out. The run summary names
 every suite that did not run, whether it was covered or deferred, its evidence
 commit and the reason. Within a suite that runs, tests matching the suite's
 declared main-tier test filter are deferred on a pull request the same way,
@@ -83,7 +87,9 @@ including when the suite is covered by an earlier run of the same pull
 request, and the summary names the filter.
 
 Why: speed on pull requests must never read as coverage that did not happen;
-`main` runs deferred suites after merge.
+`main` runs deferred suites after merge. A package a suite tests by name but
+never watches defers its only real test to `main`, which is how #3581 turned
+`main` red with macOS-only seed tests its pull request never ran.
 
 Owner: repository CI.
 

@@ -716,6 +716,26 @@ pub struct RouteRecord {
     pub sandbox_admission: Option<SandboxAdmissionReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_grant_limit: Option<WriteGrantLimitReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_config: Option<GitConfigReceipt>,
+}
+
+/// How a sandboxed lane's private Git configuration was built from the
+/// host's: the key names the allowlist withheld (subsections redacted, never
+/// values) and the person's extra allowlist with its source.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitConfigReceipt {
+    #[serde(default)]
+    pub dropped: Vec<String>,
+    #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub origin: OriginReceipt,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1332,6 +1352,9 @@ pub enum TerminalCause {
     LaneTokenLost,
     /// The host interrupted this attempt to deliver a queued steering turn.
     Steered,
+    /// A refused attempt whose record names no cause. The host states that
+    /// the cause is unknown rather than naming one it did not observe.
+    Unrecorded,
 }
 
 impl TerminalCause {
@@ -1378,6 +1401,7 @@ impl TerminalCause {
             Self::Blocked => "blocked; provenant output ID",
             Self::LaneTokenLost => "lane token lost; provenant output ID",
             Self::Steered => "steering interruption; provenant output ID",
+            Self::Unrecorded => "refused, cause not recorded; provenant output ID",
         }
     }
 
@@ -1494,6 +1518,9 @@ impl TerminalCause {
             }
             Self::Steered => {
                 "the host interrupted this attempt for a queued steering turn; continuation requires the retained session for this provider, model and account"
+            }
+            Self::Unrecorded => {
+                "the lane was refused and its record names no cause; inspect the attempt's local launch evidence and request before retrying"
             }
         }
     }
@@ -3174,6 +3201,13 @@ mod tests {
                 "write_grant_limit",
                 serde_json::json!({
                     "key":"domains.run.write_grant_limit_bytes","value":1048576,"origin":"compiled_default"
+                }),
+            ),
+            (
+                "git_config",
+                serde_json::json!({
+                    "dropped":["credential.helper","http.*.extraheader"],"allow":["push.default"],
+                    "key":"domains.lanes.git_config_allow","origin":{"kind":"compiled"}
                 }),
             ),
         ];

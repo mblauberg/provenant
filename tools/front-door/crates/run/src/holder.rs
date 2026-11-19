@@ -287,7 +287,8 @@ pub struct HostLaunchContext {
     pub credential_roots: Vec<provenant_core::CredentialDeclaration>,
     pub github_roots: Vec<PathBuf>,
     /// Trusted path overrides needed to select the same host authentication
-    /// mechanism after the guardian clears its process environment.
+    /// mechanism and Git configuration files after the guardian clears its
+    /// process environment.
     pub provider_path_environment: std::collections::BTreeMap<String, std::ffi::OsString>,
     #[serde(default)]
     pub cargo_build_jobs: Option<String>,
@@ -303,6 +304,9 @@ impl HostLaunchContext {
             "CODEX_HOME",
             "CLAUDE_CONFIG_DIR",
             "GH_CONFIG_DIR",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_NOSYSTEM",
+            "GIT_CONFIG_SYSTEM",
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
         ]
@@ -3826,8 +3830,13 @@ mod outcome_release_tests {
             assert!(read_sealed(&attempt, "release.json", RECORD_LIMIT)?.is_none());
             if !prior_exit_location {
                 assert!(
-                    crate::release_progress(execution.state_root.as_path(), &finished.record, None)
-                        .is_some_and(|detail| detail.contains("1 survivors: pid 123"))
+                    crate::release_progress(
+                        execution.state_root.as_path(),
+                        &finished.record,
+                        None,
+                        None,
+                    )
+                    .is_some_and(|detail| detail.contains("1 survivors: pid 123"))
                 );
             }
             let evidence = finished

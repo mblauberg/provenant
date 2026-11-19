@@ -579,6 +579,7 @@ impl From<crate::run::TerminalCause> for StopCause {
             T::Blocked => Self::Blocked,
             T::LaneTokenLost => Self::LaneTokenLost,
             T::Steered => Self::Steered,
+            T::Unrecorded => Self::Unsettled,
         }
     }
 }

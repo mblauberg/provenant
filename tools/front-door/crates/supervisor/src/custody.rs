@@ -111,6 +111,10 @@ pub enum CustodyError {
     Decode(#[from] provenant_records::DecodeError),
     #[error("custody reservation may be retained: {0}")]
     ReservationRetained(String),
+    /// Retained custody reached its limit with processes unresolved. The
+    /// guardian released its lease; the unresolved exit and fence remain.
+    #[error("{0}")]
+    RetentionLimit(Box<RetentionLimitReached>),
     #[error("custody I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -128,6 +132,15 @@ pub enum CustodyError {
 }
 
 impl CustodyError {
+    /// The envelope status and stable error code that `internal supervise`
+    /// reports, so the guardian's exit code distinguishes a retention limit
+    /// (`timeout`, 124) from a supervisor fault (`error`, 3).
+    pub fn outcome(&self) -> (provenant_records::Outcome, &'static str) {
+        match self {
+            Self::RetentionLimit(_) => (provenant_records::Outcome::Timeout, "RETENTION_LIMIT"),
+            _ => (provenant_records::Outcome::Error, "SUPERVISOR"),
+        }
+    }
     /// A stored record that is present but does not decode, whether or not the
     /// decoder kept its path and type. Callers that classify a malformed
     /// record (as an invalid stop intent, a replaceable stale record or an
@@ -1213,6 +1226,20 @@ pub struct CapturePlan {
     /// provider that reports no context figure is never stopped for it.
     #[serde(default)]
     pub context_handoff: u64,
+    /// How long a guardian retains custody of an unresolved exit before it
+    /// records why and exits, leaving the durable fence to reconcile. The
+    /// launcher resolves it from `domains.run.retained_custody_seconds`.
+    #[serde(default = "default_retained_custody_ms")]
+    pub retained_custody_ms: u64,
+}
+/// One hour of retained custody: about 120 bounded stops at the 30 s
+/// escalation, far beyond any orderly service shutdown, while an orphaned
+/// guardian no longer holds a lane for hours (#3572 held one for 2h43m).
+pub const DEFAULT_RETAINED_CUSTODY_SECONDS: u64 = 3_600;
+/// The largest retention limit a plan may carry: one week.
+pub const MAX_RETAINED_CUSTODY_SECONDS: u64 = 7 * 24 * 3_600;
+fn default_retained_custody_ms() -> u64 {
+    DEFAULT_RETAINED_CUSTODY_SECONDS * 1_000
 }
 impl Default for CapturePlan {
     fn default() -> Self {
@@ -1229,6 +1256,7 @@ impl Default for CapturePlan {
             token_budget: 0,
             budget_action: provenant_records::BudgetAction::default(),
             context_handoff: 0,
+            retained_custody_ms: default_retained_custody_ms(),
         }
     }
 }
@@ -1240,6 +1268,8 @@ impl CapturePlan {
             || self.wall_ms > 86400000
             || self.descendant_grace_ms > 60000
             || self.root_flush_ms > 60000
+            || self.retained_custody_ms == 0
+            || self.retained_custody_ms > MAX_RETAINED_CUSTODY_SECONDS * 1_000
         {
             return Err(CustodyError::InvalidRecord);
         }
@@ -1614,6 +1644,157 @@ pub enum SettlementEvidence {
     /// belong to it. They were never signalled and stay in `unresolved_pids`.
     LeftoverNotProven,
 }
+/// Why a guardian retains custody of an unresolved exit, and how that ended.
+/// Status names the holder and its age from this record. Reconcile acts on
+/// the unresolved exit once the guardian is gone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Retention {
+    /// The guardian that holds the writer lease while it retains custody.
+    pub guardian: ProcessIdentity,
+    /// When retention began; None when the host clock was unreadable.
+    pub since: Option<provenant_core::WallTime>,
+    /// The limit the launcher resolved (`domains.run.retained_custody_seconds`).
+    pub limit_ms: u64,
+    /// Set when the guardian stopped retaining with the exit still unresolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<RetentionEnd>,
+}
+impl Retention {
+    /// How long ago retention began, as status prints ages.
+    pub fn age(&self, now: provenant_core::WallTime) -> Option<String> {
+        self.since
+            .map(|since| format_age_ns(i128::from(since.as_micros()) * 1_000, now))
+    }
+    /// The status clause for this record. Only a census that shows the
+    /// recorded guardian identity alive proves it still holds the lane.
+    pub fn describe(
+        &self,
+        guardian: GuardianLiveness,
+        now: Option<provenant_core::WallTime>,
+    ) -> String {
+        let pid = self.guardian.pid;
+        if let Some(end) = &self.ended {
+            return format!(
+                "guardian pid {pid} stopped retaining after {} s ({}): {}; run `provenant reconcile`",
+                end.retained_ms / 1_000,
+                match end.reason {
+                    RetentionEndReason::LimitReached => "limit reached",
+                    RetentionEndReason::SupervisorSignal => "supervisor signal",
+                },
+                end.blocker,
+            );
+        }
+        match (guardian, now.and_then(|now| self.age(now))) {
+            (GuardianLiveness::Live, Some(age)) => format!("held by guardian pid {pid} for {age}"),
+            (GuardianLiveness::Live, None) => format!("held by guardian pid {pid}"),
+            (GuardianLiveness::Gone, _) => format!(
+                "guardian pid {pid} is gone with the exit unresolved; run `provenant reconcile`"
+            ),
+            (GuardianLiveness::Unknown, _) => {
+                format!("guardian pid {pid} retained custody; its liveness is unknown")
+            }
+        }
+    }
+}
+/// Whether a census shows a retention record's guardian identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuardianLiveness {
+    /// The exact recorded identity is present and not a zombie.
+    Live,
+    /// The PID is absent or missing from a whole listing, a zombie, or reused
+    /// by another process.
+    Gone,
+    /// No census, a partial listing, or a PID the census could not describe.
+    Unknown,
+}
+impl GuardianLiveness {
+    pub fn observe(census: Option<&crate::census::Census>, guardian: &ProcessIdentity) -> Self {
+        use crate::census::ProcessLookup;
+        let Some(census) = census else {
+            return Self::Unknown;
+        };
+        match census.process(guardian.pid) {
+            ProcessLookup::Present(fact) if fact.identity == *guardian && !fact.zombie => {
+                Self::Live
+            }
+            ProcessLookup::Present(_) | ProcessLookup::Absent => Self::Gone,
+            // A whole listing that omits the PID shows it was not running.
+            // This only words status; it never grants settlement authority.
+            ProcessLookup::Unknown
+                if census.listing_is_complete()
+                    && !census.unknown_pids().contains_key(&guardian.pid) =>
+            {
+                Self::Gone
+            }
+            ProcessLookup::Unknown => Self::Unknown,
+        }
+    }
+}
+/// Why retained custody ended while processes were still unresolved.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetentionEnd {
+    pub reason: RetentionEndReason,
+    /// How long the guardian retained custody, in milliseconds.
+    pub retained_ms: u64,
+    /// What kept the exit unresolved.
+    pub blocker: RetentionBlocker,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionEndReason {
+    /// Retention reached `Retention::limit_ms`.
+    LimitReached,
+    /// TERM, INT or HUP asked the guardian to stop.
+    SupervisorSignal,
+}
+/// What kept an exit unresolved when retention ended. Diagnostic only: it
+/// grants no signal authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionBlocker {
+    /// The last process census was incomplete.
+    CensusIncomplete,
+    /// A registered nested owner that could not be proven stays protected.
+    ProtectedOwner,
+    /// The run registry or host graph forbade signalling descendants.
+    StopRefused,
+    /// Tracked processes outlived TERM and KILL.
+    SurvivedStop,
+    /// No tracked process remains, but group or writer-lease quiescence is unproven.
+    SettlementUnproven,
+}
+impl std::fmt::Display for RetentionBlocker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::CensusIncomplete => "the process census was incomplete",
+            Self::ProtectedOwner => "an unproven nested owner stays protected",
+            Self::StopRefused => "the run registry or host graph forbade signalling descendants",
+            Self::SurvivedStop => "tracked processes outlived TERM and KILL",
+            Self::SettlementUnproven => "group or writer-lease quiescence is unproven",
+        })
+    }
+}
+/// A guardian that reached its retention limit with processes unresolved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetentionLimitReached {
+    pub scope: Scope,
+    pub limit_ms: u64,
+    pub end: RetentionEnd,
+    pub unresolved_pids: Vec<i64>,
+}
+impl std::fmt::Display for RetentionLimitReached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "retained custody of attempt {} reached its {} s limit after {} s: {}; unresolved pids {:?}; the exit stays unresolved and the writer stays fenced; run `provenant reconcile` for the attempt",
+            self.scope.attempt,
+            self.limit_ms / 1_000,
+            self.end.retained_ms / 1_000,
+            self.end.blocker,
+            self.unresolved_pids,
+        )
+    }
+}
 /// Bounded, immutable OS facts. No field certifies its own publication durability.
 #[derive(Clone, Debug, Serialize)]
 pub struct ProcessExit {
@@ -1655,6 +1836,9 @@ pub struct ProcessExit {
     /// the guardian is gone can prove a PID still names the process found.
     pub unresolved_identities: Vec<ProcessIdentity>,
     pub settlement_evidence: SettlementEvidence,
+    /// Present while a guardian retains custody of this unresolved exit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<Retention>,
     pub stdout: CaptureTotals,
     pub stderr: CaptureTotals,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1703,6 +1887,7 @@ impl ProcessExit {
             unresolved_pids: vec![],
             unresolved_identities: vec![],
             settlement_evidence: SettlementEvidence::NeverSpawned,
+            retention: None,
             stdout: CaptureTotals::default(),
             stderr: CaptureTotals::default(),
             launch_refusal: None,
@@ -1819,6 +2004,8 @@ pub struct StoredExit {
     #[serde(default)]
     pub unresolved_identities: Vec<ProcessIdentity>,
     pub settlement_evidence: SettlementEvidence,
+    #[serde(default)]
+    pub retention: Option<Retention>,
     pub stdout: CaptureTotals,
     pub stderr: CaptureTotals,
     #[serde(flatten)]

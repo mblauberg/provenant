@@ -1,3 +1,0 @@
-## Fixes
-### CLI and install
-- Make `provenant worktree seed-target PATH` work outside a lane. It resolves the toolchain as cargo and rustup do for that checkout (`rust-toolchain.toml`, with `RUSTUP_HOME` and `CARGO_HOME` defaulting to `$HOME/.rustup` and `$HOME/.cargo`), verifies it with the rules lanes use, and seeds from the newest compatible host seed. Every `not seeded` reason now says what differed, for example `toolchain_mismatch; expected rustc 1.100.0, found rustc 1.99.1`, and the command prints a repair step: build a seed with `provenant worktree seed-build` or wait for tick. The command also prints where its Cargo home came from. Differences are recorded in `cargo-target-setup.json` without paths or environment values. (#3578)

@@ -1045,13 +1045,16 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
                     globals,
                 ),
             },
-            Err(error) => fail(
-                "internal supervise",
-                Outcome::Error,
-                "SUPERVISOR",
-                &error.to_string(),
-                globals,
-            ),
+            Err(error) => {
+                let (status, code) = error.outcome();
+                fail(
+                    "internal supervise",
+                    status,
+                    code,
+                    &error.to_string(),
+                    globals,
+                )
+            }
         }
     })
 }

@@ -242,6 +242,49 @@ fn wait_pr_reports_the_observed_head_and_passes() -> Result {
     no_merge(&rig)
 }
 
+/// A green head with no Actions run yet stays pending through the grace period,
+/// and settles once the period is over or a run is seen.
+// Spec: docs/specs/cli.md#wait
+fn wait_pr_holds_a_green_head_until_actions_runs_exist_or_the_grace_ends() -> Result {
+    let rig = self::rig()?;
+    fs::write(rig.project.join("no-actions-runs"), "")?;
+    let held = rig.command(&["wait", "--pr", "1668", "--timeout", "3s", "--json"])?;
+    let held_text = String::from_utf8(held.stdout.bytes.clone())?;
+    let held_value: serde_json::Value = held_text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .next_back()
+        .ok_or("held wait emitted no JSON record")?;
+    assert_ne!(code(&held), 0, "{held_text}");
+    assert_eq!(held_value["data"]["timed_out"], true, "{held_value}");
+    assert_eq!(
+        held_value["data"]["targets"][0]["settle"], "pending",
+        "{held_value}"
+    );
+    assert_eq!(
+        held_value["data"]["targets"][0]["data"]["actions_grace"], true,
+        "{held_value}"
+    );
+
+    // With no grace period the same head settles on its checks alone.
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.pr.land]\napproval_tier = 'none'\n[domains.wait]\nactions_grace_seconds = 0\n",
+    )?;
+    let settled = rig.command(&["wait", "--pr", "1668", "--timeout", "30s", "--json"])?;
+    assert_eq!(code(&settled), 0, "{settled:?}");
+    let settled_value: serde_json::Value = String::from_utf8(settled.stdout.bytes)?
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .next_back()
+        .ok_or("settled wait emitted no JSON record")?;
+    assert_eq!(
+        settled_value["data"]["targets"][0]["settle"], "succeeded",
+        "{settled_value}"
+    );
+    no_merge(&rig)
+}
+
 /// A wait pinned to `--head` cannot verdict the previous head's failed checks.
 /// The fake forge reports the stale head first (with failing checks) and the
 /// new head on the next process, where the passing verdict arrives.
@@ -1340,6 +1383,19 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 .unwrap_or_else(|| serde_json::json!([]));
             io::stdout().write_all(&serde_json::to_vec(&body)?)?;
         }
+        // Actions runs for a head. By default the head has one finished run;
+        // `no-actions-runs` is a push whose workflow has not started yet.
+        value if value.starts_with("api repos/{owner}/{repo}/actions/runs?head_sha=") => {
+            io::stdout().write_all(b"HTTP/2.0 200 OK\r\n\r\n")?;
+            let runs = if Path::new("no-actions-runs").exists() {
+                serde_json::json!([])
+            } else {
+                serde_json::json!([{"status":"completed","conclusion":"success"}])
+            };
+            io::stdout().write_all(&serde_json::to_vec(
+                &serde_json::json!({"total_count":runs.as_array().map_or(0, Vec::len),"workflow_runs":runs}),
+            )?)?;
+        }
         value
             if value.starts_with("api repos/{owner}/{repo}/commits/")
                 && value.contains("/check-runs?per_page=100&filter=latest&page=") =>
@@ -1548,6 +1604,10 @@ fn main() -> ExitCode {
             (
                 "wait_pr_reports_the_observed_head_and_passes",
                 wait_pr_reports_the_observed_head_and_passes,
+            ),
+            (
+                "wait_pr_holds_a_green_head_until_actions_runs_exist_or_the_grace_ends",
+                wait_pr_holds_a_green_head_until_actions_runs_exist_or_the_grace_ends,
             ),
             (
                 "wait_pr_head_ignores_the_stale_head_then_settles_on_the_new_one",

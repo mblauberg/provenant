@@ -120,7 +120,8 @@ its result alongside the safe cause and remedy. Provider-originated diagnostics
 never supply that public explanation. Every refusal path in lane launch carries
 a typed terminal cause plus the command that fixes it, recorded in the attempt's
 terminal record (`terminal-pending.json`) and displayed by `result` and `wait`.
-Refusals never settle without a typed cause.
+Refusals never settle without a typed cause. A refusal whose record names none
+reads `unrecorded`, never a cause the host did not observe.
 
 Terminal attempts are immutable. A retry is a new linked attempt, and a writer
 is never replayed over its edits. A terminal attempt has at most one successor.
@@ -158,6 +159,24 @@ different branch, head or unclean tree is refused with the named cause.
 - Why: an owned writer must land in one project-owned location regardless of
   where the launch command ran, and a failed bind must not leave a half-made
   worktree.
+
+A node whose launch condition (`when`) does not hold never runs, so it needs no
+writer scope: submission neither inspects nor preflights its worktree, and a
+launch whose only writer is skipped runs from a primary checkout wherever a
+read-only lane runs. A composite template takes no launch control: `--access`,
+`--worktree`, `--branch`, `--base` and `--write-scope` are refused naming the
+first one given. The bundled `smoke` template is the exception for `--worktree`
+and `--branch`/`--base`, which bind to its write node only and enable it. Without
+either, `smoke` runs its read-only nodes and its launch receipt warns which node it
+skipped and why. Remote placement takes neither control.
+- Why: a verification graph must run on a real install, and a skipped node
+  must not be able to refuse the run it does not take part in.
+
+Every refusal of a launch input names the field that caused it, or the decoded
+path of a document or patch field. An unnamed `invalid input` is a defect; the
+graph, peer, owner and unified paths build their refusals with
+`FacadeError::field`, and a test pins that none of them returns an empty one.
+- Why: the repair step says to check the named field.
 
 A refused bind keeps its typed cause all the way to the facade. A held writer
 lease is `writer_lease_held` and names its holder locally; scope, confinement
@@ -199,6 +218,18 @@ continuations. Unsupported confinement is reported rather than represented as
 sandboxed execution.
 - Why: a retry must not silently weaken the requested boundary.
 
+A sandboxed lane's Git wrapper always exports `GIT_CONFIG_NOSYSTEM`, with or
+without a private identity config, and launch never strips it, so system Git
+configuration (on macOS, `credential.helper=osxkeychain`) is not read. The
+sandboxed lane environment drops `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`,
+`GIT_CONFIG_VALUE_*` and `GIT_CONFIG_PARAMETERS` and carries the token helper's
+own entries in their place. Its global configuration is the private allowlisted
+view described below. A lane that is not sandboxed keeps the host's helpers and
+askpass: it is not covered by this boundary.
+- Why: system configuration and inherited command-scope entries are credential
+  paths a lane never asked for
+  ([ADR 0035](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md)).
+
 Read-only write exceptions come from user-owned configuration, remain within
 verified repository paths and are recorded on the attempt. Git and provider
 control paths are excluded.
@@ -207,6 +238,40 @@ control paths are excluded.
 Host-native launches retain confinement and provenance and cannot resume a
 provider session or select model-specific controls.
 - Why: native execution must not claim a provider contract it cannot satisfy.
+
+A sandboxed lane's private global Git configuration is built from the host's
+system-scope entries (the system file, or the host's `GIT_CONFIG_SYSTEM`, and
+any file the Git build reads before it, such as Apple's Xcode `gitconfig`;
+none when the host sets `GIT_CONFIG_NOSYSTEM` or has no system file) and
+global files (the XDG `git/config`, then `~/.gitconfig`, or the host's
+`GIT_CONFIG_GLOBAL` alone), in that order with includes expanded, through an
+allowlist: `user.name`, `user.email`, `alias.*`, `color.*`, named core,
+diff and merge presentation keys, `filter.lfs.{clean,smudge,process,required}`,
+and `url.*.insteadOf` when neither its target nor its prefix carries a
+password or token. A rewrite whose URL names any user withholds it, since a
+token can be the whole user of an HTTP URL; only SSH forms keep a bare user
+(`ssh://git@host/`, `git@host:`). An allowlisted value
+that carries a credential by the redactor's shape rules (a token shape, URL
+userinfo with a password, or a credential assignment) is withheld. A
+`domains.lanes.git_config_allow` pattern that carries a credential is invalid,
+because the receipt records the list. Every other
+key is withheld, including `credential.*`, `http.*`, `core.askPass`,
+`core.sshCommand`, `include` and `includeIf`. The lane receives no include of,
+and no read grant on, the host files, and keeps `GIT_CONFIG_NOSYSTEM` set so
+its Git never reads the system file directly. Withheld key names, with any
+subsection redacted and never their values, are recorded in the launch
+receipt's `git_config` field with the `domains.lanes.git_config_allow` list
+and its origin. That setting passes further keys deliberately and verbatim;
+`include` and `includeIf` never pass. A withheld `filter.<driver>.required`
+that is true warns at launch, naming the key, because Git then applies no
+filter and would commit the content unfiltered. A file that cannot be located
+or read contributes nothing, with a warning. A host identity holding a control
+character refuses the launch. Unsandboxed lanes do not get this isolation:
+their private configuration includes the host global files in full, and they
+can read them directly.
+- Why: a token in an extra header, a rewrite URL, an alias or an inline
+  helper in the host configuration would otherwise reach the lane; credentials
+  reach a lane only through its granted token helper ([ADR 0035](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md)).
 
 ## Inputs and resources
 

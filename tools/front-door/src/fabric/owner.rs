@@ -183,7 +183,7 @@ fn selected_writer_project(
         &mut checked,
         selected
             .to_str()
-            .ok_or(FacadeError::InvalidInput { detail: None })?,
+            .ok_or_else(|| FacadeError::field("worktree"))?,
         factory.context.roots.state.as_path(),
         &factory.credential_roots()?,
         None,
@@ -852,15 +852,16 @@ pub(crate) fn decode_graph_document(
             .maximum_u64(),
         ..Default::default()
     };
-    let header: Header = provenant_records::decode(bytes, limits)
-        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+    let header: Header =
+        provenant_records::decode(bytes, limits).map_err(|_| FacadeError::field("document"))?;
     match header
         .schema_version
         .as_ref()
         .and_then(serde_json::Value::as_u64)
     {
-        Some(1 | 2) => provenant_records::decode(bytes, limits)
-            .map_err(|_| FacadeError::InvalidInput { detail: None }),
+        Some(1 | 2) => {
+            provenant_records::decode(bytes, limits).map_err(|_| FacadeError::field("document"))
+        }
         Some(version) if version > 2 => Err(FacadeError::UpgradeRequired {
             reader_release: env!("CARGO_PKG_VERSION").into(),
             writer_release: "unknown".into(),
@@ -1892,7 +1893,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .worktree
             .path()
             .to_str()
-            .ok_or(FacadeError::InvalidInput { detail: None })?
+            .ok_or_else(|| FacadeError::field("worktree"))?
             .to_owned();
         let identity = writer.worktree.identity();
         Ok(Some(
@@ -1928,7 +1929,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         .map_err(|error| run_error(error.into()))?;
         let path = provisioned
             .to_str()
-            .ok_or(FacadeError::InvalidInput { detail: None })?;
+            .ok_or_else(|| FacadeError::field("worktree"))?;
         self.bind_writer_worktree(path)
     }
 
@@ -2209,7 +2210,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         let branch = document
             .integration_branch
             .as_deref()
-            .ok_or(FacadeError::InvalidInput { detail: None })?;
+            .ok_or_else(|| FacadeError::field("integration_branch"))?;
         let session = BinaryRunOwner {
             factory: self.factory,
             allow_remote: false,
@@ -3080,7 +3081,7 @@ impl BoundGraphOwner<'_> {
             {
                 let head = commit
                     .parse()
-                    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                    .map_err(|_| FacadeError::field("source.commit"))?;
                 let descends = provenant_confinement::worktrees::with_context_using_facts(
                     &self.factory.context.roots,
                     &self.factory.home,
@@ -3139,7 +3140,7 @@ impl BoundGraphOwner<'_> {
             {
                 let head = commit
                     .parse()
-                    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                    .map_err(|_| FacadeError::field("source.commit"))?;
                 self.fast_forward_writer(
                     writer_directory,
                     Path::new(path),
@@ -3472,7 +3473,13 @@ impl BoundGraphOwner<'_> {
             } else {
                 let configured =
                     provenant_cli::config_reads::read_for(&self.factory.context.roots, "run")
-                        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                        .map_err(|error| {
+                            FacadeError::invalid(
+                                provenant_fabric_runtime::coordination::facade::InvalidInputDetail::Configuration(
+                                    error.to_string(),
+                                ),
+                            )
+                        })?;
                 let default_capabilities = configured
                     .domains
                     .lanes
@@ -3956,7 +3963,7 @@ impl BoundGraphOwner<'_> {
                             Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
                             Outcome::Unclassified => AttemptOutcome::Unclassified,
                             Outcome::Rejected if !launched => preparation_cause
-                                .or(Some(provenant_records::run::TerminalCause::AccessPolicyRefused))
+                                .or(Some(provenant_records::run::TerminalCause::Unrecorded))
                                 .map_or(AttemptOutcome::OtherFailure, AttemptOutcome::PreparationRefused),
                             Outcome::ReviewRequired if matches!(
                                 &attempt.state,

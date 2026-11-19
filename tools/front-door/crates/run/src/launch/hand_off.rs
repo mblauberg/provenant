@@ -573,7 +573,9 @@ impl RunStore {
                     .ok_or_else(|| local("lane priority", &"missing"))
             ),
         };
-        let capture = capture_plan(task, limits);
+        let mut capture = capture_plan(task, limits);
+        capture.retained_custody_ms =
+            retained_custody_ms(self.context.state_root.as_path(), &policy);
         if local_or_withdraw!(cancel_requested()) {
             local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
         }

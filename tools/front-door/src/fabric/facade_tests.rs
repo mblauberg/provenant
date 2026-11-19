@@ -1,3 +1,29 @@
+/// Every launch-input refusal in the graph, peer, owner and unified paths names
+/// its field. A bare `InvalidInput` has no field to repair, so the paths that
+/// reject graph input must build their refusals with `FacadeError::field` or a
+/// typed detail, never with an empty one.
+// Spec: docs/specs/run-launch.md#writer-binding
+#[test]
+fn graph_input_refusals_name_their_field() {
+    let bare = ["InvalidInput { ", "detail: None }"].concat();
+    for (path, source) in [
+        ("src/fabric.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric.rs"))),
+        ("src/fabric/graph_execution.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric/graph_execution.rs"))),
+        ("src/fabric/graph_inputs.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric/graph_inputs.rs"))),
+        ("src/fabric/owner.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric/owner.rs"))),
+        ("src/fabric/peer.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric/peer.rs"))),
+        ("src/fabric/unified.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric/unified.rs"))),
+    ] {
+        let unnamed: Vec<usize> = source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains(&bare))
+            .map(|(index, _)| index + 1)
+            .collect();
+        assert!(unnamed.is_empty(), "{path} has an unnamed refusal at lines {unnamed:?}");
+    }
+}
+
 #[cfg(test)]
 #[test]
 fn peer_remote_base_pins_a_commit_reachable_from_the_remote()

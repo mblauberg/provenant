@@ -524,11 +524,13 @@ fn attempt_presence_inner(
 }
 
 /// Read-only release diagnostics. The committed outcome remains authoritative;
-/// unresolved descendants explain why its writer reservation is still held.
+/// unresolved descendants explain why its writer reservation is still held,
+/// and the retention record names the guardian holding it and for how long.
 pub fn release_progress(
     root: &std::path::Path,
     record: &AttemptRecord,
     census: Option<&provenant_supervisor::census::Census>,
+    now: Option<WallTime>,
 ) -> Option<String> {
     if !matches!(record.state, AttemptState::Terminal { .. }) {
         return None;
@@ -551,6 +553,8 @@ pub fn release_progress(
         unresolved_pids: Vec<i64>,
         #[serde(default)]
         unresolved_identities: Vec<provenant_supervisor::census::ProcessIdentity>,
+        #[serde(default)]
+        retention: Option<custody::Retention>,
     }
     let exit: Cleanup = crate::db::decode(&raw).ok()?;
     if exit.scope != RunStore::scope(record) {
@@ -580,14 +584,19 @@ pub fn release_progress(
             )
         })
         .collect::<Vec<_>>();
+    let holder = exit.retention.map(|retention| {
+        let guardian = custody::GuardianLiveness::observe(census, &retention.guardian);
+        format!("; {}", retention.describe(guardian, now))
+    });
     Some(format!(
-        "releasing ({} survivors: {})",
+        "releasing ({} survivors: {}){}",
         exit.unresolved_pids.len(),
         if names.is_empty() {
             "census pending".into()
         } else {
             names.join(", ")
-        }
+        },
+        holder.unwrap_or_default(),
     ))
 }
 
