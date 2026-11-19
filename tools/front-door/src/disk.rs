@@ -180,6 +180,7 @@ fn collect_resolved(
         protected_owners: Default::default(),
         project_owners: Default::default(),
         selected_only: false,
+        foreign_idle_before_ns: None,
     };
     let inventory = (|| -> Result<_, Box<dyn std::error::Error>> {
         let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;

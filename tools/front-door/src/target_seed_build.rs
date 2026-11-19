@@ -841,6 +841,11 @@ fn publish_with_publication_wait(
     fs::create_dir(&stage.0)?;
     drop(store_lock);
     let manifest = build(&stage.0)?;
+    // Cargo tags a target directory only when it creates it; tag it here so a
+    // generation and every seed cloned from it carry the tag.
+    provenant_confinement::cache::tag_cache_directory(&provenant_os::fs::Directory::open_anchor(
+        &stage.0.join("target"),
+    )?)?;
     fs::write(
         stage.0.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest)?,
@@ -1731,6 +1736,10 @@ mod tests {
         ] {
             assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o222, 0);
         }
+        assert_eq!(
+            fs::read(generation.join("target/CACHEDIR.TAG")).unwrap(),
+            provenant_confinement::cache::CACHE_DIRECTORY_TAG_CONTENT
+        );
         make_directories_writable(&generation).unwrap();
     }
 }

@@ -23,6 +23,35 @@ pub(crate) const CARGO_CACHE_OWNER_VERSION: &[u8] = match CARGO_CACHE_OWNER_PREF
     Some((_, version)) => version,
     None => CARGO_CACHE_OWNER_PREFIX,
 };
+/// The cache directory tag (<https://bford.info/cachedir/>) Cargo writes into a
+/// target directory it creates. Backup and indexing tools skip a tagged tree.
+pub const CACHE_DIRECTORY_TAG: &str = "CACHEDIR.TAG";
+pub const CACHE_DIRECTORY_TAG_CONTENT: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55\n\
+# This file is a cache directory tag created by cargo.\n\
+# For information about cache directory tags see https://bford.info/cachedir/\n";
+
+/// Tag `directory` as a cache, as Cargo tags a target directory it creates,
+/// unless something already holds the name. Provenant creates target roots
+/// Cargo never sees created, so it writes the tag itself. Only backup and
+/// indexing tools read it; GC never does.
+pub fn tag_cache_directory(directory: &Directory) -> Result<(), FsError> {
+    let name = OsStr::new(CACHE_DIRECTORY_TAG);
+    match directory.metadata_at(name, false) {
+        Ok(_) => return Ok(()),
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error),
+    }
+    match directory.atomic_write(
+        name,
+        ".provenant-cachedir-tag-",
+        CACHE_DIRECTORY_TAG_CONTENT,
+        provenant_os::fs::PublishMode::NoReplace,
+    ) {
+        Ok(_) => Ok(()),
+        Err(error) if error.is_exists() => Ok(()),
+        Err(error) => Err(error),
+    }
+}
 const MAX_CACHE_SWEEP_DEPTH: usize = 32;
 const MAX_TREE_CURSOR_BYTES: usize = 14 * 1024;
 const MAX_CACHE_CURSOR_BYTES: usize = 14 * 1024;
@@ -40,8 +69,15 @@ pub enum CacheGcReason {
     Idle,
     /// A detached cache left by an interrupted sweep.
     Tombstone,
-    /// An existing owner outside the selected project; always kept.
+    /// An existing owner outside the selected project, kept until nothing
+    /// used its cache for `gc.cargo_target_idle`.
     Foreign,
+    /// An existing owner outside the selected project whose cache nothing
+    /// used for `gc.cargo_target_idle`.
+    ForeignIdle,
+    /// Another directory now stands at the owner path. The cache key records
+    /// the original worktree's identity, so no worktree builds here again.
+    Replaced,
     /// A process was observed live in the owner tree; always kept.
     Live,
     /// Writer exclusion cannot be established; always kept.
@@ -56,6 +92,10 @@ pub struct CacheGcPolicy {
     pub idle_before_ns: Option<i128>,
     /// Report without deleting.
     pub dry_run: bool,
+    /// Also remove caches of existing owners outside the selected project
+    /// whose newest write is older than this (`gc.cargo_target_idle`). `None`
+    /// keeps them.
+    pub foreign_idle_before_ns: Option<i128>,
     /// Canonical worktrees listed by the selected project.
     pub project_owners: BTreeSet<PathBuf>,
     /// Limit collection to listed owners, including orphan and detached output.
@@ -1519,11 +1559,55 @@ pub fn lock_scratch_cargo_profiles(
     Some(guards)
 }
 
-/// Read the verified worktree path that owns a private lane cache.
-pub fn lane_cargo_cache_owner_path(
+/// What became of the worktree a private lane cache was made for. Lane cache
+/// GC and target GC classify owners through this one function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerStatus {
+    /// The worktree exists with its recorded identity and, where the caller
+    /// classifies by registration, a registered lane lists it.
+    Live,
+    /// The worktree exists with its recorded identity, but no registered lane
+    /// of the selected project lists it: a chair-made or hand-made worktree,
+    /// or another project's.
+    Foreign,
+    /// Another directory stands at the owner path. The cache key records the
+    /// original identity, so no worktree builds in this cache again.
+    Replaced,
+    /// Nothing exists at the owner path.
+    Gone,
+}
+
+/// Classify an owner. `registered` lists the selected project's worktrees;
+/// `None` does not classify by registration, so an intact owner is `Live`.
+pub(crate) fn owner_status(
+    owner: &CacheOwner,
+    registered: Option<&BTreeSet<PathBuf>>,
+) -> std::io::Result<OwnerStatus> {
+    match std::fs::symlink_metadata(&owner.path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(OwnerStatus::Gone),
+        Err(error) => Err(error),
+        Ok(metadata) if owner.identity != (metadata.dev(), metadata.ino()) => {
+            Ok(OwnerStatus::Replaced)
+        }
+        Ok(_) if registered.is_some_and(|listed| !listed.contains(&owner.path)) => {
+            Ok(OwnerStatus::Foreign)
+        }
+        Ok(_) => Ok(OwnerStatus::Live),
+    }
+}
+
+/// The recorded owner of a private lane cache and what became of it, without
+/// classifying by registration.
+pub fn lane_cargo_cache_owner(
     cache: &Directory,
-) -> Result<Option<std::path::PathBuf>, PermissionError> {
-    Ok(read_cache_owner(cache, Path::new("."))?.map(|owner| owner.path))
+) -> Result<Option<(PathBuf, OwnerStatus)>, PermissionError> {
+    let Some(owner) = read_cache_owner(cache, Path::new("."))? else {
+        return Ok(None);
+    };
+    let status = owner_status(&owner, None)
+        .map_err(|error| cache_io_error("stat owner", &owner.path, error))?;
+    Ok(Some((owner.path, status)))
 }
 
 fn verify_detached_cache(
@@ -1735,48 +1819,58 @@ pub(crate) fn cache_gc_reason_with_newest(
     policy: &CacheGcPolicy,
     newest_write_ns: impl FnOnce() -> Result<i128, PermissionError>,
 ) -> Result<Option<CacheGcReason>, PermissionError> {
-    use std::io;
-
     // Occupancy is stronger than cache age and owner state. In particular, a
     // busy cache whose worktree disappeared during a run remains protected.
     if policy.protected_owners.contains_key(&owner.path) {
         return Ok(None);
     }
 
-    let reason = match std::fs::symlink_metadata(&owner.path) {
-        Ok(_) if !policy.project_owners.contains(&owner.path) => {
-            if let Some(threshold) = policy.idle_before_ns
-                && newest_write_ns()? >= threshold
-            {
-                return Ok(None);
-            }
-            CacheGcReason::Foreign
-        }
-        Ok(metadata) if owner.identity == (metadata.dev(), metadata.ino()) => {
+    let status = owner_status(owner, Some(&policy.project_owners)).map_err(|error| {
+        cache_fs_error("stat owner", relative)(FsError::Io {
+            operation: "symlink_metadata owner",
+            path: owner.path.clone(),
+            source: error,
+        })
+    })?;
+    let reason = match status {
+        OwnerStatus::Live => {
             let Some(threshold) = policy.idle_before_ns else {
                 return Ok(None);
             };
-            let newest = newest_write_ns()?;
-            if newest >= threshold {
+            if newest_write_ns()? >= threshold {
                 return Ok(None);
             }
             CacheGcReason::Idle
         }
-        Ok(_) => return Ok(None),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+        OwnerStatus::Foreign => {
+            let newest = newest_write_ns()?;
+            if policy
+                .foreign_idle_before_ns
+                .is_some_and(|threshold| newest < threshold)
+            {
+                CacheGcReason::ForeignIdle
+            } else if policy
+                .idle_before_ns
+                .is_some_and(|threshold| newest >= threshold)
+            {
+                return Ok(None);
+            } else {
+                CacheGcReason::Foreign
+            }
+        }
+        // A replaced owner is as gone as a missing one: the cache key cannot
+        // match the directory now at that path. Both wait out `gc.idle`.
+        OwnerStatus::Replaced | OwnerStatus::Gone => {
             if let Some(threshold) = policy.idle_before_ns
                 && newest_write_ns()? >= threshold
             {
                 return Ok(None);
             }
-            CacheGcReason::Orphaned
-        }
-        Err(error) => {
-            return Err(cache_fs_error("stat owner", relative)(FsError::Io {
-                operation: "symlink_metadata owner",
-                path: owner.path.clone(),
-                source: error,
-            }));
+            if status == OwnerStatus::Gone {
+                CacheGcReason::Orphaned
+            } else {
+                CacheGcReason::Replaced
+            }
         }
     };
     Ok(Some(reason))
@@ -2610,6 +2704,7 @@ mod tests {
                         project_owners: [owner.clone()].into(),
                         protected_owners: [(owner.clone(), state.clone())].into(),
                         selected_only: false,
+                        foreign_idle_before_ns: None,
                     };
                     let report =
                         gc_worktree_cargo_caches_with_writer_guard(home, &policy, |path| {
@@ -3242,8 +3337,35 @@ mod tests {
         }
     }
 
+    /// The tag is Cargo's, byte for byte, and an existing entry is never
+    /// replaced.
     #[test]
-    fn lane_cache_gc_keeps_existing_foreign_owners_even_with_old_identity()
+    fn a_tagged_cache_directory_holds_cargos_tag_and_keeps_an_existing_one()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root))?;
+        let directory = Directory::open_anchor(root.path())?;
+        tag_cache_directory(&directory)?;
+        let tag = std::fs::read(root.path().join(CACHE_DIRECTORY_TAG))?;
+        assert_eq!(tag, CACHE_DIRECTORY_TAG_CONTENT);
+        assert!(tag.starts_with(b"Signature: 8a477f597d28d172789f06886806bc55"));
+        assert_eq!(tag.iter().filter(|byte| **byte == b'\n').count(), 3);
+        tag_cache_directory(&directory)?;
+        assert_eq!(std::fs::read(root.path().join(CACHE_DIRECTORY_TAG))?, tag);
+
+        let other = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root))?;
+        std::fs::write(other.path().join(CACHE_DIRECTORY_TAG), b"someone else's")?;
+        tag_cache_directory(&Directory::open_anchor(other.path())?)?;
+        assert_eq!(
+            std::fs::read(other.path().join(CACHE_DIRECTORY_TAG))?,
+            b"someone else's"
+        );
+        Ok(())
+    }
+
+    /// A foreign owner is kept until `gc.cargo_target_idle` passes; a replaced
+    /// one can never build here again, so it goes like a missing owner.
+    #[test]
+    fn lane_cache_gc_keeps_a_foreign_owner_until_idle_and_collects_a_replaced_one()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
 
@@ -3264,24 +3386,76 @@ mod tests {
             });
             std::fs::write(cache.join(CARGO_CACHE_OWNER), marker)?;
         }
+        let foreign = root.join("a".repeat(64));
+        let replaced = root.join("b".repeat(64));
+        // Past `gc.idle` but not `gc.cargo_target_idle`: the foreign cache stays.
         let policy = CacheGcPolicy {
             idle_before_ns: Some(i128::MAX),
+            foreign_idle_before_ns: Some(i128::MIN),
             ..CacheGcPolicy::default()
         };
         let report = gc_worktree_cargo_caches(home, &policy)?;
-        assert!(
-            report.removed.is_empty(),
-            "existing foreign owners must be kept"
-        );
-        assert_eq!(report.kept.len(), 2);
-        assert!(
+        assert_eq!(
             report
                 .kept
                 .iter()
-                .all(|entry| entry.reason == CacheGcReason::Foreign)
+                .map(|entry| (entry.path.clone(), entry.reason))
+                .collect::<Vec<_>>(),
+            vec![(foreign.clone(), CacheGcReason::Foreign)]
         );
-        assert!(root.join("a".repeat(64)).is_dir());
-        assert!(root.join("b".repeat(64)).is_dir());
+        assert_eq!(
+            report
+                .removed
+                .iter()
+                .map(|entry| (entry.path.clone(), entry.reason))
+                .collect::<Vec<_>>(),
+            vec![(replaced.clone(), CacheGcReason::Replaced)]
+        );
+        assert!(foreign.is_dir() && !replaced.exists());
+
+        let policy = CacheGcPolicy {
+            foreign_idle_before_ns: Some(i128::MAX),
+            ..policy
+        };
+        let report = gc_worktree_cargo_caches(home, &policy)?;
+        assert!(report.kept.is_empty(), "{report:?}");
+        assert_eq!(
+            report
+                .removed
+                .iter()
+                .map(|entry| (entry.path.clone(), entry.reason))
+                .collect::<Vec<_>>(),
+            vec![(foreign.clone(), CacheGcReason::ForeignIdle)]
+        );
+        assert!(!foreign.exists());
+        Ok(())
+    }
+
+    /// A replaced owner waits out `gc.idle` like a missing one.
+    #[test]
+    fn a_replaced_owner_is_kept_within_the_idle_grace() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::MetadataExt;
+
+        let temporary = tempfile::tempdir()?;
+        let path = temporary.path().join("worktree");
+        std::fs::create_dir(&path)?;
+        let metadata = std::fs::metadata(&path)?;
+        let replaced = CacheOwner {
+            path,
+            identity: (metadata.dev(), metadata.ino() + 1),
+        };
+        let policy = CacheGcPolicy {
+            idle_before_ns: Some(20),
+            ..Default::default()
+        };
+        assert_eq!(
+            cache_gc_reason_with_newest(Path::new("cache"), &replaced, &policy, || Ok(30))?,
+            None
+        );
+        assert_eq!(
+            cache_gc_reason_with_newest(Path::new("cache"), &replaced, &policy, || Ok(10))?,
+            Some(CacheGcReason::Replaced)
+        );
         Ok(())
     }
 
@@ -3499,6 +3673,7 @@ mod tests {
             project_owners: caches.iter().map(|(_, owner)| owner.clone()).collect(),
             protected_owners: [(caches[2].1.clone(), Occupancy::Observed { process: None })].into(),
             selected_only: false,
+            foreign_idle_before_ns: None,
         };
 
         policy.selected_only = true;

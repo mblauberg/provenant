@@ -321,14 +321,26 @@ fn execute(
                         &provenant_core::CredentialRoots::for_home(home),
                     )?;
                     let environment: Vec<_> = std::env::vars_os().collect();
-                    Data::SeedTarget(provenant_run::seed_worktree_target(
+                    let mut seed = provenant_run::seed_worktree_target(
                         roots.state.as_path(),
                         home,
                         verified.path(),
                         verified.repo().common_git_dir(),
                         &cache,
                         &environment,
-                    ))
+                    );
+                    // GC dates a seeded target from this stamp, not from the
+                    // file times the clone carried over.
+                    if let Err(error) =
+                        provenant_run::build_dir_gc::mark_cache_targets_used(home, &cache)
+                    {
+                        let warning = format!("could not stamp the target's last use: {error}");
+                        seed.warning = Some(match seed.warning.take() {
+                            Some(existing) => format!("{existing}; {warning}"),
+                            None => warning,
+                        });
+                    }
+                    Data::SeedTarget(seed)
                 }
                 Worktree::Create { branch, base } => {
                     let info = worktrees::create(context, WorktreeCreate { branch, base }, cancel)?;
@@ -1052,7 +1064,7 @@ fn gc_data_summary(data: &GcData) -> String {
     }
     for removal in &data.build_dirs.removed {
         human.push_str(&format!(
-            "{} Cargo target {} ({}; {} allocated bytes{})\n",
+            "{} Cargo target {} ({}{}; {} allocated bytes{})\n",
             if data.report.dry_run {
                 "would remove"
             } else {
@@ -1060,6 +1072,10 @@ fn gc_data_summary(data: &GcData) -> String {
             },
             removal.path.display(),
             removal.reason.as_str(),
+            removal
+                .last_use
+                .map(|last_use| format!("; last use from {}", last_use.as_str()))
+                .unwrap_or_default(),
             removal.bytes,
             removal
                 .worktree
@@ -2458,8 +2474,15 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .wall_now()
         .map(|now| i128::from(now.as_micros()) * 1_000)
         .map_err(|_| Error::Budget)?;
+    let target_idle_seconds = config
+        .gc
+        .cargo_target_idle_seconds()
+        .map_err(|_| Error::GcObservation("invalid Cargo target idle duration"))?;
     let policy = CacheGcPolicy {
         idle_before_ns: Some(now_ns - i128::from(idle_seconds) * 1_000_000_000),
+        // Chair-made, hand-made and other projects' worktrees keep their
+        // caches until `gc.cargo_target_idle`.
+        foreign_idle_before_ns: Some(now_ns - i128::from(target_idle_seconds) * 1_000_000_000),
         // build_directories owns the shared lane/target budget and disk floor.
         // This pass reclaims only idle or orphaned whole private caches.
         dry_run: command.dry_run,
@@ -3536,6 +3559,16 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let config = self.config;
         let free_floor = self.free_floor;
         let sweep_deadline = self.deadline;
+        // A retirement cursor and a target census epoch both resume this
+        // class; each goes only to its own step.
+        let resume_detail = self.resume_detail().map(str::to_owned);
+        let retirement_resume = self.resume_candidate().map(Path::to_path_buf).zip(
+            resume_detail
+                .clone()
+                .filter(|detail| provenant_run::build_dir_gc::is_retirement_detail(detail)),
+        );
+        let resume_detail = resume_detail
+            .filter(|detail| !provenant_run::build_dir_gc::is_retirement_detail(detail));
         self.data.shared_targets = {
             let lease = self.lease.as_ref();
             let mut should_stop = || !sweep_should_continue(sweep_deadline, lease);
@@ -3549,11 +3582,15 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                     .build_dir_grace_seconds(),
                 command.dry_run,
                 self.now_ns,
+                retirement_resume
+                    .as_ref()
+                    .map(|(path, detail)| (path.as_path(), detail.as_str())),
                 &mut should_stop,
             )
         };
         if let Some(stopped) = self.data.shared_targets.interrupted_at.clone() {
-            self.stop_at(None, Some(stopped), None)?;
+            let detail = self.data.shared_targets.cursor_detail.clone();
+            self.stop_at(None, Some(stopped), detail)?;
             return Ok(());
         }
         let profile = config.dispatch_profile(&[])?;
@@ -3569,7 +3606,10 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
                 return Ok(());
             }
         };
-        let target_idle_seconds = config.gc.cargo_target_idle_seconds().unwrap_or(30 * 86_400);
+        let target_idle_seconds = config
+            .gc
+            .cargo_target_idle_seconds()
+            .map_err(|_| Error::GcObservation("invalid Cargo target idle duration"))?;
         let mut protection = provenant_run::build_dir_gc::TargetProtection::default();
         for project in &self.projects {
             let live = project
@@ -3589,7 +3629,6 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
             }
         }
         protection.unobserved = !self.data.unobserved_projects.is_empty();
-        let resume_detail = self.resume_detail().map(str::to_owned);
         let epoch_number = if let Some(lease) = self.lease.as_ref() {
             lease.epoch()
         } else {
@@ -4297,6 +4336,7 @@ mod gc_preview_tests {
                 path: "/cache/a/target".into(),
                 worktree: Some("/repo/.worktrees/gone".into()),
                 reason: provenant_run::build_dir_gc::TargetReason::Idle,
+                last_use: Some(provenant_run::build_dir_gc::LastUse::Stamp),
                 bytes: 4096,
             });
         data.build_dirs.bytes = 4096;
@@ -4325,7 +4365,7 @@ mod gc_preview_tests {
             assert!(summary.contains(expected), "{summary}");
             assert!(
                 summary.contains(&format!(
-                    "{verb} Cargo target /cache/a/target (idle; 4096 allocated bytes; worktree /repo/.worktrees/gone)\n"
+                    "{verb} Cargo target /cache/a/target (idle; last use from last-use stamp; 4096 allocated bytes; worktree /repo/.worktrees/gone)\n"
                 )),
                 "{summary}"
             );
@@ -4343,6 +4383,7 @@ mod gc_preview_tests {
         assert_eq!(json["build_dirs"]["recent"][0], "/cache/c/target");
         assert_eq!(json["build_dirs"]["removed"][0]["path"], "/cache/a/target");
         assert_eq!(json["build_dirs"]["removed"][0]["reason"], "idle");
+        assert_eq!(json["build_dirs"]["removed"][0]["last_use"], "stamp");
         assert_eq!(
             json["build_dirs"]["removed"][0]["worktree"],
             "/repo/.worktrees/gone"
