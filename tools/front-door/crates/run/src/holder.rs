@@ -5593,13 +5593,16 @@ mod writer_recovery_tests {
                 ]
             );
             let stop = stop.as_ref().ok_or("typed stop")?;
-            let next = stop.next_step(
-                &Default::default(),
-                provenant_records::StopFacts {
-                    custody_released: true,
-                    ..Default::default()
-                },
-            );
+            let next_after = |retries| {
+                stop.next_step(
+                    &Default::default(),
+                    provenant_records::StopFacts {
+                        retries,
+                        custody_released: true,
+                    },
+                )
+            };
+            let next = next_after(0);
             if empty {
                 assert!(reason.contains(EMPTY_WRITER_REASON), "{reason}");
                 assert_eq!(
@@ -5607,7 +5610,16 @@ mod writer_recovery_tests {
                     Some(SettlementReason::EmptyResult)
                 );
                 assert_eq!(stop.cause(), provenant_records::StopCause::EmptyResult);
-                assert_eq!(next, provenant_records::NextStep::NewRoute, "{reason}");
+                // run.md "What follows a stop": `empty_result` allows one fresh
+                // same-route attempt, then moves to a new route.
+                assert_eq!(
+                    next,
+                    provenant_records::NextStep::SameRoute {
+                        continuation: provenant_records::Continuation::Fresh
+                    },
+                    "{reason}"
+                );
+                assert_eq!(next_after(1), provenant_records::NextStep::NewRoute);
             } else {
                 assert!(
                     reason.contains("handoff_missing"),
