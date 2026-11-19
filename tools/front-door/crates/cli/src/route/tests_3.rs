@@ -1051,6 +1051,9 @@
                 .join(attempt_id.to_string())
                 .join("process-exit.json");
             std::fs::write(&exit_path, serde_json::to_vec(&exit_val)?)?;
+            // Stored records must not be group-writable; a runner umask of 002
+            // would otherwise fail the store's mode check.
+            std::fs::set_permissions(&exit_path, std::fs::Permissions::from_mode(0o600))?;
 
             let route = make_route();
             let finished_at = clock.wall_now()?;
