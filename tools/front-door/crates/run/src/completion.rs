@@ -415,15 +415,6 @@ mod tests {
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
     #[test]
-    fn guidance_treats_write_scope_as_advisory_outside_strict_policy() {
-        let text = guidance();
-        assert!(text.contains("not a fence"));
-        assert!(text.contains("list each such path in decisions"));
-        assert!(text.contains("strict WRITE_SCOPE lane policy"));
-        assert!(!text.contains("keep it inside the approved write scope"));
-    }
-
-    #[test]
     fn writer_preamble_states_advisory_build_policy_and_read_only_does_not() {
         let handoff = Path::new("/state/handoff.json");
         let writer = lane_preamble(

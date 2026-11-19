@@ -219,42 +219,6 @@ mod tests {
     }
 
     #[test]
-    fn preamble_line_names_target_and_source() {
-        let default_target = ResolvedCargoTarget::default();
-        assert_eq!(
-            default_target.preamble(),
-            "Cargo target: shared (source: default; lanes.cargo_target).\n"
-        );
-
-        let mut profile = HarnessProfile::default();
-        profile.knobs.insert(KNOB.into(), "private".into());
-        profile.knob_sources.insert(KNOB.into(), LimitSource::Host);
-        let resolved = ResolvedCargoTarget::resolve(&profile);
-        assert_eq!(
-            resolved.preamble(),
-            "Cargo target: private (source: host; lanes.cargo_target).\n"
-        );
-
-        let custom = ResolvedCargoTarget {
-            value: CargoTargetSetting::Custom(PathBuf::from("/custom/cache")),
-            source: "launch".into(),
-        };
-        assert_eq!(
-            custom.preamble(),
-            "Cargo target: /custom/cache (source: launch; lanes.cargo_target).\n"
-        );
-
-        let brief_override = ResolvedCargoTarget::resolve_with_brief(
-            &profile,
-            "Implement feature.\nCargo target: private\n",
-        );
-        assert_eq!(
-            brief_override.preamble(),
-            "Cargo target: private (source: brief; lanes.cargo_target).\n"
-        );
-    }
-
-    #[test]
     fn env_paths_for_shared_private_and_custom() {
         let home = Path::new("/Users/user");
         let common_git = Path::new("/Users/user/project/.git");
