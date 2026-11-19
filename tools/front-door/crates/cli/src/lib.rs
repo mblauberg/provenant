@@ -2779,6 +2779,9 @@ mod tests {
             "--any",
         ]);
         valid(&["wait", "--pr", "2721", "--follow", "--timeout", "2m"]);
+        valid(&["wait", "--pr", "2721", "--until", "complete"]);
+        invalid(&["wait", "--until", "complete"]);
+        invalid(&["wait", "--pr", "2721", "--until", "unknown"]);
         let sha = "a".repeat(40);
         let Command::Wait(wait) = valid(&["wait", "--pr", "2721", "--head", &sha]).command else {
             panic!("wait command")

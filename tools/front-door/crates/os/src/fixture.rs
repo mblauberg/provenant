@@ -4,7 +4,8 @@ use std::{io, path::Path};
 #[path = "fixture_git.rs"]
 mod fixture_git;
 pub use fixture_git::{
-    fixture_git_settings, git_command, git_command_at, git_env, run_git, scrub_git_env,
+    fixture_git_settings, git_command, git_command_at, git_env, reexec_with_clean_git, run_git,
+    scrub_git_env,
 };
 
 /// Run once on this thread after an existing lock has contended and before

@@ -344,6 +344,12 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             "findings_count",
             "findings_available",
             "review_partial",
+            // The result command reuses the same review projection wait and
+            // status read, carrying the typed findings themselves, not a second
+            // parse of the sealed result artifact.
+            "verdict",
+            "findings",
+            "partial",
         ] {
             row[field] = Value::Null;
         }
@@ -423,6 +429,12 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                 node.and_then(|node| node.outputs.as_ref())
                     .map(|outputs| outputs.partial)
             );
+            row["verdict"] = row["review_verdict"].clone();
+            row["findings"] = json!(
+                node.and_then(|node| node.outputs.as_ref())
+                    .map(|outputs| &outputs.findings)
+            );
+            row["partial"] = row["review_partial"].clone();
             row["open_asks"] = json!(
                 run.checkpoint
                     .asks
@@ -2588,6 +2600,33 @@ pub(crate) fn unified_graph_result(
     result_reply(target, &rows)
 }
 
+/// Compact, deterministic severity tally for a review row's typed findings.
+fn finding_severity_counts(findings: &[Value]) -> String {
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for finding in findings {
+        if let Some(severity) = finding["severity"].as_str() {
+            *counts.entry(severity).or_default() += 1;
+        }
+    }
+    if counts.is_empty() {
+        "none".to_owned()
+    } else {
+        counts
+            .iter()
+            .map(|(severity, count)| format!("{count} {severity}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+fn review_availability(row: &Value) -> &'static str {
+    match row["findings_available"].as_bool() {
+        Some(true) => "available",
+        Some(false) => "incomplete",
+        None => "availability unknown",
+    }
+}
+
 fn result_reply(target: &provenant_cli::Target, rows: &[Value]) -> provenant_cli::run::Reply {
     let selected: Vec<_> = rows
         .iter()
@@ -2652,33 +2691,60 @@ fn result_reply(target: &provenant_cli::Target, rows: &[Value]) -> provenant_cli
             .or_else(|| row["reason"].as_str())
             .or_else(|| attempt.and_then(|a| a["cause_code"].as_str()))
             .or_else(|| attempt.and_then(|a| a["reason"].as_str()));
-        let verdict = row["review_verdict"]
+        // `verdict` mirrors `review_verdict` on node rows; an attempt row
+        // carries only the latter.
+        let verdict = row["verdict"]
             .as_str()
+            .or_else(|| row["review_verdict"].as_str())
+            .or_else(|| attempt.and_then(|a| a["verdict"].as_str()))
             .or_else(|| attempt.and_then(|a| a["review_verdict"].as_str()));
         let result_path = super::graph_status::path_text(&row["result_path"])
             .or_else(|| attempt.and_then(|a| super::graph_status::path_text(&a["result_path"])));
 
         let mut parts = Vec::new();
-        parts.push(format!("{}: {}", field("id"), outcome));
+        parts.push(format!(
+            "{}: {}",
+            provenant_cli::bounded_text(field("id"), 24),
+            provenant_cli::bounded_text(outcome, 32)
+        ));
         if let Some(cause) = cause {
-            parts.push(format!("cause: {cause}"));
+            parts.push(format!("cause: {}", provenant_cli::bounded_text(cause, 64)));
         }
         if let Some(verdict) = verdict {
-            parts.push(format!("verdict: {verdict}"));
+            parts.push(format!(
+                "verdict: {}",
+                provenant_cli::bounded_text(verdict, 32)
+            ));
+        }
+        if let Some(items) = row["findings"].as_array() {
+            parts.push(format!(
+                "findings: {} ({})",
+                provenant_cli::bounded_text(&finding_severity_counts(items), 64),
+                review_availability(row)
+            ));
         }
         if let Some(path) = result_path {
-            parts.push(format!("result: {path}"));
+            parts.push(format!(
+                "result: {}",
+                provenant_cli::bounded_text(&path, 128)
+            ));
         }
         let branch = field("branch");
         if branch != "unknown" && !branch.is_empty() {
-            parts.push(format!("branch: {branch}"));
+            parts.push(format!(
+                "branch: {}",
+                provenant_cli::bounded_text(branch, 24)
+            ));
         }
         let head = field("head");
         if head != "unknown" && !head.is_empty() {
-            parts.push(format!("head: {head}"));
+            parts.push(format!("head: {}", provenant_cli::bounded_text(head, 64)));
         }
         if checks != "none recorded" {
-            parts.push(format!("verify: {checks}"));
+            parts.push(format!(
+                "verify: {}",
+                provenant_cli::bounded_text(&checks, 40)
+            ));
         }
         compact_rows.push(parts.join(" | "));
     }
@@ -2703,6 +2769,35 @@ fn result_reply(target: &provenant_cli::Target, rows: &[Value]) -> provenant_cli
                         .unwrap_or_else(|| value.to_string())
                 ));
             }
+        }
+        if let Some(verdict) = row["verdict"].as_str() {
+            human.push_str(&format!(
+                "  verdict: {}\n",
+                provenant_cli::bounded_text(verdict, 128)
+            ));
+        }
+        if let Some(items) = row["findings"].as_array() {
+            human.push_str(&format!(
+                "  findings: {} ({})\n",
+                finding_severity_counts(items),
+                review_availability(row)
+            ));
+            for finding in items {
+                let severity = finding["severity"].as_str().unwrap_or("unknown");
+                let file = finding["file"].as_str().unwrap_or("?");
+                let line = finding["line"]
+                    .as_u64()
+                    .map(|line| format!(":{line}"))
+                    .unwrap_or_default();
+                let summary = finding["summary"].as_str().unwrap_or("");
+                human.push_str(&format!(
+                    "  finding: [{severity}] {file}{line} — {}\n",
+                    provenant_fabric_runtime::hosts::plain_text(summary, 256)
+                ));
+            }
+        }
+        if row["partial"] == json!(true) {
+            human.push_str("  partial: true\n");
         }
         let handoff = row["handoff"].get("Ok").unwrap_or(&row["handoff"]);
         for field in ["status", "note"] {
@@ -4221,6 +4316,165 @@ mod tests {
             assert!(reply.human.contains("head: abc123"));
         }
         Ok(())
+    }
+
+    fn review_checkpoint(verdict: &str, findings: Value) -> GraphCheckpoint {
+        serde_json::from_value(json!({
+            "schema_version": 2, "graph_id": "g", "plan_digest": "digest", "nodes": [
+                {"id": "parent", "state": "succeeded", "worktree": null, "attempts": [],
+                 "outputs": {
+                    "schema_version": 1,
+                    "result": {"digest": "sha256:test", "excerpt": "review done", "truncated": false, "path": null},
+                    "verdict": verdict,
+                    "findings": findings,
+                    "findings_available": true,
+                    "review_partial": verdict != "VERDICT: PASS",
+                    "branch": "feat/review", "commit": "abc123", "warnings": []
+                 },
+                 "handoff": {"schema_version": 2, "status": "done", "note": "reviewed", "remaining": [], "decisions": [], "verify": ["checked"]}}
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn render_result(reply: &provenant_cli::run::Reply, json: bool) -> String {
+        let globals = provenant_cli::Globals {
+            json,
+            ..Default::default()
+        };
+        let mode = globals.render_mode(&reply.human, reply.read_only, reply.summary.as_ref());
+        let mut output = Vec::new();
+        provenant_cli::render(&reply.result, mode, &mut output).unwrap();
+        String::from_utf8(output).unwrap()
+    }
+
+    fn result_rows(reply: &provenant_cli::run::Reply) -> Vec<Value> {
+        reply.result.data["rows"]
+            .as_array()
+            .expect("result data rows")
+            .clone()
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn result_json_reports_accepted_and_findings_required_reviews() {
+        let accepted = result_rows(&result_reply(
+            &"g/parent".parse().unwrap(),
+            &status_rows(
+                &graph_snapshot(review_checkpoint("VERDICT: PASS", json!([]))),
+                &GraphTarget {
+                    graph: "g".into(),
+                    node: Some("parent".into()),
+                    attempt: None,
+                },
+            ),
+        ));
+        assert_eq!(accepted.len(), 1);
+        let row = &accepted[0];
+        assert_eq!(row["verdict"], "VERDICT: PASS");
+        assert_eq!(row["findings"], json!([]));
+        assert_eq!(row["findings_available"], true);
+        assert_eq!(row["partial"], false);
+
+        let findings = json!([
+            {"id":"F1","severity":"high","file":"src/a.rs","line":12,"summary":"critical bug","status":"open","lens":"security"},
+            {"id":"F2","severity":"low","file":"src/b.rs","line":3,"summary":"style","status":"open","lens":"security"}
+        ]);
+        let reply = result_reply(
+            &"g/parent".parse().unwrap(),
+            &status_rows(
+                &graph_snapshot(review_checkpoint("VERDICT: FAIL", findings.clone())),
+                &GraphTarget {
+                    graph: "g".into(),
+                    node: Some("parent".into()),
+                    attempt: None,
+                },
+            ),
+        );
+        let required = result_rows(&reply);
+        assert_eq!(required.len(), 1);
+        let row = &required[0];
+        assert_eq!(row["verdict"], "VERDICT: FAIL");
+        assert_eq!(row["findings"], findings);
+        assert_eq!(row["findings_available"], true);
+        assert_eq!(row["partial"], true);
+
+        // --json is an independent transport: the whole command envelope carries
+        // the same structured review fields as the in-process reply.
+        let encoded: Value = serde_json::from_str(&render_result(&reply, true)).unwrap();
+        assert_eq!(encoded["command"], "result");
+        let json_row = &encoded["data"]["rows"][0];
+        assert_eq!(json_row["verdict"], "VERDICT: FAIL");
+        assert_eq!(json_row["findings"], findings);
+        assert_eq!(json_row["partial"], true);
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn result_compact_shows_verdict_and_counts_findings_by_severity() {
+        let findings = json!([
+            {"id":"F1","severity":"high","file":"src/a.rs","line":12,"summary":"critical bug","status":"open","lens":"security"},
+            {"id":"F2","severity":"high","file":"src/c.rs","line":9,"summary":"another bug","status":"open","lens":"security"},
+            {"id":"F3","severity":"low","file":"src/b.rs","line":3,"summary":"style","status":"open","lens":"security"}
+        ]);
+        let reply = result_reply(
+            &"g/parent".parse().unwrap(),
+            &status_rows(
+                &graph_snapshot(review_checkpoint("VERDICT: FAIL", findings)),
+                &GraphTarget {
+                    graph: "g".into(),
+                    node: Some("parent".into()),
+                    attempt: None,
+                },
+            ),
+        );
+        let compact = render_result(&reply, false);
+        assert!(compact.contains("VERDICT: FAIL"), "{compact}");
+        assert!(compact.contains("2 high"), "{compact}");
+        assert!(compact.contains("1 low"), "{compact}");
+    }
+
+    // Spec: docs/specs/cli.md#output-references-and-bounded-tails
+    #[test]
+    fn result_on_panel_lists_each_lens_verdict() {
+        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version": 2, "graph_id": "g", "plan_digest": "digest", "nodes": [
+                {"id": "security", "state": "succeeded", "worktree": null, "attempts": [],
+                 "outputs": {"schema_version":1,"result":null,"verdict":"VERDICT: FAIL",
+                   "findings":[{"id":"F1","severity":"high","file":"a.rs","line":1,"summary":"s","status":"open","lens":"security"}],
+                   "findings_available":true,"review_partial":false,"branch":null,"commit":null,"warnings":[]},
+                 "handoff":{"schema_version":2,"status":"done","note":"","remaining":[],"decisions":[],"verify":[]}},
+                {"id": "correctness", "state": "succeeded", "worktree": null, "attempts": [],
+                 "outputs": {"schema_version":1,"result":null,"verdict":"VERDICT: PASS",
+                   "findings":[],"findings_available":true,"review_partial":false,"branch":null,"commit":null,"warnings":[]},
+                 "handoff":{"schema_version":2,"status":"done","note":"","remaining":[],"decisions":[],"verify":[]}}
+            ]
+        }))
+        .unwrap();
+        let target: provenant_cli::Target = "g".parse().unwrap();
+        let graph = GraphTarget {
+            graph: "g".into(),
+            node: None,
+            attempt: None,
+        };
+        let reply = result_reply(&target, &status_rows(&graph_snapshot(checkpoint), &graph));
+        let rows = result_rows(&reply);
+        let verdicts: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row["id"].as_str().unwrap(),
+                    row["verdict"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            verdicts,
+            vec![
+                ("g/security", "VERDICT: FAIL"),
+                ("g/correctness", "VERDICT: PASS")
+            ]
+        );
     }
 
     #[test]

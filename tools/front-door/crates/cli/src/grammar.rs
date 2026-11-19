@@ -1336,6 +1336,15 @@ pub struct Status {
     #[arg(long)]
     pub cursor: Option<u64>,
 }
+/// When a PR wait can settle after checks fail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum PrWaitUntil {
+    /// Settle as soon as a check fails.
+    Failure,
+    /// Wait for all observed checks to finish.
+    Complete,
+}
+
 /// `wait`: block until graph work or pull requests settle.
 #[derive(Clone, Debug, Args)]
 pub struct Wait {
@@ -1349,6 +1358,9 @@ pub struct Wait {
     /// Wait until GitHub reports this exact head; never verdict another SHA
     #[arg(long, value_name = "SHA", value_parser = parse_head_oid)]
     pub head: Option<String>,
+    /// PR check settlement: failure (default) or complete
+    #[arg(long, value_enum, requires = "prs")]
+    pub until: Option<PrWaitUntil>,
     /// Wait until every target settles (the default)
     #[arg(long, conflicts_with_all = ["any", "fail_fast"])]
     pub all: bool,

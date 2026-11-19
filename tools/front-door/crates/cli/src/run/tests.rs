@@ -826,11 +826,8 @@ fn reconcile_reports_orphan_reservation_issues() -> Result<(), Box<dyn std::erro
                 },
                 edge,
             );
-            assert_eq!(reply.result.status, Status::Failed, "{}", reply.human);
-            assert_eq!(
-                reply.result.error.as_ref().ok_or("missing error")?.code,
-                "RECONCILE_INCOMPLETE"
-            );
+            assert_eq!(reply.result.status, Status::Ok, "{}", reply.human);
+            assert!(reply.human.contains("warning:"), "{}", reply.human);
             assert_eq!(reply.result.data["runs"], json!([]));
             assert_eq!(
                 reply.result.data["writer_reservation_errors"][0]["reservation"],

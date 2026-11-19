@@ -16,7 +16,21 @@ fn build_slot_preparation_does_not_require_a_target() -> Result<(), Box<dyn std:
     writer_preparation_fixture(false, true)
 }
 
+thread_local! {
+    static PHASE: std::cell::Cell<&'static str> = const { std::cell::Cell::new("setup") };
+}
+
+/// Record the fixture phase so a bare I/O error names where it came from.
+fn phase(name: &'static str) {
+    PHASE.set(name);
+}
+
 fn writer_preparation_fixture(fence_only: bool, gate_only: bool) -> Result<(), Box<dyn std::error::Error>> {
+    writer_preparation_steps(fence_only, gate_only)
+        .map_err(|error| format!("{error:?} during fixture phase \"{}\"", PHASE.get()).into())
+}
+
+fn writer_preparation_steps(fence_only: bool, gate_only: bool) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
     use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId, WaitBudget};
     use provenant_os::clock::SystemClock;
@@ -52,6 +66,8 @@ fn writer_preparation_fixture(fence_only: bool, gate_only: bool) -> Result<(), B
             #[allow(clippy::disallowed_methods)]
             let output = std::process::Command::new(std::env::current_exe()?)
                 .arg(test)
+                .env_clear()
+                .envs(provenant_os::fixture::git_env())
                 .env(CHILD, layout)
                 .env("GH_TOKEN", "fixture-host-token")
                 .env_remove("GIT_CONFIG_GLOBAL")
@@ -1268,6 +1284,7 @@ printf 'agy 1.0.0\n'
     if gate_only {
         return Ok(());
     }
+    phase("host project policy shim");
     // Exercise the host project policy through preparation and the actual
     // generated shim, with a fake gh so no GitHub access is needed.
     std::fs::create_dir_all(home.join(".config"))?;
@@ -1291,6 +1308,7 @@ printf 'agy 1.0.0\n'
         .join(binding.project_id().to_string());
     std::fs::create_dir_all(&policy_dir)?;
     std::fs::write(policy_dir.join("github.json"), r#"{"deny_labels":["ci"]}"#)?;
+    phase("linked git config grants");
     // Both a linked global file and an XDG config beneath a linked directory
     // must survive preparation and the launcher's canonical anchor checks.
     let dotfiles = base.join("dotfiles");
@@ -1350,6 +1368,7 @@ printf 'agy 1.0.0\n'
             .any(|(key, value)| key == "GH_TOKEN" && value == "fixture-host-token")
     );
     assert!(!launch.environment.iter().any(|(key, _)| key == "GH_TOKEN"));
+    phase("credential receipt");
     // One credential decision per lane, recorded with its source.
     let credential = publishing
         .route
@@ -1554,6 +1573,7 @@ printf 'agy 1.0.0\n'
         Some(project.canonicalize()?)
     );
     assert_eq!(variable("PROVENANT_WORKTREE_GITDIR"), Some(expected_gitdir));
+    phase("private git directory");
     // The runtime populates this private Git directory after preparation.
     let private_common = publishing_paths.temporary.join("candidate-0/git-common");
     std::fs::create_dir_all(private_common.join("objects"))?;
@@ -1659,15 +1679,21 @@ printf 'agy 1.0.0\n'
         options.env = Some(&publishing.environment);
         executor.execute(options)
     };
-    let denied = run_shim("ci")?;
-    assert_eq!(denied.termination, provenant_os::exec::Termination::Exit(1));
-    assert_eq!(denied.stderr.bytes, b"github.deny_labels\n");
+    phase("gh shim policy");
+    // Project github.json denials are advisory: the shim forwards the call and
+    // warns with its source; it does not refuse the invocation.
+    let warned = run_shim("ci")?;
+    assert_eq!(warned.termination, provenant_os::exec::Termination::Exit(0));
+    assert_eq!(warned.stdout.bytes, b"forwarded\n");
+    assert!(String::from_utf8_lossy(&warned.stderr.bytes).contains("github.deny_labels"));
     let allowed = run_shim("docs")?;
     assert_eq!(
         allowed.termination,
         provenant_os::exec::Termination::Exit(0)
     );
     assert_eq!(allowed.stdout.bytes, b"forwarded\n");
+    assert!(warned.stdout.bytes.starts_with(b"forwarded\n"));
+    phase("pool redraw");
     // A named pool redraws after an adapter disappears during local preparation.
     // The first two lookups establish availability; the third refuses the first
     // selected member, and the next lookup admits the remaining member.
@@ -1760,6 +1786,7 @@ printf 'agy 1.0.0\n'
     ] {
         std::fs::DirBuilder::new().mode(0o700).create(path)?;
     }
+    phase("settlement retry budget");
     // Settlement retries bound launched attempts. A member that preparation
     // excluded never launched, so a zero budget still tries the next member.
     let calls = std::cell::Cell::new(0);
@@ -1832,6 +1859,7 @@ printf 'agy 1.0.0\n'
             .iter()
             .any(|(key, value)| key == "PROVENANT_LANE_BASE" && value == review_oid.as_str())
     );
+    phase("launch and spilled prompt");
     let executed = executor.execute(ExecOptions::new(
         &launch.argv,
         &project,
@@ -1879,6 +1907,7 @@ printf 'agy 1.0.0\n'
         provenant_records::CanonicalV1::file_digest(pointer.as_bytes())
     );
     assert_eq!(std::fs::read_to_string(attempt.join("prompt.txt"))?, prompt);
+    phase("continuation");
     // The original named pool may change or disappear after dispatch.
     // A continuation must use the exact applied provider, model and
     // account without consulting that pool or the original account alias.
@@ -1947,6 +1976,7 @@ printf 'agy 1.0.0\n'
     );
     let confinement = launch.confinement.ok_or("writer confinement missing")?;
     assert!(confinement.writer.is_some());
+    phase("request builder");
     // Exercise the actual request builder with two distinct project overrides.
     let project_a = binding.project_id();
     let project_b = ProjectId::from_bytes([0xff; 16]);
@@ -2036,6 +2066,7 @@ printf 'agy 1.0.0\n'
     assert!(
         matches!(result, Err(PrepareError::Run(run::RunError::InvalidBase(base))) if base == "absent-base")
     );
+    phase("unconfinable worktree");
     // A writable tree the plan cannot cover names that error, not a disclosure denial.
     std::fs::write(
         state.join("config.toml"),

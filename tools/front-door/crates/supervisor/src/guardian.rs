@@ -59,6 +59,92 @@ const JOURNAL_RETRY_INTERVAL_MS: u64 = 100;
 const TRACKING_INTERVAL_MS: u64 = 1_000;
 const CANCEL_WATCH_POLL_MS: u64 = 1_000;
 const CANCEL_FALLBACK_POLL_MS: u64 = 100;
+// Retained custody: cleanup stayed unresolved after exit, typically because a
+// detached service outlives the lane. See `RetainedSchedule`.
+const RETAINED_OBSERVE_MS: u64 = 1_000;
+const RETAINED_ESCALATION_MS: u64 = 30_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetainedStep {
+    /// Repeat the bounded stop: TERM, the descendant grace, then KILL.
+    Escalate,
+    /// One signal-free census and settlement proof.
+    Observe,
+    Wait,
+}
+
+/// When a guardian retaining unresolved custody looks and when it signals.
+/// The first turn repeats the bounded stop at once, as does a newly observed
+/// cancellation. Otherwise the stop repeats only at the escalation backstop,
+/// for authority that changes without an event (graph children settling).
+/// Between stops a signal-free check runs after a process event, at most at
+/// the census walk rate, or at the observation backstop: one second, or the
+/// five-second full-census backstop while every blocking identity is watched.
+/// Repeating the whole stop every 100 ms kept a census, a sandbox probe per
+/// host process and a decode of every pending graph checkpoint running at
+/// 50 Hz for as long as a detached service lived (#3560).
+#[derive(Debug, Default)]
+struct RetainedSchedule {
+    last_escalation_ms: Option<u64>,
+    last_observation_ms: Option<u64>,
+    /// A watched process forked or exited since the last look.
+    process_event: bool,
+    escalation_requested: bool,
+    /// Every identity that can block settlement carries exit and fork filters.
+    watched: bool,
+}
+impl RetainedSchedule {
+    fn observation_interval(&self) -> u64 {
+        if self.watched {
+            FULL_CENSUS_INTERVAL_MS
+        } else {
+            RETAINED_OBSERVE_MS
+        }
+    }
+
+    fn next(&mut self, now: u64) -> RetainedStep {
+        let escalate = self.escalation_requested
+            || self
+                .last_escalation_ms
+                .is_none_or(|last| now.saturating_sub(last) >= RETAINED_ESCALATION_MS);
+        let step = if escalate {
+            self.last_escalation_ms = Some(now);
+            self.escalation_requested = false;
+            RetainedStep::Escalate
+        } else if self.last_observation_ms.is_none_or(|last| {
+            let since = now.saturating_sub(last);
+            since >= self.observation_interval()
+                || (self.process_event && since >= CENSUS_INTERVAL_MS)
+        }) {
+            RetainedStep::Observe
+        } else {
+            return RetainedStep::Wait;
+        };
+        // A stop pass also observes; either way the pending event is consumed.
+        self.last_observation_ms = Some(now);
+        self.process_event = false;
+        step
+    }
+
+    fn wait_ms(&self, now: u64) -> u64 {
+        if self.escalation_requested {
+            return 0;
+        }
+        let escalation = self.last_escalation_ms.map_or(0, |last| {
+            last.saturating_add(RETAINED_ESCALATION_MS)
+                .saturating_sub(now)
+        });
+        let interval = if self.process_event {
+            CENSUS_INTERVAL_MS
+        } else {
+            self.observation_interval()
+        };
+        let observation = self
+            .last_observation_ms
+            .map_or(0, |last| last.saturating_add(interval).saturating_sub(now));
+        escalation.min(observation)
+    }
+}
 
 fn tracking_publication_due(now: u64, last_attempt: Option<u64>, failed: bool) -> bool {
     last_attempt.is_none_or(|last| {
@@ -2014,31 +2100,61 @@ impl Driver<'_> {
             self.release(&record)?;
         }
         if !cleanup_complete {
-            // Keep the guardian (and the unreaped
-            // leader) alive while group members remain: poll for cancellation
-            // and for the group emptying, and republish a settled exit.
+            // Keep the guardian (and the unreaped leader) alive while group
+            // members remain and republish a settled exit once they are gone.
+            // The guardian blocks on process, cancellation and signal events;
+            // `RetainedSchedule` decides when to look and when to signal.
             let mut cancelled = false;
+            let mut schedule = RetainedSchedule::default();
+            let mut cancel_pending = false;
+            let mut last_cancel_ms: Option<u64> = None;
             loop {
-                if !outcome_committed && published {
+                let now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                if std::mem::take(&mut cancel_pending)
+                    || last_cancel_ms.is_none_or(|last| {
+                        now.saturating_sub(last) >= cancel_poll_interval(cancel_watched)
+                    })
+                {
+                    last_cancel_ms = Some(now);
+                    if !cancelled
+                        && self.read_cancel(&mut warnings, &mut omitted_warnings)
+                            == Some(machine::StopReason::ExplicitCancellation)
+                    {
+                        cancelled = true;
+                        schedule.escalation_requested = true;
+                    }
+                }
+                let step = schedule.next(now);
+                if step != RetainedStep::Wait && !outcome_committed && published {
                     outcome_committed = self.commit_outcome(&record);
                 }
-                cancelled |= self.read_cancel(&mut warnings, &mut omitted_warnings)
-                    == Some(machine::StopReason::ExplicitCancellation);
-                if let Ok(true) = self.cleanup(
-                    &mut child,
-                    plan,
-                    if cancelled {
-                        Some(machine::StopReason::ExplicitCancellation)
-                    } else {
-                        record.stop_reason
-                    },
-                    &mut warnings,
-                    &mut omitted_warnings,
-                ) {
+                let settled = match step {
+                    RetainedStep::Escalate => self.cleanup(
+                        &mut child,
+                        plan,
+                        if cancelled {
+                            Some(machine::StopReason::ExplicitCancellation)
+                        } else {
+                            record.stop_reason
+                        },
+                        &mut warnings,
+                        &mut omitted_warnings,
+                    ),
+                    RetainedStep::Observe => self.settle_without_signals(
+                        &mut child,
+                        &mut warnings,
+                        &mut omitted_warnings,
+                    ),
+                    RetainedStep::Wait => Ok(false),
+                };
+                if let Ok(true) = settled {
                     if published {
                         self.republish_settled(record)?;
                     }
                     break;
+                }
+                if step != RetainedStep::Wait {
+                    schedule.watched = self.watch_retained_processes();
                 }
                 // The old lock inode can be proven idle even after its name is
                 // removed. Leave the durable unresolved fence untouched.
@@ -2046,7 +2162,14 @@ impl Driver<'_> {
                 if self.retire_unlinked_writer(&mut child) {
                     break;
                 }
-                match self.reactor.wait(&[], Duration::from_millis(100)) {
+                let wait_now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let wait_ms = schedule
+                    .wait_ms(wait_now)
+                    .min(last_cancel_ms.map_or(0, |last| {
+                        last.saturating_add(cancel_poll_interval(cancel_watched))
+                            .saturating_sub(wait_now)
+                    }));
+                match self.reactor.wait(&[], Duration::from_millis(wait_ms)) {
                     Ok(event) if event.supervisor_signal => {
                         // Never leave `unresolved` without one more bounded
                         // stop attempt: TERM, the descendant grace, then KILL.
@@ -2066,7 +2189,18 @@ impl Driver<'_> {
                         }
                         break;
                     }
-                    _ => {}
+                    Ok(event) => {
+                        schedule.process_event |= event.process_changed;
+                        schedule.watched &= !event.process_overflow;
+                        cancel_pending |= event.cancel_changed;
+                        cancel_watched &= !event.cancel_watch_failed;
+                    }
+                    Err(_) => {
+                        // Without the reactor nothing wakes this loop early.
+                        schedule.watched = false;
+                        cancel_watched = false;
+                        provenant_os::sys::wait_pause(Duration::from_millis(RETAINED_OBSERVE_MS));
+                    }
                 }
             }
             loop {
