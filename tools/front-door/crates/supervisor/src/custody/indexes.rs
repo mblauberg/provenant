@@ -209,7 +209,15 @@ pub fn recorded_attempt_indexes(slot: &Directory) -> Result<Vec<RecordedAttemptI
             }
             StoredWriterBinding::Worktree { branch, .. } => {
                 validate_branch(branch)?;
-                let settlement = settlement.ok_or(CustodyError::Fenced)?;
+                let Some(settlement) = settlement else {
+                    // A lease released before any attempt settled left no
+                    // reservation and no prepared view: no index to inspect.
+                    // A view without its settlement proof stays fenced.
+                    if index.is_some() || retired.is_some() {
+                        return Err(CustodyError::Fenced);
+                    }
+                    continue;
+                };
                 if settlement.schema_version != 1 || settlement.scope != owner.scope {
                     return Err(CustodyError::InvalidRecord);
                 }
