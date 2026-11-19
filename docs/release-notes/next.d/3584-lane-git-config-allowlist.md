@@ -1,0 +1,3 @@
+## Fixes
+### Git and safety
+- A sandboxed lane's private Git configuration no longer includes the host's global Git configuration in full. It is built from an allowlist of host keys (identity, aliases, colour, core, diff and merge presentation, and `url.*.insteadOf` rewrites whose URLs name no user), with no include of and no read grant on the host files, so a token in `http.*.extraHeader`, a rewrite URL or an inline credential helper cannot reach the lane. Withheld key names, never values, are recorded in the launch receipt. `domains.lanes.git_config_allow` passes further keys deliberately. Unsandboxed lanes still read the host configuration in full. (#3584)

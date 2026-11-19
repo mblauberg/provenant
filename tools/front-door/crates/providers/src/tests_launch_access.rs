@@ -90,6 +90,7 @@ pub(super) fn fixture_input<'a>(
         user: std::ffi::OsStr::new("fixture"),
         host_var: &|_| None,
         skill_stage_max_bytes: 16 * 1024 * 1024,
+        git_config_allow: &[],
         account: None,
         token,
         cwd,
@@ -1333,5 +1334,84 @@ fn codex_configuration_is_a_writer_preference_and_read_only_authority()
             }
         }
     }
+    Ok(())
+}
+
+/// A sandboxed writer's private Git configuration carries host identity and
+/// aliases only through the allowlist. A token in the host configuration, in
+/// an extra header, a rewrite URL or an inline helper, never reaches the
+/// written configuration or a read grant, and only key names are recorded.
+#[test]
+fn sandboxed_private_git_config_withholds_host_credentials() -> Result<(), Box<dyn std::error::Error>> {
+    const TOKEN: &str = "ghp_fixtureLaneConfigToken";
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let repo = home.join("repo");
+    std::fs::create_dir_all(&repo)?;
+    let host_config = home.join(".gitconfig");
+    std::fs::write(
+        &host_config,
+        format!(
+            "[user]\n name = Host Name\n email = host@example.com\n[alias]\n st = status --short\n\
+             [http \"https://github.com/\"]\n extraHeader = AUTHORIZATION: bearer {TOKEN}\n\
+             [url \"https://x-access-token:{TOKEN}@github.com/\"]\n insteadOf = https://github.com/\n\
+             [url \"https://mirror.example/\"]\n insteadOf = mirror:\n\
+             [credential]\n helper = \"!f() {{ echo password={TOKEN}; }}; f\"\n\
+             [core]\n askPass = /bin/echo-{TOKEN}\n"
+        ),
+    )?;
+    let git = provenant_os::git::git_executable()
+        .ok_or("Git unavailable")?
+        .canonicalize()?;
+    let prompt = Prompt::new("fixture".into());
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
+    let mut input = fixture_input(&route, &plan, &prompt, &repo, None);
+    input.home = &home;
+    input.provenant.git = &git;
+    input.credential_roots = provenant_core::CredentialRoots::for_home(&home);
+    let spec = codex::Codex.prepare(input)?;
+    let config = spec
+        .setup
+        .iter()
+        .find_map(|step| match step {
+            SetupStep::WriteFile { path, bytes } if path.ends_with("gitconfig") => {
+                Some(String::from_utf8_lossy(bytes).into_owned())
+            }
+            _ => None,
+        })
+        .ok_or("private gitconfig")?;
+    assert!(!config.contains(TOKEN), "{config}");
+    assert!(!config.contains("[include"), "{config}");
+    assert!(!config.contains(host_config.to_str().ok_or("path")?), "{config}");
+    for kept in [
+        "[user]\n\tname = \"Host Name\"\n",
+        "[user]\n\temail = \"host@example.com\"\n",
+        "[alias]\n\tst = \"status --short\"\n",
+        "[url \"https://mirror.example/\"]\n\tinsteadof = \"mirror:\"\n",
+        "[user]\n\tuseConfigOnly = true\n",
+    ] {
+        assert!(config.contains(kept), "{kept} missing from {config}");
+    }
+    assert!(
+        !spec
+            .profile
+            .spec
+            .runtime_reads
+            .iter()
+            .any(|grant| grant.path == host_config)
+    );
+    assert_eq!(
+        spec.git_config_dropped(),
+        Some(
+            &[
+                "http.*.extraheader".to_owned(),
+                "url.*.insteadof".to_owned(),
+                "credential.helper".to_owned(),
+                "core.askpass".to_owned(),
+            ][..]
+        )
+    );
     Ok(())
 }

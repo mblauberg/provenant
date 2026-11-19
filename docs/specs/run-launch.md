@@ -137,6 +137,25 @@ Host-native launches retain confinement and provenance and cannot resume a
 provider session or select model-specific controls.
 - Why: native execution must not claim a provider contract it cannot satisfy.
 
+A sandboxed lane's private global Git configuration is built from the host's
+global files (the XDG `git/config`, then `~/.gitconfig`, or the host's
+`GIT_CONFIG_GLOBAL` alone), includes expanded, through an allowlist:
+`user.name`, `user.email`, `alias.*`, `color.*`, named core, diff and merge
+presentation keys, and `url.*.insteadOf` when neither its target nor its
+prefix names a user. Every other key is withheld, including `credential.*`,
+`http.*`, `core.askPass`, `core.sshCommand`, `include` and `includeIf`. The
+lane receives no include of, and no read grant on, the host files. Withheld
+key names, with any subsection redacted and never their values, are recorded
+in the launch receipt's `git_config` field with the
+`domains.lanes.git_config_allow` list and its origin. That setting passes
+further keys deliberately and verbatim; `include` and `includeIf` never
+pass. A host identity holding a control character refuses the launch.
+Unsandboxed lanes do not get this isolation: their private configuration
+includes the host files in full, and they can read them directly.
+- Why: a token in an extra header, a rewrite URL or an inline helper in the
+  host configuration would otherwise reach the lane; credentials reach a lane
+  only through its granted token helper ([ADR 0035](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md)).
+
 ## Inputs and resources
 
 Unreadable required host inputs reject an attempt before launch. A pinned source
