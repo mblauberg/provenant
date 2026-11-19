@@ -3447,6 +3447,15 @@ fn budget_stop_result(record: &serde_json::Value, note: &str) -> String {
         }
     } else {
         text.push_str(&format!("{note}.\n"));
+        if let Some(paths) = record["leftover"]["paths"].as_array() {
+            text.push_str("Left intact:\n");
+            for path in paths.iter().filter_map(serde_json::Value::as_str) {
+                text.push_str(&format!(
+                    "- {}\n",
+                    crate::writer::path_list(&[path.to_owned()], 1)[0]
+                ));
+            }
+        }
     }
     text.push_str("What remains is unknown; inspect the branch.\n\n");
     let handoff = serde_json::json!({

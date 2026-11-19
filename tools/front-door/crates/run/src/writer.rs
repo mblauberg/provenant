@@ -653,11 +653,24 @@ impl WriterLaunch {
             .and_then(|raw| crate::db::decode::<crate::CanonicalRequest>(&raw).ok())
             .map(|req| req.task.profile.write_scope)
             .unwrap_or_default();
-        if scope.is_empty() && self.other_holders_live(Some(attempt))? {
-            return Ok(BudgetCommit::note(
-                "budget stop: no owned paths declared; worktree left intact",
-            ));
-        }
+        // Unscoped work needs a lifetime history, held stable until commit.
+        // The admission gate prevents a new sibling entering after this check.
+        let sharing = if scope.is_empty() {
+            self.custody
+                .as_ref()
+                .map(|(slot, _)| {
+                    let path = attempt.current_path()?;
+                    let current = path
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .ok_or(RunError::Validation("budget attempt identity"))?;
+                    provenant_supervisor::custody::worktree_sharing_guard(slot, current)
+                        .map_err(|error| RunError::Io(std::io::Error::other(error)))
+                })
+                .transpose()?
+        } else {
+            None
+        };
         let tip = crate::objects::private_tip(&source, self.branch.as_str())?;
         // Never stage away conflict stages or finish an in-progress Git
         // operation on the lane's behalf. Its state stays private for recovery.
@@ -722,6 +735,13 @@ impl WriterLaunch {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
+            if sharing.as_ref().is_some_and(|history| history.was_shared()) {
+                return Ok(BudgetCommit {
+                    note: "budget stop: no owned paths declared; shared worktree left intact",
+                    committed: None,
+                    leftover: Some(BudgetLeftover::SharedUnscoped { paths }),
+                });
+            }
             let any_dirty = !paths.is_empty();
             let owned_paths: Vec<String> = if scope.is_empty() {
                 paths
@@ -807,6 +827,7 @@ impl WriterLaunch {
             crate::objects::update_private_tip(&source, self.branch.as_str(), head, tip)?;
             Ok(BudgetCommit {
                 note: "work committed on its branch",
+                leftover: None,
                 committed: Some(BudgetWork {
                     sha: head.to_string().chars().take(SHORT_SHA).collect(),
                     files: owned_paths.len(),
@@ -860,6 +881,7 @@ pub(crate) const BUDGET_PATHS: usize = 20;
 pub(crate) struct BudgetCommit {
     pub(crate) note: &'static str,
     pub(crate) committed: Option<BudgetWork>,
+    pub(crate) leftover: Option<BudgetLeftover>,
 }
 
 impl BudgetCommit {
@@ -867,8 +889,16 @@ impl BudgetCommit {
         Self {
             note,
             committed: None,
+            leftover: None,
         }
     }
+}
+
+/// Files deliberately left untouched because ownership was never established.
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum BudgetLeftover {
+    SharedUnscoped { paths: Vec<String> },
 }
 
 /// Work a budget stop committed.
@@ -3426,9 +3456,9 @@ impl WriterLaunch {
         {
             // Recovery retains occupancy and this attempt has no live custody. Commit
             // failure is diagnostic and must not replace the budget outcome.
-            let (note, work) = match self.commit_budget_stop(attempt) {
-                Ok(commit) => (commit.note.to_owned(), commit.committed),
-                Err(error) => (format!("budget commit failed: {error}"), None),
+            let (note, work, leftover) = match self.commit_budget_stop(attempt) {
+                Ok(commit) => (commit.note.to_owned(), commit.committed, commit.leftover),
+                Err(error) => (format!("budget commit failed: {error}"), None, None),
             };
             let record = match work {
                 Some(work) => serde_json::json!({
@@ -3438,7 +3468,7 @@ impl WriterLaunch {
                     "files": work.files,
                     "paths": work.paths,
                 }),
-                None => serde_json::json!({"schema_version":1,"note":note}),
+                None => serde_json::json!({"schema_version":1,"note":note,"leftover":leftover}),
             };
             crate::artifacts::seal(
                 attempt,

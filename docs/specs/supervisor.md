@@ -441,7 +441,9 @@ are advisory and overlapping claims refuse nothing; a live conflicting writer is
 not excluded by Provenant. Attempts own separate Git refs, indexes and object
 stores; ordinary commits cannot take a sibling's staged snapshot. Host publication
 uses expected-old-tip compare-and-swap after verification, retaining divergent
-private commits for recovery. Custody outlives the requesting call. Each attempt
+private commits for recovery. An unscoped budget commit requires durable proof that
+no sibling shared the worktree during that attempt and holds the admission gate
+through the commit. Shared attempts instead report typed leftover paths. Custody outlives the requesting call. Each attempt
 also holds its own holder lease; proof that a sibling has settled cannot release
 another attempt's custody. Removal requires exclusive occupancy with zero live holders.
 `worktree remove` refuses the primary, a live writer or observed process, and has

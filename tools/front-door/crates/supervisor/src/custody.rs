@@ -345,6 +345,32 @@ struct SettlementJournal {
     #[serde(flatten)]
     extra: ExtraFields,
 }
+
+/// The per-slot admission counter is never reset when attempts settle. A
+/// stopped writer can therefore distinguish a worktree that stayed private
+/// from one that was shared and later became quiet again.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HolderGeneration {
+    schema_version: u64,
+    generation: u64,
+    #[serde(flatten)]
+    extra: ExtraFields,
+}
+
+/// Snapshot captured while the slot admission gate is held. The first holder
+/// in a slot can still learn that a sibling was present when it started.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HolderAdmission {
+    schema_version: u64,
+    scope: Scope,
+    generation: u64,
+    shared_at_admission: bool,
+    #[serde(flatten)]
+    extra: ExtraFields,
+}
+
+const HOLDER_GENERATION: &str = "holder-generation.json";
+const HOLDER_ADMISSION: &str = "holder-admission.json";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Reservation {
     pub schema_version: u64,
@@ -641,6 +667,10 @@ pub(crate) fn acquire_writer_with_observer(
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
     }
+    // Serialise the durable history with sibling admission. Keep the gate
+    // through reservation publication so every generation increment names an
+    // actual admitted holder, even if its owner dies immediately afterwards.
+    let _admission = writer_admission_guard(&lock_directory)?;
     match directory.metadata_at(OsStr::new("ownership.json"), false) {
         Ok(_) => {
             let previous: OwnershipJournal =
@@ -689,15 +719,55 @@ pub(crate) fn acquire_writer_with_observer(
         extra: Default::default(),
     };
     reservation.validate()?;
+    let siblings = list_writer_reservations_in_slot(&lock_directory)?;
+    if !siblings.issues.is_empty() {
+        return Err(CustodyError::Fenced);
+    }
+    let sibling_present = siblings
+        .reservations
+        .iter()
+        .any(|reservation| reservation.scope.attempt != scope.attempt);
+    let previous_generation =
+        match read_record::<HolderGeneration>(&lock_directory, HOLDER_GENERATION, RECORD_LIMIT) {
+            Ok(record) if record.schema_version == 1 => record.generation,
+            Ok(_) => return Err(CustodyError::InvalidRecord),
+            Err(CustodyError::Filesystem(error)) if error.is_not_found() => 0,
+            Err(error) => return Err(error),
+        };
+    let generation = previous_generation
+        .checked_add(1)
+        .ok_or(CustodyError::InvalidRecord)?;
     // Publish the fence first: owner death cannot leave an invisible ownership gap.
     // Publication can fail after the reservation becomes visible. From this
     // point an error must not be mistaken for a custody-free refusal.
     let publish = (|| -> Result<()> {
         Publication::require_durable(write_record(
             &directory,
+            HOLDER_ADMISSION,
+            &HolderAdmission {
+                schema_version: 1,
+                scope,
+                generation,
+                shared_at_admission: sibling_present,
+                extra: Default::default(),
+            },
+            PublishMode::Replace,
+        )?)?;
+        Publication::require_durable(write_record(
+            &directory,
             "reservation.json",
             &reservation,
             PublishMode::NoReplace,
+        )?)?;
+        Publication::require_durable(write_record(
+            &lock_directory,
+            HOLDER_GENERATION,
+            &HolderGeneration {
+                schema_version: 1,
+                generation,
+                extra: Default::default(),
+            },
+            PublishMode::Replace,
         )?)?;
         Publication::require_durable(write_record(
             &directory,
@@ -2183,6 +2253,81 @@ pub fn writer_admission_guard(directory: &Directory) -> Result<LockGuard> {
         .map_err(observation_error)
 }
 
+/// Holds the slot admission gate while a caller makes a decision that must
+/// remain true until its work completes, such as an unscoped budget commit.
+pub struct WorktreeSharingGuard {
+    _admission: LockGuard,
+    shared: bool,
+}
+
+impl WorktreeSharingGuard {
+    pub fn was_shared(&self) -> bool {
+        self.shared
+    }
+}
+
+/// Return whether this attempt shared its worktree at admission or any later
+/// writer was admitted. The durable slot generation survives sibling
+/// settlement, so a point-in-time holder census cannot erase that history.
+/// Missing or malformed history is an error and callers must preserve work.
+pub fn worktree_was_shared(slot: &Directory, current_attempt: &str) -> Result<bool> {
+    Ok(worktree_sharing_guard(slot, current_attempt)?.was_shared())
+}
+
+/// Acquire the slot admission gate and inspect this attempt's sharing history.
+/// Keep the returned guard alive through the protected operation to prevent a
+/// new sibling admission between the check and that operation.
+pub fn worktree_sharing_guard(
+    slot: &Directory,
+    current_attempt: &str,
+) -> Result<WorktreeSharingGuard> {
+    let admission_guard = writer_admission_guard(slot)?;
+    let attempt = AttemptId::parse(current_attempt).map_err(|_| CustodyError::InvalidRecord)?;
+    let evidence = slot.open_verified_directory(OsStr::new(current_attempt))?;
+    let reservation: Reservation = read_record(&evidence, "reservation.json", RECORD_LIMIT)?;
+    validate_anchor(&evidence, &reservation)?;
+    if reservation.scope.attempt != attempt
+        || evidence.current_path()?.file_name() != Some(OsStr::new(current_attempt))
+    {
+        return Err(CustodyError::InvalidRecord);
+    }
+    let admission: HolderAdmission = read_record(&evidence, HOLDER_ADMISSION, RECORD_LIMIT)?;
+    if admission.schema_version != 1
+        || admission.scope != reservation.scope
+        || admission.generation == 0
+    {
+        return Err(CustodyError::InvalidRecord);
+    }
+    let generation: HolderGeneration =
+        read_record(slot, HOLDER_GENERATION, RECORD_LIMIT).map_err(|error| match error {
+            CustodyError::Filesystem(failure) if failure.is_not_found() => {
+                CustodyError::InvalidRecord
+            }
+            error => error,
+        })?;
+    if generation.schema_version != 1
+        || generation.generation == 0
+        || generation.generation < admission.generation
+    {
+        return Err(CustodyError::InvalidRecord);
+    }
+    let siblings = list_writer_reservations_in_slot(slot)?;
+    if !siblings.issues.is_empty() {
+        return Err(CustodyError::Fenced);
+    }
+    let sibling_present = siblings
+        .reservations
+        .iter()
+        .any(|reservation| reservation.scope.attempt != attempt);
+    let shared = admission.shared_at_admission
+        || generation.generation > admission.generation
+        || sibling_present;
+    Ok(WorktreeSharingGuard {
+        _admission: admission_guard,
+        shared,
+    })
+}
+
 /// Probe an existing gate once without creating state during observation.
 pub fn writer_observation_guard(directory: &Directory) -> Result<LockGuard> {
     directory
@@ -2883,6 +3028,11 @@ pub(crate) fn clear_reservation(directory: &Directory, scope: Scope) -> Result<(
         PublishMode::Replace,
     )?)?;
     directory.unlink(OsStr::new("reservation.json"))?;
+    match directory.metadata_at(OsStr::new(HOLDER_ADMISSION), false) {
+        Ok(_) => directory.unlink(OsStr::new(HOLDER_ADMISSION))?,
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error.into()),
+    }
     directory.sync()?;
     Ok(())
 }

@@ -603,6 +603,123 @@ fn shared_occupancy_admits_siblings_while_exclusive_removal_waits() -> TestResul
 }
 
 #[test]
+// Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
+fn holder_history_stays_shared_after_a_sibling_settles() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let slot = Directory::open_anchor(root.path())?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let first_scope = scope();
+    let second_scope = Scope {
+        attempt: AttemptId::from_bytes([3; 16]),
+        generation: 1,
+    };
+    let first = crate::fixture::acquire_writer(
+        slot.try_clone()?,
+        first_scope,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+    assert!(!worktree_was_shared(
+        &slot,
+        &first_scope.attempt.to_string()
+    )?);
+
+    let second = crate::fixture::acquire_writer(
+        slot.try_clone()?,
+        second_scope,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+    assert!(worktree_was_shared(
+        &slot,
+        &second_scope.attempt.to_string()
+    )?);
+    let second_evidence = second.directory.try_clone()?;
+    drop(second);
+    clear_reservation(&second_evidence, second_scope)?;
+
+    assert!(worktree_was_shared(
+        &slot,
+        &first_scope.attempt.to_string()
+    )?);
+    drop(first);
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
+fn holder_history_keeps_a_lone_attempt_unshared() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let slot = Directory::open_anchor(root.path())?;
+    let clock = SystemClock::new();
+    let current = scope();
+    let holder = crate::fixture::acquire_writer(
+        slot.try_clone()?,
+        current,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+
+    assert!(!worktree_was_shared(&slot, &current.attempt.to_string())?);
+    let evidence = slot.open_verified_directory(OsStr::new(&current.attempt.to_string()))?;
+    evidence.unlink(OsStr::new(HOLDER_ADMISSION))?;
+    assert!(worktree_was_shared(&slot, &current.attempt.to_string()).is_err());
+    drop(holder);
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
+fn worktree_sharing_guard_blocks_a_new_sibling_until_release() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let slot = Directory::open_anchor(root.path())?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let current = scope();
+    let holder = crate::fixture::acquire_writer(
+        slot.try_clone()?,
+        current,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+
+    let sharing = worktree_sharing_guard(&slot, &current.attempt.to_string())?;
+    assert!(!sharing.was_shared());
+    let sibling = Scope {
+        attempt: AttemptId::from_bytes([4; 16]),
+        generation: 1,
+    };
+    assert!(matches!(
+        crate::fixture::acquire_writer(
+            slot.try_clone()?,
+            sibling,
+            WaitBudget::cli(clock.mono_now(), 1)?,
+            &cancel,
+            &clock,
+        ),
+        Err(CustodyError::Busy)
+    ));
+    drop(sharing);
+
+    let sibling_holder = crate::fixture::acquire_writer(
+        slot.try_clone()?,
+        sibling,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?;
+    assert!(worktree_was_shared(&slot, &current.attempt.to_string())?);
+    drop(sibling_holder);
+    drop(holder);
+    Ok(())
+}
+
+#[test]
 fn unrelated_attempt_custody_lock_does_not_prove_live_slot_holder() -> TestResult {
     let root = tempfile::tempdir()?;
     let directory = Directory::open_anchor(root.path())?;

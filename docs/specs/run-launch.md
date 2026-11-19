@@ -50,8 +50,15 @@ from `commit-tree`, and publish it by compare-and-swap into the attempt's own
 ref. They never attribute a later observation of shared HEAD to the attempt.
 - Why: every Git operation gets private state, and publication conflicts preserve both histories.
 
-Unscoped budget stops leave files intact while another holder is live. A lone
-holder can commit its work; declared path scopes bound automatic staging.
+An unscoped budget stop may commit all dirty paths only if this attempt was
+alone throughout its custody. Admission records a durable holder generation and
+whether a sibling was already present. A later sibling admission remains visible
+after that sibling exits. The budget operation retains the worktree admission
+gate from its history check through its commit, preventing admission in between.
+If sharing occurred, it leaves files and staging intact and records a typed
+`shared_unscoped` leftover with its paths. Declared path scopes bound automatic
+budget staging. Convergence restore still requires no live sibling.
+- Why: a point-in-time census cannot establish ownership of shared working files.
 
 Settlement copies object files through held, no-follow descriptors into a byte-
 and entry-bounded host-owned sender before sanitising sidecars. Inconsistent

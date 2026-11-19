@@ -1287,6 +1287,11 @@ fn budget_stop_commit_preserves_sibling_edits_and_commits()
         .commit_budget_stop(&sibling_unscoped.attempt)?;
     assert!(result.committed.is_none());
     assert!(result.note.contains("no owned paths"));
+    assert!(matches!(
+        result.leftover.as_ref(),
+        Some(writer::BudgetLeftover::SharedUnscoped { paths })
+            if paths.contains(&"ours.txt".to_owned()) && paths.contains(&"sibling.txt".to_owned())
+    ));
     assert_eq!(
         private_git(
             &sibling_unscoped.fixture,
@@ -1465,6 +1470,54 @@ fn budget_stop_keeps_unscoped_work_after_a_live_sibling_and_host_advance()
     assert_eq!(
         worktree_git(&case.fixture, &case.git, &["rev-parse", "refs/heads/lane"])?,
         host_tip.to_string()
+    );
+    Ok(())
+}
+
+#[test]
+fn budget_stop_keeps_unscoped_work_after_sibling_exits()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let case = budget_stop_case(&[], false)?;
+    let (slot, binding) = case.launch.custody.as_ref().ok_or("writer custody")?;
+    let sibling_scope = provenant_records::custody::Scope {
+        attempt: provenant_core::AttemptId::from_bytes([6; 16]),
+        generation: 1,
+    };
+    let clock = tests::clock();
+    let cancel = CancelToken::new();
+    provenant_supervisor::fixture::acquire_writer_with_binding(
+        slot.try_clone()?,
+        sibling_scope,
+        binding.clone(),
+        provenant_core::WaitBudget::cli(clock.mono_now(), 1)?,
+        &cancel,
+        &clock,
+    )?
+    .withdraw_unlaunched()?;
+
+    let wt = &case.fixture.writer.worktree;
+    std::fs::write(wt.join("ours.txt"), "lane edit\n")?;
+    std::fs::write(wt.join("sibling.txt"), "sibling edit\n")?;
+    let result = case.launch.commit_budget_stop(&case.attempt)?;
+    assert!(result.committed.is_none());
+    assert!(matches!(
+        result.leftover.as_ref(),
+        Some(writer::BudgetLeftover::SharedUnscoped { paths })
+            if paths.contains(&"ours.txt".to_owned()) && paths.contains(&"sibling.txt".to_owned())
+    ));
+    assert_eq!(
+        private_git(
+            &case.fixture,
+            &case.scratch,
+            &case.git,
+            &["rev-parse", "HEAD"],
+        )?,
+        case.launch.base.to_string()
+    );
+    assert_eq!(std::fs::read_to_string(wt.join("ours.txt"))?, "lane edit\n");
+    assert_eq!(
+        std::fs::read_to_string(wt.join("sibling.txt"))?,
+        "sibling edit\n"
     );
     Ok(())
 }
