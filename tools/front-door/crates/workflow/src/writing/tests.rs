@@ -52,8 +52,13 @@ fn rule_sets_retain_vocabulary_and_legal_severity() {
                             })
                     })
             })
-            .and_then(|rule| rule["pattern"].as_str())
-            .expect("a plain token carrying the set's severity");
+            .and_then(|rule| rule["pattern"].as_str());
+        assert!(
+            probe.is_some(),
+            "{} rules hold no plain {expected_text} token to probe with",
+            set.name()
+        );
+        let probe = probe.unwrap();
         let found = matcher(set)
             .scan(Path::new("draft.md"), &format!("é — {probe}\n"))
             .unwrap();

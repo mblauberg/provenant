@@ -559,8 +559,11 @@ mod tests {
         assert!(digest.len() <= 512, "{}", digest.len());
         let block = state.document("now", 1024);
         assert!(block.len() <= 1024, "{}", block.len());
-        // Truncation changes the output, and the bounded form still carries an
-        // actionable command to list the rest rather than silently dropping it.
+        // Truncation is disclosed, not silent, and the bounded form still
+        // carries an actionable command to list the rest.
+        assert!(digest.contains("bounded"), "{digest}");
+        assert!(block.contains("bounded"), "{block}");
+        assert!(state.digest(DIGEST_LIMIT).contains("more"));
         assert_ne!(digest, state.digest(DIGEST_LIMIT));
         let list = CommandPrefix::default().runnable("status").unwrap();
         assert!(digest.contains(&list), "{digest}");
@@ -575,8 +578,9 @@ mod tests {
             ..Default::default()
         };
         let digest = state.digest(DIGEST_LIMIT);
-        // The one populated lane is shown exactly once; an empty section adds
-        // no placeholder line.
+        // The one populated lane is shown exactly once; the empty active
+        // section adds no heading or placeholder line.
+        assert!(!digest.contains("in flight"), "{digest}");
         assert!(digest.contains("r/t/a"), "{digest}");
         assert_eq!(digest.matches("r/t/a").count(), 1, "{digest}");
     }
@@ -585,7 +589,10 @@ mod tests {
     fn project_flag_names_the_checkout_only_when_it_renders() {
         let cwd = std::path::Path::new("/work/proj");
         let flag = CommandPrefix::new(None, cwd).project_flag();
-        assert!(flag.contains(cwd.to_str().unwrap()), "{flag}");
+        assert!(
+            flag.contains(&format!("--project '{}'", cwd.display())),
+            "{flag}"
+        );
         assert!(CommandPrefix::default().project_flag().is_empty());
         let hostile = std::path::Path::new("/work/a<b>");
         assert!(CommandPrefix::new(None, hostile).project_flag().is_empty());
@@ -636,19 +643,16 @@ mod tests {
         };
         let good = "provenant --state-dir '/s/a b' status --limit 100 --cursor 7";
         assert!(render(good).contains(good), "{}", render(good));
-        for bad in [
-            "provenant --state-dir '/s/<x>' status --limit 100 --cursor 7".to_owned(),
-            "provenant --state-dir '/s/a>b' status --limit 100 --cursor 7".to_owned(),
-            "provenant --state-dir '/s/a`b' status --limit 100 --cursor 7".to_owned(),
-            format!(
-                "provenant --state-dir '/{}' status --limit 100 --cursor 7",
-                "d".repeat(600)
-            ),
-        ] {
+        let long = format!("/{}", "d".repeat(600));
+        for dir in ["/s/<x>", "/s/a>b", "/s/a`b", long.as_str()] {
+            let bad = format!("provenant --state-dir '{dir}' status --limit 100 --cursor 7");
             let text = render(&bad);
-            // The unsafe command is never shown raw; its cursor still reaches
-            // the output so the owner can page with the right store by hand.
+            // Neither the unsafe command nor any unsafe fragment of the path
+            // is shown (a long path is checked by a leading run); its cursor
+            // still reaches the output so the owner can page by hand.
+            let fragment = &dir[..dir.len().min(32)];
             assert!(!text.contains(&bad), "{text}");
+            assert!(!text.contains(fragment), "{text}");
             assert!(text.contains("--cursor 7"), "{text}");
         }
     }
@@ -696,6 +700,11 @@ mod tests {
                 assert!(text.contains("--state-dir"), "{text}");
                 assert!(!text.contains(bad), "{text}");
             }
+            // The default store keeps the plain command.
+            let text = with(None).digest(limit);
+            assert!(text.len() <= limit);
+            let plain = CommandPrefix::default().runnable("status").unwrap();
+            assert!(text.contains(&plain), "{text}");
         }
     }
 
