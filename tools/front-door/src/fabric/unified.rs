@@ -712,6 +712,11 @@ pub(crate) fn enrich_status_rows_within(
     };
     let call = provenant_run::Request { clock, cancel };
     let store = provenant_run::RunStore::open_read_only(&execution, &call).map_err(run_error)?;
+    let lane_holders = store
+        .as_ref()
+        .and_then(|store| provenant_cli::run::active_lane_admission(store, &call).ok())
+        .map(|records| records.0)
+        .unwrap_or_default();
     let local_prefix = format!("{}/", context.identity.host);
     let local_census = rows
         .iter()
@@ -845,13 +850,14 @@ pub(crate) fn enrich_status_rows_within(
             .and_then(|census| census.as_ref().ok())
             .map(Ok)
             .unwrap_or(Err(()));
-        let mut projected = provenant_cli::run::project_lane_with_census(
+        let mut projected = provenant_cli::run::project_lane_with_admission(
             &record,
             &waits,
             context.roots.state.as_path(),
             clock.wall_now().ok(),
             host == context.identity.host && row["latest_attempt"] == true,
             census,
+            &lane_holders,
         );
         if host == context.identity.host
             && let Some(store) = &store
@@ -1782,8 +1788,8 @@ pub(crate) struct Listing {
     pub rows: Vec<ListedGraph>,
     pub omitted: std::collections::BTreeMap<String, usize>,
     pub next: Option<u64>,
-    pub standalone_holders: Vec<provenant_os::admission::HeldInfo>,
-    pub standalone_waiters: Vec<provenant_os::admission::WaitInfo>,
+    pub admission_holders: Vec<provenant_os::admission::HeldInfo>,
+    pub admission_waiters: Vec<provenant_os::admission::WaitInfo>,
 }
 
 /// Every unsettled graph, always; then settled graphs newest first, within
@@ -1852,8 +1858,8 @@ pub(crate) fn select_listing(
         rows,
         omitted,
         next,
-        standalone_holders: Vec::new(),
-        standalone_waiters: Vec::new(),
+        admission_holders: Vec::new(),
+        admission_waiters: Vec::new(),
     }
 }
 
@@ -1872,8 +1878,8 @@ pub(crate) fn graph_listing(
                     rows: Vec::new(),
                     omitted: Default::default(),
                     next: None,
-                    standalone_holders: Vec::new(),
-                    standalone_waiters: Vec::new(),
+                    admission_holders: Vec::new(),
+                    admission_waiters: Vec::new(),
                 });
             }
             Err(error) => return Err(error),
@@ -1991,10 +1997,28 @@ pub(crate) fn graph_listing(
         }
         let mut finished = finish_listing(listing, settled_count, command.all || globals.full);
         if root.as_path().exists() {
-            finished.standalone_holders =
+            finished.admission_holders =
                 provenant_os::admission::standalone_holders(root.as_path());
-            finished.standalone_waiters =
+            finished.admission_waiters =
                 provenant_os::admission::standalone_waiters(root.as_path());
+            let execution = provenant_run::ExecutionContext {
+                state_root: root.clone(),
+                project_id: project,
+                actor_id: factory.context.identity.inbox.actor,
+                read_prompts: false,
+            };
+            let call = provenant_run::Request {
+                clock: &factory.clock,
+                cancel: &cancel,
+            };
+            if let Some(store) =
+                provenant_run::RunStore::open_read_only(&execution, &call).map_err(run_error)?
+            {
+                let (holders, waiters) =
+                    provenant_cli::run::active_lane_admission(&store, &call).map_err(run_error)?;
+                finished.admission_holders.extend(holders);
+                finished.admission_waiters.extend(waiters);
+            }
         }
         Ok(finished)
     })();
@@ -2053,41 +2077,48 @@ pub(crate) fn graph_listing(
             if listing.rows.is_empty() {
                 human = "no graphs\n".into();
             }
-            if !listing.standalone_waiters.is_empty() || !listing.standalone_holders.is_empty() {
+            if !listing.admission_waiters.is_empty() || !listing.admission_holders.is_empty() {
                 if !listing.rows.is_empty() {
                     human.push('\n');
                 }
                 human.push_str("admission:\n");
                 let now_sec = (now.max(0) / 1_000_000) as u64;
-                for waiter in &listing.standalone_waiters {
+                for waiter in &listing.admission_waiters {
                     let elapsed = now_sec.saturating_sub(waiter.start_unix_seconds);
                     let holders = listing
-                        .standalone_holders
+                        .admission_holders
                         .iter()
                         .filter(|h| h.class == waiter.class)
                         .collect::<Vec<_>>();
                     if holders.is_empty() {
                         human.push_str(&format!(
-                            "  {} waiter: pid {} ({}s)\n",
-                            waiter.class, waiter.pid, elapsed
+                            "  {} waiter: {} ({}s)\n",
+                            waiter.class,
+                            admission_waiter_description(waiter),
+                            elapsed
                         ));
                     } else {
                         let holders_desc = holders
                             .iter()
-                            .map(|h| format!("slot {}: pid {}", h.slot, h.pid))
+                            .map(|h| provenant_cli::run::admission_holder_description(h))
                             .collect::<Vec<_>>()
                             .join(", ");
                         human.push_str(&format!(
-                            "  {} waiter: pid {} ({}s; held by {})\n",
-                            waiter.class, waiter.pid, elapsed, holders_desc
+                            "  {} waiter: {} ({}s; held by {})\n",
+                            waiter.class,
+                            admission_waiter_description(waiter),
+                            elapsed,
+                            holders_desc
                         ));
                     }
                 }
-                for holder in &listing.standalone_holders {
+                for holder in &listing.admission_holders {
                     let elapsed = now_sec.saturating_sub(holder.start_unix_seconds);
                     human.push_str(&format!(
-                        "  {} holder: slot {} held by pid {} ({}s)\n",
-                        holder.class, holder.slot, holder.pid, elapsed
+                        "  {} holder: {} ({}s)\n",
+                        holder.class,
+                        provenant_cli::run::admission_holder_description(holder),
+                        elapsed
                     ));
                 }
             }
@@ -2124,10 +2155,10 @@ pub(crate) fn graph_listing(
                 "omitted": listing.omitted,
                 "next_cursor": listing.next,
             });
-            if !listing.standalone_holders.is_empty() || !listing.standalone_waiters.is_empty() {
+            if !listing.admission_holders.is_empty() || !listing.admission_waiters.is_empty() {
                 data["admission"] = json!({
-                    "holders": listing.standalone_holders,
-                    "waiters": listing.standalone_waiters,
+                    "holders": listing.admission_holders,
+                    "waiters": listing.admission_waiters,
                 });
             }
             crate::emit(
@@ -2142,6 +2173,13 @@ pub(crate) fn graph_listing(
             )
         }
         Err(error) => command_fail("status", error.as_ref(), globals),
+    }
+}
+
+fn admission_waiter_description(waiter: &provenant_os::admission::WaitInfo) -> String {
+    match &waiter.attempt_id {
+        Some(attempt) => format!("attempt {} (pid {})", attempt, waiter.pid),
+        None => format!("pid {}", waiter.pid),
     }
 }
 
@@ -3554,6 +3592,65 @@ mod tests {
     }
 
     #[test]
+    fn lane_status_names_another_lanes_admission_holder() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let waiting_scratch = temp.path().join("waiting");
+        let holding_scratch = temp.path().join("holding");
+        let _held = provenant_os::admission::mark_held(
+            &holding_scratch,
+            "build",
+            2,
+            42,
+            Some("holder-attempt"),
+        )?;
+        let _wait = provenant_os::admission::mark_waiting(
+            &waiting_scratch,
+            "build",
+            43,
+            Some("waiting-attempt"),
+        )?;
+        let id = "11111111111111111111111111111111";
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let mut attempt: provenant_records::run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version":1,"attempt_id":id,"project_id":id,
+            "key":{"project":id,"graph":"graph","node":"node","attempt":1},"attempt_number":1,"revision":1,"generation":1,
+            "requested_route":{"kind":"named","name":"senior"},
+            "authority_digest":digest,"queued_at":"2026-10-29T00:00:00.000000Z",
+            "state":{"state":"running"},"usage":{},"read_only_writable":[],
+            "protected_paths":[],"trace":{},
+            "prompt":{"path":{"encoding":"utf8","path":"prompt.md"},
+                "digest":digest,"bytes":0,"complete":true,"redacted":false}
+        }))?;
+        attempt
+            .write_grants
+            .push(provenant_records::run::WriteGrantRecord {
+                extra: Default::default(),
+                source: provenant_records::run::WriteSource::Scratch,
+                path: provenant_records::AbsolutePath::new(&waiting_scratch)?,
+                scope: provenant_records::run::PathScope::Subtree,
+            });
+        let holders = provenant_os::admission::lane_holders(&holding_scratch);
+        let row = provenant_cli::run::project_lane_with_admission(
+            &attempt,
+            &[],
+            temp.path(),
+            None,
+            true,
+            Err(()),
+            &holders,
+        );
+        let reason = row.waiting_for.ok_or("missing admission wait")?;
+        assert!(
+            reason.contains("build")
+                && reason.contains("holder-attempt")
+                && reason.contains("slot 2"),
+            "{reason}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn graph_peer_status_preserves_typed_wait_facts() -> Result<(), Box<dyn std::error::Error>> {
         let id = "11111111111111111111111111111111";
         let digest = format!("sha256:{}", "ab".repeat(32));
@@ -3713,8 +3810,8 @@ mod tests {
                 rows: graphs.clone(),
                 omitted: Default::default(),
                 next: None,
-                standalone_holders: Vec::new(),
-                standalone_waiters: Vec::new(),
+                admission_holders: Vec::new(),
+                admission_waiters: Vec::new(),
             },
             1,
             false,
@@ -3735,8 +3832,8 @@ mod tests {
                 rows: graphs,
                 omitted: Default::default(),
                 next: None,
-                standalone_holders: Vec::new(),
-                standalone_waiters: Vec::new(),
+                admission_holders: Vec::new(),
+                admission_waiters: Vec::new(),
             },
             1,
             true,

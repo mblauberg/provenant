@@ -184,8 +184,8 @@ wait_seconds = 30
 ```
 
 - `slots`: Maximum concurrent processes admitted for the class. For `build`,
-  defaults to host hardware capacity (`max_concurrent_builds`, derived from CPU
-  cores and RAM).
+  defaults to host hardware capacity derived from CPU cores and RAM. Set it to
+  `0` to disable the cap.
 - `memory_per_slot`: Optional memory per slot. Admission samples RSS through the
   process-tree sampler.
 - `disk_floor`: Optional minimum free disk floor required before running.

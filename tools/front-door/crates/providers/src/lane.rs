@@ -213,12 +213,6 @@ impl crate::LaunchSpec {
                 });
             }
         }
-        self.setup.push(SetupStep::CreateLock(
-            bin.join(provenant_os::admission::WAIT_FILE),
-        ));
-        self.setup.push(SetupStep::CreateLock(
-            bin.join(provenant_os::admission::HELD_FILE),
-        ));
         self.env[path_index].1 = next_path;
         let profile = &mut self.profile.spec;
         // Read only: command and none backends do not receive host slot files.
@@ -2711,7 +2705,7 @@ mod tests {
             );
             assert!(spec.setup.is_empty());
         }
-        // Zero disables the shared build cap (max_concurrent_builds = 0), so it
+        // Zero disables the shared build cap ([admission.build].slots = 0), so it
         // is a trusted setting that still installs the shim.
         let mut spec = bare_spec("/usr/bin");
         let gate = BuildSlotGate {

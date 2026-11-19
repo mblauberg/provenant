@@ -121,10 +121,59 @@ pub fn project_lane(
         waits,
         root,
         now_wall,
-        HostView::from_observation(observe_host),
+        (HostView::from_observation(observe_host), &[]),
         None,
         false,
     )
+}
+
+/// Collect live admission markers only from active lanes' scratch grants.
+pub fn active_lane_admission(
+    store: &run::RunStore,
+    call: &run::Request<'_>,
+) -> run::Result<(
+    Vec<provenant_os::admission::HeldInfo>,
+    Vec<provenant_os::admission::WaitInfo>,
+)> {
+    let mut query = lane_query(false, 100, 0);
+    let mut holders = Vec::new();
+    let mut waiters = Vec::new();
+    loop {
+        let page = store.lanes(&query, call)?;
+        for lane in page.lanes {
+            if !matches!(lane.state, run::AttemptState::Running { .. }) {
+                continue;
+            }
+            for grant in &lane.write_grants {
+                if grant.source == provenant_records::run::WriteSource::Scratch
+                    && let Ok(path) = grant.path.to_path_buf()
+                {
+                    let attempt = lane.attempt_id.to_string();
+                    holders.extend(
+                        provenant_os::admission::lane_holders(&path)
+                            .into_iter()
+                            .map(|mut info| {
+                                info.attempt_id = Some(attempt.clone());
+                                info
+                            }),
+                    );
+                    waiters.extend(
+                        provenant_os::admission::lane_waiters(&path)
+                            .into_iter()
+                            .map(|mut info| {
+                                info.attempt_id = Some(attempt.clone());
+                                info
+                            }),
+                    );
+                }
+            }
+        }
+        match page.next {
+            Some(next) => query.after = next,
+            None => break,
+        }
+    }
+    Ok((holders, waiters))
 }
 
 /// Project a status row using one bounded process census shared by the caller.
@@ -146,7 +195,27 @@ pub fn project_lane_with_census(
         waits,
         root,
         now_wall,
-        HostView::from_observation(observe_host),
+        (HostView::from_observation(observe_host), &[]),
+        Some(census),
+        true,
+    )
+}
+
+pub fn project_lane_with_admission(
+    lane: &run::AttemptRecord,
+    waits: &[run::LaneWait],
+    root: &Path,
+    now_wall: Option<WallTime>,
+    observe_host: bool,
+    census: std::result::Result<&provenant_supervisor::census::Census, ()>,
+    holders: &[provenant_os::admission::HeldInfo],
+) -> provenant_records::wire::LaneRow {
+    project_lane_inner(
+        lane,
+        waits,
+        root,
+        now_wall,
+        (HostView::from_observation(observe_host), holders),
         Some(census),
         true,
     )
@@ -166,7 +235,7 @@ pub fn project_lane_presence_only(
         &[],
         root,
         now_wall,
-        HostView::PresenceOnly,
+        (HostView::PresenceOnly, &[]),
         Some(Err(())),
         true,
     )
@@ -201,15 +270,23 @@ impl HostView {
     }
 }
 
+pub fn admission_holder_description(h: &provenant_os::admission::HeldInfo) -> String {
+    match &h.attempt_id {
+        Some(attempt) => format!("slot {}: attempt {} (pid {})", h.slot, attempt, h.pid),
+        None => format!("slot {}: pid {}", h.slot, h.pid),
+    }
+}
+
 fn project_lane_inner(
     lane: &run::AttemptRecord,
     waits: &[run::LaneWait],
     root: &Path,
     now_wall: Option<WallTime>,
-    view: HostView,
+    host: (HostView, &[provenant_os::admission::HeldInfo]),
     census: Option<std::result::Result<&provenant_supervisor::census::Census, ()>>,
     unknown_when_host_unobserved: bool,
 ) -> provenant_records::wire::LaneRow {
+    let (view, lane_holders) = host;
     let usage = lane.effective_usage();
     let host_artifacts = view.projects_host_artifacts();
     let presence = if !view.observes_presence() {
@@ -241,7 +318,9 @@ fn project_lane_inner(
                 if grant.source == provenant_records::run::WriteSource::Scratch
                     && let Ok(path) = grant.path.to_path_buf()
                 {
-                    return provenant_os::admission::is_waiting(&path);
+                    return provenant_os::admission::lane_waiters(&path)
+                        .into_iter()
+                        .next();
                 }
                 None
             })
@@ -260,13 +339,19 @@ fn project_lane_inner(
                 |w| w.unix_seconds().max(0) as u64,
             );
             let elapsed = now_sec.saturating_sub(wait_info.start_unix_seconds);
-            let holders = provenant_os::admission::host_holders(root, &wait_info.class);
+            let mut holders = provenant_os::admission::host_holders(root, &wait_info.class);
+            holders.extend(
+                lane_holders
+                    .iter()
+                    .filter(|h| h.class == wait_info.class)
+                    .cloned(),
+            );
             if holders.is_empty() {
                 format!("waiting for a host {} slot ({}s)", wait_info.class, elapsed)
             } else {
                 let holders_desc = holders
                     .iter()
-                    .map(|h| format!("slot {}: pid {}", h.slot, h.pid))
+                    .map(admission_holder_description)
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(

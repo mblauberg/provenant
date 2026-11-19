@@ -34,7 +34,6 @@
       "domains.fabric.graph.limits.nodes",
       "domains.fabric.graph.limits.expansion_depth",
       "domains.fabric.graph.limits.concurrency",
-      "domains.fabric.lanes.max_concurrent_builds",
       "providers.{provider}.update",
       "providers.{provider}.runtime_deadline_seconds",
       "providers.codex.clean_config",
@@ -378,7 +377,6 @@
     "settings": {
       "start_spacing_ms": {"type": "int", "min": 0, "max": 600000, "default": 0, "effect": "Advisory spacing window between starts of the same class, enforced through policy.ADMISSION_SPACING (warn by default)."},
       "memory_pressure_threshold": {"effect": "Kernel memory pressure threshold for policy.ADMISSION_PRESSURE. The rule defaults to warn; never disables its observation."},
-      "max_concurrent_builds": {"type": "int", "min": 0, "max": 64, "auto_value": -1, "default": "max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))", "effect": "Host-wide cap on lane cargo builds that compile, shared by every project on this state directory. Unset, the count is derived from cores and memory (source: default). A set value, including one from the host file, is source host. Over the cap a build waits a bounded time, then warns and proceeds. 0 disables the cap. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated."},
       "lane_port_base": {"type": "int", "min": 1024, "max": 65535, "auto_value": -1, "default": 30000, "effect": "First port of the range split into per-writer-lane blocks. A writer with an allocated block holds it for its lifetime and sees PROVENANT_LANE_PORT_BASE and PROVENANT_LANE_PORT_COUNT. Unreadable lane-port settings or allocation I/O errors warn and skip allocation."},
       "lane_port_block": {"type": "int", "min": 1, "max": 1024, "auto_value": -1, "default": 16, "effect": "Ports in each writer lane's block (PROVENANT_LANE_PORT_COUNT)."},
       "lane_port_blocks": {"type": "int", "min": 0, "max": 1024, "auto_value": -1, "default": 64, "effect": "Blocks in the range, so the most writer lanes that hold a block at once; the base plus blocks times block size must be at most 65536. 0 turns allocation off. A writer launched while every block is held is not started and reports no free port block."},

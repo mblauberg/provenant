@@ -10,11 +10,12 @@ so Cargo does not put intermediate build output in a separate cold directory. Th
 `targeted` and may be overridden by host or project configuration or a brief's
 `Verification scope:` line. The preamble names the source.
 
-Compiling cargo commands and targeted test runs share the host-wide
-`domains.fabric.lanes.max_concurrent_builds` budget. Busy slots wait a bounded
-time, then warn and proceed; zero disables the cap. Cargo serialises access to a
-shared target with its own locks. `lanes.local_cargo` can warn when a command
-exceeds a host's preferred scope; it does not refuse the command. By default,
+Compiling cargo commands and targeted test runs share the host-wide `build`
+admission class, configured through `[admission.build].slots` and derived from
+CPU cores and RAM when unset. Set it to `0` to disable the cap. Busy slots wait
+a bounded time, then warn and proceed. Cargo serialises access to a shared target
+with its own locks. `lanes.local_cargo` can warn when a command exceeds a host's
+preferred scope; it does not refuse the command. By default,
 `lanes.cargo_target` is `shared`, so lanes share a single per-project warm target
 under the host cache. Setting it to `private` preserves per-worktree copy-on-write
 seeding, or an absolute path can be provided. A missing warm target is not a reason to start a cold build.
