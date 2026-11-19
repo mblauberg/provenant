@@ -105,6 +105,7 @@ fn custody_local(
         custody::CustodyError::Fenced
         | custody::CustodyError::UnknownIdentity
         | custody::CustodyError::InvalidRecord
+        | custody::CustodyError::Decode(_)
         | custody::CustodyError::HandoffUnknown
         | custody::CustodyError::ProfileHandoffUnknown => boundary_handoff(
             policy,
@@ -473,6 +474,10 @@ impl RunStore {
             .and_then(|c| lane_port_plan_or_warn(&c.state_root, &policy));
         let key = record.key.clone();
         let command = ProviderCommand {
+            publication_values: provenant_os::exec::SecretValues(local_or_withdraw!(
+                provenant_redact::ambient_values()
+                    .map_err(|error| local("capture credential values", &error))
+            )),
             policy: policy.clone(),
             profile_file,
             lane_ports,

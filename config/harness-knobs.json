@@ -16,6 +16,7 @@
       "lanes.cargo_cache_max",
       "lanes.ci_scope",
       "lanes.verification",
+      "lanes.writer_dirty",
       "lanes.gh_budget",
       "lanes.isolation",
       "lanes.supervision",
@@ -34,7 +35,6 @@
       "domains.fabric.graph.limits.nodes",
       "domains.fabric.graph.limits.expansion_depth",
       "domains.fabric.graph.limits.concurrency",
-      "domains.fabric.lanes.max_concurrent_builds",
       "providers.{provider}.update",
       "providers.{provider}.runtime_deadline_seconds",
       "providers.codex.clean_config",
@@ -381,7 +381,6 @@
     "settings": {
       "start_spacing_ms": {"type": "int", "min": 0, "max": 600000, "default": 0, "effect": "Advisory spacing window between starts of the same class, enforced through policy.ADMISSION_SPACING (warn by default)."},
       "memory_pressure_threshold": {"effect": "Kernel memory pressure threshold for policy.ADMISSION_PRESSURE. The rule defaults to warn; never disables its observation."},
-      "max_concurrent_builds": {"type": "int", "min": 0, "max": 64, "auto_value": -1, "default": "max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))", "effect": "Host-wide cap on lane cargo builds that compile, shared by every project on this state directory. Unset, the count is derived from cores and memory (source: default). A set value, including one from the host file, is source host. Over the cap a build waits a bounded time, then warns and proceeds. 0 disables the cap. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated."},
       "lane_port_base": {"type": "int", "min": 1024, "max": 65535, "auto_value": -1, "default": 30000, "effect": "First port of the range split into per-writer-lane blocks. A writer with an allocated block holds it for its lifetime and sees PROVENANT_LANE_PORT_BASE and PROVENANT_LANE_PORT_COUNT. Unreadable lane-port settings or allocation I/O errors warn and skip allocation."},
       "lane_port_block": {"type": "int", "min": 1, "max": 1024, "auto_value": -1, "default": 16, "effect": "Ports in each writer lane's block (PROVENANT_LANE_PORT_COUNT)."},
       "lane_port_blocks": {"type": "int", "min": 0, "max": 1024, "auto_value": -1, "default": 64, "effect": "Blocks in the range, so the most writer lanes that hold a block at once; the base plus blocks times block size must be at most 65536. 0 turns allocation off. A writer launched while every block is held is not started and reports no free port block."},
@@ -495,6 +494,7 @@
       "policy.GRAPH_PR_EXCLUSIVE": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Graph-level and node PR delivery both set: the node setting is ignored with a warning. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.GRAPH_HOST_NATIVE_FALLBACK": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A host-native route without a fallback warns. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.LAUNCH_FIELD_UNSUPPORTED": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A non-write launch field (model, effort, network, resume, skills) unsupported by the route is dropped with a warning; write support stays an authority refusal. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
+      "policy.SECRET_SHAPED_INPUT": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Secret-shaped input warns with its field path and proceeds; exact credential values are handled at their owning boundary. The setting source is named in each warning."},
       "policy.LANE_TIP_UNROOTED": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A lane tip with no known ancestor publishes the lane's own branch with a warning, so no work is lost. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.DIRTY_WRITER": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A writer worktree with uncommitted edits launches and records the dirty state; checked-out and detached writers stay refused. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.SOURCE_TREE_ENTRY_OMITTED": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A gitlink, unsupported object or oversized entry is omitted from the read-only view with a warning naming it. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
@@ -695,7 +695,7 @@
       "values": ["all", "check", "none"],
       "default": "all",
       "status": "wired",
-      "reader": "tools/front-door/src/build_slot.rs",
+      "reader": "tools/front-door/src/admit.rs",
       "effect": "Advisory cargo scope for lanes: all permits every command without a warning; check warns for compiling commands other than cargo check; none warns for every compiling command. Commands continue after a warning. Set per run with --knob lanes.local_cargo=check, per graph node with `attempt.local_cargo`, or for the host under [knobs].",
       "trade_off": "A narrower setting warns about extra resource use; the host build slot controls cooperative cargo concurrency."
     },
@@ -733,6 +733,15 @@
       "reader": "tools/front-door/crates/run/src/verification.rs",
       "effect": "Local verification a writer lane is told to run before it commits. targeted (default) uses a shared warm target for cargo check, clippy on touched crates and targeted tests. check is one cargo check of the package it changed. full runs the repository's documented local checks, leaving the whole workspace suite to CI. A brief line `Verification scope: targeted` (or check or full) overrides the knob; the preamble then names source brief. Host and project [knobs] name source host or project. Set per run with --knob lanes.verification=targeted.",
       "trade_off": "Advisory guidance; the cargo shim warns for commands outside lanes.local_cargo. A wider scope spends the host build cap."
+    },
+    "lanes.writer_dirty": {
+      "type": "enum",
+      "values": ["refuse", "wip_commit", "continue_in_place"],
+      "default": "refuse",
+      "status": "wired",
+      "reader": "tools/front-door/crates/run/src/writer_dirty.rs, tools/front-door/src/fabric/graph_execution.rs",
+      "effect": "What a writer dispatch does when its worktree holds uncommitted edits. refuse (default) refuses at graph submission before any plan node spends tokens, naming the dirty paths and this setting. wip_commit preserves the edits in a local WIP commit before launch and records its id in the graph events. continue_in_place keeps the edits and warns. Credential and Git-internal roots stay a hard refusal under every value. The effective value and its source appear in the refusal and warning. Set per run with --knob lanes.writer_dirty=wip_commit or under [knobs].",
+      "trade_off": "refuse protects token spend but blocks a continued draft until the operator commits or overrides; wip_commit preserves work automatically but creates a commit before the plan node; continue_in_place is cheapest but leaves the writer to respect the edits."
     },
     "lanes.gh_budget": {
       "type": "int",

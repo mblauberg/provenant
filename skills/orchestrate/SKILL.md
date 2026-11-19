@@ -6,7 +6,7 @@ description: "Use to delegate or parallelise work: lanes, graphs, templates, rev
 # Orchestrate
 
 Use `provenant templates show NAME --json` to inspect bundled, user, repository
-and inline templates. Dotted names select flavours such as `review.security`.
+and inline templates. Dotted names select flavours such as `review.correctness`.
 
 ## Commands
 
@@ -15,18 +15,9 @@ submitting it; check its authority, write scope and gates first.
 
 ## Divide the work
 
-Delegate decoupled, context-heavy or cross-family work, or to use another
-subscription; keep small, coupled and user-facing steps with the chair. Split
-by context and dependency, settle shared interfaces first, and budget roughly
-1.4–3.3 times the tokens for concurrent work. Integrate each return as it
-finishes and land ready work independently. Any lane may launch child lanes.
+The global rules own when and how to delegate. Any lane may launch child lanes.
 `implement` starts a junior writer by default; `--route` picks another tier and
 `--plan` sizes the brief first.
-
-Sources: [dynamic concurrency](https://arxiv.org/abs/2610.10263),
-[agent loop](https://claude.com/resources/articles/building-agents-when-to-fold-subagents-into-your-main-agent-loop),
-[coordination](https://arxiv.org/abs/2608.16801) and
-[coordination study](https://arxiv.org/abs/2607.27877).
 
 `run implement --branch NAME --base REF` creates a single writer's worktree. Register one
 by hand (`provenant worktree create BRANCH`) only to share it: `batch` gives every

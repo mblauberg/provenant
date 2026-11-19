@@ -52,9 +52,9 @@ fn settled() -> (GraphDocument, GraphCheckpoint, AttemptKey) {
 #[test]
 fn steer_normalises_only_the_new_brief_once() {
     let mut document = graph(vec![node("work", route("first"))]);
-    // Historical free-form bytes are immutable even if today's redactor
-    // would transform them. Steer introduces only the replacement brief.
-    let old = "historical extension AKIAIOSFODNN7EXAMPLE";
+    // Retained free-form bytes are immutable. Steer introduces only the
+    // replacement brief, which is normalised at this ingress.
+    let old = "historical extension retained unchanged";
     document.nodes[0].extra.insert("comment".into(), json!(old));
     let mut owner = FakeOwner {
         observations: [done_as("original")].into(),
@@ -2388,8 +2388,7 @@ fn no_work_stop_is_never_saved_without_its_restart() {
 // Spec: docs/specs/fabric.md#checkpoint-envelope
 #[test]
 fn no_work_restart_preserves_raw_handoff_and_the_stop() {
-    // A new handoff is normalised before storage or continuation. Known
-    // credential shapes cannot poison the next writer's prompt.
+    // Retained handoff text reaches the continuation without shape filtering.
     let mut work = node("work", route("first"));
     work.route = None;
     work.routes = Some(vec![route("first"), route("second")]);
@@ -2397,7 +2396,7 @@ fn no_work_restart_preserves_raw_handoff_and_the_stop() {
     work.worktree = Some(".worktrees/work".into());
     let document = graph(vec![work]);
     let mut stop = no_work_stop(Some(&"a".repeat(40)));
-    let note = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"token ghp_abcdefghijklmnopqrstuvwxyz0123456789\",\"remaining\":[\"Finish renderer\"],\"decisions\":[],\"verify\":[]}\n```";
+    let note = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"token ghp_abcdefghijklmnopqrstuvwxyz0123456789 example AKIAIOSFODNN7EXAMPLE\",\"remaining\":[\"Finish renderer\"],\"decisions\":[],\"verify\":[]}\n```";
     if let AttemptObservation::Terminal { result, .. } = &mut stop {
         *result = Some(Box::new(capture(note)));
     }

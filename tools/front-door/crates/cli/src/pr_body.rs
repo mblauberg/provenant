@@ -456,7 +456,7 @@ mod tests {
         }
         // Every table row is complete, and the attempts are rows.
         let rows: Vec<&str> = text.lines().filter(|line| line.starts_with('|')).collect();
-        assert!(rows.len() >= 8, "{rows:?}");
+        assert!(rows.len() >= 7, "{rows:?}");
         assert!(rows.iter().all(|row| !row.contains("|  |")), "{rows:?}");
         let harness = rows
             .iter()

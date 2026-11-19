@@ -346,7 +346,7 @@ pub fn save_lane_owner_when_free(
     }
     match worktree_cleanliness_at(context, tree.repo(), cancel)? {
         WorktreeCleanliness::Clean | WorktreeCleanliness::Ignored => {}
-        WorktreeCleanliness::Dirty(paths) => return Err(WorktreeError::Dirty(paths)),
+        WorktreeCleanliness::Dirty(paths, _) => return Err(WorktreeError::Dirty(paths)),
         WorktreeCleanliness::GitOperationInProgress => {
             return Err(WorktreeError::GitOperationInProgress);
         }

@@ -1,5 +1,5 @@
 //! Bounded CI polling for a pinned PR head. No progress goes to JSON stdout.
-use super::{Result, observer::ObserveError};
+use super::Result;
 use provenant_core::retry::{Backoff, RetryCause, is_transient};
 use provenant_os::exec::Termination;
 use std::{
@@ -245,18 +245,6 @@ fn rate_delay_at(headers: &str, fallback: Duration, now: i64) -> (Duration, Stri
     };
     (delay, label)
 }
-/// The failure a land wait reports for an observer error.
-pub(super) fn ci_failure(error: ObserveError, retry_command: &str) -> Box<dyn std::error::Error> {
-    match error {
-        ObserveError::RateLimited { reset } => failure(
-            "RATE_LIMITED",
-            format!("GitHub rate limit; reset {reset}; next: {retry_command}"),
-        ),
-        ObserveError::Expired => failure("CI_TIMEOUT", "GitHub wait budget expired"),
-        ObserveError::Unavailable(message) => failure("CI_UNAVAILABLE", message),
-    }
-}
-
 #[cfg(test)]
 #[allow(dead_code, unused_imports)] // Also compiled, unrun, by the harness-less worktrees driver.
 mod tests {

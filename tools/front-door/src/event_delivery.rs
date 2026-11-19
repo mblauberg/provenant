@@ -1529,7 +1529,7 @@ mod tests {
             let round_trip: crate::pr::status::Line =
                 serde_json::from_value(recovered["status"].clone()).unwrap();
             assert_eq!(serde_json::to_value(round_trip).unwrap(), projected);
-            let reading = crate::status_wait::reading_pr_event(7, recovered);
+            let reading = crate::status_wait::reading_pr_event(7, None, recovered);
             assert_eq!(
                 reading.settle,
                 if count == 0 {

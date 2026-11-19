@@ -2,6 +2,42 @@
 use super::*;
 use std::path::Component;
 
+/// Credential and Git roots may never be carried into a writer checkout.
+pub fn writer_edit_is_protected(path: &str) -> bool {
+    const ROOTS: &[&str] = &[
+        ".git",
+        ".ssh",
+        ".gnupg",
+        ".aws",
+        ".config",
+        ".kube",
+        ".docker",
+        ".npmrc",
+        ".netrc",
+        ".env",
+        "credentials",
+        "id_rsa",
+        "id_ed25519",
+    ];
+    let normalized = path.replace('\\', "/");
+    let first = normalized
+        .trim_start_matches("./")
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    ROOTS
+        .iter()
+        .any(|root| first == *root || first.starts_with(&format!("{root}.")))
+}
+
+/// Whether an unchanged checkout may retain ordinary edits during binding.
+#[derive(Clone, Copy)]
+pub enum WriterEdits {
+    Refuse,
+    ContinueInPlace,
+}
+
 /// Advance a free, registered linked worktree to a pinned descendant commit.
 /// Writer exclusion covers verification and mutation. Local edits, divergence
 /// and ignored files that would be overwritten always refuse the handoff. A
@@ -10,6 +46,7 @@ pub fn fast_forward(
     context: &WorktreeContext<'_>,
     path: &Path,
     head: GitOid,
+    edits: WriterEdits,
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
     validate_binding(context)?;
@@ -48,7 +85,16 @@ pub fn fast_forward(
     let repo = locked.verified.repo();
     match worktree_cleanliness_at(context, repo, cancel)? {
         WorktreeCleanliness::Clean | WorktreeCleanliness::Ignored => {}
-        WorktreeCleanliness::Dirty(paths) => return Err(WorktreeError::Dirty(paths)),
+        WorktreeCleanliness::Dirty(_, false)
+            if matches!(edits, WriterEdits::ContinueInPlace) && current_head == head =>
+        {
+            repo.revalidate()?;
+            if context.facts.checkout_head(context, repo, cancel)? != current_head {
+                return Err(WorktreeError::IdentityChanged);
+            }
+            return Ok(());
+        }
+        WorktreeCleanliness::Dirty(paths, _) => return Err(WorktreeError::Dirty(paths)),
         WorktreeCleanliness::GitOperationInProgress => {
             return Err(WorktreeError::GitOperationInProgress);
         }
@@ -1449,9 +1495,9 @@ pub(super) fn removal_verdict(
 ) -> Result<(), WorktreeError> {
     match cleanliness {
         WorktreeCleanliness::Clean => Ok(()),
-        WorktreeCleanliness::Dirty(_) | WorktreeCleanliness::Ignored if discard => Ok(()),
+        WorktreeCleanliness::Dirty(..) | WorktreeCleanliness::Ignored if discard => Ok(()),
         WorktreeCleanliness::Ignored if preview => Ok(()),
-        WorktreeCleanliness::Dirty(paths) => Err(WorktreeError::Dirty(paths.clone())),
+        WorktreeCleanliness::Dirty(paths, _) => Err(WorktreeError::Dirty(paths.clone())),
         WorktreeCleanliness::Ignored => Err(WorktreeError::Dirty(String::new())),
         WorktreeCleanliness::GitOperationInProgress => Err(WorktreeError::GitOperationInProgress),
         WorktreeCleanliness::Unknown => Err(WorktreeError::UnknownWriter),
@@ -1886,7 +1932,7 @@ pub fn check_removal_preconditions(
             &output.keep,
             cancel,
         ),
-        WorktreeCleanliness::Dirty(paths) => Err(WorktreeError::Dirty(paths)),
+        WorktreeCleanliness::Dirty(paths, _) => Err(WorktreeError::Dirty(paths)),
         WorktreeCleanliness::GitOperationInProgress => Err(WorktreeError::GitOperationInProgress),
         WorktreeCleanliness::Unknown => Err(WorktreeError::UnknownWriter),
     }

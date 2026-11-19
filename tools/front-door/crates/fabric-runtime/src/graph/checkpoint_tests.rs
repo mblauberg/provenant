@@ -6,6 +6,40 @@ fn stored() -> Value {
     serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap()
 }
 
+#[test]
+fn deepest_stored_checkpoint_round_trips_on_a_512kib_debug_thread() {
+    const CHECKPOINT: &[u8] = include_bytes!("../fixtures/checkpoint-2.0.5/graph-smoke205-ro.json");
+    std::thread::Builder::new()
+        .stack_size(512 * 1024)
+        .spawn(|| {
+            let value: Value = serde_json::from_slice(CHECKPOINT).unwrap();
+            let graph_id = value["checkpoint"]["graph_id"].as_str().unwrap();
+            let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/fixtures/checkpoint-2.0.5");
+            let temp = crate::test_support::tempdir().unwrap();
+            for digest in value["stored_text"].as_object().unwrap().values() {
+                let digest = digest.as_str().unwrap();
+                let name = format!("graph-{graph_id}.prompt-{digest}");
+                let bytes = std::fs::read(fixture_dir.join(&name)).unwrap();
+                std::fs::write(temp.path().join(name), bytes).unwrap();
+            }
+            let directory = Directory::open_anchor(temp.path()).unwrap();
+            let mut stored = decode_checkpoint_in(&directory, CHECKPOINT, graph_id).unwrap();
+            // Exercise a sealed stop cause on the deepest attempt as well.
+            stored.checkpoint.nodes[0].attempts[0].stop =
+                Some(provenant_records::StopCause::Blocked);
+            let encoded = serde_json::to_vec(&stored).unwrap();
+            let again: StoredCheckpoint = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(
+                serde_json::to_value(&again).unwrap(),
+                serde_json::from_slice::<Value>(&encoded).unwrap()
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 // Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
 #[test]
 fn deployed_2_0_5_checkpoint_and_external_prompts_still_read() {

@@ -81,6 +81,17 @@ pub enum Quota {
         #[arg(long, default_value_t = 50, catalog_u32_range = 1..=100_000)]
         limit: u32,
     },
+    /// Remove recorded provider refusals and report what was cleared
+    ///
+    /// ACCOUNT is an account label or key. With MODEL, only refusals for that
+    /// model are removed; without it every recorded refusal for the account is
+    /// removed. Each clearing is recorded with source `manual`.
+    Clear {
+        /// Account label or key
+        account: String,
+        /// Model whose refusals to clear (adapter prefix optional)
+        model: Option<String>,
+    },
     /// Set menu bar display choices, then show quota
     ///
     /// With no options nothing changes. `--icon` takes `most_constrained` or an
@@ -783,6 +794,16 @@ fn persist_success(
         .is_some_and(|s| s.status == QuotaStatus::AuthRequired)
     {
         next.snapshot = None;
+    }
+    // A completed run on this route is direct evidence the model still works:
+    // clear its recorded refusal with source `run`. A login probe proves only
+    // authentication, so it never clears a quota refusal.
+    if !login_probe && let Some(model) = route.model.as_deref() {
+        let prefix = format!("{adapter}/");
+        let model = model.strip_prefix(&prefix).unwrap_or(model);
+        provenant_quota::clear_refusals(&mut next, now, RefusalClearSource::Run, |refusal| {
+            refusal.model == model && !refusal.account_wide()
+        })?;
     }
     next.revision = next
         .revision
@@ -1822,8 +1843,8 @@ pub(crate) fn execute(
     let all = Filter { adapter: None };
     let (filter, tick) = match command {
         Quota::Show(filter) => (filter, None),
-        // Dispatched by `run` before execute; reads the cache like `show`.
-        Quota::History { .. } => (&all, None),
+        // Dispatched by `run` before execute; these arms only read the cache.
+        Quota::History { .. } | Quota::Clear { .. } => (&all, None),
         Quota::Display { headline, icon } => {
             crate::accounts::set_quota_display(roots, headline.map(Into::into), icon.as_deref())
                 .map_err(EdgeError::Display)?;
@@ -2102,6 +2123,17 @@ pub(crate) fn execute(
                             settings.history_max_bytes,
                         );
                     }
+                    // A reading that proves headroom retires the refusals it
+                    // supersedes. Best effort like the history append: a
+                    // failure here must not fail an otherwise good refresh.
+                    let _ = ReadingClear {
+                        dir: &dir,
+                        state: roots.state.as_path(),
+                        records: &mut records,
+                        policy: &policy,
+                        policies: &policies,
+                    }
+                    .run(&account.adapter, &account.account_key, finished);
                 }
                 Err(QuotaError::Conflict) => {} // A newer claim or observation owns the record.
                 Err(error) => return Err(error.into()),
@@ -2345,6 +2377,209 @@ fn history_human(records: &[HistoryRecord], prices: &[Option<PlanPrice>]) -> Str
         human.push('\n');
     }
     human
+}
+
+/// Remove recorded refusals for an account (optionally one model) and report
+/// exactly what was cleared. Each removal is recorded with source `manual`.
+fn clear_report(
+    state: &Path,
+    account: &str,
+    model: Option<&str>,
+    now: i64,
+) -> Result<(serde_json::Value, String), EdgeError> {
+    let root = match Directory::open_anchor(state) {
+        Ok(root) => root,
+        Err(error) if error.is_not_found() => {
+            return Ok(clear_envelope(account, model, now, Vec::new(), false));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let directory = match root.open_verified_directory(OsStr::new("quota")) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => {
+            return Ok(clear_envelope(account, model, now, Vec::new(), false));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    check_private(&root)?;
+    let Some(_lock) = try_quota_lock(&directory)? else {
+        // Another writer owns the quota ledger. Report honestly instead of
+        // clearing a stale record; the owner can repeat the command.
+        return Ok(clear_envelope(account, model, now, Vec::new(), true));
+    };
+    let mut records = read_records(&directory)?;
+    let mut removed = Vec::new();
+    for index in 0..records.len() {
+        if records[index].account.label != account && records[index].account.account_key != account
+        {
+            continue;
+        }
+        let prefix = format!("{}/", records[index].account.adapter);
+        let wanted = |refusal: &Refusal| {
+            model.is_none_or(|requested| {
+                refusal.model == requested.strip_prefix(&prefix).unwrap_or(requested)
+            })
+        };
+        let mut next = records[index].clone();
+        let cleared =
+            provenant_quota::clear_refusals(&mut next, now, RefusalClearSource::Manual, wanted)?;
+        if cleared.is_empty() {
+            continue;
+        }
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(QuotaError::NumberOutOfRange)?;
+        next.validate()?;
+        let intent = UpdateIntent {
+            account: next.account.clone(),
+            expected: Some(records[index].clone()),
+            replacement: Some(next),
+            clear_provider_observations: false,
+            readiness_probe_result: None,
+            login_probe_expiry: None,
+        };
+        intent.check(Some(&records[index]))?;
+        write_intent(&directory, state, &intent, &mut records)?;
+        removed.extend(cleared);
+    }
+    Ok(clear_envelope(account, model, now, removed, false))
+}
+
+fn clear_envelope(
+    account: &str,
+    model: Option<&str>,
+    now: i64,
+    removed: Vec<RefusalClearing>,
+    busy: bool,
+) -> (serde_json::Value, String) {
+    let count = removed.len();
+    let cleared = removed
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "adapter": entry.account.adapter,
+                "account_key": entry.account.account_key,
+                "model": entry.model,
+                "pool": entry.pool,
+                "observed_unix_seconds": entry.observed_unix_seconds,
+                "source": entry.source.as_str(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let data = serde_json::json!({
+        "schema_version": 1,
+        "generated_unix_seconds": now,
+        "account": account,
+        "model": model,
+        "count": count,
+        "busy": busy,
+        "cleared": cleared,
+    });
+    let mut human = if busy {
+        format!(
+            "Quota is busy; no refusals were cleared for `{}`.\n",
+            account.escape_debug()
+        )
+    } else if count == 0 {
+        match model {
+            Some(model) => format!(
+                "No recorded refusals matched `{}` for model `{}`.\n",
+                account.escape_debug(),
+                model.escape_debug()
+            ),
+            None => format!(
+                "No recorded refusals matched `{}`.\n",
+                account.escape_debug()
+            ),
+        }
+    } else {
+        format!(
+            "Cleared {count} recorded refusal{} for `{}`:\n",
+            if count == 1 { "" } else { "s" },
+            account.escape_debug()
+        )
+    };
+    for entry in &removed {
+        human.push_str(&format!(
+            "  {} [{}] {} (source {})\n",
+            entry.model.escape_debug(),
+            entry.account.adapter,
+            entry
+                .pool
+                .as_deref()
+                .map_or_else(|| "any pool".into(), |pool| pool.escape_debug().to_string()),
+            entry.source.as_str()
+        ));
+    }
+    (data, human)
+}
+
+/// Retire refusals a fresh reading superseded. Uses the same rule as admission,
+/// so a refusal that still holds is never removed. The caller holds the quota
+/// lock.
+struct ReadingClear<'a> {
+    dir: &'a Directory,
+    state: &'a Path,
+    records: &'a mut Vec<AccountRecord>,
+    policy: &'a provenant_records::policy::Policy,
+    policies: &'a [QuotaPolicy],
+}
+impl ReadingClear<'_> {
+    fn run(
+        &mut self,
+        adapter: &str,
+        key: &str,
+        now: i64,
+    ) -> Result<Vec<RefusalClearing>, EdgeError> {
+        let Some(index) = self
+            .records
+            .iter()
+            .position(|r| r.account.adapter == adapter && r.account.account_key == key)
+        else {
+            return Ok(Vec::new());
+        };
+        let current = &self.records[index];
+        let admission = Admission {
+            policy: self.policy,
+            policies: self.policies,
+            now_unix_seconds: now,
+            records: self.records,
+            pools: &[],
+        };
+        let selected = current
+            .refusals
+            .iter()
+            .map(|refusal| admission.refusal_cleared_by_reading(adapter, Some(current), refusal))
+            .collect::<Result<Vec<_>, _>>()?;
+        if !selected.iter().any(|clear| *clear) {
+            return Ok(Vec::new());
+        }
+        let mut next = current.clone();
+        let mut choices = selected.into_iter();
+        let removed =
+            provenant_quota::clear_refusals(&mut next, now, RefusalClearSource::Reading, |_| {
+                choices.next().unwrap_or(false)
+            })?;
+        if removed.is_empty() {
+            return Ok(removed);
+        }
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(QuotaError::NumberOutOfRange)?;
+        let intent = UpdateIntent {
+            account: next.account.clone(),
+            expected: Some(current.clone()),
+            replacement: Some(next),
+            clear_provider_observations: false,
+            readiness_probe_result: None,
+            login_probe_expiry: None,
+        };
+        intent.check(Some(current))?;
+        write_intent(self.dir, self.state, &intent, self.records)?;
+        Ok(removed)
+    }
 }
 
 /// `93.4% of 1200 input tokens`, or why there is no share.
@@ -2786,6 +3021,7 @@ pub fn run(
     let name = match command {
         Quota::Show(_) => "quota show",
         Quota::History { .. } => "quota history",
+        Quota::Clear { .. } => "quota clear",
         Quota::Display { .. } => "quota display",
         Quota::Tick { .. } => "quota tick",
     };
@@ -2806,6 +3042,14 @@ pub fn run(
             },
             *limit,
         ),
+        Quota::Clear { account, model } => (|| {
+            let now = SystemClock::new()
+                .wall_now()
+                .map_err(|_| EdgeError::Time)?
+                .as_timestamp()
+                .as_second();
+            clear_report(roots.state.as_path(), account, model.as_deref(), now)
+        })(),
         _ => execute(&command, roots, registry, effects).and_then(|report| {
             let mut human = quota_human(&report);
             let mut data = serde_json::to_value(&report)?;
@@ -4354,6 +4598,258 @@ mod tests {
 
     // Spec: docs/specs/routing.md#unknown-never-means-ready
     #[test]
+    fn a_successful_run_clears_only_its_route_refusal_with_source_run()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let root = private(temp.path())?;
+        let dir = child(&root, OsStr::new("quota"))?;
+        let mut records = Vec::new();
+        let account = AccountScope {
+            extra: Default::default(),
+            adapter: "claude".into(),
+            account_key: "key".into(),
+            label: "work".into(),
+        };
+        let refusal = |model: &str| Refusal {
+            extra: Default::default(),
+            account: account.clone(),
+            model: model.into(),
+            pool: None,
+            observed_unix_seconds: 100,
+            resets_unix_seconds: Some(600),
+        };
+        let mut record = AccountRecord::empty(account.clone());
+        record.revision = 1;
+        record.refusals = vec![refusal("one"), refusal("two")];
+        // A plan-wide refusal is not cleared by one successful model.
+        let mut account_wide = refusal("one");
+        account_wide.pool = Some(ACCOUNT_ROUTE.into());
+        record.refusals.push(account_wide);
+        write_intent(
+            &dir,
+            temp.path(),
+            &UpdateIntent {
+                account: account.clone(),
+                expected: None,
+                replacement: Some(record),
+                clear_provider_observations: false,
+                readiness_probe_result: None,
+                login_probe_expiry: None,
+            },
+            &mut records,
+        )?;
+        let route = provenant_records::run::RouteRecord {
+            provider: Some("claude".into()),
+            model: Some("claude/one".into()),
+            account_label: Some("work".into()),
+            account_key: Some("key".into()),
+            ..Default::default()
+        };
+        persist_provider_success(temp.path(), &route, 120)?;
+        let found = read_records(&dir)?;
+        let found = found
+            .iter()
+            .find(|r| r.account.account_key == "key")
+            .unwrap();
+        assert_eq!(found.refusals.len(), 2);
+        assert_eq!(found.refusals[0].model, "two");
+        assert_eq!(found.refusals[1].pool.as_deref(), Some(ACCOUNT_ROUTE));
+        assert_eq!(found.cleared_refusals.len(), 1);
+        assert_eq!(found.cleared_refusals[0].model, "one");
+        assert_eq!(found.cleared_refusals[0].source, RefusalClearSource::Run);
+        assert_eq!(found.cleared_refusals[0].cleared_unix_seconds, 120);
+
+        // A login probe proves only authentication; nothing else is cleared.
+        persist_login_probe_success(temp.path(), &route, 130)?;
+        let found = read_records(&dir)?;
+        let found = found
+            .iter()
+            .find(|r| r.account.account_key == "key")
+            .unwrap();
+        assert_eq!(found.refusals.len(), 2);
+        assert_eq!(found.cleared_refusals.len(), 1);
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
+    #[test]
+    fn a_fresh_reading_clears_a_model_refusal_with_source_reading()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let root = private(temp.path())?;
+        let dir = child(&root, OsStr::new("quota"))?;
+        let account = AccountScope {
+            extra: Default::default(),
+            adapter: "claude".into(),
+            account_key: "key".into(),
+            label: "work".into(),
+        };
+        let mut record = AccountRecord::empty(account.clone());
+        record.revision = 1;
+        record.refusals = vec![Refusal {
+            extra: Default::default(),
+            account: account.clone(),
+            model: "one".into(),
+            pool: None,
+            observed_unix_seconds: 100,
+            resets_unix_seconds: Some(600),
+        }];
+        record.snapshot = Some(QuotaSnapshot {
+            extra: Default::default(),
+            schema_version: 1,
+            account: account.clone(),
+            revision: 1,
+            status: QuotaStatus::Unknown,
+            observed_unix_seconds: 110,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: None,
+            windows: vec![QuotaWindow {
+                extra: Default::default(),
+                window_seconds: None,
+                pool: "primary".into(),
+                used_basis_points: 1000,
+                resets_unix_seconds: Some(600),
+            }],
+        });
+        let intent = UpdateIntent {
+            account: account.clone(),
+            expected: None,
+            replacement: Some(record),
+            clear_provider_observations: false,
+            readiness_probe_result: None,
+            login_probe_expiry: None,
+        };
+        let mut records = Vec::new();
+        write_intent(&dir, temp.path(), &intent, &mut records)?;
+        let policy = provenant_records::policy::Policy::default();
+        let policies = [QuotaPolicy {
+            adapter: "claude",
+            timer_seconds: 300,
+            panel_seconds: 120,
+            probe_seconds: 14,
+            low_power: true,
+            solo: false,
+        }];
+        let removed = ReadingClear {
+            dir: &dir,
+            state: temp.path(),
+            records: &mut records,
+            policy: &policy,
+            policies: &policies,
+        }
+        .run("claude", "key", 120)?;
+        assert_eq!(removed.len(), 1);
+        let cleared = read_records(&dir)?;
+        let cleared = cleared
+            .iter()
+            .find(|r| r.account.account_key == "key")
+            .unwrap();
+        assert!(cleared.refusals.is_empty());
+        assert_eq!(cleared.cleared_refusals.len(), 1);
+        assert_eq!(
+            cleared.cleared_refusals[0].source,
+            RefusalClearSource::Reading
+        );
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
+    #[test]
+    fn quota_clear_removes_recorded_refusals_and_reports_what_it_cleared()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let root = private(temp.path())?;
+        let dir = child(&root, OsStr::new("quota"))?;
+        let mut records = Vec::new();
+        let write = |records: &mut Vec<AccountRecord>, key: &str, models: &[&str]| {
+            let account = AccountScope {
+                extra: Default::default(),
+                adapter: "claude".into(),
+                account_key: key.into(),
+                label: if key == "key" {
+                    "work".into()
+                } else {
+                    "elsewhere".into()
+                },
+            };
+            let mut record = AccountRecord::empty(account.clone());
+            record.revision = 1;
+            record.refusals = models
+                .iter()
+                .map(|model| Refusal {
+                    extra: Default::default(),
+                    account: account.clone(),
+                    model: (*model).into(),
+                    pool: None,
+                    observed_unix_seconds: 100,
+                    resets_unix_seconds: Some(600),
+                })
+                .collect();
+            write_intent(
+                &dir,
+                temp.path(),
+                &UpdateIntent {
+                    account,
+                    expected: None,
+                    replacement: Some(record),
+                    clear_provider_observations: false,
+                    readiness_probe_result: None,
+                    login_probe_expiry: None,
+                },
+                records,
+            )
+        };
+        write(&mut records, "key", &["one", "two"])?;
+        write(&mut records, "other", &["one"])?;
+
+        let (data, human) = clear_report(temp.path(), "work", Some("claude/one"), 120)?;
+        assert_eq!(data["count"], 1);
+        assert_eq!(data["cleared"][0]["model"], "one");
+        assert_eq!(data["cleared"][0]["source"], "manual");
+        assert!(human.contains("claude/one") || human.contains("one"));
+        assert!(human.contains("manual"));
+        let found = read_records(&dir)?;
+        let selected = found
+            .iter()
+            .find(|r| r.account.account_key == "key")
+            .unwrap();
+        assert_eq!(selected.refusals.len(), 1);
+        assert_eq!(selected.refusals[0].model, "two");
+        assert_eq!(selected.cleared_refusals.len(), 1);
+        assert_eq!(
+            selected.cleared_refusals[0].source,
+            RefusalClearSource::Manual
+        );
+        let untouched = found
+            .iter()
+            .find(|r| r.account.account_key == "other")
+            .unwrap();
+        assert_eq!(untouched.refusals.len(), 1);
+
+        let (data, human) = clear_report(temp.path(), "key", Some("absent"), 130)?;
+        assert_eq!(data["count"], 0);
+        assert!(human.contains("No recorded refusals matched"));
+        let (data, _) = clear_report(temp.path(), "key", None, 140)?;
+        assert_eq!(data["count"], 1);
+        let found = read_records(&dir)?;
+        let selected = found
+            .iter()
+            .find(|r| r.account.account_key == "key")
+            .unwrap();
+        assert!(selected.refusals.is_empty());
+        assert_eq!(selected.cleared_refusals.len(), 2);
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
+    #[test]
     fn preparation_login_failure_is_account_wide_and_survives_independent_dispatch_reads()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
@@ -4806,10 +5302,12 @@ mod tests {
             },
             &mut records,
         )?;
+        // Every reported window shows headroom, so the model-scoped refusal
+        // without a pool clears too (docs/specs/routing.md, #3450).
         assert_eq!(state_of(&pool), ReadinessState::Unknown);
         assert_eq!(
             state_of(&scope("claude", "key", "claude/two")),
-            ReadinessState::Unavailable
+            ReadinessState::Unknown
         );
         // Forgetting the account removes its readiness file.
         let drop = UpdateIntent {

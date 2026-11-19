@@ -26,6 +26,8 @@ pub struct FabricConfig {
     pub lanes: Lanes,
     #[serde(default)]
     pub implement: ImplementConfig,
+    #[serde(default)]
+    pub batch: BatchConfig,
     /// The planner front-end: whether `provenant run --preset` runs a planner.
     #[serde(default)]
     pub plan: PlanConfig,
@@ -51,6 +53,19 @@ impl Default for ImplementConfig {
     }
 }
 
+/// Defaults for batch templates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BatchConfig {
+    pub max_parallel: usize,
+}
+
+impl Default for BatchConfig {
+    fn default() -> Self {
+        Self { max_parallel: 4 }
+    }
+}
+
 /// Fallback after an accepted steer cannot resume its provider session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,10 +77,23 @@ pub enum SteerFallback {
     Refuse,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SteerConfig {
     pub fallback: SteerFallback,
+    /// Minimum spacing between steer restart launches, in milliseconds. Steered
+    /// lanes that settle close together queue behind this gate instead of
+    /// racing the launch lock. Zero disables the stagger.
+    pub restart_spacing_ms: u64,
+}
+
+impl Default for SteerConfig {
+    fn default() -> Self {
+        Self {
+            fallback: SteerFallback::FreshWithHandoff,
+            restart_spacing_ms: 2_000,
+        }
+    }
 }
 
 /// Whether a preset run puts a principal planner in front of its graph.
@@ -506,8 +534,6 @@ pub struct Lanes {
     /// Source directories in host CARGO_HOME are read-only unless enabled.
     pub cargo_source_writes: Option<bool>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
-    pub max_concurrent_builds: Option<u64>,
-    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub cargo_build_jobs: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub max_lanes: Option<u64>,
@@ -561,7 +587,6 @@ impl Lanes {
         provenant_config::LaneBuildSettings {
             start_spacing_ms: self.start_spacing_ms,
             memory_pressure_threshold: Some(self.memory_pressure_threshold),
-            max_concurrent_builds: self.max_concurrent_builds,
             cargo_build_jobs: self.cargo_build_jobs,
             cargo_source_writes: self.cargo_source_writes,
             cargo_incremental: self.cargo_incremental,
@@ -939,13 +964,14 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     ),
     FieldMetadata::int("graph.launch_wait_seconds", 1, 14_400),
     FieldMetadata::int("graph.writer_provision_seconds", 1, 14_400),
+    FieldMetadata::int("batch.max_parallel", 1, 64),
     FieldMetadata::enumeration("steer.fallback", &["fresh_with_handoff", "refuse"]),
+    FieldMetadata::int("steer.restart_spacing_ms", 0, 600_000),
     FieldMetadata::enumeration(
         "lanes.memory_pressure_threshold",
         &["warning", "critical", "never"],
     ),
     FieldMetadata::int("lanes.start_spacing_ms", 0, 600_000),
-    FieldMetadata::int("lanes.max_concurrent_builds", 0, 64),
     FieldMetadata::int("lanes.cargo_build_jobs", 1, 1024),
     FieldMetadata::int("lanes.max_lanes", 1, 64),
     FieldMetadata::int("lanes.max_project_lanes", 1, 32),
@@ -1143,24 +1169,15 @@ mod tests {
 
     #[test]
     fn lane_build_settings_validate_shared_bounds_and_auto() {
-        let lanes: Lanes =
-            serde_json::from_str(r#"{"max_concurrent_builds": -1, "cargo_build_jobs": -1}"#)
-                .unwrap();
-        assert_eq!(lanes.max_concurrent_builds, None);
+        let lanes: Lanes = serde_json::from_str(r#"{"cargo_build_jobs": -1}"#).unwrap();
         assert_eq!(lanes.cargo_build_jobs, None);
         let mut config = config();
-        config.lanes.max_concurrent_builds = Some(65);
         config.lanes.cargo_build_jobs = Some(1025);
         config.lanes.max_lanes = Some(65);
         config.lanes.max_project_lanes = Some(0);
         config.lanes.max_writer_lanes = Some(65);
         config.lanes.max_project_writer_lanes = Some(0);
         let errors = config.validate();
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.field == "lanes.max_concurrent_builds")
-        );
         assert!(errors.iter().any(|e| e.field == "lanes.cargo_build_jobs"));
         for key in [
             "max_lanes",
@@ -1254,6 +1271,7 @@ mod tests {
             lanes: Lanes::default(),
             plan: Default::default(),
             implement: Default::default(),
+            batch: Default::default(),
             steer: Default::default(),
             limits: Limits {
                 body_bytes: 65536,
@@ -1279,6 +1297,20 @@ mod tests {
         encoded["steer"]["fallback"] = "refuse".into();
         let decoded: FabricConfig = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded.steer.fallback, SteerFallback::Refuse);
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn steer_restart_spacing_defaults_and_can_be_overridden() {
+        let config = config();
+        assert_eq!(config.steer.restart_spacing_ms, 2_000);
+        let mut encoded = serde_json::to_value(config).unwrap();
+        encoded["steer"]["restart_spacing_ms"] = 7_500.into();
+        let decoded: FabricConfig = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded.steer.restart_spacing_ms, 7_500);
+        encoded["steer"]["restart_spacing_ms"] = 0.into();
+        let decoded: FabricConfig = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.steer.restart_spacing_ms, 0);
     }
 
     #[test]
@@ -1672,6 +1704,40 @@ mod tests {
             config.warnings[0]
                 .message
                 .starts_with("domains.fabric.lanes.priority.writer:")
+        );
+    }
+
+    #[test]
+    fn retired_lane_build_cap_reports_the_ordinary_unknown_key_warning() {
+        #[derive(Serialize, Deserialize)]
+        struct Domains {
+            fabric: FabricConfig,
+        }
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(
+                &self,
+                path: &std::path::Path,
+            ) -> std::io::Result<PathBuf> {
+                Ok(path.to_owned())
+            }
+        }
+        let mut inputs =
+            provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/checkout".into());
+        inputs.state_dir = Some("/fixture/state".into());
+        let roots = inputs.resolve(&Resolver).unwrap();
+        let sections = provenant_config::DomainSections::<Domains>::new(&[SECTION]);
+        let text = b"schema_version=1\n[domains.fabric.lanes]\nmax_concurrent_builds=3\n";
+        let loaded =
+            provenant_config::load_with_domains(&roots, Some(&text[..]), &sections).unwrap();
+        let warning = loaded
+            .warnings
+            .iter()
+            .find(|warning| warning.rule == "unknown_key")
+            .expect("retired build cap is an unknown key");
+        assert_eq!(
+            warning.message,
+            "domains.fabric.lanes.max_concurrent_builds: unknown configuration key; ignored"
         );
     }
 }

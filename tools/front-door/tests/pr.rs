@@ -216,14 +216,23 @@ fn no_merge(rig: &TestRig) -> Result {
     Ok(())
 }
 
-fn pr_watch_reports_the_verified_head_and_reads_ci_through_the_observer() -> Result {
+/// Moved from the retired `pr watch` integration test: the single PR wait
+/// still reads CI through the observer and never merges.
+fn wait_pr_reports_the_observed_head_and_passes() -> Result {
     let rig = self::rig()?;
-    let output = rig.command(&["pr", "watch", "1668", "--full"])?;
+    let output = rig.command(&["wait", "--pr", "1668", "--timeout", "30s", "--json"])?;
     assert_eq!(code(&output), 0, "{:?}", output);
+    let value: serde_json::Value = String::from_utf8(output.stdout.bytes)?
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .next_back()
+        .ok_or("wait emitted no JSON record")?;
+    assert_eq!(value["data"]["targets"][0]["target"], "#1668", "{value}");
     assert_eq!(
-        String::from_utf8(output.stdout.bytes)?,
-        format!("pass #1668 {HEAD}\n")
+        value["data"]["targets"][0]["settle"], "succeeded",
+        "{value}"
     );
+    assert_eq!(value["data"]["targets"][0]["data"]["head"], HEAD, "{value}");
     let calls = fs::read_to_string(rig.project.join("gh-calls"))?;
     assert!(
         calls.contains(&format!("commits/{HEAD}/check-runs")),
@@ -233,21 +242,100 @@ fn pr_watch_reports_the_verified_head_and_reads_ci_through_the_observer() -> Res
     no_merge(&rig)
 }
 
-fn pr_watch_failure_and_head_changes_report_fail_with_head() -> Result {
-    for flag in ["watch-fail", "move-head"] {
-        let rig = self::rig()?;
-        if flag == "watch-fail" {
-            fs::write(rig.project.join("checks.json"), r#"[{"bucket":"fail"}]"#)?;
-        } else {
-            fs::write(rig.project.join(flag), "")?;
-        }
-        let output = rig.command(&["pr", "watch", "1668"])?;
-        assert_ne!(code(&output), 0, "{flag}");
-        let error = String::from_utf8(output.stderr.bytes)?;
-        assert!(error.contains(&format!("fail #1668 {HEAD}")), "{error}");
-        no_merge(&rig)?;
-    }
-    Ok(())
+/// A wait pinned to `--head` cannot verdict the previous head's failed checks.
+/// The fake forge reports the stale head first (with failing checks) and the
+/// new head on the next process, where the passing verdict arrives.
+fn wait_pr_head_ignores_the_stale_head_then_settles_on_the_new_one() -> Result {
+    let rig = self::rig()?;
+    fs::write(
+        rig.project.join("checks.json"),
+        r#"[{"name":"ci-status","bucket":"fail"}]"#,
+    )?;
+    fs::write(
+        rig.project.join("checks-1669.json"),
+        r#"[{"name":"ci-status","bucket":"pass"}]"#,
+    )?;
+    fs::write(rig.project.join("head-seq"), format!("{HEAD}\n{OTHER}"))?;
+
+    // GitHub still reports the stale head with failing checks. Pinned to the
+    // new SHA, the wait must stay pending and name the head it watches.
+    let stale = rig.command(&[
+        "wait",
+        "--pr",
+        "1668",
+        "--head",
+        OTHER,
+        "--timeout",
+        "5s",
+        "--json",
+    ])?;
+    let stale_text = String::from_utf8(stale.stdout.bytes.clone())?;
+    let stale_value: serde_json::Value = stale_text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .next_back()
+        .ok_or("pinned wait emitted no JSON record")?;
+    assert_ne!(
+        code(&stale),
+        0,
+        "stale head produced a verdict: {stale_text}"
+    );
+    assert_eq!(stale_value["data"]["timed_out"], true, "{stale_value}");
+    assert_eq!(
+        stale_value["data"]["targets"][0]["settle"], "pending",
+        "{stale_value}"
+    );
+    assert_eq!(
+        stale_value["data"]["targets"][0]["data"]["awaiting"], OTHER,
+        "{stale_value}"
+    );
+    assert!(
+        stale_text.contains(&format!("head={OTHER}")),
+        "{stale_text}"
+    );
+    assert!(
+        fs::read_to_string(rig.project.join("gh-calls"))?
+            .contains(&format!("commits/{HEAD}/check-runs")),
+        "the stale head's checks were not read"
+    );
+
+    // GitHub now reports the pinned head; its passing checks settle the wait.
+    fs::write(rig.project.join("gh-calls"), "")?;
+    let current = rig.command(&[
+        "wait",
+        "--pr",
+        "1668",
+        "--head",
+        OTHER,
+        "--timeout",
+        "5s",
+        "--json",
+    ])?;
+    let current_text = String::from_utf8(current.stdout.bytes.clone())?;
+    let current_value: serde_json::Value = current_text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .next_back()
+        .ok_or("settled wait emitted no JSON record")?;
+    assert_eq!(code(&current), 0, "{current_text}");
+    assert_eq!(
+        current_value["data"]["targets"][0]["settle"], "succeeded",
+        "{current_value}"
+    );
+    assert_eq!(
+        current_value["data"]["targets"][0]["data"]["head"], OTHER,
+        "{current_value}"
+    );
+    assert!(
+        current_text.contains(&format!("head={OTHER}")),
+        "{current_text}"
+    );
+    assert!(
+        fs::read_to_string(rig.project.join("gh-calls"))?
+            .contains(&format!("commits/{OTHER}/check-runs")),
+        "the pinned head's checks were not read"
+    );
+    no_merge(&rig)
 }
 
 fn land_refuses_unpassed_missing_and_malformed_checks() -> Result {
@@ -537,8 +625,6 @@ fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
         vec!["pr", "land", "0", "--head", HEAD],
         vec!["land", "0"],
         vec!["land", "1668", "--head"],
-        vec!["pr", "watch", "0"],
-        vec!["pr", "watch", "--admin"],
         vec!["pr", "sync", "0"],
     ] {
         assert_eq!(code(&rig.command(&args)?), 2, "{args:?}");
@@ -1148,7 +1234,7 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             };
             let draft =
                 Path::new("draft").exists() || head_value["isDraft"].as_bool().unwrap_or(false);
-            let body = serde_json::json!({"state":if merged {"closed"} else {"open"}, "head":{"sha":next,"ref":"feature","repo":{"full_name":"owner/repo"}}, "base":{"sha":base,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":mergeable,"mergeable_state":"clean","merged_at":if merged {Some("2020-01-01T00:00:00Z")} else {None},"merge_commit_sha":null,"title":"fixture","user":{"login":"fixture-author"},"draft":draft});
+            let body = serde_json::json!({"state":if merged {"closed"} else {"open"}, "head":{"sha":next,"ref":"feature","repo":{"full_name":"owner/repo"}}, "base":{"sha":base,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":mergeable,"mergeable_state":"clean","merged_at":if merged {Some("2020-01-01T00:00:00Z")} else {None},"merge_commit_sha":null,"title":"fixture","user":{"login":"fixture-author"},"draft":draft,"html_url":"https://github.com/owner/repo/pull/1668"});
             io::stdout().write_all(&serde_json::to_vec(&body)?)?;
         }
         "pr view 1668 --json headRefOid" | "pr view 1668 --json headRefOid,mergeable" => {
@@ -1460,12 +1546,12 @@ fn main() -> ExitCode {
                 pr_status_preserves_partial_results,
             ),
             (
-                "pr_watch_reports_the_verified_head_and_reads_ci_through_the_observer",
-                pr_watch_reports_the_verified_head_and_reads_ci_through_the_observer,
+                "wait_pr_reports_the_observed_head_and_passes",
+                wait_pr_reports_the_observed_head_and_passes,
             ),
             (
-                "pr_watch_failure_and_head_changes_report_fail_with_head",
-                pr_watch_failure_and_head_changes_report_fail_with_head,
+                "wait_pr_head_ignores_the_stale_head_then_settles_on_the_new_one",
+                wait_pr_head_ignores_the_stale_head_then_settles_on_the_new_one,
             ),
             (
                 "land_refuses_unpassed_missing_and_malformed_checks",

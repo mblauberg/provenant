@@ -823,6 +823,11 @@ fn register_opencode_plans(rig: &TestRig) -> Result {
 
 fn policy_codex_fixture() -> Result<TestRig> {
     let mut rig = TestRig::new()?;
+    rig.env.push((
+        "FIXTURE_API_KEY".into(),
+        "ghp_abcdefghijklmnopqrstuvwxyz0123456789".into(),
+    ));
+
     for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
         fs::create_dir_all(rig.home.join(path))?;
     }
@@ -1064,7 +1069,7 @@ fn public_implement_steers_and_resumes_the_same_local_codex_session() -> Result 
 }
 
 /// Exercise the same public writer command with an isolated invocation directory.
-fn writer_cli_launches_from_cwd(location: &str) -> Result {
+fn writer_cli_launches_from_cwd(location: &str, base: &str) -> Result {
     let native_available = graph_fixture_available()?;
     let mut rig = policy_codex_fixture()?;
     let cleanup = rig.process_cleanup();
@@ -1171,6 +1176,17 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
             assert_eq!(code(&output), 0, "{output:?}");
         }
     }
+    if base == "origin/main" {
+        let remote = rig.root.join("remote.git");
+        for args in [
+            vec!["init", "--bare", "-q", remote.to_str().ok_or("remote")?],
+            vec!["remote", "add", "origin", remote.to_str().ok_or("remote")?],
+            vec!["push", "-q", "origin", "HEAD:main"],
+        ] {
+            let output = rig.execute(&git, &args, None)?;
+            assert_eq!(code(&output), 0, "{args:?}: {output:?}");
+        }
+    }
     let tree = if branch_mode {
         let root = if location == "branch-worktree" {
             "writer-trees"
@@ -1228,7 +1244,7 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
                 "--branch",
                 "writer-branch",
                 "--base",
-                "HEAD",
+                base,
             ],
             "30s",
         )?
@@ -1258,6 +1274,14 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
             assert_eq!(node["worktree"].as_str(), tree.to_str());
         }
         assert_eq!(node["writer_binding"]["worktree"].as_str(), tree.to_str());
+        if base == "origin/main" {
+            let checkpointed = node["new_worktree_base"].as_str().unwrap_or_default();
+            assert_eq!(
+                checkpointed.len(),
+                40,
+                "base was not checkpointed: {response}"
+            );
+        }
         if matches!(
             location,
             "branch-worktree" | "branch-separate-git-dir" | "branch-bare-linked"
@@ -1300,33 +1324,43 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
 }
 
 fn writer_cli_launches_from_worktree_root() -> Result {
-    writer_cli_launches_from_cwd("worktree")
+    writer_cli_launches_from_cwd("worktree", "HEAD")
 }
 
 fn writer_cli_branch_binds_the_new_worktree() -> Result {
-    writer_cli_launches_from_cwd("branch")
+    writer_cli_launches_from_cwd("branch", "HEAD")
+}
+
+// Spec: docs/specs/run-launch.md#writer-binding
+fn writer_cli_branch_with_remote_base_from_primary_checkout() -> Result {
+    writer_cli_launches_from_cwd("branch", "origin/main")
+}
+
+// Spec: docs/specs/run-launch.md#writer-binding
+fn writer_cli_branch_with_remote_base_from_linked_checkout() -> Result {
+    writer_cli_launches_from_cwd("branch-worktree", "origin/main")
 }
 
 // Spec: docs/specs/supervisor.md#managed-writer-path-owner
 fn writer_cli_branch_from_linked_checkout_uses_primary_layout() -> Result {
-    writer_cli_launches_from_cwd("branch-worktree")
+    writer_cli_launches_from_cwd("branch-worktree", "HEAD")
 }
 
 // Spec: docs/specs/run-git.md#project-layout-ownership
 fn writer_cli_branch_from_separate_git_directory_uses_saved_primary() -> Result {
-    writer_cli_launches_from_cwd("branch-separate-git-dir")
+    writer_cli_launches_from_cwd("branch-separate-git-dir", "HEAD")
 }
 
 fn writer_cli_branch_from_bare_linked_checkout_uses_common_layout() -> Result {
-    writer_cli_launches_from_cwd("branch-bare-linked")
+    writer_cli_launches_from_cwd("branch-bare-linked", "HEAD")
 }
 
 fn writer_cli_launches_from_worktree_subdirectory() -> Result {
-    writer_cli_launches_from_cwd("subdirectory")
+    writer_cli_launches_from_cwd("subdirectory", "HEAD")
 }
 
 fn writer_cli_launches_from_primary_checkout() -> Result {
-    writer_cli_launches_from_cwd("primary")
+    writer_cli_launches_from_cwd("primary", "HEAD")
 }
 
 fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
@@ -1654,6 +1688,11 @@ fn write_opencode_session(args: &[String]) -> Result {
 
 fn claude_fixture() -> Result<TestRig> {
     let mut rig = TestRig::new()?;
+    rig.env.push((
+        "FIXTURE_API_KEY".into(),
+        "ghp_abcdefghijklmnopqrstuvwxyz0123456789".into(),
+    ));
+
     let bin = rig.root.join("provider/bin");
     fs::create_dir_all(&bin)?;
     rig.copy_executable(&std::env::current_exe()?, &bin.join("claude"))?;
@@ -2159,10 +2198,73 @@ fn writer_registry_fixture() -> Result<TestRig> {
         rig.state.join("config.toml"),
         "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\njunior=[{model='codex/gpt-6-luna',effort='low'}]\n",
     )?;
-    let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
-    let seeded = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
-    assert_eq!(code(&seeded), 0, "{seeded:?}");
+    let seeded = provenant_os::fixture::git_command()
+        .current_dir(&rig.project)
+        .args(["commit", "--allow-empty", "-qm", "base"])
+        .output()?;
+    assert!(seeded.status.success(), "{seeded:?}");
     Ok(rig)
+}
+
+// Spec: docs/specs/run.md#writer-pin-and-re-pin
+fn dirty_writer_mode_launches_direct_graph(mode: &str) -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = writer_registry_fixture()?;
+    let _cleanup = rig.process_cleanup();
+    fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.writer_dirty'='{mode}'\n[domains.routing.pools]\njunior=[{{model='codex/gpt-6-luna',effort='low'}}]\n"
+        ),
+    )?;
+    let made = rig.command(&[
+        "worktree",
+        "create",
+        "dirty-lane",
+        "--base",
+        "HEAD",
+        "--json",
+    ])?;
+    assert_eq!(code(&made), 0, "{made:?}");
+    let tree = rig.project.join(".worktrees/dirty-lane");
+    fs::write(tree.join("retained.txt"), "draft")?;
+    let git_head = || -> Result<String> {
+        let result = provenant_os::fixture::git_command()
+            .current_dir(&tree)
+            .args(["rev-parse", "HEAD"])
+            .output()?;
+        assert!(result.status.success());
+        Ok(String::from_utf8(result.stdout)?.trim().to_owned())
+    };
+    let before = git_head()?;
+    let lane = run_graph_provider_with_wait(
+        &rig,
+        &format!("dirty-{}", mode.replace('_', "-")),
+        json!({
+            "id":"writer", "prompt":"fixture writer", "access":"worktree_write", "worktree":tree,
+            "route":{"alias":"junior"}
+        }),
+        "30s",
+    )?;
+    assert!(!lane["started_at"].is_null(), "{lane}");
+    let after = git_head()?;
+    if mode == "wip_commit" {
+        assert_ne!(before, after);
+    } else {
+        assert_eq!(before, after);
+    }
+    assert_eq!(fs::read_to_string(tree.join("retained.txt"))?, "draft");
+    Ok(())
+}
+
+fn continue_in_place_launches_direct_writer_graph() -> Result {
+    dirty_writer_mode_launches_direct_graph("continue_in_place")
+}
+
+fn wip_commit_launches_direct_writer_graph() -> Result {
+    dirty_writer_mode_launches_direct_graph("wip_commit")
 }
 
 /// Admission starts or durably schedules a retry under repository contention.
@@ -4279,7 +4381,7 @@ fn declared_stop_writer_retry_uses_the_public_cli() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
-    let rig = policy_codex_fixture()?;
+    let mut rig = policy_codex_fixture()?;
     let _cleanup = rig.process_cleanup();
     let account =
         provenant_providers::identity::codex_account(br#"{"tokens":{"account_id":"fixture-one"}}"#)
@@ -4312,7 +4414,59 @@ fn declared_stop_writer_retry_uses_the_public_cli() -> Result {
         "30s",
     )?;
     assert_eq!(lane["state"], "review_required", "{lane}");
-    let out = rig.command(&["retry", "retry-stop/writer", "--json"])?;
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let identity = provenant_cli::fabric::Context::open(roots, &rig.home, &rig.project)?.identity;
+    let directory = rig
+        .state
+        .join("fabric/graphs")
+        .join(identity.project.to_string());
+    let snapshot = || -> Result<std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>> {
+        let mut files = std::collections::BTreeMap::new();
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if (name.starts_with("graph-retry-stop.") && !name.ends_with(".lock"))
+                || name == "retry-stop.events.jsonl"
+            {
+                files.insert(entry.path(), fs::read(entry.path())?);
+            }
+        }
+        let pending = directory.join("pending/retry-stop.pending");
+        if pending.exists() {
+            files.insert(pending.clone(), fs::read(pending)?);
+        }
+        Ok(files)
+    };
+    let before = snapshot()?;
+    let brief = rig.root.join("retry-brief.md");
+    let saved_env = rig.env.clone();
+    for (k, v) in &mut rig.env {
+        if k == "PATH" {
+            *v = std::ffi::OsString::from("/fixture/changed/path");
+        }
+    }
+    // Also assert that a refused retry with invalid extension from a changed PATH leaves checkpoint unchanged
+    let out = rig.command(&[
+        "retry",
+        "retry-stop",
+        "--extend",
+        "limits.unconfigured=1",
+        "--json",
+    ])?;
+    assert_ne!(code(&out), 0, "{out:?}");
+    assert_eq!(snapshot()?, before);
+
+    rig.env = saved_env;
+    fs::write(&brief, "Complete the original task.")?;
+    let out = rig.command(&[
+        "retry",
+        "retry-stop/writer",
+        "--brief-file",
+        brief.to_str().ok_or("brief")?,
+        "--json",
+    ])?;
     let reply: Value = serde_json::from_slice(&out.stdout.bytes)?;
     assert_eq!(code(&out), 0, "{reply}; {out:?}");
     let rows = reply["data"]["rows"].as_array().ok_or("retry rows")?;
@@ -5802,6 +5956,92 @@ fn provider_checks_preserve_routes_and_settlement_causes() -> Result {
     rig.assert_v1_root_untouched()
 }
 
+/// Issue #3531: an exact model present in the cached discovered layer must
+/// resolve through the same effective catalogue `route list` uses, so launch
+/// emits no "not in the catalogue" warning. A genuinely unknown model still
+/// warns.
+fn discovered_exact_model_launch_has_no_catalogue_warning() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    let bin = rig.root.join("provider/bin");
+    fs::create_dir_all(&bin)?;
+    rig.copy_executable(&std::env::current_exe()?, &bin.join("opencode"))?;
+    register_opencode_plans(&rig)?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+
+    // Publish a discovery snapshot for an exact model absent from the bundled
+    // catalogue, using the same private layout the discovery refresh writes.
+    let directory = rig.state.join("model-discovery");
+    fs::create_dir_all(&directory)?;
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+    let snapshot = provenant_routing::DiscoverySnapshot {
+        adapter: "opencode".into(),
+        observed_at: 1_700_000_000,
+        models: vec![provenant_routing::DiscoveredModel {
+            model: provenant_routing::ModelId::parse("opencode/opencode/hy4-flash-free")?,
+            efforts: Vec::new(),
+            controls_known: false,
+            effort_suffix: false,
+            service_tiers: Vec::new(),
+        }],
+    };
+    let path = directory.join("opencode.json");
+    fs::write(&path, serde_json::to_vec(&snapshot)?)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+
+    let run_one = |name: &str, model: &str| -> Result<support::Settled> {
+        let document = rig.root.join(format!("{name}.json"));
+        fs::write(
+            &document,
+            serde_json::to_vec(&json!({
+                "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+                "graph_id":name,
+                "nodes":[{
+                    "id":"provider", "prompt":"exact discovered model", "access":"read_only",
+                    "route":{"adapter":"opencode","model":model}
+                }]
+            }))?,
+        )?;
+        rig.run_and_wait(&["--file", document.to_str().ok_or("document")?], "30s")
+    };
+
+    let discovered = run_one("discovered-exact", "opencode/opencode/hy4-flash-free")?;
+    assert_eq!(
+        discovered.launch_value["error"],
+        Value::Null,
+        "{:?}",
+        discovered.launch_value
+    );
+    let stderr = String::from_utf8_lossy(&discovered.launch.stderr.bytes);
+    assert!(
+        !stderr.contains("not in the catalogue"),
+        "discovered exact model warned: {stderr}"
+    );
+
+    let unknown = run_one("unknown-exact", "opencode/opencode/uncatalogued-3531")?;
+    assert_eq!(
+        unknown.launch_value["error"],
+        Value::Null,
+        "{:?}",
+        unknown.launch_value
+    );
+    let stderr = String::from_utf8_lossy(&unknown.launch.stderr.bytes);
+    assert!(
+        stderr.contains("not in the catalogue"),
+        "unknown model did not warn: {stderr}"
+    );
+
+    cleanup.disarm();
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     #[cfg(target_os = "macos")]
@@ -5900,6 +6140,14 @@ fn main() -> ExitCode {
                 writer_cli_branch_binds_the_new_worktree,
             ),
             (
+                "writer_cli_branch_with_remote_base_from_primary_checkout",
+                writer_cli_branch_with_remote_base_from_primary_checkout,
+            ),
+            (
+                "writer_cli_branch_with_remote_base_from_linked_checkout",
+                writer_cli_branch_with_remote_base_from_linked_checkout,
+            ),
+            (
                 "writer_cli_branch_from_linked_checkout_uses_primary_layout",
                 writer_cli_branch_from_linked_checkout_uses_primary_layout,
             ),
@@ -5977,6 +6225,14 @@ fn main() -> ExitCode {
                 "declared_stop_writer_retry_uses_the_public_cli",
                 declared_stop_writer_retry_uses_the_public_cli,
             ),
+            (
+                "continue_in_place_launches_direct_writer_graph",
+                continue_in_place_launches_direct_writer_graph,
+            ),
+            (
+                "wip_commit_launches_direct_writer_graph",
+                wip_commit_launches_direct_writer_graph,
+            ),
             ("graph_writer_restarts_fresh", graph_writer_restarts_fresh),
             ("nested_writer_fixture_child", nested_writer_fixture_child),
             (
@@ -6042,6 +6298,10 @@ fn main() -> ExitCode {
             (
                 "public_implement_steers_and_resumes_the_same_local_codex_session",
                 public_implement_steers_and_resumes_the_same_local_codex_session,
+            ),
+            (
+                "discovered_exact_model_launch_has_no_catalogue_warning",
+                discovered_exact_model_launch_has_no_catalogue_warning,
             ),
         ];
         let names: Vec<_> = tests.iter().map(|(name, _)| *name).collect();

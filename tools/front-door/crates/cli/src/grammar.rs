@@ -173,8 +173,11 @@ pub enum Command {
     /// Retry a graph, node or attempt
     #[command(name = "retry", add = crate::metadata::CoreCommand(5, "provenant retry fix-login"))]
     Retry(Resume),
-    /// Save input durably; interrupt after live session validation and resume the same session after settlement
-    #[command(add = crate::metadata::CoreCommand(3, "provenant steer fix-login/implement --brief-file - < message.md"))]
+    /// Deliver a steering note; resume the session where the provider supports it
+    #[command(
+        long_about = "Save a steering note durably, then hand it to the live attempt. Providers that can resume a session (claude, codex, cursor, agy, opencode) keep that session across the restart. Providers without session resume (command and host-native routes) restart fresh with the accepted brief, prior handoff and queued steering text. The configured fallback and its source are printed before the live attempt is interrupted, and restarts are staggered so a batch cannot race the launch lock.",
+        add = crate::metadata::CoreCommand(3, "provenant steer fix-login/implement --brief-file - < message.md")
+    )]
     Steer(crate::inbox::Steer),
     /// Apply a patch to unstarted graph nodes
     #[command(add = crate::metadata::CoreCommand(6, "provenant edit fix-login --file patch.json"))]
@@ -241,6 +244,14 @@ pub enum Command {
     /// Run harness and git hook handlers
     #[command(subcommand)]
     Hook(Hook),
+    /// Run a command under a named admission class slot
+    Admit {
+        /// Admission class name (e.g. `build`)
+        class: String,
+        /// The command to execute under the admission slot
+        #[arg(last = true, required = true, allow_hyphen_values = true)]
+        command: Vec<OsString>,
+    },
     #[command(subcommand, hide = true)]
     Internal(Internal),
 }
@@ -364,11 +375,6 @@ pub enum Pr {
         /// Retry host binding to the observed PR branch and head; close ended bindings
         #[arg(long)]
         bind: bool,
-    },
-    /// Wait for CI and report pass or fail with each pull request head
-    Watch {
-        #[arg(required = true, catalog_u64_range = 1..)]
-        numbers: Vec<u64>,
     },
     /// Open a pull request with the repository template filled from receipts
     Open(Box<PrOpen>),
@@ -1142,12 +1148,6 @@ pub enum Internal {
     EventListen {
         repository: String,
     },
-    /// Run Cargo through the selected build admission backend (the lane's cargo shim). Backend and source come from `PROVENANT_BUILD_ADMISSION_BACKEND` and `PROVENANT_BUILD_ADMISSION_SOURCE`; builtin slot directory/count use `PROVENANT_BUILD_SLOT_STATE` and `PROVENANT_BUILD_SLOTS`, never lane arguments.
-    BuildSlot {
-        /// The real cargo, then its arguments.
-        #[arg(last = true, required = true, allow_hyphen_values = true)]
-        command: Vec<OsString>,
-    },
     Supervise {
         /// Private S2 handoff values, validated and adopted only by supervisor.
         #[arg(hide = true, num_args = 5..=6, catalog_u64_range = 3..=2147483647)]
@@ -1211,7 +1211,22 @@ pub(crate) fn since(value: &str) -> Result<jiff::Timestamp, String> {
 
 #[cfg(test)]
 mod target_tests {
-    use super::since;
+    use super::{graph_name, since};
+
+    #[test]
+    fn graph_name_refusal_suggests_the_normalised_name() {
+        for (bad, suggestion) in [
+            ("Foo-", "foo"),
+            ("Foo", "foo"),
+            ("foo--bar", "foo-bar"),
+            ("UPPER", "upper"),
+        ] {
+            let error = graph_name(bad).expect_err(bad);
+            assert!(error.contains(suggestion), "{bad}: {error}");
+            assert!(error.contains("try `"), "{bad}: {error}");
+        }
+        assert_eq!(graph_name("foo-bar-2").unwrap(), "foo-bar-2");
+    }
 
     #[test]
     fn since_accepts_spans() {
@@ -1331,6 +1346,9 @@ pub struct Wait {
     /// Pull request whose required checks, merge or close ends the wait (repeatable)
     #[arg(long = "pr", value_name = "NUMBER", catalog_u64_range = 1..)]
     pub prs: Vec<u64>,
+    /// Wait until GitHub reports this exact head; never verdict another SHA
+    #[arg(long, value_name = "SHA", value_parser = parse_head_oid)]
+    pub head: Option<String>,
     /// Wait until every target settles (the default)
     #[arg(long, conflicts_with_all = ["any", "fail_fast"])]
     pub all: bool,
@@ -1353,6 +1371,12 @@ pub struct GraphTrace {
     /// Graph, node or attempt, as NAME[/NODE[#N]]
     #[arg(value_name = "TARGET", catalog_graph_target())]
     pub target: Target,
+}
+
+fn parse_head_oid(value: &str) -> Result<String, String> {
+    GitOid::parse(value)
+        .map(|_| value.to_owned())
+        .map_err(|error| error.to_string())
 }
 
 fn parse_landing_tier(value: &str) -> Result<String, String> {

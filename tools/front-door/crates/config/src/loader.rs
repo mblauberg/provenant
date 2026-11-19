@@ -641,6 +641,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
         "gc.schedule",
         "gc.idle",
         "gc.sweep_budget",
+        "gc.stale_graph_age",
         "gc.graph_checkpoint_days",
         "gc.discard_archive_retention",
         "gc.free_floor",

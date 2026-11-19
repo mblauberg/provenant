@@ -79,7 +79,7 @@ fn graph_review_launch_submits_pinned_source_and_base() -> Result<(), Box<dyn st
         let observation = graph_owner.observe_or_start(
             &key,
             graph::NodeInput {
-                review_launch: false,
+                writer_dirty_preflight: false, review_launch: false,
                 attachments: &[],
                 capabilities: None,
                 capability_sources: None,
@@ -220,7 +220,7 @@ fn child_launch_refuses_credential_and_state_roots_at_the_host()
             let result = owner.observe_or_start(
                 &key,
                 graph::NodeInput {
-                    review_launch: false,
+                    writer_dirty_preflight: false, review_launch: false,
                     attachments: &[],
                     capabilities: None,
                     capability_sources: None,
@@ -346,7 +346,7 @@ fn pinned_review_range_survives_moved_ref_and_another_checkout()
         ..Default::default()
     };
     let node = || graph::NodeInput {
-        review_launch: false,
+        writer_dirty_preflight: false, review_launch: false,
         attachments: &[],
         capabilities: None,
         capability_sources: None,
@@ -632,7 +632,7 @@ fn integrating_graph_writer_refuses_a_source_outside_the_pinned_base()
         .observe_or_start(
             &key,
             graph::NodeInput {
-                review_launch: false,
+                writer_dirty_preflight: false, review_launch: false,
                 attachments: &[],
                 capabilities: None,
                 capability_sources: None,

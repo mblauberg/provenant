@@ -149,7 +149,7 @@ pub enum ControlState {
 }
 
 /// Receipt for one control request. `unsupported` records no side effect.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ControlReceipt {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
@@ -164,6 +164,25 @@ pub struct ControlReceipt {
     pub reason: String,
     pub message_id: Option<MessageId>,
 }
+
+// Flattened into `InboxResult::Control`: a single-pass reader keeps that chain
+// at one flatten level while retaining unknown fields for round trips.
+crate::deserialize_with_extra!(ControlReceipt {
+    extra: extra,
+    required {
+        operation_id: OperationId,
+        control: ControlKind,
+        target: String,
+        launch: LaunchKind,
+        support: ControlSupport,
+        state: ControlState,
+        reason: String,
+    }
+    optional {
+        transport: Option<AnswerTransport>,
+        message_id: Option<MessageId>,
+    }
+});
 
 /// Stable refusal code for an unsupported control receipt. Every edge that
 /// reports one, CLI or relay, uses this code and `ControlReceipt::refusal_message`.
@@ -182,6 +201,37 @@ impl ControlReceipt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receipt_keeps_unknown_fields_without_a_flatten_chain() {
+        let wire = serde_json::json!({
+            "operation_id": "op-1",
+            "control": "steer",
+            "target": "HOST/PROJECT/SESSION",
+            "launch": "lane",
+            "support": "unsupported",
+            "state": "unsupported",
+            "reason": "no",
+            "transport": null,
+            "message_id": null,
+            "from_a_newer_writer": true,
+        });
+        let receipt: ControlReceipt = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&receipt).unwrap(), wire);
+    }
+
+    #[test]
+    fn receipt_rejects_duplicate_required_and_optional_fields() {
+        let base = r#""operation_id":"op-1","control":"steer","target":"host","launch":"lane","support":"unsupported","state":"unsupported","reason":"no""#;
+        for duplicate in [
+            r#""reason":"again""#,
+            r#""transport":null,"transport":null""#,
+        ] {
+            let input = format!("{{{base},{duplicate}}}");
+            let error = serde_json::from_str::<ControlReceipt>(&input).unwrap_err();
+            assert!(error.to_string().contains("duplicate field"), "{error}");
+        }
+    }
 
     #[test]
     fn matrix_has_one_row_per_adapter_and_launch_kind() {

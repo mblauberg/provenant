@@ -313,19 +313,10 @@ fn loop_admission_counts_every_round_before_any_launch() {
         nodes: 6,
         ..Default::default()
     };
-    let run = advance_with_budget(
-        &document,
-        &mut owner,
-        &mut journal,
-        &limits,
-        &Default::default(),
-    )
-    .unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(
-        run.checkpoint.pause_cause(),
-        Some(PauseCause::StructuralLimit)
-    );
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+    let error = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default()).unwrap_err();
+    assert!(matches!(error, GraphError::Candidate(CandidateError::Structural(_))));
+    assert!(journal.0.is_none());
     assert!(owner.calls.is_empty());
 }
 
@@ -1077,12 +1068,34 @@ fn loop_default_host_allows_one_to_two_round_extension() {
     assert!(run.checkpoint.successful());
 }
 
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+#[test]
+fn loop_extension_refusals_keep_the_rule_and_identifier() {
+    let mut document = fixture("extend");
+    document.nodes[0].loop_body.as_mut().unwrap().max_extension_rounds = 1;
+    let limits = crate::config::GraphLimits::default();
+    let mut journal = MemoryJournal::default();
+    advance_with_budget(&document, &mut reviews(&["VERDICT: FAIL"]), &mut journal, &limits, &Default::default()).unwrap();
+    let mut checkpoint = journal.0.clone().unwrap();
+    checkpoint.extensions.push("loop.revise.rounds=2".into());
+    for (value, rule) in [("loop.revise.rounds=02", refusal::ExtensionRule::NonIncreasing), ("loop.revise.rounds=4", refusal::ExtensionRule::MaxExtensionRounds)] {
+        let before = checkpoint.clone();
+        let error = match admit_candidate(&document, Some(&checkpoint), &[value.into()], &limits, &Default::default(), None) { Ok(_) => panic!("expected refusal"), Err(error) => error };
+        let CandidateError::Extension(cause) = error else { panic!("expected extension refusal") };
+        assert_eq!(cause.rule, rule);
+        assert_eq!(cause.loop_id.as_deref(), Some("revise"));
+        assert!(!cause.next_action().is_empty());
+        assert_eq!(checkpoint, before);
+    }
+}
+
 #[test]
 fn loop_host_ceiling_rejects_third_round_before_saving_and_can_accept() {
+    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     let document = fixture("exhaust");
     let limits = tight_limits();
     let mut journal = MemoryJournal::default();
-    let paused = advance_with_budget(
+    advance_with_budget(
         &document,
         &mut reviews(&["VERDICT: FAIL", "VERDICT: FAIL"]),
         &mut journal,
@@ -1090,22 +1103,13 @@ fn loop_host_ceiling_rejects_third_round_before_saving_and_can_accept() {
         &Default::default(),
     )
     .unwrap();
-    let rejected = extension(
-        &document,
-        &mut reviews(&[]),
-        &mut journal,
-        &["loop.revise.rounds=3".into()],
-    );
-    assert_eq!(rejected.status, GraphStatus::Paused);
-    assert_eq!(
-        rejected.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidLoopDecision)
-    );
-    assert_eq!(
-        rejected.checkpoint.nodes.len(),
-        paused.checkpoint.nodes.len()
-    );
-    assert!(rejected.checkpoint.extensions.is_empty());
+    let paused = resume_with_budget(
+        &document, &mut reviews(&[]), &mut journal, &limits,
+        &Default::default(), &["loop.revise.rounds=3".into()],
+    ).unwrap();
+    assert_eq!(paused.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+    assert_eq!(journal.0.as_ref(), Some(&paused.checkpoint));
+    assert!(paused.checkpoint.extensions.is_empty());
     let accepted = extension(
         &document,
         &mut reviews(&[]),
@@ -1141,7 +1145,7 @@ fn loop_inbox_extension_respects_host_ceiling_and_keeps_the_rejected_ask_until_r
     assert_eq!(paused.status, GraphStatus::Paused);
     assert_eq!(
         paused.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidLoopDecision)
+        Some(PauseCause::StructuralLimit)
     );
     assert!(paused.checkpoint.extensions.is_empty());
     // The rejected answer stays inspectable through its link until a resume
@@ -1676,7 +1680,7 @@ fn loop_inbox_large_extension_cannot_bypass_host_node_limit() {
     assert_eq!(paused.status, GraphStatus::Paused);
     assert_eq!(
         paused.checkpoint.pause_cause(),
-        Some(PauseCause::InvalidLoopDecision)
+        Some(PauseCause::StructuralLimit)
     );
     assert_eq!(paused.checkpoint.nodes.len(), 5);
     assert!(paused.checkpoint.extensions.is_empty());
@@ -2768,6 +2772,7 @@ fn principal_recovery_completes_enclosing_composite_and_delivery_continues() {
             soft_review_coverage: false,
             hard_review_coverage: false,
             required_review_lenses: Vec::new(),
+            max_parallel: None,
             exports: vec![],
         },
     ));
@@ -2825,6 +2830,7 @@ fn compiled_repair_design_continuation_keeps_the_original_writer() {
             soft_review_coverage: false,
             hard_review_coverage: false,
             required_review_lenses: Vec::new(),
+            max_parallel: None,
             exports: vec![],
         },
     )];

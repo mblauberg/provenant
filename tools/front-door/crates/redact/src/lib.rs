@@ -1,7 +1,7 @@
-//! Streaming redaction for disclosure projections.
+//! Streaming redaction for publication and disclosure boundaries.
 //!
 //! Exact literal prefixes and incomplete token markers stay buffered across
-//! chunks. The capture filter's EOF hook releases any unmatched tail.
+//! chunks. The streaming filter's EOF hook releases any unmatched tail.
 //! `key=value` credential assignments are scanned byte by byte: keys stream
 //! through unchanged and only the value is withheld, so no replay is needed.
 use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, FilterError};
@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, VecDeque};
 use thiserror::Error;
 
 const REDACTED: &[u8] = b"[REDACTED]";
+/// Short values are too ambiguous for document-wide substring replacement or refusal.
+pub const MIN_EXACT_BYTES: usize = 8;
 const MAX_SECRETS: usize = 128;
 const MAX_SECRET_BYTES: usize = 64 * 1024;
 const MAX_SECRET_LENGTH: usize = 16 * 1024;
@@ -23,6 +25,8 @@ pub enum RedactorError {
     SecretSetTooLarge,
     #[error("a secret value exceeds its byte bound")]
     SecretTooLong,
+    #[error("publication text filter failed")]
+    PublicationFilterFailed,
 }
 
 #[derive(Default)]
@@ -453,10 +457,21 @@ fn marker_match(bytes: &[u8], marker: &[u8]) -> MarkerMatch {
         }
         if bytes[index] == b'\\' {
             let remaining = &bytes[index..];
-            let encoded = format!("\\u{:04x}", expected);
+            // Escaped JSON can contain a backslash at every other byte.
+            // Compare the fixed-width Unicode form without allocating once
+            // per candidate marker on that hot path.
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let encoded = [
+                b'\\',
+                b'u',
+                b'0',
+                b'0',
+                HEX[usize::from(expected >> 4)],
+                HEX[usize::from(expected & 0x0f)],
+            ];
             let width = remaining.len().min(6);
             if remaining[..width].get(1).is_some_and(|byte| *byte != b'u')
-                || !remaining[..width].eq_ignore_ascii_case(&encoded.as_bytes()[..width])
+                || !remaining[..width].eq_ignore_ascii_case(&encoded[..width])
             {
                 return MarkerMatch::Mismatch;
             }
@@ -473,7 +488,31 @@ fn marker_match(bytes: &[u8], marker: &[u8]) -> MarkerMatch {
     MarkerMatch::Complete(index)
 }
 
+// First bytes that can begin a token marker. Every other byte, and an
+// escape that is not \u, mismatches every marker, so the per-marker
+// comparison is skipped on that hot path (runs of escaped quotes).
+const MARKER_START: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut index = 0;
+    while index < TOKEN_MARKERS.len() {
+        table[TOKEN_MARKERS[index].0[0] as usize] = true;
+        index += 1;
+    }
+    table
+};
+
+fn marker_may_start(bytes: &[u8]) -> bool {
+    match bytes {
+        [] | [b'\\'] => true,
+        [b'\\', next, ..] => *next == b'u',
+        [first, ..] => MARKER_START[usize::from(*first)],
+    }
+}
+
 fn token_marker_at(bytes: &[u8]) -> Option<(usize, TokenKind)> {
+    if !marker_may_start(bytes) {
+        return None;
+    }
     TOKEN_MARKERS.iter().find_map(|(marker, kind)| {
         match marker_match(bytes, marker_pattern(marker)) {
             MarkerMatch::Complete(length) => Some((length, *kind)),
@@ -483,6 +522,9 @@ fn token_marker_at(bytes: &[u8]) -> Option<(usize, TokenKind)> {
 }
 
 fn token_marker_prefix(bytes: &[u8]) -> bool {
+    if !marker_may_start(bytes) {
+        return false;
+    }
     TOKEN_MARKERS.iter().any(|(marker, _)| {
         matches!(
             marker_match(bytes, marker_pattern(marker)),
@@ -514,6 +556,10 @@ const ASSIGNMENT_KEYS: &[(&[u8], bool)] = &[
     (b"api-key", false),
     (b"apikey", false),
     (b"access_key", false),
+    (b"access_key_id", false),
+    (b"private_key", false),
+    (b"database_url", false),
+    (b"connection_string", false),
     (b"access-key", false),
     (b"auth", false),
     (b"authorization", true),
@@ -912,6 +958,9 @@ impl AssignmentScanner {
 
     /// The scheme flag of the key that the run ends with, if any.
     fn key_ending_run(&self) -> Option<bool> {
+        if self.run.is_empty() {
+            return None;
+        }
         ASSIGNMENT_KEYS.iter().find_map(|(key, scheme)| {
             let start = self.run.len().checked_sub(key.len())?;
             let bounded = start == 0 || !self.run[start - 1].is_ascii_alphanumeric();
@@ -1036,12 +1085,278 @@ impl<'a> FrameEmitter<'a> {
     }
 }
 
-/// Stateful filter used directly by supervisor capture. Values are never
+struct EncodedUnit {
+    source_length: usize,
+    decoded_remaining: usize,
+    masked: bool,
+}
+
+enum JsonUnit {
+    NeedMore,
+    Complete(usize, [u8; 4], usize),
+}
+
+/// Literal matcher for text streams that may contain JSON string escapes.
+/// It compares decoded UTF-8 bytes while retaining the original source bytes
+/// until every possible secret match affecting them is decided.
+struct DecodedLiteralMatcher {
+    matcher: LiteralAutomaton,
+    pending_escape: Vec<u8>,
+    source: VecDeque<u8>,
+    units: VecDeque<EncodedUnit>,
+    decisions: Vec<(u8, bool)>,
+}
+
+impl DecodedLiteralMatcher {
+    fn new(secrets: &[Vec<u8>]) -> Self {
+        Self {
+            matcher: LiteralAutomaton::new(secrets),
+            pending_escape: Vec::with_capacity(12),
+            source: VecDeque::new(),
+            units: VecDeque::new(),
+            decisions: Vec::with_capacity(4),
+        }
+    }
+
+    fn matched(&self) -> bool {
+        self.matcher.matched
+    }
+
+    fn filter(&mut self, bytes: &[u8], output: &mut Vec<(u8, bool)>) -> Result<(), FilterError> {
+        for byte in bytes {
+            self.pending_escape.push(*byte);
+            self.process_pending(false, output)?;
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self, output: &mut Vec<(u8, bool)>) -> Result<(), FilterError> {
+        self.process_pending(true, output)?;
+        if !self.pending_escape.is_empty() {
+            return Err(FilterError);
+        }
+        self.decisions.clear();
+        self.matcher.finish(&mut self.decisions);
+        self.consume_decisions(output)?;
+        if !self.units.is_empty() || !self.source.is_empty() {
+            return Err(FilterError);
+        }
+        Ok(())
+    }
+
+    fn process_pending(
+        &mut self,
+        eof: bool,
+        output: &mut Vec<(u8, bool)>,
+    ) -> Result<(), FilterError> {
+        while !self.pending_escape.is_empty() {
+            let JsonUnit::Complete(source_length, decoded, decoded_length) =
+                parse_json_unit(&self.pending_escape, eof)
+            else {
+                break;
+            };
+            self.source
+                .extend(self.pending_escape.drain(..source_length));
+            self.units.push_back(EncodedUnit {
+                source_length,
+                decoded_remaining: decoded_length,
+                masked: false,
+            });
+            for byte in &decoded[..decoded_length] {
+                self.decisions.clear();
+                self.matcher
+                    .filter(std::slice::from_ref(byte), &mut self.decisions);
+                self.consume_decisions(output)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn consume_decisions(&mut self, output: &mut Vec<(u8, bool)>) -> Result<(), FilterError> {
+        for (_, masked) in self.decisions.drain(..) {
+            let Some(unit) = self.units.front_mut() else {
+                return Err(FilterError);
+            };
+            if unit.decoded_remaining == 0 {
+                return Err(FilterError);
+            }
+            unit.masked |= masked;
+            unit.decoded_remaining -= 1;
+            if unit.decoded_remaining == 0 {
+                let unit = self.units.pop_front().ok_or(FilterError)?;
+                for _ in 0..unit.source_length {
+                    let byte = self.source.pop_front().ok_or(FilterError)?;
+                    output.push((byte, unit.masked));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Match both source bytes and their JSON-decoded text. Keeping both scanners
+/// preserves exact literal secrets that happen to spell an escape sequence.
+struct EncodedLiteralMatcher {
+    raw: LiteralAutomaton,
+    decoded: DecodedLiteralMatcher,
+    raw_pending: VecDeque<(u8, bool)>,
+    decoded_pending: VecDeque<(u8, bool)>,
+    raw_decisions: Vec<(u8, bool)>,
+    decoded_decisions: Vec<(u8, bool)>,
+}
+
+impl EncodedLiteralMatcher {
+    fn new(secrets: &[Vec<u8>]) -> Self {
+        Self {
+            raw: LiteralAutomaton::new(secrets),
+            decoded: DecodedLiteralMatcher::new(secrets),
+            raw_pending: VecDeque::new(),
+            decoded_pending: VecDeque::new(),
+            raw_decisions: Vec::new(),
+            decoded_decisions: Vec::new(),
+        }
+    }
+
+    fn matched(&self) -> bool {
+        self.raw.matched || self.decoded.matched()
+    }
+
+    fn filter(&mut self, bytes: &[u8], output: &mut Vec<(u8, bool)>) -> Result<(), FilterError> {
+        self.raw_decisions.clear();
+        self.raw.filter(bytes, &mut self.raw_decisions);
+        self.decoded_decisions.clear();
+        self.decoded.filter(bytes, &mut self.decoded_decisions)?;
+        self.raw_pending.extend(self.raw_decisions.drain(..));
+        self.decoded_pending
+            .extend(self.decoded_decisions.drain(..));
+        self.merge(output)
+    }
+
+    fn finish(&mut self, output: &mut Vec<(u8, bool)>) -> Result<(), FilterError> {
+        self.raw_decisions.clear();
+        self.raw.finish(&mut self.raw_decisions);
+        self.decoded_decisions.clear();
+        self.decoded.finish(&mut self.decoded_decisions)?;
+        self.raw_pending.extend(self.raw_decisions.drain(..));
+        self.decoded_pending
+            .extend(self.decoded_decisions.drain(..));
+        self.merge(output)?;
+        if !self.raw_pending.is_empty() || !self.decoded_pending.is_empty() {
+            return Err(FilterError);
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, output: &mut Vec<(u8, bool)>) -> Result<(), FilterError> {
+        while let (Some((raw_byte, raw_masked)), Some((decoded_byte, decoded_masked))) =
+            (self.raw_pending.front(), self.decoded_pending.front())
+        {
+            if raw_byte != decoded_byte {
+                return Err(FilterError);
+            }
+            output.push((*raw_byte, *raw_masked || *decoded_masked));
+            self.raw_pending.pop_front();
+            self.decoded_pending.pop_front();
+        }
+        Ok(())
+    }
+}
+
+fn parse_json_unit(source: &[u8], eof: bool) -> JsonUnit {
+    let complete = |length: usize, byte: u8| {
+        let mut decoded = [0; 4];
+        decoded[0] = byte;
+        JsonUnit::Complete(length, decoded, 1)
+    };
+    let Some(first) = source.first().copied() else {
+        return JsonUnit::NeedMore;
+    };
+    if first != b'\\' {
+        return complete(1, first);
+    }
+    let invalid = || complete(1, b'\\');
+    let Some(escape) = source.get(1).copied() else {
+        return if eof { invalid() } else { JsonUnit::NeedMore };
+    };
+    let escaped = match escape {
+        b'"' => Some(b'"'),
+        b'\\' => Some(b'\\'),
+        b'/' => Some(b'/'),
+        b'b' => Some(b'\x08'),
+        b'f' => Some(b'\x0c'),
+        b'n' => Some(b'\n'),
+        b'r' => Some(b'\r'),
+        b't' => Some(b'\t'),
+        _ => None,
+    };
+    if let Some(byte) = escaped {
+        return complete(2, byte);
+    }
+    if escape != b'u' {
+        return invalid();
+    }
+    if source.len() < 6 {
+        return if eof { invalid() } else { JsonUnit::NeedMore };
+    }
+    let Some(first_unit) = parse_hex4(&source[2..6]) else {
+        return invalid();
+    };
+    let codepoint = if (0xd800..=0xdbff).contains(&first_unit) {
+        if source.len() < 12 {
+            return if eof { invalid() } else { JsonUnit::NeedMore };
+        }
+        if source.get(6..8) != Some(&b"\\u"[..]) {
+            return invalid();
+        }
+        let Some(second_unit) = parse_hex4(&source[8..12]) else {
+            return invalid();
+        };
+        if !(0xdc00..=0xdfff).contains(&second_unit) {
+            return invalid();
+        }
+        0x10000 + ((u32::from(first_unit) - 0xd800) << 10) + (u32::from(second_unit) - 0xdc00)
+    } else if (0xdc00..=0xdfff).contains(&first_unit) {
+        return invalid();
+    } else {
+        u32::from(first_unit)
+    };
+    let Some(character) = char::from_u32(codepoint) else {
+        return invalid();
+    };
+    let mut decoded = [0; 4];
+    let decoded_length = character.encode_utf8(&mut decoded).len();
+    JsonUnit::Complete(
+        if codepoint > 0xffff { 12 } else { 6 },
+        decoded,
+        decoded_length,
+    )
+}
+
+fn parse_hex4(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() != 4 {
+        return None;
+    }
+    bytes.iter().try_fold(0u16, |value, byte| {
+        let digit = match byte {
+            b'0'..=b'9' => u16::from(*byte - b'0'),
+            b'a'..=b'f' => u16::from(*byte - b'a' + 10),
+            b'A'..=b'F' => u16::from(*byte - b'A' + 10),
+            _ => return None,
+        };
+        Some((value << 4) | digit)
+    })
+}
+
+/// Stateful filter for publication and artifact disclosure. Values are never
 /// serialized or printed; malformed bounds make construction fail closed.
 pub struct Redactor {
+    literal_values: Vec<Vec<u8>>,
+    context_bound: bool,
     literals: LiteralAutomaton,
+    encoded_literals: Option<EncodedLiteralMatcher>,
     tokens: TokenScanner,
     assignments: AssignmentScanner,
+    literal_only: bool,
     failed: bool,
     decisions: [DecisionQueue; 3],
     redaction_run: bool,
@@ -1054,32 +1369,32 @@ pub struct Redactor {
 
 impl Redactor {
     pub fn new(secrets: impl IntoIterator<Item = Vec<u8>>) -> Result<Self, RedactorError> {
-        let mut secrets: Vec<Vec<u8>> = secrets.into_iter().collect();
-        if secrets.len() > MAX_SECRETS {
-            return Err(RedactorError::TooManySecrets);
-        }
-        if secrets.iter().any(Vec::is_empty) {
-            return Err(RedactorError::EmptySecret);
-        }
-        if secrets
-            .iter()
-            .any(|secret| secret.len() > MAX_SECRET_LENGTH)
-        {
-            return Err(RedactorError::SecretTooLong);
-        }
-        let total = secrets
-            .iter()
-            .try_fold(0usize, |sum, secret| sum.checked_add(secret.len()));
-        if total.is_none_or(|total| total > MAX_SECRET_BYTES) {
-            return Err(RedactorError::SecretSetTooLarge);
-        }
-        secrets.sort();
-        secrets.dedup();
+        let secrets = validate_secrets(secrets)?;
 
-        Ok(Self {
+        Ok(Self::with_secrets(secrets, false))
+    }
+
+    /// Filter for published text. Masks registered typed and ambient
+    /// literal values, including JSON-escaped spellings, without rewriting
+    /// merely secret-shaped examples.
+    pub fn for_publication(
+        typed_values: impl IntoIterator<Item = Vec<u8>>,
+    ) -> Result<Self, RedactorError> {
+        let mut secrets = ambient_values()?;
+        secrets.extend(scoped_values());
+        secrets.extend(typed_values);
+        Ok(Self::with_secrets(publication_secrets(secrets)?, true))
+    }
+
+    fn with_secrets(secrets: Vec<Vec<u8>>, literal_only: bool) -> Self {
+        Self {
             literals: LiteralAutomaton::new(&secrets),
+            encoded_literals: (!secrets.is_empty()).then(|| EncodedLiteralMatcher::new(&secrets)),
+            literal_values: secrets,
+            context_bound: false,
             tokens: TokenScanner::default(),
             assignments: AssignmentScanner::default(),
+            literal_only,
             failed: false,
             decisions: std::array::from_fn(|_| DecisionQueue::default()),
             redaction_run: false,
@@ -1088,14 +1403,27 @@ impl Redactor {
             replacements: VecDeque::new(),
             insertions: VecDeque::new(),
             has_redacted: false,
-        })
+        }
     }
 
     pub fn has_redaction(&self) -> bool {
         self.has_redacted
+            || self
+                .encoded_literals
+                .as_ref()
+                .is_some_and(EncodedLiteralMatcher::matched)
             || self.literals.matched
-            || self.tokens.matched
-            || self.assignments.matched
+            || (!self.literal_only && (self.tokens.matched || self.assignments.matched))
+    }
+
+    fn bind_publication_context(&mut self) -> Result<(), FilterError> {
+        if self.literal_only && !self.context_bound {
+            let mut values = self.literal_values.clone();
+            values.extend(scoped_values());
+            *self = Self::with_secrets(publication_secrets(values).map_err(|_| FilterError)?, true);
+            self.context_bound = true;
+        }
+        Ok(())
     }
 
     fn filter_frames(
@@ -1103,6 +1431,7 @@ impl Redactor {
         bytes: &[u8],
         sink: &mut dyn FnMut(&[u8]),
     ) -> Result<(), FilterError> {
+        self.bind_publication_context()?;
         if self.failed {
             return Err(FilterError);
         }
@@ -1112,17 +1441,27 @@ impl Redactor {
         let mut emitter = FrameEmitter::new(sink);
         for chunk in bytes.chunks(FRAME_LIMIT) {
             let mut literals = Vec::new();
-            let mut tokens = Vec::new();
-            self.literals.filter(chunk, &mut literals);
-            self.tokens.filter(chunk, &mut tokens).map_err(|_| {
-                self.failed = true;
-                FilterError
-            })?;
-            self.assignments.filter(chunk, &mut self.decisions[2]);
-            self.insertions
-                .extend(self.assignments.insertions.drain(..));
+            if let Some(encoded) = self.encoded_literals.as_mut() {
+                encoded.filter(chunk, &mut literals)?;
+            } else {
+                self.literals.filter(chunk, &mut literals);
+            }
             self.decisions[0].extend(literals);
-            self.queue_tokens(tokens);
+            if self.literal_only {
+                let unchanged: Vec<_> = chunk.iter().copied().map(|byte| (byte, false)).collect();
+                self.decisions[1].extend(unchanged.clone());
+                self.decisions[2].extend(unchanged);
+            } else {
+                let mut tokens = Vec::new();
+                self.tokens.filter(chunk, &mut tokens).map_err(|_| {
+                    self.failed = true;
+                    FilterError
+                })?;
+                self.assignments.filter(chunk, &mut self.decisions[2]);
+                self.insertions
+                    .extend(self.assignments.insertions.drain(..));
+                self.queue_tokens(tokens);
+            }
             self.emit_decided(&mut emitter)?;
         }
         emitter.flush();
@@ -1134,17 +1473,23 @@ impl Redactor {
             return Err(FilterError);
         }
         let mut literals = Vec::new();
-        let mut tokens = Vec::new();
-        self.literals.finish(&mut literals);
-        self.tokens.finish(&mut tokens).map_err(|_| {
-            self.failed = true;
-            FilterError
-        })?;
-        self.assignments.finish(&mut self.decisions[2]);
-        self.insertions
-            .extend(self.assignments.insertions.drain(..));
+        if let Some(encoded) = self.encoded_literals.as_mut() {
+            encoded.finish(&mut literals)?;
+        } else {
+            self.literals.finish(&mut literals);
+        }
         self.decisions[0].extend(literals);
-        self.queue_tokens(tokens);
+        if !self.literal_only {
+            let mut tokens = Vec::new();
+            self.tokens.finish(&mut tokens).map_err(|_| {
+                self.failed = true;
+                FilterError
+            })?;
+            self.assignments.finish(&mut self.decisions[2]);
+            self.insertions
+                .extend(self.assignments.insertions.drain(..));
+            self.queue_tokens(tokens);
+        }
         let mut emitter = FrameEmitter::new(sink);
         self.emit_decided(&mut emitter)?;
         emitter.flush();
@@ -1261,10 +1606,287 @@ impl Redactor {
     }
 }
 
-/// Filter one bounded in-memory message or artifact using the same known
-/// credential shapes. Filter before paging to preserve token context.
+/// Validate literal values before building a matcher, independently of shape scanning.
+fn validate_secrets(
+    secrets: impl IntoIterator<Item = Vec<u8>>,
+) -> Result<Vec<Vec<u8>>, RedactorError> {
+    let mut secrets: Vec<Vec<u8>> = secrets.into_iter().collect();
+    if secrets.len() > MAX_SECRETS {
+        return Err(RedactorError::TooManySecrets);
+    }
+    if secrets.iter().any(Vec::is_empty) {
+        return Err(RedactorError::EmptySecret);
+    }
+    if secrets
+        .iter()
+        .any(|secret| secret.len() > MAX_SECRET_LENGTH)
+    {
+        return Err(RedactorError::SecretTooLong);
+    }
+    let total = secrets
+        .iter()
+        .try_fold(0usize, |sum, secret| sum.checked_add(secret.len()));
+    if total.is_none_or(|total| total > MAX_SECRET_BYTES) {
+        return Err(RedactorError::SecretSetTooLarge);
+    }
+    secrets.sort();
+    secrets.dedup();
+
+    Ok(secrets)
+}
+
+/// Mask known credential values without changing text that merely resembles one.
+pub fn known_values(
+    bytes: &[u8],
+    secrets: impl IntoIterator<Item = Vec<u8>>,
+) -> Result<Vec<u8>, RedactorError> {
+    let secrets = validate_secrets(secrets)?;
+    let mut matcher = EncodedLiteralMatcher::new(&secrets);
+    let mut decisions = Vec::with_capacity(bytes.len());
+    matcher
+        .filter(bytes, &mut decisions)
+        .map_err(|_| RedactorError::PublicationFilterFailed)?;
+    matcher
+        .finish(&mut decisions)
+        .map_err(|_| RedactorError::PublicationFilterFailed)?;
+    let mut safe = Vec::with_capacity(bytes.len());
+    let mut masked = false;
+    for (byte, secret) in decisions {
+        if secret && !masked {
+            safe.extend_from_slice(REDACTED);
+        } else if !secret {
+            safe.push(byte);
+        }
+        masked = secret;
+    }
+    Ok(safe)
+}
+
+thread_local! {
+    static PUBLICATION_VALUES: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Memory-only publication authority for one guardian invocation. The guard is
+/// thread-bound and restores its caller's values on every exit, including panic.
+pub struct PublicationScope {
+    previous: Vec<Vec<u8>>,
+    thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for PublicationScope {
+    fn drop(&mut self) {
+        PUBLICATION_VALUES.with_borrow_mut(|values| *values = std::mem::take(&mut self.previous));
+    }
+}
+
+/// Validated memory-only publication context for a host worker thread.
+/// It cannot be serialized or printed and grants no provider access.
+#[derive(Clone)]
+pub struct PublicationSnapshot(Vec<Vec<u8>>);
+
+impl PublicationSnapshot {
+    pub fn enter(self) -> PublicationScope {
+        let previous =
+            PUBLICATION_VALUES.with_borrow_mut(|values| std::mem::replace(values, self.0));
+        PublicationScope {
+            previous,
+            thread: std::marker::PhantomData,
+        }
+    }
+}
+
+pub fn capture_publication_scope() -> PublicationSnapshot {
+    PublicationSnapshot(scoped_values())
+}
+
+fn scoped_values() -> Vec<Vec<u8>> {
+    PUBLICATION_VALUES.with_borrow(Clone::clone)
+}
+
+pub fn publication_scope(
+    values: impl IntoIterator<Item = Vec<u8>>,
+) -> Result<PublicationScope, RedactorError> {
+    let mut all = scoped_values();
+    all.extend(values);
+    let all = publication_secrets(all)?;
+    let previous = PUBLICATION_VALUES.with_borrow_mut(|values| std::mem::replace(values, all));
+    Ok(PublicationScope {
+        previous,
+        thread: std::marker::PhantomData,
+    })
+}
+
+/// Values already available to the launch: classified environment and the
+/// explicit secret descriptor, including decoded strings in a JSON payload.
+pub fn launch_values(
+    environment: &[(Vec<u8>, Vec<u8>)],
+    secret: Option<&[u8]>,
+) -> Result<Vec<Vec<u8>>, RedactorError> {
+    fn strings(value: &serde_json::Value, output: &mut Vec<Vec<u8>>) {
+        match value {
+            serde_json::Value::String(value) if !value.is_empty() => {
+                output.push(value.as_bytes().to_vec())
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    strings(value, output);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for value in values.values() {
+                    strings(value, output);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut values = environment
+        .iter()
+        .filter(|(name, value)| credential_variable_name(name) && !value.is_empty())
+        .map(|(_, value)| value.clone())
+        .collect::<Vec<_>>();
+    if let Some(secret) = secret.filter(|value| !value.is_empty()) {
+        values.push(secret.to_vec());
+        if let Ok(value) = serde_json::from_slice(secret) {
+            strings(&value, &mut values);
+        }
+    }
+    publication_secrets(values)
+}
+
+/// Collect held ambient credentials for publication. Bounds failures must withdraw
+/// publication rather than silently omitting a value the process holds.
+pub fn ambient_values() -> Result<Vec<Vec<u8>>, RedactorError> {
+    ambient_values_from(std::env::vars_os())
+}
+
+fn ambient_credentials(
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> impl Iterator<Item = Vec<u8>> {
+    vars.into_iter().filter_map(|(name, value)| {
+        if !credential_variable_name(name.as_encoded_bytes()) {
+            return None;
+        }
+        let value = value.into_encoded_bytes();
+        (value.len() >= MIN_EXACT_BYTES && value.as_slice() != REDACTED).then_some(value)
+    })
+}
+
+fn ambient_values_from(
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Result<Vec<Vec<u8>>, RedactorError> {
+    validate_secrets(ambient_credentials(vars))
+}
+
+#[allow(
+    clippy::print_stderr,
+    reason = "warn once about bounded retry admission"
+)]
+fn warn_skipped_retry_credentials() {
+    static WARNING: std::sync::Once = std::sync::Once::new();
+    WARNING.call_once(|| {
+        // Do not interpolate environment names or values into diagnostics.
+        eprintln!("warning: retry admission skipped out-of-bounds ambient credentials (16 KiB per value, 128 values, 64 KiB total); publication remains fail-closed");
+    });
+}
+
+/// Only retry admission may skip credentials outside the bounded exact matcher.
+fn ambient_values_for_retry_from(
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Result<Vec<Vec<u8>>, RedactorError> {
+    let mut vars: Vec<_> = vars.into_iter().collect();
+    vars.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut values = Vec::new();
+    let mut total_bytes = 0usize;
+    for encoded in ambient_credentials(vars) {
+        if encoded.len() > MAX_SECRET_LENGTH
+            || values.len() >= MAX_SECRETS
+            || total_bytes.saturating_add(encoded.len()) > MAX_SECRET_BYTES
+        {
+            warn_skipped_retry_credentials();
+            continue;
+        }
+        total_bytes += encoded.len();
+        values.push(encoded);
+    }
+    validate_secrets(values)
+}
+
+/// Validate whether text contains an exact known credential value (ambient or scoped)
+/// of at least `MIN_EXACT_BYTES` bytes, excluding placeholder values like `[REDACTED]`.
+/// Only this admission path skips over-bound ambient values, with a warning.
+/// Returns `Ok(false)` if safe, or `Ok(true)` if text matches a credential value.
+pub fn matches_credential_value_for_retry(bytes: &[u8]) -> Result<bool, RedactorError> {
+    let mut secrets = ambient_values_for_retry_from(std::env::vars_os())?;
+    secrets.extend(scoped_values());
+    secrets.retain(|s| s.len() >= MIN_EXACT_BYTES && s.as_slice() != REDACTED);
+    if secrets.is_empty() {
+        return Ok(false);
+    }
+    let safe = known_values(bytes, publication_secrets(secrets)?)?;
+    Ok(safe != bytes)
+}
+
+/// Mask typed and ambient credential values in text that is about to be
+/// published. Shape-like examples are unchanged unless their
+/// exact value is registered as a credential.
+pub fn publication_text(
+    bytes: &[u8],
+    typed_values: impl IntoIterator<Item = Vec<u8>>,
+) -> Result<Vec<u8>, RedactorError> {
+    let mut secrets = ambient_values()?;
+    secrets.extend(scoped_values());
+    secrets.extend(typed_values);
+    known_values(bytes, publication_secrets(secrets)?)
+}
+
+fn publication_secrets(
+    secrets: impl IntoIterator<Item = Vec<u8>>,
+) -> Result<Vec<Vec<u8>>, RedactorError> {
+    let mut secrets: Vec<Vec<u8>> = secrets
+        .into_iter()
+        .filter(|secret| secret.len() >= MIN_EXACT_BYTES && secret.as_slice() != REDACTED)
+        .collect();
+    secrets.sort();
+    secrets.dedup();
+    let mut secrets = validate_secrets(secrets)?;
+    let escaped = secrets
+        .iter()
+        .filter_map(|secret| {
+            let text = std::str::from_utf8(secret).ok()?;
+            let encoded = serde_json::to_string(text).ok()?;
+            let end = encoded.len().checked_sub(1)?;
+            let interior = encoded.as_bytes().get(1..end)?;
+            (interior != secret).then(|| interior.to_vec())
+        })
+        .collect::<Vec<_>>();
+    secrets.extend(escaped);
+    secrets.sort();
+    secrets.dedup();
+    validate_secrets(secrets)
+}
+
+fn credential_variable_name(name: &[u8]) -> bool {
+    ASSIGNMENT_KEYS.iter().any(|(key, _)| {
+        let Some(start) = name.len().checked_sub(key.len()) else {
+            return false;
+        };
+        let bounded = start == 0 || !name[start - 1].is_ascii_alphanumeric();
+        bounded && name[start..].eq_ignore_ascii_case(key)
+    })
+}
+
+/// Filter a diagnostic using known literals and credential shapes. Input
+/// policy uses the shape-only disclosure scanner; content uses publication_text.
 pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
-    let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
+    let secrets = publication_secrets(
+        ambient_values()
+            .map_err(|_| FilterError)?
+            .into_iter()
+            .chain(scoped_values()),
+    )
+    .map_err(|_| FilterError)?;
+    let mut redactor = Redactor::new(secrets).map_err(|_| FilterError)?;
     let mut safe = Vec::new();
     let mut sink = |frame: &[u8]| {
         safe.extend_from_slice(frame);
@@ -1293,9 +1915,6 @@ pub fn known_shape_rule(bytes: &[u8]) -> Result<Option<&'static str>, FilterErro
     })
 }
 
-/// Redact delivery diagnostics, including every URL or scp-style remote
-/// username. Those fields can contain credentials even when no password is
-/// present. The common filter handles the other credential shapes first.
 pub fn delivery_diagnostics(detail: &str) -> String {
     let filtered = match known_shapes(detail.as_bytes()) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -1377,6 +1996,258 @@ mod tests {
         }
         redactor.finish(&mut sink).expect("bounded finish");
         output
+    }
+
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    #[test]
+    fn known_values_mask_literals_but_preserve_unregistered_shapes() {
+        let input = b"password=example-3391 actual=real-value-3391";
+        let safe = known_values(input, [b"real-value-3391".to_vec()]).unwrap();
+        assert_eq!(safe, b"password=example-3391 actual=[REDACTED]");
+        assert_eq!(
+            known_values(input, [Vec::new()]),
+            Err(RedactorError::EmptySecret)
+        );
+        assert_eq!(
+            known_values(b"abcde", [b"abc".to_vec(), b"cde".to_vec()]).unwrap(),
+            REDACTED
+        );
+    }
+
+    // Spec: docs/specs/fabric.md#checkpoint-envelope
+    #[test]
+    fn launch_descriptor_values_mask_capture_and_settlement_without_persistence() {
+        let secret = b"descriptor-credential-3391";
+        let mut filter = Redactor::for_publication([]).unwrap();
+        {
+            let values = launch_values(
+                &[(b"GH_TOKEN".to_vec(), b"ambient-launch-3391".to_vec())],
+                Some(secret),
+            )
+            .unwrap();
+            let _scope = publication_scope(values).unwrap();
+            let input = b"descriptor-credential-3391 ambient-launch-3391 sk-example-value";
+            assert_eq!(
+                checked_frames(&mut filter, &[input]),
+                b"[REDACTED] [REDACTED] sk-example-value"
+            );
+            assert_eq!(publication_text(secret, []).unwrap(), REDACTED);
+        }
+        assert_eq!(publication_text(secret, []).unwrap(), secret);
+    }
+
+    #[test]
+    fn matches_credential_value_for_retry_ignores_short_or_placeholder_values() {
+        // Short values (< 8 bytes) and placeholder '[REDACTED]' are ignored.
+        let _scope = publication_scope([
+            b"ollama".to_vec(),
+            b"EMPTY".to_vec(),
+            b"[REDACTED]".to_vec(),
+            b"1234567".to_vec(),
+            b"12345678".to_vec(),
+            b"exact-credential-3391".to_vec(),
+        ])
+        .unwrap();
+
+        assert!(
+            !matches_credential_value_for_retry(b"plain retry brief with ollama and EMPTY")
+                .unwrap()
+        );
+        assert!(!matches_credential_value_for_retry(b"brief with [REDACTED] placeholder").unwrap());
+        assert!(!matches_credential_value_for_retry(b"brief with 1234567 embedded").unwrap());
+        assert!(matches_credential_value_for_retry(b"brief with 12345678 embedded").unwrap());
+        assert!(
+            matches_credential_value_for_retry(b"brief with exact-credential-3391 embedded")
+                .unwrap()
+        );
+        let prose = b"ollama EMPTY [REDACTED] 1234567";
+        assert_eq!(publication_text(prose, []).unwrap(), prose);
+        assert_eq!(publication_text(b"12345678", []).unwrap(), REDACTED);
+    }
+
+    #[test]
+    fn publication_text_masks_registered_values_and_keeps_examples() {
+        let encoded = serde_json::to_string("typed\"credential-3391").unwrap();
+        let input = format!("example=sk-example-value actual={encoded}");
+        assert_eq!(
+            publication_text(input.as_bytes(), [b"typed\"credential-3391".to_vec()]).unwrap(),
+            b"example=sk-example-value actual=\"[REDACTED]\""
+        );
+    }
+
+    #[test]
+    fn publication_stream_masks_typed_json_values_but_preserves_shapes() {
+        let secret = b"typed\"credential-3391";
+        let encoded = serde_json::to_string(std::str::from_utf8(secret).unwrap()).unwrap();
+        let input = format!("example=sk-example-value actual={encoded}");
+        for split in 0..=input.len() {
+            let mut redactor = Redactor::for_publication([secret.to_vec()]).unwrap();
+            assert_eq!(
+                checked_frames(
+                    &mut redactor,
+                    &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
+                ),
+                b"example=sk-example-value actual=\"[REDACTED]\""
+            );
+        }
+    }
+
+    // Spec: docs/specs/retry-owner.md#credential-admission-and-publication
+    #[test]
+    fn ambient_bounds_are_lenient_only_for_retry() {
+        use std::ffi::OsString;
+        for (count, length, retained, expected) in [
+            (1, MAX_SECRET_LENGTH + 1, 0, RedactorError::SecretTooLong),
+            (
+                MAX_SECRETS + 1,
+                MIN_EXACT_BYTES,
+                MAX_SECRETS,
+                RedactorError::TooManySecrets,
+            ),
+            (5, MAX_SECRET_LENGTH, 4, RedactorError::SecretSetTooLarge),
+        ] {
+            let vars = (0..count)
+                .map(|index| {
+                    (
+                        OsString::from(format!("BOUND_{index:03}_API_KEY")),
+                        OsString::from(format!("{index:08}{}", "x".repeat(length - 8))),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(ambient_values_from(vars.clone()), Err(expected));
+            let values = ambient_values_for_retry_from(vars).unwrap();
+            assert_eq!(values.len(), retained);
+            assert!(validate_secrets(values).is_ok());
+        }
+    }
+
+    // Spec: docs/specs/retry-owner.md#credential-admission-and-publication
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "fixture subprocess isolates ambient credentials and captures process-wide stderr"
+    )]
+    fn oversized_ambient_credential_withdraws_publication_but_admits_retry() {
+        const CHILD: &str = "PROVENANT_REDACT_BOUND_TEST";
+        const NAME: &str = "UNTRUSTED\n\u{1b}[31m_API_KEY";
+        let oversized = "oversized-held-credential-".repeat(800);
+        if std::env::var_os(CHILD).is_some() {
+            for _ in 0..2 {
+                assert!(!matches_credential_value_for_retry(b"ordinary retry brief").unwrap());
+            }
+            assert_eq!(ambient_values(), Err(RedactorError::SecretTooLong));
+            assert_eq!(
+                publication_text(oversized.as_bytes(), []),
+                Err(RedactorError::SecretTooLong)
+            );
+            assert!(Redactor::for_publication([]).is_err());
+            assert!(known_shapes(oversized.as_bytes()).is_err());
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::oversized_ambient_credential_withdraws_publication_but_admits_retry",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD, "1")
+            .env(NAME, &oversized)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(stderr.matches("warning: retry admission").count(), 1);
+        assert!(!stderr.contains(&oversized));
+        assert!(!stderr.contains(NAME));
+        assert!(!stderr.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn publication_preserves_raw_escape_literal_matching() {
+        let secret = br"\u0042-escape-3391";
+        let source = br"literal=\u0042-escape-3391";
+        let expected = b"literal=[REDACTED]";
+        assert_eq!(
+            publication_text(source, [secret.to_vec()]).unwrap(),
+            expected
+        );
+        for split in 0..=source.len() {
+            let mut redactor = Redactor::for_publication([secret.to_vec()]).unwrap();
+            assert_eq!(
+                checked_frames(&mut redactor, &[&source[..split], &source[split..]]),
+                expected,
+                "source split at byte {split}"
+            );
+        }
+        assert_eq!(known_values(br"\u0042", [b"B".to_vec()]).unwrap(), REDACTED);
+    }
+
+    #[test]
+    fn publication_stream_masks_full_and_mixed_unicode_json_escapes_at_every_split() {
+        fn escape(text: &str, escape_even: bool) -> String {
+            use std::fmt::Write as _;
+            let mut encoded = String::new();
+            for (index, character) in text.chars().enumerate() {
+                if !escape_even || index % 2 == 0 {
+                    let mut units = [0; 2];
+                    for unit in character.encode_utf16(&mut units) {
+                        write!(&mut encoded, "\\u{unit:04x}").unwrap();
+                    }
+                } else {
+                    encoded.push(character);
+                }
+            }
+            encoded
+        }
+
+        let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789π🔒";
+        let variants = [
+            format!("\"{}\"", escape(secret, false)),
+            format!("\"{}\"", escape(secret, true)),
+        ];
+        for encoded in variants {
+            let input = format!("before={encoded}; example=sk-example-value");
+            let expected = b"before=\"[REDACTED]\"; example=sk-example-value";
+            assert_eq!(
+                publication_text(input.as_bytes(), [secret.as_bytes().to_vec()]).unwrap(),
+                expected,
+                "finite publication helper"
+            );
+            for split in 0..=input.len() {
+                let mut redactor = Redactor::for_publication([secret.as_bytes().to_vec()]).unwrap();
+                assert_eq!(
+                    checked_frames(
+                        &mut redactor,
+                        &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
+                    ),
+                    expected,
+                    "source split at byte {split}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ambient_credential_names_reuse_assignment_key_boundaries() {
+        for name in [
+            b"GH_TOKEN".as_slice(),
+            b"GITHUB_TOKEN",
+            b"OPENAI_API_KEY",
+            b"AWS_SECRET_ACCESS_KEY",
+            b"AWS_ACCESS_KEY_ID",
+            b"DATABASE_URL",
+            b"AZURE_CLIENT_SECRET",
+        ] {
+            assert!(credential_variable_name(name), "{name:?}");
+        }
+        for name in [b"OAUTH_CLIENT_ID".as_slice(), b"COMPASS", b"PROJECT"] {
+            assert!(!credential_variable_name(name), "{name:?}");
+        }
     }
 
     #[test]

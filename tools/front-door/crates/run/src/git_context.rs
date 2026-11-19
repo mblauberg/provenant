@@ -1357,7 +1357,15 @@ mod tests {
         )
         .expect_err("a corrupt host port table must not narrow lane roots");
 
-        assert_eq!(error, transport::TransportError::Unreadable);
+        let transport::TransportError::UnreadablePorts { detail } = error else {
+            panic!("a corrupt host port table must keep its own error: {error:?}");
+        };
+        assert!(detail.contains("ports.json"), "{detail}");
+        assert!(detail.contains("json"), "{detail}");
+        assert!(
+            !detail.contains("Git configuration could not be read"),
+            "{detail}"
+        );
         Ok(())
     }
 

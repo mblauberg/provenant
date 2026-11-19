@@ -10,6 +10,159 @@ use std::{
 };
 type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
+// Spec: docs/specs/retry-owner.md#admission-is-distinct-from-observation
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+#[test]
+fn secret_shaped_launch_inputs_warn_and_preserve_examples() -> Result {
+    let rig = GraphProject::new()?;
+    let example = "password=\"fixture-example-3391\"";
+    let templates = rig.project.join(".provenant/templates");
+    std::fs::create_dir_all(&templates)?;
+    std::fs::write(
+        templates.join("example.toml"),
+        format!("brief='{example}'\ntier='junior'\n"),
+    )?;
+    let document = rig.document(&json!({"schema_version":2,"graph_id":"example-input",
+        "nodes":[{"id":"task","use":"task","prompt":example}]}))?;
+    let cases = [
+        (
+            vec!["run", "task", "--brief", example, "--explain"],
+            "brief",
+        ),
+        (vec!["run", "example", "--explain"], "nodes[0]"),
+        (
+            vec![
+                "run",
+                "--file",
+                document.to_str().ok_or("document path")?,
+                "--explain",
+            ],
+            "document.nodes[0].prompt",
+        ),
+    ];
+    for (args, position) in cases {
+        let (output, reply) = rig.run(&args)?;
+        assert!(output.status.success(), "{reply}; {output:?}");
+        let warnings = reply["data"]["warnings"]
+            .as_array()
+            .ok_or("visible warnings")?;
+        assert!(warnings.iter().any(|w| w.as_str().is_some_and(
+            |w| w.contains("SECRET_SHAPED_INPUT")
+                && w.contains("looks like a credential")
+                && w.contains(position)
+        )));
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !w.to_string().contains("fixture-example-3391"))
+        );
+        assert!(
+            reply["data"].to_string().contains("fixture-example-3391"),
+            "example is retained: {reply}"
+        );
+    }
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn graph_metadata_warns_and_preserves_local_preview() -> Result {
+    let rig = GraphProject::new()?;
+    let credential = "plain-registered-metadata-3391";
+    let example = "password=fixture-metadata-example-3391";
+    let path = rig.document(&json!({"schema_version":2,"graph_id":"metadata-test",
+        "metadata_note":format!("{example} {credential}"),
+        "nodes":[{"id":"task","prompt":"do the task","access":"read_only","route":{"alias":"junior"}}]}))?;
+    let output = rig
+        .command()
+        .env("FIXTURE_API_KEY", credential)
+        .args(["run", "--file"])
+        .arg(path)
+        .arg("--explain")
+        .output()?;
+    let reply: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(output.status.success(), "{reply}");
+    let wire = reply.to_string();
+    assert!(
+        wire.contains(credential),
+        "local preview retains exact bytes: {reply}"
+    );
+    assert!(wire.contains(example), "{reply}");
+    assert!(
+        reply["data"]["warnings"]
+            .to_string()
+            .contains("SECRET_SHAPED_INPUT"),
+        "{reply}"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#checkpoint-envelope
+#[test]
+fn ambient_credential_is_masked_in_published_checkpoint_and_events() -> Result {
+    let rig = GraphProject::new()?;
+    let credential = "plain-registered-credential-3391";
+    let prompt = format!("Use {credential} for the fixture.");
+    let output = rig
+        .command()
+        .env("FIXTURE_API_KEY", credential)
+        .args([
+            "run",
+            "task",
+            "--brief",
+            &prompt,
+            "--model",
+            "fixture/model",
+        ])
+        .output()?;
+    let reply: Value = serde_json::from_slice(&output.stdout)?;
+    // The fixture adapter cannot execute. Successful admission still retains
+    // a checkpoint and events before that unrelated provider refusal.
+    assert!(reply["error"].is_null(), "{reply}");
+    assert!(
+        reply["data"]["checkpoint"]["graph_id"].is_string(),
+        "{reply}"
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(credential));
+    let records = graph_records(&rig.state())?;
+    assert!(
+        records
+            .iter()
+            .any(|p| p.to_string_lossy().ends_with(".events.jsonl"))
+    );
+    let mut retained_raw = false;
+    let projector =
+        provenant_confinement::publication::Projector::new([credential.as_bytes().to_vec()])?;
+    let mut published_has_mask = false;
+    for path in &records {
+        let bytes = std::fs::read(path)?;
+        let text = String::from_utf8_lossy(&bytes);
+        retained_raw |= text.contains(credential);
+        let exported = projector.project(
+            provenant_confinement::publication::Destination::GraphPublication,
+            &bytes,
+        )?;
+        let exported_text = String::from_utf8_lossy(exported.bytes());
+        assert!(
+            !exported_text.contains(credential),
+            "publication disclosed credential in {}",
+            path.display()
+        );
+        published_has_mask |= exported_text.contains("[REDACTED]");
+        assert_eq!(
+            std::fs::read(path)?,
+            bytes,
+            "publication preserves local bytes"
+        );
+    }
+    assert!(retained_raw, "local graph records keep the exact bytes");
+    assert!(
+        published_has_mask,
+        "what leaves through a publication or peer/disclosure output is masked"
+    );
+    Ok(())
+}
+
 #[test]
 // Spec: docs/specs/cli.md#results
 fn scanner_shape_keeps_local_brief_without_refusal() -> Result {
@@ -417,6 +570,17 @@ impl GraphProject {
             .map_err(|error| format!("{error}: {output:?}"))?;
         Ok((output, value))
     }
+    /// The same fixture without `--json`, so the compact human view is on stdout.
+    fn human_command(&self) -> Command {
+        let mut command = fixture_cli();
+        command
+            .current_dir(&self.project)
+            .env("PROVENANT_ROOT", &self.root)
+            .env("XDG_CONFIG_HOME", self.temp.path().join("config"))
+            .args(["--state-dir"])
+            .arg(self.state());
+        command
+    }
     fn document(&self, document: &Value) -> Result<PathBuf> {
         let path = self.project.join("graph.json");
         std::fs::write(&path, serde_json::to_vec(document)?)?;
@@ -475,7 +639,17 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
         .find(|row| row["name"] == "broken")
         .ok_or("broken row")?;
     assert_eq!(bad["state"], "unreadable");
-    assert!(rows.iter().any(|row| row["name"] == "healthy"));
+    // #3530 counts settled graphs in the default listing; --full shows them.
+    assert!(!rows.iter().any(|row| row["name"] == "healthy"));
+    let (output, full) = rig.run(&["status", "--full"])?;
+    assert!(output.status.success(), "{full}");
+    assert!(
+        full["data"]["graphs"]
+            .as_array()
+            .ok_or("full graphs")?
+            .iter()
+            .any(|row| row["name"] == "healthy")
+    );
     assert!(!listing.to_string().contains("PRIVATE_CONTENT_SENTINEL"));
     assert!(
         !listing
@@ -498,7 +672,7 @@ fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
     let command = words.strip_prefix(&["provenant"]).ok_or("next command")?;
     let (output, stopped) = rig.run(command)?;
     assert!(output.status.success(), "{stopped}");
-    let (_, after) = rig.run(&["status"])?;
+    let (_, after) = rig.run(&["status", "--full"])?;
     let rows = after["data"]["graphs"]
         .as_array()
         .ok_or("graphs after stop")?;
@@ -838,6 +1012,19 @@ fn every_bundled_template_is_listed_and_compiles_with_its_declared_parameters() 
         explained["data"]["document"]["integration_branch"],
         "batch/example"
     );
+    let proposed: Vec<_> = explained["data"]["source_admission"]
+        .as_array()
+        .ok_or("batch source admission")?
+        .iter()
+        .filter(|row| row["status"] == "pending_registration")
+        .collect();
+    assert!(!proposed.is_empty(), "batch slices need proposed worktrees");
+    for row in proposed {
+        assert!(
+            !Path::new(row["path"].as_str().ok_or("proposed worktree path")?).exists(),
+            "explanation must not create a worktree: {row}"
+        );
+    }
     Ok(())
 }
 
@@ -1198,7 +1385,7 @@ fn a_named_run_replays_its_input_and_a_changed_input_takes_the_next_name() -> Re
     // Changed input takes the next free name and leaves the first graph alone.
     let changed = run(&["--name", "once", "--set", "tag=b"])?;
     assert_eq!(changed["checkpoint"]["graph_id"], "once-2");
-    assert_eq!(changed["named"]["taken"], "once");
+    assert_eq!(changed["named"]["superseded"], "once");
     assert_eq!(graph_count()?, 2);
     // Each input finds its own graph.
     for (tag, id) in [("a", "once"), ("b", "once-2")] {
@@ -1236,6 +1423,132 @@ fn a_named_run_replays_its_input_and_a_changed_input_takes_the_next_name() -> Re
         assert!(handles.insert(id), "handles are unique");
     }
     assert_eq!(graph_count()?, 6);
+    Ok(())
+}
+
+#[test]
+fn a_changed_brief_leads_the_launch_with_the_new_handle_and_json_field() -> Result {
+    let rig = GraphProject::new()?;
+    let templates = rig.project.join(".provenant/templates");
+    std::fs::create_dir_all(&templates)?;
+    std::fs::write(
+        templates.join("stamp.toml"),
+        "kind='gate'\n[node.condition]\ntype='budget'\n[parameters.tag]\ntype='string'\ndefault='none'\n",
+    )?;
+    let json_run = |args: &[&str]| -> Result<Value> {
+        let mut command = vec!["run", "stamp"];
+        command.extend_from_slice(args);
+        let (output, result) = rig.run(&command)?;
+        assert!(output.status.success(), "{args:?}: {result}");
+        Ok(result["data"].clone())
+    };
+    let first = json_run(&["--name", "once", "--set", "tag=a"])?;
+    assert_eq!(first["checkpoint"]["graph_id"], "once");
+    // The JSON form names the prior handle under `superseded`.
+    let second = json_run(&["--name", "once", "--set", "tag=b"])?;
+    assert_eq!(second["checkpoint"]["graph_id"], "once-2");
+    assert_eq!(second["named"]["superseded"], "once");
+    // The human form leads with the new handle and the reason, not a headline.
+    let output = rig
+        .human_command()
+        .args(["run", "stamp", "--name", "once", "--set", "tag=c"])
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.starts_with("started once-3 (once exists with a different input)\n"),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("next: provenant ") && line.ends_with("once-3")),
+        "{text}"
+    );
+    Ok(())
+}
+
+#[test]
+fn waiting_on_a_superseded_name_points_at_the_newer_handle() -> Result {
+    let rig = GraphProject::new()?;
+    let templates = rig.project.join(".provenant/templates");
+    std::fs::create_dir_all(&templates)?;
+    std::fs::write(
+        templates.join("stamp.toml"),
+        "kind='gate'\n[node.condition]\ntype='budget'\n[parameters.tag]\ntype='string'\ndefault='none'\n",
+    )?;
+    for tag in ["a", "b", "c"] {
+        let (output, result) = rig.run(&[
+            "run",
+            "stamp",
+            "--name",
+            "wait-once",
+            "--set",
+            &format!("tag={tag}"),
+        ])?;
+        assert!(output.status.success(), "{result}");
+    }
+    let output = rig
+        .human_command()
+        .args(["wait", "wait-once", "--timeout", "2"])
+        .output()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let warning = String::from_utf8_lossy(&output.stderr);
+    assert!(text.contains("; provenant wait wait-once-3\n"), "{text}");
+    assert!(
+        warning.contains("wait-once") && warning.contains("wait-once-3"),
+        "{warning}"
+    );
+    Ok(())
+}
+
+#[test]
+fn status_on_a_superseded_name_points_at_the_newer_handle() -> Result {
+    let rig = GraphProject::new()?;
+    let templates = rig.project.join(".provenant/templates");
+    std::fs::create_dir_all(&templates)?;
+    std::fs::write(
+        templates.join("stamp.toml"),
+        "kind='gate'\n[node.condition]\ntype='budget'\n[parameters.tag]\ntype='string'\ndefault='none'\n",
+    )?;
+    for tag in ["a", "b"] {
+        let (output, result) = rig.run(&[
+            "run",
+            "stamp",
+            "--name",
+            "status-once",
+            "--set",
+            &format!("tag={tag}"),
+        ])?;
+        assert!(output.status.success(), "{result}");
+    }
+    let output = rig
+        .human_command()
+        .args(["status", "status-once"])
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    let warning = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        text.contains("next: provenant status status-once-2\n"),
+        "{text}"
+    );
+    assert!(
+        warning.contains("status-once") && warning.contains("status-once-2"),
+        "{warning}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_bad_name_refusal_suggests_a_valid_handle() -> Result {
+    let rig = GraphProject::new()?;
+    let output = rig
+        .human_command()
+        .args(["run", "stamp", "--name", "Foo-", "--set", "tag=a"])
+        .output()?;
+    assert!(!output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert!(text.contains("try `foo`"), "{text}");
     Ok(())
 }
 
@@ -1917,7 +2230,7 @@ fn graph_retry_extends_budget_after_advisory_failure() -> Result {
 }
 
 #[test]
-fn retry_brief_replaces_the_brief_of_a_settled_node_on_graph_and_node_targets() -> Result {
+fn secret_shaped_retry_brief_proceeds_with_field_only_warning() -> Result {
     for qualified in [true, false] {
         let rig = GraphProject::new()?;
         let id = settled_task_graph(&rig)?;
@@ -1926,7 +2239,7 @@ fn retry_brief_replaces_the_brief_of_a_settled_node_on_graph_and_node_targets() 
         } else {
             id.clone()
         };
-        let brief = "line one\nline two: corrected scope\n";
+        let brief = "line one\npassword=fixture-example-retry-3391\n";
         let brief_path = rig.project.join("amended-brief.txt");
         std::fs::write(&brief_path, brief)?;
         let (output, retried) = if qualified {
@@ -1940,6 +2253,18 @@ fn retry_brief_replaces_the_brief_of_a_settled_node_on_graph_and_node_targets() 
             rig.run(&["retry", &target, "--brief", brief])?
         };
         assert!(output.status.success(), "{target}: {retried}");
+        let warnings = retried["data"]["warnings"]
+            .as_array()
+            .ok_or("retry warnings")?;
+        assert!(warnings.iter().any(|w| {
+            w.as_str()
+                .is_some_and(|w| w.contains("brief") && w.contains("looks like a credential"))
+        }));
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !w.to_string().contains("fixture-example-retry-3391"))
+        );
         let (prompt, previous) = stored_prompt(&rig, &id, "task")?;
         assert_eq!(prompt, brief, "{target}");
         assert!(previous > 0, "started attempts are kept: {target}");
@@ -1963,6 +2288,207 @@ fn retry_brief_on_a_graph_of_several_nodes_asks_for_the_node() -> Result {
     assert_eq!(refusal["error"]["code"], "graph_target", "{refusal}");
     let (_, after) = rig.run(&["status", "two-nodes"])?;
     assert_eq!(after["data"]["rows"], before["data"]["rows"], "{after}");
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
+#[test]
+fn shape_warning_and_exact_retry_credential_refusal_are_atomic() -> Result {
+    let rig = GraphProject::new()?;
+    let id = settled_task_graph(&rig)?;
+    fn snapshot_tree(
+        root: &Path,
+        output: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    ) -> Result {
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                snapshot_tree(&entry.path(), output)?;
+            } else {
+                output.insert(entry.path(), std::fs::read(entry.path())?);
+            }
+        }
+        Ok(())
+    }
+    let snapshot = || -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
+        let mut output = std::collections::BTreeMap::new();
+        snapshot_tree(&rig.state().join("fabric/graphs"), &mut output)?;
+        Ok(output)
+    };
+    let before = snapshot()?;
+    std::fs::write(
+        rig.state().join("config.toml"),
+        "schema_version=1\n[knobs]\n'policy.SECRET_SHAPED_INPUT'='warn'\n",
+    )?;
+    let shape = "password=fixture-shape-3391";
+    let (output, reply) = rig.run(&["retry", &id, "--brief", shape])?;
+    assert!(
+        output.status.success(),
+        "shape-only input must proceed: {reply}"
+    );
+    assert!(
+        reply["data"]["warnings"]
+            .to_string()
+            .contains("SECRET_SHAPED_INPUT"),
+        "shape-only input still warns: {reply}"
+    );
+    assert!(
+        !reply["data"]["warnings"]
+            .to_string()
+            .contains("fixture-shape-3391")
+    );
+    let after_shape = snapshot()?;
+    assert_ne!(
+        after_shape, before,
+        "the admitted retry changes the checkpoint"
+    );
+
+    let credential = "plain-registered-retry-3391";
+    let output = rig
+        .command()
+        .env("FIXTURE_API_KEY", credential)
+        .args(["retry", &id, "--brief", credential])
+        .output()?;
+    let reply: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(
+        !output.status.success(),
+        "exact credential must refuse: {reply}"
+    );
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("declared credential value rule")),
+        "operator receives the typed credential cause: {reply}"
+    );
+    assert!(!reply.to_string().contains(credential));
+    assert_eq!(snapshot()?, after_shape, "exact-value refusal is atomic");
+
+    let (output, reply) = rig.run(&["retry", &id, "--extend", "limits.unconfigured=1"])?;
+    assert!(
+        !output.status.success(),
+        "invalid extension must refuse: {reply}"
+    );
+    assert!(
+        !reply
+            .to_string()
+            .contains("graph input could not be processed")
+    );
+    assert_eq!(
+        snapshot()?,
+        after_shape,
+        "invalid extension refusal is atomic"
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn short_placeholder_credential_does_not_refuse_and_exact_value_refuses_atomically() -> Result {
+    let rig = GraphProject::new()?;
+    let id = settled_task_graph(&rig)?;
+    fn snapshot_tree(
+        root: &Path,
+        output: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    ) -> Result {
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                snapshot_tree(&entry.path(), output)?;
+            } else {
+                output.insert(entry.path(), std::fs::read(entry.path())?);
+            }
+        }
+        Ok(())
+    }
+    let snapshot = || -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
+        let mut output = std::collections::BTreeMap::new();
+        snapshot_tree(&rig.state().join("fabric/graphs"), &mut output)?;
+        Ok(output)
+    };
+    let before = snapshot()?;
+
+    // Short placeholder and ambient values (e.g. ollama, EMPTY, [REDACTED])
+    // must not refuse an ordinary retry brief containing those words.
+    let output = rig
+        .command()
+        .env("FIXTURE_API_KEY", "ollama")
+        .env("OPENAI_API_KEY", "[REDACTED]")
+        .env("X_AUTH", "EMPTY")
+        .args([
+            "retry",
+            &id,
+            "--brief",
+            "retry with ollama model and EMPTY list",
+        ])
+        .output()?;
+    let reply: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(
+        output.status.success(),
+        "short placeholder ambient credentials must not refuse: {reply}"
+    );
+    let after_placeholder = snapshot()?;
+    assert_ne!(
+        after_placeholder, before,
+        "the placeholder admitted retry changes the checkpoint"
+    );
+
+    let credential = "plain-registered-retry-3391";
+    let output = rig
+        .command()
+        .env("FIXTURE_API_KEY", credential)
+        .args(["retry", &id, "--brief", credential])
+        .output()?;
+    let reply: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(
+        !output.status.success(),
+        "exact credential must refuse: {reply}"
+    );
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("declared credential value rule")),
+        "operator receives the typed credential cause: {reply}"
+    );
+    assert!(!reply.to_string().contains(credential));
+    assert_eq!(
+        snapshot()?,
+        after_placeholder,
+        "exact-value refusal is atomic"
+    );
+
+    // An out-of-bounds ambient credential variable (>16 KiB) is skipped only
+    // for retry admission, with a generic warning and no disclosed name/value.
+    let oversized = "x".repeat(16 * 1024 + 1);
+    let output = rig
+        .command()
+        .env("FIXTURE_API_KEY", &oversized)
+        .args(["retry", &id, "--brief", "ordinary retry brief"])
+        .output()?;
+    let reply: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(
+        output.status.success(),
+        "out-of-bounds ambient credentials must not refuse: {reply}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("retry admission skipped out-of-bounds ambient credentials"),
+        "expected the retry admission warning in stderr: {stderr}"
+    );
+    assert_eq!(
+        stderr
+            .matches("retry admission skipped out-of-bounds ambient credentials")
+            .count(),
+        1,
+        "warning should be emitted once per process: {stderr}"
+    );
+    assert!(
+        !stderr.contains("FIXTURE_API_KEY"),
+        "warning must omit variable names: {stderr}"
+    );
+    assert!(
+        !stderr.contains(&oversized),
+        "warning must omit credential values: {stderr}"
+    );
     Ok(())
 }
 
@@ -2136,6 +2662,7 @@ fn expansion_paused_graph_retry_resumes_without_refusal() -> Result {
         active: true,
         fallback: false,
         fragment_error: None,
+        structural_limit: None,
     });
     checkpoint.set_pause(
         provenant_records::pause::PauseCause::InvalidPlanExpansion,
@@ -2169,5 +2696,131 @@ fn expansion_paused_graph_retry_resumes_without_refusal() -> Result {
         resumed.pause.is_none(),
         "graph pause must be cleared on resume"
     );
+    Ok(())
+}
+
+// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+#[test]
+fn retry_after_lowered_host_limit_preserves_structural_pause() -> Result {
+    let rig = GraphProject::new()?;
+    let id = "lowered-limit-retry";
+    let path = rig.document(
+        &json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":id,"nodes":[
+            {"id":"first","kind":"gate","access":"read_only","condition":{"type":"budget"}},
+            {"id":"second","kind":"gate","access":"read_only","condition":{"type":"budget"}}
+        ]}),
+    )?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
+    assert!(output.status.success(), "{output:?}");
+
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, NodeState};
+
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == format!("graph-{id}.json").as_str())
+        })
+        .ok_or("checkpoint")?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let mut checkpoint = FileJournal::read_checkpoint(&state, project, id)?.ok_or("checkpoint")?;
+    checkpoint.cancelled = true;
+    for node in &mut checkpoint.nodes {
+        node.state = NodeState::Skipped;
+        node.skip_reason = Some("graph cancelled".into());
+        node.cancelled_from = Some(NodeState::Pending);
+        node.gate = None;
+        node.outputs = None;
+    }
+
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        id,
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
+    // Lower the host limit in config.toml to 1 node (the graph has 2 nodes).
+    std::fs::write(
+        rig.state().join("config.toml"),
+        "schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 1\n",
+    )?;
+
+    // 1. Graph-wide retry with no brief and no extension leaves topology unchanged:
+    // must succeed and preserve/save the StructuralLimit pause rather than refuse.
+    let (output, retried) = rig.run(&["retry", id])?;
+    assert!(
+        output.status.success(),
+        "graph-wide retry with lowered limit must succeed and pause, not refuse: {retried}"
+    );
+
+    // Verify the checkpoint in journal has the StructuralLimit pause.
+    let mut checkpoint = FileJournal::read_checkpoint(&state, project, id)?.ok_or("checkpoint")?;
+    assert_eq!(
+        checkpoint.pause_cause(),
+        Some(provenant_records::pause::PauseCause::StructuralLimit),
+        "checkpoint must record StructuralLimit pause"
+    );
+
+    // Graph-wide retry reset its nodes to pending. Recreate the explicit
+    // settled cancellation fixture so the node-scoped retry reaches candidate
+    // structural admission instead of refusing on node state.
+    checkpoint.cancelled = true;
+    for node in &mut checkpoint.nodes {
+        node.state = NodeState::Skipped;
+        node.skip_reason = Some("graph cancelled".into());
+        node.cancelled_from = Some(NodeState::Pending);
+        node.gate = None;
+        node.outputs = None;
+    }
+    assert!(
+        checkpoint
+            .nodes
+            .iter()
+            .all(|node| { node.state == NodeState::Skipped && node.cancelled_from.is_some() }),
+        "changed-retry fixture must be settled before invocation"
+    );
+    let mut journal = FileJournal::open(
+        &state,
+        project,
+        id,
+        WaitBudget::cli(clock.mono_now(), 5)?,
+        &cancel,
+        &clock,
+    )?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
+    // 2. A node-scoped retry builds a replacement candidate even without a
+    // brief. Do not put a brief on a gate: that would be an invalid candidate
+    // for an unrelated reason before structural admission.
+    let (output, refused) = rig.run(&["retry", &format!("{id}/first")])?;
+    assert!(
+        !output.status.success(),
+        "changed candidate retry against lowered limit must be refused: {refused}"
+    );
+    assert!(
+        refused["error"]["code"] == "graph_target"
+            && refused["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("limits.nodes=1 reached (2)")),
+        "changed candidate must be refused by the lowered structural node limit: {refused}"
+    );
+
     Ok(())
 }

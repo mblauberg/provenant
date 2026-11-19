@@ -36,18 +36,23 @@ pub(crate) fn selection_evidence(
             clock: &clock,
             cancel: &cancel,
         };
-        let mut projects =
-            provenant_config::registered_projects(roots).map_err(|e| e.to_string())?;
+        let mut projects: Vec<_> = provenant_config::registered_projects(roots)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|project| project.project_id())
+            .collect();
+        // Transient projects have an identity but no durable registry entry.
+        projects.push(identity.identity.project);
         if projects.len() > 128 {
             return Err("project evidence bound".into());
         }
-        projects.sort_by_key(|p| p.project_id());
-        projects.dedup_by_key(|p| p.project_id());
+        projects.sort();
+        projects.dedup();
         let mut outcomes = Vec::new();
         for project in projects {
             let context = run::ExecutionContext {
                 state_root: identity.roots.state.clone(),
-                project_id: project.project_id(),
+                project_id: project,
                 actor_id: identity.identity.inbox.actor,
                 read_prompts: false,
             };
@@ -94,7 +99,7 @@ pub(crate) fn selection_evidence(
                     Some(_) => return Err("live lane evidence bound".into()),
                 }
             }
-            if project.project_id() != identity.identity.project {
+            if project != identity.identity.project {
                 continue;
             }
             // Priors stay within the caller's project, pool and role. Read only

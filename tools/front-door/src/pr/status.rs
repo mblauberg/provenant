@@ -8,6 +8,12 @@ use std::path::Path;
 
 pub(crate) mod batch;
 mod ci;
+
+/// Why a PR whose CI never reported checks stayed pending. Shared by the
+/// graph gate's CI summary and by `wait --pr` at a timeout.
+pub(crate) const NO_CHECKS_NEXT: &str =
+    "check the workflow triggers or push an empty commit to start CI";
+
 #[derive(Deserialize)]
 struct View {
     state: String,
@@ -27,6 +33,8 @@ struct RestWaitPull {
     state: String,
     head: RestWaitHead,
     #[serde(default)]
+    base: Option<RestWaitBase>,
+    #[serde(default)]
     merged_at: Option<String>,
     #[serde(default)]
     mergeable_state: Option<String>,
@@ -37,6 +45,13 @@ struct RestWaitPull {
 #[derive(Deserialize)]
 struct RestWaitHead {
     sha: String,
+    #[serde(rename = "ref", default)]
+    branch: String,
+}
+#[derive(Deserialize)]
+struct RestWaitBase {
+    #[serde(rename = "ref", default)]
+    branch: String,
 }
 #[derive(Deserialize)]
 struct Check {
@@ -67,6 +82,18 @@ pub(crate) struct Line {
     merge: String,
     #[serde(default)]
     review: String,
+    /// Why no check was reported for this head, when that is known: either
+    /// `merge_conflict` or `not_scheduled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cause: Option<String>,
+    /// The action that unblocks the head, paired with `cause`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) next: Option<String>,
+    /// The exact head a waiter is watching. GitHub has not reported it yet, so
+    /// the head carried in `head` belongs to an earlier push and no verdict may
+    /// be drawn from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) awaiting: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     error: Option<String>,
 }
@@ -80,10 +107,21 @@ where
 }
 
 impl Line {
+    /// Keep this reading pending until GitHub reports the head being watched.
+    pub(crate) fn await_head(&mut self, head: &str) {
+        self.awaiting = Some(head.to_owned());
+        self.checks_passed = None;
+        self.checks_total = None;
+        self.checks_failed = None;
+        self.checks_pending = None;
+        self.failing_checks.clear();
+    }
     /// The state an operator acts on, most urgent first.
     pub(crate) fn class(&self) -> &'static str {
         if self.error.is_some() {
             "unavailable"
+        } else if self.awaiting.is_some() {
+            "pending"
         } else if self.state != "OPEN" {
             if self.state == "MERGED" {
                 "merged"
@@ -119,9 +157,21 @@ impl Line {
                 .then_some(true),
         }
     }
-    fn text(&self) -> String {
+    /// True when no check has been observed for this pull request's head.
+    pub(crate) fn checks_unreported(&self) -> bool {
+        self.checks_total.is_none()
+    }
+    /// The readable check summary: head, check counts, failing names, merge
+    /// and review. `wait --pr` uses this when a PR wait ends without a verdict.
+    pub(crate) fn text(&self) -> String {
         if let Some(error) = &self.error {
             return format!("#{} unavailable: {error}", self.number);
+        }
+        if let Some(awaiting) = &self.awaiting {
+            return format!(
+                "#{} waiting for head {} (GitHub reports {})",
+                self.number, awaiting, self.head
+            );
         }
         let mut line = format!("#{} {} {}", self.number, self.state, self.head);
         if let (Some(passed), Some(total), Some(failed), Some(pending)) = (
@@ -148,7 +198,15 @@ impl Line {
         if self.draft {
             line.push_str(" draft");
         }
+        line.push_str(&self.cause_suffix());
         line
+    }
+    /// The diagnosis a waiter prints for a head whose checks never started.
+    pub(crate) fn cause_suffix(&self) -> String {
+        match (&self.cause, &self.next) {
+            (Some(cause), Some(next)) => format!(" cause={cause} next: {next}"),
+            _ => String::new(),
+        }
     }
 }
 
@@ -523,9 +581,9 @@ fn summarise_ci(
     };
     let selection = required.map_or_else(String::new, |(_, names)| format!(" names={names:?}"));
     let next = if state == CiState::NotScheduled {
-        " next: check the workflow triggers or push an empty commit to start CI"
+        format!(" next: {NO_CHECKS_NEXT}")
     } else {
-        ""
+        String::new()
     };
     CiObservation {
         extra: Default::default(),
@@ -571,6 +629,37 @@ pub(crate) fn wait_repository(
     )?)
 }
 
+/// The head GitHub reports for a pull request and the branch it came from.
+/// A wait without `--head` uses the branch to find a local tip worth waiting
+/// for when the two disagree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WaitHead {
+    pub(crate) sha: String,
+    pub(crate) branch: String,
+}
+
+/// One authoritative PR metadata read for head-pinning setup, sharing the
+/// waiter's request context with the observation loop.
+pub(crate) fn wait_head(
+    state: &Path,
+    project: &Path,
+    repository: &str,
+    number: u64,
+    request: &provenant_config::ports::Request,
+) -> Result<WaitHead> {
+    let mut observer = super::observer::Observer::open(state, project, repository, request)?;
+    let value = observer.resource(
+        &format!("pulls/{number}"),
+        std::time::Duration::ZERO,
+        request,
+    )?;
+    let pull: RestWaitPull = serde_json::from_value(value)?;
+    Ok(WaitHead {
+        sha: pull.head.sha,
+        branch: pull.head.branch,
+    })
+}
+
 /// Revalidate PR metadata and its CI through the shared observer during a wait
 /// loop. The metadata read, every check page and the checks read share
 /// `request`'s one deadline and cancellation.
@@ -601,12 +690,13 @@ pub(crate) fn poll_line<F: provenant_config::Forge, C: super::observer::Clock>(
         std::time::Duration::ZERO,
         request,
     )?;
-    let pull: RestWaitPull = serde_json::from_value(value)?;
+    let pull: RestWaitPull = serde_json::from_value(value.clone())?;
     let state = if pull.merged_at.is_some() {
         "MERGED".to_owned()
     } else {
         pull.state.to_ascii_uppercase()
     };
+    let base = pull.base.as_ref().map(|base| base.branch.clone());
     let view = View {
         state,
         head: pull.head.sha,
@@ -618,7 +708,15 @@ pub(crate) fn poll_line<F: provenant_config::Forge, C: super::observer::Clock>(
         url: pull.html_url,
     };
     let checks = observer.checks(head_override.unwrap_or(&view.head), max_age, request)?;
-    let line = status_line(number, view, Some(&checks));
+    let mut line = status_line(number, view, Some(&checks));
+    if checks.is_empty() {
+        // Mergeability is read (and an UNKNOWN reread) only when it can change
+        // the diagnosis: a head with checks needs no cause.
+        let (merge_state, _) = observer.pull_merge_state(number, value, request)?;
+        let cause = merge_state.no_checks_cause(base.as_deref());
+        line.cause = Some(cause.code.to_owned());
+        line.next = Some(cause.next);
+    }
     Ok((line, checks))
 }
 
@@ -701,6 +799,9 @@ fn status_line(number: u64, view: View, checks: Option<&[super::observer::Check]
         state: view.state,
         head: view.head,
         draft: view.draft,
+        cause: None,
+        next: None,
+        awaiting: None,
         error: None,
     }
 }
@@ -798,6 +899,9 @@ fn rest_line(project: &Path, state: &Path, number: u64, try_graphql: bool) -> Li
                 failing_checks: Vec::new(),
                 merge: "unknown".into(),
                 review: "unknown".into(),
+                cause: None,
+                next: None,
+                awaiting: None,
                 error: Some(provenant_cli::bounded_text(&error.to_string(), 256)),
             }
         }
@@ -933,9 +1037,24 @@ mod tests {
             failing_checks: Vec::new(),
             merge: "clean".into(),
             review: "approved".into(),
+            cause: None,
+            next: None,
+            awaiting: None,
             error: error.map(str::to_owned),
         }
     }
+    #[test]
+    fn awaiting_an_unreported_head_never_verdicts_the_stale_one() {
+        let mut line = row(1668, "stale", None);
+        line.checks_failed = Some(1);
+        assert_eq!(line.verdict(), Some(false));
+        line.await_head("new");
+        assert_eq!(line.verdict(), None);
+        assert_eq!(line.class(), "pending");
+        assert!(line.text().contains("waiting for head new"));
+        assert!(line.text().contains("GitHub reports stale"));
+    }
+
     #[test]
     fn the_summary_puts_action_rows_first() {
         let mut failing = row(3, "c", None);

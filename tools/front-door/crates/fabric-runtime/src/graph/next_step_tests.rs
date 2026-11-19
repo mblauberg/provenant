@@ -478,6 +478,35 @@ fn a_writer_that_lost_its_lane_token_continues_from_its_handoff_on_a_new_route()
 }
 
 #[test]
+fn a_stopped_writer_restarts_when_handoff_holds_a_known_credential() {
+    let secret = "plain-registered-restart-credential-3391";
+    let _scope = provenant_redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
+    let document = document("worktree_write", serde_json::Value::Null);
+    let handoff = format!(
+        "```handoff\n{{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"Renderer half done with {secret}\",\"remaining\":[\"Finish renderer\"],\"decisions\":[],\"verify\":[]}}\n```"
+    );
+    let mut owner = Owner {
+        observations: [
+            terminal(
+                "a/1",
+                AttemptOutcome::TaskFailed,
+                Some(StopCause::LaneTokenLost),
+                Some(&handoff),
+            ),
+            done("b/1"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = journal(&document);
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(adapters(&owner), ["first", "second"]);
+    assert_eq!(owner.worktrees[0], owner.worktrees[1]);
+    assert!(owner.prompts[1].contains(secret));
+}
+
+#[test]
 fn on_stop_sends_a_stop_to_the_chair_and_unproved_custody_always_goes_there() {
     for (on_stop, cause) in [
         (json!({"usage_limited": "chair"}), StopCause::UsageLimited),

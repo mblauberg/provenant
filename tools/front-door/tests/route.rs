@@ -1302,3 +1302,53 @@ fn route_list_includes_sources_in_json_and_human_views() -> Result {
     assert!(String::from_utf8_lossy(&valid.stdout.bytes).contains("source=bundled effort="));
     Ok(())
 }
+
+#[test]
+fn route_list_attributes_a_bundled_weight_to_the_bundled_layer() -> Result {
+    let rig = rig()?;
+    let json = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
+    let member = json["data"]["pools"]["junior"]
+        .as_array()
+        .and_then(|members| {
+            members
+                .iter()
+                .find(|member| member["model"] == "codex/gpt-6-luna")
+        })
+        .ok_or("bundled junior member")?;
+    assert_eq!(member["weight_layer"], "bundled");
+    let human = rig.command(&["route", "list", "--pool", "junior", "--full"])?;
+    let human = String::from_utf8_lossy(&human.stdout.bytes);
+    assert!(
+        human.contains("codex/gpt-6-luna source=bundled weight=")
+            && human.contains("weight_layer=bundled"),
+        "human route list must name the bundled weight layer: {human}"
+    );
+    Ok(())
+}
+
+#[test]
+fn route_list_attributes_an_overridden_weight_to_host_config() -> Result {
+    let rig = rig()?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.routing.pools]\njunior = [{ model = 'codex/gpt-6-luna', weight = 7, effort = 'high', efforts = ['high'] }]\n",
+    )?;
+    let json = call(&rig, &["route", "list", "--pool", "junior"], 0)?;
+    let member = json["data"]["pools"]["junior"]
+        .as_array()
+        .and_then(|members| {
+            members
+                .iter()
+                .find(|member| member["model"] == "codex/gpt-6-luna")
+        })
+        .ok_or("configured junior member")?;
+    assert_eq!(member["weight"], 7);
+    assert_eq!(member["weight_layer"], "host config");
+    let human = rig.command(&["route", "list", "--pool", "junior", "--full"])?;
+    let human = String::from_utf8_lossy(&human.stdout.bytes);
+    assert!(
+        human.contains("codex/gpt-6-luna source=user weight=7 weight_layer=host config"),
+        "human route list must name the overriding config layer: {human}"
+    );
+    Ok(())
+}
