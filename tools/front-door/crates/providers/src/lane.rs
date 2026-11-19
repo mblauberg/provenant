@@ -814,9 +814,11 @@ while :; do
     _provenant_git_attempt=$((_provenant_git_attempt + 1))
     rm -f "$_provenant_git_tmp/stderr" "$_provenant_git_tmp/stdout" "$_provenant_git_tmp/err" "$_provenant_git_tmp/out" "$_provenant_git_tmp/err-capture" "$_provenant_git_tmp/out-capture"
     mkfifo "$_provenant_git_tmp/err" "$_provenant_git_tmp/out" "$_provenant_git_tmp/err-capture" "$_provenant_git_tmp/out-capture" || exec "$_provenant_git_program" "$@"
-    tail -c 8192 < "$_provenant_git_tmp/err-capture" > "$_provenant_git_tmp/stderr" &
+    # Give tail the FIFO pathname: reopening an inherited FIFO stdin can block
+    # after tee exits (for example, uutils tail on Ubuntu 26.04).
+    tail -c 8192 "$_provenant_git_tmp/err-capture" > "$_provenant_git_tmp/stderr" &
     _provenant_git_stderr_tail_pid=$!
-    tail -c 1 < "$_provenant_git_tmp/out-capture" > "$_provenant_git_tmp/stdout" &
+    tail -c 1 "$_provenant_git_tmp/out-capture" > "$_provenant_git_tmp/stdout" &
     _provenant_git_stdout_tail_pid=$!
     tee "$_provenant_git_tmp/err-capture" < "$_provenant_git_tmp/err" >&2 &
     _provenant_git_stderr_tee_pid=$!
