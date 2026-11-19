@@ -2572,9 +2572,9 @@ impl Driver<'_> {
     /// Retry until the exit is durable or the attempt is provably removed.
     /// Custody survives ENOSPC; a supervisor signal bounds the retries to
     /// `SIGNALLED_RETRY_BUDGET_MS`, then the guardian exits with an error.
-    /// process.json exposes publication_pending. A removed attempt keeps its held descriptor usable,
-    /// so removal is judged by directory identity, never by a pathname or an
-    /// errno alone.
+    /// process.json exposes publication_pending. A removed attempt keeps its
+    /// held descriptor usable, so removal is judged by directory identity,
+    /// never by a pathname or an errno alone.
     fn publish_until_durable(&mut self, record: &ProcessExit, state: &mut State) -> Result<bool> {
         let bytes = record.bounded_bytes()?;
         if bytes.len() as u64 > EXIT_LIMIT {
