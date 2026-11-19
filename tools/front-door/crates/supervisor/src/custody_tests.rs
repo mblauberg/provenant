@@ -555,16 +555,15 @@ fn missing_or_malformed_reservation_does_not_reopen_a_writer() -> TestResult {
     )?;
     assert!(matches!(acquire(&path), Err(CustodyError::Fenced)));
     let clock = SystemClock::new();
-    assert!(matches!(
-        acquire_recovery(
-            Directory::open_anchor(&path)?,
-            scope(),
-            WaitBudget::cli(clock.mono_now(), 1)?,
-            &CancelToken::new(),
-            &clock
-        ),
-        Err(CustodyError::InvalidRecord)
-    ));
+    let error = acquire_recovery(
+        Directory::open_anchor(&path)?,
+        scope(),
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &CancelToken::new(),
+        &clock,
+    )
+    .expect_err("malformed reservation must refuse recovery");
+    assert!(error.is_invalid_record(), "{error}");
     let good = root.path().join("good");
     std::fs::create_dir(&good)?;
     let _good = acquire(&good)?;

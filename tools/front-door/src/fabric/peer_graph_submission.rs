@@ -76,7 +76,7 @@ extend: Vec::new(),
         }))?;
         // The subject is the recorded submission, so the provider launch
         // stays queued after admission.
-        provenant_cli::run::with_deferred_provider_launch(|| bound.observe_or_start(&key, graph::NodeInput { review_launch: false,
+        provenant_cli::run::with_deferred_provider_launch(|| bound.observe_or_start(&key, graph::NodeInput { writer_dirty_preflight: false, review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, review_base: None,
             prior_attempts: prior, family_peers: peers, context: graph_test_context(&key), read_roots: &[],
             distinct_from_attempts: distinct, require_distinct: require, source_commit: None,
@@ -605,7 +605,7 @@ fn graph_submission_pins_the_integration_base_across_replay()
         network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false,
     };
     let actor = bound.actor();
-    bound.observe_or_start(&key, graph::NodeInput { review_launch: false,
+    bound.observe_or_start(&key, graph::NodeInput { writer_dirty_preflight: false, review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, review_base: None,
         prior_attempts: &[], family_peers: &[], context: graph_test_context(&key), read_roots: &[],
         distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
@@ -631,7 +631,7 @@ fn graph_submission_pins_the_integration_base_across_replay()
         "graph_id":"pinned-base", "node_id":"second-lens", "route_index":0, "attempt": 1
     }))?;
     let actor = bound.actor();
-    bound.observe_or_start(&second, graph::NodeInput { review_launch: false,
+    bound.observe_or_start(&second, graph::NodeInput { writer_dirty_preflight: false, review_launch: false,
         attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, review_base: None,
         prior_attempts: &[], family_peers: &[], context: graph_test_context(&second), read_roots: &[],
         distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),

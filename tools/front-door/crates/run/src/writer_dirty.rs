@@ -103,38 +103,6 @@ pub enum Preflight {
     ContinueInPlace(String),
 }
 
-/// Paths that stay a hard refusal under every setting. A path is compared by
-/// its first component so a nested credential file cannot be committed by a
-/// `wip_commit` that only looks at the top level.
-const PROTECTED_ROOTS: &[&str] = &[
-    ".git",
-    ".ssh",
-    ".gnupg",
-    ".aws",
-    ".config",
-    ".kube",
-    ".docker",
-    ".npmrc",
-    ".netrc",
-    ".env",
-    "credentials",
-    "id_rsa",
-    "id_ed25519",
-];
-
-fn is_protected(path: &str) -> bool {
-    let normalized = path.replace('\\', "/");
-    let first = normalized
-        .trim_start_matches("./")
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    PROTECTED_ROOTS
-        .iter()
-        .any(|root| first == *root || first.starts_with(&format!("{root}.")))
-}
-
 /// Decide the preflight outcome for the observed dirty paths.
 pub fn preflight(resolved: &ResolvedWriterDirty, paths: &[String]) -> Preflight {
     if paths.is_empty() {
@@ -142,7 +110,7 @@ pub fn preflight(resolved: &ResolvedWriterDirty, paths: &[String]) -> Preflight 
     }
     let protected: Vec<String> = paths
         .iter()
-        .filter(|path| is_protected(path))
+        .filter(|path| provenant_confinement::worktrees::writer_edit_is_protected(path))
         .cloned()
         .collect();
     if !protected.is_empty() {

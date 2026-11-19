@@ -468,7 +468,34 @@ impl WriterLaunch {
     /// Commit the worktree's retained edits locally as WIP before a plan node
     /// launches. Returns the new head. Hooks and mutable Git configuration are
     /// excluded by the bounded Git command path.
-    pub fn commit_wip(&self, git: &Path, message: &str) -> Result<GitOid> {
+    pub fn commit_wip(
+        &self,
+        git: &Path,
+        message: &str,
+        expected_paths: &[String],
+    ) -> Result<GitOid> {
+        use provenant_os::clock::SystemClock;
+        let (directory, _) = self
+            .custody
+            .as_ref()
+            .ok_or(RunError::Validation("writer custody unavailable"))?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let _guard = provenant_supervisor::custody::acquire_unreserved_writer(
+            directory,
+            provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )
+        .map_err(|error| match error {
+            provenant_supervisor::custody::CustodyError::Filesystem(
+                provenant_os::fs::FsError::LockTimeout { .. },
+            ) => RunError::Writer(worktrees::WorktreeError::LockBusy),
+            provenant_supervisor::custody::CustodyError::Fenced => {
+                RunError::Validation("writer custody has an unsettled reservation")
+            }
+            other => RunError::Io(std::io::Error::other(other.to_string())),
+        })?;
         let repo = self.worktree.repo();
         let git_dir = repo.private_git_dir();
         let root = repo.root_path();
@@ -477,6 +504,23 @@ impl WriterLaunch {
             argv.extend(args.iter().map(OsString::from));
             crate::objects::command(git, git_dir, root, &argv, None)
         };
+        repo.revalidate()
+            .map_err(provenant_confinement::worktrees::WorktreeError::from)?;
+        let branch = run(&["symbolic-ref", "-q", "HEAD"])?;
+        if std::str::from_utf8(&branch).ok().map(str::trim) != Some(self.branch.as_str()) {
+            return Err(RunError::Validation(
+                "writer branch changed during WIP preflight; retry submission",
+            ));
+        }
+        let current = run(&["rev-parse", "HEAD"])?;
+        let current = std::str::from_utf8(&current)
+            .map_err(|_| RunError::Validation("writer head is not UTF-8"))?;
+        if current.trim() != self.base.to_string() || self.uncommitted_paths(git)? != expected_paths
+        {
+            return Err(RunError::Validation(
+                "writer changed during WIP preflight; retry submission",
+            ));
+        }
         run(&["add", "-A"])?;
         run(&[
             "-c",
@@ -2484,6 +2528,31 @@ mod cargo_setup_tests {
         let refusal = outcome.refusal().expect("refusal");
         assert!(refusal.contains(&source.to_string()), "{refusal}");
         assert!(refusal.contains(&unrelated.to_string()), "{refusal}");
+        Ok(())
+    }
+
+    #[test]
+    fn wip_refuses_branch_changed_at_the_same_head() -> FixtureResult<()> {
+        if clean_environment_child(stringify!(wip_refuses_branch_changed_at_the_same_head))? {
+            return Ok(());
+        }
+        let fixture = WriterFixture::new()?;
+        let lane = fixture.add_worktree("chore/original", "lane")?;
+        let writer = fixture.prepare(&lane)?;
+        std::fs::write(lane.join("retained.txt"), "draft")?;
+        let paths = writer.uncommitted_paths(&fixture.git)?;
+        fixture.lane_git(&lane, &["checkout", "-qb", "chore/other"])?;
+        let error = writer
+            .commit_wip(&fixture.git, "WIP: test", &paths)
+            .expect_err("branch change must refuse");
+        assert!(error.to_string().contains("branch changed"), "{error}");
+        assert_eq!(std::fs::read_to_string(lane.join("retained.txt"))?, "draft");
+        let head = provenant_os::fixture::git_command_at(&fixture.git)
+            .current_dir(&lane)
+            .args(["rev-parse", "HEAD"])
+            .output()?;
+        assert!(head.status.success());
+        assert_eq!(String::from_utf8(head.stdout)?.trim(), fixture.source);
         Ok(())
     }
 

@@ -726,6 +726,7 @@ pub(super) fn validate_flat_plan(
         let mut depends_on = node.depends_on.clone();
         depends_on.sort();
         nodes.push(PlannedNode {
+            writer_dirty_preflight: node.writer_dirty_warning.is_some(),
             review_launch: is_review_node(node),
             on_stop: node.on_stop.clone(),
             family_group: node.family_group.clone(),
