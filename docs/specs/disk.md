@@ -47,8 +47,9 @@ effects complete and no live holder, writer slot or Cargo lock holds the files;
 live attempts are never touched. Busy or unreleased attempts remain protected, and collection
 preserves durable results, handoffs, logs and process records.
 
-Lanes steer build output to the shared project target (`lanes.cargo_target = "shared"`).
-When a lane configures `CARGO_TARGET_DIR` under an attempt's `tmp/` directory,
+Writer lanes steer build output to the shared project target (`lanes.cargo_target = "shared"`);
+read-only lanes never own build output and build in their attempt scratch.
+When a writer lane configures `CARGO_TARGET_DIR` under an attempt's `tmp/` directory,
 launch and handoff output emit a warning. Discard archives exclude ignored build output
 at creation (`target/` and any directory marked with `CACHEDIR.TAG`), and expire
 after `gc.discard_archive_retention` (defaults to 14 days). In shared targets,

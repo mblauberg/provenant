@@ -41,7 +41,10 @@ before removal. Measurements do not follow links; APFS clones may share physical
 blocks, so the change in volume free space can differ. Apply removes eligible attempt scratch without a separate
 pre-deletion size walk. Partial observations and failed paths remain visible in
 JSON and text. Byte rows come from each adapter; unavailable observations remain
-explicit rather than appearing as zero.
+explicit rather than appearing as zero. The compact apply summary reports one
+`known bytes` figure, the sum of cache, attempt scratch, discard archive, Cargo
+target and worktree bytes. It is a lower bound: classes without a measurement are
+not counted.
 
 `gc.idle` defaults to `6h` and accepts `0` or a duration in seconds, minutes,
 hours, days or weeks. It applies to ownerless idle artifacts and standalone

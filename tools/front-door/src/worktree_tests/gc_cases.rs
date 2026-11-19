@@ -549,7 +549,17 @@ pub(super) fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
     let text = command(&rig, &["gc", "--apply"])?;
     let text = String::from_utf8(text.stdout.bytes)?;
     assert!(text.contains("collected:"), "{text}");
-    assert!(text.contains("cache/scratch bytes"), "{text}");
+    // The compact summary reports one lower-bound byte figure over every
+    // measured class (cache, scratch, archives, Cargo targets and worktrees).
+    let known = text
+        .split(" known bytes")
+        .next()
+        .and_then(|head| head.rsplit(' ').next())
+        .and_then(|figure| figure.parse::<u64>().ok());
+    assert!(
+        text.contains(" known bytes") && known.is_some(),
+        "summary must report a numeric known-bytes figure: {text}"
+    );
     Ok(())
 }
 
