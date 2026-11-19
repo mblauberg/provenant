@@ -157,10 +157,12 @@ impl LaneRow {
                     .ok()
                     .and_then(|value| value.as_str().map(str::to_owned))
                     .unwrap_or_default(),
+                // A refusal that recorded no cause is reported as unrecorded, never
+                // as an access-policy refusal the host did not observe.
                 terminal_cause
                     .or_else(|| {
                         (*outcome == crate::run::Outcome::Rejected)
-                            .then_some(crate::run::TerminalCause::AccessPolicyRefused)
+                            .then_some(crate::run::TerminalCause::Unrecorded)
                     })
                     .map(|cause| cause.diagnostic(detail))
                     .or_else(|| {
@@ -656,6 +658,7 @@ impl crate::run::TerminalCause {
         Self::Blocked,
         Self::LaneTokenLost,
         Self::Steered,
+        Self::Unrecorded,
     ];
 }
 
@@ -699,7 +702,8 @@ mod terminal_cause_tests {
             | TerminalCause::ContextHandoff
             | TerminalCause::Blocked
             | TerminalCause::LaneTokenLost
-            | TerminalCause::Steered => {}
+            | TerminalCause::Steered
+            | TerminalCause::Unrecorded => {}
         }
     }
 
@@ -741,5 +745,27 @@ mod terminal_cause_tests {
             assert!(!label.contains("secret"));
         }
         assert!(TerminalCause::FreePoolQuota.detail().contains("paid route"));
+    }
+
+    #[test]
+    fn a_rejection_without_a_recorded_cause_is_unrecorded() {
+        let state = AttemptState::Terminal {
+            extra: Default::default(),
+            terminal_cause: None,
+            terminal_note: None,
+            stop: None,
+            outcome: Outcome::Rejected,
+            exit_code: None,
+            finished_at: provenant_core::WallTime::from_micros(1).unwrap(),
+            reason: None,
+        };
+        let (_, reason) = LaneRow::state_and_reason(&state);
+        assert_eq!(reason.as_deref(), Some(TerminalCause::Unrecorded.detail()));
+        assert_ne!(
+            reason.as_deref(),
+            Some(TerminalCause::AccessPolicyRefused.detail())
+        );
+        let (_, label) = LaneRow::state_and_label(&state);
+        assert_eq!(label.as_deref(), Some(TerminalCause::Unrecorded.reason()));
     }
 }

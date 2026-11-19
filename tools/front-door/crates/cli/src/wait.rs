@@ -23,6 +23,9 @@ pub struct Settings {
     pub forge_source: String,
     pub max_targets: u64,
     pub pr_read_timeout_seconds: u64,
+    /// How long a pull request wait holds a settling reading pending while
+    /// Actions has reported no run for its head. Zero settles at once.
+    pub actions_grace_seconds: u64,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -37,6 +40,7 @@ impl Default for Settings {
             forge_source: "auto".into(),
             max_targets: 64,
             pr_read_timeout_seconds: 60,
+            actions_grace_seconds: 60,
         }
     }
 }
@@ -246,6 +250,7 @@ impl DomainConfig for Settings {
                 1,
                 600,
             ),
+            ("actions_grace_seconds", self.actions_grace_seconds, 0, 600),
         ]
         .into_iter()
         .filter(|(_, value, min, max)| !(min..=max).contains(&value))
@@ -268,7 +273,7 @@ impl DomainConfig for Settings {
 pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     "wait",
     |_| {
-        "timeout_seconds = 300\nmax_timeout_seconds = 14400\nlocal_interval_ms = 500\npr_interval_ms = 5000\npr_slow_interval_ms = 15000\npr_near_end_window_ms = 30000\npr_conditional_requests = true\nforge_source = \"auto\"\nmax_targets = 64\npr_read_timeout_seconds = 60\n"
+        "timeout_seconds = 300\nmax_timeout_seconds = 14400\nlocal_interval_ms = 500\npr_interval_ms = 5000\npr_slow_interval_ms = 15000\npr_near_end_window_ms = 30000\npr_conditional_requests = true\nforge_source = \"auto\"\nmax_targets = 64\npr_read_timeout_seconds = 60\nactions_grace_seconds = 60\n"
     },
 )
 .with_fields(&[
@@ -282,6 +287,7 @@ pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     FieldMetadata::new("forge_source", "string"),
     FieldMetadata::int("max_targets", 1, 1024),
     FieldMetadata::int("pr_read_timeout_seconds", 1, 600),
+    FieldMetadata::int("actions_grace_seconds", 0, 600),
 ]);
 
 #[cfg(test)]

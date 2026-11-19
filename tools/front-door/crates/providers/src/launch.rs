@@ -975,16 +975,9 @@ pub(crate) fn private_git_objects(
         bytes: config_text.into_bytes(),
     });
     if input.sandboxed() {
-        spec.env.retain(|(key, _)| key != "GIT_CONFIG_NOSYSTEM");
-        crate::lane::install_token_config(&mut spec.env).map_err(|error| {
-            input.policy.boundary_error(
-                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
-                Facts::violation(
-                    "Git credentials could not be isolated in the private writer Git environment",
-                ),
-                error,
-            )
-        })?;
+        crate::lane::install_token_config(&mut spec.env);
+    } else {
+        crate::lane::scrub_git_command_config(&mut spec.env);
     }
     if let Some((_, current)) = spec
         .env
