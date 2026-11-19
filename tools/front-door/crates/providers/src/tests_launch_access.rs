@@ -1378,7 +1378,7 @@ fn sandboxed_private_git_config_withholds_host_credentials() -> Result<(), Box<d
     let prompt = Prompt::new("fixture".into());
     let mut route = route("codex", "fixture-model");
     route.account_key = None;
-    let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
+    let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
     let mut input = fixture_input(&route, &plan, &prompt, &repo, None);
     input.home = &home;
     input.provenant.git = &git;
