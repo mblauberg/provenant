@@ -7,9 +7,9 @@
   and authority boundaries. It no longer samples CPU or disk per lane, tracks
   output silence, spares processes by command name or re-checks the provider
   executable before spawn, and it scans cleanup holders once per guardian
-  rather than every 30 s. Status no longer reports provider silence.
+  rather than every 30 s. Status no longer reports provider silence. (#3566)
 - Process-tree sampling is opt-in. To keep `PROVENANT_PROCESS_TREE` or
   admission memory limits, set `domains.run.resource_sample_interval_ms`
-  (1..=60000); without a sample a memory limit is skipped with a warning.
+  (1..=60000); without a sample a memory limit is skipped with a warning. (#3566)
 - `lanes.silence_seconds`, `lanes.supervision` and the `GUARDIAN_DISK` policy
-  are removed; delete them from config.
+  are removed; delete them from config. (#3566)
