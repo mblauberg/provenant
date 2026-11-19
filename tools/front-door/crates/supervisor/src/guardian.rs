@@ -726,6 +726,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         history_complete: true,
         last_tracking: None,
         journal_warning_active: false,
+        cleanup_holders_warned: false,
         settlement_evidence: SettlementEvidence::Unresolved,
         reaped: Vec::new(),
         omitted_reaped: 0,
@@ -796,6 +797,8 @@ struct Driver<'a> {
     history_complete: bool,
     last_tracking: Option<Vec<u8>>,
     journal_warning_active: bool,
+    /// The diagnostic holder scan has run; it runs once per guardian.
+    cleanup_holders_warned: bool,
     settlement_evidence: SettlementEvidence,
     reaped: Vec<ProcessIdentity>,
     omitted_reaped: u64,

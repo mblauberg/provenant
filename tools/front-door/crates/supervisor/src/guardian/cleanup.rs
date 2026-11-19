@@ -24,15 +24,20 @@ fn live_or_full(
 
 impl Driver<'_> {
     /// Descriptor observations explain contention, but never grant signal or
-    /// settlement authority. Share one deadline across the entire scan.
+    /// settlement authority. Share one deadline across the entire scan. The
+    /// scan runs once per guardian: retained custody reaches a cleanup
+    /// deadline every escalation, and the holders rarely change between them.
     #[allow(clippy::disallowed_methods)]
     fn warn_cleanup_holders(
-        &self,
+        &mut self,
         census: Option<&crate::census::Census>,
         warnings: &mut Vec<String>,
         omitted: &mut u64,
     ) {
         use provenant_os::pid::{CwdObserver, SystemCwdObserver};
+        if std::mem::replace(&mut self.cleanup_holders_warned, true) {
+            return;
+        }
         let deadline = Instant::now() + Duration::from_millis(100);
         let resource = self
             .lock_dir
