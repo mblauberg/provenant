@@ -55,7 +55,7 @@ Diagnostics go to bounded, redacted stderr, never result bytes.
 
 Tests isolate user state and use controlled time and synchronisation.
 - Why: tests must not alter a real installation or depend on timing races.
-- Owner: `crates/test-support/src/lib.rs` (`root_inputs`, `wait_for`),
+- Owner: `crates/test-support/src/lib.rs` (`root_inputs`, `wait_for`, `process_is_gone`, `assert_process_gone`),
   `crates/core/src/time.rs::Clock`
 
 ## One owner per mechanism
