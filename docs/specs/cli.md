@@ -298,8 +298,8 @@ receipt, and states absent evidence rather than inventing it.
 ### Shell commands use confinement
 
 The hook validates its event envelope but does not decide authority from shell
-syntax. Writer isolation and authority are enforced at the boundaries described
-in [supervision](supervisor.md#permission-policy).
+syntax. The [hard boundaries](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md) are enforced by the
+[permission policy](supervisor.md#permission-policy).
 
 - Why: shell syntax rules cannot enforce those boundaries.
 

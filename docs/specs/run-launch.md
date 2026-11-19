@@ -94,9 +94,8 @@ reporting `confinement_refused` with no resource. See
 
 ## Policy and confinement
 
-Launch policy defaults to refusal only at credentials, Git isolation, data
-integrity and authority boundaries. Other checks allow or warn unless configured
-otherwise. A write-scope refusal happens before publication and retains private
+Launch policy refuses only at the [hard boundaries](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md).
+Other checks allow or warn unless configured otherwise. A write-scope refusal happens before publication and retains private
 work. The lane instructions say the same: a write scope lists the expected files,
 so a writer edits another file when the fix needs it and lists it in its
 handoff; only a strict `WRITE_SCOPE` policy refuses it.

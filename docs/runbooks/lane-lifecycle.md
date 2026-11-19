@@ -36,8 +36,8 @@ priorities) is in the [run spec](../specs/run.md) and
   Each lane resolves a
   [sandbox mode](configuration.md#lane-sandbox-mode); `status` shows
   `sandboxed(<source>)` on sandboxed lanes. Credential, state, read-only source
-  and shared Git roots retain link and write protection; ordinary hard links
-  outside those roots are available. `cargo nextest run --profile lane`
+  and shared Git roots stay write-protected; hard links follow the
+  [permission policy](../specs/supervisor.md#permission-policy). `cargo nextest run --profile lane`
   excludes fixtures requiring host control and CI's `ci` profile keeps them.
 
 ## Delivery

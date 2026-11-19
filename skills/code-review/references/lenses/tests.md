@@ -23,7 +23,7 @@ claims:
 - A vacuous pass: an early return, a fixture listed as a test, a body that
   never reaches its assertion, a runner filter or config name that matches no
   test, or a name promising a bound the body never checks.
-- A required test that does not fail closed when its dependency is unavailable.
+- A required test that skips silently when its dependency is missing.
 - A real-time wait or sleep used as proof when a barrier, injected clock,
   timeout or limit can prove the behaviour.
 - An assertion that encodes a spec clause being loosened or skipped to get a

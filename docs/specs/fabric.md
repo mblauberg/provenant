@@ -92,7 +92,7 @@ Claims do not expire, lock or refuse overlapping advisory ownership. Acquiring
 another holder's item warns, records the previous holder in the same transaction
 as the custody change, and proceeds. Gone holders leave unattended items for
 adoption. Unknown native presence stays unknown. Run writer leases still own
-Git isolation. Cursors advance monotonically; an unreachable peer is Unknown.
+worktree custody. Cursors advance monotonically; an unreachable peer is Unknown.
 Holder identifiers in warnings use their normal hexadecimal display rather than
 debug-struct formatting.
 - Why: unattended work must remain discoverable without making advisory custody

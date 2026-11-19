@@ -3,7 +3,7 @@
 # project carries them. `hard = true` makes a panel that misses a floor's lenses
 # refuse instead of warn. Other projects declare their own the same way.
 [domains.routing.review.floors.provenant_credentials]
-# ADR 0035 boundary 2: host-only GitHub login lookup, secret-pattern scan and
+# ADR 0035 boundary 1: host-only GitHub login lookup, secret-pattern scan and
 # output redaction.
 paths = [
   "tools/front-door/crates/cli/src/run/provider/gh_auth.rs",
@@ -15,14 +15,13 @@ tier = "crucial"
 hard = true
 lenses = ["correctness-spec", "security-privacy"]
 [domains.routing.review.floors.provenant_lane_git]
-# ADR 0035 boundary 1: a writer lane reaches shared refs only through
-# host-owned delivery. A lane that escapes can rewrite shared history.
+# ADR 0035 boundary 2: a writer lane reaches shared refs only through
+# host-owned delivery. A lane that escapes can rewrite other lanes' history.
 paths = [
   "tools/front-door/crates/confinement/src/utility.rs",
   "tools/front-door/src/pr/git.rs",
   "tools/front-door/crates/confinement/src/worktrees.rs",
   "tools/front-door/crates/confinement/src/worktrees/**",
-  "tools/front-door/crates/confinement/src/permissions/**",
   # Resolves mandatory credential and Git protections for each launch.
   "tools/front-door/crates/confinement/src/run_config.rs",
   "tools/front-door/crates/confinement/src/push.rs",
@@ -34,10 +33,11 @@ paths = [
 ]
 tier = "crucial"
 hard = true
-lenses = ["correctness-spec", "adversarial"]
+lenses = ["correctness-spec", "adversarial", "flexibility"]
 [domains.routing.review.floors.provenant_object_integrity]
-# ADR 0035 boundary 3: lane objects are digest-checked and fsck-verified on
-# receipt. A corrupt or substituted object lands in shared history unnoticed.
+# A project floor, not an ADR 0035 boundary: lane objects are digest-checked and
+# fsck-verified on receipt. A corrupt or substituted object lands in shared
+# history unnoticed.
 paths = [
   "tools/front-door/crates/run/src/objects.rs",
   "tools/front-door/crates/run/src/objects/**",
@@ -47,7 +47,7 @@ tier = "crucial"
 hard = true
 lenses = ["correctness-spec", "adversarial"]
 [domains.routing.review.floors.provenant_authority]
-# ADR 0035 boundary 4: landing, publishing, handoff acceptance and chair
+# ADR 0035 boundary 3: landing, publishing, handoff acceptance and chair
 # switching need held authority. Merging and publishing are external effects.
 paths = [
   "tools/front-door/crates/fabric-store/src/landing.rs",

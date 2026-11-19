@@ -199,8 +199,9 @@ configured stop remains distinct from a mandatory boundary refusal.
 Every credential declaration is enforced independently. An exception for an
 enclosing runtime, package or selected authentication root cannot open a nested
 declared store. Selected authentication and its exact aliases retain only their
-declared access. Link operations remain subject to credential, state, source
-and Git boundaries without a blanket denial of ordinary hard links.
+declared access. A lane cannot create a hard link to a file in a credential root, the shared
+Git control directory or another lane's worktree; every other hard link is
+allowed.
 
 ### Plans refuse unsafe roots
 
@@ -331,8 +332,8 @@ worktree; commands for other repositories, commands with explicit repository
 selectors and Git transport endpoints pass through with their arguments and
 environment intact. Fixture commands remove inherited lane Git selectors and
 use native Git while retaining the surrounding tool PATH.
-- Why: ordinary Git works in the lane while one host boundary guards shared
-  metadata.
+- Why: ordinary Git works in the lane while other lanes' refs and the host's Git
+  behaviour stay protected; sharing objects and caches is intended.
 
 ### Native environment and sandbox tool stores
 
