@@ -3769,7 +3769,7 @@ impl WriterLaunch {
                 &crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
                     .ok_or(RunError::NotFound)?,
             )?;
-            let ancestor = crate::objects::publish_branch(
+            let published = crate::objects::publish_branch(
                 &git_executable,
                 self.worktree.repo(),
                 crate::objects::BranchPublication {
@@ -3781,6 +3781,7 @@ impl WriterLaunch {
                 },
                 enforcement,
             )?;
+            let ancestor = published.ancestor;
             if let Some(warning) = ancestor.warning(self.branch.as_str(), base, verified_tip) {
                 // Best effort: the ancestor is also in the branch reflog.
                 let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
@@ -3808,7 +3809,14 @@ impl WriterLaunch {
                 )? == verified_tip
             {
                 self.advance_files(attempt, verified_tip)?;
-                crate::objects::advance_native_index(self.worktree.repo(), base)?;
+                // A resumed publication finds the branch already at its tip, so
+                // its replaced tip is gone; fall back to the launch base.
+                let from = if published.previous == verified_tip {
+                    base
+                } else {
+                    published.previous
+                };
+                crate::objects::advance_native_index(self.worktree.repo(), from)?;
                 crate::objects::clear_import_refs(
                     &git_executable,
                     self.worktree.repo(),

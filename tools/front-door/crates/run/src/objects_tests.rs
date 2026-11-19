@@ -2241,6 +2241,72 @@ fn native_index_advance_keeps_private_flags_and_exposes_worktree_edits() -> Test
 
 #[test]
 // Spec: docs/specs/run-launch.md#admission-and-custody
+fn sequential_publications_touching_one_path_advance_the_native_index_from_the_prior_tip()
+-> TestResult {
+    let mut fixture = Fixture::new("sha1")?;
+    let (_attempt, _scratch) = fixture.overlay()?;
+    fixture.import()?;
+    let first = super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: fixture.base,
+            launch_ref: None,
+            head: fixture.head,
+            attempt: fixture.import_attempt,
+        },
+        &provenant_records::policy::Policy::default(),
+    )?;
+    assert_eq!(first.previous, fixture.base);
+    assert!(super::advance_native_index(
+        fixture.worktree.repo(),
+        first.previous
+    )?);
+
+    // A second lane, launched at the same base, publishes a commit that
+    // changes the same path on top of the first lane's tip.
+    let native = |args: &[&str]| git(&fixture.git, &fixture.home, &fixture.lane, None, args);
+    fs::write(fixture.lane.join("file"), "second lane blob\n")?;
+    native(&["add", "file"])?;
+    let tree = String::from_utf8(native(&["write-tree"])?.stdout)?;
+    let second_head = oid(native(&[
+        "commit-tree",
+        tree.trim(),
+        "-p",
+        &fixture.head.to_string(),
+        "-m",
+        "second lane",
+    ])?)?;
+    native(&["reset", "-q", "--mixed", &fixture.head.to_string()])?;
+    let second = super::publish_branch(
+        &fixture.git,
+        fixture.worktree.repo(),
+        super::BranchPublication {
+            branch: "refs/heads/lane",
+            base: fixture.base,
+            launch_ref: None,
+            head: second_head,
+            attempt: AttemptId::from_bytes([1; 16]),
+        },
+        &provenant_records::policy::Policy::default(),
+    )?;
+    assert_eq!(second.previous, fixture.head);
+    assert!(super::advance_native_index(
+        fixture.worktree.repo(),
+        second.previous
+    )?);
+    assert_eq!(
+        native(&["diff", "--cached", "--name-only"])?.stdout,
+        Vec::<u8>::new(),
+        "the native index must match the published tip"
+    );
+    assert_eq!(native(&["show", ":file"])?.stdout, b"second lane blob\n");
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/run-launch.md#admission-and-custody
 fn native_index_advance_preserves_staged_snapshots_on_conflicts_and_disjoint_updates() -> TestResult
 {
     for (path, advances, busy) in [
@@ -2483,7 +2549,8 @@ fn publication_warns_for_orphan_history_and_strict_policy_refuses() -> TestResul
             attempt: fixture.import_attempt,
         },
         &Policy::default(),
-    )?;
+    )?
+    .ancestor;
     assert_eq!(ancestor, super::Ancestor::Unrooted);
     assert_eq!(
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
@@ -2787,7 +2854,8 @@ fn publication_accepts_a_rebase_onto_a_pushed_non_default_branch() -> TestResult
             attempt: fixture.import_attempt,
         },
         &provenant_records::policy::Policy::default(),
-    )?;
+    )?
+    .ancestor;
     assert_eq!(
         ancestor,
         super::Ancestor::Known {
@@ -2840,7 +2908,8 @@ fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
             attempt: fixture.import_attempt,
         },
         &provenant_records::policy::Policy::default(),
-    )?;
+    )?
+    .ancestor;
     assert_eq!(
         ancestor,
         super::Ancestor::Known {
@@ -2891,7 +2960,8 @@ fn publication_accepts_a_rebase_onto_the_launch_ref() -> TestResult {
             attempt: fixture.import_attempt,
         },
         &provenant_records::policy::Policy::default(),
-    )?;
+    )?
+    .ancestor;
     assert_eq!(ancestor, super::Ancestor::Unrooted);
     assert_eq!(
         super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
@@ -2915,7 +2985,8 @@ fn publication_from_the_launch_base_reports_no_ancestor_warning() -> TestResult 
             attempt: fixture.import_attempt,
         },
         &provenant_records::policy::Policy::default(),
-    )?;
+    )?
+    .ancestor;
     assert_eq!(ancestor, super::Ancestor::LaunchBase);
     assert_eq!(ancestor.warning("refs/heads/lane", fixture.base, tip), None);
     Ok(())

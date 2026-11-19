@@ -546,7 +546,9 @@ pub(crate) fn bound_source(attempt: &Directory) -> Result<Option<ObjectSource>> 
 /// merge metadata never leave their attempt. Git holds index.lock while its
 /// index-only two-tree merge resolves HEAD and preserves unrelated native
 /// staging. Working files may contain live lane edits and are never checked out.
-pub(crate) fn advance_native_index(repo: &VerifiedRepo, base: GitOid) -> Result<bool> {
+/// `from` is the host tip this publication replaced, which the native index last
+/// followed; the attempt's launch base would be stale once a sibling published.
+pub(crate) fn advance_native_index(repo: &VerifiedRepo, from: GitOid) -> Result<bool> {
     let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
     for marker in [
         "MERGE_HEAD",
@@ -569,7 +571,7 @@ pub(crate) fn advance_native_index(repo: &VerifiedRepo, base: GitOid) -> Result<
         &git,
         repo.private_git_dir(),
         repo.root_path(),
-        &args(&["read-tree", "-i", "-m", &base.to_string(), "HEAD"]),
+        &args(&["read-tree", "-i", "-m", &from.to_string(), "HEAD"]),
         None,
     ) {
         use std::io::Write;

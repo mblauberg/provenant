@@ -491,12 +491,20 @@ pub(crate) struct BranchPublication<'a> {
     pub attempt: AttemptId,
 }
 
+/// What a branch publication established. `previous` is the host tip the CAS
+/// replaced: the tree the native index is expected to match before it advances.
+#[derive(Debug)]
+pub(crate) struct Published {
+    pub ancestor: Ancestor,
+    pub previous: GitOid,
+}
+
 pub(crate) fn publish_branch(
     git: &Path,
     repo: &VerifiedRepo,
     publication: BranchPublication<'_>,
     policy: &provenant_records::policy::Policy,
-) -> Result<Ancestor> {
+) -> Result<Published> {
     let BranchPublication {
         branch,
         base,
@@ -576,7 +584,10 @@ pub(crate) fn publish_branch(
         &args(&["update-ref", "-d", &import_pin(attempt, head)]),
         None,
     )?;
-    Ok(ancestor)
+    Ok(Published {
+        ancestor,
+        previous: current,
+    })
 }
 
 pub(crate) fn import_pin(attempt: AttemptId, head: GitOid) -> String {
