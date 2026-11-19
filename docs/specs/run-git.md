@@ -36,8 +36,8 @@ Cleanup retains dirty, live and explicitly kept work, checks the expected tip an
 uses a lease for deletion. Failure warns without changing settlement's outcome.
 - Why: cleanup must not destroy changed or unproven work.
 
-Sandboxed writers cannot hard-link shared files into their worktree; host seeding
-copies or clones rather than hard-links shared stores.
+Host seeding copies or clones shared stores rather than hard-linking them; lane
+hard links follow the [permission policy](supervisor.md#permission-policy).
 - Why: a writable link must not mutate shared data outside the checkout.
 
 ## Delivery

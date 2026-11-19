@@ -67,6 +67,5 @@ Each mechanism has one implementation; callers supply the policy that varies.
 
 Build modular mechanisms around a declared core and make variable behaviour
 configurable. Design for foreseeable cases when it makes change easier. Prefer
-warnings or retries to hard holds except at real boundaries of credentials, Git
-isolation, data integrity and authority.
+warnings or retries to hard holds except at the [hard boundaries](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md).
 - Why: extensible ownership reduces the cost of change without losing custody.

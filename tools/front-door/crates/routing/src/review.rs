@@ -1892,7 +1892,7 @@ mod tests {
         review.floors.clear();
         assert_eq!(
             resolved_names(&review, "standard", None, &[], false, &[]),
-            ["correctness-spec", "tests", "reliability"]
+            ["correctness-spec", "flexibility", "tests"]
         );
         assert_eq!(
             resolved_names(&review, "quick", Some("refactor"), &[], false, &[]),
