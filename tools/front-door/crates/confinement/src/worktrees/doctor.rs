@@ -259,37 +259,58 @@ pub fn doctor(
     let (state, reason, repair_kind) = match condition {
         WorktreeCondition::Dirty => (
             WorktreeDiagnosisState::Dirty,
-            "The checkout has uncommitted changes; preserve them before starting a writer.",
+            "The checkout has uncommitted changes; preserve them before starting a writer.".into(),
             WorktreeRepairKind::PreserveChanges,
         ),
         WorktreeCondition::GitOperationInProgress => (
             WorktreeDiagnosisState::GitOperationInProgress,
-            "A Git operation is in progress; inspect its state and finish it before retrying.",
+            "A Git operation is in progress; inspect its state and finish it before retrying.".into(),
             WorktreeRepairKind::InspectGit,
         ),
         WorktreeCondition::Unknown => (
             WorktreeDiagnosisState::Unknown,
-            "Checkout cleanliness could not be verified.",
+            "Checkout cleanliness could not be verified.".into(),
             WorktreeRepairKind::InspectGit,
         ),
         _ if entry.branch.is_none() => (
             WorktreeDiagnosisState::Detached,
-            "HEAD is detached; create a branch before starting a writer.",
+            "HEAD is detached; create a branch before starting a writer.".into(),
             WorktreeRepairKind::CreateBranch,
         ),
-        _ if occupancy.is_observed() => (
-            WorktreeDiagnosisState::Observed,
-            "A process was observed in the checkout; writer custody is free and admission checks the Git boundary.",
-            WorktreeRepairKind::RetryDiagnosis,
-        ),
+        _ if occupancy.is_observed() => {
+            let reason = if let Occupancy::Observed { process: Some(ref p) } = occupancy {
+                format!(
+                    "Process {} ({}) was observed in the checkout; run `provenant gc --apply` to terminate it.",
+                    p.pid,
+                    p.command.as_deref().unwrap_or("unknown")
+                )
+            } else {
+                "A process was observed in the checkout; run `provenant gc --apply` to terminate it.".to_string()
+            };
+            (
+                WorktreeDiagnosisState::Observed,
+                reason,
+                WorktreeRepairKind::RetryDiagnosis,
+            )
+        }
         _ => (
             WorktreeDiagnosisState::Clean,
-            "The checkout is clean and writer custody is free; admission rechecks custody and the Git boundary.",
+            "The checkout is clean and writer custody is free; admission rechecks custody and the Git boundary.".into(),
             WorktreeRepairKind::RetryDiagnosis,
         ),
     };
     report.set_state(state, repair_kind, context.repo.root_path(), &path);
-    report.reason = reason.into();
+    report.reason = reason;
+    if let Occupancy::Observed { process } = &occupancy {
+        report.evidence = process.as_ref().map(|p| {
+            format!(
+                "pid {} ({})",
+                p.pid,
+                p.command.as_deref().unwrap_or("unknown")
+            )
+        });
+        report.source = Some("census");
+    }
     if state == WorktreeDiagnosisState::Unknown {
         report.scope = Some(StructuredPathWire::from_path(&path)?);
         report.evidence = Some(report.reason.clone());

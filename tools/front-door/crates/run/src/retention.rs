@@ -3,6 +3,7 @@ use crate::{
     artifacts::{seal, subdir},
     *,
 };
+use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{AttemptId, WallTime};
 use provenant_os::fs::{Directory, FileKind, LockGuard, LockMode, PayloadTree};
 use provenant_records::AttemptFile;
@@ -330,6 +331,34 @@ impl RunStore {
                 else {
                     return Ok(());
                 };
+                let attempt_dir = self
+                    .context
+                    .state_root
+                    .as_path()
+                    .join(format!("attempts/{id}"));
+                if dry_run {
+                    if let Some(proc) = provenant_confinement::worktrees::SystemWorkerObserver
+                        .live_process(&attempt_dir)
+                    {
+                        report.kept.push(ProviderStateIssue {
+                            path: attempt_dir.clone(),
+                            reason: format!(
+                                "process {} ({}) observed in attempt directory",
+                                proc.pid,
+                                proc.command.as_deref().unwrap_or("unknown")
+                            ),
+                        });
+                    }
+                } else {
+                    while let Some(proc) = provenant_confinement::worktrees::SystemWorkerObserver
+                        .live_process(&attempt_dir)
+                    {
+                        let _ = provenant_os::pid::terminate_process_bounded(
+                            proc.pid,
+                            std::time::Duration::from_millis(100),
+                        );
+                    }
+                }
                 let age = now.as_micros().saturating_sub(finished_at.as_micros());
                 let uncertain_loss = matches!(
                     record.state,

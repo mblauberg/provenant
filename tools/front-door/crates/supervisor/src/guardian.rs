@@ -1985,14 +1985,14 @@ impl Driver<'_> {
             unresolved_pids: if unresolved {
                 self.tracked
                     .iter()
-                    .take(16)
+                    .take(128)
                     .map(|identity| identity.pid)
                     .collect()
             } else {
                 Vec::new()
             },
             unresolved_identities: if unresolved {
-                self.tracked.iter().take(16).cloned().collect()
+                self.tracked.iter().take(128).cloned().collect()
             } else {
                 Vec::new()
             },
@@ -2018,7 +2018,22 @@ impl Driver<'_> {
             // leader) alive while group members remain: poll for cancellation
             // and for the group emptying, and republish a settled exit.
             let mut cancelled = false;
+            let post_exit_deadline = Instant::now()
+                + Duration::from_millis(
+                    plan.root_flush_ms
+                        .saturating_add(plan.descendant_grace_ms)
+                        .saturating_mul(4)
+                        .max(5000),
+                );
             loop {
+                if Instant::now() >= post_exit_deadline {
+                    push_warning(
+                        &mut warnings,
+                        &mut omitted_warnings,
+                        "post-exit cleanup deadline exceeded",
+                    );
+                    break;
+                }
                 if !outcome_committed && published {
                     outcome_committed = self.commit_outcome(&record);
                 }

@@ -31,14 +31,16 @@ The PID stays reserved until the handle is reaped last. Only the unreaped
 provider, its group while the leader is unreaped, descendants with retained
 proof of provider ancestry, and proven attempt-sandbox escapees may be signalled.
 Descendant proof survives session changes and reparenting, but every signal
-revalidates the full native identity. Native descendants may be stopped only for
-a recorded provider stop (cancellation, deadline, budget, context handoff, protocol
-rejection or supervisor signal); an ordinary provider exit leaves them under
-conservative custody. Registry and host child checks must permit cleanup. When
-there is no native child registry, a present host holder must affirm that no graph
-child remains. Spared and protected owners and their possible descendants stay excluded.
-A census listing or cwd observation alone never grants signal authority, and
-recovery signals only a PID whose recorded identity matches.
+revalidates the full native identity. On lane settlement and on supervisor recovery
+after a crash or SIGKILL, all lane descendants are stopped (SIGTERM then bounded
+SIGKILL), including processes re-parented to launchd, tracked by process group or
+session, and on macOS by a recorded descendant census. Registry and host child
+checks must permit cleanup. When there is no native child registry, a present host
+holder must affirm that no graph child remains. Spared and protected owners and their
+possible descendants stay excluded. When a surviving descendant has to be killed,
+a warning is recorded. A settled lane's worktree or attempt directory is checked
+by `gc` or `doctor`, and `gc --apply` kills any processes whose working directory
+remains inside them.
 
 A launch is named by its attempt's `WorkKey`: the guardian's launch summary
 records the key, and a stop request is identified by attempt and generation.
@@ -114,9 +116,9 @@ launch again.
 
 ### Quiescence before release
 
-A writer stays fenced until the provider is reaped, two complete censuses show
-no surviving member or escapee, and a fresh lock on the original lease inode
-succeeds. Failed, racing or incomplete reads keep the fence; only a recorded
+A writer stays fenced until the provider is reaped, surviving descendants are
+reaped and ended, two complete censuses show no surviving member or escapee, and
+a fresh lock on the original lease inode succeeds. Failed, racing or incomplete reads keep the fence; only a recorded
 decision with matching authority clears one, and that decision permits no signal.
 - Why: a leftover descendant could still write the worktree.
 

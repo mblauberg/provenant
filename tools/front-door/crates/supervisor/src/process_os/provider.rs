@@ -957,7 +957,9 @@ impl ProviderGroup {
                     continue;
                 }
                 let ancestry = census.ancestry(&fact.identity, &provider);
-                if ancestry == Ancestry::Yes {
+                if ancestry == Ancestry::Yes
+                    || (provider.group_id > 0 && fact.identity.group_id == provider.group_id)
+                {
                     if self.owned_descendants.contains(&fact.identity)
                         || self.owned_descendants.len() < MAX_CENSUS_ENTRIES
                     {

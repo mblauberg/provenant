@@ -22,5 +22,9 @@ Report each touched failing test as kept, redesigned, merged or deleted, with a 
    to implementation. See [boundaries](references/boundaries.md) and
    [judgement](references/judgement.md) for safeguards.
 
+## Stress tests and load generators
+
+Load generators, benchmarks and stress loops must be bounded (`timeout`) and trapped so background processes do not outlive the run. Never leave un-trapped background processes or subshells running after a test completes or aborts.
+
 For risky logic, consider mutation testing on the changed surface and investigate
 survivors.

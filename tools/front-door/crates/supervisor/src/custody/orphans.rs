@@ -117,7 +117,28 @@ impl Recovery {
 
         let mut report = OrphanReport::default();
         let mut proven = Vec::new();
-        for &pid in &exit.unresolved_pids {
+        let mut candidate_pids = std::collections::BTreeSet::new();
+        candidate_pids.extend(exit.unresolved_pids.iter().copied());
+        candidate_pids.extend(exit.unresolved_identities.iter().map(|id| id.pid));
+        candidate_pids.extend(self.reservation.descendants.iter().map(|id| id.pid));
+        if let Ok(census) = observer.census(crate::census::MAX_CENSUS_ENTRIES) {
+            for fact in census.facts() {
+                if let Some(provider) = &self.reservation.provider {
+                    if fact.identity == *provider {
+                        continue;
+                    }
+                    if (provider.group_id > 0 && fact.identity.group_id == provider.group_id)
+                        || census.ancestry(&fact.identity, provider) == crate::census::Ancestry::Yes
+                        || probe.in_attempt_sandbox(fact.identity.pid, &self.reservation.scope)
+                    {
+                        candidate_pids.insert(fact.identity.pid);
+                    }
+                } else if probe.in_attempt_sandbox(fact.identity.pid, &self.reservation.scope) {
+                    candidate_pids.insert(fact.identity.pid);
+                }
+            }
+        }
+        for pid in candidate_pids {
             // A new boot ended every process of the old one.
             let standing = if same_boot {
                 self.stand(pid, &exit, observer, probe)
@@ -127,7 +148,11 @@ impl Recovery {
             match standing {
                 Standing::Gone => {}
                 Standing::Proven(identity) => proven.push(identity),
-                Standing::Unproven => report.unproven.push(pid),
+                Standing::Unproven => {
+                    if exit.unresolved_pids.contains(&pid) {
+                        report.unproven.push(pid);
+                    }
+                }
             }
         }
         let mut live = proven.clone();
@@ -188,6 +213,18 @@ impl Recovery {
             "settlement_evidence".into(),
             serde_json::to_value(evidence).map_err(|_| CustodyError::InvalidRecord)?,
         );
+        if !report.stopped.is_empty() {
+            let warnings_entry = fields
+                .entry("warnings")
+                .or_insert_with(|| serde_json::json!([]));
+            if let Some(warnings) = warnings_entry.as_array_mut() {
+                for stopped in &report.stopped {
+                    warnings.push(
+                        format!("killed surviving descendant process {}", stopped.pid).into(),
+                    );
+                }
+            }
+        }
         let settled = serde_json::to_vec(&document).map_err(|_| CustodyError::InvalidRecord)?;
         Publication::require_durable(attempt.atomic_write(
             OsStr::new("process-exit.json"),

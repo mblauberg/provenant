@@ -1514,6 +1514,25 @@ fn collect_impl(
                     })?;
             }
             let locked = lock_worktree(context, entry, cancel, dry)?;
+            if (policy.terminal)(&lane.path) {
+                if dry {
+                    if let Some(proc) = context.workers.live_process(&lane.path) {
+                        row.detail = Some(format!(
+                            "process {} ({}) observed in settled worktree",
+                            proc.pid,
+                            proc.command.as_deref().unwrap_or("unknown")
+                        ));
+                    }
+                } else {
+                    while let Some(proc) = context.workers.live_process(&lane.path) {
+                        let _ = provenant_os::pid::terminate_process_bounded(
+                            proc.pid,
+                            std::time::Duration::from_millis(100),
+                        );
+                        context.workers.invalidate();
+                    }
+                }
+            }
             // A preview shares one census across candidates; applying re-reads.
             census_free(context, &lane.path, !dry)?;
             // Reporting must remain bounded even when apply uses a full proof

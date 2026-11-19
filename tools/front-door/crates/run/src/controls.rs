@@ -6149,11 +6149,11 @@ impl RunStore {
                 let budget = provenant_core::WaitBudget::cli(call.clock.mono_now(), 1)
                     .map_err(|_| RunError::Validation("observation budget"))?;
                 match custody::observe(&handle, budget, call.cancel, call.clock) {
-                    Ok(Observation::Exited(exit))
-                        if exit.unresolved_cleanup && !exit.unresolved_pids.is_empty() =>
-                    {
+                    Ok(Observation::Exited(exit)) if exit.unresolved_cleanup => {
                         let still_named = || {
-                            if custody::any_pid_alive(&exit.unresolved_pids) {
+                            if !exit.unresolved_pids.is_empty()
+                                && custody::any_pid_alive(&exit.unresolved_pids)
+                            {
                                 Reconciled::Escaped {
                                     pids: exit.unresolved_pids.clone(),
                                 }

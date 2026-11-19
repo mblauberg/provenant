@@ -1721,6 +1721,8 @@ pub(crate) fn signal_process(pid: i32, signal: ProcessSignal) -> io::Result<()> 
     let signal = match signal {
         ProcessSignal::Stop => libc::SIGSTOP,
         ProcessSignal::Continue => libc::SIGCONT,
+        ProcessSignal::Terminate => libc::SIGTERM,
+        ProcessSignal::Kill => libc::SIGKILL,
     };
     // SAFETY: pid is positive so kill addresses only that process; signal is
     // one of the two valid constants above. No pointers or ownership transfer.

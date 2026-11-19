@@ -42,18 +42,43 @@ pub enum PidError {
     MalformedCwdPath { pid: i32, reason: &'static str },
 }
 
-/// Signals used by disk pressure protection. Callers must establish which
-/// processes they are authorised to pause or resume before invoking this API.
+/// Signals used by disk pressure protection and descendant reaping. Callers must
+/// establish which processes they are authorised to pause, resume or terminate
+/// before invoking this API.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProcessSignal {
     Stop,
     Continue,
+    Terminate,
+    Kill,
 }
 
 /// Signal one positive PID, never a process group. Returns false if the PID no
 /// longer exists; permissions and other syscall failures remain errors.
 pub fn signal_process(pid: i64, signal: ProcessSignal) -> Result<bool, PidError> {
     signal_process_with(pid, signal, crate::sys::pid::signal_process)
+}
+
+/// Terminate one positive PID, delivering SIGTERM, waiting up to `grace`, and
+/// escalating to SIGKILL if it survives.
+#[allow(clippy::disallowed_methods)]
+pub fn terminate_process_bounded(pid: i64, grace: std::time::Duration) -> Result<bool, PidError> {
+    if pid <= 0 {
+        return Err(PidError::Refused { pid });
+    }
+    let _ = signal_process(pid, ProcessSignal::Continue);
+    if !signal_process(pid, ProcessSignal::Terminate)? {
+        return Ok(false);
+    }
+    let deadline = std::time::Instant::now() + grace;
+    while std::time::Instant::now() < deadline {
+        match process_state(pid) {
+            Ok(ProcessState::Gone) | Err(PidError::Io { .. }) => return Ok(true),
+            _ => crate::sys::wait_pause(std::time::Duration::from_millis(10)),
+        }
+    }
+    let _ = signal_process(pid, ProcessSignal::Kill);
+    Ok(true)
 }
 
 fn signal_process_with(
@@ -438,7 +463,12 @@ mod tests {
             });
             assert!(result.is_err());
         }
-        for signal in [ProcessSignal::Stop, ProcessSignal::Continue] {
+        for signal in [
+            ProcessSignal::Stop,
+            ProcessSignal::Continue,
+            ProcessSignal::Terminate,
+            ProcessSignal::Kill,
+        ] {
             assert!(
                 signal_process_with(42, signal, |pid, actual| {
                     assert_eq!(pid, 42);

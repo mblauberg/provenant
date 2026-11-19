@@ -716,13 +716,9 @@ impl Driver<'_> {
             #[cfg(target_os = "macos")]
             if self.holder_reports_no_live_children() {
                 let mut targets = std::collections::BTreeSet::new();
-                // Native descendants require a requested provider stop, not
-                // merely its ordinary exit. Without a native child registry,
-                // an actual host holder must affirm that no graph child remains;
-                // an absent holder is not that proof.
                 let requested_stop = match reason {
-                    machine::StopReason::PostTerminalCleanup => false,
-                    machine::StopReason::ExplicitCancellation
+                    machine::StopReason::PostTerminalCleanup
+                    | machine::StopReason::ExplicitCancellation
                     | machine::StopReason::Steered
                     | machine::StopReason::WallDeadline
                     | machine::StopReason::ProtocolRejected
@@ -742,11 +738,27 @@ impl Driver<'_> {
                 let targets: Vec<_> = targets.into_iter().collect();
                 for delivery in child.stop_owned_targets(escalation, &targets) {
                     self.record_delivery(
-                        Some(delivery.identity),
+                        Some(delivery.identity.clone()),
                         delivery_reason,
                         signal,
                         delivery.outcome,
                     );
+                    if delivery.outcome == DeliveryOutcome::Delivered {
+                        let cmd = match census.process(delivery.identity.pid) {
+                            crate::census::ProcessLookup::Present(fact) => {
+                                fact.command.as_deref().unwrap_or("unknown")
+                            }
+                            _ => "unknown",
+                        };
+                        push_warning(
+                            warnings,
+                            omitted,
+                            &format!(
+                                "killed surviving descendant process {} ({cmd})",
+                                delivery.identity.pid
+                            ),
+                        );
+                    }
                 }
             }
             self.persist_tracking(warnings, omitted);
