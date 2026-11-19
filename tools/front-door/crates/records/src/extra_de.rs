@@ -55,11 +55,17 @@ macro_rules! deserialize_with_extra {
                             match key.as_str() {
                                 $(
                                     stringify!($req) => {
+                                        if $req.is_some() {
+                                            return Err(::serde::de::Error::duplicate_field(stringify!($req)));
+                                        }
                                         $req = Some(map.next_value()?);
                                     }
                                 )*
                                 $(
                                     stringify!($opt) => {
+                                        if $opt.is_some() {
+                                            return Err(::serde::de::Error::duplicate_field(stringify!($opt)));
+                                        }
                                         $opt = Some(map.next_value()?);
                                     }
                                 )*

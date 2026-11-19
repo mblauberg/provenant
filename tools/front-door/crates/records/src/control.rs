@@ -221,6 +221,19 @@ mod tests {
     }
 
     #[test]
+    fn receipt_rejects_duplicate_required_and_optional_fields() {
+        let base = r#""operation_id":"op-1","control":"steer","target":"host","launch":"lane","support":"unsupported","state":"unsupported","reason":"no""#;
+        for duplicate in [
+            r#""reason":"again""#,
+            r#""transport":null,"transport":null""#,
+        ] {
+            let input = format!("{{{base},{duplicate}}}");
+            let error = serde_json::from_str::<ControlReceipt>(&input).unwrap_err();
+            assert!(error.to_string().contains("duplicate field"), "{error}");
+        }
+    }
+
+    #[test]
     fn matrix_has_one_row_per_adapter_and_launch_kind() {
         let rows = control_capabilities();
         assert_eq!(rows.len(), crate::ADAPTER_SPECS.len() * 2);
