@@ -42,6 +42,14 @@ hard links follow the [permission policy](supervisor.md#permission-policy).
 
 ## Delivery
 
+`HostDeliveryContext` accepts host-configured Git transport helpers and URL
+features with a warning under host access. Isolated access retains the existing
+refusals. Transport checks still protect configuration writable by a sandboxed
+lane; credential-bearing URLs stay out of process arguments. Delivery bindings,
+receipts and the ref ledger retain only the URL without userinfo. Cleanup
+resolves the configured push URL again and checks its credential-free identity
+against the recorded endpoint before using it.
+
 Dispatch checks delivery targets before admission; delivery checks protection
 again. Direct push and integration refuse protected targets. Integration
 conflicts do not publish a ref, and a concurrent loser records a failure for

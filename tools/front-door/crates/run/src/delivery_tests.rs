@@ -280,6 +280,15 @@ impl PrepareFixture {
         // Production passes the state root explicitly, so a broken captured
         // HOME is reported by its own environment check.
         HostDeliveryContext::new(self.environment.clone())
+            .with_lane_access(
+                Some(provenant_records::LaneAccessReceipt {
+                    access: provenant_records::LaneAccess::Isolated,
+                    source: provenant_records::LaneAccessSource::Launch,
+                    key: "lanes.access".into(),
+                    extra: Default::default(),
+                }),
+                Some(true),
+            )
             .with_host_state(&self.root.join("state"))
             .prepare(&self.writer, &self.request)
     }

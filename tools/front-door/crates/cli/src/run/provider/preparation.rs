@@ -3996,6 +3996,7 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(setup_skip(&label, error));
             continue;
         }
+        let lane_access = resolve_lane_access(task, &model_policy);
         let continuation = match resume {
             Some(prior) => match continuation_for_policy(
                 prior,
@@ -4005,6 +4006,7 @@ pub(super) fn prepare_candidates_inner(
                     state_root,
                     config_root: roots.state.as_path(),
                     private_state: &private_state,
+                    lane_access: Some(&lane_access),
                 },
                 &launch_policy,
             ) {
@@ -4151,7 +4153,6 @@ pub(super) fn prepare_candidates_inner(
             resume.is_some(),
             current_candidate > 0,
         );
-        let lane_access = resolve_lane_access(task, &model_policy);
         if let Some(warning) = lane_access_warning(task, &lane_access) {
             push_launch_warning(&mut route, warning);
         }

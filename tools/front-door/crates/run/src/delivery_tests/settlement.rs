@@ -22,6 +22,11 @@ fn review_delivery_requires_acceptance_and_exact_head()
     use provenant_core::{CancelToken, Clock, RootInputs};
     use provenant_os::clock::SystemClock;
     let fixture = PrepareFixture::new()?;
+    let credential_url = format!(
+        "file://user:secret@localhost{}",
+        fixture.root.join("remote.git").display()
+    );
+    fixture.git(&["remote", "set-url", "origin", &credential_url])?;
     let mut execution = tests::context(&fixture.root)?;
     let mut inputs = RootInputs::new(fixture.root.join("home"), fixture.root.join("checkout"));
     inputs.state_dir = Some(execution.state_root.as_path().into());
@@ -90,7 +95,9 @@ fn review_delivery_requires_acceptance_and_exact_head()
     input.request.task.deliver = Some(fixture.request.clone());
     store.create(&input, &call)?;
     let id = input.attempt_id;
-    let host = fixture.prepare()?;
+    let host = HostDeliveryContext::new(fixture.environment.clone())
+        .with_host_state(&fixture.root.join("state"))
+        .prepare(&fixture.writer, &fixture.request)?;
     let head = host.head(&fixture.writer)?;
     let attempt = store.attempt_dir(id, false)?;
     artifacts::seal(
@@ -164,6 +171,12 @@ fn review_delivery_requires_acceptance_and_exact_head()
     assert_eq!(owned.origin, provenant_records::custody::RefOrigin::Created);
     assert_eq!(owned.attempt_id, Some(id));
     assert_eq!(owned.tip, head);
+    for record in [
+        serde_json::to_string(&receipt)?,
+        serde_json::to_string(&owned)?,
+    ] {
+        assert!(!record.contains("user:secret@"));
+    }
     assert_eq!(
         store.delivered(id, &call)?.map(|(_, receipt)| receipt),
         Some(receipt)

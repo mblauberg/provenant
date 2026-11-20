@@ -349,6 +349,15 @@ impl RunStore {
                     .ok_or(RunError::Validation("delivery lacks host context"))?;
                 let host = host
                     .with_repo_facts(self.repo_facts())
+                    .with_lane_access(
+                        plan.route.lane_access.clone(),
+                        plan.route
+                            .sandbox
+                            .as_ref()
+                            .map(|sandbox| sandbox.effective)
+                            .or(Some(false)),
+                    )
+                    .with_policy(policy.clone())
                     .cancellable(&setup_cancel)
                     .prepare(writer, deliver)?;
                 host.seal_launch_binding(&self.attempt_dir(id, false)?, scope)?;
@@ -392,7 +401,17 @@ impl RunStore {
                         .with_repo_facts(self.repo_facts())
                         .with_host_state(self.context.state_root.as_path())
                 });
-                let host = host.prepare_stop_publish(writer_request, &request)?;
+                let host = host
+                    .with_lane_access(
+                        plan.route.lane_access.clone(),
+                        plan.route
+                            .sandbox
+                            .as_ref()
+                            .map(|sandbox| sandbox.effective)
+                            .or(Some(false)),
+                    )
+                    .with_policy(policy.clone())
+                    .prepare_stop_publish(writer_request, &request)?;
                 host.seal_stop_publish_binding(&self.attempt_dir(id, false)?, scope)?;
                 holder.host_delivery = Some(host);
                 holder.encode()
@@ -416,7 +435,8 @@ impl RunStore {
         }
         let mut profile_file = None;
         if let Some(confinement) = &mut plan.confinement {
-            let prepared = confinement.prepare_git(&setup_cancel, &policy);
+            let prepared =
+                confinement.prepare_git(&setup_cancel, &policy, plan.route.lane_access.as_ref());
             if let Err(error) = prepared {
                 lease.withdraw_unlaunched().map_err(|release| {
                     HandOff::Protected(format!("Git setup: {error}; custody withdrawal: {release}"))

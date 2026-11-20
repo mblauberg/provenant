@@ -257,9 +257,10 @@ authority; and credentials crossing to another host or an ungranted provider.
 - Why: a lane that resolves tool state under a HOME inside its own checkout can commit that state with its work; the rebound happens in the one place every adapter finishes rather than per tool.
 
 The selected sandbox floor applies to each candidate and is sealed for
-continuations. Unsupported confinement is reported rather than represented as
-sandboxed execution.
-- Why: a retry must not silently weaken the requested boundary.
+continuations. `SandboxMode::resolve_backend` refuses an unavailable backend
+for isolated access; host access warns, proceeds without that backend, and
+records effective=false and the reason in the sandbox receipt.
+- Why: a retry must disclose when requested confinement was unavailable.
 
 A lane sees the host's Git configuration as the host does. Its Git wrapper no
 longer forces `GIT_CONFIG_NOSYSTEM`, and launch no longer drops

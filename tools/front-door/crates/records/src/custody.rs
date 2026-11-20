@@ -246,6 +246,19 @@ pub enum RemovalEvidence {
     },
 }
 
+/// Credential-free identity for a URL endpoint. Transport keeps the original URL private.
+pub fn endpoint_identity(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_owned();
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    format!("{scheme}://{host}{}", &rest[end..])
+}
+
 /// Where a reference lives. Remote delivery is pinned to the push URL bound by
 /// the host; callers never infer it from the remote name.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
