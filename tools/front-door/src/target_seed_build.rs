@@ -1161,6 +1161,7 @@ fn build_into(
     let mut flags = vec![
         "cargo build --locked --all-targets".to_owned(),
         "cargo test --locked --no-run".to_owned(),
+        "cargo check --workspace --all-targets --locked".to_owned(),
     ];
     flags.extend(seed_build_flags(&environment));
     let mut overrides = cargo_profile.environment().to_vec();
@@ -1187,6 +1188,7 @@ fn build_into(
     for args in [
         &["build", "--locked", "--all-targets"][..],
         &["test", "--locked", "--no-run"][..],
+        &["check", "--workspace", "--all-targets", "--locked"][..],
     ] {
         let argv: Vec<OsString> = std::iter::once(cargo.as_os_str().to_owned())
             .chain(args.iter().map(OsString::from))
@@ -1924,6 +1926,110 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Exercises real Cargo freshness.
+    fn clippy_reuses_seeded_check_units() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        let write = |path: &str, text: &str| {
+            let path = app.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write(
+            "rust-toolchain.toml",
+            include_str!("../rust-toolchain.toml"),
+        );
+        write(
+            "Cargo.toml",
+            "[package]\nname='app'\nversion='0.1.0'\nedition='2021'\n[dependencies]\nvendored='1'\n",
+        );
+        write(
+            "src/lib.rs",
+            "pub fn value() -> u32 { vendored::value() }\n",
+        );
+        write(
+            ".cargo/config.toml",
+            "[source.crates-io]\nreplace-with='vendor'\n[source.vendor]\ndirectory='vendor'\n",
+        );
+        write(
+            "vendor/vendored/Cargo.toml",
+            "[package]\nname='vendored'\nversion='1.0.0'\nedition='2021'\n",
+        );
+        write(
+            "vendor/vendored/src/lib.rs",
+            "pub fn value() -> u32 { 1 }\n",
+        );
+        write(
+            "vendor/vendored/.cargo-checksum.json",
+            &format!("{{\"files\":{{}},\"package\":\"{}\"}}", "0".repeat(64)),
+        );
+        let seed = temp.path().join("seed");
+        let run_cargo = |target: &Path, args: &[&str]| {
+            let output = std::process::Command::new(
+                std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
+            )
+            .args(args)
+            .current_dir(&app)
+            .env("CARGO_TARGET_DIR", target)
+            .env("CARGO_BUILD_BUILD_DIR", target)
+            .env("CARGO_INCREMENTAL", "0")
+            .output()
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output
+        };
+        run_cargo(&seed, &["generate-lockfile", "--offline"]);
+        run_cargo(
+            &seed,
+            &[
+                "check",
+                "--workspace",
+                "--all-targets",
+                "--locked",
+                "--offline",
+            ],
+        );
+        run_cargo(&seed, &["clean", "-p", "app", "--offline"]);
+        let lint = temp.path().join("target-lint");
+        copy_tree(&seed, &lint).unwrap();
+        let output = run_cargo(
+            &lint,
+            &[
+                "check",
+                "--workspace",
+                "--all-targets",
+                "--locked",
+                "--offline",
+                "--message-format=json",
+            ],
+        );
+        let messages: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let dependency: Vec<_> = messages
+            .iter()
+            .filter(|message| {
+                message["reason"] == "compiler-artifact" && message["target"]["name"] == "vendored"
+            })
+            .collect();
+        assert!(
+            !dependency.is_empty(),
+            "missing dependency artifacts: {messages:?}"
+        );
+        assert!(
+            dependency.iter().all(|message| message["fresh"] == true),
+            "{dependency:?}"
+        );
+    }
+
     /// A deps-only seed holds no units of the checkout, so a lane must rebuild
     /// its own members even when their sources are older than the seed's
     /// artifacts, while dependency units stay fresh. The fixture uses real
@@ -2553,7 +2659,7 @@ mod tests {
         let stage = temp.path().join("stage");
         fs::create_dir(&stage).unwrap();
         let identity = identity("prepare-key", &commit);
-        build_into(
+        let manifest = build_into(
             state.path(),
             &stage,
             &project,
@@ -2563,6 +2669,12 @@ mod tests {
             &identity.cargo_profile,
         )
         .unwrap();
+        assert!(
+            manifest
+                .flags
+                .iter()
+                .any(|flag| flag == "cargo check --workspace --all-targets --locked")
+        );
         assert_eq!(
             fs::read_to_string(&marker).unwrap(),
             stage
