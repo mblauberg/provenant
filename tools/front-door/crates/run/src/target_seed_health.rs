@@ -142,7 +142,7 @@ pub fn format_duration(duration: Duration) -> String {
         return format!("{}ms", duration.as_millis());
     }
     for (unit, seconds_per) in [("d", 86_400), ("h", 3_600), ("m", 60)] {
-        if seconds % seconds_per == 0 {
+        if seconds.is_multiple_of(seconds_per) {
             return format!("{}{unit}", seconds / seconds_per);
         }
     }
