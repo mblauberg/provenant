@@ -243,8 +243,12 @@ and run directly, without a ticket.
 ### Slot lifecycle and snapshot
 
 Slots live under `~/Library/Caches/provenant-slots/<project_key>/<n>/`. Under
-the held index the slot is locked; a live process group named by `job.json` is
-killed (SIGTERM, five seconds, SIGKILL) with a warning. The slot is cloned from
+the held index `slot.lock` is held; custody intent is published in `job.json`
+before spawn and upgraded to the child's process identity after spawn. The
+`intent.lock` lease is inherited by the build's process tree, so an intent
+without a running marker keeps the slot occupied until that lease is free; a
+live process group named by a running `job.json` is killed (SIGTERM, five
+seconds, SIGKILL) with a warning. The slot is cloned from
 the store when absent (`--no-checkout`, `core.hooksPath=/dev/null`,
 `gc.auto=0`, objects hardlinked, never shared alternates). `build.prepare` runs
 when its argv digest differs, after the clock guard and snapshot sync and
@@ -252,7 +256,7 @@ before the first step, so a reset re-runs it. Sync fetches the snapshot and base
 refs, checks out the snapshot with `--force --detach`, points
 `refs/remotes/<remote_ref>` at the base so `git diff origin/main...HEAD` works,
 and cleans by `build.clean`: `none`, `untracked` (`git clean -ffd`) or `ignored`
-(`git clean -ffdx`). `job.json` is written at process spawn. After the steps,
+(`git clean -ffdx`). After the steps,
 `git status --porcelain=v2 -z --untracked-files=all` fills `slot_changes`; one
 stderr line reports a nonzero count as "not copied back" and nothing is copied
 back. `slot.json`, `after_job` and lock release finish the hold.
@@ -388,8 +392,8 @@ binding is unchanged.
 
 | Failure | Detected by | Effect |
 | --- | --- | --- |
-| admit killed mid-job | live process group in `job.json` at next sync | orphan group killed, then sync |
-| waiter killed | free ticket flock | ticket reaped by any waiter |
+| admit killed mid-job | `intent.lock` still held or live group in `job.json` at next sync | slot stays occupied until the lease frees; orphan group killed, then sync |
+| waiter killed | free ticket flock | ticket and its lock reaped by any waiter |
 | store fetch fails | git exit | `no_snapshot`, local with a warning |
 | clone or prepare fails | git or prepare exit | `pool_unavailable`, local; creation retried |
 | checkout or clean fails | git exit before spawn | infra `git`, reset ladder, one retry |

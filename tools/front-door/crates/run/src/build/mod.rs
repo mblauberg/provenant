@@ -397,6 +397,24 @@ pub(crate) type DispatchFailure = (BuildError, Box<JobOutcome>);
 
 /// The single dispatch point for build jobs.
 pub fn run(job: Job, ctx: &RunContext) -> Result<JobResult, BuildError> {
+    run_with_admission(job, ctx, None)
+}
+
+/// Run a job that already owns a host admission guard, so its slot identity
+/// cannot change between the caller's probe and the actual execution.
+pub fn run_with_pinned_slot(
+    job: Job,
+    ctx: &RunContext,
+    guard: provenant_os::admission::SlotGuard,
+) -> Result<JobResult, BuildError> {
+    run_with_admission(job, ctx, Some(guard))
+}
+
+fn run_with_admission(
+    job: Job,
+    ctx: &RunContext,
+    pinned: Option<provenant_os::admission::SlotGuard>,
+) -> Result<JobResult, BuildError> {
     let started = ledger::now_unix_ms();
     let enqueued = started;
     let base = outcome_seed(&job, ctx, enqueued);
@@ -405,9 +423,7 @@ pub fn run(job: Job, ctx: &RunContext) -> Result<JobResult, BuildError> {
     // row this invocation appends. The markers are stripped from step env by
     // the slot's job_env, so they never reach the build itself.
     let canary = env_value(&job.env, "PROVENANT_BUILD_MAINTENANCE_CANARY") == Some("1");
-    let maintenance_slot = env_value(&job.env, "PROVENANT_BUILD_MAINTENANCE_SLOT")
-        .and_then(|value| value.parse::<u64>().ok());
-    let result = dispatch(job, ctx, base, started);
+    let result = dispatch(job, ctx, base, started, pinned);
     let (mut result, mut outcome) = match result {
         Ok(result) => {
             let outcome = result.outcome.clone();
@@ -426,14 +442,6 @@ pub fn run(job: Job, ctx: &RunContext) -> Result<JobResult, BuildError> {
         outcome
             .warnings
             .push("freshness_failure: maintenance canary failed on the verify base".to_owned());
-        if let Some(index) = maintenance_slot {
-            let paths = slots::SlotPaths::new(&ctx.home, &outcome.project_key, index);
-            if let Err(error) = hygiene::full_reset(&paths) {
-                outcome
-                    .warnings
-                    .push(format!("freshness_failure: full reset failed: {error}"));
-            }
-        }
         if let Ok(success) = &mut result {
             success.outcome = outcome.clone();
         }
@@ -455,6 +463,7 @@ fn dispatch(
     ctx: &RunContext,
     mut outcome: JobOutcome,
     started: u64,
+    pinned: Option<provenant_os::admission::SlotGuard>,
 ) -> Result<JobResult, DispatchFailure> {
     outcome.strategy = ctx.strategy.name;
     outcome.base = job.verify_base.as_ref().map(|base| base.commit.clone());
@@ -537,7 +546,15 @@ fn dispatch(
             clear_admission_marker(&mut job);
             return execute_local_strategy(&mut job, ctx, outcome, 0);
         }
-        match queue::admit(&request) {
+        let admitted = match pinned {
+            Some(guard) => Ok(queue::Admitted::Held {
+                index: guard.index(),
+                guard,
+                waited: Duration::ZERO,
+            }),
+            None => queue::admit(&request),
+        };
+        match admitted {
             Ok(queue::Admitted::Held {
                 guard,
                 index,

@@ -205,15 +205,19 @@ The build store, queue, ledger and maintenance record share `<state>/build/`:
 `receive.denyDeletes=false`) with `refs/snapshots/<owner>/<seq>` and
 `refs/bases/<owner>/<seq>` pins and a `store/<project_key>.lock` (shared for
 fetch, exclusive for GC); `queue/build/<ticket_id>.json` tickets whose liveness
-is an exclusive flock; `jobs.jsonl` with `jobs.lock`; and `maintenance.json`.
+is the exclusive flock on the sibling `<ticket_id>.lock`; `jobs.jsonl` with
+`jobs.lock`; and `maintenance.json`.
 The canonical ledger is host-level so the soak spans lanes, the chair and
 landing and survives attempt GC. When the host ledger is unwritable, a row goes
 to `<attempt scratch>/build-jobs.jsonl` and the report counts it missing.
 Slots live under `~/Library/Caches/provenant-slots/<project_key>/<n>/` with
 `repo/` (a clone of the store, objects hardlinked, never shared alternates),
 `target/` (`CARGO_TARGET_DIR`), `tmp/` (`TMPDIR`), `slot.json` (slot record),
-`job.json` (running job, written after spawn) and `lock` (held for the job).
-`slot.json` lives inside the slot so an OS cache purge removes both together.
+`job.json` (an intent written before spawn, upgraded to the running process
+identity after spawn), `slot.lock` (held for the job) and `intent.lock` (held by
+the holder and inherited by its build children so a slot stays occupied until
+they are all gone). `slot.json` lives inside the slot so an OS cache purge
+removes both together.
 - Why: one root to report, GC and document; a slot record must never disagree
   with its slot.
 - Owner: `crates/run/src/build/paths.rs`, `crates/run/src/build/ledger.rs`

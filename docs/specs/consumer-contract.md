@@ -100,6 +100,7 @@ locations may also differ from `HOME`.
 | `PROVENANT_PORT_SOURCE` | port_command | evolving | Source of the selected build admission wrapper. | build admission port commands |
 | `PROVENANT_PORT_REQUEST_PATH` | port_command | evolving | The forge request path, such as `repos/{owner}/{repo}`. | CI observation and repository discovery port commands |
 | `PROVENANT_PORT_IF_NONE_MATCH` | port_command | evolving | The cached validator to send, or empty when none is sent. | CI observation and repository discovery port commands |
+| `PROVENANT_VERIFY_SELECTION` | port_command | internal | The affected package selection for the verify engine. | verify port commands |
 | `PROVENANT_VERIFY_TIER` | port_command | evolving | The verify tier being run. | verify port commands |
 | `PROVENANT_VERIFY_PROJECT_ROOT` | port_command | evolving | The project checkout being verified. | verify port commands |
 | `PROVENANT_VERIFY_EFFECTIVE_CONFIG_JSON` | port_command | internal | The resolved verify declaration, for Provenant's builtin verify engine. | verify port commands |

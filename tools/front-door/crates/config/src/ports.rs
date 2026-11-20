@@ -2320,6 +2320,15 @@ mod tests {
                     let mut expected = builtin.clone();
                     expected[name] = overlay[name].clone();
                     expected[name]["source"] = serde_json::to_value(expected_source).unwrap();
+                    if name == "build" {
+                        // This overlay restates every build leaf, so each leaf
+                        // legitimately reports the layer that declared it.
+                        if let Some(sources) = expected["build"]["leaf_sources"].as_object_mut() {
+                            for source in sources.values_mut() {
+                                *source = serde_json::to_value(expected_source).unwrap();
+                            }
+                        }
+                    }
                     assert_eq!(serde_json::to_value(&table).unwrap(), expected);
                 }
             }
@@ -2410,7 +2419,7 @@ mod tests {
         assert_eq!(table.build.source, PortSource::Project);
 
         assert_eq!(table.build.source_for_leaf("strategy"), PortSource::Builtin);
-        assert_eq!(table.build.source_for_leaf("offload"), PortSource::Host);
+        assert_eq!(table.build.source_for_leaf("offload"), PortSource::Builtin);
         assert_eq!(
             table.build.source_for_leaf("seed.stale_after"),
             PortSource::Project

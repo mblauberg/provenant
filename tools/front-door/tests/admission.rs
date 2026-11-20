@@ -92,7 +92,7 @@ impl Rig {
             .env_remove(provenant_core::consumer_env::ADMISSION_SLOT)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        set_build_context(&mut command, self, "slots")?;
+        set_build_context(&mut command, self, "lane_seed")?;
         Ok(command)
     }
 
@@ -130,28 +130,25 @@ fn build_context(rig: &Rig, strategy: &str) -> Result<String> {
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".cargo"));
     let rustup_home = std::env::var_os("RUSTUP_HOME").map(PathBuf::from);
-    let host_path = std::env::var_os("PATH")
-        .unwrap_or_default()
-        .to_string_lossy()
-        .into_owned();
-    let context = serde_json::json!({
-        "schema": 1,
-        "project": project,
-        "project_key": provenant_config::project_key_for(&project)
+    let host_path = std::env::var_os("PATH").unwrap_or_default();
+    let context = provenant_run::build::BuildContext {
+        schema: 1,
+        project: project.clone(),
+        project_key: provenant_config::project_key_for(&project)
             .unwrap_or_else(|| "admission-test".to_owned()),
-        "worktree": project,
-        "attempt": null,
-        "sandboxed": false,
-        "git": null,
-        "port": port,
-        "strategy_source": strategy_source,
-        "host_home": home,
-        "rustup_home": rustup_home,
-        "cargo_home": cargo_home,
-        "host_path": host_path,
-        "verify_base": null,
-    });
-    Ok(serde_json::to_string(&context)?)
+        worktree: project,
+        attempt: None,
+        sandboxed: false,
+        git: None,
+        port,
+        strategy_source,
+        host_home: home,
+        rustup_home,
+        cargo_home,
+        host_path,
+        verify_base: None,
+    };
+    context.to_json().map_err(Into::into)
 }
 
 fn set_build_context(command: &mut Command, rig: &Rig, strategy: &str) -> Result {
@@ -213,7 +210,7 @@ fn alive(pid: &str) -> bool {
 }
 
 #[test]
-fn a_backgrounded_grandchild_that_outlives_the_build_does_not_keep_the_slot() -> Result {
+fn a_backgrounded_grandchild_is_terminated_with_the_build_process_group() -> Result {
     let rig = Rig::new()?;
     rig.provision(1)?;
     let mut first = rig.shim(1, &["bg"])?;
@@ -223,14 +220,20 @@ fn a_backgrounded_grandchild_that_outlives_the_build_does_not_keep_the_slot() ->
         .iter()
         .find_map(|line| line.strip_prefix("bg ").map(str::to_owned))
         .ok_or("the grandchild started")?;
-    assert!(alive(&pid), "the grandchild outlives the build");
+    // A build owns its whole process group: backgrounded work must not
+    // outlive the direct child.
+    provenant_test_support::wait_for(
+        "backgrounded grandchild reaped with its group",
+        Duration::from_secs(10),
+        || !alive(&pid),
+        |gone| *gone,
+    )?;
     // The slot is free the moment the direct child exits.
     let slots = AdmissionSlots::open(&rig.state, "build")?;
     assert_eq!(slots.held(1), 0);
     let mut second = rig.shim(1, &["build"])?;
     assert!(finish(&mut second, Duration::from_secs(10))?);
-    assert!(alive(&pid), "still running after the next build finished");
-    Command::new("/bin/kill").arg(&pid).status()?;
+    assert!(!alive(&pid), "the backgrounded grandchild was not reaped");
     Ok(())
 }
 
@@ -319,7 +322,7 @@ fn concurrent_cargo_commands_wait_for_the_single_host_slot() -> Result {
             .env_remove(provenant_core::consumer_env::ADMISSION_SLOT)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        set_build_context(&mut command, &rig, "slots")?;
+        set_build_context(&mut command, &rig, "lane_seed")?;
         Ok(command)
     };
     let mut first = agent_command("exec cargo check", &rig.state)?.spawn()?;
@@ -415,7 +418,7 @@ fn missing_builtin_slot_settings_still_run_the_build() -> Result {
         .env("PATH", "/usr/bin:/bin")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    set_build_context(&mut command, &rig, "slots")?;
+    set_build_context(&mut command, &rig, "lane_seed")?;
     let mut child = command.spawn()?;
     assert!(finish(&mut child, Duration::from_secs(10))?);
     assert!(rig.started("end"), "Command ran without a slot grant");
@@ -558,7 +561,7 @@ fn the_shims_exit_code_is_the_builds() -> Result {
         .env_remove("PROVENANT_ADMISSION_SLOT_STATE")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    set_build_context(&mut failing_command, &rig, "slots")?;
+    set_build_context(&mut failing_command, &rig, "lane_seed")?;
     let failing = failing_command.status()?;
     assert_eq!(failing.code(), Some(7));
     Ok(())
@@ -714,7 +717,7 @@ fn bounded_wait_warns_and_proceeds() -> Result {
         "stderr: {stderr}"
     );
     assert!(
-        stderr.contains("bounded wait ended with every build slot busy"),
+        stderr.contains("bounded wait ended with every slot busy"),
         "stderr: {stderr}"
     );
 
@@ -796,7 +799,7 @@ fn lane_nextest_runs_through_admission_slot() -> Result {
     fs::set_permissions(&fake_nextest, fs::Permissions::from_mode(0o755))?;
 
     let provenant_bin = PathBuf::from(env!("CARGO_BIN_EXE_provenant"));
-    let build_context = build_context(&rig, "slots")?;
+    let build_context = build_context(&rig, "lane_seed")?;
     let gate = provenant_providers::BuildSlotGate {
         project: temp_lane.path(),
         build_context: &build_context,
@@ -908,7 +911,7 @@ fn custom_admission_class_in_confined_lane() -> Result {
     fs::create_dir_all(&scratch)?;
 
     let provenant_bin = PathBuf::from(env!("CARGO_BIN_EXE_provenant"));
-    let build_context = build_context(&rig, "slots")?;
+    let build_context = build_context(&rig, "lane_seed")?;
     let gate = provenant_providers::BuildSlotGate {
         project: temp_lane.path(),
         build_context: &build_context,

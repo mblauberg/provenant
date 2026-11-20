@@ -89,5 +89,5 @@ pub fn slot_job(home: &Path, project_key: &str, index: u64) -> PathBuf {
 
 /// Slot flock path.
 pub fn slot_lock(home: &Path, project_key: &str, index: u64) -> PathBuf {
-    slot_root(home, project_key, index).join("lock")
+    slot_root(home, project_key, index).join("slot.lock")
 }

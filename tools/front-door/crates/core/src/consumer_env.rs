@@ -440,7 +440,7 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         Lane,
         Internal,
         "Frozen host-side build strategy, repository and toolchain context.",
-        ADMITTED_COMMAND,
+        "every lane and its build shim",
     ),
     var(
         ADMISSION_DISK_LIMITS,

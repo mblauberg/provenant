@@ -36,6 +36,9 @@ pub(super) struct SlotLaunch<'a> {
     pub env: Vec<(OsString, OsString)>,
     pub worktree: &'a Path,
     pub on_spawn: &'a mut dyn FnMut(u32),
+    /// Inherited by the build's process tree so a slot stays occupied until
+    /// every child has exited, including after its owner crashes.
+    pub intent_lease: Option<&'a provenant_os::fs::LockGuard>,
 }
 
 /// Per-execution options collected at the shared execution boundary.
@@ -46,6 +49,7 @@ struct ExecutionOptions<'a> {
     override_env: Option<Vec<(OsString, OsString)>>,
     slot: Option<(u64, &'a Path, &'a str, &'a Path)>,
     on_spawn: Option<&'a mut dyn FnMut(u32)>,
+    intent_lease: Option<&'a provenant_os::fs::LockGuard>,
 }
 
 pub(super) fn execute_with_env(
@@ -68,6 +72,7 @@ pub(super) fn execute_with_env(
             override_env,
             slot: None,
             on_spawn: None,
+            intent_lease: None,
         },
     )
 }
@@ -89,6 +94,7 @@ pub(super) fn execute_in_slot(
             override_env: Some(launch.env),
             slot: Some((launch.index, launch.root, launch.head, launch.worktree)),
             on_spawn: Some(launch.on_spawn),
+            intent_lease: launch.intent_lease,
         },
     )
 }
@@ -106,6 +112,7 @@ fn execute_configured(
         override_env,
         slot,
         mut on_spawn,
+        intent_lease,
     } = options;
     let root = slot.map_or_else(
         || super::job_root(job).to_path_buf(),
@@ -219,6 +226,7 @@ fn execute_configured(
             Duration::from_micros(deadline_micros.saturating_sub(clock.mono_now().as_micros()));
         let mut options = ExecOptions::new(&argv, &cwd, remaining);
         options.env = Some(&env);
+        options.inherited_lease = intent_lease;
         options.process_group = true;
         options.cleanup_process_group = true;
         options.group_watchdog = false;

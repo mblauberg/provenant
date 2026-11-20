@@ -6,6 +6,7 @@ use super::{
     RunContext, SlotChanges,
 };
 use provenant_core::{Clock, MonoTime};
+use provenant_os::fs::{Directory, FsError, LockGuard, LockMode};
 use provenant_supervisor::census::{
     MAX_CENSUS_ENTRIES, ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver,
 };
@@ -13,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
+    ffi::OsStr,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -81,7 +83,7 @@ impl SlotPaths {
             tmp: root.join("tmp"),
             record: root.join("slot.json"),
             job: root.join("job.json"),
-            lock: root.join("lock"),
+            lock: root.join("slot.lock"),
             root,
         }
     }
@@ -128,6 +130,16 @@ impl SlotRecord {
     }
 }
 
+/// Intent is published before spawn; Running replaces it with the child's
+/// process identity. The default keeps older markers decodable as Running.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum JobMarkerState {
+    #[default]
+    Running,
+    Intent,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct JobMarker {
     pid: u32,
@@ -138,6 +150,8 @@ struct JobMarker {
     #[serde(default)]
     session_id: i64,
     owner: String,
+    #[serde(default)]
+    state: JobMarkerState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,6 +196,9 @@ pub struct PreparedSlot {
     pub site: super::ExecSite,
     paths: SlotPaths,
     _slot_lock: provenant_os::fs::LockGuard,
+    /// Held by this process and inherited by the build's children, so a slot
+    /// with an intent marker stays occupied until every child is gone.
+    intent_lease: LockGuard,
     _port_lease: Option<provenant_os::lane_ports::Lease>,
     record: SlotRecord,
     snapshot: super::snapshot::SnapshotRef,
@@ -216,6 +233,12 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
     fs::create_dir_all(&paths.root).map_err(|_| Exception::PoolUnavailable)?;
     fs::create_dir_all(&paths.tmp).map_err(|_| Exception::PoolUnavailable)?;
     let slot_lock = slot_lock(&paths.lock).map_err(|_| Exception::PoolUnavailable)?;
+    let intent_lease = acquire_intent_lease(&paths.root).map_err(|detail| StageFailure {
+        exception: Exception::PoolUnavailable,
+        infra: None,
+        reset: super::Reset::None,
+        detail,
+    })?;
     let orphan_killed = reap_orphan(&paths.job).map_err(|_| Exception::PoolUnavailable)?;
     let mut record = SlotRecord::read(&paths.record)
         .map_err(|_| Exception::PoolUnavailable)?
@@ -418,6 +441,7 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
         },
         paths,
         _slot_lock: slot_lock,
+        intent_lease,
         _port_lease: port_lease,
         record,
         snapshot,
@@ -483,6 +507,15 @@ pub fn execute_staged(
             }
         }
     };
+    // Custody is published before the child exists. The inherited lease below
+    // keeps the slot occupied even if this process dies before `on_spawn`.
+    mark_intent(&staged.paths.job, &owned_job.owner).map_err(|error| {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: cannot publish slot custody before spawn: {error}"
+        );
+        Exception::PoolUnavailable
+    })?;
     let peak_rss = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let sampler = start_rss_sampler(
         std::sync::Arc::clone(&process_identity),
@@ -500,6 +533,7 @@ pub fn execute_staged(
             env: staged.env.clone(),
             worktree: &staged.source_root,
             on_spawn: &mut on_spawn,
+            intent_lease: Some(&staged.intent_lease),
         },
     );
     drop(on_spawn);
@@ -829,6 +863,19 @@ fn clear_git(command: &mut Command) {
     }
 }
 fn checkout_commit(repo: &Path, commit: &str) -> bool {
+    // A stale stat cache makes `checkout --force` rewrite files whose content
+    // is unchanged, which would rebuild units that did not change. Refresh it
+    // first so only genuinely different files get a new mtime. A failure here
+    // only means there is real local work to discard, which checkout does.
+    git_status(
+        repo,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "update-index",
+            "--refresh",
+        ],
+    );
     git_status(
         repo,
         &[
@@ -855,6 +902,24 @@ fn git_status(repo: &Path, args: &[&str]) -> bool {
         .output()
         .is_ok_and(|output| output.status.success())
 }
+/// Take the slot's custody lease. A held lease means a previous job's child
+/// process still exists, even when its running marker was never published.
+fn acquire_intent_lease(root: &Path) -> Result<LockGuard, String> {
+    let directory = Directory::open_anchor(root).map_err(|error| error.to_string())?;
+    let name = OsStr::new("intent.lock");
+    match directory.try_lock_existing(name, LockMode::Exclusive) {
+        Err(FsError::LockTimeout { .. }) => {
+            return Err("slot still holds an in-flight build custody lease".into());
+        }
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error.to_string()),
+        Ok(_) => {}
+    }
+    directory
+        .try_lock(name, LockMode::Exclusive)
+        .map_err(|error| error.to_string())
+}
+
 fn slot_lock(path: &Path) -> std::io::Result<provenant_os::fs::LockGuard> {
     let parent = path
         .parent()
@@ -963,6 +1028,39 @@ fn start_rss_sampler(
     Some((stop, worker))
 }
 
+fn write_marker(path: &Path, marker: &JobMarker) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!(
+        "json.{}.tmp",
+        TEMP_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
+        serde_json::to_writer(&mut file, marker).map_err(std::io::Error::other)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// Publish custody before spawn. The caller holds the slot's intent lease, so
+/// a holder that dies before spawning leaves only an intent with no live lease.
+fn mark_intent(path: &Path, owner: &str) -> std::io::Result<()> {
+    let marker = JobMarker {
+        pid: std::process::id(),
+        pgid: 0,
+        start_time: 0,
+        boot: String::new(),
+        session_id: 0,
+        owner: owner.to_owned(),
+        state: JobMarkerState::Intent,
+    };
+    write_marker(path, &marker)
+}
+
 fn mark_job(
     path: &Path,
     pid: u32,
@@ -979,22 +1077,9 @@ fn mark_job(
         boot: identity.boot.clone(),
         session_id: identity.session_id,
         owner: owner.to_owned(),
+        state: JobMarkerState::Running,
     };
-    let tmp = path.with_extension(format!(
-        "json.{}.tmp",
-        TEMP_ID.fetch_add(1, Ordering::Relaxed)
-    ));
-    let result = (|| {
-        let mut file = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
-        serde_json::to_writer(&mut file, &marker).map_err(std::io::Error::other)?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        fs::rename(&tmp, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result?;
+    write_marker(path, &marker)?;
     Ok(identity)
 }
 fn reap_orphan(path: &Path) -> std::io::Result<bool> {
@@ -1003,6 +1088,13 @@ fn reap_orphan(path: &Path) -> std::io::Result<bool> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
+    if marker.state == JobMarkerState::Intent {
+        // The caller owns the intent lease, which proves no previous holder
+        // or spawned child is still alive. An intent without a running marker
+        // is safe to clear only under that proof.
+        fs::remove_file(path)?;
+        return Ok(false);
+    }
     if marker.pid != u32::try_from(marker.pgid).unwrap_or_default() || marker.owner.is_empty() {
         return Err(std::io::Error::other("invalid stale job marker identity"));
     }
@@ -1027,6 +1119,7 @@ fn terminate_untracked_group(pid: u32) -> std::io::Result<()> {
         boot: identity.boot,
         session_id: identity.session_id,
         owner: "untracked".into(),
+        state: JobMarkerState::Running,
     };
     terminate_recorded_group(&marker).map(|_| ())
 }

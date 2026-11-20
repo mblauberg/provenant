@@ -1440,7 +1440,7 @@ mod tests {
             "host_path": "/usr/bin:/bin",
             "verify_base": null,
         }))
-        .expect("fixture build context serializes")
+        .expect("fixture build context serialises")
     }
 
     #[test]

@@ -8,7 +8,7 @@ use provenant_os::admission::{
     AdmissionSlots, HeldGuard, HostHeldGuard, HostWaitGuard, WaitGuard, mark_held_with_command,
     mark_host_held_with_command, mark_host_waiting_with_command, mark_waiting_with_command,
 };
-use provenant_os::fs::{Directory, FsError, LockGuard, LockMode};
+use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -174,12 +174,14 @@ fn affinity(job: &Job, context: &RunContext, limit: u64) -> Vec<u64> {
 }
 
 struct TicketLease {
-    path: PathBuf,
+    json_path: PathBuf,
+    lock_path: PathBuf,
     _guard: LockGuard,
 }
 impl Drop for TicketLease {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(&self.json_path);
+        let _ = std::fs::remove_file(&self.lock_path);
     }
 }
 
@@ -207,21 +209,27 @@ fn live_tickets(dir: &Directory, path: &Path) -> Result<Vec<Ticket>, BuildError>
     for entry in std::fs::read_dir(path).map_err(unavailable)? {
         let entry = entry.map_err(unavailable)?;
         let name = entry.file_name();
-        if Path::new(&name).extension() != Some(OsStr::new("json")) {
+        if Path::new(&name).extension() != Some(OsStr::new("lock")) {
             continue;
         }
         match dir.try_lock_existing(&name, LockMode::Exclusive) {
             Ok(_guard) => {
+                // The waiter is gone: its lock was free, so reap both files.
+                let json = entry.path().with_extension("json");
+                let _ = std::fs::remove_file(&json);
                 let _ = std::fs::remove_file(entry.path());
             }
-            Err(FsError::LockTimeout { .. }) => match std::fs::read(entry.path()) {
-                Ok(bytes) => {
-                    let ticket: Ticket = serde_json::from_slice(&bytes).map_err(unavailable)?;
-                    tickets.push(ticket);
+            Err(FsError::LockTimeout { .. }) => {
+                let json = entry.path().with_extension("json");
+                match std::fs::read(&json) {
+                    Ok(bytes) => {
+                        let ticket: Ticket = serde_json::from_slice(&bytes).map_err(unavailable)?;
+                        tickets.push(ticket);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(unavailable(error)),
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(unavailable(error)),
-            },
+            }
             Err(error) if error.is_not_found() => {}
             Err(error) => return Err(unavailable(error)),
         }
@@ -296,10 +304,6 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
     let queue_path = request.state.join("build/queue").join(request.class);
     std::fs::create_dir_all(&queue_path).map_err(unavailable)?;
     let dir = Directory::open_anchor(&queue_path).map_err(unavailable)?;
-    let temp_name = format!(".{}.{}.tmp", request.job_id, std::process::id());
-    let guard = dir
-        .try_lock(OsStr::new(&temp_name), LockMode::Exclusive)
-        .map_err(unavailable)?;
     let ticket = Ticket {
         schema: 1,
         id: request.job_id.to_owned(),
@@ -314,24 +318,27 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
             .unwrap_or(0),
         command_digest: request.command_digest.clone(),
     };
-    let temp_path = queue_path.join(&temp_name);
-    let mut lease = TicketLease {
-        path: temp_path.clone(),
+    let lock_name = format!("{}.lock", request.job_id);
+    let ticket_name = format!("{}.json", request.job_id);
+    // The separate sibling lock carries liveness: a waiter that dies releases
+    // it, and any other waiter reaps both files. Lock names may not be renamed,
+    // so the ticket bytes live in the adjacent JSON file.
+    let guard = dir
+        .try_lock(OsStr::new(&lock_name), LockMode::Exclusive)
+        .map_err(unavailable)?;
+    let bytes = serde_json::to_vec(&ticket).map_err(unavailable)?;
+    dir.atomic_write(
+        OsStr::new(&ticket_name),
+        ".ticket-",
+        &bytes,
+        PublishMode::NoReplace,
+    )
+    .map_err(unavailable)?;
+    let _lease = TicketLease {
+        json_path: queue_path.join(&ticket_name),
+        lock_path: queue_path.join(&lock_name),
         _guard: guard,
     };
-    let ticket_name = format!("{}.json", request.job_id);
-    let ticket_path = queue_path.join(&ticket_name);
-    lease
-        ._guard
-        .handoff_file()
-        .set_len(0)
-        .map_err(unavailable)?;
-    let mut file = lease._guard.handoff_file();
-    serde_json::to_writer(&mut file, &ticket).map_err(unavailable)?;
-    file.flush().map_err(unavailable)?;
-    dir.rename_noreplace(OsStr::new(&temp_name), &dir, OsStr::new(&ticket_name))
-        .map_err(unavailable)?;
-    lease.path = ticket_path;
     let _waiting = mark_waiting(request).ok();
     let _ = writeln!(
         std::io::stderr().lock(),
@@ -630,7 +637,10 @@ mod tests {
         let held = slots.try_acquire(1).unwrap().unwrap();
         let path = state.path().join("build/queue/build");
         std::fs::create_dir_all(&path).unwrap();
-        std::fs::write(path.join("dead.json"), b"stale").unwrap();
+        let dead = ticket("dead", super::super::Priority::Interactive, 1);
+        std::fs::write(path.join("dead.json"), serde_json::to_vec(&dead).unwrap()).unwrap();
+        // Liveness is carried by the sibling lock; an unlocked ticket is stale.
+        std::fs::write(path.join("dead.lock"), b"").unwrap();
         let cancel = CancelToken::new();
         std::thread::scope(|scope| {
             let handle =

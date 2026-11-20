@@ -65,7 +65,10 @@ fn value(out: Output) -> Result<String, BuildError> {
         .map_err(error)
 }
 fn bound(git: &GitBinding, worktree: &Path, index: &Path) -> Command {
-    let mut c = Command::new(&git.git);
+    // The executable comes from the caller's frozen binding, never from a
+    // hard-coded program name; the environment is scrubbed below.
+    let program = &git.git;
+    let mut c = Command::new(program);
     clear_git(&mut c);
     c.env("GIT_DIR", &git.git_dir)
         .env("GIT_COMMON_DIR", &git.common_dir)
@@ -128,7 +131,7 @@ pub fn working_tree_commit(
         return Err(error(String::from_utf8_lossy(&head.stderr)));
     }
     command
-        .args(["-m", "provenant build snapshot"])
+        .args(["-m", "Provenant build snapshot"])
         .env("GIT_AUTHOR_NAME", "Provenant")
         .env("GIT_AUTHOR_EMAIL", "build@provenant.invalid")
         .env("GIT_AUTHOR_DATE", "@0 +0000")
@@ -260,7 +263,6 @@ pub fn create_in_slot(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "scratch Git fixtures")]
 mod tests {
     use super::*;
     #[test]
@@ -269,7 +271,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         fs::create_dir(&repo).unwrap();
         let run = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = provenant_os::fixture::git_command()
                 .current_dir(&repo)
                 .args(args)
                 .output()
@@ -329,7 +331,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         fs::create_dir(&repo).unwrap();
         let run = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = provenant_os::fixture::git_command()
                 .current_dir(&repo)
                 .args(args)
                 .output()
@@ -355,7 +357,7 @@ mod tests {
             format!("{}\n", repo.join(".git/objects").display()),
         )
         .unwrap();
-        let out = Command::new("git")
+        let out = provenant_os::fixture::git_command()
             .current_dir(&repo)
             .env("GIT_OBJECT_DIRECTORY", &objects)
             .args(["commit-tree", &tree, "-m", "private commit"])
@@ -368,7 +370,7 @@ mod tests {
         );
         let commit = String::from_utf8(out.stdout).unwrap().trim().to_owned();
         assert!(
-            !Command::new("git")
+            !provenant_os::fixture::git_command()
                 .current_dir(&repo)
                 .args(["cat-file", "-e", &commit])
                 .status()
@@ -389,7 +391,7 @@ mod tests {
         };
         let store = super::super::store::ensure(tmp.path(), "private").unwrap();
         create(&source, Some(&binding), &store, "verify").unwrap();
-        let out = Command::new("git")
+        let out = provenant_os::fixture::git_command()
             .arg("--git-dir")
             .arg(store)
             .args(["show", &format!("{commit}:file")])
@@ -398,7 +400,7 @@ mod tests {
         assert!(out.status.success());
         assert_eq!(out.stdout, b"private");
         assert!(
-            !Command::new("git")
+            !provenant_os::fixture::git_command()
                 .current_dir(repo)
                 .args(["cat-file", "-e", &commit])
                 .status()

@@ -399,7 +399,7 @@ pub fn run(command: Build, globals: &Globals) -> u8 {
                         .map_err(|e| e.to_string())?;
                     let _lock = dir
                         .try_lock(
-                            std::ffi::OsStr::new("lock"),
+                            std::ffi::OsStr::new("slot.lock"),
                             provenant_os::fs::LockMode::Exclusive,
                         )
                         .map_err(|e| e.to_string())?;

@@ -11,6 +11,7 @@ use provenant_os::{
     exec::{ExecOptions, StreamPolicy, SystemExecutor, Termination, run_text},
     fs::{Directory, LockMode},
 };
+use provenant_supervisor::census::{ProcessObservation, SystemProcessObserver};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -267,7 +268,7 @@ where
             let Ok(dir) = Directory::open_anchor(&paths.root) else {
                 continue;
             };
-            let Ok(_guard) = dir.try_lock(OsStr::new("lock"), LockMode::Exclusive) else {
+            let Ok(_guard) = dir.try_lock(OsStr::new("slot.lock"), LockMode::Exclusive) else {
                 continue;
             };
             // Re-read under the lock: status is deliberately an unlocked observation.
@@ -433,12 +434,23 @@ pub struct MaintenanceState {
     pub last_prewarm: BTreeMap<String, u64>,
     #[serde(default)]
     pub hour_budget_used: HourBudget,
+    /// In-flight budget claims, so a worker that dies before finishing can be
+    /// refunded by the next claimant instead of consuming the hour forever.
+    #[serde(default)]
+    pub reservations: BTreeMap<String, MaintenanceReservation>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct HourBudget {
     pub hour: u64,
     pub count: u64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct MaintenanceReservation {
+    pub pid: u32,
+    pub start_time: u64,
+    pub reserved_unix_ms: u64,
 }
 
 /// Result of a maintenance/prewarm request.
@@ -481,13 +493,91 @@ fn with_maintenance_state<T>(
     }
     let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
     let bytes = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
-    std::fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|error| error.to_string())?;
+        file.write_all(&bytes).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+    }
     std::fs::rename(&temporary, &path).map_err(|error| {
         let _ = std::fs::remove_file(&temporary);
         error.to_string()
     })?;
     drop(lock);
     Ok(result)
+}
+
+fn process_present(pid: u32, start_time: u64) -> bool {
+    match SystemProcessObserver.observe(i64::from(pid)) {
+        ProcessObservation::Present(fact) => {
+            !fact.zombie && fact.identity.native_start == start_time
+        }
+        _ => false,
+    }
+}
+
+fn current_process_reservation(now_ms: u64) -> MaintenanceReservation {
+    let pid = std::process::id();
+    let start_time = match SystemProcessObserver.observe(i64::from(pid)) {
+        ProcessObservation::Present(fact) => fact.identity.native_start,
+        _ => 0,
+    };
+    MaintenanceReservation {
+        pid,
+        start_time,
+        reserved_unix_ms: now_ms,
+    }
+}
+
+/// Claim one unit of the hour's prewarm budget under the maintenance lock.
+/// Checking and consuming are one critical section, so parallel maintainers
+/// cannot all observe the same remaining budget. Dead claims are refunded.
+fn claim_maintenance_budget(
+    state: &Path,
+    hour: u64,
+    budget: u64,
+    now_ms: u64,
+) -> Result<Option<MaintenanceReservation>, String> {
+    let reservation = current_process_reservation(now_ms);
+    let owner = format!("{}:{}", reservation.pid, reservation.start_time);
+    with_maintenance_state(state, |record| {
+        if record.hour_budget_used.hour != hour {
+            record.hour_budget_used = HourBudget { hour, count: 0 };
+            record.reservations.clear();
+        }
+        let stale: Vec<_> = record
+            .reservations
+            .iter()
+            .filter(|(_, claim)| {
+                now_ms.saturating_sub(claim.reserved_unix_ms) > 2 * 3_600_000
+                    || !process_present(claim.pid, claim.start_time)
+            })
+            .map(|(owner, _)| owner.clone())
+            .collect();
+        for owner in stale {
+            record.reservations.remove(&owner);
+            record.hour_budget_used.count = record.hour_budget_used.count.saturating_sub(1);
+        }
+        if record.hour_budget_used.count >= budget {
+            return Ok(None);
+        }
+        record.hour_budget_used.count = record.hour_budget_used.count.saturating_add(1);
+        record.reservations.insert(owner, reservation);
+        Ok(Some(reservation))
+    })
+}
+
+fn release_maintenance_reservation(state: &Path, reservation: &MaintenanceReservation) {
+    let owner = format!("{}:{}", reservation.pid, reservation.start_time);
+    let _ = with_maintenance_state(state, |record| {
+        record.reservations.remove(&owner);
+        Ok(())
+    });
 }
 
 /// Run a read-only Git query with a clean environment.
@@ -564,12 +654,51 @@ pub fn has_recent_job(state: &Path, project_key: &str, now_ms: u64) -> bool {
 }
 
 /// Try to take an idle slot without waiting; returns its index.
-fn probe_slot(state: &Path, limit: u64) -> Option<u64> {
+fn probe_slot(state: &Path, limit: u64) -> Option<provenant_os::admission::SlotGuard> {
     use provenant_os::admission::AdmissionSlots;
     let slots = AdmissionSlots::open(state, "build").ok()?;
     let order: Vec<u64> = (0..limit).collect();
-    let guard = slots.try_acquire_ordered(&order).ok()??;
-    Some(guard.index())
+    slots.try_acquire_ordered(&order).ok()?
+}
+
+/// A temporary detached checkout of the resolved verify base. Local strategy
+/// maintenance must judge this commit, never the caller's working tree.
+struct BaseCheckout {
+    project: PathBuf,
+    git: PathBuf,
+    path: PathBuf,
+}
+impl Drop for BaseCheckout {
+    fn drop(&mut self) {
+        let path = self.path.to_string_lossy().into_owned();
+        let _ = git_text(
+            &self.git,
+            &self.project,
+            &["worktree", "remove", "--force", &path],
+        );
+    }
+}
+
+fn base_checkout(project: &Path, git: &Path, commit: &str) -> Option<BaseCheckout> {
+    let path = std::env::temp_dir().join(format!(
+        "provenant-maintenance-{}-{}",
+        std::process::id(),
+        super::ledger::now_unix_ms()
+    ));
+    if path.exists() {
+        return None;
+    }
+    let text = path.to_string_lossy().into_owned();
+    git_text(
+        git,
+        project,
+        &["worktree", "add", "--detach", &text, commit],
+    )?;
+    Some(BaseCheckout {
+        project: project.to_path_buf(),
+        git: git.to_path_buf(),
+        path,
+    })
 }
 
 /// Run one best-effort prewarm, or a freshness canary when the chosen slot is stale.
@@ -619,27 +748,23 @@ pub fn maintain(state: &Path, home: &Path, project: &Path, now: SystemTime) -> M
         }
     }
     let hour = now_ms / 3_600_000;
-    let allowed = with_maintenance_state(state, |record| {
-        if record.hour_budget_used.hour != hour {
-            record.hour_budget_used = HourBudget::default();
-        }
-        Ok(record.hour_budget_used.count < budget)
-    });
-    match allowed {
-        Ok(true) => {}
-        Ok(false) => {
+    let reservation = match claim_maintenance_budget(state, hour, budget, now_ms) {
+        Ok(Some(reservation)) => reservation,
+        Ok(None) => {
             outcome.warning = Some("hourly build maintenance budget is spent".into());
             return outcome;
         }
         Err(error) => {
-            outcome.warning = Some(format!("cannot read build maintenance budget: {error}"));
+            outcome.warning = Some(format!("cannot claim build maintenance budget: {error}"));
             return outcome;
         }
-    }
-    let Some(index) = probe_slot(state, limit) else {
+    };
+    let Some(slot_guard) = probe_slot(state, limit) else {
+        release_maintenance_reservation(state, &reservation);
         outcome.warning = Some("no idle build slot for maintenance".into());
         return outcome;
     };
+    let index = slot_guard.index();
     let paths = SlotPaths::new(home, &key, index);
     let canary = SlotRecord::read(&paths.record)
         .ok()
@@ -655,11 +780,13 @@ pub fn maintain(state: &Path, home: &Path, project: &Path, now: SystemTime) -> M
                     .min(u128::from(u64::MAX)) as u64
         });
     let Some(git) = provenant_os::git::git_executable() else {
+        release_maintenance_reservation(state, &reservation);
         outcome.warning = Some("Git executable unavailable for build maintenance".into());
         return outcome;
     };
     let base = ports.verify.base.clone();
     if base.trim().is_empty() {
+        release_maintenance_reservation(state, &reservation);
         outcome.warning = Some("verify.base is unset; cannot pin the maintenance tree".into());
         return outcome;
     }
@@ -674,6 +801,7 @@ pub fn maintain(state: &Path, home: &Path, project: &Path, now: SystemTime) -> M
         ],
     )
     .filter(|commit| commit.bytes().all(|byte| byte.is_ascii_hexdigit())) else {
+        release_maintenance_reservation(state, &reservation);
         outcome.warning = Some(format!("cannot resolve verify base {base} for maintenance"));
         return outcome;
     };
@@ -688,9 +816,15 @@ pub fn maintain(state: &Path, home: &Path, project: &Path, now: SystemTime) -> M
             std::fs::canonicalize(path).unwrap_or(project.to_path_buf())
         }
         None => {
+            release_maintenance_reservation(state, &reservation);
             outcome.warning = Some("cannot locate the project's Git common directory".into());
             return outcome;
         }
+    };
+    let Some(checkout) = base_checkout(project, &git, &commit) else {
+        release_maintenance_reservation(state, &reservation);
+        outcome.warning = Some("cannot check out the resolved verify base for maintenance".into());
+        return outcome;
     };
     let mut env = provenant_config::port_command_environment(
         std::env::vars_os().collect::<Vec<_>>(),
@@ -706,6 +840,13 @@ pub fn maintain(state: &Path, home: &Path, project: &Path, now: SystemTime) -> M
             OsString::from("1"),
         ));
     }
+    // Commit-source jobs use this root under every strategy. Without it a
+    // lane-strategy job would check the caller's working tree and could
+    // report a false freshness failure for a base it never tested.
+    env.push((
+        OsString::from("PROVENANT_BUILD_LOCAL_ROOT"),
+        checkout.path.clone().into_os_string(),
+    ));
     let job = super::Job {
         id: format!(
             "maintain-{}-{}",
@@ -747,9 +888,40 @@ pub fn maintain(state: &Path, home: &Path, project: &Path, now: SystemTime) -> M
         strategy: super::strategy(&ports.build).value,
         cancel: CancelToken::new(),
     };
-    let result = super::run(job, &context);
+    let result = super::run_with_pinned_slot(job, &context, slot_guard);
     outcome.ran = true;
     outcome.canary = canary;
+    let canary_failed = match &result {
+        Ok(result) => {
+            result.outcome.infra.is_some()
+                || result
+                    .outcome
+                    .exit
+                    .is_none_or(|exit| exit.code != Some(0) || exit.signal.is_some())
+        }
+        Err(_) => true,
+    };
+    if canary && canary_failed {
+        // Reset only the slot this maintenance job actually held, and only
+        // while owning its slot lock. Another job may have taken the slot
+        // after our admission guard was released.
+        match Directory::open_anchor(&paths.root).ok().and_then(|dir| {
+            dir.try_lock(OsStr::new("slot.lock"), LockMode::Exclusive)
+                .ok()
+        }) {
+            Some(_guard) => {
+                if let Err(error) = full_reset(&paths) {
+                    outcome.warning =
+                        Some(format!("freshness_failure: full reset failed: {error}"));
+                }
+            }
+            None => {
+                outcome.warning = Some(
+                    "freshness_failure: could not lock the maintained slot for a reset".into(),
+                );
+            }
+        }
+    }
     match &result {
         Ok(result) => {
             outcome.exit_code = result.outcome.exit.map(|exit| exit.process_code());
@@ -771,11 +943,8 @@ pub fn maintain(state: &Path, home: &Path, project: &Path, now: SystemTime) -> M
         }
         Err(error) => outcome.warning = Some(error.to_string()),
     }
+    release_maintenance_reservation(state, &reservation);
     if let Err(error) = with_maintenance_state(state, |record| {
-        if record.hour_budget_used.hour != hour {
-            record.hour_budget_used = HourBudget { hour, count: 0 };
-        }
-        record.hour_budget_used.count = record.hour_budget_used.count.saturating_add(1);
         record.last_prewarm.insert(key.clone(), now_ms);
         Ok(())
     }) && outcome.warning.is_none()
@@ -806,6 +975,26 @@ mod tests {
             with_maintenance_state(&state, |record| Ok(record.hour_budget_used.hour != 42))
                 .unwrap();
         assert!(!new_hour);
+    }
+
+    #[test]
+    fn maintenance_budget_is_claimed_before_the_job_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let first = claim_maintenance_budget(&state, 7, 1, 7 * 3_600_000)
+            .unwrap()
+            .expect("the first worker reserves the only unit");
+        let second = claim_maintenance_budget(&state, 7, 1, 7 * 3_600_000).unwrap();
+        assert!(
+            second.is_none(),
+            "parallel workers cannot exceed the budget"
+        );
+        release_maintenance_reservation(&state, &first);
+        assert!(
+            claim_maintenance_budget(&state, 7, 1, 7 * 3_600_000)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -874,7 +1063,7 @@ mod tests {
         .unwrap();
         let dir = Directory::open_anchor(&paths.root).unwrap();
         let guard = dir
-            .try_lock(OsStr::new("lock"), LockMode::Exclusive)
+            .try_lock(OsStr::new("slot.lock"), LockMode::Exclusive)
             .unwrap();
         let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(900_000);
         assert_eq!(gc(&home, &state, 1, now).removed_slots, 0);
