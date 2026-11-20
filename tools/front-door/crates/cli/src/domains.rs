@@ -770,6 +770,50 @@ mod tests {
     use serde_json::json;
     use std::path::Path;
 
+    // Every registered section publishes FieldMetadata, so this walk covers
+    // every domain that declares a setting. A section registered later with an
+    // empty `fields` slice declares no settings and is intentionally absent
+    // from the walk, not silently skipped here.
+    #[test]
+    fn every_domain_field_is_declared_in_the_registry() {
+        let registry: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../../config/harness-knobs.json"))
+                .expect("registry parses");
+        let mut declared = std::collections::BTreeSet::new();
+        for section in registry.as_object().expect("registry object").values() {
+            let Some(path) = section.get("path").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            match section.get("settings").and_then(|value| value.as_object()) {
+                Some(settings) => {
+                    for key in settings.keys() {
+                        declared.insert(format!("{path}.{key}"));
+                    }
+                }
+                None => {
+                    // A section without `settings` declares its whole path.
+                    declared.insert(path.to_owned());
+                }
+            }
+        }
+        let missing: Vec<String> = SECTIONS
+            .entries
+            .iter()
+            .flat_map(|section| {
+                section
+                    .fields
+                    .iter()
+                    .map(move |field| format!("domains.{}.{}", section.name, field.path))
+            })
+            .filter(|key| !declared.contains(key))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "domain fields missing from config/harness-knobs.json:\n{}",
+            missing.join("\n")
+        );
+    }
+
     // Medium: actual config loader and editor, with no tracker or providers.
     #[test]
     fn steward_host_config_is_opt_in_and_validates_cadence() {
