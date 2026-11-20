@@ -20,8 +20,10 @@ pub fn is_review_verdict(verdict: &str) -> bool {
 pub(crate) fn is_standalone_verdict(line: &str) -> bool {
     let mut capture = VerdictCapture::default();
     capture.push(line.as_bytes());
-    let (verdict, invalid, declarations, _) = capture.finish();
-    declarations == 1 && !invalid && verdict.as_deref().is_some_and(is_review_verdict)
+    let captured = capture.finish();
+    captured.declarations == 1
+        && !captured.invalid
+        && captured.verdict.as_deref().is_some_and(is_review_verdict)
 }
 
 /// A streaming accumulator. Display windows and verdict proof are bounded;
@@ -48,13 +50,15 @@ pub struct CapturedResult {
     /// the caller that holds the sealed snapshot sets it.
     pub handoff: crate::handoff::HandoffResult,
     /// Exactly one well-formed verdict among the lines outside fenced blocks
-    /// that start with `VERDICT:` (after emphasis or list markers; not
+    /// that start with `VERDICT:` or `VERDICT `, case-insensitively (after emphasis or list markers; not
     /// blockquotes), wherever it sits. Independent of the required-line contract.
     pub verdict: Option<Box<str>>,
     /// Declarations were seen but are not exactly one well-formed verdict.
     pub verdict_invalid: bool,
     /// Why there is no verdict, naming what was seen; `None` when there is one.
     pub verdict_cause: Option<String>,
+    /// Noncanonical wording accepted as a canonical verdict.
+    pub verdict_warning: Option<String>,
     /// Saturating count of verdict declarations across the complete stream.
     pub declarations: u8,
     pub digest: String,
@@ -193,13 +197,14 @@ impl ResultCapture {
             || String::from_utf8_lossy(&self.tail).len() > TAIL_BYTES;
         let truncated = self.bytes > HEAD_BYTES as u64
             || String::from_utf8_lossy(&self.head).len() > HEAD_BYTES;
-        let (verdict, verdict_invalid, declarations, verdict_cause) = self.verdict.finish();
+        let verdict = self.verdict.finish();
         CapturedResult {
             handoff: Ok(None),
-            verdict,
-            verdict_invalid,
-            verdict_cause,
-            declarations,
+            verdict: verdict.verdict,
+            verdict_invalid: verdict.invalid,
+            verdict_cause: verdict.cause,
+            verdict_warning: verdict.warning,
+            declarations: verdict.declarations,
             digest,
             excerpt,
             tail,
@@ -418,7 +423,7 @@ impl DispositionCapture {
 
 /// Retain one bounded line and count standalone verdict declarations across
 /// every byte, even outside the excerpt windows. One rule: the result holds
-/// exactly one `VERDICT:` line outside fenced blocks. Fenced blocks (findings,
+/// exactly one verdict declaration outside fenced blocks. Fenced blocks (findings,
 /// handoff, quoted examples) and prose that merely mentions a verdict never
 /// count, and position does not matter. Two declarations, or one malformed
 /// declaration, are rejected with a cause that names what was seen.
@@ -443,6 +448,16 @@ pub(crate) struct VerdictCapture {
     seen: Vec<String>,
     /// The latest declaration, if well formed.
     verdict: Option<Box<str>>,
+    warning: Option<String>,
+}
+
+/// Bounded proof of the unique declaration, with diagnostics kept distinct.
+pub(crate) struct VerdictEvidence {
+    pub(crate) verdict: Option<Box<str>>,
+    pub(crate) invalid: bool,
+    pub(crate) declarations: u8,
+    pub(crate) cause: Option<String>,
+    pub(crate) warning: Option<String>,
 }
 
 const DECLARATION: &[u8] = b"VERDICT:";
@@ -513,7 +528,10 @@ impl VerdictCapture {
                     if ch != b'`' || !text[len..].contains('`') {
                         self.fence = Some((ch, len, self.lines));
                     }
-                } else if !self.no_decl && self.head == DECLARATION {
+                } else if !self.no_decl
+                    && (self.head.eq_ignore_ascii_case(DECLARATION)
+                        || self.head.eq_ignore_ascii_case(b"VERDICT "))
+                {
                     self.declare();
                 }
             }
@@ -536,18 +554,18 @@ impl VerdictCapture {
                 .and_then(|line| line.get(self.start..))
                 .map(str::trim)
         };
-        let token = written.and_then(|text| {
-            let token = text[DECLARATION.len()..]
-                .trim_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '_' | '`'));
-            (!token.is_empty()
-                && token.bytes().all(|byte| {
-                    byte.is_ascii_uppercase()
-                        || byte.is_ascii_digit()
-                        || matches!(byte, b'_' | b'-')
-                }))
-            .then_some(token)
+        let canonical = written.and_then(normalise_verdict_line);
+        self.verdict = canonical.map(Into::into);
+        self.warning = written.zip(canonical).and_then(|(written, canonical)| {
+            let plain =
+                written.trim_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '_' | '`'));
+            (plain != canonical).then(|| {
+                format!(
+                    "review_verdict_normalised: {} normalised to {canonical}",
+                    quoted(written)
+                )
+            })
         });
-        self.verdict = token.map(|token| format!("VERDICT: {token}").into());
         if self.seen.len() < 2 {
             self.seen.push(match written {
                 Some(text) => quoted(text),
@@ -556,7 +574,7 @@ impl VerdictCapture {
         }
     }
 
-    pub(crate) fn finish(mut self) -> (Option<Box<str>>, bool, u8, Option<String>) {
+    pub(crate) fn finish(mut self) -> VerdictEvidence {
         if !self.line.is_empty() {
             self.end_line();
         }
@@ -578,8 +596,42 @@ impl VerdictCapture {
                 if count > 2 { " and more" } else { "" }
             ),
         });
-        (verdict, invalid, self.declarations, cause)
+        let warning = verdict.as_ref().and(self.warning);
+        VerdictEvidence {
+            verdict,
+            invalid,
+            declarations: self.declarations,
+            cause,
+            warning,
+        }
     }
+}
+
+/// Interpret complete verdict words, ignoring a trailing SHA or explanation.
+/// The declaration scanner owns placement and fencing; this owns vocabulary.
+fn normalise_verdict_line(line: &str) -> Option<&'static str> {
+    let value = line.get(7..)?.trim_start();
+    let value = value.strip_prefix(':').unwrap_or(value).trim_start();
+    let value = value.trim_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '_' | '`'));
+    let lower = value.to_ascii_lowercase();
+    for (word, canonical) in [
+        ("pass", "VERDICT: PASS"),
+        ("approve", "VERDICT: PASS"),
+        ("approved", "VERDICT: PASS"),
+        ("lgtm", "VERDICT: PASS"),
+        ("fail", "VERDICT: FAIL"),
+        ("reject", "VERDICT: FAIL"),
+        ("request changes", "VERDICT: FAIL"),
+        ("changes requested", "VERDICT: FAIL"),
+        ("inconclusive", "VERDICT: INCONCLUSIVE"),
+    ] {
+        if let Some(rest) = lower.strip_prefix(word)
+            && (rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || c == ':'))
+        {
+            return Some(canonical);
+        }
+    }
+    None
 }
 
 /// The character and length of a fence opener or closer: three or more
@@ -659,6 +711,56 @@ mod tests {
         }
     }
 
+    // Spec: docs/specs/run-settlement.md#review-verdict-wording
+    #[test]
+    fn normalises_review_wording_with_visible_evidence_across_chunks() {
+        for (line, expected) in [
+            ("VERDICT: approve abc123", "VERDICT: PASS"),
+            ("verdict: Approved", "VERDICT: PASS"),
+            ("Verdict: LGTM abc123", "VERDICT: PASS"),
+            ("VERDICT: reject abc123", "VERDICT: FAIL"),
+            ("VERDICT: Request Changes abc123", "VERDICT: FAIL"),
+            ("VERDICT: changes requested", "VERDICT: FAIL"),
+            ("Verdict FAIL: reachable panic", "VERDICT: FAIL"),
+            ("VERDICT: pass abc123", "VERDICT: PASS"),
+            (
+                "verdict: inconclusive missing evidence",
+                "VERDICT: INCONCLUSIVE",
+            ),
+        ] {
+            for size in [1, 7, 4096] {
+                let text = format!("{FINDINGS}{line}\n{HANDOFF}");
+                let mut capture = ResultCapture::new(None);
+                for chunk in text.as_bytes().chunks(size) {
+                    capture.push(chunk);
+                }
+                let captured = capture.finish();
+                assert_eq!(captured.verdict.as_deref(), Some(expected), "{line}");
+                let warning = captured.verdict_warning.unwrap();
+                assert!(
+                    warning.contains(line) && warning.contains(expected),
+                    "{warning}"
+                );
+                assert!(!captured.verdict_invalid);
+            }
+        }
+        for line in [
+            "VERDICT: approveish",
+            "verdict: maybe abc123",
+            "Verdict: looks fine.",
+        ] {
+            let captured = run(line);
+            assert!(
+                captured.verdict.is_none() && captured.verdict_invalid,
+                "{line}"
+            );
+            assert!(captured.verdict_cause.unwrap().contains(line));
+            assert!(captured.verdict_warning.is_none());
+        }
+        let duplicate = run("VERDICT: approved\nverdict: reject");
+        assert!(duplicate.verdict_invalid && duplicate.verdict_warning.is_none());
+    }
+
     #[test]
     fn two_verdict_lines_outside_fences_fail_naming_both() {
         let captured = run(&format!(
@@ -679,7 +781,7 @@ mod tests {
     #[test]
     fn verdict_words_in_fences_and_prose_are_ignored() {
         for text in [
-            format!("Verdict: looks fine.\nThe verdict: PASS is likely.\nVERDICT: PASS\n{HANDOFF}"),
+            format!("The verdict: PASS is likely.\nVERDICT: PASS\n{HANDOFF}"),
             "```text\nVERDICT: FAIL\n```\nVERDICT: PASS\n".to_owned(),
             "~~~\nVERDICT: FAIL\n~~~\nVERDICT: PASS\n".to_owned(),
             "````\n```\nVERDICT: FAIL\n```\n````\nVERDICT: PASS\n".to_owned(),

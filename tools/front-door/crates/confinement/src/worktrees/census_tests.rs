@@ -1,4 +1,5 @@
 //! Worker census and native observation tests.
+use super::census::worker_evidence_from_census;
 use super::lifecycle_tests::*;
 use super::*;
 use crate::test_support::Fixture;
@@ -162,6 +163,15 @@ fn session_refusal_uses_decision_evidence_and_missing_root_is_unknown() -> Resul
                         cwd: Some(root.clone()),
                     },
                 )]),
+                held: BTreeMap::from([(
+                    root.clone(),
+                    vec![ObservedProcess {
+                        pid: 123,
+                        command: Some("first".into()),
+                        kind: ProcessEvidenceKind::WorkingDirectory,
+                        cwd: Some(root.clone()),
+                    }],
+                )]),
                 taints: BTreeMap::from([(
                     root.clone(),
                     TaintCause::LiveWriter(ObservedProcess {
@@ -172,6 +182,7 @@ fn session_refusal_uses_decision_evidence_and_missing_root_is_unknown() -> Resul
                     }),
                 )]),
                 details: BTreeMap::from([(root, "first observation".into())]),
+                held_incomplete: false,
             }
         }
     }
@@ -2337,6 +2348,7 @@ mod writer_cohort {
                 }
                 observation.occupancy = vec![first, complete()];
                 // Exercise the same budget-bound path used by landing retries.
+                let mut held_processes = BTreeMap::new();
                 let (states, holders, _, _) = observe_worker_holders_while(
                     std::slice::from_ref(&root),
                     &processes,
@@ -2344,6 +2356,7 @@ mod writer_cohort {
                     &processes.current,
                     false,
                     &mut |_, _| {},
+                    &mut held_processes,
                     Some(&|| true),
                 );
                 assert_eq!(states[&root].is_observed(), held, "{gap:?}");
@@ -2525,6 +2538,7 @@ mod narrowing {
             platform_uids: BTreeMap::new(),
         };
         let mut audit = Vec::new();
+        let mut held_processes = BTreeMap::new();
         let (states, _, details, _) = observe_worker_holders_while(
             std::slice::from_ref(&root),
             &processes,
@@ -2532,6 +2546,7 @@ mod narrowing {
             &current,
             false,
             &mut |pid, condition| audit.push((pid, condition)),
+            &mut held_processes,
             None,
         );
         Ok((
@@ -3432,5 +3447,306 @@ fn bounded_session_keeps_policy_fence_and_positive_holders()
             assert!(states[&roots[0]].is_unknown());
         }
     }
+    Ok(())
+}
+
+#[test]
+fn held_report_uses_one_bounded_census_and_only_reports() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Dwellers(AtomicUsize);
+    impl WorkerObserver for Dwellers {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, Occupancy::Observed { process: None }))
+                .collect()
+        }
+        fn observe_evidence_while(
+            &self,
+            roots: &[PathBuf],
+            _: bool,
+            keep_going: &dyn Fn() -> bool,
+        ) -> Option<WorkerEvidence> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            if !keep_going() {
+                return None;
+            }
+            let mut held = HeldProcesses::new();
+            for root in roots {
+                held.insert(
+                    root.clone(),
+                    vec![
+                        ObservedProcess::cwd(101, Some("zsh -c burn".into())),
+                        ObservedProcess::executable(202, Some("/usr/bin/yes".into())),
+                    ],
+                );
+            }
+            Some(WorkerEvidence {
+                states: roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, Occupancy::Observed { process: None }))
+                    .collect(),
+                held,
+                ..WorkerEvidence::default()
+            })
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let workers = Dwellers(AtomicUsize::new(0));
+    let roots = vec![temp.path().join("lane")];
+    let report = held_report(&workers, &roots, &|| true);
+    assert_eq!(workers.0.load(Ordering::SeqCst), 1, "one census per pass");
+    assert!(!report.incomplete);
+    assert_eq!(report.processes.len(), 2);
+    assert!(
+        report
+            .processes
+            .iter()
+            .any(|row| row.pid == 101 && row.command.as_deref() == Some("zsh -c burn"))
+    );
+    assert!(report.processes.iter().any(|row| row.pid == 202));
+    for row in &report.processes {
+        let line = row.advisory();
+        assert!(line.contains("report only"), "{line}");
+        assert!(line.contains(&row.pid.to_string()), "{line}");
+        assert!(line.contains(&row.evidence.to_string()), "{line}");
+    }
+    // A cut-short census reports incompleteness rather than an empty result.
+    let cut = held_report(&workers, &roots, &|| false);
+    assert!(cut.incomplete);
+    assert!(cut.processes.is_empty());
+    Ok(())
+}
+
+/// Two foreign processes sharing one root are both named; a sibling in the
+/// caller's session is not. This drives the real `observe_worker_holders_while`
+/// path, where `holders` keeps only the first process per root.
+#[test]
+fn failed_process_listing_makes_held_report_incomplete() {
+    use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
+    struct FailedListing;
+    impl ProcessObserver for FailedListing {
+        fn boot_identity(&self) -> Result<String, CensusError> {
+            Ok("boot".into())
+        }
+        fn observe(&self, _: i64) -> ProcessObservation {
+            ProcessObservation::Absent
+        }
+        fn census(&self, _: usize) -> Result<Census, CensusError> {
+            Err(CensusError::ProcessList(std::io::Error::other(
+                "listing failed",
+            )))
+        }
+    }
+    impl CwdObserver for FailedListing {
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::Gone)
+        }
+    }
+    impl WorkerObserver for FailedListing {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, Occupancy::Available))
+                .collect()
+        }
+        fn observe_evidence_while(
+            &self,
+            roots: &[PathBuf],
+            _: bool,
+            keep_going: &dyn Fn() -> bool,
+        ) -> Option<WorkerEvidence> {
+            let current = ProcessFact {
+                identity: ProcessIdentity {
+                    boot: "boot".into(),
+                    pid: 1,
+                    native_start: 1,
+                    group_id: 1,
+                    session_id: 1,
+                },
+                parent_pid: 0,
+                zombie: false,
+                cpu_micros: None,
+                command: None,
+            };
+            keep_going().then(|| {
+                worker_evidence_from_census(roots, true, self, self, &current, Some(keep_going))
+            })
+        }
+    }
+    let report = held_report(&FailedListing, &[PathBuf::from("/fixture")], &|| true);
+    assert!(report.incomplete);
+    assert!(report.processes.is_empty());
+}
+
+#[test]
+fn held_report_names_every_foreign_dweller_and_excludes_the_callers_session()
+-> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ProcessIdentity};
+    let temp = tempfile::tempdir()?;
+    let root = canonicalize(temp.path())?;
+    for name in ["caller", "first", "second", "sibling"] {
+        fs::create_dir(temp.path().join(name))?;
+    }
+    let fact = |pid: i64, session_id: i64, command: &str| ProcessFact {
+        identity: ProcessIdentity {
+            boot: "dwellers".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: session_id,
+            session_id,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: Some(command.into()),
+    };
+    let current = fact(100, 100, "provenant");
+    let census = Census::from_observations(
+        [
+            current.clone(),
+            fact(201, 201, "zsh -c burn"),
+            fact(202, 202, "yes"),
+            fact(103, 100, "caller sibling"),
+        ],
+        [],
+        [],
+        true,
+        false,
+        32,
+    )?;
+    let observer = InjectedCensus {
+        census,
+        cwds: BTreeMap::from([
+            (100, CwdObservation::Path(temp.path().join("caller"))),
+            (103, CwdObservation::Path(temp.path().join("sibling"))),
+            (201, CwdObservation::Path(temp.path().join("first"))),
+            (202, CwdObservation::Path(temp.path().join("second"))),
+        ]),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+    // The existing census fixture includes both positive dwellers. Marking the
+    // listing incomplete must retain those rows while exposing the gap.
+    let partial = Census::from_observations(
+        observer.census.facts().cloned().collect::<Vec<_>>(),
+        [],
+        [],
+        false,
+        false,
+        32,
+    )?;
+    let partial_observer = InjectedCensus {
+        census: partial,
+        cwds: observer.cwds.clone(),
+        current: current.clone(),
+        platform_uids: observer.platform_uids.clone(),
+    };
+    let evidence = worker_evidence_from_census(
+        std::slice::from_ref(&root),
+        true,
+        &partial_observer,
+        &partial_observer,
+        &current,
+        Some(&|| true),
+    );
+    assert!(evidence.held_incomplete);
+    assert!(
+        evidence.held[&root]
+            .iter()
+            .any(|process| process.pid == 201)
+    );
+    let mut held = HeldProcesses::new();
+    let (states, _, _, _) = observe_worker_holders_while(
+        std::slice::from_ref(&root),
+        &observer,
+        &observer,
+        &current,
+        true,
+        &mut |_, _| {},
+        &mut held,
+        Some(&|| true),
+    );
+    assert!(states[&root].is_observed());
+    let rows = &held[&root];
+    let pids: BTreeSet<_> = rows.iter().map(|row| row.pid).collect();
+    assert_eq!(pids, BTreeSet::from([201, 202]), "{rows:?}");
+    assert!(
+        rows.iter()
+            .any(|row| row.pid == 201 && row.command.as_deref() == Some("zsh -c burn"))
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.pid == 202 && row.command.as_deref() == Some("yes"))
+    );
+    Ok(())
+}
+
+/// EPERM processes are still aggregated into the held report, but the caller
+/// is excluded even when the listing could not name it.
+#[test]
+fn held_report_aggregates_eperm_dwellers_and_excludes_the_caller() -> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ProcessIdentity};
+    let temp = tempfile::tempdir()?;
+    let root = canonicalize(temp.path())?;
+    for name in ["caller", "first", "second"] {
+        fs::create_dir(temp.path().join(name))?;
+    }
+    let current = ProcessFact {
+        identity: ProcessIdentity {
+            boot: "eperm-dwellers".into(),
+            pid: 100,
+            native_start: 100,
+            group_id: 100,
+            session_id: 100,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: Some("provenant".into()),
+    };
+    let census = Census::from_observations(
+        [],
+        [
+            (100, ObservationIssue::PermissionDenied),
+            (201, ObservationIssue::PermissionDenied),
+            (202, ObservationIssue::PermissionDenied),
+        ],
+        [],
+        true,
+        false,
+        32,
+    )?;
+    let observer = InjectedCensus {
+        census,
+        cwds: BTreeMap::from([
+            (100, CwdObservation::Path(temp.path().join("caller"))),
+            (201, CwdObservation::Path(temp.path().join("first"))),
+            (202, CwdObservation::Path(temp.path().join("second"))),
+        ]),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+    let mut held = HeldProcesses::new();
+    let _ = observe_worker_holders_while(
+        std::slice::from_ref(&root),
+        &observer,
+        &observer,
+        &current,
+        true,
+        &mut |_, _| {},
+        &mut held,
+        None,
+    );
+    let rows = &held[&root];
+    let pids: BTreeSet<_> = rows.iter().map(|row| row.pid).collect();
+    assert_eq!(pids, BTreeSet::from([201, 202]), "{rows:?}");
+    assert!(
+        rows.iter()
+            .all(|row| row.kind == ProcessEvidenceKind::WorkingDirectory)
+    );
     Ok(())
 }

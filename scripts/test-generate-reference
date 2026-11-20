@@ -98,6 +98,32 @@ class ReferenceTests(unittest.TestCase):
                     GEN['with_declared_enums'](section(**{'projects.{project}.choice': {
                         'type': 'string', 'effect': 'Choose.', **restated}}), declared)
 
+    def test_reference_distinguishes_review_defaults_from_bundled_shapes(self):
+        data = json.loads((SCRIPTS.parent / GEN['KNOBS']).read_text())
+        settings = data['domain_routing_settings']['settings']
+        expected = {
+            'review.floors.{floor}.paths': 'empty',
+            'review.floors.{floor}.tier': 'empty string',
+            'review.floors.{floor}.lenses': 'empty',
+            'review.shapes.{shape}.frame': True,
+            'review.shapes.{shape}.verifiers': '1',
+            'review.shapes.{shape}.synthesis': 'model',
+        }
+        for key, default in expected.items():
+            with self.subTest(key=key):
+                self.assertEqual(settings[key]['default'], default)
+        reference = {'knobs': {}, 'domain_routing_settings': data['domain_routing_settings']}
+        GEN['with_declared_enums'](reference, [
+            {'path': 'domains.routing.review.floors.{floor}.tier',
+             'values': ['routine', 'substantial', 'crucial', 'terminal']},
+            {'path': 'domains.routing.review.shapes.{shape}.synthesis',
+             'values': ['model', 'reduce']},
+        ])
+        text = GEN['config_reference'](reference, all_fields=True)
+        self.assertIn('Bundled quick uses false; standard and deep use true', text)
+        self.assertIn('Bundled quick uses reduce; standard and deep use model', text)
+        self.assertIn('An empty tier is invalid', text)
+
     def test_external_contract_document_preserves_every_declared_interface(self):
         interfaces = [{'kind': 'lane_environment', 'name': 'FIXTURE'},
                       {'kind': 'stable_commands', 'state': {'state': 'none_declared'}}]

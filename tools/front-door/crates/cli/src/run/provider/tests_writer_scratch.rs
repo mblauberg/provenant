@@ -1259,6 +1259,7 @@ printf 'agy 1.0.0\n'
         &state,
         &std::collections::BTreeMap::new(),
         &provenant_records::policy::Policy::default(),
+        "test-lane",
     )
     .expect("sandboxed lanes receive their optional build-slot shim");
     assert!(
@@ -1286,6 +1287,7 @@ printf 'agy 1.0.0\n'
         &state,
         &std::collections::BTreeMap::new(),
         &provenant_records::policy::Policy::default(),
+        "test-lane",
     )
     .expect("an unrepresentable shim leaves launch preparation intact");
     assert!(skipped_coordination_reads.is_empty());

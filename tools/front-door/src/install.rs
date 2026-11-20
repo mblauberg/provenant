@@ -11,6 +11,7 @@ use provenant_config::{
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_fabric_runtime::peer_agent::{AgentError, launchctl};
 use provenant_os::clock::SystemClock;
+use provenant_os::fs::Directory;
 use provenant_records::{CommandError, CommandResult, Harness, Outcome};
 use serde::Serialize;
 use std::ffi::OsStr;
@@ -853,6 +854,65 @@ fn inspect_live_attempts(
     provenant_cli::run::live_attempt_ids(&store, call)
 }
 
+/// Best-effort advisory for retained writer custody predating guardian schema
+/// 2. The custody owner classifies legacy evidence; install only reports its
+/// count and a representative path. This warning never blocks preflight.
+fn warn_legacy_custody(destination: &provenant_core::Roots) -> Option<String> {
+    let worktrees_path = destination.state.as_path().join("worktrees");
+    let directory = match Directory::open_anchor(&worktrees_path) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return None,
+        Err(error) => {
+            let message = format!(
+                "could not inspect retained writer custody under {}: {error}",
+                worktrees_path.display()
+            );
+            let _ = writeln!(io::stderr().lock(), "{message}");
+            return Some(message);
+        }
+    };
+    let scan = match provenant_supervisor::custody::list_legacy_guardian_records_in_worktrees(
+        &directory,
+    ) {
+        Ok(scan) => scan,
+        Err(error) => {
+            let message = format!(
+                "could not inspect retained writer custody under {}: {error}",
+                worktrees_path.display()
+            );
+            let _ = writeln!(io::stderr().lock(), "{message}");
+            return Some(message);
+        }
+    };
+    let paths: Vec<_> = scan
+        .records
+        .into_iter()
+        .map(|record| worktrees_path.join(record))
+        .collect();
+    let inspection_issue = scan.issues.first().map(|issue| {
+        format!(
+            "could not inspect {}: {}",
+            worktrees_path.join(&issue.path).display(),
+            issue.reason
+        )
+    });
+    let message = if let Some(example) = paths.first() {
+        let mut message = format!(
+            "retained writer custody includes {} attempt(s) with guardian-lock.json schema below 2; example: {}; these attempts remain fenced but no longer block launches",
+            paths.len(),
+            example.display()
+        );
+        if let Some(issue) = inspection_issue {
+            message.push_str(&format!("; {issue}"));
+        }
+        message
+    } else {
+        inspection_issue?
+    };
+    let _ = writeln!(io::stderr().lock(), "{message}");
+    Some(message)
+}
+
 /// Best-effort preflight advisory: compare the installed receipt's live-record
 /// format with this release's and name live attempts on stderr. Live attempts
 /// are enumerated across the whole installed state root, independent of the
@@ -1278,6 +1338,7 @@ fn preflight_install(
     // Smoke the source before the handoff may stop 1.x or publish the new root.
     verify_release(&args.source, smoke, context.cancel)?;
     let live_record_warning = warn_live_record_change(destination, context);
+    let _ = warn_legacy_custody(destination);
     Ok(PreparedInstall {
         batches,
         summaries,
@@ -2657,6 +2718,38 @@ mod tests {
             },
             &call,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_warns_with_count_and_path_for_unregistered_legacy_custody()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+
+        let tmp = tempfile::tempdir()?;
+        let roots = roots_with_receipt(tmp.path(), None)?;
+        let attempts = roots.state.as_path().join("worktrees/unregistered-project");
+        let first = attempts.join("slot-a/attempt-a");
+        let second = attempts.join("slot-b/attempt-b");
+        std::fs::create_dir_all(&first)?;
+        std::fs::create_dir_all(&second)?;
+        for path in [&first, &second] {
+            std::fs::write(path.join("guardian-lock.json"), br#"{"schema_version":1}"#)?;
+        }
+
+        let warning = warn_legacy_custody(&roots)
+            .expect("retained legacy custody produces a visible warning");
+        assert!(warning.contains("2 attempt(s)"), "{warning}");
+        assert!(
+            [&first, &second].iter().any(
+                |path| warning.contains(&path.join("guardian-lock.json").display().to_string())
+            ),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("remain fenced but no longer block launches"),
+            "{warning}"
+        );
         Ok(())
     }
 

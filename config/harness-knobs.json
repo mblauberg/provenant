@@ -75,7 +75,17 @@
     "path": "domains.quota",
     "settings": {
       "max_parallel": {"type": "int", "allowed": "1 to 16", "default": "3", "effect": "Accounts per quota probe batch; batches and probes currently run sequentially. Out-of-range values refuse the file"},
-      "wall_budget_seconds": {"type": "int", "allowed": "1 to 600 seconds", "default": "55", "effect": "Wall-clock budget for a whole quota tick. Out-of-range values refuse the file"}
+      "wall_budget_seconds": {"type": "int", "allowed": "1 to 600 seconds", "default": "55", "effect": "Wall-clock budget for a whole quota tick. Out-of-range values refuse the file", "min": 1, "max": 600},
+      "refresh_budget_seconds": {"type": "int", "allowed": "1 to 600 seconds", "min": 1, "max": 600, "default": "120", "effect": "Wall-clock budget for one quota refresh cycle."},
+      "refresh_min_budget_seconds": {"type": "int", "allowed": "1 to 600 seconds", "min": 1, "max": 600, "default": "60", "effect": "Minimum wall-clock budget kept for a quota refresh after other work; it must not exceed refresh_budget_seconds."},
+      "login_expiry_warning_seconds": {"type": "int", "allowed": "0 or more seconds", "min": 0, "default": "864000", "effect": "Warn this many seconds before a provider login expires."},
+      "display.headline": {"type": "enum", "effect": "Which quota window the headline shows: auto, 5h or weekly."},
+      "polling_intervals.{adapter}.timer_seconds": {"type": "int", "allowed": "1 to 2305843009213693951 seconds", "min": 1, "default": "unset", "effect": "Timer cadence for quota polling of this adapter.", "max": 2305843009213693951},
+      "polling_intervals.{adapter}.panel_seconds": {"type": "int", "allowed": "1 to 2305843009213693951 seconds", "min": 1, "default": "unset", "effect": "Panel refresh cadence for quota polling of this adapter.", "max": 2305843009213693951},
+      "calibration.{account}.five_hour": {"type": "int", "allowed": "0 to 100", "min": 0, "max": 100, "default": "unset", "effect": "Calibrated five-hour usage percentage for this account."},
+      "calibration.{account}.seven_day": {"type": "int", "allowed": "0 to 100", "min": 0, "max": 100, "default": "unset", "effect": "Calibrated seven-day usage percentage for this account."},
+      "calibration.{account}.thirty_day": {"type": "int", "allowed": "0 to 100", "min": 0, "max": 100, "default": "unset", "effect": "Calibrated thirty-day usage percentage for this account."},
+      "calibration.{account}.expires": {"type": "string", "allowed": "RFC 3339 timestamp", "default": "required", "effect": "Expiry of the calibration figures for this account."}
     }
   },
   "host_monthly_pacing_settings": {
@@ -156,7 +166,14 @@
       "sandbox_cache_reads": {"type": "string_list", "allowed": "up to 16 absolute, safe directory paths outside credential roots", "default": "[]", "effect": "Host cache directories, such as a compiler cache, that a sandboxed lane may read but never write. Paths that do not exist at launch are skipped; a writer's own write root inside one keeps its write grant. Unsandboxed lanes are not limited by this list."},
       "projects.{project}.sandbox_cache_reads": {"type": "string_list", "allowed": "up to 16 absolute, safe directory paths outside credential roots", "default": "host sandbox_cache_reads", "effect": "Replace the host sandbox_cache_reads for this project; an empty list grants none."},
       "push_conflict_markers": {"type": "bool", "allowed": "true or false", "default": "true", "effect": "Refuse pushes that add lines starting with <<<<<<< or >>>>>>>"},
-      "projects.{project}.writer_writes": {"type": "string_list", "allowed": "up to 16 absolute, safe directory paths outside credential roots", "default": "host writer_writes", "effect": "Replace the host writer_writes list for this project; an empty list grants no host-configured writer roots. Origin: host configuration [domains.run.projects.<project ID>]."}
+      "projects.{project}.writer_writes": {"type": "string_list", "allowed": "up to 16 absolute, safe directory paths outside credential roots", "default": "host writer_writes", "effect": "Replace the host writer_writes list for this project; an empty list grants no host-configured writer roots. Origin: host configuration [domains.run.projects.<project ID>]."},
+      "host_policy.deny_read": {"type": "array", "allowed": "list of paths", "default": "unset", "effect": "Paths the host denies to writer lanes for reads; invalid entries warn at launch and never relax mandatory boundaries."},
+      "host_policy.deny_write": {"type": "array", "allowed": "list of paths", "default": "unset", "effect": "Paths the host denies to writer lanes for writes; invalid entries warn at launch and never relax mandatory boundaries."},
+      "host_policy.network": {"type": "enum", "default": "unset", "effect": "Host network policy applied to writer lanes."},
+      "resource_sample_interval_ms": {"type": "int", "allowed": "0 to 60000 milliseconds", "min": 0, "max": 60000, "default": "0", "effect": "Interval for sampling lane resource use; zero disables sampling."},
+      "admission_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "unset", "effect": "Default admission deadline in seconds before launch."},
+      "projects.{project}.review_exempt": {"type": "array", "allowed": "list of paths", "default": "host review_exempt", "effect": "Replace the host review-exempt paths for this project."},
+      "projects.{project}.admission_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "unset", "effect": "Project admission deadline in seconds before launch."}
     }
   },
   "host_land_settings": {
@@ -266,7 +283,31 @@
       "tiers.{tier}.local_gate.commands": {"type": "string_list", "allowed": "commands", "default": "inherited", "effect": "Override local_gate.commands for this risk tier; omitted fields inherit lower layers."},
       "tiers.{tier}.local_gate.timeout_seconds": {"type": "int", "allowed": "1 or more seconds", "default": "inherited", "effect": "Override local_gate.timeout_seconds for this risk tier; omitted fields inherit lower layers."},
       "projects.{project}.*": {"type": "table", "allowed": "partial land settings", "default": "empty", "effect": "Project-specific landing overrides."},
-      "tiers.{tier}.*": {"type": "table", "allowed": "partial land settings", "default": "empty", "effect": "Risk-tier landing overrides."}
+      "tiers.{tier}.*": {"type": "table", "allowed": "partial land settings", "default": "empty", "effect": "Risk-tier landing overrides."},
+      "progress_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "60", "effect": "Progress-reporting interval for a landing wait."},
+      "reuse_tested_tree": {"type": "bool", "allowed": "true or false", "default": true, "effect": "Reuse a previously tested source tree for a landing candidate."},
+      "projects.{project}.progress_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "unset", "effect": "Progress-reporting interval for this project's landing wait."},
+      "tiers.{tier}.progress_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "unset", "effect": "Progress-reporting interval for this risk tier's landing wait."},
+      "projects.{project}.reuse_tested_tree": {"type": "bool", "allowed": "true or false", "default": "unset", "effect": "Reuse a tested source tree for this project's landing candidate."},
+      "tiers.{tier}.reuse_tested_tree": {"type": "bool", "allowed": "true or false", "default": "unset", "effect": "Reuse a tested source tree for this risk tier's landing candidate."},
+      "strategy": {"type": "enum", "effect": "Landing integration strategy."},
+      "compose": {"type": "table", "allowed": "partial landing composition table", "default": "empty", "effect": "Composition of a landing candidate."},
+      "branches": {"type": "array", "allowed": "list of branches", "default": "empty", "effect": "Branches considered by a landing candidate."},
+      "compose.dependencies": {"type": "string", "allowed": "independent or stack", "default": "unset", "effect": "Dependency component of the landing composition."},
+      "compose.candidate": {"type": "string", "allowed": "single or batch", "default": "unset", "effect": "Candidate component of the landing composition."},
+      "compose.schedule": {"type": "string", "allowed": "immediate, ordered or forge_queue", "default": "unset", "effect": "Schedule component of the landing composition."},
+      "compose.publication": {"type": "string", "allowed": "exact_candidate or forge", "default": "unset", "effect": "Publication component of the landing composition."},
+      "compose.completion": {"type": "string", "allowed": "event or bounded_subscription", "default": "unset", "effect": "Completion component of the landing composition."},
+      "projects.{project}.compose": {"type": "table", "allowed": "partial landing composition table", "default": "unset", "effect": "Composition overrides for this project's landing candidate."},
+      "projects.{project}.branches": {"type": "array", "allowed": "list of branches", "default": "unset", "effect": "Branches considered by this project's landing candidate."},
+      "tiers.{tier}.compose": {"type": "table", "allowed": "partial landing composition table", "default": "unset", "effect": "Composition overrides for this risk tier's landing candidate."},
+      "approval_sources": {"type": "array", "allowed": "list of approval sources", "default": "[\"provenant_review\", \"forge\"]", "effect": "Sources that may approve a landing candidate."},
+      "projects.{project}.approval_carry": {"type": "string_list", "allowed": "list of clean deltas", "default": "unset", "effect": "Clean deltas that carry an approval for this project."},
+      "tiers.{tier}.approval_carry": {"type": "string_list", "allowed": "list of clean deltas", "default": "unset", "effect": "Clean deltas that carry an approval for this risk tier."},
+      "projects.{project}.strategy": {"type": "enum", "default": "unset", "effect": "Landing integration strategy for this project."},
+      "tiers.{tier}.strategy": {"type": "enum", "default": "unset", "effect": "Landing integration strategy for this risk tier."},
+      "projects.{project}.approval_sources": {"type": "array", "allowed": "list of approval sources", "default": "unset", "effect": "Approval sources for this project's landing candidate."},
+      "tiers.{tier}.approval_sources": {"type": "array", "allowed": "list of approval sources", "default": "unset", "effect": "Approval sources for this risk tier's landing candidate."}
     }
   },
   "host_implement_settings": {
@@ -278,7 +319,18 @@
   "domain_wait_settings": {
     "path": "domains.wait",
     "settings": {
-      "pr_complete_timeout_seconds": {"type": "int", "allowed": "1 or more seconds", "default": "3600", "effect": "Default budget for `provenant wait --pr --until complete`, covering a normal CI run (60 minutes). An explicit --timeout overrides it and domains.wait.max_timeout_seconds still clamps it; other waits keep domains.wait.timeout_seconds."}
+      "pr_complete_timeout_seconds": {"type": "int", "allowed": "1 to 4294967295 seconds", "default": "3600", "effect": "Default budget for `provenant wait --pr --until complete`, covering a normal CI run (60 minutes). An explicit --timeout overrides it and domains.wait.max_timeout_seconds still clamps it; other waits keep domains.wait.timeout_seconds.", "min": 1, "max": 4294967295},
+      "timeout_seconds": {"type": "int", "allowed": "1 to 4294967295 seconds", "min": 1, "default": "300", "effect": "Default budget for waits other than `provenant wait --pr --until complete`; an explicit --timeout overrides it and domains.wait.max_timeout_seconds still clamps it.", "max": 4294967295},
+      "max_timeout_seconds": {"type": "int", "allowed": "1 to 4294967295 seconds", "min": 1, "default": "unset", "effect": "Hard ceiling for any wait budget. When unset, the compiled 14400-second ceiling applies; an explicit value replaces it.", "max": 4294967295},
+      "local_interval_ms": {"type": "int", "allowed": "10 to 60000 milliseconds", "min": 10, "max": 60000, "default": "500", "effect": "Cadence for rereading local state during a wait; also supplies the coordination service's local observation interval."},
+      "pr_interval_ms": {"type": "int", "allowed": "10 to 60000 milliseconds", "min": 10, "max": 60000, "default": "5000", "effect": "Interval between pull request status polls."},
+      "pr_slow_interval_ms": {"type": "int", "allowed": "10 to 60000 milliseconds", "min": 10, "max": 60000, "default": "15000", "effect": "Slower poll interval used while a pull request wait observes no progress."},
+      "pr_near_end_window_ms": {"type": "int", "allowed": "0 to 60000 milliseconds", "min": 0, "max": 60000, "default": "30000", "effect": "Window near the end of a wait during which polling switches to the fast interval."},
+      "pr_conditional_requests": {"type": "bool", "allowed": "true or false", "default": true, "effect": "Send conditional ETag requests on pull request reads so unchanged responses are cheap."},
+      "forge_source": {"type": "string", "allowed": "auto, webhook or poll", "default": "auto", "effect": "Host forge event source for waits: auto detects, webhook listens for events, poll samples the forge."},
+      "max_targets": {"type": "int", "allowed": "1 to 1024", "min": 1, "max": 1024, "default": "64", "effect": "Maximum number of targets a single wait may track."},
+      "pr_read_timeout_seconds": {"type": "int", "allowed": "1 to 600 seconds", "min": 1, "max": 600, "default": "60", "effect": "Timeout for one pull request read before the wait retries."},
+      "actions_grace_seconds": {"type": "int", "allowed": "0 to 600 seconds", "min": 0, "max": 600, "default": "60", "effect": "How long a pull request wait holds a settling reading while Actions reports no run for its head; zero settles at once."}
     }
   },
   "host_graph_settings": {
@@ -297,7 +349,10 @@
       "limits.node_prompt_bytes": {"type": "int", "allowed": "1 or more", "default": "262144", "effect": "Graph node prompt bytes limit."},
       "limits.graph_prompt_bytes": {"type": "int", "allowed": "1 or more", "default": "4194304", "effect": "Graph graph prompt bytes limit."},
       "limits.fan_out_width": {"type": "int", "allowed": "1 or more", "default": "32", "effect": "Graph fan out width limit."},
-      "limits.concurrency": {"type": "int", "allowed": "0 or more", "default": "0", "effect": "Graph concurrency limit. Zero uses host lane caps."}
+      "limits.concurrency": {"type": "int", "allowed": "0 or more", "default": "0", "effect": "Graph concurrency limit. Unset or zero uses host lane caps; the bundled configuration sets zero."},
+      "decide_timeout_seconds": {"type": "int", "allowed": "1 to 18446744073709 seconds", "min": 1, "default": "300", "effect": "Maximum time a graph decision step may take before it is reported as timed out.", "max": 18446744073709},
+      "launch_wait_seconds": {"type": "int", "allowed": "1 to 14400 seconds", "min": 1, "max": 14400, "default": "55", "effect": "General launch and read/wait allowance for a graph node."},
+      "writer_provision_seconds": {"type": "int", "allowed": "1 to 14400 seconds", "min": 1, "max": 14400, "default": "55", "effect": "Independent allowance for provisioning each writer in a graph."}
     }
   },
   "host_model_policy_settings": {
@@ -380,7 +435,8 @@
         "allowed": "directory paths relative to the primary checkout",
         "default": [],
         "effect": "Read-and-execute directory subtrees relative to the primary checkout. Entries escaping that checkout, missing, protected, credential or writable targets are ignored with a warning naming the configuration key."
-      }
+      },
+      "projects.{project}.user_skills": {"type": "enum", "default": "host user_skills", "effect": "Override host user skill discovery for this project."}
     }
   },
   "host_lane_build_settings": {
@@ -534,6 +590,70 @@
       "snapshot_retention": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "7d", "effect": "How long a build snapshot is retained; declared now and consumed by a later slice."}
     }
   },
+  "domain_policy_settings": {
+    "path": "domains.policy",
+    "settings": {
+      "projects.{project}.rules.{code}": {"type": "string", "allowed": "warn, off or refuse, subject to the rule’s supported strengths", "default": "unset", "effect": "Policy rule text for a code under a project."}
+    }
+  },
+  "domain_accounts_settings": {
+    "path": "domains.accounts",
+    "settings": {
+      "entries.{id}.order": {"type": "int", "allowed": "1 to 999", "min": 1, "max": 999, "default": "unset", "effect": "Display order for this account entry."},
+      "entries.{id}.hidden": {"type": "bool", "allowed": "true or false", "default": false, "effect": "Hide this account entry from account listings."},
+      "entries.{id}.display_name": {"type": "string", "allowed": "string", "default": "unset", "effect": "Display name for this account entry."},
+      "entries.{id}.headline": {"type": "enum", "default": "unset", "effect": "Headline quota window for this account."},
+      "shared_settings.source": {"type": "string", "allowed": "string", "default": "unset", "effect": "Source of shared account settings."},
+      "shared_settings.keys": {"type": "array", "allowed": "list of keys", "default": "unset", "effect": "Keys read from the shared account settings source."}
+    }
+  },
+  "domain_routing_settings": {
+    "path": "domains.routing",
+    "settings": {
+      "pacing.free.{provider}.monthly.enabled": {"type": "bool", "allowed": "true or false", "default": true, "effect": "Enable monthly-allowance pacing for free accounts on this provider. These field defaults apply when the monthly table is declared; without it the override is unset."},
+      "pacing.free.{provider}.monthly.burst_percent": {"type": "int", "allowed": "0 to 100", "min": 0, "max": 100, "default": "10", "effect": "Percentage points of monthly allowance available ahead of elapsed time for free accounts on this provider. These field defaults apply when the monthly table is declared; without it the override is unset."},
+      "pacing.free.{provider}.monthly.initial_launch_cost_basis_points": {"type": "int", "allowed": "1 to 10000", "min": 1, "max": 10000, "default": "100", "effect": "Initial launch cost estimate for free accounts on this provider, in basis points of the monthly allowance. These field defaults apply when the monthly table is declared; without it the override is unset."},
+      "pacing.accounts.{account}.monthly.enabled": {"type": "bool", "allowed": "true or false", "default": true, "effect": "Enable monthly-allowance pacing for this account. These field defaults apply when the monthly table is declared; without it the override is unset."},
+      "pacing.accounts.{account}.monthly.burst_percent": {"type": "int", "allowed": "0 to 100", "min": 0, "max": 100, "default": "10", "effect": "Percentage points of monthly allowance available ahead of elapsed time for this account. These field defaults apply when the monthly table is declared; without it the override is unset."},
+      "pacing.accounts.{account}.monthly.initial_launch_cost_basis_points": {"type": "int", "allowed": "1 to 10000", "min": 1, "max": 10000, "default": "100", "effect": "Initial launch cost estimate for this account, in basis points of the monthly allowance. These field defaults apply when the monthly table is declared; without it the override is unset."},
+      "outcome_priors.enabled": {"type": "bool", "allowed": "true or false", "default": true, "effect": "Use prior launch outcomes when selecting a route."},
+      "outcome_priors.exploration_percent": {"type": "int", "allowed": "0 to 100", "min": 0, "max": 100, "default": "10", "effect": "Percentage of launches reserved for exploring routes with little outcome evidence."},
+      "capability_preferences.{selector}.{capability}": {"type": "int", "allowed": "1 to 100", "min": 1, "max": 100, "default": "unset", "effect": "Preference weight for a capability under a route selector."},
+      "review.floors.{floor}.paths": {"type": "string_list", "allowed": "up to 128 non-empty globs of at most 512 bytes", "default": "empty", "effect": "Changed paths that trigger this review floor. Bundled floors: routine = [\"docs/**\", \"**/*.md\"]; unknown = []; security = [\"**/credentials/**\", \"**/credentials.*\", \"**/secrets/**\", \"**/secrets.*\", \"**/auth/**\", \"**/auth.*\", \"**/.env\", \"**/.env.*\"]; external_effects = [\"**/.github/workflows/release*.y*ml\", \"**/.github/workflows/publish*.y*ml\", \"**/.github/workflows/deploy*.y*ml\", \"**/.github/workflows/*merge*.y*ml\"]; authority = [\"**/CODEOWNERS\"]; contract = [\"**/cli/**\", \"**/config/**\", \"**/schema/**\", \"**/*config*\", \"**/*schema*\"]."},
+      "review.floors.{floor}.tier": {"type": "enum", "default": "empty string", "effect": "Risk tier assigned when this review floor matches. An empty tier is invalid. Bundled floors: routine = \"routine\"; unknown = \"substantial\"; security = \"substantial\"; external_effects = \"substantial\"; authority = \"substantial\"; contract = \"substantial\"."},
+      "review.floors.{floor}.lenses": {"type": "string_list", "allowed": "up to 64 lens identifiers", "default": "empty", "effect": "Review lenses added when this floor matches. Bundled floors: routine = []; unknown = [\"correctness-spec\"]; security = [\"correctness-spec\", \"security-privacy\"]; external_effects = [\"correctness-spec\", \"reliability\"]; authority = [\"correctness-spec\", \"adversarial\"]; contract = [\"correctness-spec\", \"design-fit-reuse\"]."},
+      "review.shapes.{shape}.frame": {"type": "bool", "allowed": "true or false", "default": true, "effect": "Whether this review shape frames its findings. Bundled quick uses false; standard and deep use true."},
+      "review.shapes.{shape}.verifiers": {"type": "int", "allowed": "0 to 32", "min": 0, "max": 32, "default": "1", "effect": "Number of verifiers this review shape uses. Bundled quick uses 0; standard and deep use 1."},
+      "review.shapes.{shape}.synthesis": {"type": "enum", "default": "model", "effect": "How this review shape synthesises findings. Bundled quick uses reduce; standard and deep use model."},
+      "settlement_retries": {"type": "int", "allowed": "0 to 32", "min": 0, "max": 32, "default": "2", "effect": "Number of times a failed settlement is retried."},
+      "capacity_retry_seconds": {"type": "int", "allowed": "0 to 604800 seconds", "min": 0, "max": 604800, "default": "30", "effect": "Base wait between capacity retries."},
+      "capacity_retry_max_seconds": {"type": "int", "allowed": "0 to 604800 seconds", "min": 0, "max": 604800, "default": "600", "effect": "Maximum wait between capacity retries."},
+      "retry_delay_ceiling_seconds": {"type": "int", "allowed": "0 to 604800 seconds", "min": 0, "max": 604800, "default": "3600", "effect": "Ceiling on the computed retry delay."}
+    }
+  },
+  "domain_steer_settings": {
+    "path": "domains.fabric.steer",
+    "settings": {
+      "fallback": {"type": "enum", "effect": "What to do when a stopped session is unavailable: start fresh with a handoff or refuse."},
+      "restart_spacing_ms": {"type": "int", "allowed": "0 to 600000 milliseconds", "min": 0, "max": 600000, "default": "2000", "effect": "Minimum spacing between steer restarts; 0 disables the stagger."}
+    }
+  },
+  "domain_fabric_settings": {
+    "path": "domains.fabric",
+    "settings": {
+      "batch.max_parallel": {"type": "int", "allowed": "1 to 64", "min": 1, "max": 64, "default": "4", "effect": "Cap on the number of concurrent slices running at once."},
+      "peers.{peer}.connect_timeout_seconds": {"type": "int", "allowed": "1 to 30 seconds", "min": 1, "max": 30, "default": "10", "effect": "Connection timeout for this fabric peer."},
+      "commands.{name}.argv": {"type": "array", "allowed": "non-empty argv, with a non-empty program and no NUL bytes", "default": "required", "effect": "Program and arguments for a named fabric command."},
+      "home_hosts.{host}": {"type": "string", "allowed": "host ID, keyed by 64 lowercase hexadecimal characters", "default": "unset", "effect": "Host mapping for a named home host."}
+    }
+  },
+  "domain_steward_settings": {
+    "path": "domains.steward",
+    "settings": {
+      "repositories.{repository}.directory": {"type": "string", "allowed": "absolute directory path", "default": "required", "effect": "Directory of a tracked steward repository."},
+      "repositories.{repository}.cadence_seconds": {"type": "int", "allowed": "1 to 9223372036854 seconds", "min": 1, "default": "required", "effect": "Sweep cadence for a tracked steward repository.", "max": 9223372036854}
+    }
+  },
   "knobs": {
     "quota.model_discovery": {
       "type": "bool", "default": true, "status": "wired",
@@ -676,7 +796,7 @@
     "lanes.context_handoff_tokens": {
       "type": "int", "min": 0, "max": 2000000, "default": 0, "status": "wired",
       "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/guardian.rs",
-      "effect": "Context size, in tokens one provider call sent, at which the host stops a writer so the graph restarts it on a new route in the same worktree, from its handoff. The stop settles as a declared stop and follows the node's `on_stop` and the graph-wide `limits.continuations`; a node with no other route goes to the chair. Commits and uncommitted edits stay in place. 0 is off. Suggested setting 200000. Only providers that report each call's context (Claude) are stopped; others keep today's behaviour.",
+      "effect": "Context size, in tokens one provider call sent, at which the host stops a writer so the graph restarts it on a new route in the same worktree, from its handoff. The stop settles as a declared stop and follows the node's `on_stop` and the graph-wide `limits.continuations`; a node with no other route continues on the same route in a fresh session while each round adds a commit or changes the handoff's `remaining[]`. Commits and uncommitted edits stay in place. 0 is off. Suggested setting 200000. Only providers that report each call's context (Claude) are stopped; providers without per-call context, such as codex, never trigger it and keep today's behaviour.",
       "trade_off": "Lower stops paying for very large contexts sooner but restarts more often, and a restart may lose working state that the handoff does not record; off until a trial shows restart does not lower completion."
     },
     "lanes.token_budget": {

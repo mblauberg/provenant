@@ -494,12 +494,19 @@ fn gate_verdict_accepts_one_line_wherever_it_sits_outside_fences() {
     }
 }
 
+// Spec: docs/specs/run-settlement.md#review-verdict-wording
 #[test]
 fn gate_verdict_rejects_spoofed_multiple_and_malformed_lines() {
+    // Multiple declarations and words that are not a complete recognised
+    // verdict still fail a gate. Trailing text after a complete recognised
+    // word is now accepted; that contract is pinned by the test below.
     for text in [
         "VERDICT: FAIL\nVERDICT: PASS".to_owned(),
         "VERDICT: PASS\nVERDICT: PASS".to_owned(),
-        "VERDICT: PASS x".to_owned(),
+        "VERDICT: PASSX".to_owned(),
+        "VERDICT: passable".to_owned(),
+        "VERDICT: PASS/FAIL".to_owned(),
+        // A declaration line past the capture's line bound is not recognised.
         format!("VERDICT: PASS{}", " ".repeat(1024)),
         format!(
             "{}\nVERDICT: FAIL\n{}\nVERDICT: PASS",
@@ -526,6 +533,36 @@ fn gate_verdict_rejects_spoofed_multiple_and_malformed_lines() {
     }
 }
 
+// Spec: docs/specs/run-settlement.md#review-verdict-wording
+#[test]
+fn gate_verdict_accepts_trailing_text_after_a_recognised_word() {
+    // #3536 ignores trailing text after a complete recognised verdict word or
+    // phrase: a stray token, padding, a reviewed sha or an explanation. The
+    // captured verdict is still canonicalised before the gate reads it.
+    for text in [
+        "VERDICT: PASS x".to_owned(),
+        "verdict: pass".to_owned(),
+        "Verdict: LGTM abc123".to_owned(),
+        "VERDICT: approved 0be4e6c".to_owned(),
+    ] {
+        let (document, mut owner) =
+            verdict_fixture(VerdictThreshold::All, &[Some("PASS"), Some("PASS")]);
+        owner.observations[0] = terminal_with_result(AttemptOutcome::Succeeded, &text);
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(run.checkpoint.nodes[2].state, NodeState::Succeeded, "{text:?}");
+        assert_eq!(
+            run.checkpoint.nodes[0]
+                .outputs
+                .as_ref()
+                .unwrap()
+                .verdict
+                .as_deref(),
+            Some("VERDICT: PASS"),
+            "{text:?}"
+        );
+    }
+}
+
 #[test]
 fn gate_verdict_ignores_prose_that_only_resembles_a_verdict_line() {
     // Not a declaration, so the reviewer reports no verdict: it cannot pass an
@@ -534,7 +571,12 @@ fn gate_verdict_ignores_prose_that_only_resembles_a_verdict_line() {
         VerdictThreshold::All,
         &[Some("PASS"), Some("PASS"), Some("PASS")],
     );
-    owner.observations[0] = terminal_with_result(AttemptOutcome::Succeeded, "verdict: pass");
+    // A declaration is recognised case-insensitively, so prose here must not
+    // take the declaration shape at all.
+    owner.observations[0] = terminal_with_result(
+        AttemptOutcome::Succeeded,
+        "Overall the verdict leans towards a pass once F1 is fixed.",
+    );
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.checkpoint.nodes[3].state, NodeState::Failed);
     assert_eq!(

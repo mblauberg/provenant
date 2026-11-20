@@ -1232,6 +1232,48 @@ fn a_pin_mismatch_refusal_uses_its_own_text_not_the_handoff_cause() {
 
 #[cfg(test)]
 #[test]
+fn anchor_mismatch_at_refusal_names_path_and_stage() {
+    use provenant_confinement::permissions::PermissionError;
+    use provenant_records::diagnostic::{ConfinementGuard, PlanFailure};
+
+    let home = PathBuf::from(std::env::var_os("HOME").expect("test home directory"));
+    let path = home.join(".local/share/provenant/guardian-lock.json");
+    let stage = "writer custody inventory";
+    let display = display_anchor_path(&path);
+    assert!(display.starts_with("~/"), "{display}");
+
+    let permission = || PermissionError::AnchorMismatchAt {
+        path: path.clone(),
+        stage,
+    };
+    let skipped = PlanCheckError::Permission(permission()).skipped("r");
+    assert!(skipped.detail.contains(&display), "{}", skipped.detail);
+    assert!(skipped.detail.contains(stage), "{}", skipped.detail);
+    assert_eq!(skipped.plan_error, Some(PlanFailure::AnchorMismatch));
+    assert_eq!(
+        skipped.confinement_guard,
+        Some(ConfinementGuard::PathAnchorChanged)
+    );
+
+    let refusal = PrepareError::Permission(permission()).into_refusal();
+    assert!(refusal.message.contains(&display), "{}", refusal.message);
+    assert!(refusal.message.contains(stage), "{}", refusal.message);
+    assert_eq!(
+        refusal.skipped_routes[0].confinement_guard,
+        Some(ConfinementGuard::PathAnchorChanged)
+    );
+    let refused_line = format!("Refused: {}", refusal.skipped_routes[0].describe());
+    assert!(refused_line.contains(&display), "{refused_line}");
+    assert!(refused_line.contains(stage), "{refused_line}");
+    assert_eq!(
+        refusal.policy_code.as_deref(),
+        Some("VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS_2")
+    );
+    assert!(!refusal.policy_code.as_deref().unwrap().contains(&display));
+}
+
+#[cfg(test)]
+#[test]
 // Spec: docs/specs/fabric.md#session-ready-steering
 fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     use provenant_records::diagnostic::BoundaryClass;
@@ -1536,7 +1578,42 @@ pub(super) enum PlanCheckError {
     SourceHead(#[from] SourceHeadError),
 }
 
+fn display_anchor_path(path: &Path) -> String {
+    let display = if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
+        && let Ok(relative) = path.strip_prefix(home)
+    {
+        if relative.as_os_str().is_empty() {
+            "~".into()
+        } else {
+            format!("~/{}", relative.display())
+        }
+    } else {
+        path.display().to_string()
+    };
+    provenant_records::diagnostic::safe_text(&display)
+}
+
 impl PlanCheckError {
+    fn anchor_mismatch_detail(&self, detail: &str) -> Option<String> {
+        use provenant_confinement::{PlanError, permissions::PermissionError};
+
+        fn anchor(error: &PermissionError) -> Option<(&Path, &'static str)> {
+            match error {
+                PermissionError::ConfigOrigin { source, .. } => anchor(source),
+                PermissionError::AnchorMismatchAt { path, stage } => Some((path, stage)),
+                _ => None,
+            }
+        }
+
+        let permission = match self {
+            Self::Permission(error) | Self::Plan(PlanError::Permission(error)) => Some(error),
+            _ => None,
+        }?;
+        let (path, stage) = anchor(permission)?;
+        let display = display_anchor_path(path);
+        Some(format!("{detail} at {display} ({stage})"))
+    }
+
     fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
         match self {
             Self::Plan(error) => error.boundary_class(),
@@ -1640,12 +1717,16 @@ impl PlanCheckError {
             Self::ReadOnly(_) => PlanFailure::ReadOnly,
             Self::SourceHead(_) => PlanFailure::SourceHead,
         };
+        let detail = self.anchor_mismatch_detail(failure.detail());
         let mut skipped = skip(route, SkipKind::Refused, failure.detail());
         skipped.plan_error = Some(failure);
         skipped.guard_boundary = Some(self.boundary_class());
         skipped.guard_resource = permission.and_then(PermissionError::resource_fact);
         skipped.confinement_guard = Some(self.guard_fact());
         skipped.set_cause(provenant_records::RouteExclusionReason::ConfinementUnavailable);
+        if let Some(detail) = detail {
+            skipped.detail = detail;
+        }
         skipped
     }
 
@@ -4523,6 +4604,11 @@ pub(super) fn prepare_candidates_inner(
             roots.state.as_path(),
             &task.profile.knobs,
             &launch_policy,
+            task.context
+                .as_ref()
+                .and_then(|context| context.node_id.as_deref())
+                .or(task.title.as_deref())
+                .unwrap_or("lane"),
         )?;
         if let Some(policy) = plan.policy_mut() {
             for root in std::iter::once(process_tree_read).chain(coordination_reads) {

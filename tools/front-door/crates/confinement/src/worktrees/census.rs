@@ -4,6 +4,68 @@ use super::*;
 pub(super) const UNREADABLE_NO_CANDIDATE_PATH: &str =
     "unreadable process has no path under candidate roots";
 
+/// One time budget (microseconds) shared by every advisory dweller census.
+/// The same bound governs gc, hosts doctor and worktree doctor so a report
+/// cannot silently change meaning between commands.
+pub const HELD_CENSUS_BUDGET_MICROS: u64 = 2_000_000;
+
+/// Printed by callers when a bounded dweller census did not finish. An empty
+/// report must never read as "no dwellers" when the census was cut short.
+pub const HELD_CENSUS_INCOMPLETE_WARNING: &str =
+    "dweller census incomplete (budget/cancel); results may be missing";
+
+/// One bounded dweller report. `incomplete` means the census was cut short by
+/// its budget, cancellation or an observation gap, so rows may be missing.
+#[derive(Clone, Debug, Default)]
+pub struct HeldReport {
+    pub processes: Vec<super::HeldProcess>,
+    pub incomplete: bool,
+}
+
+/// Every process one census saw holding each root by cwd, executable image or
+/// open descriptor. Diagnostic only: a cwd observation never grants signal
+/// authority, so this is reported and never acted on.
+pub type HeldProcesses = BTreeMap<PathBuf, Vec<ObservedProcess>>;
+
+fn record_held(held: &mut HeldProcesses, root: &Path, process: &ObservedProcess) {
+    let list = held.entry(root.to_path_buf()).or_default();
+    if !list
+        .iter()
+        .any(|seen| seen.pid == process.pid && seen.kind == process.kind && seen.cwd == process.cwd)
+    {
+        list.push(process.clone());
+    }
+}
+
+/// Whether a process the listing could not name may be named in a held
+/// report. This applies the same caller-session and verified-ancestor
+/// exclusion as the named paths: an ancestor is excluded by pid even when the
+/// census could not describe it, and the caller's session is excluded when a
+/// direct observation can name the process.
+fn held_reportable(
+    pid: i64,
+    excluded: &BTreeSet<provenant_supervisor::census::ProcessIdentity>,
+    current: &ProcessFact,
+    observer: &dyn ProcessObserver,
+) -> bool {
+    if excluded.iter().any(|identity| identity.pid == pid) {
+        return false;
+    }
+    match observer.observe(pid) {
+        ProcessObservation::Present(fact) => {
+            fact.identity.session_id != current.identity.session_id
+        }
+        _ => true,
+    }
+}
+
+fn finish_held(mut held: HeldProcesses) -> HeldProcesses {
+    for processes in held.values_mut() {
+        processes.sort_by_key(|process| (process.pid, process.kind as u8));
+    }
+    held
+}
+
 /// When set by the gc CLI's `--full`, each PID is listed in addition to the
 /// aggregate warning. Other callers keep the compact single-line warning.
 static UNREADABLE_DETAIL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -60,6 +122,10 @@ fn warn_unreadable_processes(boot: &str, pids: &BTreeSet<i64>) {
 pub struct WorkerEvidence {
     pub states: BTreeMap<PathBuf, Occupancy>,
     pub holders: BTreeMap<PathBuf, ObservedProcess>,
+    /// Every process the same census saw inside each root. Diagnostic only.
+    pub held: HeldProcesses,
+    /// True when acquisition or coverage could have missed a dweller.
+    pub held_incomplete: bool,
     pub details: BTreeMap<PathBuf, String>,
     pub taints: BTreeMap<PathBuf, TaintCause>,
 }
@@ -370,6 +436,20 @@ impl WorkerObserver for CensusSession<'_> {
     fn observe_evidence(&self, roots: &[PathBuf], for_land: bool) -> WorkerEvidence {
         self.evidence(roots, for_land)
     }
+    fn observe_evidence_while(
+        &self,
+        roots: &[PathBuf],
+        for_land: bool,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerEvidence> {
+        let policy = self.inner.epoch_policy()?;
+        self.inner.observe_evidence_with_policy_while(
+            roots,
+            &policy.entries,
+            for_land || policy.exclude_ancestors,
+            keep_going,
+        )
+    }
     fn observe_roots_with_taints(&self, roots: &[PathBuf]) -> WorkerTaintObservations {
         let e = self.evidence(roots, false);
         (e.states, e.taints)
@@ -464,10 +544,66 @@ pub trait WorkerObserver: Send + Sync {
         attach_worker_evidence(&mut states, &BTreeMap::new(), &details);
         WorkerEvidence {
             taints: default_taints(&states, &|_| None),
+            held_incomplete: states
+                .values()
+                .any(|state| matches!(state, Occupancy::Unknown { .. })),
             states,
             holders: BTreeMap::new(),
+            held: BTreeMap::new(),
             details,
         }
+    }
+
+    /// One bounded acquisition carrying both custody and every process seen
+    /// inside each root. Native observers do a single census; injected seams
+    /// may derive the named holder from one observation.
+    fn observe_evidence_while(
+        &self,
+        roots: &[PathBuf],
+        for_land: bool,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerEvidence> {
+        if !keep_going() {
+            return None;
+        }
+        let (mut states, details) = if for_land {
+            self.observe_roots_for_land_with_details(roots)
+        } else {
+            self.observe_roots_with_details(roots)
+        };
+        let mut held = BTreeMap::new();
+        for root in states.keys() {
+            if !keep_going() {
+                return None;
+            }
+            if let Some(process) = self.live_process(root) {
+                record_held(&mut held, root, &process);
+            }
+        }
+        attach_worker_evidence(&mut states, &BTreeMap::new(), &details);
+        let evidence = WorkerEvidence {
+            taints: default_taints(&states, &|_| None),
+            held_incomplete: states
+                .values()
+                .any(|state| matches!(state, Occupancy::Unknown { .. })),
+            states,
+            holders: BTreeMap::new(),
+            held: finish_held(held),
+            details,
+        };
+        keep_going().then_some(evidence)
+    }
+
+    /// Bounded acquisition under the caller's host policy. The default ignores
+    /// host configuration, as injected observers own their refusal semantics.
+    fn observe_evidence_with_policy_while(
+        &self,
+        roots: &[PathBuf],
+        _entries: &[CensusIgnoreEntry],
+        for_land: bool,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerEvidence> {
+        self.observe_evidence_while(roots, for_land, keep_going)
     }
 
     /// Acquire with the same policy used to identify the session epoch.
@@ -527,6 +663,25 @@ pub trait WorkerObserver: Send + Sync {
 
     /// Composition supplies host configuration. Injected observers retain
     /// their own refusal semantics; the native observer uses these entries.
+    fn observe_evidence_with_policy(
+        &self,
+        roots: &[PathBuf],
+        entries: &[CensusIgnoreEntry],
+        for_land: bool,
+    ) -> WorkerEvidence {
+        let (states, details) = self.observe_roots_with_policy(roots, entries, for_land);
+        WorkerEvidence {
+            taints: default_taints(&states, &|_| None),
+            held_incomplete: states
+                .values()
+                .any(|state| matches!(state, Occupancy::Unknown { .. })),
+            states,
+            holders: BTreeMap::new(),
+            held: BTreeMap::new(),
+            details,
+        }
+    }
+
     fn observe_roots_with_policy(
         &self,
         roots: &[PathBuf],
@@ -550,21 +705,6 @@ pub trait WorkerObserver: Send + Sync {
             self.observe_roots_for_land_with_taints(roots)
         } else {
             self.observe_roots_with_taints(roots)
-        }
-    }
-
-    fn observe_evidence_with_policy(
-        &self,
-        roots: &[PathBuf],
-        entries: &[CensusIgnoreEntry],
-        for_land: bool,
-    ) -> WorkerEvidence {
-        let (states, details) = self.observe_roots_with_policy(roots, entries, for_land);
-        WorkerEvidence {
-            taints: default_taints(&states, &|_| None),
-            states,
-            holders: BTreeMap::new(),
-            details,
         }
     }
 
@@ -712,6 +852,7 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
                         )
                     })
                     .collect(),
+                held_incomplete: true,
                 ..WorkerEvidence::default()
             };
         };
@@ -741,6 +882,30 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
     ) -> WorkerEvidence {
         self.inner
             .observe_evidence_with_policy(roots, entries, for_land)
+    }
+    fn observe_evidence_while(
+        &self,
+        roots: &[PathBuf],
+        for_land: bool,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerEvidence> {
+        let policy = self.epoch_policy()?;
+        self.inner.observe_evidence_with_policy_while(
+            roots,
+            &policy.entries,
+            for_land || policy.exclude_ancestors,
+            keep_going,
+        )
+    }
+    fn observe_evidence_with_policy_while(
+        &self,
+        roots: &[PathBuf],
+        entries: &[CensusIgnoreEntry],
+        for_land: bool,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerEvidence> {
+        self.inner
+            .observe_evidence_with_policy_while(roots, entries, for_land, keep_going)
     }
     fn observe_roots_with_policy(
         &self,
@@ -803,6 +968,37 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
     }
     fn incomplete_census_detail(&self) -> String {
         self.inner.incomplete_census_detail()
+    }
+}
+
+/// Report every process one bounded census saw inside any of `roots`. The
+/// report is advisory: no caller of this function may signal a named PID from
+/// a cwd, executable or descriptor observation. A census cut short by its
+/// budget, cancellation or incomplete observation is reported rather than as no rows.
+pub fn held_report(
+    workers: &dyn WorkerObserver,
+    roots: &[PathBuf],
+    keep_going: &dyn Fn() -> bool,
+) -> HeldReport {
+    // `for_land` carries the ancestor-exclusion policy into the census: the
+    // caller's own session and verified ancestors are never stray dwellers.
+    let Some(evidence) = workers.observe_evidence_while(roots, true, keep_going) else {
+        return HeldReport {
+            incomplete: true,
+            ..HeldReport::default()
+        };
+    };
+    HeldReport {
+        processes: evidence
+            .held
+            .iter()
+            .flat_map(|(root, processes)| {
+                processes
+                    .iter()
+                    .filter_map(|process| super::HeldProcess::new(root, process))
+            })
+            .collect(),
+        incomplete: evidence.held_incomplete,
     }
 }
 
@@ -877,6 +1073,27 @@ impl WorkerObserver for SystemWorkerObserver {
     }
     fn observe_evidence(&self, roots: &[PathBuf], for_land: bool) -> WorkerEvidence {
         system_worker_evidence(roots, for_land, &[])
+    }
+    fn observe_evidence_while(
+        &self,
+        roots: &[PathBuf],
+        for_land: bool,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerEvidence> {
+        self.observe_evidence_with_policy_while(roots, &[], for_land, keep_going)
+    }
+    fn observe_evidence_with_policy_while(
+        &self,
+        roots: &[PathBuf],
+        entries: &[CensusIgnoreEntry],
+        for_land: bool,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerEvidence> {
+        if !keep_going() {
+            return None;
+        }
+        let evidence = system_worker_evidence_while(roots, for_land, entries, Some(keep_going));
+        keep_going().then_some(evidence)
     }
     fn observe_roots_with_policy(
         &self,
@@ -1068,28 +1285,57 @@ fn system_worker_evidence_while(
                 .cloned()
                 .map(|root| (root, detail.clone()))
                 .collect(),
+            held_incomplete: true,
+            ..WorkerEvidence::default()
         };
     };
-    let mut unreadable_warnings = BTreeSet::new();
-    let (states, holders, details, taints) = observe_worker_holders_while(
+    worker_evidence_from_census(
         roots,
+        ancestors,
         &SystemProcessObserver,
         &PolicyCwdObserver(entries),
         &current,
+        keep_going,
+    )
+}
+
+pub(super) fn worker_evidence_from_census(
+    roots: &[PathBuf],
+    ancestors: bool,
+    observer: &dyn ProcessObserver,
+    cwd_observer: &dyn CwdObserver,
+    current: &ProcessFact,
+    keep_going: Option<&dyn Fn() -> bool>,
+) -> WorkerEvidence {
+    let mut incomplete = false;
+    let mut unreadable_warnings = BTreeSet::new();
+    let mut held = BTreeMap::new();
+    let (states, holders, details, taints) = observe_worker_holders_while(
+        roots,
+        observer,
+        cwd_observer,
+        current,
         ancestors,
         &mut |pid, condition| {
+            incomplete = true;
             if condition == Some(UNREADABLE_NO_CANDIDATE_PATH)
                 && let Some(pid) = pid
             {
                 unreadable_warnings.insert(pid);
             }
         },
+        &mut held,
         keep_going,
     );
     warn_unreadable_processes(&current.identity.boot, &unreadable_warnings);
     WorkerEvidence {
+        held_incomplete: incomplete
+            || states
+                .values()
+                .any(|state| matches!(state, Occupancy::Unknown { .. })),
         states,
         holders,
+        held: finish_held(held),
         details,
         taints,
     }
@@ -1228,6 +1474,7 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
     ancestors: bool,
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
 ) -> WorkerHolderAudit {
+    let mut held = BTreeMap::new();
     observe_worker_holders_while(
         roots,
         observer,
@@ -1235,10 +1482,15 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
         current,
         ancestors,
         unplaceable,
+        &mut held,
         None,
     )
 }
 
+/// Collect every process a single census places inside each root into `held`.
+/// The caller's own identity and verified ancestors are already excluded by
+/// the census; none of these observations grants signal authority.
+#[allow(clippy::too_many_arguments)] // The holder audit and held report share one bounded census.
 pub(super) fn observe_worker_holders_while(
     roots: &[PathBuf],
     observer: &dyn ProcessObserver,
@@ -1246,6 +1498,7 @@ pub(super) fn observe_worker_holders_while(
     current: &ProcessFact,
     ancestors: bool,
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
+    held: &mut HeldProcesses,
     keep_going: Option<&dyn Fn() -> bool>,
 ) -> WorkerHolderAudit {
     let within_budget = || keep_going.is_none_or(|check| check());
@@ -1301,6 +1554,31 @@ pub(super) fn observe_worker_holders_while(
             );
         }
     };
+    // Exclude the caller and its verified ancestors before any held rows are
+    // recorded, including EPERM processes that a direct census could not name.
+    // A walk that stops early leaves the remaining ancestors in the census,
+    // where one inside a root still makes it live, so an incomplete ancestry
+    // hides nothing.
+    let mut excluded = BTreeSet::from([current.identity.clone()]);
+    if ancestors {
+        let mut child = current;
+        while child.identity.pid != current.identity.session_id {
+            if !within_budget() {
+                return (states, holders, details, taints);
+            }
+            let ProcessLookup::Present(parent) = census.process(child.parent_pid) else {
+                break;
+            };
+            if parent.identity.boot != current.identity.boot
+                || parent.identity.session_id != current.identity.session_id
+                || census.ancestry(&child.identity, &parent.identity) != Ancestry::Yes
+                || !excluded.insert(parent.identity.clone())
+            {
+                break;
+            }
+            child = parent;
+        }
+    }
     // Custody is decided per root. A gap that could hide a process anywhere
     // (an incomplete or truncated listing, or a process that could not be
     // described or placed) leaves every root that is not positively live
@@ -1330,12 +1608,14 @@ pub(super) fn observe_worker_holders_while(
                 under_candidate |= record_unreadable_path(
                     &mut states,
                     &mut holders,
+                    held,
                     &mut details,
                     &mut taints,
                     cwd_observer,
                     pid,
                     path.as_path(),
                     ProcessEvidenceKind::WorkingDirectory,
+                    held_reportable(pid, &excluded, current, observer),
                     unplaceable,
                 );
             }
@@ -1346,12 +1626,14 @@ pub(super) fn observe_worker_holders_while(
                 under_candidate |= record_unreadable_path(
                     &mut states,
                     &mut holders,
+                    held,
                     &mut details,
                     &mut taints,
                     cwd_observer,
                     pid,
                     &path,
                     ProcessEvidenceKind::OtherHeldPath,
+                    held_reportable(pid, &excluded, current, observer),
                     unplaceable,
                 );
             }
@@ -1371,29 +1653,6 @@ pub(super) fn observe_worker_holders_while(
             &detail,
             TaintCause::Uncertainty(UncertaintyReason::UnstableProcessIdentity),
         );
-    }
-    // Exclude the caller's verified ancestors. A walk that stops early leaves
-    // the remaining ancestors in the census, where one inside a root still
-    // makes it live, so an incomplete ancestry hides nothing.
-    let mut excluded = BTreeSet::from([current.identity.clone()]);
-    if ancestors {
-        let mut child = current;
-        while child.identity.pid != current.identity.session_id {
-            if !within_budget() {
-                return (states, holders, details, taints);
-            }
-            let ProcessLookup::Present(parent) = census.process(child.parent_pid) else {
-                break;
-            };
-            if parent.identity.boot != current.identity.boot
-                || parent.identity.session_id != current.identity.session_id
-                || census.ancestry(&child.identity, &parent.identity) != Ancestry::Yes
-                || !excluded.insert(parent.identity.clone())
-            {
-                break;
-            }
-            child = parent;
-        }
     }
     // An incomplete census must not hide positively observed live workers.
     for fact in census.facts() {
@@ -1570,6 +1829,14 @@ pub(super) fn observe_worker_holders_while(
                                 kind,
                                 cwd: Some(location.to_path_buf()),
                             });
+                        if fact.identity.session_id != current.identity.session_id {
+                            // `holder` is the first process stored for this root,
+                            // not necessarily this one. Report the current fact.
+                            let mut observed =
+                                ObservedProcess::new(pid, fact.command.clone(), kind);
+                            observed.cwd = Some(location.to_path_buf());
+                            record_held(held, &root, &observed);
+                        }
                         taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
                         details.insert(
                             root,
@@ -1690,6 +1957,13 @@ pub(super) fn observe_worker_holders_while(
                                 kind: ProcessEvidenceKind::WorkingDirectory,
                                 cwd: Some(canonical.clone()),
                             });
+                        if fact.identity.session_id != current.identity.session_id {
+                            // Keep the taint's first holder, but name this
+                            // process in the held report.
+                            let mut observed = ObservedProcess::cwd(pid, fact.command.clone());
+                            observed.cwd = Some(canonical.clone());
+                            record_held(held, &root, &observed);
+                        }
                         taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
                         details.insert(root, format!("process {}: cwd inside root", holder.pid));
                     }
@@ -1817,16 +2091,18 @@ pub(super) enum NativeCwd {
 
 /// Place positive cwd/descriptor evidence from an EPERM process. Unreadable
 /// process metadata is scoped to roots that its known paths could occupy.
-#[allow(clippy::too_many_arguments)] // The census owns these four correlated evidence maps.
+#[allow(clippy::too_many_arguments)] // The census owns these five correlated evidence maps.
 fn record_unreadable_path(
     states: &mut BTreeMap<PathBuf, Occupancy>,
     holders: &mut BTreeMap<PathBuf, ObservedProcess>,
+    held: &mut HeldProcesses,
     details: &mut BTreeMap<PathBuf, String>,
     taints: &mut BTreeMap<PathBuf, TaintCause>,
     cwd_observer: &dyn CwdObserver,
     pid: i64,
     path: &Path,
     kind: ProcessEvidenceKind,
+    reportable: bool,
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
 ) -> bool {
     let Some(canonical) = canonical_cwd(path) else {
@@ -1894,6 +2170,9 @@ fn record_unreadable_path(
             format!("process {pid}: {} inside root", holder.kind),
         );
         taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
+        if reportable {
+            record_held(held, &root, &holder);
+        }
         holders.entry(root).or_insert(holder);
     }
     possible

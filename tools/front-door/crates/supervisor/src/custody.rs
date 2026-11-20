@@ -2836,6 +2836,15 @@ fn format_age_ns(modified_ns: i128, now: provenant_core::WallTime) -> String {
 pub struct ReservationIssue {
     pub reservation: PathBuf,
     pub reason: String,
+    /// Typed cause for internal policy decisions; the human report remains
+    /// the stable serialized `reason` field.
+    #[serde(skip)]
+    pub kind: ReservationIssueKind,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReservationIssueKind {
+    Other,
+    LegacyEvidence,
 }
 #[derive(Debug, Default, Serialize)]
 pub struct ReservationListing {
@@ -2871,11 +2880,212 @@ pub fn list_writer_reservations(directory: &Directory) -> Result<ReservationList
             listing.issues.push(ReservationIssue {
                 reservation: PathBuf::from(&name).join("reservation.json"),
                 reason: error.to_string(),
+                kind: ReservationIssueKind::Other,
             });
         }
     }
     Ok(listing)
 }
+
+/// List guardian records that predate schema 2 under a project worktree-state
+/// directory. Paths are relative to `directory`. This inventory deliberately
+/// does not require a readable reservation record: a malformed or absent
+/// reservation must not hide retained legacy guardian evidence from preflight.
+#[derive(Debug)]
+pub struct LegacyGuardianRecordIssue {
+    pub path: PathBuf,
+    pub reason: String,
+}
+#[derive(Debug, Default)]
+pub struct LegacyGuardianRecordListing {
+    pub records: Vec<PathBuf>,
+    pub issues: Vec<LegacyGuardianRecordIssue>,
+}
+pub fn list_legacy_guardian_records(directory: &Directory) -> Result<LegacyGuardianRecordListing> {
+    let mut listing = LegacyGuardianRecordListing::default();
+    for (slot_index, slot_name) in directory.entries()?.enumerate() {
+        if slot_index >= 10_000 {
+            listing.issues.push(LegacyGuardianRecordIssue {
+                path: PathBuf::new(),
+                reason: "worktree slot inventory exceeded its entry limit".into(),
+            });
+            break;
+        }
+        let slot_name = match slot_name {
+            Ok(name) => name,
+            Err(error) => {
+                listing.issues.push(LegacyGuardianRecordIssue {
+                    path: PathBuf::new(),
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let slot_path = PathBuf::from(&slot_name);
+        let metadata = match directory.metadata_at(&slot_name, false) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                listing.issues.push(LegacyGuardianRecordIssue {
+                    path: slot_path,
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
+        if metadata.kind != provenant_os::fs::FileKind::Directory {
+            continue;
+        }
+        let slot = match directory.open_verified_directory(&slot_name) {
+            Ok(slot) => slot,
+            Err(error) => {
+                listing.issues.push(LegacyGuardianRecordIssue {
+                    path: slot_path,
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let attempts = match slot.entries() {
+            Ok(attempts) => attempts,
+            Err(error) => {
+                listing.issues.push(LegacyGuardianRecordIssue {
+                    path: slot_path,
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
+        for (attempt_index, attempt_name) in attempts.enumerate() {
+            if attempt_index >= 10_000 {
+                listing.issues.push(LegacyGuardianRecordIssue {
+                    path: slot_path.clone(),
+                    reason: "guardian record inventory exceeded its entry limit".into(),
+                });
+                break;
+            }
+            let attempt_name = match attempt_name {
+                Ok(name) => name,
+                Err(error) => {
+                    listing.issues.push(LegacyGuardianRecordIssue {
+                        path: slot_path.clone(),
+                        reason: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+            let attempt_path = slot_path.join(&attempt_name);
+            let metadata = match slot.metadata_at(&attempt_name, false) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    listing.issues.push(LegacyGuardianRecordIssue {
+                        path: attempt_path,
+                        reason: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+            if metadata.kind != provenant_os::fs::FileKind::Directory {
+                continue;
+            }
+            let attempt = match slot.open_verified_directory(&attempt_name) {
+                Ok(attempt) => attempt,
+                Err(error) => {
+                    listing.issues.push(LegacyGuardianRecordIssue {
+                        path: attempt_path,
+                        reason: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+            let guardian_path = attempt_path.join("guardian-lock.json");
+            match liveness::is_legacy_record(&attempt) {
+                Ok(true) => listing.records.push(guardian_path),
+                Ok(false) => {}
+                Err(error) => listing.issues.push(LegacyGuardianRecordIssue {
+                    path: guardian_path,
+                    reason: error.to_string(),
+                }),
+            }
+        }
+    }
+    Ok(listing)
+}
+
+/// List legacy guardian records under every project-state directory in the
+/// host's `worktrees` root, including records whose project is no longer
+/// registered. Paths are relative to `directory`.
+pub fn list_legacy_guardian_records_in_worktrees(
+    directory: &Directory,
+) -> Result<LegacyGuardianRecordListing> {
+    let mut listing = LegacyGuardianRecordListing::default();
+    for (project_index, project_name) in directory.entries()?.enumerate() {
+        if project_index >= 10_000 {
+            listing.issues.push(LegacyGuardianRecordIssue {
+                path: PathBuf::new(),
+                reason: "project worktree inventory exceeded its entry limit".into(),
+            });
+            break;
+        }
+        let project_name = match project_name {
+            Ok(name) => name,
+            Err(error) => {
+                listing.issues.push(LegacyGuardianRecordIssue {
+                    path: PathBuf::new(),
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let project_path = PathBuf::from(&project_name);
+        let metadata = match directory.metadata_at(&project_name, false) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                listing.issues.push(LegacyGuardianRecordIssue {
+                    path: project_path,
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
+        if metadata.kind != provenant_os::fs::FileKind::Directory {
+            continue;
+        }
+        let project = match directory.open_verified_directory(&project_name) {
+            Ok(project) => project,
+            Err(error) => {
+                listing.issues.push(LegacyGuardianRecordIssue {
+                    path: project_path,
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
+        match list_legacy_guardian_records(&project) {
+            Ok(project_listing) => {
+                listing.records.extend(
+                    project_listing
+                        .records
+                        .into_iter()
+                        .map(|path| project_path.join(path)),
+                );
+                listing
+                    .issues
+                    .extend(project_listing.issues.into_iter().map(|issue| {
+                        LegacyGuardianRecordIssue {
+                            path: project_path.join(issue.path),
+                            reason: issue.reason,
+                        }
+                    }));
+            }
+            Err(error) => listing.issues.push(LegacyGuardianRecordIssue {
+                path: project_path,
+                reason: error.to_string(),
+            }),
+        }
+    }
+    Ok(listing)
+}
+
 /// Read only one worktree's predecessor reservations. The caller holds that
 /// slot's writer exclusion; sibling worktrees need no observation or lock.
 /// Paths are relative to the slot, including malformed evidence.
@@ -2935,6 +3145,10 @@ pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationL
             Err(error) => listing.issues.push(ReservationIssue {
                 reservation: path,
                 reason: error.to_string(),
+                kind: match error {
+                    CustodyError::LegacyEvidence => ReservationIssueKind::LegacyEvidence,
+                    _ => ReservationIssueKind::Other,
+                },
             }),
         }
     }
