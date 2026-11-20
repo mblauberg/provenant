@@ -188,44 +188,44 @@ fn census_byte_method(candidates: &[Candidate]) -> ByteMethod {
     }
 }
 
-/// Headroom the cache census leaves for an incoming Cargo seed clone. The
-/// figure is in the **same unit the census budgets** (`ByteMethod`): clone-
-/// private bytes on a reflink filesystem, allocated bytes where private size is
-/// unavailable. Keeping the unit here, beside the census that consumes it,
-/// stops a caller from reserving a seed manifest's allocated size against a
-/// private-byte limit and evicting unrelated targets for shared blocks.
+/// The incoming Cargo seed clone's recorded allocated size, held beside the
+/// census so the collector resolves it against the byte unit that census
+/// actually used. A reflink clone is charged near-zero private bytes on a
+/// private-byte filesystem but its full allocated size where the census falls
+/// back to allocated bytes; the collector decides which, never the caller.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SeedReservation(u64);
 
 impl SeedReservation {
-    /// A copy-on-write clone (`clone_file_from` / reflink). The clone shares
-    /// every data block with the seed at clone time, so it privately owns only
-    /// its new inodes and directory entries: near zero against the seed's
-    /// allocated size. Cargo writes private blocks later, and the next census
-    /// measures them, so nothing is reserved up front.
-    pub(crate) fn shared_clone() -> Self {
-        Self(0)
-    }
-
-    /// A full copy fallback (not used for lane seeds): every allocated block
-    /// becomes private to the clone, so the whole figure is reserved. Present
-    /// so the unit distinction is explicit and testable.
-    #[cfg(test)]
-    pub(crate) fn copy(allocated_bytes: u64) -> Self {
+    /// A reflink clone of a seed generation whose built target's allocated size
+    /// was recorded at seed-build time. The figure is the seed's allocated
+    /// size; the collector resolves it to the census's unit when it measures
+    /// the cache.
+    pub(crate) fn clone_of(allocated_bytes: u64) -> Self {
         Self(allocated_bytes)
     }
 
-    /// The reservation in the census's byte unit.
-    pub(crate) fn private_bytes(self) -> u64 {
-        self.0
+    /// Bytes to reserve in the census's unit: near zero when the census budgets
+    /// clone-private bytes, the recorded allocated size when it budgets
+    /// allocated bytes. An unmeasured census has no observed unit to charge, so
+    /// it reserves nothing.
+    pub(crate) fn resolved(self, method: ByteMethod) -> u64 {
+        match method {
+            ByteMethod::AllocatedFallback => self.0,
+            ByteMethod::Private | ByteMethod::Unmeasured => 0,
+        }
     }
 }
 
-/// The effective launch-admission byte limit after reserving private-byte
-/// headroom for a seed clone. The subtraction lives here, next to the census,
-/// so both sides of the budget arithmetic share a unit.
-pub(crate) fn budget_limit_reserving(budget_bytes: u64, reservation: SeedReservation) -> u64 {
-    budget_bytes.saturating_sub(reservation.private_bytes())
+/// The effective launch-admission byte limit after reserving headroom for the
+/// incoming seed clone in the census's byte unit. The subtraction lives here,
+/// next to the census, so reservation and census share one unit.
+pub(crate) fn budget_limit_reserving(
+    budget_bytes: u64,
+    reservation: SeedReservation,
+    method: ByteMethod,
+) -> u64 {
+    budget_bytes.saturating_sub(reservation.resolved(method))
 }
 
 impl TargetReason {
@@ -1481,7 +1481,7 @@ pub fn collect_with_protection(
     protection: &TargetProtection,
 ) -> Result<Report, Box<dyn std::error::Error>> {
     let mut refresh = || protection.clone();
-    collect_with_protection_refresh(
+    collect_with_reservation(
         host,
         home,
         limits,
@@ -1489,12 +1489,20 @@ pub fn collect_with_protection(
         budget,
         protection,
         &mut refresh,
+        SeedReservation::default(),
+        None,
     )
 }
 
 /// Like `collect_with_protection`, but refresh live custody after acquiring
-/// lane admission and immediately before the pruning boundary.
-pub fn collect_with_protection_refresh(
+/// lane admission and immediately before the pruning boundary. `reservation`
+/// is the incoming seed's recorded allocated size; the collector resolves it
+/// against the byte unit its census used before applying the budget.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "GC admission, cache protection and the seed reservation stay explicit"
+)]
+pub(crate) fn collect_with_protection_refresh(
     host: &Path,
     home: &Path,
     limits: Limits,
@@ -1502,9 +1510,46 @@ pub fn collect_with_protection_refresh(
     budget: &provenant_config::CargoCacheBudget,
     protection: &TargetProtection,
     refresh_protection: &mut dyn FnMut() -> TargetProtection,
+    reservation: SeedReservation,
+) -> Result<Report, Box<dyn std::error::Error>> {
+    collect_with_reservation(
+        host,
+        home,
+        limits,
+        dry_run,
+        budget,
+        protection,
+        refresh_protection,
+        reservation,
+        None,
+    )
+}
+
+/// The collect workhorse. The census decides the byte unit and the collector
+/// resolves the seed reservation in that same unit, so the two budget decisions
+/// cannot drift apart. `census_method` is a test seam that forces the unit a
+/// survey reports on filesystems where it is otherwise fixed by the OS.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "GC admission, cache protection, reservation and census-unit seam stay explicit"
+)]
+fn collect_with_reservation(
+    host: &Path,
+    home: &Path,
+    mut limits: Limits,
+    dry_run: bool,
+    budget: &provenant_config::CargoCacheBudget,
+    protection: &TargetProtection,
+    refresh_protection: &mut dyn FnMut() -> TargetProtection,
+    reservation: SeedReservation,
+    census_method: Option<ByteMethod>,
 ) -> Result<Report, Box<dyn std::error::Error>> {
     let mut free = || free_bytes(home);
     let mut survey = survey(home, &mut free, dry_run);
+    if let Some(method) = census_method {
+        survey.report.byte_method = method;
+    }
+    let reservation_method = survey.report.byte_method;
     survey.report.budget_bytes = budget.bytes;
     survey.report.budget_setting = budget.setting.clone();
     survey.report.budget_source = budget.source.as_str().to_owned();
@@ -1513,6 +1558,9 @@ pub fn collect_with_protection_refresh(
             "live Cargo target custody was not fully observed; preserving cache targets".into(),
         );
     }
+    // The census has now named its byte unit: make room for the incoming clone
+    // in that unit before deciding whether the cache is already satisfied.
+    limits.max_bytes = budget_limit_reserving(limits.max_bytes, reservation, reservation_method);
     if !survey.complete {
         return Ok(survey.finish());
     }
@@ -4508,6 +4556,36 @@ mod tests {
         assert!(profile.join("deps/payload").is_file());
     }
 
+    /// Drive the real collect path with a fixed census byte method. The fixture
+    /// target is a plain file, so its private and allocated sizes coincide;
+    /// forcing the method exercises the reservation decision without changing
+    /// the byte figures the census would otherwise report.
+    fn collect_with_forced_census(
+        home: &Path,
+        budget_bytes: u64,
+        reservation: SeedReservation,
+        method: ByteMethod,
+    ) -> Report {
+        let budget = provenant_config::CargoCacheBudget {
+            bytes: budget_bytes,
+            setting: "128K".into(),
+            source: provenant_records::LimitSource::Default,
+        };
+        let mut refresh = || TargetProtection::default();
+        collect_with_reservation(
+            home,
+            home,
+            limits(budget_bytes, 0),
+            false,
+            &budget,
+            &TargetProtection::default(),
+            &mut refresh,
+            reservation,
+            Some(method),
+        )
+        .unwrap()
+    }
+
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
     fn a_large_shared_seed_reserves_no_private_budget_and_keeps_an_under_budget_target() {
@@ -4515,52 +4593,60 @@ mod tests {
         // An unrelated warm target comfortably under the configured budget.
         let warm = fixture.profile('a', "debug", 4096, 100);
         let budget_bytes = 128 * 1024;
-        let budget = provenant_config::CargoCacheBudget {
-            bytes: budget_bytes,
-            setting: "128K".into(),
-            source: provenant_records::LimitSource::Default,
-        };
-        // A generation whose allocated size alone would take the effective
-        // limit below the warm target's size: reserving it in full is the bug.
+        // The generation's allocated size equals the whole budget. Under a
+        // private-byte census a reflink clone is charged near zero, so the warm
+        // target must survive even though reserving the full figure would evict it.
         let seed_allocated_bytes = budget_bytes;
-
-        // A reflink clone reserves only its private bytes (near zero at clone
-        // time), so the limit stays at the budget and the warm target survives.
-        let shared = SeedReservation::shared_clone();
-        assert_eq!(shared.private_bytes(), 0);
-        let shared_limit = budget_limit_reserving(budget_bytes, shared);
-        assert_eq!(shared_limit, budget_bytes);
-        let shared_report = collect_with_protection(
+        let reservation = SeedReservation::clone_of(seed_allocated_bytes);
+        assert_eq!(reservation.resolved(ByteMethod::Private), 0);
+        assert_eq!(
+            budget_limit_reserving(budget_bytes, reservation, ByteMethod::Private),
+            budget_bytes
+        );
+        let report = collect_with_forced_census(
             fixture.home.path(),
-            fixture.home.path(),
-            limits(shared_limit, 0),
-            false,
-            &budget,
-            &TargetProtection::default(),
-        )
-        .unwrap();
+            budget_bytes,
+            reservation,
+            ByteMethod::Private,
+        );
+        assert_eq!(report.byte_method, ByteMethod::Private);
         assert!(
-            !shared_report.removed_contains(&warm),
-            "a shared clone must not evict an under-budget target for blocks it never privately consumes"
+            !report.removed_contains(&warm),
+            "a reflink clone must not evict an under-budget target under a private-byte census"
         );
         assert!(warm.exists());
+    }
 
-        // A full copy reserves the seed's whole allocated size, dropping the
-        // limit to zero and evicting the warm target: the reservation unit is
-        // what changes the outcome, so the first assertion is not vacuous.
-        let copy_limit =
-            budget_limit_reserving(budget_bytes, SeedReservation::copy(seed_allocated_bytes));
-        assert_eq!(copy_limit, 0);
-        let copy_report = collect_with_protection(
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn a_shared_seed_is_charged_its_allocated_size_under_allocated_fallback() {
+        let fixture = Fixture::new();
+        // An unrelated warm target near the limit. Under an allocated-byte
+        // census the incoming clone is charged its full allocated size, so this
+        // target must be evicted to make room.
+        let warm = fixture.profile('a', "debug", 4096, 100);
+        let budget_bytes = 128 * 1024;
+        let seed_allocated_bytes = budget_bytes;
+        let reservation = SeedReservation::clone_of(seed_allocated_bytes);
+        assert_eq!(
+            reservation.resolved(ByteMethod::AllocatedFallback),
+            seed_allocated_bytes
+        );
+        assert_eq!(
+            budget_limit_reserving(budget_bytes, reservation, ByteMethod::AllocatedFallback),
+            0
+        );
+        let report = collect_with_forced_census(
             fixture.home.path(),
-            fixture.home.path(),
-            limits(copy_limit, 0),
-            false,
-            &budget,
-            &TargetProtection::default(),
-        )
-        .unwrap();
-        assert!(copy_report.removed_contains(&warm));
+            budget_bytes,
+            reservation,
+            ByteMethod::AllocatedFallback,
+        );
+        assert_eq!(report.byte_method, ByteMethod::AllocatedFallback);
+        assert!(
+            report.removed_contains(&warm),
+            "an allocated-byte census must evict an under-budget target to make room for the seed's allocated size"
+        );
         assert!(!warm.exists());
     }
 

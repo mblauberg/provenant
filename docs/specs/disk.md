@@ -99,8 +99,11 @@ within `gc.sweep_budget` and resumes with the census cursor. Where the
 filesystem cannot report private bytes, the report says so, reports allocated
 bytes instead and never reports zero. The same figure feeds the budget
 arithmetic and the per-target reclaimable totals; the report names which figure
-it carries. The budget compares that sum with the configured byte cap, not
-volume occupancy: private bytes exclude blocks shared with a seed, so the sum
+it carries. A launch-time seed reservation is charged in that same figure: near
+zero private bytes under a private-byte census, the seed's recorded allocated
+size under the allocated fallback, so admission and the census account for the
+incoming target in one unit. The budget compares that sum with the configured
+byte cap, not volume occupancy: private bytes exclude blocks shared with a seed, so the sum
 can stay below the cap while shared blocks still occupy disk. Eviction stays
 least-recently-used; the byte figure does not rank targets by bytes freed.
 - Why: a clone's allocated bytes are not the space its deletion recovers, and
