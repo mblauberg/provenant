@@ -660,8 +660,8 @@ pub trait AttemptOwner {
         })
     }
 
-    /// Write each requested upstream result, verified and redacted as
-    /// `provenant output --full` reads it, into a directory only this attempt
+    /// Write each requested upstream result, verified and subject to the same policy as
+    /// `provenant output --full`, into a directory only this attempt
     /// may read, within `cap` bytes in total. Idempotent by `key`. A host that
     /// cannot materialise returns `None` and the prompt keeps its excerpts.
     fn materialise_inputs(

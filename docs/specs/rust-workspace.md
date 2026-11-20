@@ -46,7 +46,8 @@ Each `unsafe` block documents its invariants and needs a second reviewer.
 
 Integers, never floats, and `serde_json`'s `arbitrary_precision` stays off.
 Digest bytes come from the canonical encoder, never map iteration order.
-Diagnostics go to bounded, redacted stderr, never result bytes.
+Diagnostics go to bounded stderr, never result bytes; local text masking follows
+the `redaction` setting.
 - Why: float or map-order digests change identity, and diagnostics must not
   corrupt result bytes.
 - Owner: `crates/records/src/canonical.rs`

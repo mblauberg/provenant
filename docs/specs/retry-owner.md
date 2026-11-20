@@ -64,14 +64,14 @@ to their author.
 
 ## Credential admission and publication
 
-Operator brief admission uses `provenant_redact::matches_credential_value_for_retry`:
-only held exact credential values of at least eight bytes participate, excluding
-`[REDACTED]`. This path alone skips ambient values exceeding 16 KiB each, 128
-values or 64 KiB total, warning once per process without names or values. It
-never opens credential stores or refuses because an unrelated ambient value
-exceeds these bounds.
+Operator brief admission checks held exact credential values of at least eight
+bytes, excluding `[REDACTED]`, only when `redaction` is `secrets` or `full`. A
+match warns and proceeds; `off` skips the check. This path skips ambient values
+exceeding 16 KiB each, 128 values or 64 KiB total, warning once per process
+without names or values. It never opens credential stores or refuses an operator
+brief.
 
-Publication uses strict `ambient_values` collection. Any over-bound held
-credential set fails validation and withdraws the affected publication, including
-text, streams, diagnostics and launch publication context. Retry admission's
-leniency never authorises publishing a skipped credential.
+When egress masking is enabled, publication uses strict `ambient_values`
+collection. An over-bound held credential set fails validation and withdraws
+the affected publication, including text, streams, diagnostics and launch
+publication context.

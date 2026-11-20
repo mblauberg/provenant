@@ -426,8 +426,8 @@ pub struct AttemptSpec {
     pub sealed_profile: Option<provenant_records::run::HarnessProfile>,
 }
 
-/// The `light` preset: no private source view and no delivery receipt. Secret redaction and object integrity are not settings,
-/// so no preset can lower them.
+/// The `light` preset: no private source view and no delivery receipt.
+/// Redaction follows its own setting; object integrity is not a preset setting.
 pub const LIGHT_PRESET: &str = "light";
 
 impl AttemptSpec {

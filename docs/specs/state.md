@@ -173,7 +173,9 @@ Landing records retain the current snapshot and consumer revisions without an un
 Syntax, version and filesystem-boundary failures refuse loading; an invalid
 optional value warns and uses the default, and a malformed restriction never
 becomes permission. `config set` publishes atomically and keeps unknown keys;
-`config show` redacts secrets.
+`config show` reports `redaction` and its source on one line. In `off` mode
+configuration history is raw; `secrets` and `full` mask credential-shaped
+values in history. Metadata and paths remain visible.
 Project binding directories must be directories owned by the current user and
 private from group and other users. Permission or ownership failures have a
 local repair diagnostic; malformed bindings and filesystem errors retain their
