@@ -1453,10 +1453,14 @@ mod admission_tests {
         let mut scoped = record.clone();
         scoped.refusals[0].pool = None;
         assert_eq!(free_pool_recheck_due(&scoped).unwrap(), None);
-        // An adapter with no registered probe cannot re-check cheaply.
-        let mut no_probe = record.clone();
-        no_probe.account.adapter = "codex".into();
-        assert_eq!(free_pool_recheck_due(&no_probe).unwrap(), None);
+        // An adapter with no registered free pool cannot re-check cheaply.
+        let plain = provenant_records::ADAPTER_SPECS
+            .iter()
+            .find(|spec| spec.free_pool.is_none())
+            .expect("adapter without a free pool");
+        let mut no_pool = record.clone();
+        no_pool.account.adapter = plain.name.into();
+        assert_eq!(free_pool_recheck_due(&no_pool).unwrap(), None);
     }
 
     // Spec: docs/specs/routing.md#unknown-never-means-ready
