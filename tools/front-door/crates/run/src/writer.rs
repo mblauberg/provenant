@@ -1929,6 +1929,39 @@ impl LaunchConfinement {
         target_outcome.is_seeded()
     }
 
+    /// Show seed health once at lane start. Every read is advisory: a bad
+    /// policy or unreadable store warns but never stops the lane.
+    fn warn_seed_health(&self, project_key: &str, worktree: &VerifiedWorktree) {
+        let Ok(now) = provenant_os::clock::SystemClock::new().wall_now() else {
+            return;
+        };
+        let (stale_after, source, policy_warning) =
+            match provenant_config::PortTable::read_for(Some(worktree.path()), &self.state_root) {
+                Ok(table) => crate::target_seed_health::stale_after_policy(&table),
+                Err(error) => (
+                    crate::target_seed_health::DEFAULT_STALE_AFTER,
+                    "default".to_owned(),
+                    Some(format!(
+                        "build.seed.stale_after could not be read ({error}); using 24h from default"
+                    )),
+                ),
+            };
+        let health = crate::target_seed_health::seed_health(
+            &self.state_root,
+            project_key,
+            stale_after,
+            &source,
+            now,
+        );
+        let mut warnings = health.warnings();
+        if let Some(warning) = policy_warning {
+            warnings.insert(0, warning);
+        }
+        for warning in warnings {
+            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+        }
+    }
+
     fn seed_cargo_target(
         &self,
         worktree: &VerifiedWorktree,
@@ -1951,6 +1984,8 @@ impl LaunchConfinement {
                     );
                 }
             };
+        let project_key = crate::target_seed::project_key(worktree.repo().common_git_dir());
+        self.warn_seed_health(&project_key, worktree);
         if cfg!(unix)
             && let Err(detail) =
                 verified_cargo_config(&build, &self.cargo_home.path).and_then(|()| {
@@ -1971,7 +2006,7 @@ impl LaunchConfinement {
             &self.state_root,
             cache,
             worktree.path(),
-            &crate::target_seed::project_key(worktree.repo().common_git_dir()),
+            &project_key,
             &self.home,
             environment,
             cancel,

@@ -48,9 +48,21 @@ working directory before a seed build, and a failing command fails that build
 (the runner is implemented by a later slice). `build.seed.stale_after` is the age
 after which a seed is considered stale, expressed in the host-gc duration syntax
 (0 or whole seconds, minutes, hours, days or weeks, e.g. `24h`, the default); a
-reader warns and falls back to `24h` on a bad value. Both keys layer like other
-port fields, so a layer can set only the one it changes. For example, to ensure
-generated files exist before seeding:
+reader warns and falls back to `24h` on a bad value, reported with source
+`default`; a valid value reports the layer that declared it (`builtin`, `host`
+or `project`). Both keys layer like other port fields, so a layer can set only
+the one it changes. A writer lane with a private Cargo target warns once when a
+project has no complete seed generation, when the newest one is older than
+`build.seed.stale_after` (aged from its `complete` marker), or when the last
+refresh outcome is `failed` or `prepare_failed`. `provenant worktree doctor`
+shows the same generation age, last outcome and reason, and effective knob with
+its source. The warning names the outcome, the knob and its value/source, and
+says to run `provenant worktree seed-build` in the repository; it never refuses
+the lane. Refresh outcomes are stored atomically at
+`<state>/cargo-target-seeds/refresh/<project_key>.json` with a schema, instant,
+outcome and a reason capped at 2 KiB. A missing, corrupt or newer-schema file
+is read as no record. For example, to ensure generated files exist before
+seeding:
 
 ```json
 {

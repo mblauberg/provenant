@@ -40,6 +40,24 @@ impl WorktreeRepairKind {
     ];
 }
 
+/// Seed facts shown alongside a worktree diagnosis. Values are inert strings:
+/// the run crate owns seed-store resolution and this crate cannot depend on it.
+#[derive(Clone, Debug, Serialize)]
+pub struct SeedDiagnosis {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub newest_generation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub newest_age: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_refresh_outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_refresh_reason: Option<String>,
+    pub stale_after: String,
+    pub stale_after_source: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
 /// A diagnosis grants no custody and never performs the suggested repair.
 #[derive(Clone, Debug, Serialize)]
 pub struct WorktreeDiagnosis {
@@ -56,6 +74,8 @@ pub struct WorktreeDiagnosis {
     pub evidence: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<&'static str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<SeedDiagnosis>,
 }
 
 impl WorktreeDiagnosis {
@@ -136,6 +156,7 @@ pub fn doctor(
         scope: None,
         evidence: None,
         source: None,
+        seed: None,
     };
     report.set_state(
         WorktreeDiagnosisState::Unregistered,
