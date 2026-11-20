@@ -14,6 +14,7 @@ use crate::{emit_summarised, fail, roots};
 use provenant_cli::Globals;
 use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
 
 /// How long one forge read may take.
@@ -62,10 +63,40 @@ pub(crate) fn run(command: provenant_cli::Ci, globals: &Globals) -> u8 {
     }
 }
 
+/// How a job ended. Cancellation is never reported as a real failure: a job
+/// cancelled by the chair, and an aggregate gate whose only bad inputs were
+/// cancelled, both settle as cancelled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum JobClass {
+    #[default]
+    Failed,
+    Cancelled,
+    /// Failed only because the jobs it gates were cancelled, not because any
+    /// of its own inputs failed.
+    CancelledDependencies,
+}
+impl JobClass {
+    /// Both cancelled classes are cancellation, not a defect to act on.
+    fn is_cancelled(self) -> bool {
+        matches!(self, Self::Cancelled | Self::CancelledDependencies)
+    }
+}
+
 /// One failed job's evidence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct JobFailures {
     pub job: String,
+    /// The step that failed, when the Actions job metadata names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    /// How the job ended.
+    #[serde(default)]
+    pub class: JobClass,
+    /// `possibly unrelated: PATH untouched by this PR` advisories for
+    /// failures in files this pull request did not change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unrelated: Vec<String>,
     /// Failing tests in log order.
     pub tests: Vec<TestFailure>,
     /// Error lines that belong to no failing test, such as a build failure.
@@ -120,6 +151,10 @@ pub(crate) struct Report {
     /// Failed checks with no Actions run behind them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unlogged: Vec<Unlogged>,
+    /// A suggested rerun command. This is advice only; no command ever reruns
+    /// jobs automatically.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rerun: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,8 +220,8 @@ fn failures_run(run: u64, globals: &Globals) -> u8 {
             .state;
         let request = provenant_config::ports::Request::within(READ_BUDGET);
         let repository = batch::repository(state.as_path(), &project)?;
-        let logs = failed_logs(state.as_path(), &project, &repository, run, &request);
-        let jobs = logs.as_deref().map(parse_failed_log).unwrap_or_default();
+        let RunDigest { jobs, error } =
+            run_digest(state.as_path(), &project, &repository, run, None, &request);
         Ok(Report {
             pr: None,
             run: Some(run),
@@ -194,9 +229,10 @@ fn failures_run(run: u64, globals: &Globals) -> u8 {
             runs: vec![RunFailures {
                 run,
                 jobs: compact(jobs),
-                error: logs.err().map(|error| bounded(&error)),
+                error: error.map(|error| bounded(&error)),
             }],
             unlogged: Vec::new(),
+            rerun: Some(rerun_hint(run)),
         })
     })();
     emit(LEAF, result, globals)
@@ -319,6 +355,11 @@ fn report(
 ) -> Result<Report, Box<dyn std::error::Error>> {
     let mut runs: Vec<RunFailures> = Vec::new();
     let mut unlogged = Vec::new();
+    // The changed-file list is read once per pull request, not per run: the
+    // "possibly unrelated" advisory compares every failure against the same
+    // tree delta. An unreadable list stays absent rather than becoming an empty
+    // list that would label every failure unrelated.
+    let changed = pr.and_then(|number| changed_files(state, project, repository, number, request));
     for check in checks
         .iter()
         .filter(|check| matches!(check.bucket.as_str(), "fail" | "cancel"))
@@ -333,20 +374,22 @@ fn report(
         if runs.iter().any(|known: &RunFailures| known.run == run) {
             continue;
         }
-        let logs = failed_logs(state, project, repository, run, request);
-        let jobs = logs.as_deref().map(parse_failed_log).unwrap_or_default();
+        let RunDigest { jobs, error } =
+            run_digest(state, project, repository, run, changed.as_deref(), request);
         runs.push(RunFailures {
             run,
             jobs: compact(jobs),
-            error: logs.err().map(|error| bounded(&error)),
+            error: error.map(|error| bounded(&error)),
         });
     }
+    let rerun = runs.first().map(|run| rerun_hint(run.run));
     Ok(Report {
         pr,
         run: None,
         head,
         runs,
         unlogged,
+        rerun,
     })
 }
 
@@ -360,18 +403,270 @@ fn actions_run(url: &str) -> Option<u64> {
         .flatten()
 }
 
-/// The failed-job logs of one run, cached for the fast observation interval:
-/// a completed run's logs never change, and a still-running run gains them.
-fn failed_logs(
+/// A run's failed jobs and an error describing any unreadable metadata or log.
+struct RunDigest {
+    jobs: Vec<JobFailures>,
+    error: Option<String>,
+}
+
+/// One job from `actions/runs/{id}/jobs`, the metadata the digest needs to
+/// classify the job and name its failed step.
+#[derive(Deserialize)]
+struct ApiJob {
+    id: u64,
+    name: String,
+    #[serde(default)]
+    status: String,
+    conclusion: Option<String>,
+    #[serde(default)]
+    steps: Vec<ApiStep>,
+    #[serde(default)]
+    needs: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ApiStep {
+    name: String,
+    conclusion: Option<String>,
+}
+
+/// Whether a job conclusion is a bad input to a gate. A skipped job is bad
+/// input too: it means the gate lost a member.
+fn bad_input(conclusion: Option<&str>) -> bool {
+    matches!(
+        conclusion,
+        Some("failure")
+            | Some("timed_out")
+            | Some("action_required")
+            | Some("startup_failure")
+            | Some("cancelled")
+            | Some("skipped")
+    )
+}
+
+/// Classify every ended job in a run. `gh run view --log-failed` waits for the
+/// whole run; the jobs endpoint names each job's own conclusion as soon as that
+/// job ends. A gate whose only bad inputs were cancelled is a cancellation,
+/// never a real failure, so an aggregate `ci-status` cannot misreport FAILURE.
+fn classify_jobs(jobs: &[ApiJob]) -> BTreeMap<u64, JobClass> {
+    let mut conclusions: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for job in jobs {
+        conclusions.insert(job.name.clone(), job.conclusion.clone());
+        conclusions.insert(job.id.to_string(), job.conclusion.clone());
+    }
+    let mut classes = BTreeMap::new();
+    for job in jobs {
+        if job.status != "completed" {
+            continue;
+        }
+        let class = match job.conclusion.as_deref() {
+            Some("cancelled") => JobClass::Cancelled,
+            Some("skipped") if gate_only_cancelled(job, &conclusions) => {
+                JobClass::CancelledDependencies
+            }
+            Some("skipped") => JobClass::Cancelled,
+            Some(conclusion) if bad_input(Some(conclusion)) => {
+                if gate_only_cancelled(job, &conclusions) {
+                    JobClass::CancelledDependencies
+                } else {
+                    JobClass::Failed
+                }
+            }
+            // A succeeded (or neutral) job is not part of the failing digest.
+            _ => continue,
+        };
+        classes.insert(job.id, class);
+    }
+    classes
+}
+
+/// Whether a job's only bad inputs were cancelled or skipped, with no real
+/// failure among them. A job with no declared inputs is never a gate.
+fn gate_only_cancelled(job: &ApiJob, conclusions: &BTreeMap<String, Option<String>>) -> bool {
+    if job.needs.is_empty() {
+        return false;
+    }
+    let mut saw_bad = false;
+    for need in &job.needs {
+        let Some(conclusion) = conclusions.get(need).and_then(Option::as_deref) else {
+            return false;
+        };
+        if !bad_input(Some(conclusion)) {
+            continue;
+        }
+        saw_bad = true;
+        if !matches!(conclusion, "cancelled" | "skipped") {
+            return false;
+        }
+    }
+    saw_bad
+}
+
+/// Build the per-job digest for one run. Each ended job's log is fetched on its
+/// own through the `jobs/{id}/logs` endpoint, so a job's failure is available
+/// as soon as that job ends rather than after the slowest job in the run.
+fn run_digest(
+    state: &Path,
+    project: &Path,
+    repository: &str,
+    run: u64,
+    changed: Option<&[String]>,
+    request: &provenant_config::ports::Request,
+) -> RunDigest {
+    let jobs = match run_jobs(state, project, repository, run, request) {
+        Ok(jobs) => jobs,
+        Err(error) => {
+            return RunDigest {
+                jobs: Vec::new(),
+                error: Some(error),
+            };
+        }
+    };
+    let classes = classify_jobs(&jobs);
+    let mut errors = Vec::new();
+    let mut failures = Vec::new();
+    for job in &jobs {
+        let Some(class) = classes.get(&job.id).copied() else {
+            continue;
+        };
+        let step = job
+            .steps
+            .iter()
+            .find(|step| {
+                matches!(
+                    step.conclusion.as_deref(),
+                    Some("failure") | Some("timed_out")
+                )
+            })
+            .map(|step| step.name.clone());
+        let mut parsed = if class == JobClass::Failed {
+            match job_log(state, project, repository, job.id, request) {
+                Ok(text) => parse_failed_log(&text),
+                Err(error) => {
+                    errors.push(format!("job {}: {error}", job.name));
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        if parsed.is_empty() {
+            parsed.push(JobFailures {
+                job: job.name.clone(),
+                step: step.clone(),
+                class,
+                unrelated: Vec::new(),
+                tests: Vec::new(),
+                errors: Vec::new(),
+                truncated: false,
+            });
+        }
+        for parsed_job in &mut parsed {
+            parsed_job.job = job.name.clone();
+            parsed_job.step = step.clone();
+            parsed_job.class = class;
+            if let Some(changed) = changed {
+                parsed_job.unrelated = unrelated_paths(parsed_job, changed);
+            }
+        }
+        failures.extend(parsed);
+    }
+    RunDigest {
+        jobs: failures,
+        error: (!errors.is_empty()).then(|| errors.join("; ")),
+    }
+}
+
+/// Read every job of one Actions run, following pagination. A slurped response
+/// is a list of pages; a single response is one page.
+fn run_jobs(
     state: &Path,
     project: &Path,
     repository: &str,
     run: u64,
     request: &provenant_config::ports::Request,
+) -> Result<Vec<ApiJob>, String> {
+    let endpoint = format!("repos/{repository}/actions/runs/{run}/jobs");
+    let bytes = successful(
+        forge_execute(
+            state,
+            project,
+            &["gh", "api", &endpoint, "--paginate", "--slurp"],
+            request,
+            false,
+            None,
+        )
+        .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    parse_jobs(&bytes)
+}
+
+/// Parse an Actions jobs response, following pagination. A slurped response
+/// is a list of pages; a single response is one page.
+fn parse_jobs(bytes: &[u8]) -> Result<Vec<ApiJob>, String> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    let pages: Vec<&Value> = match &value {
+        Value::Array(items) if items.iter().any(|item| item.get("jobs").is_some()) => {
+            items.iter().collect()
+        }
+        _ => vec![&value],
+    };
+    let mut jobs = Vec::new();
+    for page in pages {
+        let entries = page
+            .get("jobs")
+            .and_then(Value::as_array)
+            .or_else(|| page.as_array())
+            .ok_or("Actions jobs response named no jobs")?;
+        for entry in entries {
+            jobs.push(serde_json::from_value(entry.clone()).map_err(|error| error.to_string())?);
+        }
+    }
+    Ok(jobs)
+}
+
+/// Fetch one job's log. `gh api` follows the `jobs/{id}/logs` 302 redirect to
+/// the signed log archive and returns the text; the redirect strips the
+/// forge token at the archive host. The log of an ended job never changes, so
+/// it is cached per job id for the short observation interval.
+fn job_log(
+    state: &Path,
+    project: &Path,
+    repository: &str,
+    job_id: u64,
+    request: &provenant_config::ports::Request,
 ) -> Result<String, String> {
     let dir = crate::pr::observer::shared_dir(state, repository)
         .map_err(|error| format!("cannot open shared CI cache: {error}"))?;
-    let name = format!("run-failures-{run}.json");
+    let name = format!("job-log-{job_id}.json");
+    let endpoint = format!("repos/{repository}/actions/jobs/{job_id}/logs");
+    cached_text(state, project, &dir, &name, || {
+        let bytes = successful(
+            forge_execute(
+                state,
+                project,
+                &["gh", "api", &endpoint],
+                request,
+                false,
+                None,
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    })
+}
+
+/// Share the bounded cache used by per-job logs. A completed job's log and a
+/// stale observation are both harmless to reread after the freshness window.
+fn cached_text(
+    state: &Path,
+    project: &Path,
+    dir: &provenant_os::fs::Directory,
+    name: &str,
+    fetch: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
     let ttl = crate::pr::observer::fast_interval(state, project)
         .unwrap_or(std::time::Duration::from_secs(5));
     let now = clock();
@@ -380,7 +675,7 @@ fn failed_logs(
         fetched_at: i64,
         text: String,
     }
-    if let Ok(bytes) = dir.read_bounded(std::ffi::OsStr::new(&name), 4 * 1024 * 1024)
+    if let Ok(bytes) = dir.read_bounded(std::ffi::OsStr::new(name), 4 * 1024 * 1024)
         && let Ok(cached) = serde_json::from_slice::<Cached>(&bytes)
     {
         let age = now.as_millisecond().saturating_sub(cached.fetched_at);
@@ -388,39 +683,146 @@ fn failed_logs(
             return Ok(cached.text);
         }
     }
-    let bytes = successful(
-        forge_execute(
-            state,
-            project,
-            &[
-                "gh",
-                "run",
-                "view",
-                &run.to_string(),
-                "-R",
-                repository,
-                "--log-failed",
-            ],
-            request,
-            false,
-            None,
-        )
-        .map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let text = fetch()?;
     if let Ok(bytes) = serde_json::to_vec(&Cached {
         fetched_at: now.as_millisecond(),
         text: text.clone(),
     }) {
         let _ = dir.atomic_write(
-            std::ffi::OsStr::new(&name),
-            ".run-failures-",
+            std::ffi::OsStr::new(name),
+            ".job-log-",
             &bytes,
             provenant_os::fs::PublishMode::Replace,
         );
     }
     Ok(text)
+}
+
+/// The files a pull request changes. A failed read returns `None`, which
+/// suppresses the "possibly unrelated" advisory instead of treating an
+/// unreadable delta as an empty one.
+fn changed_files(
+    state: &Path,
+    project: &Path,
+    repository: &str,
+    number: u64,
+    request: &provenant_config::ports::Request,
+) -> Option<Vec<String>> {
+    let endpoint = format!("repos/{repository}/pulls/{number}/files");
+    let bytes = successful(
+        forge_execute(
+            state,
+            project,
+            &["gh", "api", &endpoint, "--paginate", "--slurp"],
+            request,
+            false,
+            None,
+        )
+        .ok()?,
+    )
+    .ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    let pages: Vec<&Value> = match &value {
+        Value::Array(items) if items.iter().all(Value::is_array) => items.iter().collect(),
+        _ => vec![&value],
+    };
+    let mut paths = Vec::new();
+    for page in pages {
+        let entries = page.as_array()?;
+        for entry in entries {
+            if let Some(path) = entry.get("filename").and_then(Value::as_str) {
+                paths.push(path.to_owned());
+            }
+        }
+    }
+    Some(paths)
+}
+
+/// The unit of ownership a path belongs to: a crate directory, or the root
+/// crate's `src`. Two paths in the same unit are touched by the same change.
+fn ownership_unit(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let normalized = normalized
+        .strip_prefix("tools/front-door/")
+        .unwrap_or(&normalized);
+    let parts: Vec<&str> = normalized.split('/').collect();
+    match parts.as_slice() {
+        ["crates", name, ..] => format!("crates/{name}"),
+        ["src", ..] => "src".to_owned(),
+        _ => normalized.to_owned(),
+    }
+}
+
+/// The advisory for a path a pull request did not touch. The exact wording is
+/// part of the digest so it reads the same in text and in `--json`.
+fn unrelated_label(path: &str) -> String {
+    format!("possibly unrelated: {path} untouched by this PR")
+}
+
+/// Compare a job's failure locations and error paths against the pull request's
+/// changed files. A failure in an untouched crate or file is labelled; one in
+/// a touched file is not.
+fn unrelated_paths(job: &JobFailures, changed: &[String]) -> Vec<String> {
+    let changed_units: Vec<String> = changed.iter().map(|path| ownership_unit(path)).collect();
+    let mut paths: Vec<String> = Vec::new();
+    for test in &job.tests {
+        if let Some(location) = &test.panic {
+            paths.push(failure_path(&location.location).to_owned());
+        }
+    }
+    for error in &job.errors {
+        if let Some(path) = error_path(error) {
+            paths.push(path.to_owned());
+        }
+    }
+    let mut labels = Vec::new();
+    for path in paths {
+        if path.is_empty()
+            || changed_units
+                .iter()
+                .any(|unit| *unit == ownership_unit(&path))
+        {
+            continue;
+        }
+        let label = unrelated_label(&path);
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
+    labels
+}
+
+/// The file a panic location names, without its `:line:column` suffix.
+fn failure_path(location: &str) -> &str {
+    let location = location
+        .rsplit_once(" panicked at ")
+        .map_or(location, |(_, rest)| rest);
+    let trimmed = location.trim_end_matches(':');
+    match trimmed.rfind(':') {
+        Some(at) if trimmed[at + 1..].bytes().all(|b| b.is_ascii_digit()) => {
+            let line = &trimmed[..at];
+            match line.rfind(':') {
+                Some(col) if line[col + 1..].bytes().all(|b| b.is_ascii_digit()) => &line[..col],
+                _ => line,
+            }
+        }
+        _ => trimmed,
+    }
+}
+
+/// A compiler error's `--> path:line:column` location.
+fn error_path(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix("--> ")?.trim();
+    let path = rest
+        .split_once(':')
+        .map_or(rest, |(path, _)| path)
+        .trim_end_matches(':');
+    (!path.is_empty()).then_some(path)
+}
+
+/// A rerun is advice, never an action: no code here executes it.
+fn rerun_hint(run: u64) -> String {
+    format!("gh run rerun {run} --failed")
 }
 
 #[allow(
@@ -465,7 +867,11 @@ fn emit(leaf: &str, result: Result<Report, Box<dyn std::error::Error>>, globals:
                 .iter()
                 .map(|run| run.jobs.iter().map(|job| job.tests.len()).sum::<usize>())
                 .sum::<usize>();
-            let failing_jobs = report.runs.iter().map(|run| run.jobs.len()).sum::<usize>();
+            let failing_jobs = report
+                .runs
+                .iter()
+                .map(|run| real_jobs(&run.jobs))
+                .sum::<usize>();
             let text = human(&report);
             let outcome = if report.runs.iter().any(|run| run.error.is_some())
                 && tests == 0
@@ -488,10 +894,8 @@ fn emit(leaf: &str, result: Result<Report, Box<dyn std::error::Error>>, globals:
                     format!("{subject}: ")
                 }
             );
-            let next = report
-                .runs
-                .first()
-                .map(|run| format!("gh run view {} --log-failed", run.run));
+            // The rerun is advice shown to the chair; nothing executes it.
+            let next = report.rerun.clone();
             let summary = provenant_cli::Summary::new(headline, rows(&report), next);
             emit_summarised(
                 &CommandResult::new(leaf, outcome, report),
@@ -522,15 +926,11 @@ fn emit_reports(
             let mut all_rows = Vec::new();
             let mut failing_jobs = 0;
             let mut tests = 0;
-            let mut first_run = None;
             for report in &reports {
                 text.push_str(&human(report));
                 all_rows.extend(rows(report));
                 for run in &report.runs {
-                    if first_run.is_none() {
-                        first_run = Some(run.run);
-                    }
-                    failing_jobs += run.jobs.len();
+                    failing_jobs += real_jobs(&run.jobs);
                     tests += run.jobs.iter().map(|job| job.tests.len()).sum::<usize>();
                 }
             }
@@ -553,7 +953,7 @@ fn emit_reports(
             };
             let headline =
                 format!("{subject}{failing_jobs} failed job(s), {tests} failing test(s)");
-            let next = first_run.map(|run| format!("gh run view {} --log-failed", run));
+            let next = reports.iter().find_map(|report| report.rerun.clone());
             let summary = provenant_cli::Summary::new(headline, all_rows, next);
             emit_summarised(
                 &CommandResult::new(leaf, outcome, reports),
@@ -573,12 +973,34 @@ fn emit_reports(
     }
 }
 
+/// Only a real failure counts as a failed job in the headline; cancelled jobs
+/// and gates cancelled through their inputs are cancellation, not defects.
+fn real_jobs(jobs: &[JobFailures]) -> usize {
+    jobs.iter().filter(|job| !job.class.is_cancelled()).count()
+}
+
+/// The class label a chair reads; a gate cancelled through its inputs says why.
+fn class_label(class: JobClass) -> &'static str {
+    match class {
+        JobClass::Failed => "failed",
+        JobClass::Cancelled => "cancelled",
+        JobClass::CancelledDependencies => "cancelled (dependencies only)",
+    }
+}
+
 fn rows(report: &Report) -> Vec<String> {
     let mut rows = Vec::new();
     for run in &report.runs {
         for job in &run.jobs {
+            let prefix = match &job.step {
+                Some(step) => format!("run {} {} [{}]", run.run, job.job, step),
+                None => format!("run {} {}", run.run, job.job),
+            };
+            if job.tests.is_empty() && job.errors.is_empty() {
+                rows.push(format!("{prefix}: {}", class_label(job.class)));
+            }
             for test in &job.tests {
-                let mut row = format!("run {} {}: {}", run.run, job.job, test.name);
+                let mut row = format!("{prefix} {}: {}", class_label(job.class), test.name);
                 if let Some(duration) = &test.duration {
                     row.push_str(&format!(" ({duration})"));
                 }
@@ -590,10 +1012,16 @@ fn rows(report: &Report) -> Vec<String> {
                 }
                 rows.push(row);
             }
+            for unrelated in &job.unrelated {
+                rows.push(format!("{prefix}: {unrelated}"));
+            }
         }
     }
     for unlogged in &report.unlogged {
         rows.push(format!("check {}: no Actions run logs", unlogged.check));
+    }
+    if let Some(rerun) = &report.rerun {
+        rows.push(format!("suggested: {rerun} (not run automatically)"));
     }
     rows
 }
@@ -607,10 +1035,17 @@ fn human(report: &Report) -> String {
             continue;
         }
         for job in &run.jobs {
+            let step = job
+                .step
+                .as_deref()
+                .map(|step| format!(" step {step}"))
+                .unwrap_or_default();
             text.push_str(&format!(
-                "run {} job {}: {} failing test(s)\n",
+                "run {} job {} [{}]{}: {} failing test(s)\n",
                 run.run,
                 job.job,
+                class_label(job.class),
+                step,
                 job.tests.len()
             ));
             for test in &job.tests {
@@ -635,6 +1070,9 @@ fn human(report: &Report) -> String {
             for error in &job.errors {
                 text.push_str(&format!("  {error}\n"));
             }
+            for unrelated in &job.unrelated {
+                text.push_str(&format!("  {unrelated}\n"));
+            }
             if job.truncated {
                 text.push_str(&format!("  job {}: more failures held back\n", job.job));
             }
@@ -650,6 +1088,9 @@ fn human(report: &Report) -> String {
                 .map(|url| format!(" ({url})"))
                 .unwrap_or_default()
         ));
+    }
+    if let Some(rerun) = &report.rerun {
+        text.push_str(&format!("suggested: {rerun} (not run automatically)\n"));
     }
     text
 }
@@ -672,6 +1113,9 @@ pub(crate) fn parse_failed_log(text: &str) -> Vec<JobFailures> {
         if jobs.len() <= job {
             jobs.push(JobFailures {
                 job: job_label(job_name),
+                step: None,
+                class: JobClass::Failed,
+                unrelated: Vec::new(),
                 tests: Vec::new(),
                 errors: Vec::new(),
                 truncated: false,
@@ -887,7 +1331,7 @@ fn captures_message(line: &str) -> bool {
 }
 
 fn is_error_line(line: &str) -> bool {
-    line.starts_with("error:") || line.starts_with("error[")
+    line.starts_with("error:") || line.starts_with("error[") || line.starts_with("##[error]")
 }
 
 fn bounded_line(line: &str) -> String {
@@ -956,5 +1400,72 @@ mod tests {
                 .chain(&jobs[0].errors)
                 .any(|line| line.contains("error[E0308]"))
         );
+    }
+
+    // Spec: docs/specs/cli.md#ci-observations
+    #[test]
+    fn job_log_with_nextest_failure_yields_test_and_panic() {
+        let jobs = parse_failed_log(include_str!("ci/fixtures/job-nextest-failure.log"));
+        let job = &jobs[0];
+        assert_eq!(job.tests.len(), 1);
+        let failure = &job.tests[0];
+        assert!(failure.name.ends_with(
+            "native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults"
+        ));
+        let panic = failure.panic.as_ref().expect("panic");
+        assert_eq!(
+            panic.location,
+            "crates/confinement/src/permissions/tests/host_boundaries.rs:399:17"
+        );
+        assert!(panic.message.contains("default=allow"));
+    }
+
+    // Spec: docs/specs/cli.md#ci-observations
+    #[test]
+    fn aggregate_gate_failed_only_by_cancelled_members_is_cancelled() {
+        let jobs = parse_jobs(include_str!("ci/fixtures/run-cancelled-aggregate.json").as_bytes())
+            .expect("jobs");
+        let classes = classify_jobs(&jobs);
+        let gate = jobs
+            .iter()
+            .find(|job| job.name == "ci-status")
+            .expect("gate");
+        assert_eq!(classes[&gate.id], JobClass::CancelledDependencies);
+        assert!(classes[&gate.id].is_cancelled());
+        let member = jobs
+            .iter()
+            .find(|job| job.name == "Rust Linux tests (cache)")
+            .expect("member");
+        assert_eq!(classes[&member.id], JobClass::Cancelled);
+    }
+
+    // Spec: docs/specs/cli.md#ci-observations
+    #[test]
+    fn failure_in_untouched_crate_is_labelled_possibly_unrelated() {
+        let changed = vec!["tools/front-door/crates/cache/src/store.rs".to_owned()];
+        let jobs = parse_failed_log(include_str!("ci/fixtures/job-unrelated-failure.log"));
+        let job = &jobs[0];
+        assert_eq!(job.tests.len(), 2);
+        let unrelated = unrelated_paths(job, &changed);
+        assert_eq!(unrelated.len(), 1);
+        assert_eq!(
+            unrelated[0],
+            "possibly unrelated: crates/confinement/src/permissions/tests/host_boundaries.rs untouched by this PR"
+        );
+        let touched = JobFailures {
+            job: "cache".into(),
+            step: None,
+            class: JobClass::Failed,
+            unrelated: Vec::new(),
+            tests: job
+                .tests
+                .iter()
+                .filter(|test| test.name.contains("reads_expired"))
+                .cloned()
+                .collect(),
+            errors: Vec::new(),
+            truncated: false,
+        };
+        assert!(unrelated_paths(&touched, &changed).is_empty());
     }
 }

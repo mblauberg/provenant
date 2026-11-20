@@ -1,0 +1,31 @@
+{
+  "total_count": 3,
+  "jobs": [
+    {
+      "id": 101,
+      "name": "Rust Linux tests (cache)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "steps": [],
+      "needs": []
+    },
+    {
+      "id": 102,
+      "name": "Rust macOS tests (custody)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "steps": [],
+      "needs": []
+    },
+    {
+      "id": 103,
+      "name": "ci-status",
+      "status": "completed",
+      "conclusion": "failure",
+      "steps": [
+        { "name": "Check required suites", "conclusion": "failure" }
+      ],
+      "needs": ["Rust Linux tests (cache)", "Rust macOS tests (custody)"]
+    }
+  ]
+}
