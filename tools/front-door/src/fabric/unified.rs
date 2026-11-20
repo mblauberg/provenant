@@ -379,15 +379,22 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                         .and_then(|node| node.land.as_ref())
                         .map(|land| &land.branch))
             );
+            // A review result reports the subject it actually reviewed, not
+            // the checkout head the launch started from. ReviewSettlement is
+            // the only checkpoint evidence that pins that subject; other nodes
+            // keep their existing commit, land and writer-binding fallback.
             row["head"] = json!(
-                node.and_then(|node| node.outputs.as_ref())
-                    .and_then(|out| out.commit.as_ref())
+                node.and_then(|node| node.review_settlement.as_ref())
+                    .map(|settlement| settlement.head.to_string())
+                    .or_else(|| node
+                        .and_then(|node| node.outputs.as_ref())
+                        .and_then(|out| out.commit.clone()))
                     .or_else(|| node
                         .and_then(|node| node.land.as_ref())
-                        .map(|land| &land.head))
+                        .map(|land| land.head.clone()))
                     .or_else(|| node
                         .and_then(|node| node.writer_binding.as_ref())
-                        .map(|binding| &binding.head))
+                        .map(|binding| binding.head.clone()))
             );
             row["pr"] = node
                 .and_then(|node| node.land.as_ref())
@@ -4316,6 +4323,35 @@ mod tests {
             assert_eq!(reply.result.data["rows"][0]["head"], "abc123");
             assert!(reply.human.contains("head: abc123"));
         }
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-settlement.md#review-verdict-wording
+    #[test]
+    fn review_result_reports_the_reviewed_head_not_the_launch_base()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut value = serde_json::to_value(review_checkpoint("VERDICT: PASS", json!([])))?;
+        value["nodes"][0]["review_settlement"] = json!({
+            "attempt_id": "7".repeat(32),
+            "head": "b".repeat(40),
+            "base": "a".repeat(40),
+            "verdict": "approve",
+            "independent": true,
+        });
+        let checkpoint: GraphCheckpoint = serde_json::from_value(value)?;
+        let rows = status_rows(
+            &graph_snapshot(checkpoint),
+            &GraphTarget {
+                graph: "g".into(),
+                node: Some("parent".into()),
+                attempt: None,
+            },
+        );
+        let target = "g/parent".parse()?;
+        let reply = result_reply(&target, &rows);
+        let reviewed = "b".repeat(40);
+        assert_eq!(reply.result.data["rows"][0]["head"], reviewed.as_str());
+        assert!(reply.human.contains(&format!("head: {reviewed}")));
         Ok(())
     }
 

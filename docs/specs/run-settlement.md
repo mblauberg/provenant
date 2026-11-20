@@ -356,4 +356,4 @@ keeps that contract in the reviewer guidance. Review results report the pinned
 reviewed subject as their head, independently of the checkout's launch base.
 - Why: ordinary review vocabulary must preserve usable evidence while visible
   warnings expose brief and output drift before it becomes a settlement surprise.
-- Owner: `crates/records/src/result_capture.rs`, `crates/fabric-runtime/src/graph/outputs.rs`, `src/fabric/interface.rs`, `src/fabric/review_subject.rs`
+- Owner: `crates/records/src/result_capture.rs`, `crates/fabric-runtime/src/graph/outputs.rs`, `src/fabric/interface.rs`, `src/fabric/review_subject.rs`, `src/fabric/unified.rs`

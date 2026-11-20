@@ -716,9 +716,7 @@ fn review_verdict_contract_warning(input: &Value) -> Option<String> {
                     brief_strings(value, output);
                 }
             }
-            Value::Array(values) => values
-                .iter()
-                .for_each(|value| brief_strings(value, output)),
+            Value::Array(values) => values.iter().for_each(|value| brief_strings(value, output)),
             _ => {}
         }
     }
@@ -2281,9 +2279,7 @@ impl Factory {
         // inputs. Check the bound launch before submission normalises its text.
         input_warnings.extend(self.graph_input_warnings(&bound)?);
         document = decode_input(bound, "document")?;
-        if review_launch
-            && let Some(warning) = review_verdict_contract_warning(input)
-        {
+        if review_launch && let Some(warning) = review_verdict_contract_warning(input) {
             input_warnings.push(warning.clone());
             for node in &mut document.nodes {
                 bind_review_warning(node, &warning);
