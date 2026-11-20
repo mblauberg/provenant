@@ -322,6 +322,112 @@ pub(crate) fn resolve_ref(git: &Path, repo: &VerifiedRepo, reference: &str) -> R
     GitOid::parse(std::str::from_utf8(&bytes).map_err(|_| invalid())?.trim()).map_err(|_| invalid())
 }
 
+/// What the primary checkout holds: the branch HEAD names (none when
+/// detached), the commit (none when unborn) and every local and remote-tracking
+/// branch tip. The common Git directory's own HEAD is the primary checkout's,
+/// whichever linked worktree asks.
+pub(crate) struct PrimaryRefs {
+    pub head_ref: Option<String>,
+    pub head: Option<GitOid>,
+    pub refs: std::collections::BTreeMap<String, GitOid>,
+}
+
+pub(crate) fn primary_refs(git: &Path, repo: &VerifiedRepo) -> Result<PrimaryRefs> {
+    let read = |arguments: &[&str]| {
+        command(
+            git,
+            repo.common_git_dir(),
+            repo.root_path(),
+            &args(arguments),
+            None,
+        )
+    };
+    let text = |bytes: Vec<u8>| String::from_utf8(bytes).map(|text| text.trim().to_owned());
+    let head_ref = read(&["symbolic-ref", "-q", "HEAD"])
+        .ok()
+        .and_then(|bytes| text(bytes).ok())
+        .filter(|name| !name.is_empty());
+    let head = read(&["rev-parse", "--verify", "--end-of-options", "HEAD"])
+        .ok()
+        .and_then(|bytes| text(bytes).ok())
+        .and_then(|text| GitOid::parse(&text).ok());
+    let listing = String::from_utf8(read(&[
+        "for-each-ref",
+        "--format=%(objectname) %(refname)",
+        "refs/heads/",
+        "refs/remotes/",
+    ])?)
+    .map_err(|_| invalid())?;
+    let mut refs = std::collections::BTreeMap::new();
+    for line in listing.lines() {
+        let (oid, name) = line.split_once(' ').ok_or_else(invalid)?;
+        refs.insert(name.to_owned(), GitOid::parse(oid).map_err(|_| invalid())?);
+    }
+    Ok(PrimaryRefs {
+        head_ref,
+        head,
+        refs,
+    })
+}
+
+/// The commits at the heads of every linked worktree. The first listed
+/// worktree is the primary checkout and is left out; the bound worktree and
+/// other lanes' worktrees are in.
+pub(crate) fn linked_worktree_heads(git: &Path, repo: &VerifiedRepo) -> Result<Vec<GitOid>> {
+    let listing = String::from_utf8(command(
+        git,
+        repo.common_git_dir(),
+        repo.root_path(),
+        &args(&["worktree", "list", "--porcelain"]),
+        None,
+    )?)
+    .map_err(|_| invalid())?;
+    Ok(listing
+        .split("\n\n")
+        .skip(1)
+        .flat_map(|entry| entry.lines())
+        .filter_map(|line| line.strip_prefix("HEAD "))
+        .filter_map(|oid| GitOid::parse(oid.trim()).ok())
+        .collect())
+}
+
+/// Commits reachable from `tips` and from none of `excluded`, newest first and
+/// at most `limit`, in one `git rev-list` call.
+pub(crate) fn commits_outside(
+    git: &Path,
+    repo: &VerifiedRepo,
+    tips: &[GitOid],
+    excluded: &[GitOid],
+    limit: usize,
+) -> Result<Vec<GitOid>> {
+    if tips.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut input = String::new();
+    for tip in tips {
+        input.push_str(&format!("{tip}\n"));
+    }
+    for tip in excluded {
+        input.push_str(&format!("^{tip}\n"));
+    }
+    let listing = execute_bounded(
+        git,
+        repo.common_git_dir(),
+        repo.root_path(),
+        &args(&["rev-list", &format!("--max-count={limit}"), "--stdin"]),
+        None,
+        Execution {
+            input: Some(input.as_bytes()),
+            ..Default::default()
+        },
+    )?;
+    String::from_utf8(listing)
+        .map_err(|_| invalid())?
+        .lines()
+        .map(|line| GitOid::parse(line.trim()).map_err(|_| invalid()))
+        .collect()
+}
+
 /// List the refs below a Provenant-owned prefix. Ref names come from Git, so
 /// they are already validated; the prefix check keeps the result in namespace.
 fn list_refs(git: &Path, repo: &VerifiedRepo, prefix: &str) -> Result<Vec<String>> {

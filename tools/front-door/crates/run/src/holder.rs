@@ -608,6 +608,15 @@ fn seal_import_refusal(
     )
 }
 
+/// The stray-work check is advice: when it cannot run, the lane still settles.
+fn warn_stray_check(error: &dyn std::fmt::Display) {
+    use std::io::Write as _;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "warning: could not check the primary checkout for stray lane work: {error}"
+    );
+}
+
 /// A refused import keeps its private Git whole, so a step that only guards
 /// removal of that Git is reported, not fatal.
 fn warn_retained_private_git(what: &str, error: &dyn std::fmt::Display) {
@@ -1858,6 +1867,26 @@ impl RunStore {
         })
     }
 
+    /// Whether the lane left work in the primary checkout. Observation only.
+    fn writer_stray(
+        &self,
+        record: &AttemptRecord,
+        writer: &crate::WriterRequest,
+        attempt: &Directory,
+        scope: provenant_records::custody::Scope,
+        cancel: CancelToken,
+    ) -> Result<Option<crate::writer::StrayWork>> {
+        let launch = crate::prepare_writer_with_facts(
+            writer,
+            &self.writer_registry,
+            record.project_id,
+            &self.repo_facts,
+        )?;
+        crate::settlement::with_cancellation(attempt, scope, &cancel, || {
+            launch.stray_work(attempt, self.context.state_root.as_path())
+        })
+    }
+
     fn retry_terminal_effects(
         &self,
         record: &AttemptRecord,
@@ -2256,6 +2285,7 @@ impl RunStore {
         let mut deferred: Vec<(SettlementEffect, EffectDisposition)> = Vec::new();
         let mut import_failed = false;
         let mut import_stopped = false;
+        let mut stray_work = false;
         // A late request alone cannot invalidate a verified clean exit. If the
         // current guardian could not establish ordering, its receipt stays unknown.
         let steered = exit.stop_reason == Some(StopReason::Steered)
@@ -2922,6 +2952,41 @@ impl RunStore {
                             None => note,
                         });
                     }
+                    // Work left in the primary checkout (a branch that did not
+                    // exist at launch, or commits nothing else accounts for) is
+                    // not a success, whatever the bound branch holds. Nothing
+                    // here refuses the lane.
+                    if decoded.outcome == Outcome::Succeeded {
+                        let stray = self.writer_stray(
+                            &record,
+                            writer,
+                            attempt,
+                            exit.scope,
+                            settlement
+                                .as_ref()
+                                .map_or_else(CancelToken::new, |driver| driver.cancellation()),
+                        );
+                        let finding = match stray {
+                            Ok(None) => None,
+                            Ok(Some(stray)) => {
+                                decoded.outcome = Outcome::ReviewRequired;
+                                stray_work = true;
+                                Some(stray.note)
+                            }
+                            Err(error) => {
+                                warn_stray_check(&error);
+                                None
+                            }
+                        };
+                        if let Some(finding) = finding {
+                            use std::io::Write as _;
+                            let _ = writeln!(std::io::stderr().lock(), "warning: {finding}");
+                            decoded.reason = Some(match decoded.reason.take() {
+                                Some(reason) => format!("{reason}; {finding}"),
+                                None => finding,
+                            });
+                        }
+                    }
                 }
                 Ok(_) => {}
                 Err(error) => {
@@ -3164,6 +3229,9 @@ impl RunStore {
         }
         if decoded.terminal_cause == Some(TerminalCause::EmptyWriterResult) {
             partial.push(PartialSignal::HandoffMissing);
+        }
+        if stray_work {
+            partial.push(PartialSignal::StrayWork);
         }
         // A read-only lane has no changes to prove, so its complete answer is
         // the proof. Only a writer must also report its work in a handoff.

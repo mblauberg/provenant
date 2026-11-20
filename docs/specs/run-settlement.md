@@ -209,6 +209,42 @@ A missing required writer handoff seals `handoff_missing` and goes to the chair;
 - Why: all readers need the same cause for the next decision; host stops must
   preserve valid handoffs and never count as negative provider-quality evidence.
 
+## Stray lane work
+
+A writer's work is the commits on its bound branch. Launch records the primary
+checkout's branch and every local and remote-tracking ref tip (`refs/heads/*`,
+`refs/remotes/*`). At settlement, once the writer's terminal check passes, the
+host flags stray work only when either holds:
+- (a) the primary checkout now sits on a branch that did not exist at launch;
+- (b) commits are reachable from the primary's HEAD or from a new or advanced
+  local branch that are reachable from none of the launch tips, the current tips
+  of the remote-tracking refs that existed at launch, or the HEAD of any linked
+  worktree other than the primary (which covers the bound branch and other
+  lanes' branches). One `git rev-list --stdin` call decides this.
+
+Stray work does not succeed. The attempt settles `review_required` with the
+`stray_work` partial signal and settlement reason, whose graph outcome is
+failed so dependants stay held, whatever the bound branch holds. The reason names
+the stray branch or the commits, the branches they are on, the primary checkout
+and the bound worktree.
+
+Nothing else is reported: a primary checkout that merely moved is not a finding.
+No recorded position (a bare repository, or a record that could not be written)
+or a comparison that cannot run is no finding, and an unreadable comparison
+warns while the lane still settles. Only host Git facts decide this; the handoff
+is the lane's prose, so branch or head names in it are never parsed. A lane with
+uncommitted edits in its bound worktree keeps its `uncommitted` outcome, which
+already needs the chair.
+- Why: settlement said `succeeded` for a lane whose work sat on a stray branch
+  in the primary checkout while its bound worktree stayed at base (#3611). A
+  whole-HEAD comparison blamed lanes for a pull the owner ran during the attempt,
+  and missed a lane that committed in the primary and switched back. Fetched
+  remote-tracking tips and other worktrees' heads account for those ordinary
+  moves, while an owner commit or branch made in the primary checkout during an
+  attempt is still flagged, because Git cannot tell it from a lane's. The check
+  asks for review; it never refuses or stops a lane.
+- Owner: `crates/run/src/writer.rs`, `crates/run/src/holder.rs`
+
 ## Guardian loss proof
 
 `Recovery::after_guardian_loss` offers a separate same-boot recovery capability.
