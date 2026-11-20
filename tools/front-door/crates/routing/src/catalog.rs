@@ -1155,6 +1155,18 @@ fn defaults(_: Profile) -> &'static str {
 /// Enforced model policy restrictions, including a retired schedule key in a
 /// restricting rule, are a boundary; other routing input recovers.
 pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::new("model_exclusions", "array"),
+    FieldMetadata::new("model_choices", "array"),
+    FieldMetadata::new("model_policy", "table"),
+    FieldMetadata::new("writer_advisory", "table"),
+    FieldMetadata::new("suppress_opus_writer_warning", "bool"),
+    FieldMetadata::new("capacity_cooldown_seconds", "int"),
+    FieldMetadata::new("depletion", "table"),
+    FieldMetadata::new("routes", "table"),
+    FieldMetadata::new("pools", "table"),
+    FieldMetadata::new("pacing_reserve", "table"),
+    FieldMetadata::new("pacing_overrides", "array"),
+    FieldMetadata::new("opencode_go", "table"),
     FieldMetadata::new("model_policy.defaults.cache.read_share_target", "float"),
     FieldMetadata::new("model_policy.defaults.cache.price_multiplier", "float"),
     FieldMetadata::new("model_policy.defaults.cache.read_ratio", "float"),

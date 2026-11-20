@@ -53,6 +53,7 @@ mod settlement;
 mod staging_gc;
 mod state_handoff;
 mod status_wait;
+mod stranded_work;
 mod target_seed_build;
 mod usage;
 mod verify;

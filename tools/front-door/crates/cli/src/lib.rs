@@ -7,6 +7,7 @@ pub mod check;
 pub mod ci;
 pub mod cloud;
 pub mod config_reads;
+pub mod config_shape;
 pub mod console;
 pub mod domains;
 pub mod external_contract;
@@ -1281,6 +1282,21 @@ mod tests {
             "--worktree",
             ".",
         ]);
+    }
+
+    #[test]
+    fn run_accepts_an_explicit_local_read_only_source() {
+        let invocation = valid(&["run", "task", "Review the tree", "--source", "local"]);
+        let Command::Run(request) = invocation.command else {
+            panic!("expected run");
+        };
+        assert_eq!(request.source.as_deref(), Some("local"));
+        let invocation = valid(&["run", "task", "Review the tree", "--source", "upstream"]);
+        let Command::Run(request) = invocation.command else {
+            panic!("expected run");
+        };
+        assert_eq!(request.source.as_deref(), Some("upstream"));
+        invalid(&["run", "task", "Review the tree", "--source", "elsewhere"]);
     }
 
     #[test]

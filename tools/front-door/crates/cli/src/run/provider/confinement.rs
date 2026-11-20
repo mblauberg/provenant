@@ -1665,8 +1665,22 @@ pub(super) fn read_only_plan(
 /// warnings. The lane reads `source`: the `--worktree` checkout, or the caller's
 /// checkout when none is named. Absent or unusable Git data yields no warning.
 pub(in crate::run) fn read_only_checkout_warning(state: &Path, source: &Path) -> Option<String> {
+    let selected = read_only_source_ref(state, source)?;
+    Some(crate::run::read_only_local_checkout_warning(
+        source, &selected,
+    ))
+}
+
+/// The fetched upstream head a stale read-only checkout should review instead
+/// of its own working tree. This is advisory: missing or unusable Git data
+/// yields no pin, so the launch keeps its existing local-source behaviour.
+pub(in crate::run) fn read_only_source_ref(
+    state: &Path,
+    source: &Path,
+) -> Option<crate::run::ReadOnlySourceRef> {
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_os::exec::SystemExecutor;
+    use std::io::Write;
 
     let git = provenant_os::git::git_executable()?;
     let utility_home = host_git_home(state).ok()?;
@@ -1689,55 +1703,210 @@ pub(in crate::run) fn read_only_checkout_warning(state: &Path, source: &Path) ->
     .ok()
     .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
     .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok())?;
-    let count = commits_behind_default(&executor, &repo, &utility, budget, &cancel, head)?;
-    Some(format!(
-        "{} is {count} commit{} behind origin's default branch; read-only lane will read {head}",
-        source.display(),
-        if count == 1 { "" } else { "s" }
-    ))
+    let (commit, reference) = configured_upstream(&executor, &repo, &utility, budget, &cancel)
+        .or_else(|| {
+            let fallback = default_upstream(&executor, &repo, &utility, budget, &cancel)?;
+            // The branch's own tracking configuration could not be resolved, so
+            // the remote's default branch is only an advisory stand-in.
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: read-only source could not resolve this branch's configured upstream; using {} instead, which may not track this checkout",
+                fallback.1
+            );
+            Some(fallback)
+        })?;
+    let behind = commits_behind(&executor, &repo, &utility, budget, &cancel, head, commit)?;
+    (behind > 0).then_some(crate::run::ReadOnlySourceRef {
+        commit,
+        reference,
+        behind,
+        head,
+    })
 }
 
-/// Compare `head` with the remote's default branch as last fetched. This never
-/// fetches. The remote is asked only when no `origin/HEAD` is recorded, and only
-/// within the utility budget.
-fn commits_behind_default(
+/// Resolve a fetched ref to its commit and keep the exact ref that named it.
+fn resolve_upstream_ref(
+    executor: &dyn provenant_os::exec::Executor,
+    repo: &provenant_confinement::ReadOnlyRepo,
+    utility: &provenant_confinement::UtilityRuntime,
+    budget: provenant_confinement::UtilityBudget,
+    cancel: &provenant_core::CancelToken,
+    reference: &str,
+) -> Option<(provenant_core::GitOid, String)> {
+    use provenant_confinement::{GitRead, run_read_utility};
+    use provenant_os::exec::Termination;
+
+    let out = run_read_utility(
+        executor,
+        GitRead::ResolveRevision {
+            revision: provenant_confinement::repo::GitRevision::new(reference).ok()?,
+        },
+        repo,
+        utility,
+        budget,
+        cancel,
+    )
+    .ok()?;
+    if out.termination != Termination::Exit(0) {
+        return None;
+    }
+    let oid =
+        provenant_core::GitOid::parse(std::str::from_utf8(&out.stdout.bytes).ok()?.trim()).ok()?;
+    Some((oid, reference.to_owned()))
+}
+
+/// The short name of the checked-out branch, when HEAD is symbolic.
+fn current_branch(
+    executor: &dyn provenant_os::exec::Executor,
+    repo: &provenant_confinement::ReadOnlyRepo,
+    utility: &provenant_confinement::UtilityRuntime,
+    budget: provenant_confinement::UtilityBudget,
+    cancel: &provenant_core::CancelToken,
+) -> Option<String> {
+    use provenant_confinement::{GitRead, run_read_utility};
+    use provenant_os::exec::Termination;
+
+    let out = run_read_utility(
+        executor,
+        GitRead::SymbolicRevision {
+            revision: provenant_confinement::repo::GitRevision::new("HEAD").ok()?,
+        },
+        repo,
+        utility,
+        budget,
+        cancel,
+    )
+    .ok()?;
+    if out.termination != Termination::Exit(0) {
+        return None;
+    }
+    std::str::from_utf8(&out.stdout.bytes)
+        .ok()?
+        .trim()
+        .strip_prefix("refs/heads/")
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_owned)
+}
+
+/// One `branch.<name>.remote` or `branch.<name>.merge` value from the verified
+/// repository config. A missing or non-zero result is no upstream, never a
+/// reason to guess.
+fn branch_config_value(
+    executor: &dyn provenant_os::exec::Executor,
+    repo: &provenant_confinement::ReadOnlyRepo,
+    utility: &provenant_confinement::UtilityRuntime,
+    budget: provenant_confinement::UtilityBudget,
+    cancel: &provenant_core::CancelToken,
+    key: &str,
+) -> Option<String> {
+    use provenant_confinement::{GitRead, run_read_utility};
+    use provenant_os::exec::Termination;
+
+    let out = run_read_utility(
+        executor,
+        GitRead::ConfigValue {
+            key: key.to_owned(),
+        },
+        repo,
+        utility,
+        budget,
+        cancel,
+    )
+    .ok()?;
+    if out.termination != Termination::Exit(0) {
+        return None;
+    }
+    let value = std::str::from_utf8(&out.stdout.bytes).ok()?.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// The fetched remote-tracking head configured for the current branch, by way
+/// of `branch.<name>.remote` and `branch.<name>.merge`. A detached HEAD, a
+/// local-only upstream or an unfetched ref yields no pin here.
+fn configured_upstream(
+    executor: &dyn provenant_os::exec::Executor,
+    repo: &provenant_confinement::ReadOnlyRepo,
+    utility: &provenant_confinement::UtilityRuntime,
+    budget: provenant_confinement::UtilityBudget,
+    cancel: &provenant_core::CancelToken,
+) -> Option<(provenant_core::GitOid, String)> {
+    use provenant_confinement::repo::GitRefName;
+
+    let branch = current_branch(executor, repo, utility, budget, cancel)?;
+    let remote = branch_config_value(
+        executor,
+        repo,
+        utility,
+        budget,
+        cancel,
+        &format!("branch.{branch}.remote"),
+    )?;
+    let merge = branch_config_value(
+        executor,
+        repo,
+        utility,
+        budget,
+        cancel,
+        &format!("branch.{branch}.merge"),
+    )?;
+    let short = merge.strip_prefix("refs/heads/")?;
+    let name = GitRefName::remote_tracking(format!("{remote}/{short}")).ok()?;
+    resolve_upstream_ref(executor, repo, utility, budget, cancel, name.as_str())
+}
+
+/// The remote's default branch as last fetched, with the exact ref that named
+/// it. Advisory fallback only: this never fetches. The remote is asked only
+/// when no `origin/HEAD` is recorded, and only within the utility budget.
+fn default_upstream(
+    executor: &dyn provenant_os::exec::Executor,
+    repo: &provenant_confinement::ReadOnlyRepo,
+    utility: &provenant_confinement::UtilityRuntime,
+    budget: provenant_confinement::UtilityBudget,
+    cancel: &provenant_core::CancelToken,
+) -> Option<(provenant_core::GitOid, String)> {
+    use provenant_confinement::utility::advertised_default_branch;
+
+    resolve_upstream_ref(
+        executor,
+        repo,
+        utility,
+        budget,
+        cancel,
+        "refs/remotes/origin/HEAD",
+    )
+    .or_else(|| {
+        let branch =
+            advertised_default_branch(executor, repo, utility, "origin", budget, cancel).ok()??;
+        resolve_upstream_ref(
+            executor,
+            repo,
+            utility,
+            budget,
+            cancel,
+            &format!("refs/remotes/origin/{}", branch.short_name()),
+        )
+    })
+}
+
+/// How many commits of `head` are not in `base`, as last fetched. Zero means
+/// the checkout is level with or ahead of the default branch.
+fn commits_behind(
     executor: &dyn provenant_os::exec::Executor,
     repo: &provenant_confinement::ReadOnlyRepo,
     utility: &provenant_confinement::UtilityRuntime,
     budget: provenant_confinement::UtilityBudget,
     cancel: &provenant_core::CancelToken,
     head: provenant_core::GitOid,
+    base: provenant_core::GitOid,
 ) -> Option<u64> {
-    use provenant_confinement::{GitRead, run_read_utility, utility::advertised_default_branch};
+    use provenant_confinement::{GitRead, run_read_utility};
     use provenant_os::exec::Termination;
 
-    let resolve = |reference: &str| {
-        let out = run_read_utility(
-            executor,
-            GitRead::ResolveRevision {
-                revision: provenant_confinement::repo::GitRevision::new(reference).ok()?,
-            },
-            repo,
-            utility,
-            budget,
-            cancel,
-        )
-        .ok()?;
-        if out.termination != Termination::Exit(0) {
-            return None;
-        }
-        provenant_core::GitOid::parse(std::str::from_utf8(&out.stdout.bytes).ok()?.trim()).ok()
-    };
-    let default = resolve("refs/remotes/origin/HEAD").or_else(|| {
-        let branch =
-            advertised_default_branch(executor, repo, utility, "origin", budget, cancel).ok()??;
-        resolve(&format!("refs/remotes/origin/{}", branch.short_name()))
-    })?;
     let behind = run_read_utility(
         executor,
         GitRead::AncestorCount {
             base: head,
-            head: default,
+            head: base,
         },
         repo,
         utility,
@@ -1753,7 +1922,6 @@ fn commits_behind_default(
         .trim()
         .parse::<u64>()
         .ok()
-        .filter(|count| *count > 0)
 }
 
 /// Publishing hands the lane the GitHub credential. It is on by default for

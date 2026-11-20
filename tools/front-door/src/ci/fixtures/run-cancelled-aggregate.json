@@ -1,0 +1,63 @@
+{
+  "total_count": 8,
+  "jobs": [
+    {
+      "id": 901,
+      "name": "Select CI suites",
+      "status": "completed",
+      "conclusion": "success",
+      "steps": []
+    },
+    {
+      "id": 902,
+      "name": "Rust front door (1/3)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "steps": []
+    },
+    {
+      "id": 903,
+      "name": "Rust front door (2/3)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "steps": []
+    },
+    {
+      "id": 904,
+      "name": "Rust front door (3/3)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "steps": []
+    },
+    {
+      "id": 905,
+      "name": "Rust macOS tests (custody)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "steps": []
+    },
+    {
+      "id": 906,
+      "name": "Rust macOS tests (dispatch)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "steps": []
+    },
+    {
+      "id": 907,
+      "name": "Docs drift",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "steps": []
+    },
+    {
+      "id": 908,
+      "name": "ci-status",
+      "status": "completed",
+      "conclusion": "failure",
+      "steps": [
+        { "name": "Require every needed job to succeed", "conclusion": "failure" }
+      ]
+    }
+  ]
+}

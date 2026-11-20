@@ -1,0 +1,62 @@
+# Trimmed, realistic shape of .github/workflows/ci.yml: the aggregate gate
+# declares its members by job key, and matrix members carry display-name
+# templates that the runner expands into the names the jobs API reports.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scope:
+    name: Select CI suites
+    runs-on: ubuntu-latest
+    steps:
+      - name: Select CI suites
+        run: scripts/select-ci-suites
+
+  rust:
+    name: Rust front door (${{ matrix.partition }}/3)
+    needs: [scope]
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3]
+    steps:
+      - name: Run native tests
+        run: cargo nextest run --workspace
+
+  rust-macos-tests:
+    name: Rust macOS tests (${{ matrix.group }})
+    needs: [scope]
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [custody, dispatch]
+    steps:
+      - name: Run native tests
+        run: cargo nextest run --workspace
+
+  docs-drift:
+    name: Docs drift
+    if: github.event_name == 'push'
+    steps:
+      - name: Check documentation truth
+        run: scripts/check-doc-truth
+
+  ci-status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - scope
+      - rust
+      - rust-macos-tests
+    if: always()
+    steps:
+      - name: Require every needed job to succeed
+        run: scripts/check-ci-status

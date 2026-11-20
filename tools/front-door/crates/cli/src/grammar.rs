@@ -698,6 +698,9 @@ pub struct GraphRunArgs {
     /// Access for a plain task; writer targets imply worktree-write
     #[arg(long, value_parser = ["read-only", "worktree-write"])]
     pub mode: Option<String>,
+    /// Tree a read-only task reads: the fetched upstream head, or the local checkout
+    #[arg(long, value_parser = ["upstream", "local"])]
+    pub source: Option<String>,
     /// Existing writer worktree
     #[arg(long, conflicts_with = "branch")]
     pub worktree: Option<PathBuf>,
