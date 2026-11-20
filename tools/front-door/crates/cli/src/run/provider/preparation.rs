@@ -4312,14 +4312,21 @@ pub(super) fn prepare_candidates_inner(
             &plan,
         );
         if !lane_access.access.is_isolated() || !sandbox.effective {
-            let expected = match adapter.id() {
-                "codex" | "cursor" => Some("login"),
-                "agy" => Some("keychain"),
-                "claude" => None,
-                _ => None,
-            };
-            if matches!(adapter.id(), "codex" | "cursor" | "agy" | "claude")
-                && (adapter.id() == "claude"
+            // The native-authentication warning belongs to the adapters whose
+            // host profile reads the provider's own login. Take that set and
+            // its expected mechanism from the registry rather than restating
+            // adapter names here.
+            let native_auth = adapter_spec.is_some_and(|spec| {
+                spec.id == provenant_records::Harness::Codex
+                    || spec.id == provenant_records::Harness::Cursor
+                    || spec.id == provenant_records::Harness::Agy
+                    || spec.id == provenant_records::Harness::Claude
+            });
+            let claude_native =
+                adapter_spec.is_some_and(|spec| spec.id == provenant_records::Harness::Claude);
+            let expected = adapter_spec.and_then(|spec| spec.authentication);
+            if native_auth
+                && (claude_native
                     || plan.permissions().selected_authentication.as_deref() != expected)
             {
                 let detail = format!(
