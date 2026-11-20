@@ -271,9 +271,15 @@ impl HostView {
 }
 
 pub fn admission_holder_description(h: &provenant_os::admission::HeldInfo) -> String {
-    match &h.attempt_id {
+    let base = match &h.attempt_id {
         Some(attempt) => format!("slot {}: attempt {} (pid {})", h.slot, attempt, h.pid),
         None => format!("slot {}: pid {}", h.slot, h.pid),
+    };
+    match &h.command {
+        // The holder's masked argv names the command actually blocking the
+        // slot, so a lock wait is distinguishable from a hung writer.
+        Some(command) => format!("{base} running {command}"),
+        None => base,
     }
 }
 
@@ -327,6 +333,22 @@ fn project_lane_inner(
         } else {
             None
         };
+    // The shim records the masked argv before publishing a wait or hold. A
+    // lane that is waiting names the command it waits to run; a lane that owns
+    // the slot names the command it is running now.
+    let waiting_command = admission_wait
+        .as_ref()
+        .and_then(|wait_info| wait_info.command.clone());
+    let holding_command = || {
+        let attempt = lane.attempt_id.to_string();
+        lane_holders
+            .iter()
+            .find(|holder| holder.attempt_id.as_deref() == Some(attempt.as_str()))
+            .and_then(|holder| holder.command.clone())
+    };
+    let child_command = host_artifacts
+        .then(|| waiting_command.clone().or_else(holding_command))
+        .flatten();
     let waiting_for = admission_wait
         .map(|wait_info| {
             let now_sec = now_wall.map_or_else(
@@ -391,6 +413,16 @@ fn project_lane_inner(
         })
         .flatten()
         .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok());
+    // The directory is a host-local artefact path: peer rows project no path.
+    let attempt_directory = host_artifacts
+        .then(|| root.join("attempts").join(lane.attempt_id.to_string()))
+        .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok());
+    // There is no wall-clock column on a run event; the newest observed
+    // activity is the last output, else the launch, else the queue time.
+    let last_event_at = lane
+        .last_output_at
+        .or(lane.started_at)
+        .unwrap_or(lane.queued_at);
     let retained = (host_artifacts
         && lane.settlement_receipts.as_ref().is_some_and(|receipts| {
             matches!(
@@ -417,6 +449,9 @@ fn project_lane_inner(
                 .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok()),
             waiting_for,
             lane_class: wait.map(|wait| wait.lane_class.as_str().to_owned()),
+            last_event_at: Some(last_event_at),
+            attempt_directory,
+            child_command,
             overdue: now_wall.map(|now| run::overdue_at(lane, now)),
             stale,
             presence,

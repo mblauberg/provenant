@@ -581,6 +581,12 @@ pub(crate) fn render_graph_status(rows: &[Value]) -> String {
         let name = attempt.map_or_else(|| plain(&node["id"]), |attempt| plain(&attempt["id"]));
         let model = attempt.map_or_else(|| "-".to_owned(), row_model);
         human.push_str(&status_line(&name, node, Some(&model)));
+        // Liveness detail belongs only to the full human view. The compact
+        // view renders the summary instead of this text, and JSON carries the
+        // same fields on the attempt row itself.
+        if let Some(attempt) = attempt {
+            human.push_str(&liveness_detail(attempt));
+        }
     }
     if lines.len() > LISTING_ROWS {
         let mut omitted = std::collections::BTreeMap::<String, usize>::new();
@@ -605,6 +611,45 @@ pub(crate) fn render_graph_status(rows: &[Value]) -> String {
 
 fn plain(value: &Value) -> String {
     provenant_fabric_runtime::hosts::plain_text(value.as_str().unwrap_or(""), 1024)
+}
+
+/// One bounded detail line for a live attempt in `status --full`: its newest
+/// observed event, host-local attempt directory, masked current child command
+/// and known wait reason. Absent observations are simply omitted, never guessed.
+fn liveness_detail(attempt: &Value) -> String {
+    if !StateRank::of(attempt["state"].as_str().unwrap_or("")).is_live() {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    if attempt["last_event_at"].is_string() {
+        parts.push(format!("last event {}", plain(&attempt["last_event_at"])));
+    }
+    if let Ok(path) = serde_json::from_value::<provenant_records::StructuredPathWire>(
+        attempt["attempt_directory"].clone(),
+    )
+    .and_then(|path| {
+        path.to_path_buf()
+            .map_err(|_| serde_json::Error::io(std::io::Error::other("host-only path")))
+    }) {
+        parts.push(format!(
+            "attempt {}",
+            plain(&json!(path.display().to_string()))
+        ));
+    }
+    if attempt["child_command"].is_string() {
+        parts.push(format!("command {}", plain(&attempt["child_command"])));
+    }
+    if attempt["waiting_for"].is_string() {
+        parts.push(format!("wait {}", plain(&attempt["waiting_for"])));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    let line = format!("  live: {}", parts.join("; "));
+    format!(
+        "{}\n",
+        provenant_cli::bounded_text(&line, provenant_cli::limits::SUMMARY_ROW_BYTES * 2)
+    )
 }
 
 /// The model an attempt row ran on, as `PROVIDER/MODEL`, or `-` when unknown.
@@ -3734,6 +3779,54 @@ mod tests {
     use provenant_fabric_runtime::graph::{
         GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
     };
+
+    // Spec: docs/specs/cli.md#status-selection
+    #[test]
+    fn full_status_liveness_detail_names_event_directory_command_and_wait() {
+        let attempt = json!({
+            "state": "running",
+            "last_event_at": "2026-11-20T10:00:00.000000Z",
+            "attempt_directory": {
+                "kind": "path",
+                "root": "/",
+                "relative": {"encoding": "utf8", "path": "state/attempts/abc"}
+            },
+            "child_command": "cargo build --release",
+            "waiting_for": "waiting for a host build slot (12s)"
+        });
+        let detail = liveness_detail(&attempt);
+        assert!(
+            detail.contains("last event 2026-11-20T10:00:00.000000Z"),
+            "{detail}"
+        );
+        assert!(detail.contains("attempt /state/attempts/abc"), "{detail}");
+        assert!(detail.contains("command cargo build --release"), "{detail}");
+        assert!(
+            detail.contains("wait waiting for a host build slot (12s)"),
+            "{detail}"
+        );
+
+        let settled = json!({"state": "succeeded", "child_command": "cargo build"});
+        assert!(liveness_detail(&settled).is_empty());
+    }
+
+    #[test]
+    fn admission_holder_reason_names_the_blocking_command() {
+        let holder = provenant_os::admission::HeldInfo {
+            class: "build".into(),
+            slot: 2,
+            pid: 42,
+            start_unix_seconds: 0,
+            attempt_id: Some("holder-attempt".into()),
+            command: Some("cargo build --release".into()),
+        };
+        let description = provenant_cli::run::admission_holder_description(&holder);
+        assert!(description.contains("holder-attempt"), "{description}");
+        assert!(
+            description.contains("running cargo build --release"),
+            "{description}"
+        );
+    }
 
     #[test]
     fn composite_output_preserves_every_public_typed_export() {
