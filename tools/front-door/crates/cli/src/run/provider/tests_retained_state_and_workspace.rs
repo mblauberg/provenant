@@ -2012,7 +2012,14 @@ fn live_child_source_uses_its_selected_directory_and_rechecks_authority()
         let mut denied = task.clone();
         denied.access.source_root = Some(root.clone());
         denied.access.source_identity = Some(source_identity(root)?);
-        assert!(source_cwd(&registry, &denied).is_err());
+        // A state root is still refused at the source boundary. A credential
+        // root is now an access-aware preparation warning under host access,
+        // not a pre-route source_cwd refusal.
+        if root == &state {
+            assert!(source_cwd(&registry, &denied).is_err());
+        } else {
+            assert_eq!(source_cwd(&registry, &denied)?, *root);
+        }
     }
     Ok(())
 }

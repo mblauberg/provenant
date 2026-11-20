@@ -92,7 +92,15 @@ impl CommitSourcePreparation {
             head: Some(head),
             source_head: None,
             base_ref: None,
-            profile: Default::default(),
+            profile: provenant_records::run::HarnessProfile {
+                knobs: [("lanes.access".into(), serde_json::json!("isolated"))].into(),
+                knob_sources: [(
+                    "lanes.access".into(),
+                    provenant_records::LimitSource::Launch,
+                )]
+                .into(),
+                ..Default::default()
+            },
             prompt_digest: provenant_records::CanonicalV1::file_digest(b"review fixture"),
             route: run::RequestedRoute::Model { required_family: None,
                 extra: Default::default(),

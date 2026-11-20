@@ -1902,10 +1902,19 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     for path in [&paths.scratch, &paths.temporary, &paths.provider_state] {
         fs::create_dir_all(path)?;
     }
-    let task: provenant_run::TaskRequest = serde_json::from_value(json!({
+    let mut task: provenant_run::TaskRequest = serde_json::from_value(json!({
         "prompt_digest":provenant_records::CanonicalV1::file_digest(b"fixture host-native"),
         "route":{"kind":"adapter","provider":"host-native","name":"ci-fixer"}, "account":"pro", "authority_digest":Digest::from_bytes([4;32]), "provider_timeout_seconds":20, "delivery_id":null
     }))?;
+    // The Claude token-pipe and redaction contract pinned below is isolated
+    // behaviour; host access uses native login and carries no secret input.
+    task.profile
+        .knobs
+        .insert("lanes.access".into(), serde_json::json!("isolated"));
+    task.profile.knob_sources.insert(
+        "lanes.access".into(),
+        provenant_records::LimitSource::Launch,
+    );
     let mut absent = task.clone();
     absent.route = provenant_run::RequestedRoute::Adapter {
         required_family: None,
@@ -2067,6 +2076,14 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     assert!(!rig.home.join(".cargo").exists());
     assert!(!rig.home.join(".rustup").exists());
     let cleanup = rig.process_cleanup();
+    // The fake account refresh and private-prompt contract below depend on
+    // isolated preparation; host access uses the native login instead.
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[knobs]\n'lanes.access'='isolated'\n"
+    )?;
     let account = rig.home.join(".claude-pro");
     if host_native {
         writeln!(

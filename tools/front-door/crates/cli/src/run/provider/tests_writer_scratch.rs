@@ -265,7 +265,19 @@ fn writer_preparation_steps(
         source_head: None,
         base_ref: None,
         profile: provenant_records::run::HarnessProfile {
-            knobs: [("lanes.publish".into(), serde_json::json!(false))].into(),
+            knobs: [
+                ("lanes.publish".into(), serde_json::json!(false)),
+                // These cases pin sandboxed isolated staging and the private
+                // Git-config-includes view; host access stages native state
+                // under HOME instead.
+                ("lanes.access".into(), serde_json::json!("isolated")),
+            ]
+            .into(),
+            knob_sources: [(
+                "lanes.access".into(),
+                provenant_records::LimitSource::Launch,
+            )]
+            .into(),
             ..Default::default()
         },
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),

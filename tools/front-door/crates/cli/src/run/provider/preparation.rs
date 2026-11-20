@@ -5915,7 +5915,7 @@ mod user_skills_tests {
                 selection_context: Default::default(),
                 diagnostics: Default::default(),
                 user_skills: true,
-                access: Default::default(),
+                access: provenant_records::LaneAccess::Isolated,
                 extra: Default::default(),
                 adapter: adapter.name.into(),
                 model: "fixture".into(),
