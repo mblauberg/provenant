@@ -32,6 +32,10 @@ const MAX_FETCH_STDERR: usize = 1024;
 const GIT_LOCK_MAX_ATTEMPTS: usize = 5;
 const GIT_LOCK_BACKOFF_START: Duration = Duration::from_millis(50);
 static GIT_LOCK_JITTER: AtomicU64 = AtomicU64::new(0);
+/// Bound each part of a Git-config-read cause. Paths and keys are names, not
+/// values; this keeps an error bounded and one line even when Git reports a
+/// long origin or an unexpected diagnostic.
+const CONFIG_CAUSE_BOUND: usize = 192;
 const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
 const GIT_COMMON: &[&str] = &[
@@ -59,6 +63,72 @@ const GIT_CONFIG_OVERRIDES: [(&str, &str); 13] = [
     ("core.fsmonitorHookVersion", "0"),
 ];
 
+/// A bounded, secret-free explanation of a failed Git configuration read.
+///
+/// It names the operation, the config file and the key or include directive
+/// involved, plus a bounded underlying diagnostic. Config *values* are never
+/// carried: keys and paths only, so a credential in a config file cannot leak
+/// through a refusal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitConfigCause {
+    /// Stable label for the read that failed.
+    pub operation: &'static str,
+    /// The config file or directory involved, when one is known.
+    pub file: Option<String>,
+    /// The key or include directive involved, never its value.
+    pub key: Option<String>,
+    /// Bounded underlying error, such as a Git exit status or parse failure.
+    pub detail: String,
+}
+
+impl GitConfigCause {
+    fn new(
+        operation: &'static str,
+        file: Option<&Path>,
+        key: Option<&str>,
+        detail: impl std::fmt::Display,
+    ) -> Self {
+        Self {
+            operation,
+            file: file.map(|path| cause_text(path.display())),
+            key: key.map(cause_text),
+            detail: cause_text(detail),
+        }
+    }
+}
+
+impl std::fmt::Display for GitConfigCause {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.operation)?;
+        if let Some(file) = &self.file {
+            write!(formatter, " on {file}")?;
+        }
+        if let Some(key) = &self.key {
+            write!(formatter, " for key {key}")?;
+        }
+        if !self.detail.is_empty() {
+            write!(formatter, ": {}", self.detail)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for GitConfigCause {}
+
+fn cause_text(value: impl std::fmt::Display) -> String {
+    let raw = value.to_string();
+    let clean: String = raw
+        .chars()
+        .map(|character| if character.is_control() { ' ' } else { character })
+        .collect();
+    if clean.chars().count() <= CONFIG_CAUSE_BOUND {
+        return clean;
+    }
+    let mut bounded: String = clean.chars().take(CONFIG_CAUSE_BOUND).collect();
+    bounded.push('…');
+    bounded
+}
+
 #[derive(Debug, Error)]
 pub enum UtilityError {
     #[error("invalid pinned {tool} executable")]
@@ -69,8 +139,11 @@ pub enum UtilityError {
     InvalidBudget,
     #[error("utility operation has an invalid or unsupported value")]
     InvalidOperationValue,
-    #[error("repository Git configuration could not be read")]
-    UnreadableGitConfiguration,
+    #[error("repository Git configuration could not be read: {cause}")]
+    UnreadableGitConfiguration {
+        #[source]
+        cause: GitConfigCause,
+    },
     #[error(
         "Git configuration key {key} comes from {file}, a location lanes can write, and cannot be neutralised; remove that include or move the file out of the project"
     )]
@@ -112,6 +185,19 @@ pub enum UtilityError {
 }
 
 impl UtilityError {
+    /// Build a config-read failure whose cause names only the operation, file
+    /// and key. Callers must never pass config values as `detail`.
+    pub(crate) fn unreadable_config(
+        operation: &'static str,
+        file: Option<&Path>,
+        key: Option<&str>,
+        detail: impl std::fmt::Display,
+    ) -> Self {
+        Self::UnreadableGitConfiguration {
+            cause: GitConfigCause::new(operation, file, key, detail),
+        }
+    }
+
     /// The error's fixed text, for a variant whose text names no path, value,
     /// Git output or source error. Edges may disclose it as a failure's cause.
     pub fn safe_cause(&self) -> Option<&'static str> {
@@ -119,7 +205,9 @@ impl UtilityError {
             Self::InvalidHome => "utility home must be an absolute private directory",
             Self::InvalidBudget => "utility budget is outside its supported bounds",
             Self::InvalidOperationValue => "utility operation has an invalid or unsupported value",
-            Self::UnreadableGitConfiguration => "repository Git configuration could not be read",
+            Self::UnreadableGitConfiguration { .. } => {
+                "repository Git configuration could not be read"
+            }
             Self::AttributeSourceUnsupported => {
                 "pinned Git does not support a verified attribute source"
             }
@@ -540,7 +628,7 @@ impl UtilityRuntime {
         cancel: &CancelToken,
     ) -> Result<crate::worktrees::ProjectLayout, UtilityError> {
         if binding.common_dir() != repo.common_git_dir() {
-            return Err(UtilityError::UnreadableGitConfiguration);
+            return Err(UtilityError::unreadable_config("verify bound repository common directory", Some(binding.common_dir()), Some("core.bare"), "bound common directory does not match the repository"));
         }
         self.project_layout_for_repository_with_binding(
             executor,
@@ -561,35 +649,35 @@ impl UtilityRuntime {
     ) -> Result<crate::worktrees::ProjectLayout, UtilityError> {
         if repo.is_bare() {
             let location = provenant_config::ProjectLocation::new(repo.common_git_dir())
-                .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+                .map_err(|error| UtilityError::unreadable_config("resolve bare project location", Some(repo.common_git_dir()), None, error))?;
             let binding = match bound {
                 Some(binding) => binding.clone(),
                 None if self.host_state_available => {
                     provenant_config::lookup_project_at_state(&self.host_state, &location)
-                        .map_err(|_| UtilityError::UnreadableGitConfiguration)?
-                        .ok_or(UtilityError::UnreadableGitConfiguration)?
+                        .map_err(|error| UtilityError::unreadable_config("look up bare project binding", Some(&self.host_state), None, error))?
+                        .ok_or_else(|| UtilityError::unreadable_config("look up bare project binding", Some(&self.host_state), None, "no registered project binding"))?
                 }
-                None => return Err(UtilityError::UnreadableGitConfiguration),
+                None => return Err(UtilityError::unreadable_config("resolve bare project location", None, None, "host project state is unavailable")),
             };
             if binding.common_dir() != repo.common_git_dir() {
-                return Err(UtilityError::UnreadableGitConfiguration);
+                return Err(UtilityError::unreadable_config("verify bare project binding", Some(binding.common_dir()), None, "bound common directory does not match the repository"));
             }
             return self.project_layout_for_binding(executor, &binding, budget, cancel);
         }
         if repo.is_primary_checkout() {
             return crate::worktrees::ProjectLayout::from_repo(repo, true)
-                .map_err(|_| UtilityError::UnreadableGitConfiguration);
+                .map_err(|error| UtilityError::unreadable_config("read primary checkout project layout", Some(repo.root_path()), None, error));
         }
 
         let environment = crate::worktrees::project_layout_git_environment();
         let git = self.git.program()?;
         let location = provenant_config::ProjectLocation::new(repo.common_git_dir().to_path_buf())
-            .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+            .map_err(|error| UtilityError::unreadable_config("resolve linked project location", Some(repo.common_git_dir()), None, error))?;
         let binding = if let Some(binding) = bound {
             Some(binding.clone())
         } else if self.host_state_available {
             provenant_config::lookup_project_at_state(&self.host_state, &location)
-                .map_err(|_| UtilityError::UnreadableGitConfiguration)?
+                .map_err(|error| UtilityError::unreadable_config("look up linked project binding", Some(&self.host_state), None, error))?
         } else {
             None
         };
@@ -603,14 +691,14 @@ impl UtilityRuntime {
                     budget.timeout,
                     cancel,
                 )
-                .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+                .map_err(|error| UtilityError::unreadable_config("read bound project primary layout", Some(binding.common_dir()), None, error))?;
                 if let Some(primary) = primary {
                     Ok(primary)
                 } else {
                     let bootstrap = self.bootstrap_lane_roots(repo)?;
                     let trusted_bare = crate::worktrees::RepoFacts::default()
                         .bare_setting_with_roots(repo, executor, self, budget, cancel, &bootstrap)
-                        .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+                        .map_err(|error| UtilityError::unreadable_config("classify bound local core.bare", Some(&repo.common_git_dir().join("config")), Some("core.bare"), error))?;
                     crate::worktrees::project_layout_for_binding_with_bare_setting(
                         executor,
                         &binding,
@@ -626,7 +714,7 @@ impl UtilityRuntime {
                 let bootstrap = self.bootstrap_lane_roots(repo)?;
                 let trusted_bare = crate::worktrees::RepoFacts::default()
                     .bare_setting_with_roots(repo, executor, self, budget, cancel, &bootstrap)
-                    .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+                    .map_err(|error| UtilityError::unreadable_config("classify local core.bare", Some(&repo.common_git_dir().join("config")), Some("core.bare"), error))?;
                 crate::worktrees::project_layout_for_common_with_bare_setting(
                     executor,
                     repo.common_git_dir(),
@@ -638,7 +726,7 @@ impl UtilityRuntime {
                 )
             }
         }
-        .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+        .map_err(|error| UtilityError::unreadable_config("resolve common directory project layout", Some(repo.common_git_dir()), None, error))?;
         Ok(layout)
     }
 
@@ -662,13 +750,13 @@ impl UtilityRuntime {
             budget.timeout,
             cancel,
         )
-        .map_err(|_| UtilityError::UnreadableGitConfiguration)?
+        .map_err(|error| UtilityError::unreadable_config("read bound project primary layout", Some(binding.common_dir()), None, error))?
         {
             return Ok(primary);
         }
 
         let common = provenant_os::fs::canonicalize(binding.common_dir())
-            .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+            .map_err(|error| UtilityError::unreadable_config("canonicalize bound common directory", Some(binding.common_dir()), None, error))?;
         let identity = Directory::open_anchor(&common)?.metadata()?;
         let inventory = crate::worktrees::RepoFacts::default()
             .discover_worktree_inventory(
@@ -682,9 +770,9 @@ impl UtilityRuntime {
                 )
                 .with_bare_setting(false),
             )
-            .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+            .map_err(|error| UtilityError::unreadable_config("enumerate worktree inventory", Some(&common), None, error))?;
         for entry in crate::worktrees::parse_worktree_list(&inventory)
-            .map_err(|_| UtilityError::UnreadableGitConfiguration)?
+            .map_err(|error| UtilityError::unreadable_config("parse worktree inventory", Some(&common), None, error))?
         {
             if entry.bare {
                 continue;
@@ -718,7 +806,7 @@ impl UtilityRuntime {
             budget.timeout,
             cancel,
         )
-        .map_err(|_| UtilityError::UnreadableGitConfiguration)
+        .map_err(|error| UtilityError::unreadable_config("resolve bare bound project layout", Some(binding.common_dir()), None, error))
     }
 
     /// Resolve a common Git directory when the caller has no checkout. A
@@ -732,13 +820,13 @@ impl UtilityRuntime {
         cancel: &CancelToken,
     ) -> Result<crate::worktrees::ProjectLayout, UtilityError> {
         let common = provenant_os::fs::canonicalize(common)
-            .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+            .map_err(|error| UtilityError::unreadable_config("canonicalize common directory", Some(common), None, error))?;
         if self.host_state_available {
             let location = provenant_config::ProjectLocation::new(common.clone())
-                .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+                .map_err(|error| UtilityError::unreadable_config("resolve project location", Some(&common), None, error))?;
             if let Some(binding) =
                 provenant_config::lookup_project_at_state(&self.host_state, &location)
-                    .map_err(|_| UtilityError::UnreadableGitConfiguration)?
+                    .map_err(|error| UtilityError::unreadable_config("look up project binding", Some(&self.host_state), None, error))?
             {
                 return self.project_layout_for_binding(executor, &binding, budget, cancel);
             }
@@ -757,7 +845,7 @@ impl UtilityRuntime {
             budget.timeout,
             cancel,
         )
-        .map_err(|_| UtilityError::UnreadableGitConfiguration)
+        .map_err(|error| UtilityError::unreadable_config("resolve unbound project layout", Some(&common), None, error))
     }
 
     fn bare_setting_for_common(
@@ -790,9 +878,12 @@ impl UtilityRuntime {
             .map(OsString::from),
         );
         let environment = crate::worktrees::project_layout_git_environment();
-        let outcome = validate_outcome(self.git.execute(executor, || {
-            exec_options(&argv, common, budget, &environment, None, Some(cancel))
-        })?)?;
+        let outcome = retry_git_lock_contention(budget, cancel, || true, |attempt_budget| {
+            let options = || {
+                exec_options(&argv, common, attempt_budget, &environment, None, Some(cancel))
+            };
+            validate_outcome(self.git.execute(executor, options)?)
+        })?;
         match outcome.termination {
             Termination::Exit(0) => crate::worktrees::classify_bare_origins_at_root(
                 common,
@@ -800,11 +891,20 @@ impl UtilityRuntime {
                 roots,
                 &BTreeSet::new(),
             )
-            .map_err(|_| UtilityError::UnreadableGitConfiguration),
+            .map_err(|error| UtilityError::unreadable_config("classify core.bare origins", Some(&common.join("config")), Some("core.bare"), error)),
             Termination::Exit(1) => Ok(None),
-            Termination::Exit(_) | Termination::Signal(_) => {
-                Err(UtilityError::UnreadableGitConfiguration)
-            }
+            Termination::Exit(status) => Err(UtilityError::unreadable_config(
+                "read local core.bare",
+                Some(&common.join("config")),
+                Some("core.bare"),
+                format!("git config exited with status {status}"),
+            )),
+            Termination::Signal(signal) => Err(UtilityError::unreadable_config(
+                "read local core.bare",
+                Some(&common.join("config")),
+                Some("core.bare"),
+                format!("git config was signalled with {signal}"),
+            )),
         }
     }
 
@@ -899,9 +999,9 @@ impl UtilityRuntime {
         self.revalidate()?;
         let layout = self.project_layout_for_binding(executor, binding, budget, cancel)?;
         let common = canonicalize(binding.common_dir())
-            .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+            .map_err(|error| UtilityError::unreadable_config("canonicalize bound common directory", Some(binding.common_dir()), None, error))?;
         if layout.project().is_some() || layout.root() != common {
-            return Err(UtilityError::UnreadableGitConfiguration);
+            return Err(UtilityError::unreadable_config("verify bare bound layout", Some(&common), None, "binding does not resolve to a bare common directory"));
         }
         let identity = layout.directory().metadata()?;
         VerifiedRepo::open_bound_bare(&common, identity, |repo| {
@@ -1294,7 +1394,7 @@ impl<'a> HostGit<'a> {
                 .collect::<Vec<_>>(),
         )?;
         if listing.termination != Termination::Exit(0) {
-            return Err(UtilityError::UnreadableGitConfiguration);
+            return Err(UtilityError::unreadable_config("read effective Git configuration", Some(&repo.common_git_dir().join("config")), None, format!("git config exited with {:?}", listing.termination)));
         }
         let entries = transport::parse_listing(&listing.stdout.bytes)?;
         transport::check_listing(&entries, repo.root_path(), &roots)?;
@@ -1313,7 +1413,7 @@ impl<'a> HostGit<'a> {
                 .collect::<Vec<_>>(),
         )?;
         if directives.termination != Termination::Exit(0) {
-            return Err(UtilityError::UnreadableGitConfiguration);
+            return Err(UtilityError::unreadable_config("read configuration include directives", Some(&self.repo.common_git_dir().join("config")), None, format!("git config exited with {:?}", directives.termination)));
         }
         let top = transport::parse_listing(&directives.stdout.bytes)?;
         let base = self.repo.root_path();
@@ -2639,10 +2739,10 @@ fn scan_configuration_with_policy(
     let listing_args = transport::LISTING_ARGS.map(OsString::from);
     let outcome = run_git_probe(executor, repo, runtime, budget, cancel, &[], &listing_args)?;
     if outcome.termination != Termination::Exit(0) {
-        return Err(UtilityError::UnreadableGitConfiguration);
+        return Err(UtilityError::unreadable_config("list effective Git configuration", Some(&repo.common_git_dir().join("config")), None, format!("git config exited with {:?}", outcome.termination)));
     }
     let entries = transport::parse_listing(&outcome.stdout.bytes)
-        .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+        .map_err(|error| UtilityError::unreadable_config("parse effective Git configuration", Some(&repo.common_git_dir().join("config")), None, error))?;
     let base = repo.root_path();
     let home = runtime.home.path.as_path();
     let own: Vec<PathBuf> = [repo.private_git_dir(), repo.common_git_dir()]
@@ -2917,11 +3017,11 @@ fn read_config_file(
     let args = transport::file_listing_args(path);
     let outcome = run_git_probe(executor, repo, runtime, budget, cancel, &[], &args)?;
     if outcome.termination != Termination::Exit(0) {
-        return Err(UtilityError::UnreadableGitConfiguration);
+        return Err(UtilityError::unreadable_config("read included config file", Some(path), None, format!("git config exited with {:?}", outcome.termination)));
     }
     transport::parse_listing(&outcome.stdout.bytes)
         .map(Some)
-        .map_err(|_| UtilityError::UnreadableGitConfiguration)
+        .map_err(|error| UtilityError::unreadable_config("parse included config file", Some(path), None, error))
 }
 
 /// Whether two scans of `repo` describe the same configuration view. Only
@@ -3073,9 +3173,23 @@ fn run_git_probe(
     argv.extend(GIT_COMMON.iter().map(OsString::from));
     argv.extend(command.iter().cloned());
     let env = environment_with(runtime, repo, overrides);
-    validate_outcome(runtime.git.execute(executor, || {
-        exec_options(&argv, repo.root_path(), budget, &env, None, Some(cancel))
-    })?)
+    // A sibling writer may be publishing a new common config (upstream
+    // tracking keys during settlement). Wait out Git's explicit config-lock
+    // collision within this operation's single deadline; the same hardened
+    // environment and post-read checks still apply to the retried output.
+    retry_git_lock_contention(budget, cancel, || true, |attempt_budget| {
+        let options = || {
+            exec_options(
+                &argv,
+                repo.root_path(),
+                attempt_budget,
+                &env,
+                None,
+                Some(cancel),
+            )
+        };
+        validate_outcome(runtime.git.execute(executor, options)?)
+    })
 }
 
 fn mutation_args(mutation: GitMutation) -> Result<(Vec<OsString>, Option<Vec<u8>>), UtilityError> {
@@ -5606,5 +5720,107 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
         assert!(RepoPath::new("a//b").is_err());
         assert!(GitRefName::branch("../bad").is_err());
         assert!(GitRefName::new("refs/remotes/origin/main").is_err());
+    }
+
+    // Spec: docs/specs/run.md#lane-git-and-import
+    #[test]
+    fn config_read_failure_names_its_bounded_cause() -> Result<(), Box<dyn Error>> {
+        let error = UtilityError::unreadable_config(
+            "list effective Git configuration",
+            Some(Path::new("/repo/.git/config")),
+            Some("credential.helper"),
+            "git config exited with status 128",
+        );
+        let UtilityError::UnreadableGitConfiguration { cause } = &error else {
+            return Err("expected a typed config cause".into());
+        };
+        assert_eq!(cause.operation, "list effective Git configuration");
+        assert_eq!(cause.file.as_deref(), Some("/repo/.git/config"));
+        assert_eq!(cause.key.as_deref(), Some("credential.helper"));
+        assert_eq!(cause.detail, "git config exited with status 128");
+        let text = error.to_string();
+        assert!(text.contains("list effective Git configuration"), "{text}");
+        assert!(text.contains("/repo/.git/config"), "{text}");
+        assert!(text.contains("credential.helper"), "{text}");
+        // A credential value is never part of a cause: only its key is named.
+        assert!(!text.contains("secret-token-value"), "{text}");
+        Ok(())
+    }
+
+    // Spec: docs/specs/run.md#lane-git-and-import
+    #[test]
+    fn config_read_cause_is_bounded_and_single_line() {
+        let long = "A".repeat(4096);
+        let error = UtilityError::unreadable_config(
+            "read included config file",
+            Some(Path::new(&long)),
+            Some("include.path"),
+            format!("{long}\nsecond line"),
+        );
+        let text = error.to_string();
+        assert!(!text.contains('\n'), "{text}");
+        assert!(text.chars().count() < 4 * CONFIG_CAUSE_BOUND, "{text}");
+        assert!(text.contains('…'), "{text}");
+    }
+
+    // Spec: docs/specs/run.md#lane-git-and-import
+    #[test]
+    fn transient_config_lock_collision_is_retried_within_budget() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let scripted = ScriptedConfig::new(
+            vec![
+                exit_outcome(128, LOCK_CONTENTION_STDERR),
+                exit_outcome(0, ""),
+            ],
+            None,
+        );
+        let args: Vec<OsString> = transport::LISTING_ARGS.iter().map(OsString::from).collect();
+        let outcome = run_git_probe(
+            &scripted,
+            &fixture.repo,
+            &fixture.runtime,
+            fixture.budget()?,
+            &CancelToken::new(),
+            &[],
+            &args,
+        )?;
+        assert_eq!(outcome.termination, Termination::Exit(0));
+        assert_eq!(
+            scripted.calls(),
+            2,
+            "one bounded retry must follow Git's config-lock collision"
+        );
+        Ok(())
+    }
+
+    // Spec: docs/specs/run.md#lane-git-and-import
+    #[test]
+    fn config_listing_failure_reports_typed_cause() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let scripted = ScriptedConfig::new(
+            vec![exit_outcome(128, "fatal: bad config line 7")],
+            None,
+        );
+        let error = scan_configuration_with_policy(
+            &scripted,
+            &fixture.repo,
+            &fixture.runtime,
+            fixture.budget()?,
+            &CancelToken::new(),
+            &transport::LaneRoots::default(),
+            true,
+        )
+        .err()
+        .ok_or("a nonzero config listing must fail closed")?;
+        let UtilityError::UnreadableGitConfiguration { cause } = error else {
+            return Err(format!("unexpected error: {error}").into());
+        };
+        assert_eq!(cause.operation, "list effective Git configuration");
+        assert!(
+            cause.file.as_deref().is_some_and(|file| file.ends_with("config")),
+            "{cause:?}"
+        );
+        assert_eq!(cause.detail, "git config exited with Exit(128)");
+        Ok(())
     }
 }
