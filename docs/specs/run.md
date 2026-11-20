@@ -289,10 +289,23 @@ holds uncommitted edits. Both codes take the `stopped_early` row below unless
 the node overrides it: a new route, which restarts the writer in a fresh session
 on its retained worktree. A junior route escalates to senior; otherwise the
 restart uses a declared route not yet launched, and an alias route may resolve
-again. With no such route, or with the continuation budget spent, the writer
+again. A different route is always preferred when one exists.
+
+With no different route, a stop that can continue on its own route
+(`stopped_early`, `lane_token_lost` and `context_handoff`) takes the same route
+with a fresh session on the retained worktree and branch, briefed with the
+previous handoff. This fallback is bounded twice: by the graph-wide
+`limits.continuations`, whose value and source the restart and pause reasons
+name, and by progress, because after the first round each further round must add
+a commit or change the handoff's `remaining[]`. A round that does neither pauses
+for the chair, which keeps a usage-limit stop that a writer wrote up as
+`stopped_early` from looping. A node `on_stop` entry for the cause wins over
+the fallback, so `chair` or `new_route` still pauses or restarts as the node
+says. Any other stop with no route, or with the continuation budget spent,
 pauses for the chair. A `blocked` stop always goes to the chair.
 - Why: the chair must see whether a restart resumes committed work, without a
-  second stop rule that could treat the two differently.
+  second stop rule that could treat the two differently; a writer that stops
+  early on its only route should continue, not wait for a manual relaunch.
 - Owner: `crates/fabric-runtime/src/graph/transitions.rs`,
   `crates/fabric-runtime/src/graph/next_step.rs`
 

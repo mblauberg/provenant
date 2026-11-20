@@ -736,3 +736,205 @@ fn a_host_native_hand_off_keeps_a_launchable_route_after_it() {
     assert_eq!(choices[0].rung, provenant_routing::Rung::HostNative);
     assert_eq!(choices[0].target, "host-native/claude-agent");
 }
+
+fn single_route_document(on_stop: serde_json::Value) -> GraphDocument {
+    let mut document = document("worktree_write", on_stop);
+    document.nodes[0].routes = Some(vec![serde_json::from_value(route("first")).unwrap()]);
+    document
+}
+
+fn stopped_early_handoff(remaining: &[&str]) -> String {
+    format!(
+        "```handoff\n{}\n```",
+        json!({
+            "schema_version": 2, "status": "stopped_early", "note": "Work remains",
+            "remaining": remaining, "decisions": [], "verify": []
+        })
+    )
+}
+
+/// A writer round that declares `stopped_early` with the given head.
+fn stopped_round(reference: &str, remaining: &[&str], commit: char) -> AttemptObservation {
+    let handoff = stopped_early_handoff(remaining);
+    let mut observation = terminal(reference, AttemptOutcome::Succeeded, None, Some(&handoff));
+    if let AttemptObservation::Terminal { commit: head, .. } = &mut observation {
+        *head = Some(commit.to_string().repeat(40));
+    }
+    observation
+}
+
+fn restart_reasons(checkpoint: &GraphCheckpoint) -> Vec<String> {
+    checkpoint
+        .expansions
+        .iter()
+        .filter_map(|expansion| {
+            let patch = expansion.patch.as_ref()?;
+            patch.restart.as_ref()?;
+            patch.reason.clone()
+        })
+        .collect()
+}
+
+fn pause_reason(checkpoint: &GraphCheckpoint) -> &str {
+    checkpoint.nodes[0].expansion_pause.as_deref().unwrap()
+}
+
+/// Invariant: a recoverable stop on a node with no alternative route continues
+/// on the same route; it does not pause.
+#[test]
+fn a_recoverable_stop_on_a_single_route_continues_on_the_same_route() {
+    for cause in [
+        StopCause::StoppedEarly,
+        StopCause::LaneTokenLost,
+        StopCause::ContextHandoff,
+    ] {
+        let document = single_route_document(serde_json::Value::Null);
+        let handoff = stopped_early_handoff(&["Finish the renderer"]);
+        let stopped = if cause == StopCause::StoppedEarly {
+            terminal("a/1", AttemptOutcome::Succeeded, None, Some(&handoff))
+        } else {
+            terminal(
+                "a/1",
+                AttemptOutcome::TaskFailed,
+                Some(cause),
+                Some(&handoff),
+            )
+        };
+        let mut owner = Owner {
+            observations: [stopped, done("a/2")].into(),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+        assert!(run.checkpoint.successful(), "{cause}");
+        assert_eq!(adapters(&owner), ["first", "first"], "{cause}");
+        assert_eq!(owner.routes[0], owner.routes[1], "{cause}");
+        assert_eq!(owner.worktrees[0], owner.worktrees[1], "{cause}");
+        assert!(owner.prompts[1].contains("Finish the renderer"), "{cause}");
+        assert_eq!(
+            restarts(&run.checkpoint),
+            [(
+                cause,
+                NextStep::SameRoute {
+                    continuation: provenant_records::Continuation::Fresh
+                }
+            )],
+            "{cause}"
+        );
+        let reasons = restart_reasons(&run.checkpoint);
+        assert!(
+            reasons[0].contains("continuation 1 of 2")
+                && reasons[0].contains("limits.continuations=2"),
+            "{reasons:?}"
+        );
+    }
+}
+
+/// Invariant: a different route is still preferred when one exists.
+#[test]
+fn a_stopped_early_writer_still_prefers_a_different_route() {
+    let document = document("worktree_write", serde_json::Value::Null);
+    let mut owner = Owner {
+        observations: [stopped_round("a/1", &["Finish"], '1'), done("b/1")].into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(adapters(&owner), ["first", "second"]);
+    assert_eq!(
+        restarts(&run.checkpoint),
+        [(StopCause::StoppedEarly, NextStep::NewRoute)]
+    );
+}
+
+/// Invariant: rounds are bounded by a configurable limit, and the reason shows
+/// the limit, its value and where the value comes from.
+#[test]
+fn same_route_continuations_stop_at_the_continuation_limit_and_name_it() {
+    for (configured, rounds, source) in [(None, 3, "default"), (Some(1), 2, "configured")] {
+        let document = single_route_document(serde_json::Value::Null);
+        let mut limits = crate::config::GraphLimits::default();
+        if let Some(continuations) = configured {
+            limits.continuations = continuations;
+        }
+        let observations: VecDeque<_> = ["a", "b", "c"]
+            .iter()
+            .take(rounds)
+            .enumerate()
+            .map(|(index, item)| {
+                stopped_round(
+                    &format!("a/{index}"),
+                    &[*item],
+                    char::from(b'1' + index as u8),
+                )
+            })
+            .collect();
+        let mut owner = Owner {
+            observations,
+            ..Default::default()
+        };
+        let mut journal = Settled {
+            limits: limits.clone(),
+            ..journal(&document)
+        };
+        let run = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &limits,
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(restarts(&run.checkpoint).len(), rounds - 1, "{source}");
+        let reason = pause_reason(&run.checkpoint);
+        assert!(
+            reason.contains(&format!("limits.continuations={}", limits.continuations))
+                && reason.contains(source),
+            "{reason}"
+        );
+    }
+}
+
+/// Invariant: no continuation loop without progress. The first round has
+/// nothing to compare with; each later round must add a commit or change the
+/// handoff's remaining items.
+#[test]
+fn a_same_route_round_without_progress_pauses_for_the_chair() {
+    for (second, continues) in [
+        (stopped_round("a/2", &["Finish"], '1'), false),
+        (stopped_round("a/2", &["Finish"], '2'), true),
+        (stopped_round("a/2", &["Finish", "Polish"], '1'), true),
+    ] {
+        let document = single_route_document(serde_json::Value::Null);
+        let mut owner = Owner {
+            observations: [stopped_round("a/1", &["Finish"], '1'), second, done("a/3")].into(),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+        if continues {
+            assert!(run.checkpoint.successful());
+            assert_eq!(restarts(&run.checkpoint).len(), 2);
+        } else {
+            assert_eq!(restarts(&run.checkpoint).len(), 1);
+            assert_eq!(adapters(&owner), ["first", "first"]);
+            assert!(
+                pause_reason(&run.checkpoint).contains("without progress"),
+                "{}",
+                pause_reason(&run.checkpoint)
+            );
+        }
+    }
+}
+
+/// Invariant: explicit graph policy beats the default.
+#[test]
+fn on_stop_chair_beats_the_single_route_continuation() {
+    let document = single_route_document(json!({"stopped_early": "chair"}));
+    let mut owner = Owner {
+        observations: [stopped_round("a/1", &["Finish"], '1'), done("a/2")].into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+    assert_eq!(adapters(&owner), ["first"]);
+    assert!(restarts(&run.checkpoint).is_empty());
+    assert!(pause_reason(&run.checkpoint).contains("return to the chair"));
+}

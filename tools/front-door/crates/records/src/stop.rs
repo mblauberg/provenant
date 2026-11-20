@@ -7,9 +7,13 @@
 //! [`StopCause::next_step`]; a pinned cause ignores it, and a stop whose
 //! custody is not proved released always goes to the chair. Route
 //! availability and the continuation budget are applied after this, by the
-//! graph runtime's one decision function, and can only turn a step into
-//! [`NextStep::Chair`]. `docs/specs/run.md#what-follows-a-stop` mirrors the
-//! table and a test keeps the two equal.
+//! graph runtime's one decision function. They can turn a step into
+//! [`NextStep::Chair`], with one exception: a stop that
+//! [`StopCause::continues_on_same_route`] and finds no different route for its
+//! new-route step continues on its own route in a fresh session, while each
+//! round adds a commit or changes the handoff's `remaining[]`.
+//! `docs/specs/run.md#what-follows-a-stop` mirrors the table and a test keeps
+//! the two equal.
 use crate::handoff::{HANDOFF_BYTES, Handoff, HandoffResult, HandoffStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -438,6 +442,17 @@ impl StopCause {
             },
             _ => rule.default,
         }
+    }
+
+    /// A stop the work can recover from on its own route: the writer stopped
+    /// early, or the host ended the attempt on a lost lane token or a context
+    /// handoff. With no different route to take, such a stop continues on the
+    /// same route in a fresh session rather than pausing the graph.
+    pub const fn continues_on_same_route(self) -> bool {
+        matches!(
+            self,
+            Self::StoppedEarly | Self::LaneTokenLost | Self::ContextHandoff
+        )
     }
 
     /// A usage limit, an unavailable model or a missing login: the route

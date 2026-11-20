@@ -370,6 +370,8 @@ enum Settle {
     Restart {
         routes: Vec<GraphRoute>,
         restart: patch::Restart,
+        /// Why the restart took the step it did, when that needs saying.
+        detail: Option<String>,
     },
     Pause(String),
     Chair,
@@ -394,8 +396,9 @@ fn decide(
         return None;
     }
     let pause = |reason: String| declared(progress).then_some(Settle::Pause(reason));
-    let step = cause.next_step(&node.on_stop, facts(&node.id, cause, checkpoint));
+    let mut step = cause.next_step(&node.on_stop, facts(&node.id, cause, checkpoint));
     let mut ladder = None;
+    let mut fallback = false;
     let routes = match step {
         NextStep::Chair => {
             return pause(if cause == StopCause::Blocked {
@@ -411,21 +414,7 @@ fn decide(
                 format!("node {} stopped ({cause}); return to the chair", node.id)
             });
         }
-        // The stopped route first; the others stay for a later new route.
-        NextStep::SameRoute { .. } => progress
-            .attempts
-            .last()
-            .map(|attempt| {
-                std::iter::once(attempt.route.clone())
-                    .chain(
-                        node.routes
-                            .iter()
-                            .filter(|route| **route != attempt.route)
-                            .cloned(),
-                    )
-                    .collect()
-            })
-            .unwrap_or_default(),
+        NextStep::SameRoute { .. } => same_route_first(node, attempt),
         NextStep::NewRoute
             if cause == StopCause::StoppedEarly
                 && attempt
@@ -449,13 +438,30 @@ fn decide(
             ladder = successor.choice;
             successor.routes
         }
-        NextStep::NewRoute
-            if matches!(cause, StopCause::LaneTokenLost | StopCause::ContextHandoff)
-                && node.routes.len() == 1 =>
-        {
-            vec![attempt.route.clone()]
+        NextStep::NewRoute => {
+            let routes = restart_routes(node, progress);
+            if !routes.is_empty() || !cause.continues_on_same_route() {
+                routes
+            } else {
+                // No different route exists, and the work can continue on its
+                // own: take a fresh session on this route, while each round
+                // moves the work forward. The first round has nothing to
+                // compare with, so it always continues.
+                if let Some(previous) = previous_round(&node.id, checkpoint)
+                    && !patch::StopProgress::of(progress).advanced_from(previous)
+                {
+                    return pause(format!(
+                        "node {} stopped ({cause}) twice without progress: no new commit and `remaining[]` unchanged; return to the chair",
+                        node.id
+                    ));
+                }
+                fallback = true;
+                step = NextStep::SameRoute {
+                    continuation: Continuation::Fresh,
+                };
+                same_route_first(node, attempt)
+            }
         }
-        NextStep::NewRoute => restart_routes(node, progress),
     };
     if routes.is_empty() {
         return pause(format!(
@@ -466,8 +472,9 @@ fn decide(
     }
     if plans::continuation_count(checkpoint) >= limits.continuations {
         return pause(format!(
-            "node {} stopped ({cause}); limits.continuations={} reached; extend the continuation budget",
-            node.id, limits.continuations
+            "node {} stopped ({cause}); {} reached; extend the continuation budget",
+            node.id,
+            limits.continuations_note()
         ));
     }
     // The node's sealed infrastructure allowance bounds its launches across
@@ -488,6 +495,14 @@ fn decide(
         },
         step => step,
     };
+    let detail = fallback.then(|| {
+        format!(
+            "continuing on the same route (no different route available): continuation {} of {}, {}",
+            plans::continuation_count(checkpoint) + 1,
+            limits.continuations,
+            limits.continuations_note()
+        )
+    });
     Some(Settle::Restart {
         routes,
         restart: patch::Restart {
@@ -495,8 +510,37 @@ fn decide(
             cause,
             step,
             ladder,
+            progress: Some(patch::StopProgress::of(progress)),
         },
+        detail,
     })
+}
+
+/// The stopped attempt's route first; the node's other routes stay behind it
+/// for a later new route.
+fn same_route_first(node: &PlannedNode, attempt: &GraphAttempt) -> Vec<GraphRoute> {
+    std::iter::once(attempt.route.clone())
+        .chain(
+            node.routes
+                .iter()
+                .filter(|route| **route != attempt.route)
+                .cloned(),
+        )
+        .collect()
+}
+
+/// What the node's previous stop left behind, when a restart answered it.
+fn previous_round<'a>(
+    node: &str,
+    checkpoint: &'a GraphCheckpoint,
+) -> Option<&'a patch::StopProgress> {
+    checkpoint
+        .expansions
+        .iter()
+        .filter_map(|expansion| expansion.patch.as_ref()?.restart.as_ref())
+        .rfind(|restart| restart.node == node)?
+        .progress
+        .as_ref()
 }
 
 fn select<'a>(
@@ -545,7 +589,7 @@ pub(super) fn settle_stop(
 ) -> Option<(usize, GraphCheckpoint)> {
     let (index, node, settle) = select(plan, checkpoint, limits, ladder_facts)?;
     let mut next = checkpoint.clone();
-    let (routes, restart) = match settle {
+    let (routes, restart, detail) = match settle {
         Settle::Chair => {
             fence_stopped(&mut next.nodes[index]);
             return Some((index, next));
@@ -554,7 +598,11 @@ pub(super) fn settle_stop(
             plans::set_expansion_pause(&mut next, index, reason, false, None, None);
             return Some((index, next));
         }
-        Settle::Restart { routes, restart } => (routes, restart),
+        Settle::Restart {
+            routes,
+            restart,
+            detail,
+        } => (routes, restart, detail),
     };
     let progress = &checkpoint.nodes[index];
     let brief = restart_brief(node, progress);
@@ -567,6 +615,7 @@ pub(super) fn settle_stop(
         brief.as_deref(),
         &routes,
         restart,
+        detail.as_deref(),
         &PatchContext {
             library: &TemplateLibrary::bundled(),
             resolvers: &Default::default(),

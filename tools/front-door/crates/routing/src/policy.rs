@@ -225,7 +225,7 @@ impl ModelPolicy {
             lines.push(format!("Finish or hand off within {turns} turns."));
         }
         if self.lane.stop_early_ok == Some(false) {
-            lines.push("Carry the task to completion. Keep the schema v2 handoff current and repeat it as the final fenced handoff block. Use status done when finished, stopped_early when work remains, or blocked when an owner decision, missing capability or external change prevents progress. Use blocked, not stopped_early, in those cases.".into());
+            lines.push("Carry the task to completion. Keep the schema v2 handoff current and repeat it as the final fenced handoff block. Use status done when finished, stopped_early when you cannot carry on in this session (a fresh session continues on this branch from your handoff, so commit and push first), or blocked when an owner decision, missing capability or external change prevents progress. Use blocked, not stopped_early, in those cases.".into());
         }
         if let Some(sections) = &self.result.sections
             && !sections.is_empty()
