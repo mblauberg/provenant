@@ -12,6 +12,7 @@
       "lanes.publish",
       "lanes.local_cargo",
       "lanes.cargo_target",
+      "lanes.cargo_seed_budget",
       "lanes.cargo_cache_max",
       "lanes.ci_scope",
       "lanes.verification",
@@ -716,6 +717,15 @@
       "reader": "tools/front-door/crates/run/src/cargo_target.rs",
       "effect": "CARGO_TARGET_DIR for lanes: private (default; the worktree's own target in its lane cache, seeded warm by a copy-on-write clone of the project's host seed generation with dep-info aged so members rebuild from this worktree's sources), project (the writer worktree's own target/ beside its Cargo workspace) or an absolute path. provenant worktree seed-target prints and seeds the private target for a checkout outside a lane. The value and its source appear in the lane preamble and in provenant config show.",
       "trade_off": "private starts warm and costs little disk on APFS, where clones share blocks; where the filesystem cannot clone, the target starts unseeded and cold, with a warning. It is removed with the worktree. project shares artifacts with builds a person runs in the same checkout but starts cold. Never point several worktrees at one absolute path: Cargo decides member freshness by source mtimes, so one worktree reuses another branch's artifacts."
+    },
+    "lanes.cargo_seed_budget": {
+      "type": "duration",
+      "default": "5m",
+      "host_only": true,
+      "status": "wired",
+      "reader": "tools/front-door/crates/config/src/cargo_seed_budget.rs, tools/front-door/crates/run/src/cargo_seed.rs",
+      "effect": "Maximum wall time for each step of a private Cargo target seed: generation selection and stage cleanup, the clone, and dep-info aging each start with their own budget from this knob. The size a clone reserves is measured once when the host builds the generation, not by walking the seed before cloning. A fallback names the step that ran out; the effective value and its source (host or compiled default) appear in cargo-target-setup.json and the warning. Accept a duration such as 30s, 5m or 1h; 1h is the ceiling.",
+      "trade_off": "A higher budget lets a large seed finish on a loaded host but can hold a store lock and partial stage longer; a lower one falls back to a cold build sooner."
     },
     "lanes.cargo_cache_max": {
       "type": "size",
