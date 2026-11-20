@@ -9,12 +9,11 @@
 
 mod error;
 mod git_support;
+mod glob;
+mod metadata;
 mod state;
 
-use camino::Utf8Path;
-use determinator::Determinator;
-use globset::{Glob, GlobSet, GlobSetBuilder};
-use guppy::graph::{DependencyDirection, PackageGraph};
+use glob::Glob;
 use state::RunState;
 use std::{
     fmt,
@@ -58,6 +57,11 @@ pub enum Reason {
     GlobalPath {
         /// The changed path that matched.
         path: String,
+    },
+    /// A `global_paths` entry could not be parsed, so the run is conservative.
+    InvalidGlobalPath {
+        /// The pattern that could not be parsed.
+        pattern: String,
     },
     /// A changed path belongs to no workspace package.
     UnownedPath {
@@ -108,6 +112,9 @@ impl fmt::Display for Reason {
         match self {
             Self::Changed => formatter.write_str("changed packages and their dependents"),
             Self::GlobalPath { path } => write!(formatter, "global path changed: {path}"),
+            Self::InvalidGlobalPath { pattern } => {
+                write!(formatter, "invalid global path pattern: {pattern}")
+            }
             Self::UnownedPath { path } => write!(formatter, "unowned path changed: {path}"),
             Self::Lockfile { path } => write!(formatter, "lockfile changed: {path}"),
             Self::Toolchain { path } => write!(formatter, "toolchain changed: {path}"),
@@ -154,10 +161,7 @@ pub fn select(
     let now_millis = to_unix_millis(now)?;
     let state_path = state_path(state_dir, project_key)?;
     let loaded = state::load(&state_path);
-    let prior = match &loaded {
-        Ok(state) => state.clone(),
-        Err(_) => None,
-    };
+    let prior = loaded.as_ref().ok().cloned().flatten();
     // A missing or corrupt state file warns through the reason and forces a full
     // run; it never panics or refuses the selection.
     let mut reason = loaded
@@ -167,15 +171,22 @@ pub fn select(
             message: (*message).clone(),
         });
 
-    let globals = global_paths(&policy.global_paths)?;
+    // The head graph defines the output package set and is always available.
+    let head_graph = git_support::load_metadata(workspace, "head")?;
     let changed = git_support::changed_paths(workspace, base, head)?;
-    let new_graph = git_support::build_graph(workspace, "head")?;
+    let (globals, invalid_pattern) = global_paths(&policy.global_paths);
 
     if reason.is_none() {
-        for path in changed.iter() {
-            if let Some(trigger) = classify(path, &globals, &new_graph) {
-                reason = Some(trigger);
-                break;
+        if let Some(pattern) = &invalid_pattern {
+            reason = Some(Reason::InvalidGlobalPath {
+                pattern: pattern.clone(),
+            });
+        } else {
+            for path in &changed {
+                if let Some(trigger) = classify(path, &globals) {
+                    reason = Some(trigger);
+                    break;
+                }
             }
         }
     }
@@ -200,26 +211,41 @@ pub fn select(
         }
     }
 
-    let full = reason.is_some();
-    let reason = reason.unwrap_or(Reason::Changed);
+    let mut full = reason.is_some();
     let packages = if full {
-        all_members(&new_graph)
+        head_graph.member_names()
     } else {
+        // Only an incremental selection needs the base graph. It supplies
+        // ownership for paths removed or moved in head, and the dependency sets
+        // used to detect changed manifest edges.
         let checkout = git_support::BaseCheckout::new(workspace, base, now_millis)?;
-        let old_graph = git_support::build_graph(checkout.path(), "base")?;
-        let mut determinator = Determinator::new(&old_graph, &new_graph);
-        determinator.add_changed_paths(changed.iter());
-        let set = determinator.compute();
-        let mut names: Vec<String> = set
-            .affected_set
-            .packages(DependencyDirection::Forward)
-            .map(|package| package.name().to_string())
-            .collect();
-        names.sort();
-        names.dedup();
-        names
+        let base_graph = git_support::load_metadata(checkout.path(), "base")?;
+        let mut owners: Vec<String> = Vec::new();
+        for path in &changed {
+            let mut owned = false;
+            for graph in [&head_graph, &base_graph] {
+                if let Some(name) = graph.owner_of(path) {
+                    owners.push(name.to_owned());
+                    owned = true;
+                }
+            }
+            if !owned {
+                reason = Some(Reason::UnownedPath {
+                    path: path.to_string_lossy().into_owned(),
+                });
+                break;
+            }
+        }
+        full = reason.is_some();
+        if full {
+            head_graph.member_names()
+        } else {
+            owners.extend(head_graph.dependency_changes_since(&base_graph));
+            head_graph.affected_packages(&owners)
+        }
     };
 
+    let reason = reason.unwrap_or(Reason::Changed);
     let next = if full {
         RunState::fresh(now_millis)
     } else {
@@ -241,14 +267,17 @@ pub fn select(
 
 /// Maps a changed path to a full-run trigger, if any.
 ///
-/// The order is fixed so the reported reason is deterministic. Package
-/// ownership is checked against the head graph: a path no member owns cannot be
-/// attributed to a crate and therefore forces a full run.
-fn classify(path: &Utf8Path, globals: &GlobSet, head: &PackageGraph) -> Option<Reason> {
-    let text = path.as_str().to_owned();
-    let name = path.file_name().unwrap_or_default();
+/// The order is fixed so the reported reason is deterministic. Ownership is
+/// checked later, once the base graph is available, so a path removed in head
+/// can still be attributed to its base owner.
+fn classify(path: &Path, globals: &[Glob]) -> Option<Reason> {
+    let text = path.to_string_lossy().into_owned();
+    let name = path
+        .file_name()
+        .and_then(|component| component.to_str())
+        .unwrap_or_default();
 
-    if globals.is_match(path.as_str()) {
+    if globals.iter().any(|glob| glob.is_match(&text)) {
         return Some(Reason::GlobalPath { path: text });
     }
     if name == "Cargo.lock" {
@@ -259,7 +288,7 @@ fn classify(path: &Utf8Path, globals: &GlobSet, head: &PackageGraph) -> Option<R
     }
     if path
         .components()
-        .any(|component| component.as_str() == ".cargo")
+        .any(|component| component.as_os_str() == ".cargo")
         && name.starts_with("config")
     {
         return Some(Reason::CargoConfig { path: text });
@@ -267,48 +296,26 @@ fn classify(path: &Utf8Path, globals: &GlobSet, head: &PackageGraph) -> Option<R
     if name == "Cargo.toml"
         && path
             .parent()
-            .is_none_or(|parent| parent.as_str().is_empty())
+            .is_none_or(|parent| parent.as_os_str().is_empty())
     {
         return Some(Reason::WorkspaceManifest { path: text });
-    }
-    if !owned_by_member(path, head) {
-        return Some(Reason::UnownedPath { path: text });
     }
     None
 }
 
-fn owned_by_member(path: &Utf8Path, head: &PackageGraph) -> bool {
-    head.workspace().member_by_path(path).is_ok()
-        || path
-            .ancestors()
-            .skip(1)
-            .any(|ancestor| head.workspace().member_by_path(ancestor).is_ok())
-}
-
-fn global_paths(patterns: &[String]) -> Result<GlobSet, Error> {
-    let mut builder = GlobSetBuilder::new();
+/// Compiles the configured patterns. An unparsable pattern is returned to the
+/// caller, which forces a full run rather than risking an under-matched diff.
+fn global_paths(patterns: &[String]) -> (Vec<Glob>, Option<String>) {
+    let mut globs = Vec::new();
+    let mut invalid = None;
     for pattern in patterns {
-        let glob = Glob::new(pattern).map_err(|source| Error::InvalidGlobalPath {
-            pattern: pattern.clone(),
-            source,
-        })?;
-        builder.add(glob);
+        match Glob::parse(pattern) {
+            Ok(glob) => globs.push(glob),
+            Err(_) if invalid.is_none() => invalid = Some(pattern.clone()),
+            Err(_) => {}
+        }
     }
-    builder.build().map_err(|source| Error::InvalidGlobalPath {
-        pattern: "global_paths".to_owned(),
-        source,
-    })
-}
-
-fn all_members(graph: &PackageGraph) -> Vec<String> {
-    let mut names: Vec<String> = graph
-        .resolve_workspace()
-        .packages(DependencyDirection::Forward)
-        .map(|package| package.name().to_string())
-        .collect();
-    names.sort();
-    names.dedup();
-    names
+    (globs, invalid)
 }
 
 fn state_path(state_dir: &Path, project_key: &str) -> Result<PathBuf, Error> {

@@ -9,10 +9,6 @@ publish = false
 # No fixture feature: callers inject state directories and wall time directly.
 
 [dependencies]
-camino = { workspace = true }
-determinator = { workspace = true }
-globset = { workspace = true }
-guppy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

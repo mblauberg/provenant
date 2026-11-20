@@ -1,8 +1,6 @@
 //! Git and `cargo metadata` boundaries used to build the two package graphs.
 
-use crate::error::Error;
-use determinator::Utf8Paths0;
-use guppy::{MetadataCommand, graph::PackageGraph};
+use crate::{error::Error, metadata};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -10,21 +8,26 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-// A named constant keeps the process-creation site explicit. The front-door
-// selector is its own custody boundary for these two read-only subprocesses.
+// Named constants keep the process-creation sites explicit. The front-door
+// selector is its own custody boundary for these read-only subprocesses.
 const GIT_PROGRAM: &str = "git";
 const CARGO_PROGRAM: &str = "cargo";
 
-/// Runs git in `workspace`, returning stdout on a zero exit.
+/// Builds a child command with the ambient worktree bindings removed, so a lane
+/// binding cannot redirect these read-only commands to a different repository.
 #[allow(clippy::disallowed_methods)]
+fn command(program: &str, directory: &Path) -> Command {
+    let mut command = Command::new(program);
+    command.current_dir(directory);
+    command.env_remove("GIT_DIR");
+    command.env_remove("GIT_WORK_TREE");
+    command.env_remove("GIT_INDEX_FILE");
+    command
+}
+
+/// Runs git in `workspace`, returning stdout on a zero exit.
 fn run_git(workspace: &Path, args: &[&str]) -> Result<Vec<u8>, Error> {
-    // `workspace` is authoritative: an ambient worktree binding must not
-    // redirect these read-only commands to a different repository.
-    let output = Command::new(GIT_PROGRAM)
-        .current_dir(workspace)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
+    let output = command(GIT_PROGRAM, workspace)
         .args(args)
         .output()
         .map_err(|source| Error::GitSpawn {
@@ -46,9 +49,21 @@ fn run_git(workspace: &Path, args: &[&str]) -> Result<Vec<u8>, Error> {
 }
 
 /// The NUL-separated paths changed between `base` and `head`.
-pub(super) fn changed_paths(workspace: &Path, base: &str, head: &str) -> Result<Utf8Paths0, Error> {
+pub(super) fn changed_paths(
+    workspace: &Path,
+    base: &str,
+    head: &str,
+) -> Result<Vec<PathBuf>, Error> {
     let stdout = run_git(workspace, &["diff", "--name-only", "-z", base, head, "--"])?;
-    Utf8Paths0::from_bytes(stdout).map_err(|(_, error)| Error::NonUtf8Path(error.to_string()))
+    stdout
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            std::str::from_utf8(part)
+                .map(PathBuf::from)
+                .map_err(|_| Error::NonUtf8Path(String::from_utf8_lossy(part).into_owned()))
+        })
+        .collect()
 }
 
 /// A detached, temporary checkout of the base revision.
@@ -112,16 +127,36 @@ impl Drop for BaseCheckout {
     }
 }
 
-/// Builds an offline package graph for a checkout, using guppy's metadata wrapper.
-pub(super) fn build_graph(directory: &Path, revision: &'static str) -> Result<PackageGraph, Error> {
-    let manifest = directory.join("Cargo.toml");
-    let mut command = MetadataCommand::new();
-    command
-        .cargo_path(CARGO_PROGRAM)
-        .manifest_path(manifest)
-        .current_dir(directory)
-        .other_options(["--offline"]);
-    command
-        .build_graph()
-        .map_err(|source| Error::Metadata { revision, source })
+/// Reads an offline, locked `cargo metadata` document for a checkout and builds
+/// its selection graph. No network access is permitted.
+pub(super) fn load_metadata(
+    directory: &Path,
+    revision: &'static str,
+) -> Result<metadata::Graph, Error> {
+    let output = command(CARGO_PROGRAM, directory)
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--offline",
+            "--locked",
+            "--manifest-path",
+        ])
+        .arg(directory.join("Cargo.toml"))
+        .output()
+        .map_err(|source| Error::Metadata {
+            revision,
+            detail: format!("could not spawn cargo: {source}"),
+        })?;
+    if !output.status.success() {
+        return Err(Error::Metadata {
+            revision,
+            detail: if output.stderr.is_empty() {
+                format!("exit status {}", output.status)
+            } else {
+                String::from_utf8_lossy(&output.stderr).trim().to_owned()
+            },
+        });
+    }
+    metadata::parse(&output.stdout).map_err(|detail| Error::Metadata { revision, detail })
 }

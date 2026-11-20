@@ -26,29 +26,19 @@ pub enum Error {
         source: io::Error,
     },
 
-    /// `cargo metadata` failed for one of the two revisions.
-    #[error("cargo metadata failed for {revision}: {source}")]
+    /// `cargo metadata` failed, or its document could not be read, for one of
+    /// the two revisions.
+    #[error("cargo metadata failed for {revision}: {detail}")]
     Metadata {
         /// `base` or `head`, for diagnostics.
         revision: &'static str,
-        /// The guppy error.
-        #[source]
-        source: guppy::Error,
+        /// Exit status, stderr or parse detail.
+        detail: String,
     },
 
     /// Changed paths were not valid UTF-8.
     #[error("git returned a non-UTF-8 path: {0}")]
     NonUtf8Path(String),
-
-    /// A `global_paths` entry is not a valid glob.
-    #[error("invalid global path glob {pattern:?}: {source}")]
-    InvalidGlobalPath {
-        /// The offending pattern.
-        pattern: String,
-        /// The glob error.
-        #[source]
-        source: globset::Error,
-    },
 
     /// The project key cannot be used as a state file name.
     #[error("invalid project key {0:?}: expected one path component without separators")]
