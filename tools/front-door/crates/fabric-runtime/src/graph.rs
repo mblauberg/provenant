@@ -2878,13 +2878,12 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
             transitions::refresh_structure_pause(&mut checkpoint, &expanded, &plan, limits);
         if structural_pause.is_some() {
             // Persist the durable pause before observing attempts. A resume
-            // against tighter limits still owes every terminal attempt its
-            // settlement: returning here would leave its node running forever,
-            // and the live node would in turn keep the structural pause in
-            // place. Observing under the pause is already the non-resume
-            // behaviour; the saved pause survives settlement while the graph
-            // is still over the limit and clears only once it is back within
-            // limits (#3558).
+            // against tighter limits still owes every launched attempt its
+            // settlement: returning here would leave a finished node running
+            // forever. The pause admits no new launch (see the guard in the
+            // attempt loop) but never stops observing work the host already
+            // accepted; it survives while any node is live and clears when
+            // the graph fully settles or limits are raised (#3558).
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
         if structural_pause.is_none() {
@@ -3283,6 +3282,21 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                 let key = transitions::attempt_key(&plan, node_index, &checkpoint, route_index)
                     .map_err(|error| GraphError::Invalid(error.into()))?;
 
+                // A structural pause admits no new launch. Staging a fresh
+                // attempt is already refused under any pause; a saved attempt
+                // with no host reference would be started by the observation
+                // below, so wait unless the host has already accepted it. An
+                // attempt with a reference is only observed, so a resume
+                // under tighter limits still settles finished work (#3558).
+                if checkpoint.pause_cause() == Some(PauseCause::StructuralLimit)
+                    && let Some(last) = checkpoint.nodes[node_index].attempts.last()
+                    && last.state != AttemptState::Terminal
+                    && last.attempt_ref.is_none()
+                    && !owner.launch_accepted(last).map_err(GraphError::Run)?
+                {
+                    break;
+                }
+
                 {
                     let prior = checkpoint.nodes[node_index]
                         .launch_retry
@@ -3541,7 +3555,7 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
             &mut stopped_children,
         )?;
         loops::refresh_pause(&mut checkpoint);
-        if transitions::clear_settled_pause(&mut checkpoint, &expanded, &plan, limits) {
+        if transitions::clear_settled_pause(&mut checkpoint) {
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
         // Close asks only after an obsolete pause is cleared, so its ask closes too.
