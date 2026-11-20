@@ -939,6 +939,25 @@ fn on_stop_chair_beats_the_single_route_continuation() {
     assert!(pause_reason(&run.checkpoint).contains("return to the chair"));
 }
 
+/// Invariant: an explicit `new_route` is the node's choice; the same-route
+/// fallback applies only to the table default.
+#[test]
+fn an_explicit_on_stop_new_route_pauses_on_a_single_route_instead_of_continuing() {
+    let document = single_route_document(json!({"stopped_early": "new_route"}));
+    let mut owner = Owner {
+        observations: [stopped_round("a/1", &["Finish"], '1'), done("a/2")].into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+    assert_eq!(adapters(&owner), ["first"]);
+    assert!(restarts(&run.checkpoint).is_empty());
+    assert!(
+        pause_reason(&run.checkpoint).contains("no different route is available"),
+        "{}",
+        pause_reason(&run.checkpoint)
+    );
+}
+
 fn blocked_handoff(blocked_on: Option<&str>) -> String {
     let mut handoff = json!({
         "schema_version": 2, "status": "blocked", "note": "the shared cargo lock",
@@ -1066,4 +1085,23 @@ fn a_blocked_handoff_without_a_kind_gets_neutral_wording() {
     );
     assert!(!reason.contains("owner decision"), "{reason}");
     assert!(!reason.contains("capability the brief"), "{reason}");
+}
+
+/// An unrecognised kind is reported as unrecognised, not as missing.
+#[test]
+fn an_unrecognised_blocked_on_is_named_not_reported_missing() {
+    let document = document("worktree_write", serde_json::Value::Null);
+    let mut owner = Owner {
+        observations: [blocked_round("a/1", Some("weather"))].into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+    let reason = pause_reason(&run.checkpoint);
+    assert!(
+        reason.contains("is blocked: the shared cargo lock"),
+        "{reason}"
+    );
+    assert!(reason.contains("weather"), "{reason}");
+    assert!(!reason.contains("not given"), "{reason}");
+    assert!(!reason.contains("owner decision"), "{reason}");
 }

@@ -401,9 +401,16 @@ fn blocked_reason(
             Some(BlockedOn::Capability) => {
                 format!("writer {id} has a missing capability the brief requires: {note}")
             }
-            _ => format!(
-                "writer {id} is blocked: {note} (blocked_on not given; the handoff should say owner_decision, capability, environment or dependency)"
-            ),
+            _ => {
+                let kind = progress
+                    .handoff
+                    .as_ref()
+                    .and_then(|handoff| handoff.blocked_on_warning())
+                    .unwrap_or_else(|| {
+                        "blocked_on not given; the handoff should say owner_decision, capability, environment or dependency".into()
+                    });
+                format!("writer {id} is blocked: {note} ({kind})")
+            }
         },
         StopCause::BlockedEnvironment => {
             let retries = facts(id, cause, checkpoint).retries;
@@ -475,7 +482,12 @@ fn decide(
         }
         NextStep::NewRoute => {
             let routes = restart_routes(node, progress);
-            if !routes.is_empty() || !cause.continues_on_same_route() {
+            // An explicit `on_stop` entry for the cause is the node's own
+            // choice of a new route, so it never falls back to the same one.
+            if !routes.is_empty()
+                || !cause.continues_on_same_route()
+                || node.on_stop.get(cause).is_some()
+            {
                 routes
             } else {
                 // No different route exists, and the work can continue on its
