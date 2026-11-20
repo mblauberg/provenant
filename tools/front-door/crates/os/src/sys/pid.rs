@@ -1804,6 +1804,8 @@ pub(crate) fn signal_process(pid: i32, signal: ProcessSignal) -> io::Result<()> 
     let signal = match signal {
         ProcessSignal::Stop => libc::SIGSTOP,
         ProcessSignal::Continue => libc::SIGCONT,
+        ProcessSignal::Terminate => libc::SIGTERM,
+        ProcessSignal::Kill => libc::SIGKILL,
     };
     // SAFETY: pid is positive so kill addresses only that process; signal is
     // one of the two valid constants above. No pointers or ownership transfer.
@@ -2537,5 +2539,24 @@ mod tests {
             decode_darwin_path(42, &malformed),
             Err(PidError::MalformedCwdPath { pid: 42, .. })
         ));
+    }
+}
+
+/// Signal a negative process-group ID; callers must validate the recorded group leader.
+pub(crate) fn signal_process_group(pgid: i32, signal: ProcessSignal) -> io::Result<()> {
+    if pgid <= 0 {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    let signal = match signal {
+        ProcessSignal::Stop => libc::SIGSTOP,
+        ProcessSignal::Continue => libc::SIGCONT,
+        ProcessSignal::Terminate => libc::SIGTERM,
+        ProcessSignal::Kill => libc::SIGKILL,
+    };
+    // SAFETY: pgid is positive and negation therefore targets only that group.
+    if unsafe { libc::kill(-pgid, signal) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
