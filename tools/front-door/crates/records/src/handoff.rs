@@ -589,7 +589,7 @@ impl Handoff {
 fn verdict_declarations(result: &str) -> u8 {
     let mut capture = crate::result_capture::VerdictCapture::default();
     capture.push(result.as_bytes());
-    capture.finish().2
+    capture.finish().declarations
 }
 
 /// Where one completed provider turn ends in the decoded result text, and
@@ -793,7 +793,13 @@ impl HandoffCapture {
                 Err(error) => self.error = Some(error),
             }
         }
-        let (verdict, verdict_invalid, declarations, verdict_cause) = self.verdict.finish();
+        let crate::result_capture::VerdictEvidence {
+            verdict,
+            invalid: verdict_invalid,
+            declarations,
+            cause: verdict_cause,
+            ..
+        } = self.verdict.finish();
         if self.error.is_none()
             && self.trailing_verdict
             && (declarations != 1
@@ -1105,6 +1111,8 @@ mod tests {
             "**VERDICT: FAIL**",
             "- VERDICT: FAIL",
             "VERDICT:FAIL",
+            "Verdict: request changes abc123",
+            "Verdict FAIL: reachable panic",
         ] {
             let result = format!("Findings.\n\n{STOP}\n{line}\n");
             let parsed = Handoff::from_result_report(&result);

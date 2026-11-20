@@ -2169,6 +2169,78 @@ mod tests {
     }
 
     #[test]
+    fn review_settlement_records_subject_head_separately_from_base() {
+        let base = "1".repeat(40);
+        let head = "2".repeat(40);
+        let library = super::super::template::TemplateLibrary::bundled();
+        let mut node = super::super::template::Compiler::new(&library)
+            .compile(&serde_json::json!({
+                "id":"review", "use":"review.tests", "route":{"alias":"fixture"}
+            }))
+            .unwrap();
+        node.source = Some(SourceBinding::Commit {
+            commit: base.clone(),
+        });
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "graph_id": "review-subject-head",
+            "nodes": [node]
+        }))
+        .unwrap();
+        let limits = crate::config::GraphLimits::default();
+        let (plan, positions) = validate_flat_plan(&document, &limits).unwrap();
+        let mut checkpoint =
+            initial_checkpoint(&document, &plan, "digest".into(), None, None, None);
+        let key = start(&plan, &positions, &mut checkpoint, &limits);
+
+        let mut capture = crate::result_capture::ResultCapture::new(None);
+        // review.tests requires a valid findings block; without one the
+        // settlement is not a review result and records no review settlement.
+        capture.push(
+            "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS\n".as_bytes(),
+        );
+        let attempt_id = provenant_core::AttemptId::from_bytes([7; 16]);
+        let observation = AttemptObservation::Terminal {
+            attempt_ref: Some(format!("fixture/{attempt_id}")),
+            outcome: AttemptOutcome::Succeeded,
+            launched: true,
+            result: Some(Box::new(capture.finish())),
+            result_warning: None,
+            result_path: None,
+            branch: None,
+            commit: Some(base.clone()),
+            stop: None,
+            settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        };
+        apply_attempt_observation(
+            &plan,
+            &mut checkpoint,
+            &positions,
+            0,
+            &limits,
+            observation,
+            ObservationFacts {
+                route_index: usize::from(key.route_index),
+                usage: None,
+                fallback_evidence: None,
+                evidence_unreadable: false,
+                fallback_evidence_retry: None,
+                fallback_cause: None,
+                skipped_accounts: Vec::new(),
+                review_range: ReviewRange::Resolved {
+                    base: base.clone(),
+                    head: head.clone(),
+                },
+            },
+        )
+        .unwrap();
+
+        let settlement = checkpoint.nodes[0].review_settlement.as_ref().unwrap();
+        assert_eq!(settlement.head.to_string(), head);
+        assert_eq!(settlement.base.map(|oid| oid.to_string()), Some(base));
+    }
+
+    #[test]
     fn writer_declared_stop_cause_uses_commit_evidence() {
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version": 1, "graph_id": "writer-stop-cause",
