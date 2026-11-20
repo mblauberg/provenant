@@ -1329,10 +1329,13 @@ pub(super) fn worker_evidence_from_census(
     );
     warn_unreadable_processes(&current.identity.boot, &unreadable_warnings);
     WorkerEvidence {
+        held_incomplete: incomplete
+            || states
+                .values()
+                .any(|state| matches!(state, Occupancy::Unknown { .. })),
         states,
         holders,
         held: finish_held(held),
-        held_incomplete: incomplete,
         details,
         taints,
     }
@@ -1990,7 +1993,6 @@ pub(super) fn observe_worker_holders_while(
             }
         }
         if let Some(gap) = occupancy_gap {
-            unplaceable(Some(pid), Some("process occupancy incomplete"));
             record_unknown_all_with_taint(
                 &mut states,
                 &mut details,
