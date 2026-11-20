@@ -64,8 +64,8 @@ class Selection(unittest.TestCase):
                 "workspace": "host-workspace",
                 "default_tier": "host/default",
                 "tiers": {
-                    "host/default": {"commands": ["default-check"], "selection": "all", "warn_for_host_load": False},
-                    "host/custom": {"commands": ["host-check"], "selection": "all", "warn_for_host_load": False},
+                    "host/default": {"commands": [{"argv": ['default-check']}], "selection": "all", "warn_for_host_load": False},
+                    "host/custom": {"commands": [{"argv": ['host-check']}], "selection": "all", "warn_for_host_load": False},
                 },
             })
             with self.assertRaises(ValueError):
@@ -96,10 +96,10 @@ class Selection(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "config").mkdir()
-            write_ports(root, {"default_tier": "assurance/linux", "tiers": {"assurance/linux": {"commands": ["custom test"], "selection": "all", "warn_for_host_load": False}}})
+            write_ports(root, {"default_tier": "assurance/linux", "tiers": {"assurance/linux": {"commands": [{"argv": ['custom', 'test']}], "selection": "all", "warn_for_host_load": False}}})
             self.assertFalse((root / ".provenant").exists())
             cfg = verify.config(root)
-            self.assertEqual(cfg["tiers"]["assurance/linux"]["commands"], ["custom test"])
+            self.assertEqual(cfg["tiers"]["assurance/linux"]["commands"][0]["argv"], ["custom", "test"])
             self.assertNotIn("0", cfg["tiers"])
             self.assertEqual(cfg["tiers"]["assurance/linux"]["selection"], "all")
 
@@ -108,7 +108,7 @@ class Selection(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "config").mkdir()
-            write_ports(root, {"default_tier": "assurance/full", "tiers": {"assurance/full": {"commands": ["custom-check --full"], "selection": "all", "warn_for_host_load": False}}})
+            write_ports(root, {"default_tier": "assurance/full", "tiers": {"assurance/full": {"commands": [{"argv": ['custom-check', '--full']}], "selection": "all", "warn_for_host_load": False}}})
             with mock.patch.object(verify, "ROOT", root), \
                  mock.patch.object(verify.subprocess, "check_output", return_value="abc\n"), \
                  mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
@@ -140,7 +140,7 @@ class Selection(unittest.TestCase):
     def test_t1_prints_matching_path_and_runs_named_binary(self):
         path = "workspace/src/parser.rs"
         tiers = dict(verify.DEFAULTS["tiers"])
-        tiers["1"] = {"commands": ["scripts/verify-nextest --profile lane --locked {integration_args}"], "selection": "integrations", "warn_for_host_load": False}
+        tiers["1"] = {"commands": [{"argv": ['scripts/verify-nextest', '--profile', 'lane', '--locked', '{integration_args}']}], "selection": "integrations", "warn_for_host_load": False}
         cfg = dict(verify.DEFAULTS, integrations=[{"paths": ["workspace/src/*"], "package": "root", "binary": "parser"}], tiers=tiers)
         metadata = json.dumps({"packages": [], "workspace_members": []})
         with mock.patch.object(verify, "config", return_value=cfg), \
@@ -155,7 +155,7 @@ class Selection(unittest.TestCase):
         self.assertIn("--test", run.call_args.args[0])
 
     def test_high_load_warns_and_runs_configured_tier(self):
-        cfg = dict(verify.DEFAULTS, runners={"peer": ["runner"]}, tiers={"full-run": {"commands": ["true"], "selection": "all", "warn_for_host_load": True}})
+        cfg = dict(verify.DEFAULTS, runners={"peer": ["runner"]}, tiers={"full-run": {"commands": [{"argv": ['true']}], "selection": "all", "warn_for_host_load": True}})
         metadata = json.dumps({"packages": [], "workspace_members": []})
         with mock.patch.object(verify, "config", return_value=cfg), \
              mock.patch.object(verify, "changed_paths", return_value=[]), \
@@ -262,7 +262,7 @@ class Selection(unittest.TestCase):
     def test_quarantine_and_thread_cap_reach_nextest_run(self):
         cfg = dict(verify.DEFAULTS, workspace=".", test_threads=2,
                    quarantine_command=["quarantine"],
-                   tiers={"2": {"commands": ["verify-nextest --profile ci {quarantine_args}"], "selection": "all", "warn_for_host_load": True}})
+                   tiers={"2": {"commands": [{"argv": ['verify-nextest', '--profile', 'ci', '{quarantine_args}']}], "selection": "all", "warn_for_host_load": True}})
         with mock.patch.dict(os.environ, {name: "private-bridge" for name in verify.BRIDGE_ENV}), \
              mock.patch.object(verify, "config", return_value=cfg), \
              mock.patch.object(verify.subprocess, "check_output", side_effect=["abc\n", "test(=flaky)\n"]) as query, \
@@ -283,8 +283,19 @@ class Selection(unittest.TestCase):
         self.assertIn("not (test(=flaky))", commands[-1])
         self.assertEqual(commands[-1][-2:], ["--test-threads", "2"])
 
+    def test_command_runs_in_its_own_project_directory(self):
+        cfg = dict(verify.DEFAULTS, tiers={"2": {"commands": [{"cwd": "nested", "argv": ["command"]}], "selection": "all", "warn_for_host_load": False}})
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(verify, "config", return_value=cfg), \
+             mock.patch.object(verify.subprocess, "check_output", return_value="abc\n"), \
+             mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
+             mock.patch.object(verify.sys, "argv", ["verify-tier", "--tier", "2", "--project", tmp]), \
+             mock.patch.object(verify.sys, "stdout", new_callable=io.StringIO):
+            self.assertEqual(verify.main(), 0)
+            self.assertEqual(run.call_args.kwargs["cwd"], Path(tmp) / "nested")
+
     def test_commands_keep_literal_braces(self):
-        cfg = dict(verify.DEFAULTS, tiers={"2": {"commands": ["command '{literal}'"], "selection": "all", "warn_for_host_load": True}})
+        cfg = dict(verify.DEFAULTS, tiers={"2": {"commands": [{"argv": ['command', '{literal}']}], "selection": "all", "warn_for_host_load": True}})
         with mock.patch.object(verify, "config", return_value=cfg), \
              mock.patch.object(verify.subprocess, "check_output", return_value="abc\n"), \
              mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
@@ -324,7 +335,7 @@ class Selection(unittest.TestCase):
         cfg = verify.config(verify.ROOT)
         self.assertEqual(cfg["quarantine_command"], ["scripts/flaky-quarantine"])
         for tier in ("2", "3"):
-            self.assertTrue(any("{quarantine_args}" in command for command in cfg["tiers"][tier]["commands"]))
+            self.assertTrue(any("{quarantine_args}" in command["argv"] for command in cfg["tiers"][tier]["commands"]))
 
     def test_peer_tier_receives_eof(self):
         peer = load_script("peer_stdin", "verify-peer-runner")

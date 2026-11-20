@@ -875,12 +875,12 @@ fn verify_fixture_port(backend: serde_json::Value) -> Result<serde_json::Value> 
     ports["verify"]["default_tier"] = json!("security/default");
     ports["verify"]["tiers"] = json!({
         "security/default": {
-            "commands": ["unused-by-port-dispatch"],
+            "commands": [{"argv": ["unused-by-port-dispatch"]}],
             "selection": "all",
             "warn_for_host_load": false
         },
         "security/linux": {
-            "commands": ["unused-by-port-dispatch"],
+            "commands": [{"argv": ["unused-by-port-dispatch"]}],
             "selection": "all",
             "warn_for_host_load": false
         }

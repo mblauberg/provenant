@@ -28,7 +28,8 @@ paths, comparing committed and working-tree changes against `origin/main`.
 Base, workspace, commands, integration mappings, `package_paths` (non-Rust
 paths that affect a crate's unit tests), `test_threads` and runner hosts are set
 in the `verify` port in `config/ports.json` (also exposed through the optional `.provenant/ports.json` link). Tier names are free-form strings;
-each tier declares its commands, package/integration/all selection, and whether
+each tier declares commands as argv arrays with a stack and project-relative cwd,
+package/integration/all selection, and whether
 to warn under host load. Host-load warnings continue locally.
 
 See [CI](ci.md#pipeline) for pull request selection. A configured host can
@@ -67,7 +68,11 @@ Stack detection is read-only: `provenant config detect` shows proposed Rust and
 Node commands and their working directories. Rust uses the nearest workspace or
 package manifest within two levels, skipping equal-depth ties. Node uses the
 root `package.json`, its package manager field or lockfile, and only scripts
-that exist. The detected default is below all configured layers; detected argv
-commands are informational and never override configured tier commands. Use
+that exist. The detected default and commands are below all configured layers and replace
+builtin commands for matching tier keys. Whole argv elements `{packages}`,
+`{integration_args}` and `{quarantine_args}` expand to argument lists; no
+shell splitting occurs. Detected commands inherit the existing tier selection:
+package and integration tiers still require Cargo metadata and matching changes,
+so a Node-only or mixed repository may need configured tier selection. Use
 `provenant config show --full` for effective leaves and sources, and
 `provenant config path --project` for the host-project ports file.

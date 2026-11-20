@@ -660,11 +660,13 @@ fn format_delta_only(
     };
     let kind = formatter_kind(command).unwrap_or_default();
     let mut argv: Vec<String> = command
-        .split_whitespace()
+        .argv
+        .iter()
+        .map(String::as_str)
         .filter(|part| {
             !matches!(
                 *part,
-                "{packages}" | "{integration_args}" | "--check" | "--"
+                "{packages}" | "{integration_args}" | "{quarantine_args}" | "--check" | "--"
             )
         })
         .map(str::to_owned)
@@ -695,7 +697,7 @@ fn format_delta_only(
         }
         _ => return false,
     }
-    let workspace = |root: &std::path::Path| root.join(&ports.verify.workspace);
+    let workspace = |root: &std::path::Path| root.join(&command.cwd);
     let root = match crate::scratch_dir::ScratchDir::new_in(
         &std::env::temp_dir(),
         "provenant-approval-format-",
@@ -777,8 +779,8 @@ fn format_delta_only(
     same
 }
 
-fn formatter_kind(command: &str) -> Option<&'static str> {
-    let parts: Vec<_> = command.split_whitespace().collect();
+fn formatter_kind(command: &provenant_config::TierCommand) -> Option<&'static str> {
+    let parts: Vec<_> = command.argv.iter().map(String::as_str).collect();
     if parts.contains(&"fmt")
         && parts
             .first()
@@ -1147,7 +1149,11 @@ mod tests {
             .tiers
             .get_mut("0")
             .ok_or_else(|| LandingError::Failed("built-in verify tier is missing".into()))?
-            .commands = vec!["cargo fmt --all".into()];
+            .commands = vec![provenant_config::TierCommand {
+            stack: "rust".into(),
+            cwd: "tools/front-door".into(),
+            argv: vec!["cargo".into(), "fmt".into(), "--all".into()],
+        }];
         let ports_dir = project.join(".provenant");
         std::fs::create_dir_all(&ports_dir)
             .and_then(|()| {
@@ -1257,7 +1263,11 @@ mod tests {
             tier.commands
                 .retain(|command| super::formatter_kind(command).is_none());
             if tier.commands.is_empty() {
-                tier.commands.push("true".into());
+                tier.commands.push(provenant_config::TierCommand {
+                    stack: String::new(),
+                    cwd: ".".into(),
+                    argv: vec!["true".into()],
+                });
             }
         }
         std::fs::write(
