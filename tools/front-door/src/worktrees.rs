@@ -2573,8 +2573,10 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 }
                 Ok(provenant_config::GcProjectStatus::Excluded) => continue,
                 Err(error) => {
-                    unobserved_projects
-                        .push(roots.state.as_path().join("projects").join(&project_key));
+                    unobserved_projects.push(provenant_config::project_binding_dir(
+                        roots.state.as_path(),
+                        project_id,
+                    ));
                     append_sweep_warning(
                         &mut sweep_warning,
                         format!("project {project_key} lookup failed: {error}"),

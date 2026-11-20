@@ -777,13 +777,8 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
             }
             ConfigAction::Detect => serde_json::to_value(config::detect::detect(&context.project))?,
             ConfigAction::Path => {
-                let key = config::project_key_for(&context.project)
-                    .ok_or("cannot determine project key")?;
-                let path = roots
-                    .state
-                    .as_path()
-                    .join("projects")
-                    .join(key)
+                let path = config::host_project_dir(roots.state.as_path(), &context.project)
+                    .ok_or("cannot determine host project directory")?
                     .join("ports.json");
                 serde_json::json!({"exists": path.is_file(), "path": path})
             }
