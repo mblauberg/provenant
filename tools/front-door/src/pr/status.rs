@@ -1336,6 +1336,7 @@ mod tests {
         line.failed_check_details = vec![super::FailedCheck {
             name: "ci-status".into(),
             url: Some("https://github.com/owner/repo/actions/runs/7".into()),
+            bucket: "fail".into(),
         }];
         line.failures = Some(crate::ci::Report {
             pr: Some(1669),
