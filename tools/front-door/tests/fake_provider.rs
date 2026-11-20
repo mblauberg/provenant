@@ -213,7 +213,7 @@ fn account_placement() -> Result {
             selection_context: Default::default(),
             diagnostics: Default::default(),
             user_skills: true,
-            access: Default::default(),
+            access: provenant_records::LaneAccess::Isolated,
             extra: Default::default(),
             adapter: "codex".into(),
             model: "fixture".into(),

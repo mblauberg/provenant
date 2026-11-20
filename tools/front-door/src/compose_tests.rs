@@ -247,7 +247,7 @@ pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Resul
         // This proves confinement's denied writes and selected exceptions.
         fs::write(
             rig.state.join("config.toml"),
-            "schema_version = 1\n[knobs]\n\"lanes.sandbox\" = \"on\"\n[gc]\nfree_floor='1B'\n",
+            "schema_version = 1\n[knobs]\n\"lanes.sandbox\" = \"on\"\n\"lanes.access\" = \"isolated\"\n[gc]\nfree_floor='1B'\n",
         )?;
         let cleanup = provenant_supervisor::fixture::ProcessCleanupGuard::new(&rig.state);
         let (_, context) = writer_context(&rig)?;
@@ -302,7 +302,7 @@ pub(crate) fn writer_dispatch_uses_lane_cache_and_narrow_provider_state() -> Res
     // runs sandboxed.
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version = 1\n[knobs]\n\"lanes.sandbox\" = \"on\"\n\"lanes.cargo_target\" = \"private\"\n[gc]\nfree_floor='1B'\n[domains.fabric.lanes.cargo_seed]\nenabled = false\n",
+        "schema_version = 1\n[knobs]\n\"lanes.sandbox\" = \"on\"\n\"lanes.access\" = \"isolated\"\n\"lanes.cargo_target\" = \"private\"\n[gc]\nfree_floor='1B'\n[domains.fabric.lanes.cargo_seed]\nenabled = false\n",
     )?;
     let (_, context) = writer_context(&rig)?;
     let cleanup = super::worktree_tests::writer_process_cleanup(&context);

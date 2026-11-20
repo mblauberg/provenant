@@ -163,9 +163,18 @@ fn transport_protects_sandboxed_lane_configuration()
         "core.sshCommand",
         helper.to_str().ok_or("helper")?,
     ])?;
-    let prepare = |sandboxed| {
+    let prepare = |sandboxed: bool| {
+        // This pins the sandboxed isolated transport protection. A sandboxed
+        // host-access lane deliberately uses ordinary host transport instead,
+        // so opt into isolation here rather than relying on the old default.
+        let access = sandboxed.then(|| provenant_records::LaneAccessReceipt {
+            access: provenant_records::LaneAccess::Isolated,
+            source: provenant_records::LaneAccessSource::Launch,
+            key: "lanes.access".into(),
+            extra: Default::default(),
+        });
         HostDeliveryContext::new(fixture.environment.clone())
-            .with_lane_access(None, Some(sandboxed))
+            .with_lane_access(access, Some(sandboxed))
             .with_host_state(&fixture.root.join("state"))
             .prepare(&fixture.writer, &fixture.request)
     };

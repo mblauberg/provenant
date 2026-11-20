@@ -240,7 +240,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
     }
     let config = |depth: u8| {
         format!(
-            "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.max_depth'={depth}\n'lanes.sandbox'='on'\n{accounts}"
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.max_depth'={depth}\n'lanes.sandbox'='on'\n'lanes.access'='isolated'\n{accounts}"
         )
     };
     fs::write(rig.state.join("config.toml"), config(1))?;
@@ -265,6 +265,9 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         task.profile
             .knobs
             .insert("lanes.sandbox".into(), serde_json::json!("on"));
+        task.profile
+            .knobs
+            .insert("lanes.access".into(), serde_json::json!("isolated"));
         // Select publishing explicitly; missing host configuration does not
         // disable it because the login may live in a relocated store or keychain.
         task.profile

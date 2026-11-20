@@ -215,6 +215,7 @@ fn child_launch_refuses_credential_and_state_roots_at_the_host()
             let roots = vec![root.to_string_lossy().into_owned()];
             let attempt = graph::AttemptSpec {
                 write_roots: if write { roots.clone() } else { Vec::new() },
+                lane_access: Some("isolated".into()),
                 ..Default::default()
             };
             let result = owner.observe_or_start(
