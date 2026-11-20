@@ -647,7 +647,15 @@ printf 'custom interpreter ran; credentials and writes denied\n'
         }),
     )?;
     // Lanes run unsandboxed by default; the host knob sandboxes this one.
+    // The credential denials this test pins are isolated-mode behaviour;
+    // host access deliberately keeps the native credential reads.
     configure(&rig, &["knobs"], "lanes.sandbox", toml_edit::value("on"))?;
+    configure(
+        &rig,
+        &["knobs"],
+        "lanes.access",
+        toml_edit::value("isolated"),
+    )?;
     let submitted = dispatch(&rig, "granted", 10)?;
     let id = attempt_id(&submitted)?;
     let lane = settled(&rig, id)?;
