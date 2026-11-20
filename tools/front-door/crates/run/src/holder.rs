@@ -366,11 +366,15 @@ mod identity_policy_tests {
                 Some(TerminalCause::IdentityMismatch)
             );
             let reason = decoded.reason.as_deref().ok_or("mismatch reason")?;
-            assert!(reason.contains("fixture/model"), "{reason}");
-            assert!(reason.contains("fixture/other"), "{reason}");
             if committed.is_some() {
+                assert!(reason.contains("fixture/model"), "{reason}");
+                assert!(reason.contains("fixture/other"), "{reason}");
                 assert!(reason.contains(&head.to_string()), "{reason}");
                 assert!(decoded.complete);
+            } else {
+                // No verified moved head: the fatal decision and its fixed
+                // detail are unchanged.
+                assert_eq!(reason, TerminalCause::IdentityMismatch.detail());
             }
         }
         Ok(())
