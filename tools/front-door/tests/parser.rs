@@ -595,6 +595,67 @@ fn config_set_accepts_documented_domain_settings() -> Result {
 }
 
 #[test]
+fn config_set_and_check_agree_on_existing_findings() -> Result {
+    for (text, succeeds, warning) in [
+        ("schema_version=1\n", true, None),
+        (
+            "schema_version=1\n[domains.fabric.lanes]\nmax_concurrent_builds=7 # retained\n",
+            true,
+            Some("domains.fabric.lanes.max_concurrent_builds"),
+        ),
+        (
+            "schema_version=1\n[domains.fabric.lanes]\ncargo_build_jobs='bad'\n",
+            true,
+            Some("domains.fabric.lanes.cargo_build_jobs"),
+        ),
+        ("schema_version=1\nfuture=true\n", true, Some("future")),
+        (
+            "schema_version=1\n[domains.fabric.limits]\nstore_busy_timeout_ms=600001\n",
+            false,
+            None,
+        ),
+        ("schema_version=999\n", false, None),
+        ("schema_version=1\n[broken\n", false, None),
+    ] {
+        let rig = TestRig::new()?;
+        let path = rig.state.join("config.toml");
+        std::fs::write(&path, text)?;
+        let check_rig = TestRig::new()?;
+        std::fs::write(check_rig.state.join("config.toml"), text)?;
+        let checked = check_rig.command(&["config", "check"])?;
+        let check_message = format!(
+            "{}{}",
+            String::from_utf8_lossy(&checked.stdout.bytes),
+            String::from_utf8_lossy(&checked.stderr.bytes)
+        );
+        let hard_error = ["config.syntax", "config.version", "config.schema"]
+            .iter()
+            .any(|rule| check_message.contains(rule));
+        assert_eq!(!hard_error, succeeds, "check: {text}: {check_message}");
+        let edited = rig.command(&["config", "set", "config.history_max_bytes", "300000"])?;
+        assert_eq!(code(&edited) == 0, succeeds, "set: {text}: {edited:?}");
+        if let Some(key) = warning {
+            let set_message = String::from_utf8_lossy(&edited.stderr.bytes);
+            assert!(check_message.contains(key), "{check_message}");
+            assert!(set_message.contains(key), "{set_message}");
+        }
+        let after = std::fs::read_to_string(&path)?;
+        if succeeds {
+            assert!(after.contains("300000"), "{after}");
+            if text.contains("max_concurrent_builds") {
+                assert!(
+                    after.contains("max_concurrent_builds=7 # retained"),
+                    "{after}"
+                );
+            }
+        } else {
+            assert_eq!(after, text);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 // Spec: docs/specs/cli.md#results
 fn config_set_profile_reports_effective_source() -> Result {
     let rig = TestRig::new()?.without_state()?;
