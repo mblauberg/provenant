@@ -122,9 +122,47 @@ mod tests {
             visit::visit_local(self, local);
         }
     }
+    struct CallerSites<'a> {
+        core_names: &'a BTreeSet<String>,
+        violations: Vec<String>,
+    }
+    impl<'ast> Visit<'ast> for CallerSites<'_> {
+        fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+            let mut receiver = Facts::default();
+            receiver.visit_expr(&node.receiver);
+            if receiver
+                .refs
+                .iter()
+                .any(|name| self.core_names.contains(name))
+                && !(matches!(&*node.receiver, Expr::Try(_)) && node.method == "unwrap_or")
+            {
+                let mut expression = Facts::default();
+                expression.visit_expr_method_call(node);
+                self.violations.extend(expression.violations);
+            }
+            visit::visit_expr_method_call(self, node);
+        }
+        fn visit_local(&mut self, node: &'ast syn::Local) {
+            if matches!(node.pat, Pat::Wild(_))
+                && let Some(init) = &node.init
+            {
+                let mut expression = Facts::default();
+                expression.visit_expr(&init.expr);
+                if expression
+                    .refs
+                    .iter()
+                    .any(|name| self.core_names.contains(name))
+                {
+                    self.violations.push("let _ discards a config read".into());
+                }
+            }
+            visit::visit_local(self, node);
+        }
+    }
     #[derive(Default)]
     struct Functions {
         functions: BTreeMap<String, Facts>,
+        bodies: BTreeMap<String, syn::Block>,
     }
     impl<'ast> Visit<'ast> for Functions {
         fn visit_item_fn(&mut self, node: &'ast ItemFn) {
@@ -134,10 +172,9 @@ mod tests {
             let mut signature = Facts::default();
             signature.visit_return_type(&node.sig.output);
             facts.returns_transport_error = signature.refs.contains("TransportError");
-            self.functions.insert(
-                format!("{}:{}", self.functions.len(), node.sig.ident),
-                facts,
-            );
+            let name = format!("{}:{}", self.functions.len(), node.sig.ident);
+            self.bodies.insert(name.clone(), (*node.block).clone());
+            self.functions.insert(name, facts);
         }
         fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
             let mut facts = Facts::default();
@@ -146,10 +183,9 @@ mod tests {
             let mut signature = Facts::default();
             signature.visit_return_type(&node.sig.output);
             facts.returns_transport_error = signature.refs.contains("TransportError");
-            self.functions.insert(
-                format!("{}:{}", self.functions.len(), node.sig.ident),
-                facts,
-            );
+            let name = format!("{}:{}", self.functions.len(), node.sig.ident);
+            self.bodies.insert(name.clone(), node.block.clone());
+            self.functions.insert(name, facts);
         }
         fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
             if !node.attrs.iter().any(|a| {
@@ -223,13 +259,35 @@ mod tests {
                 break;
             }
         }
-        functions
+        let core_names: BTreeSet<_> = selected
+            .iter()
+            .filter_map(|name| name.split_once(':').map(|(_, ident)| ident.to_owned()))
+            .filter(|name| name != "new")
+            .collect();
+        let mut result: Vec<_> = functions
             .functions
             .into_iter()
             .filter_map(|(name, facts)| {
                 selected.contains(&name).then_some((name, facts.violations))
             })
-            .collect()
+            .collect();
+        // Check the expression containing a read in each caller. Other errors
+        // in that function can belong to unrelated work and must not be linted
+        // as config reads.
+        for (name, body) in &functions.bodies {
+            if selected.contains(name) {
+                continue;
+            }
+            let mut calls = CallerSites {
+                core_names: &core_names,
+                violations: Vec::new(),
+            };
+            calls.visit_block(body);
+            if !calls.violations.is_empty() {
+                result.push((name.clone(), calls.violations));
+            }
+        }
+        result
     }
     #[test]
     fn config_readers_preserve_errors() {
@@ -270,6 +328,17 @@ mod tests {
         }
         assert!(count > 0, "no readers discovered");
     }
+    #[test]
+    fn synthetic_caller_of_a_reader_is_discovered() {
+        let source = "fn wrapper() { parse_listing(); } fn new_reader() { wrapper().ok(); }";
+        let found = readers(source);
+        assert!(
+            found
+                .iter()
+                .any(|(name, failures)| name.ends_with(":new_reader") && !failures.is_empty())
+        );
+    }
+
     #[test]
     fn synthetic_called_transport_helper_is_discovered() {
         let source = "fn reader() { parse_listing(); roots(); } fn roots() -> Result<(), TransportError> { let _ = fallible(); Ok(()) }";
