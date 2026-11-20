@@ -2209,7 +2209,7 @@ mod tests {
             &limits,
             observation,
             ObservationFacts {
-                route_index: key.route_index,
+                route_index: usize::from(key.route_index),
                 usage: None,
                 fallback_evidence: None,
                 evidence_unreadable: false,
