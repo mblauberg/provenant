@@ -127,6 +127,8 @@ lane_row! {
         provider_error: String => string();
         payload: String => choices(&["evicted"]);
         capabilities: Value => array(object(&[("name", string()), ("source", string())], &[]));
+        provenant_version: String => string();
+        release_source_digest: String => string();
         attempt_directory: crate::StructuredPathWire => nullable(super::schema::worktree_path());
         child_command: String => nullable(string());
         last_event_source: LastEventSource => nullable(choices(&["output", "started", "queued"]));
@@ -305,6 +307,10 @@ impl LaneRow {
         use crate::run::AttemptState;
         let (mut state, mut terminal_reason) = Self::state_and_reason(&lane.state);
         let recorded_state = state.clone();
+        // Build identity is read from the attempt's own trace, never from the
+        // current binary: an old attempt may predate an observation, and an
+        // upgrade must not rewrite the build that actually ran it.
+        let telemetry = crate::telemetry_context::TelemetryContext::from_trace(&lane.trace);
         if let Some(presence) = facts.presence
             && !matches!(lane.state, AttemptState::Terminal { .. })
         {
@@ -606,6 +612,14 @@ impl LaneRow {
             provider_error: None,
             capabilities: None,
             payload: facts.payload_evicted.then(|| "evicted".to_owned()),
+            provenant_version: telemetry
+                .as_ref()
+                .and_then(|context| context.provenant_version.as_ref())
+                .map(|observation| observation.value.clone()),
+            release_source_digest: telemetry
+                .as_ref()
+                .and_then(|context| context.release_source_digest.as_ref())
+                .map(|observation| observation.value.clone()),
         }
     }
 }
