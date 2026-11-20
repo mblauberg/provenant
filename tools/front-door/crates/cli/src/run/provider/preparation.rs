@@ -1960,6 +1960,7 @@ fn prepare_inner(
             locate_override,
             fixture_token,
             wait,
+            Some(name),
         )?;
         if launch.route.model.as_deref() != Some(model) {
             return Err("host-native requires its configured model; use graph routes for non-native fallback".into());
@@ -1971,8 +1972,6 @@ fn prepare_inner(
             "--agent".into(),
             name.into(),
         ]);
-        launch.route.source = Some(format!("domains.fabric.host_native.{name}"));
-        launch.route.host_native = Some(name.clone());
         return Ok(launch);
     }
     prepare_candidates(
@@ -1985,6 +1984,7 @@ fn prepare_inner(
         locate_override,
         fixture_token,
         wait,
+        None,
     )
 }
 
@@ -2752,6 +2752,7 @@ pub(super) fn prepare_candidates(
     locate_override: Option<&ExecutableLocator<'_>>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
+    host_native: Option<&str>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
     prepare_candidates_inner(
         registry,
@@ -2763,6 +2764,7 @@ pub(super) fn prepare_candidates(
         locate_override,
         fixture_token,
         wait,
+        host_native,
         #[cfg(test)]
         None,
     )
@@ -2782,6 +2784,7 @@ pub(super) fn prepare_candidates_inner(
     locate_override: Option<&ExecutableLocator<'_>>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
+    host_native: Option<&str>,
     #[cfg(test)] alter_availability: Option<&AlterAvailability<'_>>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
@@ -4134,7 +4137,23 @@ pub(super) fn prepare_candidates_inner(
                     )),
                 ),
             };
+        let model_id =
+            provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?;
+        let exact_model = resolved_launch_model(&catalogue, &model_id);
+        let mut provider = launch_route_record(
+            &route,
+            entry.map(|e| e.label.as_str()),
+            &task.route,
+            resume.is_some(),
+            current_candidate > 0,
+        );
+        apply_resolved_model(&mut provider, &exact_model);
+        if let Some(name) = host_native {
+            provider.source = Some(format!("domains.fabric.host_native.{name}"));
+            provider.host_native = Some(name.to_owned());
+        }
         let extras = run::PreambleExtras {
+            route: Some(provider.clone()),
             location: writer.as_ref().map(|writer| run::LaneLocation {
                 worktree: writer.worktree.path().to_owned(),
                 branch: writer.branch.as_str().to_owned(),
@@ -4309,11 +4328,6 @@ pub(super) fn prepare_candidates_inner(
             None
         };
         let mut provider_route = adapter_route(&route);
-        let model_id =
-            provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?;
-        // Resolve a family alias once at selection: the provider reports the
-        // exact model, which launch and identity comparison must both use.
-        let exact_model = resolved_launch_model(&catalogue, &model_id);
         let launch_model = catalogue.launch_model(&exact_model, route.effort.as_deref());
         let provider_model = (launch_model != route.model).then_some(launch_model);
         let project_id_str = project_id.to_string();
@@ -4951,17 +4965,6 @@ pub(super) fn prepare_candidates_inner(
             }
             None => None,
         };
-        let mut provider = launch_route_record(
-            &route,
-            entry.map(|e| e.label.as_str()),
-            &task.route,
-            resume.is_some(),
-            current_candidate > 0,
-        );
-        // The launch uses the exact model; record it so identity comparison
-        // cannot judge it different from the model the provider reports. The
-        // requested alias stays on the attempt's requested route.
-        apply_resolved_model(&mut provider, &exact_model);
         provider.account_source = Some(if resume.is_some() {
             provenant_records::run::AccountSource::Continuation
         } else if task.account.is_some() {
