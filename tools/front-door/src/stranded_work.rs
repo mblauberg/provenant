@@ -131,6 +131,12 @@ pub(crate) fn survey_in_context(
         let Some(branch) = tree.branch.clone() else {
             continue;
         };
+        // Git reports a fully-qualified ref, but the report names the short
+        // branch, as its human output and unit fixture do.
+        let branch = branch
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&branch)
+            .to_owned();
         let Ok(stats) = worktrees::edit_stats(context, &tree.path, cancel) else {
             continue;
         };

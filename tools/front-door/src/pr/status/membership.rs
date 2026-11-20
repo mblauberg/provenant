@@ -307,7 +307,7 @@ pub(crate) fn report(
                     number: container.number,
                     label: container.key(),
                     head: container.head.clone(),
-                    ci: String::new(),
+                    ci: container.ci.clone(),
                     head_moved: standing == Standing::HeadMoved,
                 },
             );
@@ -763,7 +763,17 @@ mod tests {
 
     #[test]
     fn membership_without_a_base_never_claims_a_moved_head() {
-        let (history, mut members, _) = fixture();
+        let (_, mut members, _) = fixture();
+        // A moved head is a new commit on top of the batched one. Naming a
+        // commit that is absent from the bounded history would leave no shared
+        // history with the batch, so no move could be proven even with a base.
+        let history = History::new([
+            commit("batch", &["m7", "m8"], &["integration.txt"]),
+            commit("m7-new", &["m7"], &["src/new.rs"]),
+            commit("m8", &["b"], &["src/b.rs", "shared.rs"]),
+            commit("m7", &["b"], &["src/a.rs", "shared.rs"]),
+            commit("b", &[], &["base.txt"]),
+        ]);
         members[0].1 = "m7-new".into();
         assert_eq!(standing(&history, None, "m7-new", "batch"), None);
         assert_eq!(
