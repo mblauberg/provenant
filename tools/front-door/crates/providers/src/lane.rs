@@ -677,6 +677,72 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
     bytes.push(b'\n');
     bytes.extend_from_slice(
         br#"
+# This policy belongs only to the lane-bound wrapper, never host plumbing.
+_provenant_hook_rule() {
+    printf '%s\n' 'Provenant lane rule: Git hooks must run; do not bypass hooks.' >&2
+    exit 1
+}
+_provenant_hook_guard() {
+    # Ask Git to parse its two environment configuration encodings. The scope
+    # distinguishes command overrides from the repository's configured hooks.
+    if "$_provenant_git_program" config --list --show-scope 2>/dev/null |
+        LC_ALL=C grep -i '^command[[:space:]]core\.hookspath=' >/dev/null; then
+        _provenant_hook_rule
+    fi
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -c|--config-env)
+                [ "$#" -ge 2 ] || return 0
+                case $(printf '%s' "${2%%=*}" | LC_ALL=C tr '[:upper:]' '[:lower:]') in core.hookspath) _provenant_hook_rule ;; esac
+                shift 2 ;;
+            -c?*)
+                _provenant_key=${1#-c}; _provenant_key=${_provenant_key%%=*}
+                case $(printf '%s' "$_provenant_key" | LC_ALL=C tr '[:upper:]' '[:lower:]') in core.hookspath) _provenant_hook_rule ;; esac
+                shift ;;
+            --config-env=*)
+                _provenant_key=${1#*=}; _provenant_key=${_provenant_key%%=*}
+                case $(printf '%s' "$_provenant_key" | LC_ALL=C tr '[:upper:]' '[:lower:]') in core.hookspath) _provenant_hook_rule ;; esac
+                shift ;;
+            -C|--git-dir|--work-tree|--namespace|--attr-source|--super-prefix) [ "$#" -ge 2 ] || return 0; shift 2 ;;
+            -*) shift ;;
+            *) break ;;
+        esac
+    done
+    [ "$#" -gt 0 ] || return 0
+    _provenant_subcommand=$1; shift
+    if [ "$_provenant_subcommand" = config ]; then
+        _provenant_config_read=0; _provenant_config_key=0; _provenant_config_values=0
+        for _provenant_arg do
+            case "$_provenant_arg" in
+                --get|--get-all|--get-regexp|--get-urlmatch|--list|-l|get|list) _provenant_config_read=1 ;;
+                -*) ;;
+                *)
+                    if [ "$_provenant_config_key" -eq 1 ]; then _provenant_config_values=$((_provenant_config_values + 1)); fi
+                    case $(printf '%s' "$_provenant_arg" | LC_ALL=C tr '[:upper:]' '[:lower:]') in core.hookspath) _provenant_config_key=1 ;; esac ;;
+            esac
+        done
+        if [ "$_provenant_config_key" -eq 1 ] && [ "$_provenant_config_read" -eq 0 ]; then
+            # A bare key is a query; explicit mutation options also write.
+            [ "$_provenant_config_values" -eq 0 ] || _provenant_hook_rule
+            for _provenant_arg do case "$_provenant_arg" in --unset*|--replace-all|--add|--fixed-value|unset|set) _provenant_hook_rule ;; esac; done
+        fi
+    fi
+    case "$_provenant_subcommand" in commit|merge|rebase|cherry-pick|am|push)
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --) break ;;
+                --no-verify) _provenant_hook_rule ;;
+                -m|-F|-C|-c|--message|--file|--reuse-message|--reedit-message)
+                    shift; [ "$#" -gt 0 ] || break ;;
+                --*|-m*|-F*|-C*|-c*) ;;
+                -*) if [ "$_provenant_subcommand" = commit ]; then case "$1" in -*n*) _provenant_hook_rule ;; esac; fi ;;
+            esac
+            shift
+        done ;;
+    esac
+}
+if [ "${_provenant_lane_bound:-0}" = 1 ]; then _provenant_hook_guard "$@"; fi
+
 _provenant_git_retry_safe() {
     [ "$#" -gt 0 ] || return 1
     _provenant_git_explicit_config=0
@@ -1380,6 +1446,7 @@ fn bound_exports(bound: &BoundGit) -> Result<String, ProviderError> {
             "  done\n",
             "}}\n",
             "if lane_git_bound \"$@\"; then\n",
+            "  _provenant_lane_bound=1\n",
             "  unset {}\n",
             "{}",
             "fi\n",
@@ -3324,6 +3391,122 @@ mod tests {
             .output()?;
         assert!(output.status.success());
         assert_eq!(output.stdout, value);
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn bound_git_refuses_hook_bypasses_and_runs_hooks() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let repo = dir.path().canonicalize()?.join("repo");
+        std::fs::create_dir(&repo)?;
+        let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
+        let base = || {
+            let mut cmd = provenant_os::fixture::git_command_at(&git);
+            cmd.current_dir(&repo)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", dir.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null");
+            cmd
+        };
+        assert!(base().args(["init", "-q"]).status()?.success());
+        for (key, value) in [
+            ("user.name", "Fixture"),
+            ("user.email", "fixture@example.test"),
+        ] {
+            assert!(base().args(["config", key, value]).status()?.success());
+        }
+        let hook = repo.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nprintf ran > hook-ran\n")?;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700))?;
+        let wrapper = dir.path().join("git-wrapper");
+        std::fs::write(
+            &wrapper,
+            git_wrapper(
+                &git,
+                &GitWrapper {
+                    scrub: true,
+                    bound: Some(BoundGit {
+                        worktree: repo.clone(),
+                        env: vec![],
+                    }),
+                    ..Default::default()
+                },
+            )?,
+        )?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+        let run = |args: &[&str], env: &[(&str, &str)]| {
+            let mut cmd = provenant_os::fixture::git_command_at(&wrapper);
+            cmd.current_dir(&repo)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", dir.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .args(args)
+                .envs(env.iter().copied());
+            cmd.output().unwrap()
+        };
+        let cases: &[(&[&str], &[(&str, &str)])] = &[
+            (&["-c", "core.hooksPath=/dev/null", "commit"], &[]),
+            (&["-ccore.hooksPath=/dev/null", "commit"], &[]),
+            (
+                &["--config-env", "core.hooksPath=HOOKS", "push"],
+                &[("HOOKS", "/dev/null")],
+            ),
+            (
+                &["--config-env=core.hooksPath=HOOKS", "push"],
+                &[("HOOKS", "/dev/null")],
+            ),
+            (
+                &["commit"],
+                &[
+                    ("GIT_CONFIG_COUNT", "1"),
+                    ("GIT_CONFIG_KEY_0", "core.hooksPath"),
+                    ("GIT_CONFIG_VALUE_0", "/dev/null"),
+                ],
+            ),
+            (
+                &["commit"],
+                &[("GIT_CONFIG_PARAMETERS", "'core.hooksPath=/dev/null'")],
+            ),
+            (&["config", "core.hooksPath", "/dev/null"], &[]),
+            (&["config", "--unset", "core.hooksPath"], &[]),
+            (&["commit", "-n"], &[]),
+            (&["commit", "-qn"], &[]),
+            (&["commit", "--no-verify"], &[]),
+            (&["merge", "--no-verify"], &[]),
+            (&["rebase", "--no-verify"], &[]),
+            (&["cherry-pick", "--no-verify"], &[]),
+            (&["am", "--no-verify"], &[]),
+            (&["push", "--no-verify"], &[]),
+        ];
+        for (args, env) in cases {
+            let output = run(args, env);
+            assert!(!output.status.success(), "{args:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(stderr.lines().count(), 1, "{args:?}: {stderr}");
+            assert!(stderr.contains("Git hooks must run"), "{args:?}: {stderr}");
+        }
+        std::fs::write(repo.join("file"), "fixture")?;
+        assert!(run(&["add", "file"], &[]).status.success());
+        let commit = run(&["commit", "-m", "normal"], &[]);
+        assert!(
+            commit.status.success(),
+            "{}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+        assert_eq!(std::fs::read(repo.join("hook-ran"))?, b"ran");
+        // Direct host-side Git plumbing is not subject to the lane wrapper.
+        assert!(
+            base()
+                .args(["-c", "core.hooksPath=/dev/null", "rev-parse", "HEAD"])
+                .output()?
+                .status
+                .success()
+        );
         Ok(())
     }
 
