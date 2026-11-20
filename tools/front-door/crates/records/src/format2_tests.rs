@@ -414,6 +414,7 @@ fn handoff(status: HandoffStatus, note: &str) -> Handoff {
         verify: vec![],
         spec_concerns: vec![],
         write_scope: None,
+        blocked_on: None,
         extra: Default::default(),
     }
 }
@@ -441,6 +442,32 @@ fn a_declared_stop_needs_the_handoff_that_declared_it() {
     let mut empty = handoff(HandoffStatus::StoppedEarly, "x");
     empty.note = " ".into();
     assert!(Stop::new(StopCause::StoppedEarly, Some(empty)).is_err());
+}
+
+/// Invariant: the sealed cause follows what the handoff says blocked it.
+#[test]
+fn a_blocked_handoff_seals_the_cause_its_blocked_on_names() {
+    for (kind, cause) in [
+        (Some("environment"), StopCause::BlockedEnvironment),
+        (Some("dependency"), StopCause::BlockedDependency),
+        (Some("owner_decision"), StopCause::Blocked),
+        (Some("capability"), StopCause::Blocked),
+        (Some("weather"), StopCause::Blocked),
+        (None, StopCause::Blocked),
+    ] {
+        let mut blocked = handoff(HandoffStatus::Blocked, "The shared lock.");
+        if let Some(kind) = kind {
+            blocked.blocked_on = Some(serde_json::from_value(json!(kind)).unwrap());
+        }
+        let stop = Stop::declared(blocked.clone()).unwrap().unwrap();
+        assert_eq!(stop.cause(), cause, "{kind:?}");
+        assert!(Stop::new(cause, Some(blocked)).is_ok(), "{kind:?}");
+    }
+    let mut stopped = handoff(HandoffStatus::StoppedEarly, "Out of room.");
+    stopped.blocked_on = Some(serde_json::from_value(json!("environment")).unwrap());
+    let stop = Stop::declared(stopped.clone()).unwrap().unwrap();
+    assert_eq!(stop.cause(), StopCause::StoppedEarly);
+    assert!(Stop::new(StopCause::BlockedEnvironment, Some(stopped)).is_err());
 }
 
 #[test]
@@ -656,6 +683,7 @@ fn handoff_write_scope_report_round_trips_full_and_compact_shapes() {
             verify: Vec::new(),
             spec_concerns: Vec::new(),
             write_scope: Some(report),
+            blocked_on: None,
             extra: Default::default(),
         };
         let wire = serde_json::to_value(&handoff).unwrap();

@@ -225,7 +225,10 @@ impl ModelPolicy {
             lines.push(format!("Finish or hand off within {turns} turns."));
         }
         if self.lane.stop_early_ok == Some(false) {
-            lines.push("Carry the task to completion. Keep the schema v2 handoff current and repeat it as the final fenced handoff block. Use status done when finished, stopped_early when work remains, or blocked when an owner decision, missing capability or external change prevents progress. Use blocked, not stopped_early, in those cases.".into());
+            lines.push(format!(
+                "Carry the task to completion. Keep the schema v2 handoff current and repeat it as the final fenced handoff block. {}",
+                provenant_records::handoff::STATUS_GUIDANCE
+            ));
         }
         if let Some(sections) = &self.result.sections
             && !sections.is_empty()
@@ -1793,6 +1796,20 @@ mod tests {
         assert!(policy.guidance().is_empty());
         policy.result.sections = Some(vec!["Summary".into()]);
         assert!(policy.guidance().contains("Summary"));
+    }
+
+    /// Invariant: one text teaches the handoff statuses to every lane.
+    #[test]
+    fn guidance_teaches_the_statuses_from_the_shared_text() {
+        let mut policy = ModelPolicy::default();
+        policy.lane.stop_early_ok = Some(false);
+        let guidance = policy.guidance();
+        assert!(
+            guidance.contains(provenant_records::handoff::STATUS_GUIDANCE),
+            "{guidance}"
+        );
+        assert!(guidance.contains("blocked_on"), "{guidance}");
+        assert!(!guidance.contains("real boundary"), "{guidance}");
     }
 
     #[test]

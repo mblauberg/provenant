@@ -553,11 +553,13 @@ fn declared_stop_requires_a_valid_review_result_and_never_accepts_a_writer() {
             subject.access = AccessMode::WorktreeWrite;
             subject.worktree = Some(".worktrees/write".into());
         }
+        // A stop with nothing new is followed once, then returns to the chair:
+        // no round accepts the node.
         let mut owner = FakeOwner {
-            observations: VecDeque::from([terminal_with_result(
-                AttemptOutcome::DeclaredStop,
-                &text,
-            )]),
+            observations: VecDeque::from([
+                terminal_with_result(AttemptOutcome::DeclaredStop, &text),
+                terminal_with_result(AttemptOutcome::DeclaredStop, &text),
+            ]),
             ..Default::default()
         };
         let run = advance(

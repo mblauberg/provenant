@@ -210,6 +210,46 @@ pub struct Restart {
     /// The routing ladder's choice, when a depleted stop was handed off by it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ladder: Option<LadderChoice>,
+    /// What the stopped attempt left behind, so the node's next stop can tell
+    /// whether this round moved the work forward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<StopProgress>,
+}
+
+/// The work a stopped writer attempt left on its worktree: the head it
+/// reported and the remaining items of its handoff.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopProgress {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remaining: Vec<String>,
+}
+
+impl StopProgress {
+    /// The attempt's reported head and its handoff's remaining items.
+    pub(super) fn of(progress: &NodeProgress) -> Self {
+        Self {
+            commit: progress
+                .outputs
+                .as_ref()
+                .and_then(|outputs| outputs.commit.clone()),
+            remaining: progress
+                .handoff
+                .as_ref()
+                .map(|handoff| handoff.remaining.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Whether this round added a commit or changed the remaining items,
+    /// compared with the round before it.
+    pub(super) fn advanced_from(&self, previous: &Self) -> bool {
+        self.commit
+            .as_ref()
+            .is_some_and(|commit| previous.commit.as_ref() != Some(commit))
+            || self.remaining != previous.remaining
+    }
 }
 
 /// The rung, target and tier the depletion ladder chose for a restart.
@@ -547,9 +587,13 @@ pub(super) fn restart_stopped(
     brief: Option<&str>,
     routes: &[GraphRoute],
     restart: Restart,
+    detail: Option<&str>,
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
-    let reason = format!("restart node {id} after a {} stop", restart.cause);
+    let reason = match detail {
+        Some(detail) => format!("restart node {id} after a {} stop: {detail}", restart.cause),
+        None => format!("restart node {id} after a {} stop", restart.cause),
+    };
     debug_assert_eq!(restart.node, id);
     retry_node_scope(
         graph,

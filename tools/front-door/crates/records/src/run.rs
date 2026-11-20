@@ -1527,7 +1527,7 @@ impl TerminalCause {
                 "the host stopped the writer at lanes.context_handoff_tokens; a fresh attempt continues from its handoff on the same worktree"
             }
             Self::Blocked => {
-                "the writer declared itself blocked: an owner decision, a missing capability or an external change prevents progress; its handoff note says what"
+                "the writer declared itself blocked and could not proceed; its handoff's blocked_on says whether an owner decision, a missing capability, an environment problem or a dependency blocked it, and its note says what"
             }
             Self::LaneTokenLost => {
                 "the lane's access token was revoked or expired mid-run while the account login stayed usable; a writer continues from its handoff on a new token"

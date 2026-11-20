@@ -382,6 +382,22 @@ impl GraphBound<'_> {
 }
 
 impl GraphLimits {
+    /// `limits.continuations` with its value, where the value comes from and
+    /// the key that changes it, for the reason a restart or pause gives.
+    pub fn continuations_note(&self) -> String {
+        let default = Self::default().continuations;
+        if self.continuations == default {
+            format!(
+                "limits.continuations={default} (default; set domains.fabric.graph.limits.continuations to change)"
+            )
+        } else {
+            format!(
+                "limits.continuations={} (configured in domains.fabric.graph.limits; default {default})",
+                self.continuations
+            )
+        }
+    }
+
     /// Maximum size of a persisted graph document accepted by graph readers.
     pub fn document_bytes_bound() -> GraphBound<'static> {
         GraphBound {
