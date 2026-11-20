@@ -648,6 +648,11 @@ pub(crate) fn set_env(
 pub(crate) fn job_root(job: &Job) -> &Path {
     match &job.source {
         SnapshotSource::WorkingTree { worktree, .. } => worktree,
-        SnapshotSource::Commit { .. } => &job.project,
+        SnapshotSource::Commit { .. } => job
+            .env
+            .iter()
+            .find(|(key, _)| key == "PROVENANT_BUILD_LOCAL_ROOT")
+            .map(|(_, value)| Path::new(value))
+            .unwrap_or(&job.project),
     }
 }

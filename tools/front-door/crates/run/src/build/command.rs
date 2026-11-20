@@ -30,8 +30,7 @@ pub(super) fn execute(
         outcome.finished_unix_ms = super::ledger::now_unix_ms();
         return Err((error, Box::new(outcome)));
     }
-    let mut argv: Vec<OsString> = command.argv.iter().map(OsString::from).collect();
-    argv.extend(step.argv.iter().cloned());
+    let wrapper: Vec<OsString> = command.argv.iter().map(OsString::from).collect();
 
     let mut explicit = Vec::new();
     for name in [
@@ -55,11 +54,32 @@ pub(super) fn execute(
         OsString::from(PORT_SOURCE),
         OsString::from(source_name(ctx.strategy.source)),
     ));
-    let env = provenant_config::port_command_environment(job.env.iter().cloned(), &explicit);
-    let original = std::mem::replace(&mut job.steps[0].argv, argv);
+    let env = if matches!(&job.kind, super::JobKind::Gate { .. }) {
+        let mut env = job.env.clone();
+        for (key, value) in explicit {
+            super::set_env(&mut env, key, value);
+        }
+        env
+    } else {
+        provenant_config::port_command_environment(job.env.iter().cloned(), &explicit)
+    };
+    let preserve_steps = matches!(&job.kind, super::JobKind::Gate { .. });
+    let count = if preserve_steps { job.steps.len() } else { 1 };
+    let originals: Vec<_> = job
+        .steps
+        .iter_mut()
+        .take(count)
+        .map(|step| {
+            let mut argv = wrapper.clone();
+            argv.extend(step.argv.iter().cloned());
+            std::mem::replace(&mut step.argv, argv)
+        })
+        .collect();
     let result =
         super::local::execute_with_env(job, ctx, outcome, ExecPlace::Local, None, 0, Some(env));
-    job.steps[0].argv = original;
+    for (step, original) in job.steps.iter_mut().zip(originals) {
+        step.argv = original;
+    }
     let result = result?;
     let Some(exit) = result.outcome.exit else {
         return Ok(result);
@@ -68,14 +88,14 @@ pub(super) fn execute(
     {
         let disposition = disposition(command, code);
         match disposition {
-            Disposition::Success => Ok(with_exit(result, 0)),
+            Disposition::Success => Ok(with_exit(result, 0, preserve_steps)),
             Disposition::Unknown => {
                 let msg = format!(
                     "provenant: repository build admission returned an unknown outcome (source: {:?})",
                     ctx.strategy.source
                 );
                 Ok(with_warning(
-                    with_exit(result, if code == 0 { 1 } else { code }),
+                    with_exit(result, if code == 0 { 1 } else { code }, preserve_steps),
                     msg,
                 ))
             }
@@ -85,7 +105,7 @@ pub(super) fn execute(
                     ctx.strategy.source
                 );
                 Ok(with_warning(
-                    with_exit(result, if code == 0 { 1 } else { code }),
+                    with_exit(result, if code == 0 { 1 } else { code }, preserve_steps),
                     msg,
                 ))
             }
@@ -110,10 +130,10 @@ fn with_warning(mut result: JobResult, warning: String) -> JobResult {
     result
 }
 
-fn with_exit(mut result: JobResult, code: i32) -> JobResult {
+fn with_exit(mut result: JobResult, code: i32, preserve_steps: bool) -> JobResult {
     let exit = super::ExitStatus::code(code);
     result.outcome.exit = Some(exit);
-    if let Some(step) = result.step_exits.first_mut() {
+    if !preserve_steps && let Some(step) = result.step_exits.last_mut() {
         *step = Some(exit);
     }
     result

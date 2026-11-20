@@ -50,6 +50,7 @@ pub(super) fn execute_with_env(
         slot: outcome.slot,
     };
     let mut env = override_env.unwrap_or_else(|| job.env.clone());
+    env.retain(|(key, _)| key != "PROVENANT_BUILD_LOCAL_ROOT");
     if let Some(prelude) = job.prelude.take() {
         match prelude(&site) {
             Ok(extra) => {
@@ -122,7 +123,13 @@ pub(super) fn execute_with_env(
             Output::Capture { limit_bytes } => {
                 let limit = limit_bytes.min(MAX_CAPTURE_LIMIT);
                 options.stdout = StreamPolicy::Capture { limit };
-                options.stderr = StreamPolicy::Capture { limit };
+                options.stderr = if matches!(&job.kind, super::JobKind::Tier { .. }) {
+                    StreamPolicy::Tail {
+                        limit: limit.min(64 * 1024),
+                    }
+                } else {
+                    StreamPolicy::Capture { limit }
+                };
             }
         }
         let output = match executor.execute_forwarding_group(options) {
@@ -173,7 +180,11 @@ pub(super) fn execute_with_env(
             outcome.cancelled = true;
         }
         exits.push(Some(exit));
-        if let Some(capture) = capture(output.stdout, output.stderr) {
+        if let Some(capture) = capture(
+            output.stdout,
+            output.stderr,
+            output.drain_truncated || output.overflow_stopped,
+        ) {
             let bound = match job.output {
                 Output::Capture { limit_bytes } => limit_bytes.min(MAX_CAPTURE_LIMIT),
                 Output::Stream => 0,
@@ -223,15 +234,31 @@ pub(super) fn finish_slot_execution(
 fn capture(
     stdout: provenant_os::exec::CapturedStream,
     stderr: provenant_os::exec::CapturedStream,
+    drain_incomplete: bool,
 ) -> Option<Captured> {
-    if stdout.total_bytes == 0 && stderr.total_bytes == 0 {
+    let incomplete = |stream: &provenant_os::exec::CapturedStream| {
+        stream.truncated
+            || stream.sink_lost_bytes != 0
+            || stream.sink_failed
+            || stream.oversized_frames != 0
+            || stream.decoder_lost_frames != 0
+            || stream.read_failed
+            || stream.filter_failed
+    };
+    let stdout_incomplete = incomplete(&stdout) || drain_incomplete;
+    let stderr_incomplete = incomplete(&stderr) || drain_incomplete;
+    if stdout.total_bytes == 0
+        && stderr.total_bytes == 0
+        && !stdout_incomplete
+        && !stderr_incomplete
+    {
         return None;
     }
     Some(Captured {
         stdout: stdout.bytes,
         stderr: stderr.bytes,
-        stdout_truncated: stdout.truncated,
-        stderr_truncated: stderr.truncated,
+        stdout_truncated: stdout_incomplete,
+        stderr_truncated: stderr_incomplete,
         stdout_total_bytes: stdout.total_bytes,
         stderr_total_bytes: stderr.total_bytes,
     })
@@ -284,5 +311,23 @@ pub fn step_cwd(root: &Path, cwd_rel: &Path) -> PathBuf {
         cwd_rel.to_path_buf()
     } else {
         root.join(cwd_rel)
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::capture;
+    use provenant_os::exec::CapturedStream;
+
+    #[test]
+    fn failed_or_incomplete_capture_is_not_reported_complete_when_empty() {
+        let failed = CapturedStream {
+            read_failed: true,
+            ..Default::default()
+        };
+        let result = capture(failed, CapturedStream::default(), false).unwrap();
+        assert!(result.stdout_truncated);
+        let result = capture(CapturedStream::default(), CapturedStream::default(), true).unwrap();
+        assert!(result.stdout_truncated && result.stderr_truncated);
     }
 }
