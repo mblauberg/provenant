@@ -32,6 +32,198 @@ pub struct Manifest {
     pub contents: String,
 }
 
+/// Dependency inputs used to decide whether a host generation can be reused.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SeedIdentity {
+    pub schema: u32,
+    pub inputs: serde_json::Value,
+    pub hash: String,
+}
+
+/// Draft only: the fallback walk does not yet discover hidden or symlinked
+/// workspace members. Do not use this value for generation selection.
+///
+/// Compute identity from files only. The preimage is compact JSON of `inputs`,
+/// whose object keys are sorted by serde_json. It includes relative file names
+/// and dependency tables; unrelated manifests can over-invalidate a seed.
+pub fn seed_identity(
+    checkout: &Path,
+    workspace: &Path,
+    rustc_vv: &str,
+    host_triple: &str,
+    cargo_profile: &provenant_config::CargoBuildProfile,
+) -> io::Result<SeedIdentity> {
+    use sha2::{Digest, Sha256};
+    use std::{collections::BTreeMap, fs};
+    fn parse(path: &Path) -> io::Result<serde_json::Value> {
+        let text = fs::read_to_string(path)?;
+        toml_edit::de::from_str(&text).map_err(io::Error::other)
+    }
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        depth: usize,
+        count: &mut usize,
+        manifests: &mut BTreeMap<String, serde_json::Value>,
+    ) -> io::Result<()> {
+        if depth > 64 || *count >= 100_000 {
+            return Err(io::Error::other("seed identity traversal limit exceeded"));
+        }
+        *count += 1;
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let kind = entry.file_type()?;
+            if kind.is_dir() && name != "target" && !name.starts_with('.') {
+                walk(root, &entry.path(), depth + 1, count, manifests)?;
+            } else if kind.is_file() && name == "Cargo.toml" {
+                let path = entry.path();
+                let mut value = parse(&path)?;
+                let table = value
+                    .as_object_mut()
+                    .ok_or_else(|| io::Error::other("invalid manifest"))?;
+                table.retain(|key, _| {
+                    matches!(
+                        key.as_str(),
+                        "features"
+                            | "dependencies"
+                            | "dev-dependencies"
+                            | "build-dependencies"
+                            | "target"
+                            | "workspace"
+                            | "patch"
+                            | "replace"
+                    )
+                });
+                if let Some(workspace) = table
+                    .get_mut("workspace")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    workspace.retain(|key, _| key == "dependencies");
+                }
+                if let Some(targets) = table
+                    .get_mut("target")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    for target in targets
+                        .values_mut()
+                        .filter_map(serde_json::Value::as_object_mut)
+                    {
+                        target.retain(|key, _| {
+                            matches!(
+                                key.as_str(),
+                                "dependencies" | "dev-dependencies" | "build-dependencies"
+                            )
+                        });
+                    }
+                }
+                let relative = path.strip_prefix(root).map_err(io::Error::other)?;
+                let relative = relative
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("non-UTF-8 manifest path"))?;
+                manifests.insert(relative.to_owned(), value);
+            } else if kind.is_symlink() && name == "Cargo.toml" {
+                return Err(io::Error::other(
+                    "symlinked Cargo manifest cannot be identified",
+                ));
+            }
+        }
+        Ok(())
+    }
+    let checkout = checkout.canonicalize()?;
+    let workspace = workspace.canonicalize()?;
+    if !workspace.starts_with(&checkout) {
+        return Err(io::Error::other("workspace is outside checkout"));
+    }
+    let lock = fs::read(workspace.join("Cargo.lock"))?;
+    let mut manifests = BTreeMap::new();
+    walk(&checkout, &checkout, 0, &mut 0, &mut manifests)?;
+    // An omitted path dependency cannot safely share a generation.
+    fn check_paths(
+        value: &serde_json::Value,
+        base: &Path,
+        root: &Path,
+        manifests: &BTreeMap<String, serde_json::Value>,
+    ) -> io::Result<()> {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(path) = map.get("path").and_then(serde_json::Value::as_str) {
+                    let manifest = base.join(path).join("Cargo.toml").canonicalize()?;
+                    let relative = manifest.strip_prefix(root).map_err(io::Error::other)?;
+                    let relative = relative
+                        .to_str()
+                        .ok_or_else(|| io::Error::other("non-UTF-8 dependency path"))?;
+                    if !manifests.contains_key(relative) {
+                        return Err(io::Error::other("path dependency omitted from identity"));
+                    }
+                }
+                for child in map.values() {
+                    check_paths(child, base, root, manifests)?;
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    check_paths(child, base, root, manifests)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    for (path, value) in &manifests {
+        let manifest = checkout.join(path);
+        check_paths(
+            value,
+            manifest
+                .parent()
+                .ok_or_else(|| io::Error::other("manifest parent unavailable"))?,
+            &checkout,
+            &manifests,
+        )?;
+    }
+    let root_manifest = parse(&workspace.join("Cargo.toml"))?;
+    let profiles = root_manifest
+        .get("profile")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let mut configs = BTreeMap::new();
+    let mut dir = workspace.as_path();
+    loop {
+        for name in ["config", "config.toml"] {
+            let path = dir.join(".cargo").join(name);
+            match fs::read_to_string(&path) {
+                Ok(text) => {
+                    let value: serde_json::Value =
+                        toml_edit::de::from_str(&text).map_err(io::Error::other)?;
+                    let relative = path.strip_prefix(&checkout).map_err(io::Error::other)?;
+                    configs.insert(relative.to_string_lossy().into_owned(), value);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if dir == checkout {
+            break;
+        }
+        dir = dir
+            .parent()
+            .ok_or_else(|| io::Error::other("workspace parent unavailable"))?;
+    }
+    let inputs = serde_json::json!({
+        "lock_sha256": provenant_core::hex(&Sha256::digest(&lock)),
+        "manifests": manifests, "profiles": profiles, "configs": configs,
+        "rustc_vv": rustc_vv, "host_triple": host_triple,
+        "contents": "deps", "cargo_profile": cargo_profile,
+    });
+    let preimage = serde_json::to_vec(&inputs).map_err(io::Error::other)?;
+    Ok(SeedIdentity {
+        schema: 1,
+        hash: provenant_core::hex(&Sha256::digest(preimage)),
+        inputs,
+    })
+}
+
 /// Allocated bytes of a seed target, measured at seed-build time. A clone of a
 /// multi-gigabyte target cannot afford a second walk of the whole tree before it
 /// starts, so the figure is recorded here and read from the manifest instead.
@@ -544,6 +736,65 @@ fn lane_release_pin(worktree: &Path, home: &Path, host_state: &Path) -> Result<S
 #[cfg(test)]
 mod lane_probe_tests {
     use super::*;
+
+    #[test]
+    fn identity_changes_with_each_input() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join(".cargo")).unwrap();
+        fs::write(root.join("Cargo.lock"), "lock one").unwrap();
+        let manifest = "[package]\nname = \"sample\"\nversion = \"1.0.0\"\ndescription = \"first\"\n[dependencies]\nexample = \"1\"\n[profile.dev]\nopt-level = 0\n";
+        fs::write(root.join("Cargo.toml"), manifest).unwrap();
+        fs::write(root.join(".cargo/config.toml"), "[build]\njobs = 1\n").unwrap();
+        let profile = provenant_config::CargoBuildProfile::default();
+        let identity =
+            |version: &str, host: &str, profile: &provenant_config::CargoBuildProfile| {
+                seed_identity(root, root, version, host, profile)
+                    .unwrap()
+                    .hash
+            };
+        fs::write(root.join("source.rs"), "source one").unwrap();
+        let original = identity("rustc one", "host one", &profile);
+        fs::write(root.join("source.rs"), "source two").unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            manifest
+                .replace("1.0.0", "2.0.0")
+                .replace("first", "second"),
+        )
+        .unwrap();
+        assert_eq!(original, identity("rustc one", "host one", &profile));
+        fs::write(root.join("Cargo.lock"), "lock two").unwrap();
+        assert_ne!(original, identity("rustc one", "host one", &profile));
+        fs::write(root.join("Cargo.lock"), "lock one").unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            manifest.replace("example = \"1\"", "example = \"2\""),
+        )
+        .unwrap();
+        assert_ne!(original, identity("rustc one", "host one", &profile));
+        fs::write(
+            root.join("Cargo.toml"),
+            manifest.replace("opt-level = 0", "opt-level = 1"),
+        )
+        .unwrap();
+        assert_ne!(original, identity("rustc one", "host one", &profile));
+        fs::write(root.join("Cargo.toml"), manifest).unwrap();
+        fs::write(root.join(".cargo/config.toml"), "[build]\njobs = 2\n").unwrap();
+        assert_ne!(original, identity("rustc one", "host one", &profile));
+        fs::write(root.join(".cargo/config.toml"), "[build]\njobs = 1\n").unwrap();
+        assert_ne!(original, identity("rustc two", "host one", &profile));
+        assert_ne!(original, identity("rustc one", "host two", &profile));
+        let mut other = profile.clone();
+        other.incremental.push('x');
+        assert_ne!(original, identity("rustc one", "host one", &other));
+        assert!(
+            original
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        );
+    }
 
     #[test]
     fn project_key_reexport_matches_config() {
