@@ -4741,7 +4741,11 @@ mod tests {
             listing.rows.iter().any(|row| row.name == "old-live"),
             "the old settled graph with a live lane is still listed"
         );
-        assert_eq!(live_lanes(&listing), 1, "only the live lane is counted");
+        assert_eq!(
+            live_lanes(&listing),
+            2,
+            "the active graph's lane and the old settled graph's live lane are both counted"
+        );
         assert_eq!(
             listing.omitted.get("settled"),
             Some(&2),

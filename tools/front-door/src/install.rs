@@ -874,10 +874,7 @@ fn warn_live_record_change(
         cancel: context.cancel,
     };
     let message = match inspect_live_attempts(destination, &call) {
-        Ok(live) => match live_record_warning(installed, &live) {
-            Some(message) => message,
-            None => return None,
-        },
+        Ok(live) => live_record_warning(installed, &live)?,
         Err(reason) => format!(
             "release changes live-attempt records (format {} → {}); could not inspect live attempts under {}: {reason}",
             installed
