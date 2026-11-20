@@ -6,16 +6,14 @@
       "name": "Rust Linux tests (cache)",
       "status": "completed",
       "conclusion": "cancelled",
-      "steps": [],
-      "needs": []
+      "steps": []
     },
     {
       "id": 102,
       "name": "Rust macOS tests (custody)",
       "status": "completed",
       "conclusion": "cancelled",
-      "steps": [],
-      "needs": []
+      "steps": []
     },
     {
       "id": 103,
@@ -24,8 +22,7 @@
       "conclusion": "failure",
       "steps": [
         { "name": "Check required suites", "conclusion": "failure" }
-      ],
-      "needs": ["Rust Linux tests (cache)", "Rust macOS tests (custody)"]
+      ]
     }
   ]
 }

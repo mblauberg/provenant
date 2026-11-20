@@ -111,6 +111,61 @@ pub(super) fn status_omits_stranded_work_with_a_live_lane() -> Result {
     Ok(())
 }
 
+pub(super) fn status_reports_in_progress_merge_with_edits() -> Result {
+    let rig = repository()?;
+    let created = ok(&rig, &["worktree", "create", "fix/3650-merge", "--json"])?;
+    let path = created_worktree_path(&created)?;
+    fs::write(path.join("merged.txt"), "one\ntwo\n")?;
+    let path_text = path.to_str().ok_or("worktree path")?.to_owned();
+    let git_dir = git(&rig, &["-C", &path_text, "rev-parse", "--absolute-git-dir"])?;
+    fs::write(Path::new(&git_dir).join("MERGE_HEAD"), "0".repeat(40))?;
+
+    let status = ok(&rig, &["status", "--json"])?;
+    let rows = status["data"]["stranded_work"]
+        .as_array()
+        .ok_or("status has no stranded_work array")?;
+    assert_eq!(rows.len(), 1, "{status}");
+    assert_eq!(rows[0]["operation"], "merge", "{status}");
+    assert_eq!(rows[0]["files"], 1, "{status}");
+    assert_eq!(rows[0]["lines"], 2, "{status}");
+
+    let human = command(&rig, &["status"])?;
+    let text = String::from_utf8(human.stdout.bytes)?;
+    assert!(text.contains("(merge)"), "{text}");
+    Ok(())
+}
+
+pub(super) fn status_reports_dirty_detached_worktree() -> Result {
+    let rig = repository()?;
+    git(
+        &rig,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            ".worktrees/detached",
+            "HEAD",
+        ],
+    )?;
+    let path = rig.project.join(".worktrees/detached");
+    fs::write(path.join("detached.txt"), "one\ntwo\nthree\n")?;
+
+    let status = ok(&rig, &["status", "--json"])?;
+    let rows = status["data"]["stranded_work"]
+        .as_array()
+        .ok_or("status has no stranded_work array")?;
+    assert_eq!(rows.len(), 1, "{status}");
+    assert!(rows[0]["branch"].is_null(), "{status}");
+    assert_eq!(rows[0]["files"], 1, "{status}");
+    assert_eq!(rows[0]["lines"], 3, "{status}");
+
+    let human = command(&rig, &["status"])?;
+    let text = String::from_utf8(human.stdout.bytes)?;
+    assert!(text.contains("detached HEAD"), "{text}");
+    Ok(())
+}
+
 pub(super) fn naming_and_post_create_ports_are_advisory_and_evidenced() -> Result {
     let rig = repository()?;
     let (roots, _execution) = writer_context(&rig)?;

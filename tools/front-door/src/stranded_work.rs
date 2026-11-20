@@ -16,6 +16,9 @@ pub(crate) struct StrandedWork {
     /// Best-effort `#<number>` read from a branch name, when one is present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issue: Option<String>,
+    /// The Git operation left in progress, when edits accompanied one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
     pub files: usize,
     pub lines: usize,
     /// Human age of the newest edit, or `-` when no file time was available.
@@ -77,14 +80,19 @@ pub(crate) fn human_lines(rows: &[StrandedWork]) -> Vec<String> {
     }
     let mut lines = vec!["stranded work:".to_owned()];
     for row in rows {
-        let branch = row.branch.as_deref().unwrap_or("-");
+        let branch = row.branch.as_deref().unwrap_or("detached HEAD");
         let issue = row
             .issue
             .as_deref()
             .map(|issue| format!(" {issue}"))
             .unwrap_or_default();
+        let operation = row
+            .operation
+            .as_deref()
+            .map(|operation| format!(" ({operation})"))
+            .unwrap_or_default();
         lines.push(format!(
-            "  {branch}{issue}: {}, {}, {} old: {}",
+            "  {branch}{operation}{issue}: {}, {}, {} old: {}",
             count_text(row.files, "file"),
             count_text(row.lines, "line"),
             row.age,
@@ -125,32 +133,48 @@ pub(crate) fn survey_in_context(
     };
     let mut rows = Vec::new();
     for tree in trees {
-        if tree.primary || tree.dirty != WorktreeCondition::Dirty || !unheld(&tree.occupancy) {
+        if tree.primary || !unheld(&tree.occupancy) {
             continue;
         }
-        let Some(branch) = tree.branch.clone() else {
+        // Custody classifies an in-progress Git operation separately from a
+        // dirty tree, even when conflicts and edits are present. Both carry
+        // work a chair may want to adopt before cleanup.
+        let in_progress = tree.dirty == WorktreeCondition::GitOperationInProgress;
+        if !matches!(
+            tree.dirty,
+            WorktreeCondition::Dirty | WorktreeCondition::GitOperationInProgress
+        ) {
             continue;
-        };
+        }
         // Git reports a fully-qualified ref, but the report names the short
-        // branch, as its human output and unit fixture do.
-        let branch = branch
-            .strip_prefix("refs/heads/")
-            .unwrap_or(&branch)
-            .to_owned();
+        // branch. A detached checkout names none and is labelled in the human
+        // report instead of being hidden.
+        let branch = tree.branch.as_deref().map(|branch| {
+            branch
+                .strip_prefix("refs/heads/")
+                .unwrap_or(branch)
+                .to_owned()
+        });
         let Ok(stats) = worktrees::edit_stats(context, &tree.path, cancel) else {
             continue;
         };
         if stats.files == 0 {
             continue;
         }
+        let operation = in_progress
+            .then(|| worktrees::in_progress_git_operation(context, &tree.path, cancel).ok())
+            .flatten()
+            .flatten()
+            .map(str::to_owned);
         rows.push(StrandedWork {
-            issue: linked_reference(&branch),
+            issue: branch.as_deref().and_then(linked_reference),
             age: stats.newest_edit_micros.map_or_else(
                 || "-".to_owned(),
                 |newest| age_text(now_micros.saturating_sub(newest)),
             ),
             path: tree.path,
-            branch: Some(branch),
+            branch,
+            operation,
             files: stats.files,
             lines: stats.lines,
             newest_edit_micros: stats.newest_edit_micros,
@@ -217,6 +241,7 @@ mod tests {
             path: PathBuf::from("/repo/.worktrees/fix-3650-stranded-work"),
             branch: Some("fix/3650-stranded-work".into()),
             issue: Some("#3650".into()),
+            operation: None,
             files: 1,
             lines: 3,
             age: "2d".into(),
@@ -232,5 +257,37 @@ mod tests {
             lines[2],
             "    next: provenant run implement --worktree /repo/.worktrees/fix-3650-stranded-work"
         );
+    }
+
+    #[test]
+    fn stranded_lines_label_a_detached_head_and_an_in_progress_operation() {
+        let rows = [
+            StrandedWork {
+                path: PathBuf::from("/repo/.worktrees/detached"),
+                branch: None,
+                issue: None,
+                operation: None,
+                files: 2,
+                lines: 4,
+                age: "1d".into(),
+                newest_edit_micros: None,
+            },
+            StrandedWork {
+                path: PathBuf::from("/repo/.worktrees/merging"),
+                branch: Some("fix/3650-stranded-work".into()),
+                issue: Some("#3650".into()),
+                operation: Some("merge".into()),
+                files: 3,
+                lines: 9,
+                age: "2h".into(),
+                newest_edit_micros: None,
+            },
+        ];
+        let lines = human_lines(&rows);
+        assert!(lines[1].contains("detached HEAD"), "{}", lines[1]);
+        assert!(lines[1].contains("2 files"), "{}", lines[1]);
+        assert!(lines[1].contains("4 lines"), "{}", lines[1]);
+        assert!(lines[3].contains("(merge)"), "{}", lines[3]);
+        assert!(lines[3].contains("#3650"), "{}", lines[3]);
     }
 }

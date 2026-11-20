@@ -94,6 +94,11 @@ pub(crate) struct Line {
     /// Links from the same observation, retained for completion reports.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     failed_check_details: Vec<FailedCheck>,
+    /// The shared per-job digest for this head, when checks failed. The same
+    /// report `ci failures` builds, embedded so status and wait never point at
+    /// a digest they do not show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) failures: Option<crate::ci::Report>,
     #[serde(default, deserialize_with = "display_default")]
     merge: String,
     #[serde(default)]
@@ -306,6 +311,63 @@ impl Line {
         line.push_str(&self.cause_suffix());
         line
     }
+
+    /// Compact digest lines for this head's failed jobs, empty when nothing
+    /// failed or the digest could not be read.
+    pub(crate) fn digest_rows(&self) -> Vec<String> {
+        self.failures
+            .as_ref()
+            .map(crate::ci::digest_rows)
+            .unwrap_or_default()
+    }
+
+    /// Full digest text for this head, used by `--full` output.
+    pub(crate) fn digest_human(&self) -> String {
+        self.failures
+            .as_ref()
+            .map(crate::ci::digest_human)
+            .unwrap_or_default()
+    }
+
+    /// Read the shared per-job digest for a head whose checks failed. An
+    /// unreadable digest stays absent; the status line remains complete.
+    pub(crate) fn attach_failure_digest(
+        &mut self,
+        state: &Path,
+        project: &Path,
+        request: &provenant_config::ports::Request,
+    ) {
+        if self.failed_check_details.is_empty() || self.failures.is_some() {
+            return;
+        }
+        let checks: Vec<batch::RawCheck> = self
+            .failed_check_details
+            .iter()
+            .map(|check| batch::RawCheck {
+                name: check.name.clone(),
+                bucket: "fail".to_owned(),
+                url: check.url.clone(),
+            })
+            .collect();
+        let Some(repository) = checks
+            .iter()
+            .find_map(|check| check.url.as_deref().and_then(crate::ci::repository_of))
+            .or_else(|| batch::repository(state, project).ok())
+        else {
+            return;
+        };
+        self.failures = crate::ci::digest(
+            state,
+            project,
+            &repository,
+            self.number,
+            &self.head,
+            &checks,
+            request,
+        )
+        .ok();
+    }
+
     /// The diagnosis a waiter prints for a head whose checks never started.
     pub(crate) fn cause_suffix(&self) -> String {
         match (&self.cause, &self.next) {
@@ -950,6 +1012,7 @@ fn status_line(number: u64, view: View, checks: Option<&[super::observer::Check]
                 url: check.url.as_deref().and_then(display_check_url),
             })
             .collect(),
+        failures: None,
         merge: word(&view.merge),
         review: word(view.review.as_deref().unwrap_or_default()),
         state: view.state,
@@ -1061,6 +1124,7 @@ fn rest_line(project: &Path, state: &Path, number: u64, try_graphql: bool) -> Li
                 failing_checks: Vec::new(),
                 pending_checks: Vec::new(),
                 failed_check_details: Vec::new(),
+                failures: None,
                 merge: "unknown".into(),
                 review: "unknown".into(),
                 cause: None,
@@ -1096,7 +1160,12 @@ pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
         } else {
             numbers
         };
-        Ok(snapshot(&project, state.as_path(), &numbers))
+        let request = provenant_config::ports::Request::within(std::time::Duration::from_secs(60));
+        let mut lines = snapshot(&project, state.as_path(), &numbers);
+        for line in &mut lines {
+            line.attach_failure_digest(state.as_path(), &project, &request);
+        }
+        Ok(lines)
     })();
     match result {
         Ok(lines) => {
@@ -1115,7 +1184,14 @@ pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
                     }
                 }
             }
-            let text: String = lines.iter().map(|line| line.text() + "\n").collect();
+            let text: String = lines
+                .iter()
+                .map(|line| {
+                    let mut text = line.text() + "\n";
+                    text.push_str(&line.digest_human());
+                    text
+                })
+                .collect();
             let summary = summarise(&lines);
             let outcome = if !lines.is_empty() && lines.iter().all(|line| line.error.is_some()) {
                 Outcome::Unavailable
@@ -1169,7 +1245,14 @@ fn summarise(lines: &[Line]) -> provenant_cli::Summary {
             .iter()
             .position(|class| *class == line.display_class())
     });
-    let rows: Vec<String> = action.iter().map(|line| line.text()).collect();
+    let rows: Vec<String> = action
+        .iter()
+        .flat_map(|line| {
+            let mut rows = vec![line.text()];
+            rows.extend(line.digest_rows());
+            rows
+        })
+        .collect();
     let quiet = lines.len() - action.len();
     let next = match action.first() {
         Some(line) if line.class() == "failing" => {
@@ -1213,6 +1296,7 @@ mod tests {
             failing_checks: Vec::new(),
             pending_checks: Vec::new(),
             failed_check_details: Vec::new(),
+            failures: None,
             merge: "clean".into(),
             review: "approved".into(),
             cause: None,
@@ -1224,6 +1308,48 @@ mod tests {
             batch_detail: None,
         }
     }
+    #[test]
+    fn a_failing_line_reports_the_shared_digest_in_text_and_json() {
+        let mut line = row(1669, "head", None);
+        line.failing_checks = vec!["ci-status".into()];
+        line.failed_check_details = vec![super::FailedCheck {
+            name: "ci-status".into(),
+            url: Some("https://github.com/owner/repo/actions/runs/7".into()),
+        }];
+        line.failures = Some(crate::ci::Report {
+            pr: Some(1669),
+            run: None,
+            head: Some("head".into()),
+            runs: vec![crate::ci::RunFailures {
+                run: 7,
+                jobs: vec![crate::ci::JobFailures {
+                    job: "lint".into(),
+                    step: Some("clippy".into()),
+                    class: crate::ci::JobClass::Failed,
+                    unrelated: Vec::new(),
+                    tests: Vec::new(),
+                    errors: vec!["error[E0308]: mismatched types".into()],
+                    truncated: false,
+                }],
+                error: None,
+            }],
+            unlogged: Vec::new(),
+            rerun: None,
+        });
+        let rows = line.digest_rows();
+        assert!(
+            rows.iter().any(|row| row.contains("mismatched types")),
+            "{rows:?}"
+        );
+        let json = serde_json::to_value(&line).expect("line serialises");
+        assert!(
+            json["failures"]["runs"][0]["jobs"][0]["errors"][0]
+                .as_str()
+                .is_some_and(|text| text.contains("mismatched types")),
+            "{json}"
+        );
+    }
+
     #[test]
     fn completion_report_retains_every_failed_check_and_link() {
         let check = |name: &str, bucket: &str, url: &str| super::super::observer::Check {

@@ -966,6 +966,10 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("agent_label", "string"),
     FieldMetadata::new("client_label", "string"),
     FieldMetadata::new("host_native", "table"),
+    FieldMetadata::new("ssh_executable", "string"),
+    FieldMetadata::new("limits", "table"),
+    FieldMetadata::new("implement", "table"),
+    FieldMetadata::new("plan", "table"),
     FieldMetadata::int(
         "graph.decide_timeout_seconds",
         1,

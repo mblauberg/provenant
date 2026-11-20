@@ -20,6 +20,45 @@ pub struct EditStats {
 }
 
 const MAX_UNTRACKED_BYTES: u64 = 1_048_576;
+const MAX_NUMSTAT_BYTES: usize = 1_048_576;
+const MAX_NUMSTAT_ROWS: usize = 10_000;
+
+/// Count added and removed lines from `git diff --numstat -z`. Numeric counts
+/// never depend on patch line prefixes, so a changed line beginning `++` or
+/// `--` is counted like any other. Binary entries report `-` and add nothing.
+fn count_numstat_lines(raw: &[u8]) -> Result<usize, WorktreeError> {
+    if raw.len() > MAX_NUMSTAT_BYTES || (!raw.is_empty() && !raw.ends_with(&[0])) {
+        return Err(WorktreeError::InvalidOutput);
+    }
+    let mut total = 0usize;
+    let mut rows = 0usize;
+    for record in raw.split(|byte| *byte == 0) {
+        if record.is_empty() {
+            continue;
+        }
+        rows += 1;
+        if rows > MAX_NUMSTAT_ROWS {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        let mut fields = record.splitn(3, |byte| *byte == b'\t');
+        let added = fields.next().ok_or(WorktreeError::InvalidOutput)?;
+        let removed = fields.next().ok_or(WorktreeError::InvalidOutput)?;
+        if fields.next().is_none() {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        for value in [added, removed] {
+            if value == b"-" {
+                continue;
+            }
+            let text = std::str::from_utf8(value).map_err(|_| WorktreeError::InvalidOutput)?;
+            total = total.saturating_add(
+                text.parse::<usize>()
+                    .map_err(|_| WorktreeError::InvalidOutput)?,
+            );
+        }
+    }
+    Ok(total)
+}
 
 fn modified_micros(metadata: &std::fs::Metadata) -> Option<i64> {
     let elapsed = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
@@ -74,18 +113,13 @@ pub fn edit_stats(
         return Ok(stats);
     }
 
-    let patch = super::inventory::run_git(context, tree.repo(), GitRead::DirtyPatch, cancel)?;
-    if super::inventory::exit_code(&patch)? == 0 {
-        stats.lines = patch
-            .stdout
-            .bytes
-            .split(|byte| *byte == b'\n')
-            .filter(|line| {
-                matches!(line.first(), Some(b'+') | Some(b'-'))
-                    && !line.starts_with(b"+++")
-                    && !line.starts_with(b"---")
-            })
-            .count();
+    let numstat = super::inventory::run_git(context, tree.repo(), GitRead::Numstat, cancel)?;
+    if super::inventory::exit_code(&numstat)? == 0
+        && !numstat.drain_truncated
+        && !numstat.stdout.sink_failed
+        && !numstat.stdout.read_failed
+    {
+        stats.lines = count_numstat_lines(&numstat.stdout.bytes)?;
     }
 
     for raw in &paths {
@@ -118,4 +152,37 @@ pub fn edit_stats(
         }
     }
     Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WorktreeError, count_numstat_lines};
+
+    #[test]
+    fn numstat_counts_added_and_removed_lines_from_numbers_not_patch_prefixes() {
+        // The patch for `++added` / `--removed` renders as `+++` / `---`;
+        // numstat reports only the counts, so both lines are counted.
+        assert_eq!(count_numstat_lines(b"1\t1\tweird.rs\0").unwrap(), 2);
+        assert_eq!(
+            count_numstat_lines(b"5\t0\tadd.rs\0-\t-\timage.png\0").unwrap(),
+            5
+        );
+        assert_eq!(count_numstat_lines(b"").unwrap(), 0);
+    }
+
+    #[test]
+    fn numstat_rejects_malformed_or_unbounded_output() {
+        assert!(matches!(
+            count_numstat_lines(b"1\t1\tunterminated"),
+            Err(WorktreeError::InvalidOutput)
+        ));
+        assert!(matches!(
+            count_numstat_lines(b"1\tfile.rs\0"),
+            Err(WorktreeError::InvalidOutput)
+        ));
+        assert!(matches!(
+            count_numstat_lines(b"bad\t1\tfile.rs\0"),
+            Err(WorktreeError::InvalidOutput)
+        ));
+    }
 }

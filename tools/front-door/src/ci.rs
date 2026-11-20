@@ -332,7 +332,7 @@ fn rate_limited(error: &dyn std::error::Error) -> bool {
 }
 
 /// The base repository a pull request URL names, whose CI the checks ran on.
-fn repository_of(url: &str) -> Option<String> {
+pub(crate) fn repository_of(url: &str) -> Option<String> {
     let segments: Vec<&str> = url.trim_end_matches('/').split('/').collect();
     let [.., owner, name, "pull", _] = segments.as_slice() else {
         return None;
@@ -341,6 +341,39 @@ fn repository_of(url: &str) -> Option<String> {
         return None;
     }
     Some(format!("{owner}/{name}"))
+}
+
+/// The shared per-job digest for a pull request head. `pr status` and
+/// `wait --pr` embed this alongside `ci failures` so every command reports the
+/// same failed steps, tests and errors.
+pub(crate) fn digest(
+    state: &Path,
+    project: &Path,
+    repository: &str,
+    pr: u64,
+    head: &str,
+    checks: &[RawCheck],
+    request: &provenant_config::ports::Request,
+) -> Result<Report, Box<dyn std::error::Error>> {
+    report(
+        state,
+        project,
+        repository,
+        Some(pr),
+        Some(head.to_owned()),
+        checks,
+        request,
+    )
+}
+
+/// Compact digest rows for an embedded report, reused by status and wait.
+pub(crate) fn digest_rows(report: &Report) -> Vec<String> {
+    rows(report)
+}
+
+/// Full digest text for an embedded report, reused by status and wait.
+pub(crate) fn digest_human(report: &Report) -> String {
+    human(report)
 }
 
 /// Failed Actions runs behind the checks, plus checks with no Actions run.
@@ -420,8 +453,6 @@ struct ApiJob {
     conclusion: Option<String>,
     #[serde(default)]
     steps: Vec<ApiStep>,
-    #[serde(default)]
-    needs: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -480,16 +511,27 @@ fn classify_jobs(jobs: &[ApiJob]) -> BTreeMap<u64, JobClass> {
     classes
 }
 
-/// Whether a job's only bad inputs were cancelled or skipped, with no real
-/// failure among them. A job with no declared inputs is never a gate.
+/// The repository's required aggregate check. Its own conclusion is a failure
+/// that says nothing about its cause; the member jobs do.
+const AGGREGATE_GATE: &str = "ci-status";
+
+/// Whether the required aggregate gate failed only because every other ended
+/// job with a bad conclusion was cancelled or skipped. The jobs endpoint does
+/// not publish dependency lists, so the evidence is the run's own job names and
+/// conclusions: any real failure elsewhere keeps the gate a real failure, and
+/// a job that is not the aggregate gate is never demoted on this basis.
 fn gate_only_cancelled(job: &ApiJob, conclusions: &BTreeMap<String, Option<String>>) -> bool {
-    if job.needs.is_empty() {
+    if job.name != AGGREGATE_GATE || !bad_input(job.conclusion.as_deref()) {
         return false;
     }
+    let own_id = job.id.to_string();
     let mut saw_bad = false;
-    for need in &job.needs {
-        let Some(conclusion) = conclusions.get(need).and_then(Option::as_deref) else {
-            return false;
+    for (name, conclusion) in conclusions {
+        if name == &job.name || name == &own_id {
+            continue;
+        }
+        let Some(conclusion) = conclusion.as_deref() else {
+            continue;
         };
         if !bad_input(Some(conclusion)) {
             continue;
@@ -1012,6 +1054,11 @@ fn rows(report: &Report) -> Vec<String> {
                 }
                 rows.push(row);
             }
+            // A lint or compiler error belongs to no test, so keep its job,
+            // failed step and classification in the default compact output.
+            for error in &job.errors {
+                rows.push(format!("{prefix}: {}: {error}", class_label(job.class)));
+            }
             for unrelated in &job.unrelated {
                 rows.push(format!("{prefix}: {unrelated}"));
             }
@@ -1437,6 +1484,71 @@ mod tests {
             .find(|job| job.name == "Rust Linux tests (cache)")
             .expect("member");
         assert_eq!(classes[&member.id], JobClass::Cancelled);
+    }
+
+    // Spec: docs/specs/cli.md#ci-observations
+    #[test]
+    fn a_real_member_failure_keeps_the_aggregate_gate_a_failure() {
+        let jobs = parse_jobs(
+            br#"{"total_count":3,"jobs":[
+                {"id":201,"name":"Rust Linux tests","status":"completed","conclusion":"failure","steps":[]},
+                {"id":202,"name":"Rust macOS tests","status":"completed","conclusion":"cancelled","steps":[]},
+                {"id":203,"name":"ci-status","status":"completed","conclusion":"failure","steps":[]}
+            ]}"#,
+        )
+        .expect("jobs");
+        let classes = classify_jobs(&jobs);
+        assert_eq!(classes[&201], JobClass::Failed);
+        assert_eq!(classes[&202], JobClass::Cancelled);
+        assert_eq!(classes[&203], JobClass::Failed);
+        assert!(!classes[&203].is_cancelled());
+    }
+
+    // Spec: docs/specs/cli.md#ci-observations
+    #[test]
+    fn a_non_gate_job_with_a_cancelled_sibling_is_never_demoted() {
+        let jobs = parse_jobs(
+            br#"{"total_count":2,"jobs":[
+                {"id":301,"name":"Rust Linux tests","status":"completed","conclusion":"failure","steps":[]},
+                {"id":302,"name":"Rust macOS tests","status":"completed","conclusion":"cancelled","steps":[]}
+            ]}"#,
+        )
+        .expect("jobs");
+        let classes = classify_jobs(&jobs);
+        assert_eq!(classes[&301], JobClass::Failed);
+    }
+
+    // Spec: docs/specs/cli.md#ci-observations
+    #[test]
+    fn compact_rows_keep_a_non_test_error_with_its_job_step_and_class() {
+        let report = Report {
+            pr: Some(42),
+            run: None,
+            head: None,
+            runs: vec![RunFailures {
+                run: 7,
+                jobs: vec![JobFailures {
+                    job: "lint".into(),
+                    step: Some("clippy".into()),
+                    class: JobClass::Failed,
+                    unrelated: Vec::new(),
+                    tests: Vec::new(),
+                    errors: vec!["error[E0308]: mismatched types".into()],
+                    truncated: false,
+                }],
+                error: None,
+            }],
+            unlogged: Vec::new(),
+            rerun: Some("provenant ci failures pr 42".into()),
+        };
+        let lines = rows(&report);
+        let error_row = lines
+            .iter()
+            .find(|line| line.contains("mismatched types"))
+            .expect("compact output kept the error");
+        assert!(error_row.contains("lint"), "{error_row}");
+        assert!(error_row.contains("clippy"), "{error_row}");
+        assert!(error_row.contains("failed"), "{error_row}");
     }
 
     // Spec: docs/specs/cli.md#ci-observations

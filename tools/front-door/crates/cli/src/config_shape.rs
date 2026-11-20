@@ -124,6 +124,23 @@ impl Probe<'_> {
             self.seen.borrow_mut().insert(self.path.clone());
         }
     }
+    /// Record a struct's declared fields before any value is visited.
+    ///
+    /// A field whose type the probe cannot construct (an internally tagged
+    /// enum, for example) makes serde stop the enclosing map. Recording the
+    /// declaration up front keeps the fields after it in the typed schema, so
+    /// a new setting can never hide behind an earlier unprobeable field.
+    fn record_fields(&self, fields: &[&str]) {
+        let mut seen = self.seen.borrow_mut();
+        for field in fields {
+            let path = if self.path.is_empty() {
+                (*field).to_owned()
+            } else {
+                format!("{}.{}", self.path, field)
+            };
+            seen.insert(path);
+        }
+    }
 }
 
 struct ProbeMap<'a> {
@@ -331,6 +348,7 @@ impl<'de> de::Deserializer<'de> for Probe<'_> {
         v: V,
     ) -> Result<V::Value, Self::Error> {
         self.record_self();
+        self.record_fields(fields);
         v.visit_map(ProbeMap {
             probe: self,
             keys: fields,
@@ -353,5 +371,67 @@ impl<'de> de::Deserializer<'de> for Probe<'_> {
     }
     fn deserialize_ignored_any<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Self::Error> {
         v.visit_unit()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::typed_paths;
+    use serde::Deserialize;
+
+    // An internally tagged enum cannot be probed: `deserialize_any` supplies a
+    // unit, which the tag visitor rejects. It stands in for any field whose
+    // value the probe cannot construct.
+    #[derive(Deserialize)]
+    #[serde(tag = "kind")]
+    enum Unprobeable {
+        Variant { value: String },
+    }
+
+    #[derive(Deserialize)]
+    struct Nested {
+        leaf: u64,
+    }
+
+    #[derive(Deserialize)]
+    struct Domain {
+        before: Nested,
+        blocking: Unprobeable,
+        after: String,
+    }
+
+    fn read_all_fields(domain: Domain) -> (u64, String, String) {
+        let Domain {
+            before,
+            blocking,
+            after,
+        } = domain;
+        let Unprobeable::Variant { value } = blocking;
+        (before.leaf, value, after)
+    }
+
+    #[test]
+    fn every_declared_field_is_enumerated_even_when_a_value_cannot_be_probed() {
+        let sample = Domain {
+            before: Nested { leaf: 1 },
+            blocking: Unprobeable::Variant {
+                value: "value".to_owned(),
+            },
+            after: "after".to_owned(),
+        };
+        let _ = read_all_fields(sample);
+        let paths = typed_paths::<Domain>();
+        assert!(
+            paths.contains("before.leaf"),
+            "nested field missing: {paths:?}"
+        );
+        assert!(
+            paths.contains("blocking"),
+            "blocking field missing: {paths:?}"
+        );
+        assert!(
+            paths.contains("after"),
+            "field after an unprobeable value was dropped: {paths:?}"
+        );
     }
 }
