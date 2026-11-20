@@ -368,9 +368,11 @@ fn pacing_refusal_retains_the_selected_reserve_fact() {
         percent: 15,
         setting: PacingReserveSetting::AdapterFiveHour,
         origin: PacingSettingSource::ShippedDefault,
-        account: "codex/opaque-account".into(),
-        window: "five_hour".into(),
-        setting_path: "domains.routing.pacing_reserve.codex.five_hour_percent".into(),
+        hold: Box::new(provenant_records::diagnostic::PacingHold {
+            account: "codex/opaque-account".into(),
+            window: "five_hour".into(),
+            setting_path: "domains.routing.pacing_reserve.codex.five_hour_percent".into(),
+        }),
     };
     let mut skipped = SkippedRoute {
         skipped_accounts: Vec::new(),
@@ -2305,11 +2307,11 @@ impl RunStore {
                         });
                         continue;
                     }
+                    let reason = error.to_string();
                     let kind = match error {
                         WriteGrantError::InvalidPath => RefusalKind::InvalidWriteGrantPath,
                         WriteGrantError::Policy(fact) => RefusalKind::WriteGrantsLimit(fact),
                     };
-                    let reason = error.to_string();
                     match self.withdraw_with_preparation_failure(
                         id,
                         crate::store::Withdrawal {

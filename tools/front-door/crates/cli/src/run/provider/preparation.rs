@@ -187,7 +187,7 @@ fn resolve_pacing_source(
     let ResourceFact::PacingReserve {
         setting,
         origin,
-        setting_path,
+        hold,
         ..
     } = &mut fact
     else {
@@ -202,7 +202,7 @@ fn resolve_pacing_source(
         _ => return fact,
     };
     let key = format!("domains.routing.pacing_reserve.{adapter}.{field}");
-    debug_assert_eq!(*setting_path, key);
+    debug_assert_eq!(hold.setting_path, key);
     *origin = if matches!(
         origins.get(&key),
         Some(provenant_config::Origin::User { .. })

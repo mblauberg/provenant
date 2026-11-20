@@ -935,9 +935,11 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
         percent: 23,
         setting: PacingReserveSetting::AdapterFiveHour,
         origin: PacingSettingSource::Configuration,
-        account: "codex/opaque-account".into(),
-        window: "five_hour".into(),
-        setting_path: "domains.routing.pacing_reserve.codex.five_hour_percent".into(),
+        hold: Box::new(provenant_records::diagnostic::PacingHold {
+            account: "codex/opaque-account".into(),
+            window: "five_hour".into(),
+            setting_path: "domains.routing.pacing_reserve.codex.five_hour_percent".into(),
+        }),
     };
     let started = session.store.start(
         record.attempt_id,

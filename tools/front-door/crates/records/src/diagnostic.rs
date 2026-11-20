@@ -326,6 +326,14 @@ impl PacingSettingSource {
     }
 }
 
+/// Details identifying the account, window and configuration behind a pacing hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PacingHold {
+    pub account: String,
+    pub window: String,
+    pub setting_path: String,
+}
+
 /// Origin of a lane-port block count in the handed-off plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -406,9 +414,8 @@ pub enum ResourceFact {
         percent: u8,
         setting: PacingReserveSetting,
         origin: PacingSettingSource,
-        account: String,
-        window: String,
-        setting_path: String,
+        #[serde(flatten)]
+        hold: Box<PacingHold>,
     },
     MemoryPressure {
         level: PressureLevel,
@@ -459,9 +466,9 @@ impl ResourceFact {
             Self::LanePorts { blocks, origin } => diagnostic
                 .detail(format!("no free lane port block; domains.fabric.lanes.lane_port_blocks is {blocks} (source: {})", origin.description()))
                 .next("wait for a lane port block or raise or disable domains.fabric.lanes.lane_port_blocks"),
-            Self::PacingReserve { percent, origin, account, window, setting_path, .. } => diagnostic
-                .detail(format!("selected account is held by a {percent}% pacing reserve; account={}; window={}; {} (source: {})", safe_text(account), safe_text(window), safe_text(setting_path), origin.description()))
-                .next(format!("wait for account {} and its {} pacing window or adjust {}", safe_text(account), safe_text(window), safe_text(setting_path))),
+            Self::PacingReserve { percent, origin, hold, .. } => diagnostic
+                .detail(format!("selected account is held by a {percent}% pacing reserve; account={}; window={}; {} (source: {})", safe_text(&hold.account), safe_text(&hold.window), safe_text(&hold.setting_path), origin.description()))
+                .next(format!("wait for account {} and its {} pacing window or adjust {}", safe_text(&hold.account), safe_text(&hold.window), safe_text(&hold.setting_path))),
             Self::MemoryPressure { level, threshold, origin } => diagnostic
                 .detail(format!("host memory pressure is {}; domains.fabric.lanes.memory_pressure_threshold is {} (source: {})", level.name(), threshold.name(), origin.description()))
                 .next("reduce host memory pressure before retrying"),

@@ -2996,9 +2996,11 @@ mod tests {
                 percent: 10,
                 setting: crate::diagnostic::PacingReserveSetting::Account,
                 origin: crate::diagnostic::PacingSettingSource::Configuration,
-                account: "codex/opaque-account".into(),
-                window: "five_hour".into(),
-                setting_path: "domains.routing.pacing.accounts.codex/opaque-account.reserve.five_hour".into(),
+                hold: Box::new(crate::diagnostic::PacingHold {
+                    account: "codex/opaque-account".into(),
+                    window: "five_hour".into(),
+                    setting_path: "domains.routing.pacing.accounts.codex/opaque-account.reserve.five_hour".into(),
+                }),
             }),
             ..Default::default()
         };

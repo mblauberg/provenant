@@ -2365,9 +2365,11 @@ fn candidate(
                 context.config,
             );
             diagnostics.pacing_reserve_fact = Some(ResourceFact::PacingReserve {
-                account,
-                window: window_name.into(),
-                setting_path,
+                hold: Box::new(provenant_records::diagnostic::PacingHold {
+                    account,
+                    window: window_name.into(),
+                    setting_path,
+                }),
                 percent: window.percent,
                 setting,
                 origin,

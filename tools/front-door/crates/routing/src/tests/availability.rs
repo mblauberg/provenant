@@ -239,14 +239,16 @@ fn pacing_reserve_warns_without_excluding_accounts() -> Result<(), Box<dyn std::
                 percent: expected_percent,
                 setting: expected_setting,
                 origin: expected_origin,
-                account: "codex/opaque-account".into(),
-                window: "five_hour".into(),
-                setting_path: match expected_setting {
+                hold: Box::new(provenant_records::diagnostic::PacingHold {
+                    account: "codex/opaque-account".into(),
+                    window: "five_hour".into(),
+                    setting_path: match expected_setting {
                     provenant_records::diagnostic::PacingReserveSetting::Account =>
                         "domains.routing.pacing.accounts.codex/opaque-account.reserve.five_hour",
-                    _ => "domains.routing.pacing_reserve.codex.five_hour_percent",
-                }
-                .into(),
+                        _ => "domains.routing.pacing_reserve.codex.five_hour_percent",
+                    }
+                    .into(),
+                }),
             }
         );
         if expected_setting == provenant_records::diagnostic::PacingReserveSetting::Account {

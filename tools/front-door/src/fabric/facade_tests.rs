@@ -542,9 +542,11 @@ fn pacing_dispatch_refusal_keeps_the_route_and_monthly_window_note() {
         percent: 10,
         setting: PacingReserveSetting::Account,
         origin: PacingSettingSource::Configuration,
-        account: "codex/opaque-account".into(),
-        window: "five_hour".into(),
-        setting_path: "domains.routing.pacing.accounts.codex/opaque-account.reserve.five_hour".into(),
+        hold: Box::new(provenant_records::diagnostic::PacingHold {
+            account: "codex/opaque-account".into(),
+            window: "five_hour".into(),
+            setting_path: "domains.routing.pacing.accounts.codex/opaque-account.reserve.five_hour".into(),
+        }),
     };
     let projection = fact
         .project(Diagnostic::new("REFUSED").category("refused"))
