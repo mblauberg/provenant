@@ -588,7 +588,7 @@ dweller; the lane's own tree is reaped separately under proven identity.
 `worktree doctor` keeps main's unbounded occupancy classification and adds the
 held rows beside it, only for terminal worktrees; a bounded census never
 changes live-writer or `census_unknown` classification. When a bounded census is
-cut short by its budget or cancellation the report warns
+cut short by its budget or cancellation, or its process listing or coverage is incomplete, the report warns
 `dweller census incomplete (budget/cancel); results may be missing` rather than
 reading as no dwellers, and never refuses the command. A locally produced
 report caps held rows at 128 and acknowledges any omitted rows with an

@@ -1457,6 +1457,7 @@ enum GcOutput<'a> {
         alerts: &'a [String],
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
         held_processes: &'a [worktrees::HeldProcess],
+        held_incomplete: bool,
         notice: &'a Option<String>,
     },
 }
@@ -1538,6 +1539,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         unobserved_projects: &data.unobserved_projects,
         alerts: &data.alerts,
         held_processes: &data.held_processes,
+        held_incomplete: data.held_incomplete,
         notice: &data.notice,
     }
 }
@@ -1603,30 +1605,17 @@ fn settled_held_processes(
 ) -> worktrees::HeldReport {
     let project = context.binding.project_id();
     let terminal = crate::gc_support::lane_states(roots, project, cancel).ok();
-    let mut report_roots = Vec::new();
+    let mut report_roots = crate::gc_support::project_settled_attempt_roots(roots, project, cancel);
     for lane in lanes {
-        if !terminal
+        if terminal
             .as_ref()
             .is_some_and(|snapshot| snapshot.get(&lane.path) == Some(&true))
         {
-            continue;
+            report_roots.push(lane.path.clone());
         }
-        report_roots.push(lane.path.clone());
-        let Some(branch) = lane
-            .branch
-            .as_deref()
-            .and_then(|branch| branch.strip_prefix("refs/heads/"))
-        else {
-            continue;
-        };
-        let Ok(ids) = crate::provider_retention::branch_attempts(roots, project, branch) else {
-            continue;
-        };
-        // Same terminal-and-released filter as hosts doctor.
-        report_roots.extend(crate::gc_support::settled_attempt_roots(
-            roots, project, cancel, &ids,
-        ));
     }
+    report_roots.sort();
+    report_roots.dedup();
     if report_roots.is_empty() {
         return worktrees::HeldReport::default();
     }
@@ -4678,6 +4667,17 @@ mod gc_preview_tests {
             held_incomplete: true,
             ..GcData::default()
         };
+        let compact = serde_json::to_value(gc_result_data(&data, false)).unwrap();
+        let detailed = serde_json::to_value(gc_result_data(&data, true)).unwrap();
+        assert_eq!(compact["held_incomplete"], true);
+        assert_eq!(detailed["held_incomplete"], true);
+        let empty = GcData {
+            held_incomplete: true,
+            ..GcData::default()
+        };
+        let compact_empty = serde_json::to_value(gc_result_data(&empty, false)).unwrap();
+        assert_eq!(compact_empty["held_incomplete"], true);
+
         let human = gc_data_summary(&data);
         assert!(human.contains("4242"), "{human}");
         assert!(human.contains("zsh -c burn"), "{human}");
