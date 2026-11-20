@@ -6,7 +6,7 @@ fn opencode_free_limit_preserves_provider_message() -> Result<(), Box<dyn std::e
         (serde_json::json!(240_000), Some(240)),
         (serde_json::json!(240_000.0), Some(240)),
         (serde_json::json!(1_500), Some(2)),
-        (serde_json::json!(999_999_999), Some(86_400)),
+        (serde_json::json!(999_999_999), Some(1_000_000)),
         (serde_json::json!(null), None),
         (serde_json::json!(-1000), None),
         (serde_json::json!(0), None),

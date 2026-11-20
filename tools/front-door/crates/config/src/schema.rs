@@ -91,6 +91,7 @@ const INSTALL_FIELDS: &[FieldMetadata] = &[
 const PROVIDER_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("{provider}.models", "array"),
     FieldMetadata::new("{provider}.clean_config", "bool"),
+    FieldMetadata::enumeration("{provider}.profile", &["host", "lane"]),
     FieldMetadata::enumeration("{provider}.out_of_scope_pin", &["warn", "refuse", "allow"]),
     FieldMetadata::new("{provider}.update", "bool"),
     FieldMetadata::int("{provider}.update_interval_seconds", 1, i64::MAX),
@@ -348,9 +349,9 @@ fn push_fields(
             restart_required,
         });
     }
-    // A keyed shape with no configured row still needs its type and bounds.
+    // Keyed patterns remain editable independently of materialised rows.
     for (index, field) in metadata.iter().enumerate() {
-        if used[index] {
+        if used[index] && !field.path.split('.').any(is_placeholder) {
             continue;
         }
         fields.push(SchemaField {
@@ -499,6 +500,44 @@ pub fn dedicated_command(path: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// Apply the same editable schema to a single CLI setting. Registry knobs keep
+/// their existing parser; typed fields are decoded according to their owner.
+pub fn apply_edit<T: Serialize>(
+    edit: KnobEdit<'_>,
+    document: &mut DocumentMut,
+    config: &ResolvedConfig<T>,
+    sections: &DomainSections<T>,
+) -> Result<(), ConfigError> {
+    let (name, text) = match edit {
+        KnobEdit::Profile(_) => return edit.apply(document),
+        KnobEdit::Set { name, value } => (name, Some(value)),
+        KnobEdit::Unset(name) => (name, None),
+    };
+    if registry()?.knobs.contains_key(name) {
+        return edit.apply(document);
+    }
+    let editable = schema(config, sections, String::new())?;
+    let field = editable.fields.iter().find(|f| matches(&f.path, name));
+    let Some(field) = field else {
+        return edit.apply(document);
+    };
+    let value = match text {
+        None => Value::Null,
+        Some(text)
+            if matches!(
+                field.kind,
+                "string" | "enum" | "duration" | "size" | "cargo_target"
+            ) =>
+        {
+            Value::String(text.to_owned())
+        }
+        Some(text) => serde_json::from_str(text)
+            .map_err(|_| ConfigError::Refused(format!("{name}: invalid {} value", field.kind)))?,
+    };
+    let patch = Value::Object([(name.to_owned(), value)].into_iter().collect());
+    apply_patch(&patch, document, config, sections)
 }
 
 /// Apply a flat patch of `{"field": value}` to the document; a null value

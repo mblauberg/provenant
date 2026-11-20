@@ -114,6 +114,17 @@ fn dispatch_with(
     network: Option<&str>,
     wait: bool,
 ) -> Result<Value> {
+    dispatch_with_budget(rig, name, timeout, network, wait, "30s")
+}
+
+fn dispatch_with_budget(
+    rig: &TestRig,
+    name: &str,
+    timeout: u64,
+    network: Option<&str>,
+    wait: bool,
+    wait_budget: &str,
+) -> Result<Value> {
     let document = rig.root.join(format!("{name}.json"));
     let mut graph = json!({"schema_version":2,"graph_id":name,"nodes":[{
         "id":"command", "use":"task", "prompt":"Ignore this prompt: it cannot change command argv.",
@@ -130,7 +141,7 @@ fn dispatch_with(
         assert_eq!(code(&out), 0, "{value}");
         return Ok(value);
     }
-    let settled = rig.run_and_wait(&args, "30s")?;
+    let settled = rig.run_and_wait(&args, wait_budget)?;
     let expected = if matches!(name, "fail" | "missing" | "m-off") {
         1
     } else {
@@ -155,18 +166,40 @@ fn attempt_id(submitted: &Value) -> Result<&str> {
 
 /// The first attempt's own output, so a failed lane names its cause.
 fn lane_logs(rig: &TestRig, checkpoint: &Value) -> String {
+    let record = (|| -> Result<String> {
+        let graph = checkpoint["graph_id"].as_str().ok_or("graph id")?;
+        let node = checkpoint["nodes"][0]["id"].as_str().ok_or("node id")?;
+        let db = rusqlite::Connection::open_with_flags(
+            rig.state.join("run.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        db.busy_timeout(Duration::ZERO)?;
+        let bytes: Vec<u8> = db.query_row(
+            "SELECT record FROM attempts WHERE graph=?1 AND node=?2 ORDER BY sequence DESC LIMIT 1",
+            [graph, node],
+            |row| row.get(0),
+        )?;
+        Ok(format!(
+            "last attempt record: {}",
+            String::from_utf8_lossy(&bytes)
+        ))
+    })()
+    .unwrap_or_else(|error| format!("last attempt record unavailable: {error}"));
     let Some(reference) = checkpoint["nodes"][0]["attempts"][0]["attempt_ref"].as_str() else {
-        return "no attempt reference".into();
+        return record;
     };
     let Ok(directory) = attempt_dir(rig, reference) else {
-        return format!("no attempt directory for {reference}");
+        return format!("{record}\nno attempt directory for {reference}");
     };
-    ["stdout.log", "stderr.log"]
-        .iter()
-        .map(|name| match fs::read(directory.join(name)) {
-            Ok(bytes) => format!("{name}:\n{}", String::from_utf8_lossy(&bytes)),
-            Err(error) => format!("{name}: {error}"),
-        })
+    std::iter::once(record)
+        .chain(
+            ["process-exit.json", "result.md", "stdout.log", "stderr.log"]
+                .iter()
+                .map(|name| match fs::read(directory.join(name)) {
+                    Ok(bytes) => format!("{name}:\n{}", String::from_utf8_lossy(&bytes)),
+                    Err(error) => format!("{name}: {error}"),
+                }),
+        )
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -213,6 +246,68 @@ fn settled(rig: &TestRig, reference: &str) -> Result<Value> {
     ))?;
     lane["network"] = json!(task.access.network(task.writer.is_some()));
     Ok(lane)
+}
+
+// Spec: docs/specs/supervisor.md#host-inventory-problems-stay-local
+#[test]
+fn upgrade_corpus_allows_unrelated_read_only_launch() -> Result {
+    if !available()? {
+        return Ok(());
+    }
+    let rig = rig(json!({"upgrade-smoke":{"argv":["/usr/bin/true"]}}))?;
+    let _cleanup = rig.process_cleanup();
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    assert_eq!(
+        code(&identity),
+        0,
+        "{}",
+        String::from_utf8_lossy(&identity.stderr.bytes)
+    );
+    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+    let project = identity["data"]["project"].as_str().ok_or("project id")?;
+    let seed = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/upgrade-corpus/v2.4.1/seed.py");
+    let output = rig.execute(
+        std::path::Path::new("/usr/bin/python3"),
+        &[
+            seed.to_str().ok_or("seed path")?,
+            rig.state.to_str().ok_or("state path")?,
+            project,
+        ],
+        None,
+    )?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let inventory = provenant_supervisor::custody::list_writer_reservations(
+        &provenant_os::fs::Directory::open_anchor(&rig.state.join("worktrees").join(project))?,
+    )?;
+    assert!(
+        inventory.issues.iter().any(|issue| matches!(
+            issue.kind,
+            provenant_supervisor::custody::ReservationIssueKind::LegacyEvidence
+        )),
+        "corpus must exercise legacy guardian inventory: {inventory:?}"
+    );
+    // The seeded attempt parent must have the same private mode as the real
+    // run-store writer, even when the process umask permits public access.
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        fs::metadata(rig.state.join("attempts"))?
+            .permissions()
+            .mode()
+            & 0o077,
+        0
+    );
+    let result = dispatch_with_budget(&rig, "upgrade-smoke", 5, None, true, "12s")?;
+    assert_eq!(
+        result["data"]["checkpoint"]["nodes"][0]["state"], "succeeded",
+        "{result}"
+    );
+    Ok(())
 }
 
 #[test]

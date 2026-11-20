@@ -937,6 +937,108 @@ mod tests {
         );
     }
 
+    // Registry entries which name an editable scalar or collection must pass
+    // through the same single-setting editor used by `config set`.
+    #[test]
+    fn documented_settable_settings_are_accepted_by_the_config_editor() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        let current = provenant_config::read_with_domains(&roots, &SECTIONS).unwrap();
+        let schema = provenant_config::schema(&current, &SECTIONS, String::new()).unwrap();
+        let registry: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../../config/harness-knobs.json")).unwrap();
+        let mut names = std::collections::BTreeSet::new();
+        names.extend(registry["knobs"].as_object().unwrap().keys().cloned());
+        for section in registry.as_object().unwrap().values() {
+            if let (Some(path), Some(settings)) = (
+                section.get("path").and_then(|v| v.as_str()),
+                section.get("settings").and_then(|v| v.as_object()),
+            ) {
+                names.extend(settings.keys().map(|key| format!("{path}.{key}")));
+            }
+        }
+        let concrete = |path: &str| {
+            path.split('.')
+                .map(|segment| {
+                    if segment.starts_with('{') && segment.ends_with('}') {
+                        "probe"
+                    } else {
+                        segment
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(".")
+        };
+        let matches = |pattern: &str, name: &str| {
+            pattern
+                .split('.')
+                .zip(name.split('.'))
+                .all(|(a, b)| a == b || (a.starts_with('{') && a.ends_with('}')))
+                && pattern.split('.').count() == name.split('.').count()
+        };
+        let mut failures = Vec::new();
+        for name in names {
+            let Some(field) = schema
+                .fields
+                .iter()
+                .find(|field| matches(&field.path, &name))
+            else {
+                continue;
+            };
+            let name = concrete(&name);
+            let value = if field.value.is_null() || field.kind == "table" {
+                match field.kind {
+                    "bool" => json!(false),
+                    "int" | "fraction" => json!(field.min.unwrap_or(1).max(1)),
+                    "float" => json!(1.0),
+                    "array" | "list" | "string_list" | "census_ignore_list" => json!([]),
+                    "table" => json!({"dependencies": "independent"}),
+                    "enum" => json!(field.values.first().cloned().unwrap_or_default()),
+                    "string" if name == "domains.routing.model_policy.defaults.result.fallback" => {
+                        json!("codex/gpt-6-luna")
+                    }
+                    _ => json!("probe"),
+                }
+            } else {
+                field.value.clone()
+            };
+            let text = value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_owned);
+            let mut document = toml_edit::DocumentMut::new();
+            if let Err(error) = provenant_config::apply_edit(
+                provenant_config::KnobEdit::Set {
+                    name: &name,
+                    value: &text,
+                },
+                &mut document,
+                &current,
+                &SECTIONS,
+            ) {
+                failures.push(format!("{name}: {error}"));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "documented settings rejected by config set:\n{}",
+            failures.join("\n")
+        );
+        let edited = edit(
+            &roots,
+            json!({"domains.routing.opencode_go.min_monthly_allowance_usd": 42}),
+        )
+        .unwrap();
+        assert_eq!(
+            edited
+                .config
+                .domains
+                .routing
+                .opencode_go
+                .min_monthly_allowance_usd,
+            42
+        );
+    }
+
     // Medium: actual config loader and editor, with no tracker or providers.
     #[test]
     fn steward_host_config_is_opt_in_and_validates_cadence() {

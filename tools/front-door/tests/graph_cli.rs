@@ -1623,6 +1623,74 @@ fn explain_refuses_document_read_roots_outside_the_project() -> Result {
     Ok(())
 }
 
+// Spec: docs/specs/run-launch.md#writer-binding
+#[test]
+fn upgrade_verify_dry_run_explains_a_scratch_project() -> Result {
+    let rig = GraphProject::new()?;
+    let home = rig.temp.path().join("home");
+    let scratch = rig.temp.path().join("scratch");
+    std::fs::create_dir_all(home.join(".ssh"))?;
+    std::fs::create_dir_all(&scratch)?;
+    let output = rig
+        .command()
+        .current_dir(&home)
+        .env("HOME", &home)
+        .env("TMPDIR", &scratch)
+        .args(["upgrade", "--verify", "--dry-run"])
+        .output()?;
+    let reply: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(output.status.success(), "{reply}; {output:?}");
+    let preview: Value = serde_json::from_str(reply["data"]["preview"].as_str().ok_or("preview")?)?;
+    let rows = preview["data"]["source_admission"]
+        .as_array()
+        .ok_or("source admission")?;
+    assert!(!rows.is_empty(), "{preview}");
+    for row in rows {
+        assert_eq!(row["status"], "admitted", "{row}");
+        let path = Path::new(row["path"].as_str().ok_or("source path")?);
+        assert!(path.starts_with(scratch.canonicalize()?), "{row}");
+        assert!(!path.starts_with(home.canonicalize()?), "{row}");
+    }
+    Ok(())
+}
+
+// Spec: docs/specs/run-launch.md#writer-binding
+#[test]
+fn smoke_explanation_uses_selected_project_from_credential_containing_cwd() -> Result {
+    let rig = GraphProject::new()?;
+    let home = rig.temp.path().join("home");
+    std::fs::create_dir_all(home.join(".ssh"))?;
+    let output = rig
+        .command()
+        .current_dir(&home)
+        .env("HOME", &home)
+        .arg("--project")
+        .arg(&rig.project)
+        .args(["run", "smoke", "--explain"])
+        .output()?;
+    let reply: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(output.status.success(), "{reply}; {output:?}");
+    let rows = reply["data"]["source_admission"]
+        .as_array()
+        .ok_or("source admission")?;
+    for node in ["read", "review"] {
+        assert!(
+            rows.iter().any(|row| row["node"]
+                .as_str()
+                .is_some_and(|id| id.split("--").any(|part| part == node))),
+            "missing {node}: {rows:?}"
+        );
+    }
+    for row in rows {
+        assert_eq!(row["status"], "admitted", "{row}");
+        assert_eq!(
+            Path::new(row["path"].as_str().ok_or("source path")?).canonicalize()?,
+            rig.project.canonicalize()?
+        );
+    }
+    Ok(())
+}
+
 /// The bundled `smoke` graph is what `upgrade --verify` runs, so it must run its
 /// read-only nodes wherever a read-only lane runs, and say what it skipped.
 // Spec: docs/specs/run-launch.md#writer-binding

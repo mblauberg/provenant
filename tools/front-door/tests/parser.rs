@@ -625,6 +625,139 @@ fn config_set_reports_only_the_changed_effective_setting() -> Result {
 }
 
 #[test]
+fn config_set_accepts_documented_domain_settings() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    let key = "domains.routing.opencode_go.min_monthly_allowance_usd";
+    let output = rig.command(&["config", "set", key, "42", "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(result["data"]["effective"]["value"], 42);
+    Ok(())
+}
+
+#[test]
+fn config_set_accepts_multiple_distinct_keyed_accounts() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    for key in ["codex/account-a", "codex/account-b"] {
+        let path = format!("domains.routing.pacing.accounts.{key}.monthly.enabled");
+        let output = rig.command(&["config", "set", &path, "false", "--json"])?;
+        assert_eq!(code(&output), 0, "{output:?}");
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(result["data"]["effective"]["value"], false);
+    }
+    Ok(())
+}
+
+#[test]
+fn config_set_and_check_agree_on_existing_findings() -> Result {
+    for (text, succeeds, warning) in [
+        ("schema_version=1\n", true, None),
+        (
+            "schema_version=1\n[domains.fabric.lanes]\nmax_concurrent_builds=7 # retained\n",
+            true,
+            Some("domains.fabric.lanes.max_concurrent_builds"),
+        ),
+        (
+            "schema_version=1\n[domains.fabric.lanes]\ncargo_build_jobs='bad'\n",
+            true,
+            Some("domains.fabric.lanes.cargo_build_jobs"),
+        ),
+        ("schema_version=1\nfuture=true\n", true, Some("future")),
+        (
+            "schema_version=1\n[domains.fabric.limits]\nstore_busy_timeout_ms=600001\n",
+            false,
+            None,
+        ),
+        ("schema_version=999\n", false, None),
+        ("schema_version=1\n[broken\n", false, None),
+    ] {
+        let rig = TestRig::new()?;
+        let path = rig.state.join("config.toml");
+        std::fs::write(&path, text)?;
+        let check_rig = TestRig::new()?;
+        std::fs::write(check_rig.state.join("config.toml"), text)?;
+        let checked = check_rig.command(&["config", "check"])?;
+        let check_message = format!(
+            "{}{}",
+            String::from_utf8_lossy(&checked.stdout.bytes),
+            String::from_utf8_lossy(&checked.stderr.bytes)
+        );
+        let hard_error = ["config.syntax", "config.version", "config.schema"]
+            .iter()
+            .any(|rule| check_message.contains(rule));
+        assert_eq!(!hard_error, succeeds, "check: {text}: {check_message}");
+        let edited = rig.command(&["config", "set", "config.history_max_bytes", "300000"])?;
+        assert_eq!(code(&edited) == 0, succeeds, "set: {text}: {edited:?}");
+        if let Some(key) = warning {
+            let set_message = String::from_utf8_lossy(&edited.stderr.bytes);
+            assert!(check_message.contains(key), "{check_message}");
+            assert!(set_message.contains(key), "{set_message}");
+        }
+        let after = std::fs::read_to_string(&path)?;
+        if succeeds {
+            assert!(after.contains("300000"), "{after}");
+            if text.contains("max_concurrent_builds") {
+                assert!(
+                    after.contains("max_concurrent_builds=7 # retained"),
+                    "{after}"
+                );
+            }
+        } else {
+            assert_eq!(after, text);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn config_set_validates_edits_with_same_domain_findings() -> Result {
+    for (existing, key) in [
+        ("build_dir_max_bytes=1000", "build_dir_max_bytes"),
+        ("future_lane_option=7", "future_lane_option"),
+    ] {
+        let rig = TestRig::new()?;
+        let path = rig.state.join("config.toml");
+        let original = format!("schema_version=1\n[domains.fabric.lanes]\n{existing} # retained\n");
+        std::fs::write(&path, &original)?;
+        let edited = rig.command(&[
+            "config",
+            "set",
+            "domains.fabric.lanes.cargo_build_jobs",
+            "4",
+        ])?;
+        assert_eq!(code(&edited), 0, "{edited:?}");
+        let warning = String::from_utf8_lossy(&edited.stderr.bytes);
+        assert!(
+            warning.contains(&format!("domains.fabric.lanes.{key}")),
+            "{warning}"
+        );
+        let after = std::fs::read_to_string(&path)?;
+        assert!(after.contains(&format!("{existing} # retained")), "{after}");
+        assert!(after.contains("cargo_build_jobs = 4"), "{after}");
+
+        let invalid = rig.command(&[
+            "config",
+            "set",
+            "domains.fabric.lanes.cargo_build_jobs",
+            "0",
+        ])?;
+        assert_ne!(code(&invalid), 0, "{invalid:?}");
+        assert_eq!(std::fs::read_to_string(&path)?, after);
+    }
+    for key in ["build_dir_max_bytes", "future_lane_option"] {
+        let rig = TestRig::new()?;
+        let path = rig.state.join("config.toml");
+        let original = format!("schema_version=1\n[domains.fabric.lanes]\n{key}=7\n");
+        std::fs::write(&path, &original)?;
+        let edited =
+            rig.command(&["config", "set", &format!("domains.fabric.lanes.{key}"), "8"])?;
+        assert_ne!(code(&edited), 0, "{edited:?}");
+        assert_eq!(std::fs::read_to_string(&path)?, original);
+    }
+    Ok(())
+}
+
+#[test]
 // Spec: docs/specs/cli.md#results
 fn config_set_profile_reports_effective_source() -> Result {
     let rig = TestRig::new()?.without_state()?;

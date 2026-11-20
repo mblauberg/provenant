@@ -429,7 +429,7 @@ pub const DEFAULT_LANE_PORT_BLOCKS: u64 = 64;
 pub const WRITER_LANES_CEILING: u64 = 64;
 pub const PROJECT_WRITER_LANES_CEILING: u64 = 32;
 /// Cargo's accepted `debug` levels, including current numeric and boolean forms.
-const CARGO_DEBUG_LEVELS: [&str; 10] = [
+pub const CARGO_DEBUG_LEVELS: [&str; 10] = [
     "none",
     "line-directives-only",
     "line-tables-only",

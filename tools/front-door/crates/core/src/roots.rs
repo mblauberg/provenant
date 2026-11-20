@@ -427,6 +427,42 @@ impl CredentialRoots {
         &self.entries
     }
 
+    /// Remove credential declarations contained by selected provider profile
+    /// directories, accounting for both their public and resolved spellings.
+    /// Ancestor declarations remain in force, so opting a child directory into
+    /// a provider profile cannot silently widen an enclosing credential root.
+    pub fn without_roots_with_aliases<E>(
+        &self,
+        profile_roots: &[PathBuf],
+        mut resolve: impl FnMut(&Path) -> Result<PathBuf, E>,
+    ) -> Result<Self, E> {
+        let mut roots = profile_roots.to_vec();
+        for root in profile_roots {
+            roots.push(resolve(root)?);
+        }
+        roots.sort();
+        roots.dedup();
+
+        let resolved_entries = self
+            .entries
+            .iter()
+            .map(|entry| resolve(&entry.path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut filtered = self.clone();
+        filtered.entries = self
+            .entries
+            .iter()
+            .zip(resolved_entries)
+            .filter(|(entry, resolved)| {
+                !roots
+                    .iter()
+                    .any(|root| entry.path.starts_with(root) || resolved.starts_with(root))
+            })
+            .map(|(entry, _)| entry.clone())
+            .collect();
+        Ok(filtered)
+    }
+
     /// Skill snapshots may read ordinary entries beneath an enclosing provider
     /// store, but never an independently declared endpoint or nested store.
     /// Check entries individually, so a directory containing a secret can still
@@ -1000,6 +1036,54 @@ mod tests {
             roots
                 .skill_entry_refusal(&source.join("SKILL.md"), source)
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn selected_profile_removal_covers_aliases_and_keeps_ancestor_roots() {
+        use CredentialKind::Store;
+        use CredentialScope::{Exact, Subtree};
+
+        let profile = PathBuf::from("/fixture/xdg/data/opencode");
+        let alias = PathBuf::from("/fixture/alias/opencode");
+        let ancestor = PathBuf::from("/fixture/xdg");
+        let sibling = PathBuf::from("/fixture/xdg/data/opencode-other");
+        let resolve = |path: &Path| -> Result<PathBuf, ()> {
+            Ok(path
+                .strip_prefix(&alias)
+                .map_or_else(|_| path.to_owned(), |tail| profile.join(tail)))
+        };
+
+        let mut roots = CredentialRoots::default();
+        roots.add(ancestor.clone(), Subtree, "enclosing store", Store);
+        roots.add(profile.clone(), Subtree, "OpenCode profile", Store);
+        roots.add(profile.join("auth.json"), Exact, "OpenCode endpoint", Store);
+        roots.add(alias.clone(), Subtree, "profile alias", Store);
+        roots.add(alias.join("auth.json"), Exact, "endpoint alias", Store);
+        roots.add(sibling.clone(), Subtree, "unrelated sibling", Store);
+
+        let roots = roots.with_aliases(resolve).unwrap();
+        let without_profile = roots
+            .without_roots_with_aliases(std::slice::from_ref(&profile), resolve)
+            .unwrap();
+
+        assert!(
+            without_profile
+                .entries()
+                .iter()
+                .any(|root| root.path == ancestor)
+        );
+        assert!(
+            without_profile
+                .entries()
+                .iter()
+                .any(|root| root.path == sibling)
+        );
+        assert!(
+            without_profile
+                .entries()
+                .iter()
+                .all(|root| !root.path.starts_with(&profile) && !root.path.starts_with(&alias))
         );
     }
 

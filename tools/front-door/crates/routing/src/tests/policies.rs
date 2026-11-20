@@ -540,6 +540,44 @@ fn explicit_catalogued_model_is_ready_without_provider_listing()
 }
 
 #[test]
+fn unprobed_go_account_with_empty_model_observation_remains_launchable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let mut record = availability();
+    record.adapter = "opencode".into();
+    record.account_key = Some("go".into());
+    record.plan = Some("go".into());
+    record.observed_models.clear();
+    let records = [record];
+    let access = [AccessContext {
+        adapter: "opencode",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let unknown = |_scope: &provenant_quota::ReadinessScope, _now: i64| {
+        provenant_quota::ReadinessRead::unknown(provenant_quota::ReadinessReason::NotProbed)
+    };
+    let mut context = context(&catalogue, &config, now()?);
+    context.availability = &records;
+    context.access = &access;
+    context.readiness = Some(&unknown);
+    let route = resolve(
+        &request("opencode/opencode-go/deepseek-v4.1-flash")?,
+        &context,
+    )?;
+    assert!(matches!(
+        route.readiness,
+        RouteReadiness::Ready {
+            availability_warning: Some(_),
+            ..
+        }
+    ));
+    assert_eq!(route.account_key.as_deref(), Some("go"));
+    Ok(())
+}
+
+#[test]
 fn explicit_unlisted_opencode_models_and_fallbacks_are_ready()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
