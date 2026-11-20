@@ -904,15 +904,14 @@ fn directory_security_diagnostic(
     path: &std::path::Path,
     mode: u32,
     owner_matches: bool,
-    destination: provenant_records::diagnostic::Destination<'_>,
+    destination: provenant_records::diagnostic::Destination,
     label: &str,
 ) -> provenant_records::diagnostic::Diagnostic {
-    use provenant_records::diagnostic::{Diagnostic, safe_path, shell_path};
+    use provenant_records::diagnostic::{Diagnostic, shell_path};
     let exposed = mode & 0o077 != 0;
-    let detail = safe_path(path, destination).map_or_else(
-        || state_directory_security_detail(label, None, mode, owner_matches, exposed),
-        |path| state_directory_security_detail(label, Some(&path), mode, owner_matches, exposed),
-    );
+    let path_display = path.to_string_lossy();
+    let detail =
+        state_directory_security_detail(label, Some(&path_display), mode, owner_matches, exposed);
     let action = shell_path(path, destination).map_or_else(
         || {
             if owner_matches {
@@ -941,7 +940,7 @@ impl FacadeError {
     /// their owning error path and are not reclassified here.
     pub fn project_binding_directory_diagnostic(
         error: &provenant_config::ConfigError,
-        destination: provenant_records::diagnostic::Destination<'_>,
+        destination: provenant_records::diagnostic::Destination,
     ) -> Option<provenant_records::diagnostic::Diagnostic> {
         let provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
             path,
@@ -964,7 +963,7 @@ impl FacadeError {
     pub fn state_directory_permissions(
         path: &std::path::Path,
         mode: u32,
-        destination: provenant_records::diagnostic::Destination<'_>,
+        destination: provenant_records::diagnostic::Destination,
     ) -> provenant_records::diagnostic::Diagnostic {
         Self::state_directory_security(path, mode, true, destination)
     }
@@ -974,7 +973,7 @@ impl FacadeError {
         path: &std::path::Path,
         mode: u32,
         owner_matches: bool,
-        destination: provenant_records::diagnostic::Destination<'_>,
+        destination: provenant_records::diagnostic::Destination,
     ) -> provenant_records::diagnostic::Diagnostic {
         directory_security_diagnostic(
             path,
@@ -2034,16 +2033,9 @@ mod diagnostic_tests {
         let path = std::path::Path::new("/private/a b");
         let local = FacadeError::state_directory_permissions(path, 0o755, Destination::Local);
         assert!(local.next.unwrap().contains("chmod 700 '/private/a b'"));
-        let remote = FacadeError::state_directory_permissions(
-            path,
-            0o755,
-            Destination::Remote {
-                repository: None,
-                home: None,
-            },
-        );
+        let remote = FacadeError::state_directory_permissions(path, 0o755, Destination::Remote);
         let wire = serde_json::to_string(&remote).unwrap();
-        assert!(!wire.contains("/private"));
+        assert!(wire.contains("/private/a b"));
         assert!(remote.next.is_some());
     }
 
@@ -2074,15 +2066,11 @@ mod diagnostic_tests {
 
         let remote = FacadeError::project_binding_directory_diagnostic(
             &error,
-            provenant_records::diagnostic::Destination::Remote {
-                repository: None,
-                home: Some(std::path::Path::new("/private")),
-            },
+            provenant_records::diagnostic::Destination::Remote,
         )
         .unwrap();
         let remote_wire = serde_json::to_string(&remote).unwrap();
-        assert!(remote_wire.contains("~/state with"));
-        assert!(!remote_wire.contains("/private"));
+        assert!(remote_wire.contains("/private/state with"));
         assert!(
             remote
                 .next

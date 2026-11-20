@@ -764,33 +764,20 @@ impl RunError {
     /// Select safe facts at their owner, before an adapter formats a refusal.
     pub fn diagnostic(
         &self,
-        destination: provenant_records::diagnostic::Destination<'_>,
+        destination: provenant_records::diagnostic::Destination,
     ) -> provenant_records::diagnostic::Diagnostic {
         if let Self::StoredRecordRead { source, .. } = self {
-            let diagnostic = source.diagnostic(destination);
-            return if matches!(
-                destination,
-                provenant_records::diagnostic::Destination::Local
-            ) {
-                diagnostic.detail(self.to_string())
-            } else {
-                diagnostic
-            };
+            return source.diagnostic(destination).detail(self.to_string());
         }
         if let Self::RecordedRefusal(diagnostic) = self {
             return diagnostic.as_ref().clone();
         }
         use provenant_confinement::{permissions::PermissionError, worktrees::WorktreeError};
-        use provenant_records::diagnostic::{Diagnostic, DiagnosticFact, safe_path, shell_path};
+        use provenant_records::diagnostic::{Diagnostic, DiagnosticFact, shell_path};
         let kind = ErrorKind::from(self);
         let mut diagnostic = Diagnostic::new(kind.code()).category(kind.category());
         match self {
-            Self::Decode(error)
-                if matches!(
-                    destination,
-                    provenant_records::diagnostic::Destination::Local
-                ) =>
-            {
+            Self::Decode(error) => {
                 diagnostic = diagnostic.detail(error.to_string()).next(
                     if kind == ErrorKind::UpgradeRequired {
                         "upgrade Provenant to read the named stored record"
@@ -800,11 +787,7 @@ impl RunError {
                 );
             }
             Self::AbandonBlocked(evidence) => {
-                diagnostic = diagnostic.detail(if matches!(destination, provenant_records::diagnostic::Destination::Local) {
-                    evidence.to_string()
-                } else {
-                    "abandonment requires non-live presence, free exclusion and a free worktree census".into()
-                });
+                diagnostic = diagnostic.detail(evidence.to_string());
             }
             Self::ContinuationRefused { refusal } => {
                 diagnostic = diagnostic.detail(refusal.safe_reason());
@@ -824,10 +807,10 @@ impl RunError {
                     _ => "requested",
                 };
                 diagnostic = diagnostic
-                    .detail(match safe_path(path, destination) {
-                        Some(path) => format!("credential root refused for {access} grant: {path}"),
-                        None => format!("credential root refused for {access} grant"),
-                    })
+                    .detail(format!(
+                        "credential root refused for {access} grant: {}",
+                        path.display()
+                    ))
                     .next(format!(
                         "inspect the requested {access} grant and select a permitted root"
                     ))
@@ -838,12 +821,11 @@ impl RunError {
                 root,
                 declaration_source,
             }) => {
-                let overlap = match (safe_path(path, destination), safe_path(root, destination)) {
-                    (Some(path), Some(root)) => {
-                        format!("credential grant at {path} overlaps {root}")
-                    }
-                    _ => "credential grant overlaps a declared store".into(),
-                };
+                let overlap = format!(
+                    "credential grant at {} overlaps {}",
+                    path.display(),
+                    root.display()
+                );
                 diagnostic = diagnostic
                     .detail(format!("{overlap} (source: {declaration_source})"))
                     .next("select a root clear of the declared credential store");
@@ -856,22 +838,21 @@ impl RunError {
                 }
             }
             Self::WriterProjectMismatch {
-                project, selected, ..
+                worktree,
+                project,
+                selected,
             } => {
-                if let (Some(project), Some(selected)) = (
-                    safe_path(project, destination),
-                    safe_path(selected, destination),
-                ) {
-                    diagnostic = diagnostic.detail(format!(
-                        "writer project {project} differs from selected project {selected}"
-                    ));
-                }
+                diagnostic = diagnostic.detail(format!(
+                    "worktree {} belongs to writer project {} rather than selected project {}",
+                    worktree.display(),
+                    project.display(),
+                    selected.display()
+                ));
                 diagnostic = diagnostic.next("select a worktree belonging to the chosen project");
             }
             Self::WorktreeUnregistered(path) => {
-                if let Some(path) = safe_path(path, destination) {
-                    diagnostic = diagnostic.detail(format!("worktree is not registered: {path}"));
-                }
+                diagnostic =
+                    diagnostic.detail(format!("worktree is not registered: {}", path.display()));
                 diagnostic = diagnostic.fact(DiagnosticFact::WorktreeUnregistered).next(match shell_path(path, destination) {
                     Some(path) => format!("inspect custody, then select the checkout with --worktree {path}"),
                     None => "inspect worktree registration and select a verified checkout with --worktree".into(),
@@ -886,27 +867,19 @@ impl RunError {
                     expected,
                 } = error
                 {
-                    let detail = match (
-                        safe_path(requested, destination),
-                        safe_path(expected, destination),
-                    ) {
-                        (Some(requested), Some(expected)) => format!(
-                            "requested writer path {requested} does not match configured project path {expected}"
-                        ),
-                        _ => {
-                            "requested writer path does not match the configured project worktree layout".into()
-                        }
-                    };
+                    let detail = format!(
+                        "requested writer path {} does not match configured project path {}",
+                        requested.display(),
+                        expected.display()
+                    );
                     diagnostic = diagnostic.detail(detail);
                 }
                 if let WorktreeError::UnknownWriterAt { path }
                 | WorktreeError::CensusUnknown { path, .. }
                 | WorktreeError::UnknownOccupancy { path, .. } = error
                 {
-                    if let Some(path) = safe_path(path, destination) {
-                        diagnostic =
-                            diagnostic.detail(format!("writer custody is unknown for {path}"));
-                    }
+                    diagnostic = diagnostic
+                        .detail(format!("writer custody is unknown for {}", path.display()));
                     if let Some(path) = shell_path(path, destination) {
                         diagnostic = diagnostic.next(format!(
                             "inspect custody, then select the checkout with --worktree {path}"
@@ -923,8 +896,7 @@ impl RunError {
                         provenant_records::diagnostic::Destination::Local
                     )
                 {
-                    let scope = safe_path(path, destination)
-                        .unwrap_or_else(|| "the requested worktree".into());
+                    let scope = path.display();
                     diagnostic = diagnostic
                         .detail(format!("writer occupancy is unknown for {scope}: {detail}"));
                 }
@@ -938,12 +910,7 @@ impl RunError {
                         .detail(format!("branch at {head} does not contain base {base}"))
                         .next("omit --base to reuse the branch");
                 }
-                if let WorktreeError::WriterLeaseHeld { .. } = error
-                    && matches!(
-                        destination,
-                        provenant_records::diagnostic::Destination::Local
-                    )
-                {
+                if let WorktreeError::WriterLeaseHeld { .. } = error {
                     diagnostic = diagnostic
                         .detail(error.to_string())
                         .next("reconcile the holding attempt before retrying writer binding");
@@ -1010,11 +977,10 @@ impl RunError {
                 }
             }
             Self::UnsafePath { path, check } => {
-                if let Some(path) = safe_path(path, destination) {
-                    diagnostic = diagnostic.detail(format!(
-                        "run-store path {path} is not private or contained: {check}"
-                    ));
-                }
+                diagnostic = diagnostic.detail(format!(
+                    "run-store path {} is not private or contained: {check}",
+                    path.display()
+                ));
             }
             Self::GenerationConflict { current_generation } => {
                 diagnostic =
@@ -1058,10 +1024,10 @@ impl RunError {
                 }
             }
             Self::RetainedWriterImport { fence, worktree } => {
-                let path = safe_path(&fence.fence, destination);
+                let path = fence.fence.to_string_lossy().into_owned();
                 diagnostic.custody = Some(provenant_records::diagnostic::RetainedCustody {
                     scope: fence.scope,
-                    fence: path.clone(),
+                    fence: Some(path.clone()),
                     lane: fence.lane.clone(),
                     reconcile: fence.reconcile(),
                     abandon: fence.abandon(),
@@ -1071,8 +1037,8 @@ impl RunError {
                         "lane {}; retained attempt {}; fence {}; worktree {}",
                         fence.lane,
                         fence.scope.attempt,
-                        path.as_deref().unwrap_or("[redacted]"),
-                        safe_path(worktree, destination).as_deref().unwrap_or("[redacted]")
+                        path,
+                        worktree.display()
                     ))
                     .next(format!(
                         "run `{}` to resume import, or `{}` to release custody and recover the preserved private Git manually",
@@ -1141,7 +1107,7 @@ mod tests;
 mod diagnostic_projection_tests {
     use super::*;
     use provenant_records::diagnostic::{BoundaryClass, Destination};
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     #[test]
     fn stored_read_failure_keeps_context_and_underlying_kind() {
@@ -1155,11 +1121,13 @@ mod diagnostic_projection_tests {
         let detail = error.diagnostic(Destination::Local).detail.unwrap();
         assert!(detail.contains("/fixture/process-exit.json"));
         assert!(detail.contains("StoredExit"));
-        let remote = error.diagnostic(Destination::Remote {
-            repository: None,
-            home: None,
-        });
-        assert!(remote.detail.is_none());
+        let remote = error.diagnostic(Destination::Remote);
+        assert!(
+            remote
+                .detail
+                .unwrap()
+                .contains("/fixture/process-exit.json")
+        );
     }
 
     #[test]
@@ -1187,11 +1155,13 @@ mod diagnostic_projection_tests {
         ] {
             assert!(detail.contains(fact), "missing {fact}: {detail}");
         }
-        let remote = error.diagnostic(Destination::Remote {
-            repository: None,
-            home: None,
-        });
-        assert!(remote.detail.is_none());
+        let remote = error.diagnostic(Destination::Remote);
+        assert!(
+            remote
+                .detail
+                .unwrap()
+                .contains("/fixture/process-exit.json")
+        );
     }
 
     #[test]
@@ -1218,11 +1188,8 @@ mod diagnostic_projection_tests {
         ] {
             assert!(detail.contains(fact), "missing {fact}: {detail}");
         }
-        let remote = error.diagnostic(Destination::Remote {
-            repository: None,
-            home: None,
-        });
-        assert!(remote.detail.is_none());
+        let remote = error.diagnostic(Destination::Remote);
+        assert!(remote.detail.unwrap().contains("/private/holder-worktree"));
     }
 
     #[test]
@@ -1236,10 +1203,7 @@ mod diagnostic_projection_tests {
             }),
             origin: SettingSource::Configuration,
         });
-        let diagnostic = error.diagnostic(Destination::Remote {
-            repository: None,
-            home: None,
-        });
+        let diagnostic = error.diagnostic(Destination::Remote);
         assert_eq!(diagnostic.code, ErrorKind::Confinement.code());
         let detail = diagnostic.detail.unwrap();
         assert!(detail.contains("domains.run.grant_limit"));
@@ -1262,13 +1226,7 @@ mod diagnostic_projection_tests {
             ("TOKEN_SENTINEL\u{1b}".into(), true),
         ] {
             let error = RunError::Writer(WorktreeError::Dirty(paths));
-            for destination in [
-                Destination::Local,
-                Destination::Remote {
-                    repository: None,
-                    home: None,
-                },
-            ] {
+            for destination in [Destination::Local, Destination::Remote] {
                 let diagnostic = error.diagnostic(destination);
                 assert_eq!(diagnostic.code, error.code());
                 assert_eq!(diagnostic.detail.is_some(), names_edits);
@@ -1299,13 +1257,7 @@ mod diagnostic_projection_tests {
             }),
         ];
         for error in cases {
-            for destination in [
-                Destination::Local,
-                Destination::Remote {
-                    repository: None,
-                    home: None,
-                },
-            ] {
+            for destination in [Destination::Local, Destination::Remote] {
                 let projection = error.diagnostic(destination);
                 let encoded = serde_json::to_string(&projection).unwrap();
                 assert_eq!(projection.code, error.code());
@@ -1326,7 +1278,7 @@ mod diagnostic_projection_tests {
     }
 
     #[test]
-    fn project_mismatch_discloses_paths_only_at_safe_destinations() {
+    fn project_mismatch_discloses_paths_at_each_destination() {
         let error = RunError::WriterProjectMismatch {
             worktree: "/foreign/tree".into(),
             project: "/foreign".into(),
@@ -1334,43 +1286,24 @@ mod diagnostic_projection_tests {
         };
         let local = error.diagnostic(Destination::Local);
         let detail = local.detail.unwrap();
-        assert!(detail.contains("/foreign"));
+        assert!(detail.contains("/foreign/tree"));
         assert!(detail.contains("/selected"));
-        let remote = error.diagnostic(Destination::Remote {
-            repository: None,
-            home: None,
-        });
-        assert!(remote.detail.is_none());
+        let remote = error.diagnostic(Destination::Remote);
+        let detail = remote.detail.unwrap();
+        assert!(detail.contains("/foreign/tree"));
+        assert!(detail.contains("/selected"));
         assert!(remote.next.is_some());
     }
 
     #[test]
-    fn credential_grants_keep_typed_access_and_disclose_only_anchored_paths() {
+    fn credential_grants_keep_typed_access_and_disclose_full_paths() {
         use provenant_records::diagnostic::DiagnosticFact;
-        let rows = [
-            (
-                "TOKEN_SENTINEL",
-                PathBuf::from("/private/root"),
-                None,
-                "requested",
-                None,
-            ),
-            (
-                "read",
-                PathBuf::from("/home/person/.config/private"),
-                Some(Path::new("/home/person")),
-                "read",
-                Some("~/.config/private"),
-            ),
-            (
-                "write",
-                PathBuf::from("/home/person/.config/private"),
-                Some(Path::new("/home/person")),
-                "write",
-                Some("~/.config/private"),
-            ),
-        ];
-        for (requested, path, anchor, expected_access, safe_path) in rows {
+        for (requested, expected_access) in [
+            ("TOKEN_SENTINEL", "requested"),
+            ("read", "read"),
+            ("write", "write"),
+        ] {
+            let path = PathBuf::from("/private/root");
             let error = RunError::Confinement(
                 provenant_confinement::permissions::PermissionError::CredentialGrant {
                     path: path.clone(),
@@ -1381,32 +1314,25 @@ mod diagnostic_projection_tests {
                 ErrorKind::from(&error).boundary_class(),
                 BoundaryClass::Credentials
             );
-            let homes = if anchor.is_some() {
-                vec![anchor, None]
-            } else {
-                vec![None]
-            };
-            for home in homes {
-                let diagnostic = error.diagnostic(Destination::Remote {
-                    repository: None,
-                    home,
-                });
+            for destination in [Destination::Local, Destination::Remote] {
+                let diagnostic = error.diagnostic(destination);
                 assert_eq!(diagnostic.code, "CREDENTIAL_ROOT");
                 assert!(diagnostic.next.is_some());
-                assert!(matches!(
-                    &diagnostic.fact,
-                    Some(DiagnosticFact::CredentialGrant { access })
-                        if *access == expected_access
-                ));
-                let wire = serde_json::to_string(&diagnostic).unwrap();
-                assert!(!wire.contains("TOKEN_SENTINEL"));
-                assert!(!wire.contains("/private/root"));
-                assert!(!wire.contains("/home/person"));
-                if home.is_some()
-                    && let Some(safe_path) = safe_path
-                {
-                    assert!(diagnostic.detail.as_deref().unwrap().contains(safe_path));
-                }
+                assert!(
+                    matches!(&diagnostic.fact, Some(DiagnosticFact::CredentialGrant { access }) if *access == expected_access)
+                );
+                assert!(
+                    diagnostic
+                        .detail
+                        .as_deref()
+                        .unwrap()
+                        .contains(path.to_string_lossy().as_ref())
+                );
+                assert!(
+                    !serde_json::to_string(&diagnostic)
+                        .unwrap()
+                        .contains("TOKEN_SENTINEL")
+                );
             }
         }
     }
@@ -1427,19 +1353,16 @@ mod diagnostic_projection_tests {
                 .unwrap()
                 .contains("--worktree '/checkout/has a'\\''quote'")
         );
-        let remote = error.diagnostic(Destination::Remote {
-            repository: None,
-            home: None,
-        });
+        let remote = error.diagnostic(Destination::Remote);
         assert!(
-            !serde_json::to_string(&remote)
+            serde_json::to_string(&remote)
                 .unwrap()
-                .contains("/checkout")
+                .contains("/checkout/has a")
         );
     }
 
     #[test]
-    fn unknown_occupancy_diagnostics_name_local_scope_without_leaking_remote_evidence() {
+    fn unknown_occupancy_diagnostics_name_worktree_at_each_destination() {
         use provenant_confinement::worktrees::{Occupancy, WorktreeError};
         for (error, expected_kind) in [
             (
@@ -1477,14 +1400,9 @@ mod diagnostic_projection_tests {
             let detail = local.detail.unwrap();
             assert!(detail.contains("/checkout/tree"));
             assert!(detail.contains("process 123: cwd unreadable at /private/other"));
-            let remote = error.diagnostic(Destination::Remote {
-                repository: None,
-                home: None,
-            });
+            let remote = error.diagnostic(Destination::Remote);
             let rendered = serde_json::to_string(&remote).unwrap();
-            assert!(!rendered.contains("process 123"));
-            assert!(!rendered.contains("/private/other"));
-            assert!(!rendered.contains("/checkout/tree"));
+            assert!(rendered.contains("/checkout/tree"));
         }
     }
 }

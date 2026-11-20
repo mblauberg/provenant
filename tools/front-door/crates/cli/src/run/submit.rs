@@ -623,8 +623,7 @@ fn submit_with_launcher(
                     };
                     let projection = match &check {
                         DiskCheck::Low { path, available, floor, reclaimed, gc_scheduled, origin } => {
-                            let path = provenant_records::diagnostic::safe_path(path, provenant_records::diagnostic::Destination::Local)
-                                .unwrap_or_else(|| "the limiting volume".into());
+                            let path = path.display();
                             Some(provenant_records::diagnostic::Diagnostic::new(kind.code()).category(kind.category())
                                 .detail(format!("insufficient disk space on {path}: {available} bytes available, floor {floor} bytes; gc.critical_free from {}; {}; reclaimed bytes are not observed here", origin.description(), if *gc_scheduled { "background GC scheduled" } else { "background GC was not scheduled" }))
                                 .next(format!("run `provenant gc --free-floor {floor}B` before dispatching a writer"))
