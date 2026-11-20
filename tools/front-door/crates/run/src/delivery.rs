@@ -1561,16 +1561,26 @@ impl HostDeliveryContext {
         let stage = Stage::Prepare;
         // Free-form shell helpers can select writer code. Support normal
         // executable helpers and gh's standard helper, otherwise refuse early.
-        let helpers = self.command(
-            &writer.worktree,
-            "git",
-            &[
-                "config",
-                "--get-regexp",
-                "^(credential(\\..*)?\\.helper|core\\.sshcommand)$",
-            ],
-            stage,
-        )?;
+        let helpers = self
+            .command(
+                &writer.worktree,
+                "git",
+                &[
+                    "config",
+                    "--get-regexp",
+                    "^(credential(\\..*)?\\.helper|core\\.sshcommand)$",
+                ],
+                stage,
+            )
+            .map_err(|error| RunError::DeliveryTransport {
+                stage,
+                kind: crate::TransportRefusal::Unreadable,
+                reason: transport_config_cause(
+                    "read transport helper settings",
+                    &writer.worktree,
+                    error,
+                ),
+            })?;
         for line in helpers.lines() {
             let (key, value) = line.split_once(' ').unwrap_or((line, ""));
             if value.trim().is_empty() {
@@ -1838,7 +1848,7 @@ impl HostDeliveryContext {
                         })
                         .map(|(_, value)| value.clone()),
                 )
-                .map_err(|_| failure("diagnostic redaction unavailable".into()))?,
+                .map_err(|error| failure(format!("diagnostic redaction unavailable: {error}")))?,
             )
         } else {
             None
@@ -1926,7 +1936,9 @@ impl HostDeliveryContext {
                     .collect();
                 return Err(RunError::MergeConflict { conflicting_files });
             }
-            let stderr = if output.stderr.filter_failed {
+            let stderr = if tool == "git" && args.first() == Some(&"config") {
+                "Git config diagnostics withheld".into()
+            } else if output.stderr.filter_failed {
                 "diagnostic redaction failed".into()
             } else {
                 provenant_redact::delivery_diagnostics(&String::from_utf8_lossy(
@@ -1977,15 +1989,10 @@ impl HostDeliveryContext {
         stage: Stage,
     ) -> Result<()> {
         use provenant_confinement::transport;
-        let refuse = |error: transport::TransportError| {
-            if stage == Stage::Prepare {
-                RunError::DeliveryTransport {
-                    kind: (&error).into(),
-                    reason: prepare_reason(error),
-                }
-            } else {
-                RunError::Delivery(stage)
-            }
+        let refuse = |error: transport::TransportError| RunError::DeliveryTransport {
+            stage,
+            kind: (&error).into(),
+            reason: prepare_reason(error),
         };
         let roots = transport::LaneRoots::new(self.lane_roots.iter().cloned());
         let base = self
@@ -1994,14 +2001,17 @@ impl HostDeliveryContext {
             .map_or(cwd, |bound| bound.host_cwd.as_path());
         let ctx = transport::ConfigRead::new("check delivery transport configuration", base, None);
         transport::check_environment(environment, base, &roots, &ctx).map_err(refuse)?;
-        let listing = self.command_with_input(cwd, "git", &transport::LISTING_ARGS, stage, b"")?;
+        let listing = self
+            .command_with_input(cwd, "git", &transport::LISTING_ARGS, stage, b"")
+            .map_err(|error| refuse(ctx.unreadable(error)))?;
         let entries = transport::parse_listing(listing.as_bytes(), &ctx).map_err(refuse)?;
         transport::check_listing(&entries, base, &roots, &ctx).map_err(refuse)?;
         // Git rereads configuration for the command itself, so refuse any
         // include directive that names a lane area, read or not: a lane could
         // otherwise create the target between this check and the command.
-        let directives =
-            self.command_with_input(cwd, "git", &transport::DIRECTIVE_ARGS, stage, b"")?;
+        let directives = self
+            .command_with_input(cwd, "git", &transport::DIRECTIVE_ARGS, stage, b"")
+            .map_err(|error| refuse(ctx.unreadable(error)))?;
         let top = transport::parse_listing(directives.as_bytes(), &ctx).map_err(refuse)?;
         let home = environment
             .iter()
@@ -2011,11 +2021,17 @@ impl HostDeliveryContext {
             Option<Vec<transport::ConfigEntry>>,
             transport::TransportError,
         > {
-            if !file.is_file() {
-                return Ok(None);
+            let ctx = transport::ConfigRead::new(
+                "read included config file",
+                "<included config>",
+                Some("include.path"),
+            );
+            match std::fs::metadata(file) {
+                Ok(metadata) if !metadata.is_file() => return Ok(None),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(ctx.unreadable(error)),
             }
-            let ctx =
-                transport::ConfigRead::new("read included config file", file, Some("include.path"));
             let file = file
                 .to_str()
                 .ok_or_else(|| ctx.unreadable("included config path is not UTF-8"))?;
@@ -3113,6 +3129,15 @@ fn delivery_stage_error(error: RunError, stage: Stage) -> RunError {
     }
 }
 
+fn transport_config_cause(
+    operation: &'static str,
+    base: &Path,
+    error: impl std::fmt::Display,
+) -> String {
+    let context = provenant_confinement::transport::ConfigRead::new(operation, base, None);
+    prepare_reason(context.unreadable(error))
+}
+
 fn prepare_reason(detail: impl std::fmt::Display) -> String {
     let detail = detail.to_string();
     let redacted = provenant_redact::delivery_diagnostics(&detail);
@@ -3125,29 +3150,25 @@ fn prepare_reason(detail: impl std::fmt::Display) -> String {
 }
 
 fn credential_helper(path: &Path, writer: &WriterRequest) -> Result<()> {
-    let name = path
-        .file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy();
     let helper = match host_path(path, writer) {
         Ok(helper) => helper,
         Err(error @ HostPathError::InsideWorktree) => {
             return Err(credential_helper_refusal(
                 HelperSafety::LaneLocalPath,
-                format!("{name}: {error}"),
+                format!("credential helper: {error}"),
             ));
         }
         Err(error @ HostPathError::NotFound) => {
             return Err(credential_helper_refusal(
                 HelperSafety::Unavailable,
-                format!("{name}: {error}"),
+                format!("credential helper: {error}"),
             ));
         }
     };
     if !helper.is_file() || !provenant_os::sys::is_executable(&helper) {
         return Err(credential_helper_refusal(
             HelperSafety::Unavailable,
-            format!("{name} is unavailable ({})", path.display()),
+            "configured credential helper is unavailable",
         ));
     }
     Ok(())

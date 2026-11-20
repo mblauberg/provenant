@@ -1788,9 +1788,13 @@ fn current_branch(
         .map(str::to_owned)
 }
 
-/// One `branch.<name>.remote` or `branch.<name>.merge` value from the verified
-/// repository config. A missing or non-zero result is no upstream, never a
-/// reason to guess.
+fn warn_branch_config(detail: impl std::fmt::Display) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "warning: {detail}");
+}
+
+/// One branch remote or merge value from the verified repository config.
+/// Missing values are normal; other failures are reported before falling back.
 fn branch_config_value(
     executor: &dyn provenant_os::exec::Executor,
     repo: &provenant_confinement::ReadOnlyRepo,
@@ -1802,7 +1806,7 @@ fn branch_config_value(
     use provenant_confinement::{GitRead, run_read_utility};
     use provenant_os::exec::Termination;
 
-    let out = run_read_utility(
+    let out = match run_read_utility(
         executor,
         GitRead::ConfigValue {
             key: key.to_owned(),
@@ -1811,12 +1815,30 @@ fn branch_config_value(
         utility,
         budget,
         cancel,
-    )
-    .ok()?;
-    if out.termination != Termination::Exit(0) {
-        return None;
+    ) {
+        Ok(out) => out,
+        Err(error) => {
+            warn_branch_config(format!("read branch Git configuration failed: {error}"));
+            return None;
+        }
+    };
+    match out.termination {
+        Termination::Exit(0) => {}
+        Termination::Exit(1) => return None,
+        termination => {
+            warn_branch_config(format!(
+                "read branch Git configuration ended with {termination:?}"
+            ));
+            return None;
+        }
     }
-    let value = std::str::from_utf8(&out.stdout.bytes).ok()?.trim();
+    let value = match std::str::from_utf8(&out.stdout.bytes) {
+        Ok(value) => value.trim(),
+        Err(error) => {
+            warn_branch_config(format!("parse branch Git configuration failed: {error}"));
+            return None;
+        }
+    };
     (!value.is_empty()).then(|| value.to_owned())
 }
 

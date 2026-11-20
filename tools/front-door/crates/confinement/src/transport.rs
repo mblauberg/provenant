@@ -206,7 +206,10 @@ pub enum TransportError {
     #[error(
         "{context}: Git configuration includes {file}, which lives where lanes can write; remove that include or move the file"
     )]
-    LaneConfig { file: String, context: ConfigRead },
+    LaneConfig {
+        file: &'static str,
+        context: ConfigRead,
+    },
     // The program is a config *value* and is deliberately not carried: naming
     // it could leak a credential embedded in a helper command. The key names
     // the offending setting and the context names the read; that is enough to
@@ -214,9 +217,14 @@ pub enum TransportError {
     #[error(
         "{context}: {key} names a program in a lane-writable location; point it at a program outside the project"
     )]
-    LaneProgram { key: String, context: ConfigRead },
+    LaneProgram {
+        key: &'static str,
+        context: ConfigRead,
+    },
     #[error("Git configuration could not be read: {cause}")]
     Unreadable { cause: GitConfigCause },
+    #[error("could not resolve lane roots during {step}: {detail}")]
+    LaneRoots { step: &'static str, detail: String },
     /// A malformed port table is a port error, not a Git configuration error.
     /// The detail already names the file and key that must be corrected.
     #[error("port configuration could not be read: {detail}")]
@@ -536,7 +544,7 @@ pub fn check_includes(
     while let Some(target) = pending.pop() {
         if roots.contains(&target) {
             return Err(TransportError::LaneConfig {
-                file: target.display().to_string(),
+                file: "lane-writable include target",
                 context: ctx.clone(),
             });
         }
@@ -594,6 +602,24 @@ fn expand(word: &str, base: &Path) -> PathBuf {
     }
 }
 
+/// A config key may contain credentials in its subsection. Only these labels
+/// may cross the error boundary.
+pub fn key_class(key: &str) -> &'static str {
+    if key.starts_with("credential.") {
+        "credential setting"
+    } else if key.starts_with("remote.") {
+        "remote setting"
+    } else if key.starts_with("branch.") {
+        "branch setting"
+    } else if key.starts_with("include") {
+        "include directive"
+    } else if key.starts_with("core.") {
+        "core setting"
+    } else {
+        "Git configuration setting"
+    }
+}
+
 fn check_program(
     key: &str,
     value: &str,
@@ -604,7 +630,7 @@ fn check_program(
     for word in program_paths(value) {
         if roots.contains(&expand(&word, base)) {
             return Err(TransportError::LaneProgram {
-                key: key.to_owned(),
+                key: key_class(key),
                 context: ctx.clone(),
             });
         }
@@ -626,7 +652,7 @@ pub fn check_listing(
             && roots.contains(&file)
         {
             return Err(TransportError::LaneConfig {
-                file: file.display().to_string(),
+                file: "lane-writable config file",
                 context: ctx.clone(),
             });
         }
@@ -925,6 +951,30 @@ mod tests {
             )],
         )];
         assert!(check(&outside, &cycle).is_ok());
+    }
+
+    #[test]
+    fn refusal_does_not_reveal_key_or_value() {
+        let key = "credential.https://user:password@example.invalid.helper";
+        let value = "/project/.worktrees/secret-helper";
+        let entries = [ConfigEntry {
+            origin: "file:/project/.git/config".into(),
+            key: key.into(),
+            value: Some(value.into()),
+        }];
+        let error = check_listing(
+            &entries,
+            Path::new("/project"),
+            &LaneRoots::new([PathBuf::from("/project/.worktrees")]),
+            &test_ctx(),
+        )
+        .unwrap_err();
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            assert!(!rendered.contains(key));
+            assert!(!rendered.contains("user:password"));
+            assert!(!rendered.contains(value));
+            assert!(rendered.contains("credential setting"));
+        }
     }
 
     #[test]

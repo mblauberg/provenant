@@ -255,9 +255,9 @@ impl From<&provenant_confinement::transport::TransportError> for TransportRefusa
         match error {
             TransportError::LaneConfig { .. } => Self::LaneConfig,
             TransportError::LaneProgram { .. } => Self::LaneProgram,
-            TransportError::Unreadable { .. } | TransportError::UnreadablePorts { .. } => {
-                Self::Unreadable
-            }
+            TransportError::Unreadable { .. }
+            | TransportError::UnreadablePorts { .. }
+            | TransportError::LaneRoots { .. } => Self::Unreadable,
         }
     }
 }
@@ -494,8 +494,9 @@ pub enum RunError {
     ProtectedDeliveryBranch,
     #[error("host writer delivery failed at Prepare (origin refresh): {0}")]
     OriginNormalisationCollision(String),
-    #[error("host writer delivery failed at Prepare (transport): {reason}")]
+    #[error("host writer delivery failed at {stage:?} (transport): {reason}")]
     DeliveryTransport {
+        stage: WriterDeliveryStage,
         kind: TransportRefusal,
         reason: String,
     },

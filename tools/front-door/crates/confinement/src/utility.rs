@@ -70,14 +70,14 @@ pub enum UtilityError {
     #[error("utility operation has an invalid or unsupported value")]
     InvalidOperationValue,
     #[error("repository Git configuration could not be read: {cause}")]
-    UnreadableGitConfiguration {
-        #[source]
-        cause: GitConfigCause,
-    },
+    UnreadableGitConfiguration { cause: GitConfigCause },
     #[error(
-        "Git configuration key {key} comes from {file}, a location lanes can write, and cannot be neutralised; remove that include or move the file out of the project"
+        "Git configuration {key} comes from {file}, a location lanes can write, and cannot be neutralised; remove that include or move the file out of the project"
     )]
-    LaneConfiguration { file: String, key: String },
+    LaneConfiguration {
+        file: &'static str,
+        key: &'static str,
+    },
     #[error("pinned Git does not support a verified attribute source")]
     AttributeSourceUnsupported,
     #[error("verified repository was not opened with its required Git probes")]
@@ -94,8 +94,10 @@ pub enum UtilityError {
     Incomplete,
     #[error("fetching remote branch failed with exit status {status}: {stderr}")]
     FetchFailed { status: i64, stderr: String },
-    #[error("setting branch configuration failed with exit status {status}: {stderr}")]
-    ConfigFailed { status: i64, stderr: String },
+    #[error(
+        "setting branch configuration failed with exit status {status} (lock contention: {lock_contention})"
+    )]
+    ConfigFailed { status: i64, lock_contention: bool },
     #[error(
         "setting branch configuration timed out after {attempts} attempts waiting out lock contention"
     )]
@@ -983,7 +985,15 @@ impl UtilityRuntime {
                 };
                 validate_outcome(self.git.execute(executor, options)?)
             },
-        )?;
+        )
+        .map_err(|error| {
+            UtilityError::unreadable_config(
+                "read local core.bare",
+                Some(&common.join("config")),
+                Some("core.bare"),
+                error,
+            )
+        })?;
         match outcome.termination {
             Termination::Exit(0) => crate::worktrees::classify_bare_origins_at_root(
                 common,
@@ -1180,8 +1190,16 @@ impl UtilityRuntime {
         budget: UtilityBudget,
         cancel: &CancelToken,
     ) -> Result<ExecOutcome, UtilityError> {
-        let args = git_args(GitRead::LocalBareOrigins, repo, EMPTY_TREE_SHA1)?;
-        run_git_probe(executor, repo, runtime, budget, cancel, &[], &args)
+        let context = |error| {
+            UtilityError::unreadable_config(
+                "read local core.bare",
+                Some(&repo.common_git_dir().join("config")),
+                Some("core.bare"),
+                error,
+            )
+        };
+        let args = git_args(GitRead::LocalBareOrigins, repo, EMPTY_TREE_SHA1).map_err(context)?;
+        run_git_probe(executor, repo, runtime, budget, cancel, &[], &args).map_err(context)
     }
 
     /// One project-discovery owner for CLI/runtime callers. A Git marker is
@@ -1515,12 +1533,21 @@ impl<'a> HostGit<'a> {
                 Some("transport program"),
             ),
         )?;
-        let listing = host.run(
-            &transport::LISTING_ARGS
-                .iter()
-                .map(OsString::from)
-                .collect::<Vec<_>>(),
-        )?;
+        let listing = host
+            .run(
+                &transport::LISTING_ARGS
+                    .iter()
+                    .map(OsString::from)
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|error| {
+                UtilityError::unreadable_config(
+                    "read effective Git configuration",
+                    Some(&config),
+                    None,
+                    error,
+                )
+            })?;
         if listing.termination != Termination::Exit(0) {
             return Err(UtilityError::unreadable_config(
                 "read effective Git configuration",
@@ -1558,13 +1585,22 @@ impl<'a> HostGit<'a> {
         roots: &LaneRoots,
         ctx: &ConfigRead,
     ) -> Result<(), UtilityError> {
-        let directives = self.run(
-            &transport::DIRECTIVE_ARGS
-                .iter()
-                .map(OsString::from)
-                .collect::<Vec<_>>(),
-        )?;
         let config = self.repo.common_git_dir().join("config");
+        let directives = self
+            .run(
+                &transport::DIRECTIVE_ARGS
+                    .iter()
+                    .map(OsString::from)
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|error| {
+                UtilityError::unreadable_config(
+                    "read configuration include directives",
+                    Some(&config),
+                    Some("include directive"),
+                    error,
+                )
+            })?;
         if directives.termination != Termination::Exit(0) {
             return Err(UtilityError::unreadable_config(
                 "read configuration include directives",
@@ -1590,10 +1626,17 @@ impl<'a> HostGit<'a> {
         // Every failure in the include read carries the file being read and the
         // include directive: no error may be discarded here.
         let mut read = |file: &Path| -> Result<Option<Vec<ConfigEntry>>, TransportError> {
-            if !file.is_file() {
-                return Ok(None);
+            let ctx = ConfigRead::new(
+                "read included config file",
+                "<included config>",
+                Some("include.path"),
+            );
+            match std::fs::metadata(file) {
+                Ok(metadata) if !metadata.is_file() => return Ok(None),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(ctx.unreadable(error)),
             }
-            let ctx = ConfigRead::new("read included config file", file, Some("include.path"));
             let outcome = self
                 .run(&transport::file_listing_args(file))
                 .map_err(|error| ctx.unreadable(error))?;
@@ -2611,15 +2654,7 @@ fn retry_git_lock_contention(
                 attempts: attempt - 1,
             });
         };
-        let outcome = match execute(attempt_budget) {
-            Err(UtilityError::TimedOut) if attempt > 1 => {
-                return Err(UtilityError::GitLockTimedOut {
-                    operation,
-                    attempts: attempt,
-                });
-            }
-            result => result?,
-        };
+        let outcome = execute(attempt_budget)?;
         if !git_lock_retry_capture_complete(&outcome)
             || !matches!(outcome.termination, Termination::Exit(status) if status != 0)
             || !git_lock_contention(&outcome.stderr.bytes)
@@ -2807,7 +2842,7 @@ pub fn set_lane_upstream_key(
         Termination::Exit(0) => Ok(()),
         Termination::Exit(status) => Err(UtilityError::ConfigFailed {
             status,
-            stderr: git_stderr_excerpt(&result.stderr.bytes),
+            lock_contention: git_lock_contention(&result.stderr.bytes),
         }),
         Termination::Signal(signal) => Err(UtilityError::Signalled { signal }),
     }
@@ -2919,7 +2954,15 @@ fn scan_configuration_with_policy(
     enforce_lane_settings: bool,
 ) -> Result<ConfigScan, UtilityError> {
     let listing_args = transport::LISTING_ARGS.map(OsString::from);
-    let outcome = run_git_probe(executor, repo, runtime, budget, cancel, &[], &listing_args)?;
+    let outcome = run_git_probe(executor, repo, runtime, budget, cancel, &[], &listing_args)
+        .map_err(|error| {
+            UtilityError::unreadable_config(
+                "list effective Git configuration",
+                Some(&repo.common_git_dir().join("config")),
+                None,
+                error,
+            )
+        })?;
     if outcome.termination != Termination::Exit(0) {
         return Err(UtilityError::unreadable_config(
             "list effective Git configuration",
@@ -3002,8 +3045,8 @@ fn scan_configuration_with_policy(
         }
         if visited.len() > MAX_LANE_CONFIG_FILES {
             return Err(UtilityError::LaneConfiguration {
-                file: target.display().to_string(),
-                key: "include.path".into(),
+                file: "lane-writable include target",
+                key: "include directive",
             });
         }
         let Some(entries) = read_config_file(executor, repo, runtime, budget, cancel, &target)?
@@ -3059,10 +3102,10 @@ fn scan_configuration_with_policy(
             // Not active for this HEAD: the matching worktree's probe decides.
             (_, None) => {}
             (_, Some(_)) if !enforce_lane_settings => {}
-            (_, Some(file)) => {
+            (_, Some(_)) => {
                 return Err(UtilityError::LaneConfiguration {
-                    file: file.display().to_string(),
-                    key: key.to_owned(),
+                    file: "lane-writable config file",
+                    key: transport::key_class(key),
                 });
             }
         }
@@ -3204,22 +3247,44 @@ fn read_config_file(
     cancel: &CancelToken,
     path: &Path,
 ) -> Result<Option<Vec<ConfigEntry>>, UtilityError> {
-    if !path.is_file() {
-        return Ok(None);
+    match std::fs::metadata(path) {
+        Ok(metadata) if !metadata.is_file() => return Ok(None),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(UtilityError::unreadable_config(
+                "inspect included config file",
+                Some(Path::new("<included config>")),
+                Some("include directive"),
+                error,
+            ));
+        }
     }
     let args = transport::file_listing_args(path);
-    let outcome = run_git_probe(executor, repo, runtime, budget, cancel, &[], &args)?;
+    let outcome =
+        run_git_probe(executor, repo, runtime, budget, cancel, &[], &args).map_err(|error| {
+            UtilityError::unreadable_config(
+                "read included config file",
+                Some(Path::new("<included config>")),
+                Some("include directive"),
+                error,
+            )
+        })?;
     if outcome.termination != Termination::Exit(0) {
         return Err(UtilityError::unreadable_config(
             "read included config file",
-            Some(path),
+            Some(Path::new("<included config>")),
             None,
             format!("git config exited with {:?}", outcome.termination),
         ));
     }
     let entries = transport::parse_listing(
         &outcome.stdout.bytes,
-        &ConfigRead::new("parse included config file", path, Some("include.path")),
+        &ConfigRead::new(
+            "parse included config file",
+            "<included config>",
+            Some("include.path"),
+        ),
     )?;
     Ok(Some(entries))
 }
@@ -4265,7 +4330,7 @@ pub(crate) mod tests {
                     matches!(
                         &result,
                         Err(UtilityError::Transport(TransportError::LaneProgram { key: named, .. }))
-                            if named.eq_ignore_ascii_case(key)
+                            if *named == transport::key_class(&key.to_ascii_lowercase())
                     ),
                     "{key}: {result:?}"
                 );
@@ -4557,10 +4622,16 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
     }
 
     #[test]
-    fn lane_upstream_nonzero_exit_reports_config_stderr() -> Result<(), Box<dyn Error>> {
+    fn lane_upstream_nonzero_exit_reports_status_without_config_data() -> Result<(), Box<dyn Error>>
+    {
         let fixture = Fixture::new()?;
-        let fake =
-            ScriptedConfig::new(vec![exit_outcome(1, "fatal: invalid config value\n")], None);
+        let fake = ScriptedConfig::new(
+            vec![exit_outcome(
+                1,
+                "fatal: credential.secret.helper = secret-value\n",
+            )],
+            None,
+        );
         let error = set_lane_upstream_key(
             &fake,
             &fixture.repo,
@@ -4571,11 +4642,17 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
             &CancelToken::new(),
         )
         .expect_err("a failed config write must be reported as ConfigFailed");
-        let UtilityError::ConfigFailed { status, stderr } = error else {
+        let rendered = format!("{error} {error:?}");
+        assert!(!rendered.contains("secret"));
+        let UtilityError::ConfigFailed {
+            status,
+            lock_contention,
+        } = error
+        else {
             return Err(format!("unexpected error: {error}").into());
         };
         assert_eq!(status, 1);
-        assert!(stderr.contains("invalid config value"));
+        assert!(!lock_contention);
         assert_eq!(fake.calls(), 1, "a non-contention failure must not retry");
         let argvs = fake.argvs()?;
         let argv = argvs.first().ok_or("no config call recorded")?;
@@ -4626,6 +4703,30 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn timeout_after_lock_collision_keeps_timeout_cause() {
+        let mut calls = 0;
+        let error = execute_with_git_lock_retry(
+            "test",
+            Duration::from_secs(1),
+            &CancelToken::new(),
+            |_| {
+                calls += 1;
+                if calls == 1 {
+                    Ok(exit_outcome(
+                        128,
+                        "fatal: Unable to create '/fixture/index.lock': File exists.",
+                    ))
+                } else {
+                    Err(UtilityError::TimedOut)
+                }
+            },
+        )
+        .expect_err("second attempt times out");
+        assert!(matches!(error, UtilityError::TimedOut));
+        assert_eq!(calls, 2);
     }
 
     #[test]
@@ -4954,13 +5055,16 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
             fixture.budget()?,
             &CancelToken::new(),
         )
-        .expect_err("eternal contention must fail with the captured stderr");
-        let UtilityError::ConfigFailed { status, stderr } = error else {
+        .expect_err("eternal contention must report lock contention");
+        let UtilityError::ConfigFailed {
+            status,
+            lock_contention,
+        } = error
+        else {
             return Err(format!("unexpected error: {error}").into());
         };
         assert_eq!(status, 255);
-        assert!(stderr.contains("could not lock config file"));
-        assert!(stderr.chars().count() <= MAX_FETCH_STDERR);
+        assert!(lock_contention);
         assert_eq!(
             fake.calls(),
             GIT_LOCK_MAX_ATTEMPTS,
@@ -5742,7 +5846,7 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
             .err()
             .ok_or("the lane worktree must fail")?;
         assert!(
-            matches!(&error, UtilityError::LaneConfiguration { key, .. } if key == "status.showuntrackedfiles"),
+            matches!(&error, UtilityError::LaneConfiguration { key, .. } if *key == "Git configuration setting"),
             "{error}"
         );
         // The primary checkout and a worktree on another branch are unaffected.
@@ -5933,176 +6037,6 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
         assert!(GitRefName::new("refs/remotes/origin/main").is_err());
     }
 
-    // One declaration owns the set of config-read functions and each one's
-    // operation label. The rule below derives the whole set from it, so a new
-    // reader cannot be added without being checked; the declare-time source
-    // keeps the rule bound to the code rather than to a hand-kept list.
-    macro_rules! config_read_functions {
-        ($($name:ident => ($operation:literal, $source:expr)),+ $(,)?) => {
-            #[allow(non_camel_case_types)]
-            #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-            enum ConfigReadFunction {
-                $($name),+
-            }
-            impl ConfigReadFunction {
-                const ALL: &'static [Self] = &[$(Self::$name),+];
-                fn name(self) -> &'static str {
-                    match self {
-                        $(Self::$name => stringify!($name)),+
-                    }
-                }
-                fn operation(self) -> &'static str {
-                    match self {
-                        $(Self::$name => $operation),+
-                    }
-                }
-                fn source(self) -> &'static str {
-                    match self {
-                        $(Self::$name => $source),+
-                    }
-                }
-            }
-        };
-    }
-    config_read_functions! {
-        parse_listing => ("parse Git config listing", include_str!("transport.rs")),
-        check_listing => ("check effective Git configuration", include_str!("transport.rs")),
-        check_includes => ("check config include directives", include_str!("transport.rs")),
-        check_environment => ("check transport environment", include_str!("transport.rs")),
-        check_program => ("refuse lane transport program", include_str!("transport.rs")),
-        check_include_targets => ("check config include directives", include_str!("utility.rs")),
-    }
-
-    /// Split a declared function into its signature and body. Braces in strings
-    /// and comments are ignored so the extracted body is the real one.
-    fn config_read_parts(source: &str, name: &str) -> Option<(String, String)> {
-        let marker = format!("fn {name}");
-        let start = source.find(&marker)?;
-        let after_name = start + marker.len();
-        let open = after_name + source[after_name..].find('{')?;
-        let bytes = source.as_bytes();
-        let (mut depth, mut index) = (0usize, open);
-        let (mut string, mut character) = (false, false);
-        let (mut line_comment, mut block_comment) = (false, false);
-        while index < bytes.len() {
-            let byte = bytes[index];
-            if line_comment {
-                if byte == b'\n' {
-                    line_comment = false;
-                }
-                index += 1;
-                continue;
-            }
-            if block_comment {
-                if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                    block_comment = false;
-                    index += 2;
-                } else {
-                    index += 1;
-                }
-                continue;
-            }
-            if string {
-                if byte == b'\\' {
-                    index += 2;
-                } else {
-                    if byte == b'"' {
-                        string = false;
-                    }
-                    index += 1;
-                }
-                continue;
-            }
-            if character {
-                if byte == b'\\' {
-                    index += 2;
-                } else {
-                    if byte == b'\'' {
-                        character = false;
-                    }
-                    index += 1;
-                }
-                continue;
-            }
-            match byte {
-                b'/' if bytes.get(index + 1) == Some(&b'/') => {
-                    line_comment = true;
-                    index += 2;
-                    continue;
-                }
-                b'/' if bytes.get(index + 1) == Some(&b'*') => {
-                    block_comment = true;
-                    index += 2;
-                    continue;
-                }
-                b'"' => string = true,
-                // A char literal, not a lifetime: escapes and single chars only.
-                b'\''
-                    if bytes.get(index + 1) == Some(&b'\\')
-                        || bytes.get(index + 2) == Some(&b'\'') =>
-                {
-                    character = true
-                }
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some((
-                            source[start..open].to_owned(),
-                            source[open..=index].to_owned(),
-                        ));
-                    }
-                }
-                _ => {}
-            }
-            index += 1;
-        }
-        None
-    }
-
-    fn check_contextual_errors(body: &str, name: &str) -> Result<(), String> {
-        if body.contains("map_err(|_|") {
-            return Err(format!(
-                "{name} discards its error; route it through ConfigRead so the refusal names its cause"
-            ));
-        }
-        Ok(())
-    }
-
-    // Spec: docs/specs/run.md#lane-git-and-import
-    #[test]
-    fn config_reads_route_every_error_through_their_context() {
-        for function in ConfigReadFunction::ALL {
-            let (signature, body) = config_read_parts(function.source(), function.name())
-                .unwrap_or_else(|| panic!("{}: no function body found", function.name()));
-            assert!(
-                signature.contains("ctx: &ConfigRead"),
-                "{} ({}) must take a config-read context: {signature}",
-                function.name(),
-                function.operation()
-            );
-            check_contextual_errors(&body, function.name())
-                .unwrap_or_else(|reason| panic!("{reason}"));
-        }
-        assert!(
-            ConfigReadFunction::ALL.len() >= 6,
-            "the rule must cover the whole declared config-read set"
-        );
-    }
-
-    // The source-scan rule must reject a real violation, or it proves nothing.
-    #[test]
-    fn config_read_source_scan_bites_on_a_discarded_error() {
-        let violating = "fn sample(ctx: &ConfigRead) { \
-                         let _ = value.map_err(|_| TransportError::Unreadable { cause: ctx.cause(\"x\") }); \
-                         }";
-        let (_, body) = config_read_parts(violating, "sample").expect("synthetic body");
-        assert!(
-            check_contextual_errors(&body, "sample").is_err(),
-            "the scanner must reject map_err(|_| inside a config-read function"
-        );
-    }
-
     // Spec: docs/specs/run.md#lane-git-and-import
     #[test]
     fn config_read_cause_is_bounded_and_single_line() {
@@ -6120,6 +6054,32 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
             "{text}"
         );
         assert!(text.contains('…'), "{text}");
+    }
+
+    #[test]
+    fn lane_configuration_error_uses_a_static_key_class() {
+        let key = "credential.https://user:password@example.invalid.helper";
+        let error = UtilityError::LaneConfiguration {
+            file: "lane-writable config file",
+            key: transport::key_class(key),
+        };
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            assert!(rendered.contains("credential setting"));
+            assert!(!rendered.contains(key));
+            assert!(!rendered.contains("user:password"));
+        }
+    }
+
+    #[test]
+    fn config_cause_appears_once_in_error_chain() {
+        let error = UtilityError::unreadable_config("read config", None, None, "failure marker");
+        let mut rendered = error.to_string();
+        let mut next = std::error::Error::source(&error);
+        while let Some(source) = next {
+            rendered.push_str(&source.to_string());
+            next = source.source();
+        }
+        assert_eq!(rendered.matches("failure marker").count(), 1);
     }
 
     // Spec: docs/specs/run.md#lane-git-and-import
