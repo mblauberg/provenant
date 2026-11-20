@@ -7,17 +7,12 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub const SHELL_PROOF_COMMAND: &str = r#"test -z "${CLAUDE_CODE_OAUTH_TOKEN+x}" && test -z "${CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR+x}" && printf provenant-shell-proof"#;
 
-/// Fixture-specific pseudonyms follow the shared destination projection. An
-/// invalid projection withholds the export rather than substituting success.
+/// Apply the configured egress policy to fixture exports.
 pub struct Redactor {
-    literals: Vec<(String, String)>,
     projector: provenant_confinement::publication::Projector,
 }
 impl Redactor {
-    pub fn new(
-        literals: Vec<(String, String)>,
-        token: Option<&crate::claude::OauthToken>,
-    ) -> Result<Self> {
+    pub fn new(token: Option<&crate::claude::OauthToken>) -> Result<Self> {
         let mut secrets: Vec<_> = std::env::vars_os()
             .filter(|(key, value)| {
                 key.to_str()
@@ -30,7 +25,6 @@ impl Redactor {
             secrets.push(token.access.as_bytes().to_vec());
         }
         Ok(Self {
-            literals,
             projector: provenant_confinement::publication::Projector::new(secrets)?,
         })
     }
@@ -40,11 +34,9 @@ impl Redactor {
             provenant_confinement::publication::Destination::FixtureExport,
             value.as_bytes(),
         )?;
-        let mut out = String::from_utf8(projection.into_bytes())?;
-        for (from, to) in &self.literals {
-            out = out.replace(from, to);
-        }
-        Ok(out)
+        Ok(String::from_utf8(provenant_redact::egress_shapes(
+            projection.bytes(),
+        )?)?)
     }
 
     pub fn value(&self, value: &mut Value) -> Result<()> {
@@ -53,33 +45,25 @@ impl Redactor {
             provenant_confinement::publication::Destination::FixtureExport,
             &bytes,
         )?;
-        let mut projected: Value = serde_json::from_slice(projection.bytes())?;
-        self.pseudonyms(&mut projected)?;
-        *value = projected;
+        *value = serde_json::from_slice(projection.bytes())?;
+        Self::shape_values(value)?;
         Ok(())
     }
 
-    fn pseudonyms(&self, value: &mut Value) -> Result<()> {
+    fn shape_values(value: &mut Value) -> Result<()> {
         match value {
             Value::String(text) => {
-                for (from, to) in &self.literals {
-                    *text = text.replace(from, to);
-                }
+                *text = String::from_utf8(provenant_redact::egress_shapes(text.as_bytes())?)?
             }
             Value::Array(items) => {
                 for item in items {
-                    self.pseudonyms(item)?;
+                    Self::shape_values(item)?;
                 }
             }
             Value::Object(map) => {
-                let entries = std::mem::take(map);
-                for (mut key, mut item) in entries {
-                    for (from, to) in &self.literals {
-                        key = key.replace(from, to);
-                    }
-                    self.pseudonyms(&mut item)?;
-                    if map.insert(key, item).is_some() {
-                        return Err("fixture projection collided object keys".into());
+                for (key, item) in map {
+                    if !provenant_confinement::publication::metadata_field(key) {
+                        Self::shape_values(item)?;
                     }
                 }
             }
@@ -181,9 +165,26 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn recording_redacts_known_tokens_in_argv_zero() {
+    fn recording_preserves_metadata_and_masks_credential_prose() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
         let redactor = Redactor {
-            literals: vec![],
+            projector: provenant_confinement::publication::Projector::new([token
+                .as_bytes()
+                .to_vec()])
+            .unwrap(),
+        };
+        let mut value = json!({"model":token,"account_key":token,"message":token});
+        redactor.value(&mut value).unwrap();
+        assert_eq!(value["model"], token);
+        assert_eq!(value["account_key"], token);
+        assert_eq!(value["message"], "[REDACTED]");
+    }
+
+    #[test]
+    fn recording_redacts_known_tokens_in_argv_zero() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
+        let redactor = Redactor {
             projector: provenant_confinement::publication::Projector::new([
                 b"ghp_abcdefghijklmnopqrst".to_vec(),
             ])

@@ -1236,7 +1236,23 @@ pub fn encode_peer_response(
                 texts.extend(diagnostic.detail.iter_mut());
                 texts.extend(diagnostic.next.iter_mut());
             }
-            facade::FacadeError::DispatchRefused { reason, .. } => texts.push(reason),
+            facade::FacadeError::DispatchRefused { reason, fact, .. } => {
+                if let Some(fact) = fact {
+                    use facade::DispatchRefusalFact;
+                    match fact {
+                        DispatchRefusalFact::GraphCycle { node }
+                        | DispatchRefusalFact::GraphWriterWorktree { node }
+                        | DispatchRefusalFact::GraphNodeLimit { node, .. } => node.project_egress(),
+                        DispatchRefusalFact::GraphExtension(cause) => {
+                            if let Some(id) = &mut cause.loop_id {
+                                id.project_egress();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                texts.push(reason);
+            }
             facade::FacadeError::InvalidInput {
                 detail: Some(detail),
             }
@@ -1282,7 +1298,6 @@ pub fn encode_peer_response(
                 "nodes/*/metadata/operation/blocked_reason",
                 "nodes/*/metadata/operation/refusal/detail",
                 "nodes/*/metadata/operation/refusal/next",
-                "nodes/*/title",
                 "unfetched_children/*/detail",
                 "delivery/state/reason",
                 "linked_inbox_requests/*/title",
@@ -2021,6 +2036,7 @@ mod tests {
     // Spec: docs/specs/fabric.md#publication-boundary
     #[test]
     fn cross_host_submit_projects_credentials_before_encoding() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         let local = HostId::from_bytes([1; 16]);
         let remote = HostId::from_bytes([2; 16]);
         let actor = crate::identity::Address::new(local, "origin")
@@ -2091,7 +2107,8 @@ mod tests {
 
     // Spec: docs/specs/fabric.md#publication-boundary
     #[test]
-    fn cross_host_errors_project_declared_credentials_and_preserve_shape_only_ids() {
+    fn cross_host_errors_mask_credentials_in_prose() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         use crate::graph::template::{ParameterFault, ParameterRefusal};
 
         let remote = HostId::from_bytes([2; 16]);
@@ -2125,7 +2142,7 @@ mod tests {
         let error = &value["result"]["data"]["error"];
         let reason = error["reason"].as_str().unwrap();
         assert_eq!(error["fact"], "graph_plan");
-        assert!(reason.contains(shaped_identifier));
+        assert!(!reason.contains(shaped_identifier));
         assert!(!reason.contains(exact));
 
         let parameter = facade::FacadeError::invalid(facade::InvalidInputDetail::Parameter(
@@ -2150,7 +2167,40 @@ mod tests {
     }
 
     #[test]
+    fn graph_refusal_identifier_is_raw_locally_and_projected_for_peer() {
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        for mode in [provenant_redact::Mode::Off, provenant_redact::Mode::Secrets] {
+            let _mode = provenant_redact::scoped(mode);
+            let node = crate::graph::refusal::GraphIdentifier::try_from(token.to_owned()).unwrap();
+            assert_eq!(node.to_string(), token);
+            let response = PeerResponse {
+                extra: Default::default(),
+                version: 1,
+                protocol: PROTOCOL,
+                host: HostId::from_bytes([2; 16]),
+                project: project_key(Path::new("/h")),
+                result: PeerResult::Error {
+                    extra: Default::default(),
+                    data: PeerResultError {
+                        extra: Default::default(),
+                        error: facade::FacadeError::DispatchRefused {
+                            reason: format!("node {token}"),
+                            disk: None,
+                            fact: Some(facade::DispatchRefusalFact::GraphCycle { node }),
+                        },
+                    },
+                },
+            };
+            let projector = provenant_confinement::publication::Projector::new([]).unwrap();
+            let wire =
+                String::from_utf8(encode_peer_response(response, &projector).unwrap()).unwrap();
+            assert_eq!(wire.contains(token), mode == provenant_redact::Mode::Off);
+        }
+    }
+
+    #[test]
     fn cross_host_response_projects_only_declared_text_fields() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         let remote = HostId::from_bytes([2; 16]);
         let projector = provenant_confinement::publication::Projector::new([]).unwrap();
         for (message, projected) in [
@@ -2214,7 +2264,7 @@ mod tests {
             "lanes":[{"metadata":{"attempt":{
                 "title":r#"{"token":"submit-test"}"#,
                 "state":"failed", "reason":"submit-test token: it; it remains",
-                "applied_route":{"account_key":"submit-test", "launch_warnings":["submit-test"]},
+                "applied_route":{"account_key":"submit-test", "model":"submit-test", "effort":"submit-test", "adapter":"submit-test", "name":"submit-test", "alias":"submit-test", "launch_warnings":["submit-test"]},
                 "extension":{"title":"submit-test"}
             }}}],
             "nodes":[{"title":"submit-test", "status":"failed", "lane_id":{"attempt_id":"submit-test"}}],
@@ -2240,7 +2290,6 @@ mod tests {
         attempt["reason"] = serde_json::json!("[REDACTED] token: [REDACTED]; it remains");
         attempt["applied_route"]["launch_warnings"][0] = serde_json::json!("[REDACTED]");
         expected["result"]["data"]["delivery"]["state"]["reason"] = serde_json::json!("[REDACTED]");
-        expected["result"]["data"]["nodes"][0]["title"] = serde_json::json!("[REDACTED]");
         expected["result"]["data"]["unfetched_children"][0]["detail"] =
             serde_json::json!("[REDACTED]");
         let wire = encode_peer_response(response, &projector).unwrap();
@@ -3134,6 +3183,7 @@ mod tests {
     // Spec: docs/specs/fabric.md#publication-boundary
     #[test]
     fn session_handoff_fits_one_frame_and_keeps_its_operation_on_a_lost_reply() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         use crate::handoff::{
             ATTACHMENT_LIMIT, Attachment, PROMPT_HEADER, PROMPT_LIMIT, SessionHandoff,
             encode_base64,

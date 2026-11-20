@@ -19,6 +19,9 @@ pub enum DisclosureError {
 /// Scan one exact snapshot for credential patterns and supplied literal values.
 /// A match returns `SecretMatch` without including any matched bytes.
 pub fn scan_snapshot(bytes: &[u8], known_secrets: &[Vec<u8>]) -> Result<(), DisclosureError> {
+    if !provenant_redact::mode().masks_egress() {
+        return Ok(());
+    }
     let mut redactor =
         Redactor::new(known_secrets.iter().cloned()).map_err(DisclosureError::InvalidSecretSet)?;
     for chunk in bytes.chunks(BUFFER_SIZE) {
@@ -44,6 +47,7 @@ mod tests {
 
     #[test]
     fn snapshot_reports_known_secrets_without_returning_content() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         let result = scan_snapshot(b"private token-abc-123", &[b"token-abc-123".to_vec()]);
         assert!(matches!(result, Err(DisclosureError::SecretMatch)));
     }

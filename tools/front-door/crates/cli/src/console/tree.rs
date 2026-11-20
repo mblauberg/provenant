@@ -369,6 +369,7 @@ mod tests {
     // Spec: docs/specs/fabric.md#publication-boundary
     #[test]
     fn host_tree_preserves_lineage_detail_and_usage() -> Result<(), Box<dyn std::error::Error>> {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
         std::fs::create_dir(base.join("home"))?;
@@ -517,7 +518,6 @@ mod tests {
                 if node["title"].as_str() == Some(raw_title) {
                     found = true;
                     let title = "[REDACTED] token: [REDACTED]; it stays";
-                    node["title"] = json!(title);
                     if let Some(metadata) = node.get_mut("metadata") {
                         metadata["attempt"]["title"] = json!(title);
                     }

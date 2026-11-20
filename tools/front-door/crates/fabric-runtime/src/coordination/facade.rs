@@ -501,20 +501,18 @@ pub enum FacadeError {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resource: Option<provenant_records::diagnostic::ResourceFact>,
     },
-    /// A writer bind refused because another lease holds the worktree. Holder
-    /// facts are local-only: peers receive the typed code and repair action,
-    /// never an unanchored worktree path.
+    /// A writer bind refused because another lease holds the worktree.
     #[error("writer lease held{}", .holder.map_or_else(String::new, |holder| format!(" by {holder}")))]
     WriterLeaseHeld {
-        #[serde(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         holder: Option<AttemptId>,
-        #[serde(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
-        #[serde(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         worktree: Option<String>,
-        #[serde(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         age: Option<String>,
-        #[serde(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         live: Option<bool>,
     },
     /// A typed run refusal with no richer facade projection. It carries the

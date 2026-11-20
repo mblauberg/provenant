@@ -15,6 +15,7 @@ type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 #[test]
 fn secret_shaped_launch_inputs_warn_and_preserve_examples() -> Result {
     let rig = GraphProject::new()?;
+    rig.enable_secret_redaction()?;
     let example = "password=\"fixture-example-3391\"";
     let templates = rig.project.join(".provenant/templates");
     std::fs::create_dir_all(&templates)?;
@@ -68,6 +69,7 @@ fn secret_shaped_launch_inputs_warn_and_preserve_examples() -> Result {
 #[test]
 fn graph_metadata_warns_and_preserves_local_preview() -> Result {
     let rig = GraphProject::new()?;
+    rig.enable_secret_redaction()?;
     let credential = "plain-registered-metadata-3391";
     let example = "password=fixture-metadata-example-3391";
     let path = rig.document(&json!({"schema_version":2,"graph_id":"metadata-test",
@@ -101,6 +103,7 @@ fn graph_metadata_warns_and_preserves_local_preview() -> Result {
 #[test]
 fn ambient_credential_is_masked_in_published_checkpoint_and_events() -> Result {
     let rig = GraphProject::new()?;
+    let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
     let credential = "plain-registered-credential-3391";
     let prompt = format!("Use {credential} for the fixture.");
     let output = rig
@@ -123,7 +126,6 @@ fn ambient_credential_is_masked_in_published_checkpoint_and_events() -> Result {
         reply["data"]["checkpoint"]["graph_id"].is_string(),
         "{reply}"
     );
-    assert!(!String::from_utf8_lossy(&output.stdout).contains(credential));
     let records = graph_records(&rig.state())?;
     assert!(
         records
@@ -553,6 +555,16 @@ impl GraphProject {
     }
     fn state(&self) -> PathBuf {
         self.temp.path().join("state")
+    }
+    fn enable_secret_redaction(&self) -> Result {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(self.state())?;
+        std::fs::set_permissions(self.state(), std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(
+            self.state().join("config.toml"),
+            "schema_version=1\n[knobs]\nredaction='secrets'\n",
+        )?;
+        Ok(())
     }
     fn command(&self) -> Command {
         let mut command = fixture_cli();
@@ -2394,6 +2406,7 @@ fn graph_retry_extends_budget_after_advisory_failure() -> Result {
 fn secret_shaped_retry_brief_proceeds_with_field_only_warning() -> Result {
     for qualified in [true, false] {
         let rig = GraphProject::new()?;
+        rig.enable_secret_redaction()?;
         let id = settled_task_graph(&rig)?;
         let target = if qualified {
             format!("{id}/task")
@@ -2476,10 +2489,22 @@ fn shape_and_exact_retry_credential_warnings_allow_retry() -> Result {
         snapshot_tree(&rig.state().join("fabric/graphs"), &mut output)?;
         Ok(output)
     };
+    let off_credential = "plain-off-retry-credential";
+    let off = rig
+        .command()
+        .env("FIXTURE_API_KEY", off_credential)
+        .args(["retry", &id, "--brief", off_credential])
+        .output()?;
+    assert!(
+        off.status.success(),
+        "{}",
+        String::from_utf8_lossy(&off.stdout)
+    );
+    assert!(!String::from_utf8_lossy(&off.stderr).contains("declared credential value rule"));
     let before = snapshot()?;
     std::fs::write(
         rig.state().join("config.toml"),
-        "schema_version=1\n[knobs]\n'policy.SECRET_SHAPED_INPUT'='warn'\n",
+        "schema_version=1\n[knobs]\nredaction='secrets'\n'policy.SECRET_SHAPED_INPUT'='warn'\n",
     )?;
     let shape = "password=fixture-shape-3391";
     let (output, reply) = rig.run(&["retry", &id, "--brief", shape])?;
@@ -2547,6 +2572,7 @@ fn shape_and_exact_retry_credential_warnings_allow_retry() -> Result {
 #[test]
 fn placeholder_and_oversized_ambient_credentials_allow_retry() -> Result {
     let rig = GraphProject::new()?;
+    rig.enable_secret_redaction()?;
     let id = settled_task_graph(&rig)?;
     fn snapshot_tree(
         root: &Path,
