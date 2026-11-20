@@ -230,3 +230,24 @@ Attempt records reject identity mismatches and unsupported store versions
 without rewriting the store. Oversize records fail explicitly rather than being
 truncated. See [state](state.md#strict-bounded-records) for record boundaries.
 - Why: recovery must not accept altered identity or silently discard evidence.
+
+## Review verdict wording
+
+Review results require exactly one verdict declaration outside fenced blocks.
+The shared streaming capture recognises the declaration and verdict words
+case-insensitively. PASS, FAIL and INCONCLUSIVE remain the canonical values;
+approve, approved and lgtm mean PASS, while reject, request changes and changes
+requested mean FAIL. Trailing text, including a reviewed SHA or explanation,
+is ignored after a complete recognised verdict word or phrase. A declaration
+such as `Verdict FAIL: explanation` is also recognised. Accepted noncanonical
+wording records a warning quoting the original line and naming its canonical
+normalisation. Unknown words stay invalid, with the diagnostic quoting the
+line. Multiple declarations remain invalid, including synonymous ones.
+
+Review launch warns when a brief prescribes a verdict shape different from the
+canonical standalone `VERDICT: PASS|FAIL|INCONCLUSIVE` contract; it proceeds and
+keeps that contract in the reviewer guidance. Review results report the pinned
+reviewed subject as their head, independently of the checkout's launch base.
+- Why: ordinary review vocabulary must preserve usable evidence while visible
+  warnings expose brief and output drift before it becomes a settlement surprise.
+- Owner: `crates/records/src/result_capture.rs`, `crates/fabric-runtime/src/graph/outputs.rs`, `src/fabric/interface.rs`, `src/fabric/review_subject.rs`

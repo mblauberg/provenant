@@ -72,6 +72,9 @@ pub(super) fn make_outputs_with_upstream(
     if let Some(warning) = result_warning {
         warnings.push(bounded(&warning, WARNING_BYTES));
     }
+    if let Some(warning) = result.and_then(|capture| capture.verdict_warning.as_deref()) {
+        warnings.push(bounded(warning, WARNING_BYTES));
+    }
     let verdict = result
         .and_then(|capture| capture.verdict.as_deref())
         .map(str::to_owned);

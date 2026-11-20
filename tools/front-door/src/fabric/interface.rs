@@ -694,6 +694,94 @@ fn bind_review_base(node: &mut provenant_fabric_runtime::graph::GraphNode, base:
     }
 }
 
+/// Warn when a user-authored review brief asks for a verdict line outside the
+/// standalone PASS/FAIL/INCONCLUSIVE contract. ResultCapture remains the owner
+/// of parsing and can normalise common wording, but launch should expose drift
+/// before a reviewer spends time on the task.
+fn review_verdict_contract_warning(input: &Value) -> Option<String> {
+    fn brief_strings<'a>(value: &'a Value, output: &mut Vec<&'a str>) {
+        match value {
+            Value::Object(fields) => {
+                for (key, value) in fields {
+                    if matches!(key.as_str(), "brief" | "prompt")
+                        && let Some(text) = value.as_str()
+                    {
+                        output.push(text);
+                    }
+                    brief_strings(value, output);
+                }
+            }
+            Value::Array(values) => values
+                .iter()
+                .for_each(|value| brief_strings(value, output)),
+            _ => {}
+        }
+    }
+
+    fn mismatched_declaration(line: &str) -> bool {
+        let lower = line.to_ascii_lowercase();
+        let mut rest = lower.as_str();
+        while let Some(marker) = rest.find("verdict") {
+            if marker > 0
+                && rest[..marker]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            {
+                rest = &rest[marker + "verdict".len()..];
+                continue;
+            }
+            rest = &rest[marker + "verdict".len()..];
+            let after_word = rest.trim_start_matches(char::is_whitespace);
+            let has_contract_colon = after_word.starts_with(':');
+            let trimmed = after_word
+                .strip_prefix(':')
+                .unwrap_or(after_word)
+                .trim_start_matches(|ch: char| {
+                    ch.is_whitespace() || matches!(ch, '`' | '*' | '_' | '[' | '(')
+                });
+            let token_end = trimmed
+                .find(|ch: char| {
+                    ch.is_whitespace()
+                        || matches!(ch, ',' | ';' | '.' | ':' | ']' | ')' | '`' | '*' | '_')
+                })
+                .unwrap_or(trimmed.len());
+            let token = trimmed[..token_end].trim_end_matches(':');
+            let canonical = matches!(token, "pass" | "fail" | "inconclusive");
+            let trailing = trimmed[token_end..].trim_matches(|ch: char| {
+                ch.is_whitespace() || matches!(ch, ',' | ';' | '.' | ']' | ')' | '`' | '*' | '_')
+            });
+            let option_list = trailing.starts_with("verdict")
+                || trailing.starts_with("or verdict")
+                || trailing.starts_with("and verdict");
+            if !has_contract_colon || !canonical || (!trailing.is_empty() && !option_list) {
+                return true;
+            }
+            rest = &trimmed[token_end..];
+        }
+        false
+    }
+
+    let mut briefs = Vec::new();
+    brief_strings(input, &mut briefs);
+    briefs
+        .into_iter()
+        .flat_map(str::lines)
+        .find(|line| mismatched_declaration(line))
+        .map(|line| {
+            let line = line.trim();
+            let excerpt = line.chars().take(160).collect::<String>();
+            let excerpt = if line.chars().count() > 160 {
+                format!("{excerpt}…")
+            } else {
+                excerpt
+            };
+            format!(
+                "review_verdict_contract_mismatch: brief asks for `{excerpt}`; the contract requires one standalone VERDICT: PASS, FAIL or INCONCLUSIVE line"
+            )
+        })
+}
+
 fn bind_review_warning(node: &mut provenant_fabric_runtime::graph::GraphNode, warning: &str) {
     if let Some(composite) = &mut node.composite {
         for child in &mut composite.nodes {
@@ -817,6 +905,34 @@ mod launch_report_tests {
         let mut failed = json!({"status":"complete","outcome":"failed","checkpoint":{"nodes":[{"state":"failed","attempts":[attempt("host/one", false)]},{"state":"succeeded","attempts":[attempt("host/three", true)]},{"state":"blocked","attempts":[]}]}});
         report_launch_refusals(&mut failed, &rows);
         assert_eq!(failed["outcome"], "failed");
+    }
+
+    /// Spec: docs/specs/run-settlement.md#review-verdict-wording
+    #[test]
+    fn review_launch_warns_when_brief_declares_a_different_verdict_shape() {
+        for brief in [
+            "VERDICT: approve <sha>",
+            "VERDICT: PASS 0be4e6c",
+            "Verdict FAIL: reason",
+            "verdict: maybe",
+        ] {
+            let warning = super::review_verdict_contract_warning(&json!({"brief":brief}))
+                .unwrap_or_else(|| panic!("expected a warning for {brief:?}"));
+            assert!(warning.contains("review_verdict_contract_mismatch"));
+            assert!(warning.contains(brief));
+        }
+        for brief in [
+            "VERDICT: PASS",
+            "verdict: FAIL",
+            "VERDICT: INCONCLUSIVE",
+            "Write VERDICT: PASS, VERDICT: FAIL or VERDICT: INCONCLUSIVE",
+        ] {
+            assert_eq!(
+                super::review_verdict_contract_warning(&json!({"brief":brief})),
+                None,
+                "{brief:?}"
+            );
+        }
     }
 }
 
@@ -2083,6 +2199,14 @@ impl Factory {
         input_warnings.extend(self.graph_input_warnings(&bound)?);
         document = serde_json::from_value(bound)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        if review_launch
+            && let Some(warning) = review_verdict_contract_warning(input)
+        {
+            input_warnings.push(warning.clone());
+            for node in &mut document.nodes {
+                bind_review_warning(node, &warning);
+            }
+        }
         if let Some(warning) = review_subject
             .as_ref()
             .and_then(|subject| subject.warning.as_ref())
