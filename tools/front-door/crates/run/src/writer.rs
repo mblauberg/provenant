@@ -1928,16 +1928,14 @@ impl LaunchConfinement {
             &self.home,
             environment,
             cancel,
-            |projected_bytes| match projected_bytes {
-                Some(projected_bytes) => {
+            |projected_bytes| {
+                // A generation built before sizes were recorded has no figure
+                // to reserve, so nothing is evicted for it. The outcome records
+                // `size_recorded: false` in cargo-target-setup.json instead of
+                // warning every launch; accounting resumes once the seed is
+                // refreshed with a recorded size.
+                if let Some(projected_bytes) = projected_bytes {
                     self.enforce_cargo_cache_budget_reserving(projected_bytes);
-                }
-                None => {
-                    use std::io::Write;
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "warning: seed size is unknown; skipping Cargo cache eviction for this launch"
-                    );
                 }
             },
         )

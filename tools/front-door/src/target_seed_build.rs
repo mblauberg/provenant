@@ -918,6 +918,9 @@ fn build_into(
         ]);
         run(&worktree, &argv, &overrides)?;
     }
+    // Record the size once, while building the host seed is already walking the
+    // tree; a lane clone must not walk a multi-gigabyte seed before starting.
+    let allocated_bytes = target_seed::allocated_tree_bytes(&target);
     fs::remove_dir_all(checkout)?;
     Ok(Manifest {
         project_key: project_key.into(),
@@ -928,6 +931,7 @@ fn build_into(
         cargo_profile: cargo_profile.clone(),
         features: vec!["default".into()],
         flags,
+        allocated_bytes,
     })
 }
 
@@ -1295,6 +1299,7 @@ mod checkout_tests {
                 cargo_profile: identity.cargo_profile.clone(),
                 features: vec![],
                 flags: vec![],
+                allocated_bytes: None,
             })
         })
         .unwrap();
@@ -1367,6 +1372,7 @@ mod tests {
             cargo_profile: identity.cargo_profile.clone(),
             features: vec![],
             flags: vec![],
+            allocated_bytes: None,
         }
     }
     #[allow(dead_code)] // The harness-free target includes this module without its tests.
@@ -1830,6 +1836,7 @@ mod tests {
                     .expect("default Cargo profile is UTF-8"),
                 features: vec![],
                 flags: vec![],
+                allocated_bytes: None,
             })
         })
         .unwrap();
