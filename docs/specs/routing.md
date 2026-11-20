@@ -222,9 +222,15 @@ renew the refusal. A fresh reading below the 95% headroom threshold that
 postdates a refusal clears it, including a model-scoped refusal without a pool:
 with no verified binding, every reported window must show headroom before that
 model is unblocked. A successful run on a route clears that model's refusal,
-and `provenant quota clear ACCOUNT [MODEL]` removes recorded refusals on owner
-request and reports exactly what it removed (saying so when nothing matched).
-Each clearing is recorded with its source: `reading`, `run` or `manual`.
+and a successful run on a free-model route clears the registered free pool's
+refusal with source `observed_success`: a later lane on the same pool disproves
+the whole pool's 429, not just one model. `provenant quota tick` re-checks a free-pool refusal
+older than a bounded interval with the adapter's registered quota probe, where
+one exists; a refusal the probe does not supersede keeps its provider reset and
+gets another bounded window. `provenant quota clear ACCOUNT [MODEL]` removes
+recorded refusals on owner request and reports exactly what it removed (saying
+so when nothing matched). Each clearing is recorded with its source: `reading`,
+`run`, `observed_success` or `manual`.
 One function, `Admission::account_block`, decides account blocks for both
 resolution and the pre-launch recheck. Readiness is stored apart from quota records; a failed
 publication leaves readiness unknown and never erases held refusals.
