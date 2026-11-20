@@ -31,6 +31,9 @@ const S2_PRODUCTION_SHAPE: &str = "s2-production-shape";
 const S2_REFUSE_ADMISSION: &str = "s2-refuse-admission";
 const S2_IGNORE_CHILD_REGISTRY: &str = "s2-ignore-child-registry";
 const S2_SUPPRESSED_REGISTRY_READ: &str = "s2-registry-suppressed-read";
+/// Make the child registry unreadable so settlement refuses escapee signals
+/// and retains custody. This replaces the old live-graph-child refusal (#3568).
+const S2_UNREADABLE_CHILD_REGISTRY: &str = "s2-unreadable-child-registry";
 
 /// Seconds the guardian's wall clock jumps forward after launch, as a sleeping
 /// host's does while its monotonic clock stands still.
@@ -800,7 +803,7 @@ fn idle_supervisor(root: &Path) -> Result<()> {
     capture_idle_cpu(&attempt)?;
     assert!(
         !home.join("graph-children-read").exists(),
-        "live census must not read host graph checkpoints"
+        "live census and cleanup must not read host graph checkpoints"
     );
     // A valid atomic cancel still wakes and stops the sleeping driver.
     stop(&handle, StopReason::ExplicitCancellation)?;
@@ -1682,15 +1685,13 @@ fn escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures(
     wait_for_identity_absence(&owner_identity)?;
     Ok(())
 }
-/// Host graph-child evidence at the production custody seam.
-struct GraphChildrenHolder(PathBuf);
-impl provenant_supervisor::Holder for GraphChildrenHolder {
+/// The production custody seam: a holder with no child registry. It never
+/// reports graph state, because a live graph child is a separate attempt and
+/// cannot be one of this lane's cleanup candidates (#3568).
+struct ProductionHolder;
+impl provenant_supervisor::Holder for ProductionHolder {
     fn admit(&self, _: &[u8], _: &Directory) -> std::result::Result<(), CustodyError> {
         Ok(())
-    }
-    fn has_live_children(&self, _: &[u8]) -> std::result::Result<bool, CustodyError> {
-        std::fs::write(self.0.join("graph-children-read"), b"read")?;
-        Ok(self.0.join("live-graph-children").try_exists()?)
     }
     fn terminal(
         &self,
@@ -1768,10 +1769,12 @@ fn the_guardian_names_an_unreadable_host_clock_in_its_admission_refusal(root: &P
     }
     Ok(())
 }
-/// The production shape queries the host for live graph children before
-/// ending an escapee. Live children keep cleanup unresolved.
+/// A live graph child spares only its own process tree (#3568): it is a
+/// separate attempt, never this lane's descendant or sandbox escapee. The
+/// lane's own escapee is therefore ended at settlement, cleanup resolves and
+/// custody is released even while a detached graph child is running.
 #[cfg(target_os = "macos")]
-fn escapee_is_ended_only_when_the_host_reports_no_nested_runs(root: &Path) -> Result<()> {
+fn escapee_is_ended_even_with_live_graph_children(root: &Path) -> Result<()> {
     let home = root.join("HOME");
     std::fs::create_dir_all(&home)?;
     std::fs::write(home.join(S2_PRODUCTION_SHAPE), b"no registry")?;
@@ -1798,18 +1801,19 @@ fn escapee_is_ended_only_when_the_host_reports_no_nested_runs(root: &Path) -> Re
         let exit = exited(&handle)?;
         Ok((exit, escapee, stream))
     };
-    // The host initially reports no live graph children.
-    let (exit, escapee, _stream) = case("empty")?;
-    assert!(!exit.unresolved_cleanup, "{exit:?}");
-    wait_for_identity_absence(&escapee)?;
-    std::fs::write(home.join("live-graph-children"), b"pending")?;
-    let (exit, escapee, stream) = case("live-graph-children")?;
-    assert!(exit.unresolved_cleanup, "{exit:?}");
-    assert_eq!(exit.unresolved_pids, vec![escapee.pid], "{exit:?}");
-    process_identity(escapee.pid)?;
-    // Only the process this test started: it exits when its socket closes.
-    drop(stream);
-    wait_for_identity_absence(&escapee)?;
+    for name in ["empty", "live-graph-children"] {
+        if name == "live-graph-children" {
+            // The host may still have detached graph children. Nothing reads
+            // this marker now: they are separate attempts and cannot gate the
+            // lane's own cleanup (#3568).
+            std::fs::write(home.join("live-graph-children"), b"pending")?;
+        }
+        let (exit, escapee, stream) = case(name)?;
+        assert!(!exit.unresolved_cleanup, "{name}: {exit:?}");
+        assert!(exit.unresolved_pids.is_empty(), "{name}: {exit:?}");
+        wait_for_identity_absence(&escapee)?;
+        drop(stream);
+    }
     Ok(())
 }
 /// Half the five-second full-census backstop: a retained guardian that
@@ -1850,8 +1854,9 @@ fn launch_unstoppable_escapee(
     let home = root.join("HOME");
     std::fs::create_dir_all(&home)?;
     std::fs::write(home.join(S2_PRODUCTION_SHAPE), b"no registry")?;
-    // Live graph children forbid the escapee stop: only its own exit settles.
-    std::fs::write(home.join("live-graph-children"), b"pending")?;
+    // An unreadable child registry forbids the escapee stop: only its own exit
+    // settles. Graph children are separate attempts and no longer gate it.
+    std::fs::write(home.join(S2_UNREADABLE_CHILD_REGISTRY), b"unavailable")?;
     let ready_path = root.join(format!("{name}.sock"));
     let ready_listener = UnixListener::bind(&ready_path)?;
     let (writer, handle) = start(
@@ -2260,6 +2265,9 @@ struct FileChildRegistry {
 }
 impl ChildRegistry for FileChildRegistry {
     fn registered_children(&self) -> io::Result<Vec<RegisteredChild>> {
+        if self.home.join(S2_UNREADABLE_CHILD_REGISTRY).is_file() {
+            return Err(io::Error::other("child registry unavailable"));
+        }
         if let Some(state_dir) = std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from)
             && state_dir.join(S2_IGNORE_CHILD_REGISTRY).is_file()
         {
@@ -3358,8 +3366,8 @@ const CASES: &[Case] = &[
     ),
     #[cfg(target_os = "macos")]
     (
-        "escapee_is_ended_only_when_the_host_reports_no_nested_runs",
-        escapee_is_ended_only_when_the_host_reports_no_nested_runs,
+        "escapee_is_ended_even_with_live_graph_children",
+        escapee_is_ended_even_with_live_graph_children,
     ),
     #[cfg(target_os = "macos")]
     (
@@ -3467,7 +3475,7 @@ fn run_case(name: &str) -> Result<()> {
     let escape = matches!(
         name,
         "escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures"
-            | "escapee_is_ended_only_when_the_host_reports_no_nested_runs"
+            | "escapee_is_ended_even_with_live_graph_children"
             | "detached_descendant_in_the_attempt_sandbox_is_found_and_ended"
     );
     for scoped in [false, true].into_iter().take(if escape { 2 } else { 1 }) {
@@ -3534,8 +3542,11 @@ fn main() -> Result<()> {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-        // The production shape wires no child registry.
+        // The production shape wires no child registry. An unreadable registry
+        // is wired explicitly to keep a blocker for retention tests; graph
+        // children no longer withhold a lane's own signals (#3568).
         let production_shape = home.join(S2_PRODUCTION_SHAPE).is_file();
+        let unreadable_registry = home.join(S2_UNREADABLE_CHILD_REGISTRY).is_file();
         let refusal_marker = home.join(S2_REFUSE_ADMISSION);
         let jump_marker = home.join(S2_WALL_JUMP);
         let jump = std::fs::read_to_string(&jump_marker)
@@ -3548,7 +3559,7 @@ fn main() -> Result<()> {
             sleeping,
             jump: jump.unwrap_or(0),
         };
-        let graph_children = GraphChildrenHolder(home.clone());
+        let production_holder = ProductionHolder;
         let registry = FileChildRegistry { home };
         let observer = CensusGateObserver;
         let publisher = match std::env::var_os("PROVENANT_STATE_DIR") {
@@ -3577,9 +3588,10 @@ fn main() -> Result<()> {
                     .map(|holder| holder as &dyn provenant_supervisor::Holder)
                     .or_else(|| {
                         production_shape
-                            .then_some(&graph_children as &dyn provenant_supervisor::Holder)
+                            .then_some(&production_holder as &dyn provenant_supervisor::Holder)
                     }),
-                children: (!production_shape).then_some(&registry as &dyn ChildRegistry),
+                children: (!production_shape || unreadable_registry)
+                    .then_some(&registry as &dyn ChildRegistry),
                 observer: Some(&observer),
                 wall_clock: jump
                     .is_some()

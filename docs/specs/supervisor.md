@@ -45,10 +45,12 @@ proof of provider ancestry, and proven attempt-sandbox escapees may be signalled
 Descendant proof survives session changes and reparenting, but every signal
 revalidates the full native identity. On macOS, however the provider ends,
 natural exit included, cleanup ends the lane's own tree: recorded descendants and
-sandbox-marked escapees get TERM, then KILL after the descendant grace. Registry
-and host child checks must permit cleanup. When there is no native child
-registry, a present host holder must affirm that no graph child remains. Spared
-and protected owners and their possible descendants stay excluded. The exit
+sandbox-marked escapees get TERM, then KILL after the descendant grace. The
+child registry must permit cleanup. A live graph child spares only its own
+process tree: it is a separate attempt, never a recorded descendant of this
+lane's provider and never carrying this lane's sandbox mark, so it is never a
+cleanup candidate and cannot withhold a lane's signals or its custody release.
+Spared and protected owners and their possible descendants stay excluded. The exit
 records one summary warning ("killed N surviving descendants") and at most 16
 unresolved identities; the reservation journal records up to 128. Background
 services an unsandboxed lane starts (for example a compiler-cache server) are

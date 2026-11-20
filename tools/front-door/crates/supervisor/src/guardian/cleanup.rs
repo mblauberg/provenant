@@ -722,16 +722,17 @@ impl Driver<'_> {
             // The lane's own tree ends with it, whatever ended the provider
             // (#3545). Only recorded descendants with retained provider
             // ancestry and sandbox-marked escapees are candidates, and each
-            // signal re-observes the exact identity. Without a native child
-            // registry, an actual host holder must affirm that no graph
-            // child remains; an absent holder is not that proof.
+            // signal re-observes the exact identity. A live graph child is a
+            // separate attempt: it is never a provider descendant here and
+            // never carries this lane's sandbox mark, so it cannot be a
+            // candidate. Its own tree is its guardian's to end (#3568).
             let owned = child.owned_cleanup_targets(census, spared);
             let descendants_allowed =
                 self.descendant_stop_allowed || (self.registry.is_none() && self.holder.is_some());
             // A live candidate this pass may not signal can settle only by its
             // own exit. Only actual candidates count: a withheld permission
             // with nothing to stop refuses nothing.
-            let mut refused = (!descendants_allowed && !owned.is_empty())
+            let refused = (!descendants_allowed && !owned.is_empty())
                 || (!self.escapee_stop_allowed && !marked.is_empty());
             if descendants_allowed {
                 candidates.extend(owned);
@@ -739,9 +740,7 @@ impl Driver<'_> {
             if self.escapee_stop_allowed {
                 candidates.extend(marked);
             }
-            let had_candidates = !candidates.is_empty();
-            let targets = host_authorised_targets(self.holder, &self.holder_context, candidates);
-            refused |= had_candidates && targets.is_empty();
+            let targets = authorised_cleanup_targets(candidates);
             self.stop_refused = refused;
             for delivery in child.stop_owned_targets(escalation, &targets) {
                 if delivery.outcome == DeliveryOutcome::Delivered {
@@ -1079,26 +1078,14 @@ impl RetainedStopPasses for DriverPasses<'_, '_> {
     }
 }
 
-/// Unknown host graph state refuses escapee signals. This is intentionally
-/// separate from census: an ordinary history walk must not reopen graph state.
+/// Targets the lane may signal at settlement. A live graph child spares only
+/// its own process tree: it is a separate attempt, never a recorded descendant
+/// of this lane's provider and never carrying this lane's sandbox mark, so it
+/// is not among `candidates` and cannot withhold a signal from them (#3568).
 #[cfg(any(target_os = "macos", test))]
-pub(super) fn host_allows_escapee_stop(holder: Option<&dyn Holder>, context: &[u8]) -> bool {
-    holder.is_none_or(|holder| matches!(holder.has_live_children(context), Ok(false)))
-}
-
-/// Graph evidence is read only at a signalling decision that has candidates,
-/// so a cleanup pass with nothing to signal never reopens host graph state.
-/// Each read decodes every pending graph checkpoint; at the 20 ms cleanup
-/// tick that decode dominated retained guardians (#3560).
-#[cfg(any(target_os = "macos", test))]
-pub(super) fn host_authorised_targets(
-    holder: Option<&dyn Holder>,
-    context: &[u8],
+pub(super) fn authorised_cleanup_targets(
     candidates: std::collections::BTreeSet<ProcessIdentity>,
 ) -> Vec<ProcessIdentity> {
-    if candidates.is_empty() || !host_allows_escapee_stop(holder, context) {
-        return Vec::new();
-    }
     candidates.into_iter().collect()
 }
 
@@ -1199,76 +1186,30 @@ mod live_census_tests {
     use crate::census::{Census, CensusError, ObservationIssue, ProcessObservation};
     use std::cell::Cell;
 
-    struct GraphHolder {
-        live: Option<bool>,
-        reads: Cell<usize>,
-    }
-    impl Holder for GraphHolder {
-        fn admit(&self, _: &[u8], _: &Directory) -> Result<()> {
-            Ok(())
-        }
-        fn terminal(
-            &self,
-            _: &[u8],
-            _: &Directory,
-            _: &ExitObservation,
-            _: &crate::custody::Recovery,
-        ) -> Result<()> {
-            Ok(())
-        }
-        fn has_live_children(&self, context: &[u8]) -> Result<bool> {
-            assert_eq!(context, b"attempt");
-            self.reads.set(self.reads.get() + 1);
-            self.live.ok_or(CustodyError::InvalidRecord)
-        }
-    }
-
     #[test]
-    fn escapee_signal_requires_current_clear_host_graph_evidence() {
-        assert!(host_allows_escapee_stop(None, b"attempt"));
-        for live in [Some(false), Some(true), None] {
-            let holder = GraphHolder {
-                live,
-                reads: Cell::new(0),
-            };
-            assert_eq!(
-                host_allows_escapee_stop(Some(&holder), b"attempt"),
-                live == Some(false)
-            );
-            assert_eq!(holder.reads.get(), 1);
-        }
-    }
-
-    #[test]
-    fn cleanup_reads_graph_evidence_only_for_a_signalling_decision() {
-        let candidate = ProcessIdentity {
+    fn lane_cleanup_candidates_need_no_host_graph_evidence() {
+        let first = ProcessIdentity {
             boot: "boot".into(),
             pid: 20,
             native_start: 2,
             group_id: 20,
             session_id: 20,
         };
-        for live in [Some(false), Some(true), None] {
-            let holder = GraphHolder {
-                live,
-                reads: Cell::new(0),
-            };
-            // Nothing to signal: retained cleanup passes never decode graphs.
-            for _ in 0..100 {
-                assert!(
-                    host_authorised_targets(Some(&holder), b"attempt", Default::default())
-                        .is_empty()
-                );
-            }
-            assert_eq!(holder.reads.get(), 0);
-            let targets = host_authorised_targets(
-                Some(&holder),
-                b"attempt",
-                std::collections::BTreeSet::from([candidate.clone()]),
-            );
-            assert_eq!(holder.reads.get(), 1);
-            assert_eq!(targets.is_empty(), live != Some(false));
-        }
+        let second = ProcessIdentity {
+            boot: "boot".into(),
+            pid: 21,
+            native_start: 3,
+            group_id: 20,
+            session_id: 20,
+        };
+        // Live graph children live in other attempts, so they are never in
+        // this set; every lane-owned candidate is authorised (#3568).
+        let targets = authorised_cleanup_targets(std::collections::BTreeSet::from([
+            second.clone(),
+            first.clone(),
+        ]));
+        assert_eq!(targets, vec![first, second]);
+        assert!(authorised_cleanup_targets(Default::default()).is_empty());
     }
 
     struct Observer {
