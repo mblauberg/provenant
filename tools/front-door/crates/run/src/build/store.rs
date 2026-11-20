@@ -28,6 +28,7 @@ fn io_error(error: std::io::Error) -> BuildError {
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "Git store subprocess boundary")]
 fn git() -> Command {
     let mut command =
         Command::new(provenant_os::git::git_executable().unwrap_or_else(|| "/usr/bin/git".into()));

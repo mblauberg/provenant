@@ -160,6 +160,29 @@ class Selection(unittest.TestCase):
             self.assertIn("child", command)
             self.assertNotIn("root", command)
 
+    def test_affected_selection_overrides_changed_paths(self):
+        metadata = {"packages": [
+            {"name": "root", "id": "root", "manifest_path": str(verify.ROOT / "tools/front-door/Cargo.toml")},
+            {"name": "child", "id": "child", "manifest_path": str(verify.ROOT / "tools/front-door/crates/child/Cargo.toml")},
+        ], "workspace_members": ["root", "child"]}
+        def output(cmd, **kwargs):
+            return json.dumps(metadata) if cmd[0] == "cargo" else "abc\n"
+        for full, expected in [(False, {"root"}), (True, {"root", "child"})]:
+            payload = json.dumps({"packages": ["root"], "full": full, "reason": "fixture selection"})
+            with self.subTest(full=full), mock.patch.dict(os.environ, {"PROVENANT_VERIFY_SELECTION": payload}), \
+                 mock.patch.object(verify, "config", return_value=verify.DEFAULTS), \
+                 mock.patch.object(verify, "changed_paths", side_effect=AssertionError("unexpected changed paths")), \
+                 mock.patch.object(verify.subprocess, "check_output", side_effect=output), \
+                 mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
+                 mock.patch.object(verify.sys, "argv", ["verify-tier"]), \
+                 mock.patch.object(verify.sys, "stdout", new_callable=io.StringIO) as stdout:
+                self.assertEqual(verify.main(), 0)
+                self.assertIn("fixture selection", stdout.getvalue())
+            for call in run.call_args_list:
+                argv = call.args[0]
+                selected = {argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "-p"}
+                self.assertEqual(selected, expected)
+
     def test_t1_prints_matching_path_and_runs_named_binary(self):
         path = "workspace/src/parser.rs"
         tiers = dict(verify.DEFAULTS["tiers"])

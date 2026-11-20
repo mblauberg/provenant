@@ -1823,7 +1823,11 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Disk(provenant_cli::Disk::Report) => disk::run(globals),
         Command::Cloud(command) => cloud::run(command, globals),
         Command::Tracker(command) => tracker::run(command, globals),
-        Command::Verify { tier, .. } => verify::run(tier.as_deref(), globals),
+        Command::Verify {
+            tier,
+            commit,
+            affected,
+        } => verify::run(tier.as_deref(), commit.as_deref(), affected, globals),
         Command::Build(command) => build_cmd::run(command, globals),
         Command::Check(check) => checks::run(check, globals, process.workers()),
         Command::Hook(hook) => hooks::run(hook, globals),

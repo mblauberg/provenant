@@ -598,7 +598,7 @@ fn run_prepared_ref_transaction(
 #[allow(clippy::disallowed_methods)]
 fn run_inner<'a>(
     reaper: &Reaper,
-    options: ExecOptions<'a>,
+    mut options: ExecOptions<'a>,
     mut transaction: Option<PreparedRefTransaction<'_>>,
     forward_signals: bool,
 ) -> Result<ExecOutcome, ExecError> {

@@ -54,6 +54,7 @@ BRIDGE_ENV = (
     "PROVENANT_VERIFY_EFFECTIVE_CONFIG_JSON",
     "PROVENANT_VERIFY_PROJECT_ROOT",
     "PROVENANT_VERIFY_TIER",
+    "PROVENANT_VERIFY_SELECTION",
 )
 
 
@@ -151,10 +152,16 @@ def main():
         metadata_cwd = workspace / rust_command.get("cwd", ".") if rust_command else workspace
         metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=metadata_cwd, env=child_environment(), text=True))
         packages = [{"name": p["name"], "manifest_path": str(Path(p["manifest_path"]).relative_to(root))} for p in metadata["packages"] if p["id"] in metadata["workspace_members"]]
-        paths = changed_paths(root, cfg["base"])
-        touched, integrations = select(
-            paths, packages, cfg["integrations"], cfg["package_paths"]
-        )
+        selected = os.environ.get("PROVENANT_VERIFY_SELECTION") if selection == "packages" else None
+        if selected is not None:
+            selected = json.loads(selected)
+            touched = sorted(p["name"] for p in packages) if selected["full"] else selected["packages"]
+            print(f"selection: {selected['reason']}", flush=True)
+        else:
+            paths = changed_paths(root, cfg["base"])
+            touched, integrations = select(
+                paths, packages, cfg["integrations"], cfg["package_paths"]
+            )
     print(f"tier {args.tier} on local, commit {commit}; touched crates: {', '.join(touched) or 'none'}", flush=True)
     for package, binary, matches in integrations:
         print(f"integration {package}/{binary}: {', '.join(matches)}", flush=True)

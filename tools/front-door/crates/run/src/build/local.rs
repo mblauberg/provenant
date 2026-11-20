@@ -47,10 +47,13 @@ pub(super) fn execute_with_env(
         override_env,
         None,
         None,
-        None,
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "slot execution supplies its site and spawn callback"
+)]
 pub(super) fn execute_in_slot(
     job: &mut Job,
     ctx: &RunContext,
@@ -75,6 +78,10 @@ pub(super) fn execute_in_slot(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "shared execution boundary receives strategy options"
+)]
 fn execute_configured(
     job: &mut Job,
     ctx: &RunContext,
@@ -97,12 +104,34 @@ fn execute_configured(
             Box::new(result),
         ));
     }
+    if slot.is_none() && matches!(job.kind, super::JobKind::Tier { .. }) {
+        match &job.source {
+            super::SnapshotSource::WorkingTree { worktree, git } => {
+                match super::snapshot::working_tree_commit(
+                    worktree,
+                    git,
+                    &std::env::temp_dir().join("provenant-build-snapshots"),
+                ) {
+                    Ok(commit) => outcome.snapshot = Some(commit),
+                    Err(error) => {
+                        let warning =
+                            format!("could not capture verify working tree identity: {error}");
+                        super::warn_and_record(&mut outcome, &warning);
+                    }
+                }
+            }
+            super::SnapshotSource::Commit { commit, .. } => outcome.snapshot = Some(commit.clone()),
+        }
+    }
     let site = ExecSite {
         root: root.clone(),
-        head: slot.map(|(_, _, head, _)| head.to_owned()),
+        head: slot
+            .map(|(_, _, head, _)| head.to_owned())
+            .or_else(|| outcome.snapshot.clone()),
         slot: slot.map(|(index, _, _, _)| index).or(outcome.slot),
     };
     let mut env = override_env.unwrap_or_else(|| job.env.clone());
+    env.retain(|(key, _)| key != "PROVENANT_BUILD_LOCAL_ROOT");
     if let Some(prelude) = job.prelude.take() {
         match prelude(&site) {
             Ok(extra) => {
@@ -181,13 +210,18 @@ fn execute_configured(
         options.group_watchdog = false;
         options.terminate_grace = Duration::from_secs(10);
         options.cancel = Some(&ctx.cancel);
-        options.on_spawn = on_spawn.as_deref_mut();
+        let mut notify_spawn = |pid| {
+            if let Some(callback) = on_spawn.as_mut() {
+                callback(pid);
+            }
+        };
+        options.on_spawn = Some(&mut notify_spawn);
         let mut stdout_filter =
             slot.map(|(_, _, _, worktree)| StreamPathFilter::new(&root, worktree));
         let mut stderr_filter =
             slot.map(|(_, _, _, worktree)| StreamPathFilter::new(&root, worktree));
-        let mut stdout_handle = std::io::stdout();
-        let mut stderr_handle = std::io::stderr();
+        let stdout_handle = std::io::stdout();
+        let stderr_handle = std::io::stderr();
         let mut stdout_lock = stdout_handle.lock();
         let mut stderr_lock = stderr_handle.lock();
         match job.output {
@@ -211,7 +245,13 @@ fn execute_configured(
             Output::Capture { limit_bytes } => {
                 let limit = limit_bytes.min(MAX_CAPTURE_LIMIT);
                 options.stdout = StreamPolicy::Capture { limit };
-                options.stderr = StreamPolicy::Capture { limit };
+                options.stderr = if matches!(&job.kind, super::JobKind::Tier { .. }) {
+                    StreamPolicy::Tail {
+                        limit: limit.min(64 * 1024),
+                    }
+                } else {
+                    StreamPolicy::Capture { limit }
+                };
             }
         }
         let output = match executor.execute_forwarding_group(options) {
@@ -279,7 +319,11 @@ fn execute_configured(
         }
         exits.push(Some(exit));
         if !(slot.is_some() && matches!(job.output, Output::Stream))
-            && let Some(capture) = capture(output.stdout, output.stderr)
+            && let Some(capture) = capture(
+                output.stdout,
+                output.stderr,
+                output.drain_truncated || output.overflow_stopped,
+            )
         {
             let bound = match job.output {
                 Output::Capture { limit_bytes } => limit_bytes.min(MAX_CAPTURE_LIMIT),
@@ -391,15 +435,31 @@ impl provenant_os::exec::CaptureFilter for StreamPathFilter {
 fn capture(
     stdout: provenant_os::exec::CapturedStream,
     stderr: provenant_os::exec::CapturedStream,
+    drain_incomplete: bool,
 ) -> Option<Captured> {
-    if stdout.total_bytes == 0 && stderr.total_bytes == 0 {
+    let incomplete = |stream: &provenant_os::exec::CapturedStream| {
+        stream.truncated
+            || stream.sink_lost_bytes != 0
+            || stream.sink_failed
+            || stream.oversized_frames != 0
+            || stream.decoder_lost_frames != 0
+            || stream.read_failed
+            || stream.filter_failed
+    };
+    let stdout_incomplete = incomplete(&stdout) || drain_incomplete;
+    let stderr_incomplete = incomplete(&stderr) || drain_incomplete;
+    if stdout.total_bytes == 0
+        && stderr.total_bytes == 0
+        && !stdout_incomplete
+        && !stderr_incomplete
+    {
         return None;
     }
     Some(Captured {
         stdout: stdout.bytes,
         stderr: stderr.bytes,
-        stdout_truncated: stdout.truncated,
-        stderr_truncated: stderr.truncated,
+        stdout_truncated: stdout_incomplete,
+        stderr_truncated: stderr_incomplete,
         stdout_total_bytes: stdout.total_bytes,
         stderr_total_bytes: stderr.total_bytes,
     })
@@ -452,5 +512,23 @@ pub fn step_cwd(root: &Path, cwd_rel: &Path) -> PathBuf {
         cwd_rel.to_path_buf()
     } else {
         root.join(cwd_rel)
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::capture;
+    use provenant_os::exec::CapturedStream;
+
+    #[test]
+    fn failed_or_incomplete_capture_is_not_reported_complete_when_empty() {
+        let failed = CapturedStream {
+            read_failed: true,
+            ..Default::default()
+        };
+        let result = capture(failed, CapturedStream::default(), false).unwrap();
+        assert!(result.stdout_truncated);
+        let result = capture(CapturedStream::default(), CapturedStream::default(), true).unwrap();
+        assert!(result.stdout_truncated && result.stderr_truncated);
     }
 }

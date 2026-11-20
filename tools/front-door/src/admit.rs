@@ -765,7 +765,7 @@ fn run_build_job(
     code
 }
 
-fn host_build_context(
+pub(crate) fn host_build_context(
     env: &[(OsString, OsString)],
     state: Option<&Path>,
 ) -> Result<provenant_run::build::BuildContext, String> {

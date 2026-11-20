@@ -19,9 +19,11 @@ const CARGO_PROGRAM: &str = "cargo";
 fn command(program: &str, directory: &Path) -> Command {
     let mut command = Command::new(program);
     command.current_dir(directory);
-    command.env_remove("GIT_DIR");
-    command.env_remove("GIT_WORK_TREE");
-    command.env_remove("GIT_INDEX_FILE");
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(name);
+        }
+    }
     command
 }
 
@@ -53,8 +55,29 @@ pub(super) fn changed_paths(
     workspace: &Path,
     base: &str,
     head: &str,
+    object_dir: Option<&Path>,
 ) -> Result<Vec<PathBuf>, Error> {
-    let stdout = run_git(workspace, &["diff", "--name-only", "-z", base, head, "--"])?;
+    let args = ["diff", "--name-only", "-z", base, head, "--"];
+    let stdout = if let Some(object_dir) = object_dir {
+        let output = command(GIT_PROGRAM, workspace)
+            .env("GIT_OBJECT_DIRECTORY", object_dir)
+            .args(args)
+            .output()
+            .map_err(|source| Error::GitSpawn {
+                workspace: workspace.to_path_buf(),
+                source,
+            })?;
+        if !output.status.success() {
+            return Err(Error::Git {
+                workspace: workspace.to_path_buf(),
+                args: args.join(" "),
+                detail: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        output.stdout
+    } else {
+        run_git(workspace, &args)?
+    };
     stdout
         .split(|byte| *byte == 0)
         .filter(|part| !part.is_empty())
@@ -159,4 +182,74 @@ pub(super) fn load_metadata(
         });
     }
     metadata::parse(&output.stdout).map_err(|detail| Error::Metadata { revision, detail })
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "scratch Git fixtures")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn changed_paths_reads_a_private_snapshot_without_publishing_objects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["config", "user.email", "test@example.invalid"]);
+        fs::write(repo.join("file"), "before").unwrap();
+        run(&["add", "file"]);
+        run(&["commit", "-qm", "base"]);
+        let base = run(&["rev-parse", "HEAD"]);
+        fs::write(repo.join("file"), "after").unwrap();
+        let objects = tmp.path().join("objects");
+        fs::create_dir_all(objects.join("info")).unwrap();
+        fs::write(
+            objects.join("info/alternates"),
+            format!("{}\n", repo.join(".git/objects").display()),
+        )
+        .unwrap();
+        let invoke = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&repo)
+                .env("GIT_OBJECT_DIRECTORY", &objects)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        invoke(&["add", "file"]);
+        let tree = invoke(&["write-tree"]);
+        let head = invoke(&["commit-tree", &tree, "-p", &base, "-m", "snapshot"]);
+        assert_eq!(
+            changed_paths(&repo, &base, &head, Some(&objects)).unwrap(),
+            vec![PathBuf::from("file")]
+        );
+        assert!(
+            !Command::new("git")
+                .current_dir(repo)
+                .args(["cat-file", "-e", &head])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
 }
