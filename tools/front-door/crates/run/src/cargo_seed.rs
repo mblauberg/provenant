@@ -624,6 +624,8 @@ pub fn seed_worktree_target(
                 home,
                 &environment,
                 &provenant_core::CancelToken::new(),
+                "target",
+                false,
                 |_| {},
             ),
         },
@@ -659,6 +661,8 @@ pub(crate) fn seed_target_with_reservation(
     home: &Path,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
     cancel: &provenant_core::CancelToken,
+    destination: &str,
+    split_clone_budget: bool,
     before_clone: impl FnOnce(Option<u64>),
 ) -> Outcome {
     #[cfg(unix)]
@@ -679,7 +683,7 @@ pub(crate) fn seed_target_with_reservation(
                 return Outcome::fallback_refusal(fallback_reasons::TOOLCHAIN_UNVERIFIED, refusal);
             }
         };
-        seed_target_cancellable(
+        seed_target_cancellable_inner_for_destination(
             state,
             cache,
             SeedCompatibility {
@@ -691,6 +695,9 @@ pub(crate) fn seed_target_with_reservation(
             Some(cancel),
             before_clone,
             |source, dest, deadline| clone_target_until(source, dest, cancel, deadline),
+            SeedBudget::for_step,
+            destination,
+            split_clone_budget,
         )
     }
     #[cfg(not(unix))]
@@ -703,6 +710,8 @@ pub(crate) fn seed_target_with_reservation(
             home,
             environment,
             cancel,
+            destination,
+            split_clone_budget,
             before_clone,
         );
         Outcome::skipped("unsupported_platform")
@@ -757,7 +766,7 @@ fn describe_profile(profile: &provenant_config::CargoBuildProfile) -> String {
     )
 }
 
-#[cfg(any(unix, test))]
+#[cfg(test)]
 fn seed_target_cancellable(
     state: &Path,
     cache: &Path,
@@ -780,7 +789,7 @@ fn seed_target_cancellable(
 /// Same seeding flow, with the per-step budget construction injected. Production
 /// passes the real per-step builder; tests inject a clock-backed one so a slow
 /// clone can be simulated without waiting on the real clock.
-#[cfg(any(unix, test))]
+#[cfg(test)]
 fn seed_target_cancellable_inner(
     state: &Path,
     cache: &Path,
@@ -789,6 +798,32 @@ fn seed_target_cancellable_inner(
     before_clone: impl FnOnce(Option<u64>),
     clone: impl FnOnce(&Path, &provenant_os::fs::Directory, &SeedBudget) -> Result<(), &'static str>,
     budget: impl Fn(&provenant_config::SeedBudgetSetting, BudgetStep) -> SeedBudget,
+) -> Outcome {
+    seed_target_cancellable_inner_for_destination(
+        state,
+        cache,
+        compatibility,
+        cancel,
+        before_clone,
+        clone,
+        budget,
+        "target",
+        false,
+    )
+}
+
+#[cfg(any(unix, test))]
+#[allow(clippy::too_many_arguments)]
+fn seed_target_cancellable_inner_for_destination(
+    state: &Path,
+    cache: &Path,
+    compatibility: SeedCompatibility<'_>,
+    cancel: Option<&provenant_core::CancelToken>,
+    before_clone: impl FnOnce(Option<u64>),
+    clone: impl FnOnce(&Path, &provenant_os::fs::Directory, &SeedBudget) -> Result<(), &'static str>,
+    budget: impl Fn(&provenant_config::SeedBudgetSetting, BudgetStep) -> SeedBudget,
+    destination: &str,
+    split_clone_budget: bool,
 ) -> Outcome {
     // One configured budget, one deadline per step. Cleanup, selection, clone
     // and aging each start their own deadline when the step begins, so a slow
@@ -818,7 +853,7 @@ fn seed_target_cancellable_inner(
     let Ok(cache_dir) = Directory::open_anchor(cache) else {
         return Outcome::fallback(fallback_reasons::CACHE_UNAVAILABLE);
     };
-    match cache_dir.metadata_at(OsStr::new("target"), false) {
+    match cache_dir.metadata_at(OsStr::new(destination), false) {
         Ok(_) => return Outcome::skipped("existing_target"),
         Err(error) if error.is_not_found() => {}
         Err(_) => return Outcome::fallback(fallback_reasons::TARGET_UNAVAILABLE),
@@ -999,7 +1034,12 @@ fn seed_target_cancellable_inner(
     if cache_dir.mkdir(&stage, 0o700).is_err() {
         return Outcome::fallback(fallback_reasons::STAGING_UNAVAILABLE);
     }
-    let cloning = budget(&setting, BudgetStep::Clone);
+    let mut clone_setting = setting.clone();
+    if split_clone_budget {
+        clone_setting.micros /= 2;
+        clone_setting.setting = format!("{} (half share)", setting.setting);
+    }
+    let cloning = budget(&clone_setting, BudgetStep::Clone);
     // The size was measured once at publication; record whether this
     // generation has one so a missing size is visible without a per-launch
     // warning. Eviction accounting resumes when the seed is refreshed.
@@ -1018,7 +1058,7 @@ fn seed_target_cancellable_inner(
             .sync()
             .map_err(|_| fallback_reasons::STAGING_SYNC_FAILED)?;
         cache_dir
-            .rename_noreplace(&stage, &cache_dir, OsStr::new("target"))
+            .rename_noreplace(&stage, &cache_dir, OsStr::new(destination))
             .map_err(|_| fallback_reasons::PUBLISH_FAILED)?;
         Ok(())
     })();
@@ -1047,7 +1087,14 @@ fn seed_target_cancellable_inner(
             // retried by the next seed under the store lock.
             let _ = remove_seed_tree(&cache_dir, &stage, None, &fresh_cleanup());
             if is_budget_detail(reason) {
-                Outcome::budget_fallback(reason, &setting)
+                Outcome::budget_fallback(
+                    reason,
+                    if reason == BudgetStep::Clone.detail() {
+                        &clone_setting
+                    } else {
+                        &setting
+                    },
+                )
             } else {
                 Outcome::fallback(reason)
             }
@@ -2371,6 +2418,8 @@ mod tests {
             &home,
             &env,
             &provenant_core::CancelToken::new(),
+            "target",
+            false,
             |_| {},
         );
         assert_eq!(
@@ -2398,6 +2447,8 @@ mod tests {
             &tmp.path().join("home"),
             &refused,
             &provenant_core::CancelToken::new(),
+            "target",
+            false,
             |_: Option<u64>| panic!("a refused seed must not clone"),
         );
         assert_eq!(
@@ -2765,6 +2816,121 @@ mod tests {
         assert_eq!(seed.generation.as_deref(), Some("001"));
         assert!(seed.warning.is_none() && seed.differs.is_none());
         assert!(fixture.cache.join("target").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lint_target_seeds_independently() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        generation(&state, "001", "v1", "host");
+        let source = crate::target_seed::store_path(&state).join("generations/001/target");
+        let fingerprint = unit(
+            &source,
+            "debug/.fingerprint/dependency",
+            "lib-dependency",
+            &check_dep_info("debug/.fingerprint/dependency/dep-lib-dependency"),
+        );
+        std::fs::write(fingerprint.join("dep-lib-dependency"), b"dependency").unwrap();
+        let profile = provenant_config::LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .unwrap();
+        let (main, lint) = crate::writer::seed_both_cargo_targets(|name| {
+            seed_target_cancellable_inner_for_destination(
+                &state,
+                &cache,
+                SeedCompatibility {
+                    version: "v1",
+                    triple: "host",
+                    cargo_profile: &profile,
+                    project_key: "",
+                },
+                None,
+                |_| {},
+                |src, dst, budget| {
+                    clone_target_until(src, dst, &provenant_core::CancelToken::new(), budget)
+                },
+                SeedBudget::for_step,
+                name,
+                true,
+            )
+        });
+        let directory = provenant_os::fs::Directory::open_anchor(tmp.path()).unwrap();
+        crate::writer::record_cargo_setup_file(&directory, "setup.json", &main, &lint).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(tmp.path().join("setup.json")).unwrap()).unwrap();
+        for name in ["target", "target-lint"] {
+            assert_eq!(
+                std::fs::read(
+                    cache
+                        .join(name)
+                        .join("debug/.fingerprint/dependency/dep-lib-dependency")
+                )
+                .unwrap(),
+                b"dependency"
+            );
+        }
+        assert_eq!(record["status"], "seeded");
+        assert_eq!(record["lint_target"]["status"], "seeded");
+        assert_eq!(record["seed_source"], record["lint_target"]["seed_source"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_fallback_never_blocks_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        generation(&state, "001", "v1", "host");
+        let source = crate::target_seed::store_path(&state).join("generations/001/target");
+        let fingerprint = unit(
+            &source,
+            "debug/.fingerprint/dependency",
+            "lib-dependency",
+            &check_dep_info("debug/.fingerprint/dependency/dep-lib-dependency"),
+        );
+        std::fs::write(fingerprint.join("dep-lib-dependency"), b"dependency").unwrap();
+        let profile = provenant_config::LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .unwrap();
+        let (main, lint) = crate::writer::seed_both_cargo_targets(|name| {
+            seed_target_cancellable_inner_for_destination(
+                &state,
+                &cache,
+                SeedCompatibility {
+                    version: "v1",
+                    triple: "host",
+                    cargo_profile: &profile,
+                    project_key: "",
+                },
+                None,
+                |_| {},
+                |src, dst, budget| {
+                    if name == "target" {
+                        return Err(fallback_reasons::CLONE_FAILED);
+                    }
+                    clone_target_until(src, dst, &provenant_core::CancelToken::new(), budget)
+                },
+                SeedBudget::for_step,
+                name,
+                true,
+            )
+        });
+        let directory = provenant_os::fs::Directory::open_anchor(tmp.path()).unwrap();
+        crate::writer::record_cargo_setup_file(&directory, "setup.json", &main, &lint).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(tmp.path().join("setup.json")).unwrap()).unwrap();
+        assert_eq!(record["status"], "fallback");
+        assert_eq!(record["lint_target"]["status"], "seeded");
+        assert!(!cache.join("target").exists());
+        assert!(
+            cache
+                .join("target-lint/debug/.fingerprint/dependency/dep-lib-dependency")
+                .is_file()
+        );
     }
 
     /// The #3561 protection against the Cargo that is actually pinned, not a tree
