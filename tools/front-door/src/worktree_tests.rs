@@ -299,6 +299,11 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "gc_collects_bound_bare_worktrees",
             "provider_retention_classes_sweep_host_and_refuse_replaced_roots",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
+            "status_and_worktree_list_report_stranded_work",
+            "status_omits_stranded_work_with_a_live_lane",
+            "status_reports_in_progress_merge_with_edits",
+            "status_reports_dirty_detached_worktree",
+            "gc_keeps_and_names_stranded_work",
             "merged_pruning_deletes_a_merged_branch_without_a_worktree",
             "remove_by_name_follows_the_branch_merge_state",
             "remove_by_name_deletes_a_branch_fully_contained_in_integration",
@@ -435,6 +440,19 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees" => {
                     merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees()
                 }
+                "status_and_worktree_list_report_stranded_work" => {
+                    status_and_worktree_list_report_stranded_work()
+                }
+                "status_omits_stranded_work_with_a_live_lane" => {
+                    status_omits_stranded_work_with_a_live_lane()
+                }
+                "status_reports_in_progress_merge_with_edits" => {
+                    status_reports_in_progress_merge_with_edits()
+                }
+                "status_reports_dirty_detached_worktree" => {
+                    status_reports_dirty_detached_worktree()
+                }
+                "gc_keeps_and_names_stranded_work" => gc_keeps_and_names_stranded_work(),
                 "merged_pruning_deletes_a_merged_branch_without_a_worktree" => {
                     merged_pruning_deletes_a_merged_branch_without_a_worktree()
                 }

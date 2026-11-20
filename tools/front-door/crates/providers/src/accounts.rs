@@ -341,6 +341,21 @@ fn boundary_error(error: &SectionError) -> bool {
     )
 }
 pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::new("entries.{id}.adapter", "string"),
+    FieldMetadata::new("entries.{id}.label", "string"),
+    FieldMetadata::new("entries.{id}.key", "string"),
+    FieldMetadata::new("entries.{id}.org_fingerprint", "string"),
+    FieldMetadata::new("entries.{id}.directory", "string"),
+    FieldMetadata::new("entries.{id}.directories", "array"),
+    FieldMetadata::new("entries.{id}.plan", "string"),
+    FieldMetadata::new("entries.{id}.plans", "array"),
+    FieldMetadata::new("entries.{id}.priority", "int"),
+    FieldMetadata::new("entries.{id}.billing_anchor", "string"),
+    FieldMetadata::new("entries.{id}.limits", "table"),
+    FieldMetadata::new("entries.{id}.limits.monthly_usd", "float"),
+    FieldMetadata::new("entries.{id}.limits.cycle_anchor", "string"),
+    FieldMetadata::new("entries.{id}.limits.weekly_anchor", "string"),
+    FieldMetadata::new("entries.{id}.settings", "table"),
     FieldMetadata::int("entries.{id}.order", 1, 999),
     FieldMetadata::new("entries.{id}.hidden", "bool"),
     FieldMetadata::new("entries.{id}.display_name", "string"),

@@ -236,6 +236,10 @@ pub enum GitObjectKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitRead {
     DirtyPatch,
+    /// Added and removed line counts for tracked changes as NUL-delimited
+    /// `added\tremoved\tpath` records, so content beginning with `+++` or
+    /// `---` is counted as ordinary added or removed lines.
+    Numstat,
     IndexPatch,
     Untracked,
     MergeTree {
@@ -269,6 +273,11 @@ pub enum GitRead {
     },
     SymbolicRevision {
         revision: GitRevision,
+    },
+    /// Read one `branch.<name>.remote` or `branch.<name>.merge` config value.
+    /// The key is validated before it reaches the Git command line.
+    ConfigValue {
+        key: String,
     },
     Diff {
         base: GitOid,
@@ -1786,6 +1795,16 @@ fn git_read_tail(operation: GitRead) -> Result<Vec<OsString>, UtilityError> {
             "HEAD".into(),
             "--".into(),
         ],
+        GitRead::Numstat => vec![
+            "diff".into(),
+            "--numstat".into(),
+            "-z".into(),
+            "--no-renames".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            "HEAD".into(),
+            "--".into(),
+        ],
         GitRead::IndexPatch => vec![
             "diff".into(),
             "--cached".into(),
@@ -1879,6 +1898,10 @@ fn git_read_tail(operation: GitRead) -> Result<Vec<OsString>, UtilityError> {
             "--end-of-options".into(),
             revision.as_str().into(),
         ],
+        GitRead::ConfigValue { key } => {
+            validate_branch_config_key(&key)?;
+            vec!["config".into(), "--get".into(), "--".into(), key.into()]
+        }
         GitRead::ChangedPaths { base, head } => vec![
             "diff".into(),
             "--no-ext-diff".into(),
@@ -2115,6 +2138,32 @@ fn git_read_tail(operation: GitRead) -> Result<Vec<OsString>, UtilityError> {
 
 fn append_paths(args: &mut Vec<OsString>, paths: &[RepoPath]) {
     args.extend(paths.iter().map(|path| path.as_os_str().to_owned()));
+}
+
+/// Only the two branch tracking keys are readable through `ConfigValue`, and
+/// only with a bounded, single-component-safe branch name. Nothing reaches the
+/// Git command line that could be read as an option or another config key.
+fn validate_branch_config_key(key: &str) -> Result<(), UtilityError> {
+    let Some(branch) = key.strip_prefix("branch.") else {
+        return Err(UtilityError::InvalidOperationValue);
+    };
+    let Some(name) = branch
+        .strip_suffix(".remote")
+        .or_else(|| branch.strip_suffix(".merge"))
+    else {
+        return Err(UtilityError::InvalidOperationValue);
+    };
+    if name.is_empty()
+        || name.len() > 256
+        || name.starts_with('-')
+        || name.contains("..")
+        || name
+            .bytes()
+            .any(|byte| byte <= b' ' || !byte.is_ascii_graphic())
+    {
+        return Err(UtilityError::InvalidOperationValue);
+    }
+    Ok(())
 }
 
 fn validate_limit(limit: u64) -> Result<(), UtilityError> {

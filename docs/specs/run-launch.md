@@ -278,6 +278,17 @@ rewritten, and the launch receipt carries no Git-config filtering field.
 
 ## Inputs and resources
 
+A plain read-only launch from a checkout behind its fetched upstream reviews
+that upstream head by default. `read_only_source_ref` resolves the default branch
+as last fetched without fetching; `bind_default_read_only_source` pins the
+graph's read-only nodes to that commit, and the launch warning names the ref,
+the commit and the stale local head it replaced. A level or ahead checkout keeps
+its local tree. An explicit `source` choice of `local`, a review range, an
+authored document or a writer launch keeps its own subject. Absent or unusable
+Git evidence stays advisory and never refuses the launch.
+- Why: file:line evidence from a stale working tree would report findings that
+  upstream has already fixed.
+
 Unreadable required host inputs reject an attempt before launch. A pinned source
 view reports its failure without exposing captured contents or credentials.
 - Why: a partial source view must not be mistaken for the requested input.
