@@ -217,7 +217,7 @@ pub fn main() -> std::process::ExitCode {
                 crate::dispatch(provenant_cli::parse(args), &Fixture)
             }))
         }
-        Some("--state-dir" | "internal") => {
+        Some("--state-dir" | "internal" | "admit") => {
             let code = crate::dispatch(provenant_cli::parse(args), &Fixture);
             // A fixture-only observation after the real command has rendered.
             if let Some(path) = std::env::var_os("FIXTURE_LAND_CWD_FILE") {
