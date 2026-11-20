@@ -11,6 +11,7 @@ pub mod ledger;
 pub mod local;
 pub mod pathmap;
 pub mod paths;
+pub(crate) mod process;
 pub mod queue;
 pub mod report;
 pub mod rust;

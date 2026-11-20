@@ -1,9 +1,9 @@
 //! Bare object store and its fetch/GC lock.
+use super::process::Command;
 use super::{BuildError, InfraKind};
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -28,7 +28,6 @@ fn io_error(error: std::io::Error) -> BuildError {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "Git store subprocess boundary")]
 fn git() -> Command {
     let mut command =
         Command::new(provenant_os::git::git_executable().unwrap_or_else(|| "/usr/bin/git".into()));

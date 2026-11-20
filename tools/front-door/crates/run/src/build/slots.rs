@@ -1,9 +1,11 @@
 //! Persistent slot records and isolated build execution.
 
+use super::process::Command;
 use super::{
     BuildContext, BuildError, Captured, Exception, ExecPlace, Job, JobOutcome, JobResult,
     RunContext, SlotChanges,
 };
+use provenant_core::{Clock, MonoTime};
 use provenant_supervisor::census::{
     MAX_CENSUS_ENTRIES, ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver,
 };
@@ -14,7 +16,6 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -200,10 +201,6 @@ impl PreparedSlot {
 }
 
 /// Prepare slot contents and retain both slot and port leases through execution.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "slot Git and process lifecycle boundary"
-)]
 pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot, StageFailure> {
     if let super::rust::RustClass::Local { exception } = super::rust::classify(job) {
         return Err(exception.into());
@@ -375,7 +372,13 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
         record.prepare_digest = Some(digest);
     }
     fs::create_dir_all(&paths.target).map_err(|_| Exception::PoolUnavailable)?;
-    let started_at = SystemTime::now();
+    let clock = provenant_os::clock::SystemClock::new();
+    let started_at = clock
+        .wall_now()
+        .ok()
+        .and_then(|now| u64::try_from(now.as_micros()).ok())
+        .map(|micros| UNIX_EPOCH + Duration::from_micros(micros))
+        .unwrap_or(UNIX_EPOCH);
     let started_ms = started_at
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -490,12 +493,14 @@ pub fn execute_staged(
         &mut owned_job,
         context,
         outcome,
-        index,
-        &staged.paths.repo,
-        &staged.snapshot.commit,
-        staged.env.clone(),
-        &staged.source_root,
-        &mut on_spawn,
+        super::local::SlotLaunch {
+            index,
+            root: &staged.paths.repo,
+            head: &staged.snapshot.commit,
+            env: staged.env.clone(),
+            worktree: &staged.source_root,
+            on_spawn: &mut on_spawn,
+        },
     );
     drop(on_spawn);
     if let Some((stop, worker)) = sampler {
@@ -715,10 +720,6 @@ fn stage_reset_failure(error: BuildError, reset: super::Reset) -> StageFailure {
     }
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "slot Git and process lifecycle boundary"
-)]
 fn ensure_slot_repo(paths: &SlotPaths, store: &Path) -> Result<(), Exception> {
     if !paths.repo.join(".git").exists() {
         let git = provenant_os::git::git_executable().ok_or(Exception::PoolUnavailable)?;
@@ -841,10 +842,6 @@ fn checkout_commit(repo: &Path, commit: &str) -> bool {
     )
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "slot Git and process lifecycle boundary"
-)]
 fn git_status(repo: &Path, args: &[&str]) -> bool {
     let Some(git) = provenant_os::git::git_executable() else {
         return false;
@@ -1193,11 +1190,8 @@ fn remaining_recorded_members(
     Ok((known, unknown))
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "slot Git and process lifecycle boundary"
-)]
 fn terminate_recorded_group(marker: &JobMarker) -> std::io::Result<bool> {
+    let clock = provenant_os::clock::SystemClock::new();
     let observed = group_members(marker)?;
     if observed.is_empty() {
         return Ok(false);
@@ -1207,7 +1201,7 @@ fn terminate_recorded_group(marker: &JobMarker) -> std::io::Result<bool> {
         provenant_os::pid::ProcessSignal::Terminate,
     )
     .map_err(std::io::Error::other)?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = MonoTime::from_micros(clock.mono_now().as_micros().saturating_add(5_000_000));
     loop {
         let (known, unknown) = remaining_recorded_members(marker, &observed)?;
         if unknown {
@@ -1218,10 +1212,12 @@ fn terminate_recorded_group(marker: &JobMarker) -> std::io::Result<bool> {
         if !known {
             return Ok(true);
         }
-        if std::time::Instant::now() >= deadline {
+        if clock.mono_now() >= deadline {
             break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        let _ = clock.wait_until(MonoTime::from_micros(
+            clock.mono_now().as_micros().saturating_add(50_000),
+        ));
     }
     let (known, unknown) = remaining_recorded_members(marker, &observed)?;
     if unknown {
@@ -1235,8 +1231,9 @@ fn terminate_recorded_group(marker: &JobMarker) -> std::io::Result<bool> {
             provenant_os::pid::ProcessSignal::Kill,
         )
         .map_err(std::io::Error::other)?;
-        let kill_deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while std::time::Instant::now() < kill_deadline {
+        let kill_deadline =
+            MonoTime::from_micros(clock.mono_now().as_micros().saturating_add(1_000_000));
+        while clock.mono_now() < kill_deadline {
             let (known, unknown) = remaining_recorded_members(marker, &observed)?;
             if unknown {
                 return Err(std::io::Error::other(
@@ -1246,7 +1243,9 @@ fn terminate_recorded_group(marker: &JobMarker) -> std::io::Result<bool> {
             if !known {
                 return Ok(true);
             }
-            std::thread::sleep(Duration::from_millis(50));
+            let _ = clock.wait_until(MonoTime::from_micros(
+                clock.mono_now().as_micros().saturating_add(50_000),
+            ));
         }
         return Err(std::io::Error::other(
             "build process group survived SIGKILL",
@@ -1280,10 +1279,6 @@ fn fingerprint_scan(target: &Path, started_at: SystemTime) -> Vec<(String, bool)
     units.sort();
     units
 }
-#[allow(
-    clippy::disallowed_methods,
-    reason = "slot Git and process lifecycle boundary"
-)]
 fn slot_changes(repo: &Path) -> Option<SlotChanges> {
     let mut git = Command::new(provenant_os::git::git_executable()?);
     clear_git(&mut git);
@@ -1444,7 +1439,7 @@ mod tests {
         use std::os::unix::process::CommandExt;
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("job.json");
-        let mut child = Command::new("sleep")
+        let mut child = std::process::Command::new("sleep")
             .arg("30")
             .process_group(0)
             .spawn()

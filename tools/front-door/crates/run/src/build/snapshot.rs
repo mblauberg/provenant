@@ -1,10 +1,11 @@
 //! Deterministic snapshots and negotiated transfer to the build store.
+use super::process::Command;
 use super::{BuildError, GitBinding, InfraKind, SnapshotSource};
 use std::{
     ffi::OsStr,
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::Output,
     sync::atomic::{AtomicU64, Ordering},
 };
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -63,7 +64,6 @@ fn value(out: Output) -> Result<String, BuildError> {
         .map(|s| s.trim().to_owned())
         .map_err(error)
 }
-#[allow(clippy::disallowed_methods, reason = "bound Git snapshot subprocess")]
 fn bound(git: &GitBinding, worktree: &Path, index: &Path) -> Command {
     let mut c = Command::new(&git.git);
     clear_git(&mut c);
@@ -155,10 +155,6 @@ pub fn create(
 }
 
 /// Create a slot snapshot and pin it, optionally alongside a verify base.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "Git snapshot transfer subprocess"
-)]
 pub fn create_in_slot(
     source: &SnapshotSource,
     binding: Option<&GitBinding>,

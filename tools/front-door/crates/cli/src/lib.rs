@@ -1205,7 +1205,10 @@ mod tests {
         ));
         assert!(matches!(
             valid(&["build", "reset", "--project", ".", "--slot", "2", "--full"]).command,
-            Command::Build(Build::Reset { slot: Some(2) })
+            Command::Build(Build::Reset {
+                slot: Some(2),
+                full: true
+            })
         ));
         assert!(matches!(
             valid(&["build", "maintain", "--project", "."]).command,

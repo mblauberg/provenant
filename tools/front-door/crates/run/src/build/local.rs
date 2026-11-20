@@ -28,6 +28,26 @@ pub(super) fn execute(
     execute_with_env(job, ctx, outcome, place, override_argv, waited_ms, None)
 }
 
+/// Site and lifecycle inputs supplied by the slot staging owner.
+pub(super) struct SlotLaunch<'a> {
+    pub index: u64,
+    pub root: &'a Path,
+    pub head: &'a str,
+    pub env: Vec<(OsString, OsString)>,
+    pub worktree: &'a Path,
+    pub on_spawn: &'a mut dyn FnMut(u32),
+}
+
+/// Per-execution options collected at the shared execution boundary.
+struct ExecutionOptions<'a> {
+    place: ExecPlace,
+    override_argv: Option<Vec<OsString>>,
+    waited_ms: u64,
+    override_env: Option<Vec<(OsString, OsString)>>,
+    slot: Option<(u64, &'a Path, &'a str, &'a Path)>,
+    on_spawn: Option<&'a mut dyn FnMut(u32)>,
+}
+
 pub(super) fn execute_with_env(
     job: &mut Job,
     ctx: &RunContext,
@@ -41,58 +61,52 @@ pub(super) fn execute_with_env(
         job,
         ctx,
         outcome,
-        place,
-        override_argv,
-        waited_ms,
-        override_env,
-        None,
-        None,
+        ExecutionOptions {
+            place,
+            override_argv,
+            waited_ms,
+            override_env,
+            slot: None,
+            on_spawn: None,
+        },
     )
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "slot execution supplies its site and spawn callback"
-)]
 pub(super) fn execute_in_slot(
     job: &mut Job,
     ctx: &RunContext,
     outcome: JobOutcome,
-    index: u64,
-    root: &Path,
-    head: &str,
-    env: Vec<(OsString, OsString)>,
-    worktree: &Path,
-    on_spawn: &mut dyn FnMut(u32),
+    launch: SlotLaunch<'_>,
 ) -> Result<JobResult, super::DispatchFailure> {
     execute_configured(
         job,
         ctx,
         outcome,
-        ExecPlace::Slot,
-        None,
-        0,
-        Some(env),
-        Some((index, root, head, worktree)),
-        Some(on_spawn),
+        ExecutionOptions {
+            place: ExecPlace::Slot,
+            override_argv: None,
+            waited_ms: 0,
+            override_env: Some(launch.env),
+            slot: Some((launch.index, launch.root, launch.head, launch.worktree)),
+            on_spawn: Some(launch.on_spawn),
+        },
     )
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "shared execution boundary receives strategy options"
-)]
 fn execute_configured(
     job: &mut Job,
     ctx: &RunContext,
     mut outcome: JobOutcome,
-    place: ExecPlace,
-    override_argv: Option<Vec<OsString>>,
-    waited_ms: u64,
-    override_env: Option<Vec<(OsString, OsString)>>,
-    slot: Option<(u64, &Path, &str, &Path)>,
-    mut on_spawn: Option<&mut dyn FnMut(u32)>,
+    options: ExecutionOptions<'_>,
 ) -> Result<JobResult, super::DispatchFailure> {
+    let ExecutionOptions {
+        place,
+        override_argv,
+        waited_ms,
+        override_env,
+        slot,
+        mut on_spawn,
+    } = options;
     let root = slot.map_or_else(
         || super::job_root(job).to_path_buf(),
         |(_, root, _, _)| root.to_path_buf(),
