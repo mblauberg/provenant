@@ -3546,7 +3546,10 @@ impl BoundGraphOwner<'_> {
             && source_commit.is_none()
             && let Some(warning) = provenant_cli::run::read_only_checkout_warning(
                 self.factory.context.roots.state.as_path(),
-                grants.source_root.as_deref().unwrap_or(&self.factory.cwd),
+                grants
+                    .source_root
+                    .as_deref()
+                    .unwrap_or(self.factory.context.selected_project()),
             )
         {
             let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
@@ -3787,10 +3790,10 @@ impl BoundGraphOwner<'_> {
                 && source_commit.is_some()
             {
                 grants.source_root = {
-                    let path = worktree.map_or(self.factory.cwd.as_path(), Path::new);
+                    let path = worktree.map_or(self.factory.context.selected_project(), Path::new);
                     let source = provenant_run::resolve_reader_source(
                         self.factory.context.roots.state.as_path(),
-                        &self.factory.cwd,
+                        self.factory.context.selected_project(),
                         path,
                     )
                     .map_err(|_| FacadeError::DispatchRefused {
@@ -4547,6 +4550,91 @@ mod journal_error_tests {
                 .is_err()
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn pinned_reader_uses_project_when_cwd_contains_credentials()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_fabric_runtime::graph::{self, AccessMode};
+        let rig = crate::worktree_tests::repository()?;
+        std::fs::create_dir_all(rig.home.join(".ssh"))?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.home.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            workers: &provenant_confinement::worktrees::SystemWorkerObserver,
+        };
+        let cancel = CancelToken::new();
+        let owner = BoundGraphOwner {
+            writer_launch_budget: None,
+            admission_timeout: None,
+            factory: &factory,
+            repo_facts: Default::default(),
+            launch_warnings: Vec::new(),
+            integration_base: None,
+            integration_branch: None,
+            network: None,
+            capability_overrides: Default::default(),
+            exclude: Vec::new(),
+            budget: WaitBudget::cli(factory.clock.mono_now(), 30)?,
+            cancel: &cancel,
+            prices: None,
+            tick: false,
+        };
+        let key = graph::AttemptKey {
+            extra: Default::default(),
+            retry_generation: None,
+            previous_attempt_ref: None,
+            graph_id: "reader-project".into(),
+            node_id: "read".into(),
+            route_index: 0,
+            attempt: 1,
+        };
+        let node = graph::NodeInput {
+            writer_dirty_preflight: false,
+            review_launch: false,
+            require_skill_location: false,
+            settlement_retries: None,
+            prior_attempts: &[],
+            family_peers: &[],
+            context: Default::default(),
+            read_roots: &[],
+            attachments: &[],
+            capabilities: None,
+            capability_sources: None,
+            attempt: None,
+            distinct_from_attempts: &[],
+            require_distinct: false,
+            source_commit: None,
+            review_base: None,
+            title: "reader",
+            prompt: "read",
+            required_verdict: None,
+            deadline_seconds: None,
+            inputs_dir: None,
+        };
+        let grants = owner.launch_grants(
+            &node,
+            &key,
+            AccessMode::ReadOnly,
+            None,
+            false,
+            None,
+            Some("HEAD"),
+        )?;
+        assert_eq!(
+            grants.source_root,
+            Some(provenant_os::fs::canonicalize(&rig.project)?)
+        );
         Ok(())
     }
 
