@@ -610,6 +610,33 @@ fn reservation_has_descendant(path: &Path, expected: &ProcessIdentity) -> Result
     }
     Ok(false)
 }
+// Allow ten full census and publication cadences for scheduling and retries.
+// A census is entry-bounded, so this is a diagnostic deadline, not a guarantee.
+fn wait_for_census_record(path: &Path, incomplete: bool) -> Result<()> {
+    let deadline = Instant::now() + fixture::census_publication_cadence() * 10;
+    loop {
+        let last = match std::fs::read(path) {
+            Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Ok(value) => {
+                    if value.get("census_incomplete").and_then(|v| v.as_bool()) == Some(incomplete)
+                    {
+                        return Ok(());
+                    }
+                    String::from_utf8_lossy(&bytes).into_owned()
+                }
+                Err(_) => format!("unparsable: {}", String::from_utf8_lossy(&bytes)),
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => "absent".to_owned(),
+            Err(error) => format!("unreadable: {error}"),
+        };
+        if Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "reservation census_incomplete did not become {incomplete}; last reservation: {last}"
+            )).into());
+        }
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
+}
 fn wait_for_descendant(path: &Path, identity: &ProcessIdentity) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -921,18 +948,7 @@ fn descendant_journal_failure_is_reported(root: &Path) -> Result<()> {
         .join("tracking-writer")
         .join(scope().attempt.to_string())
         .join("reservation.json");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !std::fs::read(&reservation)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .is_some_and(|value| value["census_incomplete"] == true)
-    {
-        assert!(
-            Instant::now() < deadline,
-            "journal did not recover after the fault was removed"
-        );
-        std::thread::park_timeout(Duration::from_millis(5));
-    }
+    wait_for_census_record(&reservation, true)?;
     drop(held);
     let exit = exited(&handle)?;
     assert_eq!(exit.stop_reason, None);
@@ -2948,28 +2964,12 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
     let clock = SystemClock::new();
     // Guardian loss frees the kernel lease, but never clears the durable fence.
     let writer_path = root.join("crash-writer");
-    // An unsandboxed lane is proven gone only after its guardian completed a
-    // census of the tree, which a running guardian does within seconds. Wait
-    // for that record, so the loss below is the ordinary mid-run one. This is
-    // setup, not the behaviour under test: a loaded macOS runner can delay the
-    // first census and its durable write well past a short fixed deadline, so
-    // wait generously for the condition rather than failing the whole case on
-    // scheduling latency. The custody assertions below remain unchanged.
+    // Keep the provider alive until its complete census is durable, then
+    // exercise guardian loss with a surviving provider.
     let reservation = writer_path
         .join(scope().attempt.to_string())
         .join("reservation.json");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !std::fs::read(&reservation)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .is_some_and(|value| value["census_incomplete"] == false)
-    {
-        assert!(
-            Instant::now() < deadline,
-            "the guardian never completed a census"
-        );
-        std::thread::park_timeout(Duration::from_millis(5));
-    }
+    wait_for_census_record(&reservation, false)?;
     let provider = process_identity(read_pid_line(&mut held)?)?;
     let locked = acquire_recovery(
         Directory::open_anchor(&writer_path)?,

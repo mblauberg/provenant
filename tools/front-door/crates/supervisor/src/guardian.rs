@@ -80,10 +80,10 @@ fn census_fallback_notice(fallback: bool, recorded: &mut bool) -> Option<&'stati
 // Bound live walks to the former 10 Hz census rate, even during fork storms.
 // A five-second backstop finds missed events; wait errors back off by one tick.
 const CENSUS_INTERVAL_MS: u64 = 100;
-const FULL_CENSUS_INTERVAL_MS: u64 = 5_000;
+pub(crate) const FULL_CENSUS_INTERVAL_MS: u64 = 5_000;
 const EVENT_DRAIN_BACKOFF_MS: u64 = 10;
 const JOURNAL_RETRY_INTERVAL_MS: u64 = 100;
-const TRACKING_INTERVAL_MS: u64 = 1_000;
+pub(crate) const TRACKING_INTERVAL_MS: u64 = 1_000;
 const CANCEL_WATCH_POLL_MS: u64 = 1_000;
 const CANCEL_FALLBACK_POLL_MS: u64 = 100;
 // Retained custody: cleanup stayed unresolved after exit, typically because a

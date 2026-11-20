@@ -77,6 +77,13 @@
     "binary": "provenant-os"
   },
   {
+    "test": "upgrade_corpus_allows_unrelated_read_only_launch",
+    "platform": "macOS",
+    "invocation": "provider-dispatch",
+    "environment": "PROVENANT_CONFINEMENT_REQUIRED",
+    "binary": "provenant::command_adapter"
+  },
+  {
     "test": "command_custom_shebang_runtime_keeps_credentials_and_writes_denied",
     "platform": "macOS",
     "invocation": "provider-dispatch",

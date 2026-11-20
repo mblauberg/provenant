@@ -269,6 +269,7 @@ pub(super) fn prepare_command(
     let prompt = Prompt::new(String::new());
     let mut spec = adapter
         .prepare(PrepareInput {
+            opencode_profile: provenant_config::OpenCodeProfile::Lane,
             credential_roots: credential_roots.clone(),
             images: &[],
             policy: &launch_policy,

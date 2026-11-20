@@ -144,6 +144,74 @@ pub fn observe_model(data: &std::path::Path, session: &str) -> Result<String, Pr
     }
 }
 
+/// Resolve the XDG homes used by an interactive OpenCode process.
+pub fn host_xdg_homes(
+    home: &std::path::Path,
+    lookup: &dyn Fn(&str) -> Option<OsString>,
+) -> [PathBuf; 4] {
+    [
+        ("XDG_CONFIG_HOME", ".config"),
+        ("XDG_DATA_HOME", ".local/share"),
+        ("XDG_STATE_HOME", ".local/state"),
+        ("XDG_CACHE_HOME", ".cache"),
+    ]
+    .map(|(key, fallback)| {
+        lookup(key)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .unwrap_or_else(|| home.join(fallback))
+    })
+}
+
+fn service_reachable(path: &std::path::Path) -> bool {
+    let Some(url) = std::fs::read(path)
+        .ok()
+        .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+        .and_then(|v| v.get("url")?.as_str().map(str::to_owned))
+    else {
+        return false;
+    };
+    let Some(authority) = url
+        .strip_prefix("http://")
+        .and_then(|s| s.split('/').next())
+    else {
+        return false;
+    };
+    let Some((host, port)) = authority.rsplit_once(':') else {
+        return false;
+    };
+    let Ok(port) = port.parse::<u16>() else {
+        return false;
+    };
+    if host != "127.0.0.1" && host != "localhost" {
+        return false;
+    }
+    use std::io::{Read, Write};
+    let timeout = std::time::Duration::from_millis(250);
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        timeout,
+    ) else {
+        return false;
+    };
+    if stream.set_read_timeout(Some(timeout)).is_err()
+        || stream.set_write_timeout(Some(timeout)).is_err()
+        || stream
+            .write_all(b"GET /global/health HTTP/1.0\r\nHost: localhost\r\n\r\n")
+            .is_err()
+    {
+        return false;
+    }
+    let mut response = [0u8; 128];
+    stream.read(&mut response).is_ok_and(|n| {
+        let line = &response[..n];
+        line.starts_with(b"HTTP/1.1 200 ")
+            || line.starts_with(b"HTTP/1.0 200 ")
+            || line.starts_with(b"HTTP/1.1 401 ")
+            || line.starts_with(b"HTTP/1.0 401 ")
+    })
+}
+
 /// OpenCode uses the user's configuration and stored provider accounts.
 /// Native tools remain available while the outer profile grants their paths
 /// and bounds filesystem and network access. Search tools run ripgrep, which
@@ -178,10 +246,10 @@ fn prepare(
         input.policy,
         "OPENCODE_PREPARE_NONE",
     )?;
+    let host_profile = input.opencode_profile == provenant_config::OpenCodeProfile::Host;
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "run".as_ref(),
-        "--standalone".as_ref(),
         "--format".as_ref(),
         "json".as_ref(),
         // The server reports its own HTTP failures only in its log, and the
@@ -193,6 +261,13 @@ fn prepare(
     ]
     .map(OsString::from)
     .to_vec();
+    let [config_home, data_home, state_home, cache_home] =
+        host_xdg_homes(input.home, input.host_var);
+    let service_available =
+        host_profile && service_reachable(&state_home.join("opencode/service.json"));
+    if !service_available {
+        argv.push("--standalone".into());
+    }
     if session == Session::Resume {
         let continuation = input.continuation.ok_or_else(|| {
             input.boundary_error(
@@ -283,14 +358,6 @@ fn prepare(
     let package = package_grant(input.executable, &mut omitted_discovery, input.policy)?;
     let defaults = crate::launch::tool_search_path(input.home, true, input.policy)?;
     let mut env = base_env(input, &plan.scratch.path, defaults)?;
-    let xdg = |key, fallback| {
-        (input.host_var)(key)
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .unwrap_or_else(|| input.home.join(fallback))
-    };
-    let config_home = xdg("XDG_CONFIG_HOME", ".config");
-    let data_home = xdg("XDG_DATA_HOME", ".local/share");
     let host_data = data_home.join("opencode");
     let private_data = private.join("data");
     let data = private_data.join("opencode");
@@ -312,7 +379,8 @@ fn prepare(
     // or skills into the lane. Do not follow unrelated config links.
     let config_dir = config_home.join("opencode");
     let optional_start = runtime_reads.len();
-    if let Ok(config_dir) = std::fs::canonicalize(&config_dir)
+    if !host_profile
+        && let Ok(config_dir) = std::fs::canonicalize(&config_dir)
         && (!config_isolated
             || !provenant_confinement::refuses_lane_root(
                 &config_dir,
@@ -335,7 +403,7 @@ fn prepare(
             }
         }
     }
-    if config_isolated
+    if config_isolated || !host_profile
         && let Ok(config_dir) = std::fs::canonicalize(&config_dir)
         && provenant_confinement::refuses_lane_root(&config_dir, true, &input.credential_roots)
         && !omitted_discovery.iter().any(|entry| {
@@ -357,19 +425,30 @@ fn prepare(
         crate::launch::OmissionSource::ProviderConfig,
         &mut omitted_discovery,
     )?;
-    let authentication_roots = vec![exact(host_data.join("auth.json"))];
+    let authentication_roots = if host_profile {
+        Vec::new()
+    } else {
+        vec![exact(host_data.join("auth.json"))]
+    };
     runtime_reads.extend(skill_reads);
-    let mut setup = vec![
-        SetupStep::CreateDir(data.clone()),
-        SetupStep::Symlink {
-            link: data.join("auth.json"),
-            target: host_data.join("auth.json"),
-        },
-    ];
+    let mut setup = if host_profile {
+        [&config_home, &data_home, &state_home, &cache_home]
+            .into_iter()
+            .map(|home| SetupStep::CreateDir(home.join("opencode")))
+            .collect()
+    } else {
+        vec![
+            SetupStep::CreateDir(data.clone()),
+            SetupStep::Symlink {
+                link: data.join("auth.json"),
+                target: host_data.join("auth.json"),
+            },
+        ]
+    };
     // Mirror ordinary provider settings as individual links. Lane-owned
     // instructions, hooks and skills use their own private paths.
     let private_config = private.join("config");
-    {
+    if !host_profile {
         let private_opencode = private_config.join("opencode");
         setup.push(SetupStep::CreateDir(private_opencode.clone()));
         if let Ok(canonical) = std::fs::canonicalize(&config_dir)
@@ -402,7 +481,11 @@ fn prepare(
     // `shell` holds per-project shell state; the server creates its entry
     // while resolving the location, and refuses every request (HTTP 500)
     // when that mkdir is denied.
-    for name in ["log", "storage", "snapshot", "shell"] {
+    for name in if host_profile {
+        &[][..]
+    } else {
+        &["log", "storage", "snapshot", "shell"][..]
+    } {
         let directory = data.join(name);
         setup.push(SetupStep::CreateDir(directory));
     }
@@ -417,7 +500,11 @@ fn prepare(
         // and installs it there when absent. The lane sets XDG_CACHE_HOME to
         // its private state, whose grant already covers the read, so grant
         // exactly that binary for execution, alongside system grep.
-        let rg = private.join("cache/opencode/bin/rg");
+        let rg = if host_profile {
+            cache_home.join("opencode/bin/rg")
+        } else {
+            private.join("cache/opencode/bin/rg")
+        };
         // Resolve install-name symlinks to exact files, accepting libraries by
         // content regardless of the host's package manager or PATH ordering.
         tool_exec_roots.push(exact(rg));
@@ -438,27 +525,59 @@ fn prepare(
     });
     env.extend([
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-        ("XDG_CONFIG_HOME".into(), private_config.into_os_string()),
-        ("XDG_DATA_HOME".into(), private_data.into_os_string()),
+        (
+            "XDG_CONFIG_HOME".into(),
+            if host_profile {
+                config_home.clone()
+            } else {
+                private_config
+            }
+            .into_os_string(),
+        ),
+        (
+            "XDG_DATA_HOME".into(),
+            if host_profile {
+                data_home.clone()
+            } else {
+                private_data
+            }
+            .into_os_string(),
+        ),
         (
             "XDG_CACHE_HOME".into(),
-            private.join("cache").into_os_string(),
+            if host_profile {
+                cache_home.clone()
+            } else {
+                private.join("cache")
+            }
+            .into_os_string(),
         ),
         (
             "XDG_STATE_HOME".into(),
-            private.join("state").into_os_string(),
+            if host_profile {
+                state_home.clone()
+            } else {
+                private.join("state")
+            }
+            .into_os_string(),
         ),
     ]);
-    env.push(("OPENCODE_CONFIG_CONTENT".into(), config.into()));
+    if !host_profile {
+        env.push(("OPENCODE_CONFIG_CONTENT".into(), config.into()));
+    }
     // No repository configuration or Claude Code files. Provenant's global
     // plugin is loaded from the private OpenCode config home.
-    for key in [
-        "OPENCODE_DISABLE_AUTOUPDATE",
-        "OPENCODE_DISABLE_PROJECT_CONFIG",
-        "OPENCODE_DISABLE_CLAUDE_CODE",
-        "OPENCODE_DISABLE_FILEWATCHER",
-    ] {
-        env.push((key.into(), "1".into()));
+    for key in if host_profile {
+        &[][..]
+    } else {
+        &[
+            "OPENCODE_DISABLE_AUTOUPDATE",
+            "OPENCODE_DISABLE_PROJECT_CONFIG",
+            "OPENCODE_DISABLE_CLAUDE_CODE",
+            "OPENCODE_DISABLE_FILEWATCHER",
+        ][..]
+    } {
+        env.push(((*key).into(), "1".into()));
     }
     let mut spec = LaunchSpec {
         argv,
@@ -468,13 +587,26 @@ fn prepare(
         cwd: input.cwd.to_owned(),
         setup,
         omitted_discovery,
-        warnings: Vec::new(),
+        warnings: if host_profile && !service_available {
+            vec![
+                "OpenCode host service unavailable; running standalone with the host profile"
+                    .into(),
+            ]
+        } else {
+            Vec::new()
+        },
         user_skills: staged_skills,
         tool_requirements: Default::default(),
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
         credential_roots: input.credential_roots.clone(),
-        session_state: crate::SessionStateLocation::AttemptPrivate,
+        session_state: if host_profile {
+            crate::SessionStateLocation::Native {
+                root: host_data.clone(),
+            }
+        } else {
+            crate::SessionStateLocation::AttemptPrivate
+        },
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
                 confinement:
@@ -484,6 +616,19 @@ fn prepare(
                 // The standalone server is a child copy of the same program.
                 allow_process_fork: true,
                 runtime_reads,
+                state_writes: if host_profile {
+                    [
+                        config_home.join("opencode"),
+                        host_data.clone(),
+                        state_home.join("opencode"),
+                        cache_home.clone().join("opencode"),
+                    ]
+                    .into_iter()
+                    .map(subtree)
+                    .collect()
+                } else {
+                    Vec::new()
+                },
                 authentication: vec![AuthenticationProfile {
                     mechanism: "login".into(),
                     roots: authentication_roots,
@@ -690,7 +835,7 @@ pub fn stderr_quota(stderr: &[u8]) -> Option<E> {
             "h" | "hr" | "hrs" | "hour" | "hours" => 3_600,
             _ => return None,
         };
-        (number > 0).then(|| number.saturating_mul(scale).min(86_400))
+        (number > 0).then(|| number.saturating_mul(scale))
     };
     let retry = number_after("retryafterms")
         .and_then(|(n, _)| parse_retry_after(Some(&serde_json::Value::from(n))))
@@ -788,17 +933,16 @@ struct LimitError {
 }
 fn parse_retry_after(value: Option<&serde_json::Value>) -> Option<u64> {
     let value = value?;
-    const MAX_SECONDS: u64 = 86_400;
     let seconds = if let Some(n) = value.as_u64() {
         if n == 0 {
             return None;
         }
-        n.saturating_add(999) / 1000
+        n.div_ceil(1000)
     } else if let Some(i) = value.as_i64() {
         if i <= 0 {
             return None;
         }
-        (i as u64).saturating_add(999) / 1000
+        (i as u64).div_ceil(1000)
     } else {
         let f = value.as_f64()?;
         if !f.is_finite() || f <= 0.0 {
@@ -809,7 +953,7 @@ fn parse_retry_after(value: Option<&serde_json::Value>) -> Option<u64> {
     if seconds == 0 {
         return None;
     }
-    Some(seconds.min(MAX_SECONDS))
+    Some(seconds)
 }
 fn quota(
     message: Option<String>,

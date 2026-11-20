@@ -121,7 +121,7 @@ name = "macos_native"
 tier = "main"
 cost_minutes = 16
 jobs = ["rust-macos-archive", "rust-macos-tests", "rust-macos-inventory"]
-watch = ["skills/legal-writing/references/**"]
+watch = ["skills/legal-writing/references/**", "tools/front-door/tests/upgrade-corpus/**"]
 # Real SwiftPM and Cargo compiles inside a lane (33-41 s each, serial in the
 # dispatch group): pull requests skip them, main runs them. The worktree driver
 # has flat test names, so they are listed rather than tagged `main_tier`.
@@ -136,6 +136,7 @@ pr_paths = [
   "tools/front-door/src/worktree_tests/**",
   "tools/front-door/tests/graph_provider.rs",
   "tools/front-door/tests/command_adapter.rs",
+  "tools/front-door/tests/upgrade-corpus/**",
   # Every package a native group filters by name needs an entry here, or a pull
   # request defers its only real test to main (scripts/check-ci-suites). These
   # are the narrow files those native tests cover; a whole crate would pull
@@ -163,6 +164,7 @@ name = "macos_release"
 tier = "main"
 cost_minutes = 8
 jobs = ["rust-macos-release"]
+watch = ["tools/front-door/tests/upgrade-corpus/**"]
 pr_paths = [
   "tools/front-door/Cargo.toml",
   "tools/front-door/crates/*/Cargo.toml",
@@ -172,5 +174,7 @@ pr_paths = [
   "tools/front-door/src/release_smoke.rs",
   "tools/front-door/src/upgrade-release.sh",
   "tools/front-door/tests/install.rs",
+  "tools/front-door/tests/command_adapter.rs",
+  "tools/front-door/tests/upgrade-corpus/**",
   "apps/**",
 ]

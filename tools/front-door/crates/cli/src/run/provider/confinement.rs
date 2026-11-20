@@ -1247,6 +1247,8 @@ pub(super) fn host_provider_var(registry: &Registry<'_>, name: &str) -> Option<s
                 | "GIT_CONFIG_SYSTEM"
                 | "XDG_CONFIG_HOME"
                 | "XDG_DATA_HOME"
+                | "XDG_STATE_HOME"
+                | "XDG_CACHE_HOME"
         )
     {
         return host.provider_path_environment.get(name).cloned();

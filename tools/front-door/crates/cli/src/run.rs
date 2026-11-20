@@ -1081,7 +1081,8 @@ impl Registry<'_> {
                 let session = outcome
                     .session()
                     .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
-                provider::observe_opencode_session(provider_state, session).map(|(_, model)| model)
+                provider::observe_opencode_session(provider_state, session, route)
+                    .map(|(_, model)| model)
             });
         let opencode_model = match opencode_model {
             Some(Ok(model)) => Some(model),

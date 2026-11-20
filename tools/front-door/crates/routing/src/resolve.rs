@@ -1021,6 +1021,21 @@ fn pacing_factor_basis_points(
     {
         return (0, format!("{detail}; {}", assessment.detail), true);
     }
+    let inferred_factor = monthly.as_ref().and_then(|assessment| {
+        assessment
+            .windows
+            .iter()
+            .filter(|window| window.estimated_cycle_source.is_some())
+            .map(|window| {
+                let headroom = 10_000_u64.saturating_sub(window.estimated_basis_points.min(10_000));
+                let remaining = 10_000_u64
+                    .saturating_sub(window.elapsed_basis_points)
+                    .max(1);
+                ((headroom * 10_000 / remaining) as u32)
+                    .clamp(PACE_MIN_BASIS_POINTS, PACE_MAX_BASIS_POINTS)
+            })
+            .min()
+    });
     let detail = monthly.map_or(detail.clone(), |assessment| {
         format!("{detail}; {}", assessment.detail)
     });
@@ -1086,8 +1101,10 @@ fn pacing_factor_basis_points(
                 .check(
                     pacing_rule(profile, model),
                     provenant_records::policy::Facts::violation(format!(
-                        "pacing reserve window={}",
-                        window.pool
+                        "pacing reserve window={} pool={} knob={}",
+                        window.name(),
+                        window.pool,
+                        window.setting_path(model.adapter(), account, context.config)
                     )),
                 )
                 .message()
@@ -1138,10 +1155,18 @@ fn pacing_factor_basis_points(
         );
     }
     result.map_or(
-        (NEUTRAL_FACTOR_BASIS_POINTS, neutral_detail, false),
+        (
+            inferred_factor.unwrap_or(NEUTRAL_FACTOR_BASIS_POINTS),
+            neutral_detail,
+            false,
+        ),
         |(factor, window, standby)| {
             (
-                if standby { 0 } else { factor },
+                if standby {
+                    0
+                } else {
+                    inferred_factor.map_or(factor, |inferred| factor.min(inferred))
+                },
                 format!("{detail} {window}"),
                 standby,
             )
@@ -1213,6 +1238,47 @@ struct ReserveWindow {
     percent: u8,
     profile: bool,
     seven_day: bool,
+    setting_window: PacingWindow,
+}
+
+impl ReserveWindow {
+    fn name(&self) -> &'static str {
+        match self.setting_window {
+            PacingWindow::FiveHour => "five_hour",
+            PacingWindow::SevenDay => "seven_day",
+            PacingWindow::Monthly => "monthly",
+            PacingWindow::Rolling => "rolling",
+            PacingWindow::Daily => "daily",
+        }
+    }
+
+    fn setting_path(&self, adapter: &str, account: Option<&str>, config: &RoutingConfig) -> String {
+        if self.profile {
+            if let Some(account) = account.filter(|key| {
+                config
+                    .pacing
+                    .accounts
+                    .contains_key(&format!("{adapter}/{key}"))
+            }) {
+                format!(
+                    "domains.routing.pacing.accounts.{adapter}/{account}.reserve.{}",
+                    self.name()
+                )
+            } else {
+                format!(
+                    "domains.routing.pacing.free.{adapter}.reserve.{}",
+                    self.name()
+                )
+            }
+        } else {
+            let field = if self.seven_day {
+                "seven_day_percent"
+            } else {
+                "five_hour_percent"
+            };
+            format!("domains.routing.pacing_reserve.{adapter}.{field}")
+        }
+    }
 }
 
 fn pacing_rule(profile: Option<&PacingProfile>, model: &ModelId) -> &'static str {
@@ -1249,9 +1315,9 @@ fn pacing_reserve_window(
             p.reserve
                 .iter()
                 .find(|(k, _)| window_matches(window, **k, adapter))
-                .map(|(_, value)| *value)
+                .map(|(kind, value)| (*kind, *value))
         });
-        let percent = selected.unwrap_or(match kind {
+        let percent = selected.map(|(_, value)| value).unwrap_or(match kind {
             Some(PacingWindow::FiveHour | PacingWindow::Rolling) => reserve.five_hour_percent,
             Some(PacingWindow::SevenDay) => reserve.seven_day_percent,
             _ => 0,
@@ -1260,6 +1326,10 @@ fn pacing_reserve_window(
             percent,
             selected.is_some(),
             matches!(kind, Some(PacingWindow::SevenDay)),
+            selected
+                .map(|(kind, _)| kind)
+                .or(kind)
+                .unwrap_or(PacingWindow::Rolling),
         )
     };
     snapshot
@@ -1267,7 +1337,7 @@ fn pacing_reserve_window(
         .iter()
         .filter(|w| selected_window(w, profile, adapter, model_pool))
         .find(|window| {
-            let (percent, _, _) = reserve_for(window);
+            let (percent, _, _, _) = reserve_for(window);
             percent > 0
                 && (window.resets_unix_seconds.is_some_and(|reset| reset > now)
                     || (window.resets_unix_seconds.is_none()
@@ -1285,12 +1355,13 @@ fn pacing_reserve_window(
                 && window.used_basis_points >= 10_000 - u64::from(percent) * 100
         })
         .map(|window| {
-            let (percent, profile, seven_day) = reserve_for(window);
+            let (percent, profile, seven_day, setting_window) = reserve_for(window);
             ReserveWindow {
                 pool: window.pool.clone(),
                 percent,
                 profile,
                 seven_day,
+                setting_window,
             }
         })
 }
@@ -1890,6 +1961,33 @@ fn account_load(
             u128::from(*headroom) * 3_600 / u128::from(eta.unwrap_or(3_600))
         });
     let mut warnings = Vec::new();
+    if let Some(assessment) = crate::monthly_allowance_assessment(
+        context.catalogue,
+        context.config,
+        context.now,
+        model,
+        key,
+        latest_reading(model, availability, context, false),
+    )
+    .filter(|a| a.active && a.windows.iter().any(|w| w.estimated_cycle_source.is_some()))
+    {
+        let detail = format!(
+            "account={} {}; inferred monthly cycle",
+            key.unwrap_or("unknown"),
+            assessment.detail
+        );
+        if let Some(message) = context
+            .config
+            .launch_policy
+            .check(
+                "PACING_ACCOUNT",
+                provenant_records::policy::Facts::violation(detail),
+            )
+            .message()
+        {
+            warnings.push(message.to_owned());
+        }
+    }
     if let Err(warning) = check_go_allowance(model, context.config, context.catalogue) {
         let source = context
             .config
@@ -1956,8 +2054,11 @@ fn account_load(
                 "default:pacing_reserve"
             };
             let detail = format!(
-                "pacing reserve {}% window={}; ranking penalty; source={source}",
-                window.percent, window.pool
+                "pacing reserve {}% window={} pool={}; ranking penalty; source={source}; knob={}",
+                window.percent,
+                window.name(),
+                window.pool,
+                window.setting_path(model.adapter(), key, context.config)
             );
             if context
                 .config
@@ -2252,7 +2353,23 @@ fn candidate(
             } else {
                 PacingSettingSource::ShippedDefault
             };
+            let window_name = window.name();
+            let account = format!(
+                "{}/{}",
+                model.adapter(),
+                availability.account_key.as_deref().unwrap_or("unknown")
+            );
+            let setting_path = window.setting_path(
+                model.adapter(),
+                availability.account_key.as_deref(),
+                context.config,
+            );
             diagnostics.pacing_reserve_fact = Some(ResourceFact::PacingReserve {
+                hold: Box::new(provenant_records::diagnostic::PacingHold {
+                    account,
+                    window: window_name.into(),
+                    setting_path,
+                }),
                 percent: window.percent,
                 setting,
                 origin,

@@ -86,6 +86,10 @@ write node), or add `--branch B --base REF` or `--worktree PATH` to run it too. 
 
 ### Test a candidate binary
 
+When a release changes a persisted schema, add its previous shape to the
+[upgrade corpus](../../tools/front-door/tests/upgrade-corpus/v2.4.1/README.md)
+and exercise it in the macOS release smoke.
+
 CI's macOS release smoke retains a checked package in the
 `candidate-release-<workflow SHA>` artifact for seven days. Verify its checksum,
 commit, tree and platform metadata against the intended candidate before

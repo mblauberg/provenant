@@ -594,7 +594,7 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                         path: None,
                         delivery_limit: None,
                         delivery_stage: None,
-                        resource: Some(Box::new(*fact)),
+                        resource: Some(Box::new(fact.clone())),
                         input_failure: None,
                         cause: None,
                     };
@@ -605,7 +605,7 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                 // retain the projected fact detail.
                 if fail.kind == provenant_run::ErrorKind::Confinement {
                     return FacadeError::ConfinementRefused {
-                        resource: Some(*fact),
+                        resource: Some(fact.clone()),
                     };
                 }
                 if let FacadeError::RunKind { run_code, next, .. } =
@@ -615,7 +615,7 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                         run_code,
                         next,
                         detail: None,
-                        resource: Some(Box::new(*fact)),
+                        resource: Some(Box::new(fact.clone())),
                     };
                 }
             }
@@ -680,14 +680,31 @@ pub(crate) fn dispatch_refused(fail: provenant_cli::run::Fail) -> FacadeError {
         .as_ref()
         .and_then(|projection| projection.fact.as_ref())
     {
+        let reason = match fact {
+            provenant_records::diagnostic::ResourceFact::PacingReserve { .. } => {
+                let detail = fail
+                    .projection
+                    .as_ref()
+                    .and_then(|projection| projection.detail.as_deref())
+                    .filter(|detail| !detail.is_empty());
+                match detail {
+                    Some(detail) if !fail.message.is_empty() => {
+                        format!("{detail}; {}", fail.message)
+                    }
+                    Some(detail) => detail.to_owned(),
+                    None => fail.message.clone(),
+                }
+            }
+            _ => "dispatch was refused".into(),
+        };
         return FacadeError::DispatchRefused {
             fact: Some(
                 provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::Resource(
-                    *fact,
+                    fact.clone(),
                 ),
             ),
             disk: None,
-            reason: "dispatch was refused".into(),
+            reason: provenant_core::bounded_line(&reason, 4096),
         };
     }
     if matches!(
@@ -857,7 +874,8 @@ pub(crate) fn durable_launch_refusal(
 /// replay. Preparation failures are accepted terminal attempts: graph routing
 /// observes their typed outcome and may advance to a fallback route. Only
 /// retained custody, or sealed pre-launch evidence whose typed cause names the
-/// refusal, refuses. Reasons carry typed text, never a refusal's source text.
+/// refusal, refuses. Pacing reasons carry the router-owned skipped-route summary;
+/// other reasons use typed text, never a refusal's source text.
 pub(crate) fn launch_refusal(
     started: &[provenant_run::Started],
     lanes: &[provenant_run::AttemptRecord],
@@ -936,13 +954,23 @@ pub(crate) fn launch_refusal(
         reason: sealed
             .iter()
             .map(|lane| {
-                format!(
-                    "{}: {}",
-                    lane.attempt_id,
+                let pacing = lane
+                    .skipped_routes
+                    .iter()
+                    .filter(|route| {
+                        route.cause == Some(provenant_records::RouteExclusionReason::PacingReserve)
+                    })
+                    .map(provenant_records::run::SkippedRoute::describe)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let reason = if pacing.is_empty() {
                     terminal_cause(lane)
                         .map(|cause| cause.detail())
                         .unwrap_or("pacing reserve refused")
-                )
+                } else {
+                    &pacing
+                };
+                format!("{}: {reason}", lane.attempt_id)
             })
             .collect::<Vec<_>>()
             .join("; "),

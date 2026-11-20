@@ -415,6 +415,8 @@ impl LaunchSpec {
 /// Frozen confinement policy and launch facts, compiled before launch by the
 /// composition edge. Paths must be canonical: providers never resolve them.
 pub struct PrepareInput<'a> {
+    /// Selected OpenCode profile for this launch.
+    pub opencode_profile: provenant_config::OpenCodeProfile,
     pub route: &'a ResolvedRoute,
     /// Provider-facing spelling for the invocation only. Route identity and
     /// continuation validation always use the canonical `route.model`.
@@ -1325,7 +1327,12 @@ pub(crate) fn finalise_provider_env(
 /// variable that is no longer set; OpenCode keeps a private home, so it still
 /// receives the projection.
 fn lane_instructions(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<(), ProviderError> {
-    if !input.sandboxed() || (!input.isolated() && input.route.adapter != "opencode") {
+    let host_profile = provenant_records::AdapterSpec::get(&input.route.adapter)
+        .is_some_and(|spec| spec.host_profile);
+    if !input.sandboxed()
+        || (!input.isolated() && !host_profile)
+        || (host_profile && input.opencode_profile == provenant_config::OpenCodeProfile::Host)
+    {
         return Ok(());
     }
     let Some(install) = provenant_records::AdapterSpec::get(&input.route.adapter)
@@ -1365,10 +1372,15 @@ fn lane_instructions(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<
 }
 
 /// Render Provenant's declared hooks into the isolated harness configuration.
-/// Native Claude uses its explicit settings file in scratch, and OpenCode
-/// always uses a private config home; other native harnesses keep their
+/// Native Claude uses its explicit settings file in scratch. OpenCode host
+/// mode and other native harnesses keep their
 /// install-managed host configuration untouched.
 fn lane_hooks(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<bool, ProviderError> {
+    if input.route.adapter == "opencode"
+        && input.opencode_profile == provenant_config::OpenCodeProfile::Host
+    {
+        return Ok(true);
+    }
     let Some(adapter) = provenant_records::AdapterSpec::get(&input.route.adapter) else {
         return Ok(false);
     };

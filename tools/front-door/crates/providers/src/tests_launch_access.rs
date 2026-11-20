@@ -73,6 +73,7 @@ pub(super) fn fixture_input<'a>(
 ) -> PrepareInput<'a> {
     let executable = std::path::Path::new("/opt/homebrew/Cellar/provider/1.0/bin/provider");
     PrepareInput {
+            opencode_profile: provenant_config::OpenCodeProfile::Lane,
         images: &[],
         command: None,
         route,
@@ -792,6 +793,64 @@ fn claude_read_only_adds_read_roots_outside_the_working_directory() -> Result<()
             OsString::from("/fixture/diffs")
         ]
     );
+    Ok(())
+}
+
+#[test]
+fn opencode_profiles_choose_host_service_or_private_standalone() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path();
+    let state = home.join("state");
+    std::fs::create_dir_all(state.join("opencode"))?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    std::fs::write(state.join("opencode/service.json"), format!(r#"{{"url":"http://{}"}}"#, listener.local_addr()?))?;
+    let lookup = |key: &str| match key {
+        "XDG_CONFIG_HOME" => Some(home.join("config").into_os_string()),
+        "XDG_DATA_HOME" => Some(home.join("data").into_os_string()),
+        "XDG_STATE_HOME" => Some(state.clone().into_os_string()),
+        "XDG_CACHE_HOME" => Some(home.join("cache").into_os_string()),
+        _ => None,
+    };
+    let server = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut stream, _) = listener.accept().expect("health connection");
+        let mut request = [0; 256];
+        let _ = stream.read(&mut request);
+        stream.write_all(b"HTTP/1.1 401 Unauthorized\r\n\r\n").expect("health response");
+    });
+    let prompt = Prompt::new("fixture prompt".into());
+    let route = route("opencode", "configured/model");
+    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.home = home;
+    input.host_var = &lookup;
+    input.opencode_profile = provenant_config::OpenCodeProfile::Host;
+    let attached = opencode::OpenCode.prepare(input)?;
+    server.join().expect("health server");
+    for (key, name) in [("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"), ("XDG_STATE_HOME", "state"), ("XDG_CACHE_HOME", "cache")] {
+        assert_eq!(attached.env.iter().find(|(k, _)| k == key).map(|(_, v)| Path::new(v)), Some(home.join(name).as_path()));
+        assert!(attached.profile.spec.state_writes.contains(&crate::launch::subtree(home.join(name).join("opencode"))));
+    }
+    assert!(!attached.argv.iter().any(|arg| arg == "--standalone"));
+    assert!(attached.profile.spec.loopback_server);
+    std::fs::remove_file(state.join("opencode/service.json"))?;
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.home = home;
+    input.host_var = &lookup;
+    input.opencode_profile = provenant_config::OpenCodeProfile::Host;
+    let fallback = opencode::OpenCode.prepare(input)?;
+    assert!(fallback.argv.iter().any(|arg| arg == "--standalone"));
+    assert!(fallback.warnings.iter().any(|warning| warning.contains("host service unavailable")));
+    assert_eq!(fallback.session_state, crate::SessionStateLocation::Native { root: home.join("data/opencode") });
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.home = home;
+    input.host_var = &lookup;
+    input.opencode_profile = provenant_config::OpenCodeProfile::Lane;
+    let lane = opencode::OpenCode.prepare(input)?;
+    assert!(lane.argv.iter().any(|arg| arg == "--standalone"));
+    assert_eq!(lane.session_state, crate::SessionStateLocation::AttemptPrivate);
+    let private = &plan.permissions().private_state.as_ref().expect("private state").path;
+    assert_eq!(lane.env.iter().find(|(k, _)| k == "XDG_DATA_HOME").map(|(_, v)| Path::new(v)), Some(private.join("data").as_path()));
     Ok(())
 }
 

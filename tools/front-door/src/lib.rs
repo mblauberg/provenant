@@ -724,6 +724,21 @@ fn config_show_ports(project: &std::path::Path, state: &std::path::Path) -> serd
     })
 }
 
+fn config_setting_value(
+    config: &provenant_config::ResolvedConfig<provenant_cli::domains::Domains>,
+    sections: &provenant_config::DomainSections<provenant_cli::domains::Domains>,
+    name: &str,
+) -> serde_json::Value {
+    if let Some(knob) = config.knobs.get(name) {
+        return serde_json::to_value(knob).unwrap_or_default();
+    }
+    provenant_config::schema(config, sections, String::new())
+        .ok()
+        .and_then(|schema| schema.fields.into_iter().find(|field| field.path == name))
+        .map(|field| serde_json::json!({"value": field.value, "source": field.source}))
+        .unwrap_or_default()
+}
+
 /// Run one config action and print the result: the effective config read back
 /// for show and edits, or the schema, apply report or history.
 fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::Globals) -> u8 {
@@ -846,16 +861,16 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 let edited = config::edit_config(&roots, sections, &options, |doc, current| {
                     previous = match edit {
                         config::KnobEdit::Set { name, .. } | config::KnobEdit::Unset(name) => {
-                            serde_json::to_value(current.knobs.get(name)).unwrap_or_default()
+                            config_setting_value(current, sections, name)
                         }
                         config::KnobEdit::Profile(_) => serde_json::json!(current.profile),
                     };
-                    edit.apply(doc)
+                    config::apply_edit(edit, doc, current, sections)
                 })?;
                 match edit {
                     config::KnobEdit::Set { name, .. } | config::KnobEdit::Unset(name) => {
                         serde_json::json!({"key": name, "previous": previous,
-                            "effective": edited.config.knobs.get(name), "revision": edited.after_revision})
+                            "effective": config_setting_value(&edited.config, sections, name), "revision": edited.after_revision})
                     }
                     config::KnobEdit::Profile(_) => serde_json::json!({"key": "profile",
                         "previous": previous, "effective": edited.config.profile,

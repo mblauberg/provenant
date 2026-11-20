@@ -39,6 +39,7 @@
       "providers.{provider}.update",
       "providers.{provider}.runtime_deadline_seconds",
       "providers.codex.clean_config",
+      "providers.opencode.profile",
       "gc.graph_checkpoint_days"
   ],
   "host_gc_settings": {
@@ -92,7 +93,7 @@
     "path": "domains.routing.pacing.monthly",
     "account_override": "domains.routing.pacing.accounts.<adapter/key>.monthly",
     "settings": {
-      "enabled": {"type": "bool", "default": true, "effect": "Under pace, admit monthly-allowance accounts only while estimated spend including the next launch fits elapsed cycle time plus burst_percent. Missing or stale cycle evidence is constrained. false, spend or max bypasses this preference; diagnostics name the effective source and knob."},
+      "enabled": {"type": "bool", "default": true, "effect": "Under pace, admit monthly-allowance accounts only while estimated spend including the next launch fits elapsed cycle time plus burst_percent. Missing or stale cycle evidence uses available usage and an inferred cycle with a policy warning; it does not hold an account on that uncertainty. false, spend or max bypasses this preference; diagnostics name the effective source and knob."},
       "burst_percent": {"type": "int", "min": 0, "max": 100, "default": 10, "effect": "Percentage points of monthly allowance available ahead of elapsed cycle time, capped at the full allowance."},
       "initial_launch_cost_basis_points": {"type": "int", "min": 1, "max": 10000, "default": 100, "effect": "Conservative allowance cost per launch before calibration. Positive provider-reported usage deltas calibrate and smooth the account-local estimate; unchanged reports retain pending launch estimates."}
     }
@@ -100,13 +101,19 @@
   "host_opencode_go_settings": {
     "path": "domains.routing.opencode_go",
     "settings": {
-      "min_monthly_allowance_usd": {"type": "int", "allowed": "0 or more; 0 disables the floor", "default": "60", "effect": "Lowest documented monthly allowance an OpenCode Go model needs to be routed or selected; a model with an unknown allowance is refused while the floor is on"}
+      "min_monthly_allowance_usd": {"type": "int", "allowed": "0 or more; 0 disables the floor", "default": "60", "effect": "Preferred minimum documented monthly allowance for an OpenCode Go model; a lower or unknown allowance receives a sourced ranking warning"}
     }
   },
   "host_codex_settings": {
     "path": "providers.codex",
     "settings": {
       "clean_config": {"type": "bool", "default": false, "effect": "Suppress inherited Codex configuration for writers. Read-only execution always uses clean configuration."}
+    }
+  },
+  "host_opencode_settings": {
+    "path": "providers.opencode",
+    "settings": {
+      "profile": {"type": "enum", "allowed": "host or lane", "default": "host", "effect": "Select the host OpenCode profile or a private per-attempt profile."}
     }
   },
   "provider_updates": {
@@ -360,16 +367,16 @@
     "settings": {
       "bundled": {"type": "bool", "allowed": "true or false", "default": "true", "effect": "Start from the bundled per-model policy (cache prices, compaction windows, lane guidance, result checks). false starts empty."},
       "defaults.cache.read_share_target": {"type": "number", "allowed": "0 to 1", "default": "unset (bundled 0.9)", "effect": "Advisory cache-read share a lane should reach; reported in stats, never enforced."},
-      "defaults.cache.price_multiplier": {"type": "number", "allowed": "number above 0", "default": "1.0 (bundled: 2.0 in DeepSeek weekday peak)", "effect": "Current price multiplier; divides the read-heavy preference weight."},
-      "defaults.cache.read_ratio": {"type": "number", "allowed": "0 or more", "default": "per model", "effect": "Cache-read price divided by uncached input price."},
-      "defaults.cache.write_ratio": {"type": "number", "allowed": "0 or more", "default": "per model", "effect": "Cache-write price divided by uncached input price."},
-      "defaults.cache.output_ratio": {"type": "number", "allowed": "0 or more", "default": "per model", "effect": "Output price divided by uncached input price, for compaction break-even guidance."},
-      "defaults.cache.ttl_seconds": {"type": "number", "allowed": "seconds, 1 or more", "default": "unset", "effect": "Provider cache time to live."},
-      "defaults.cache.min_prefix": {"type": "number", "allowed": "tokens, 1 or more", "default": "unset", "effect": "Smallest prefix the provider caches."},
-      "defaults.cache.context_window": {"type": "number", "allowed": "tokens, 1 or more", "default": "per model", "effect": "Context window size; read-heavy preference needs at least 1000000."},
-      "defaults.cache.read_heavy_weight": {"type": "number", "allowed": "1 to 255", "default": "3", "effect": "Weight multiplier for read-heavy and review work on cheap-cache models."},
+      "defaults.cache.price_multiplier": {"type": "number", "allowed": "0.01 to 1000", "default": "1.0 (bundled: 2.0 in DeepSeek weekday peak)", "effect": "Current price multiplier; divides the read-heavy preference weight."},
+      "defaults.cache.read_ratio": {"type": "number", "allowed": "0 to 1000", "default": "per model", "effect": "Cache-read price divided by uncached input price."},
+      "defaults.cache.write_ratio": {"type": "number", "allowed": "0 to 1000", "default": "per model", "effect": "Cache-write price divided by uncached input price."},
+      "defaults.cache.output_ratio": {"type": "number", "allowed": "0 to 1000", "default": "per model", "effect": "Output price divided by uncached input price, for compaction break-even guidance."},
+      "defaults.cache.ttl_seconds": {"type": "int", "allowed": "seconds, 1 or more", "default": "unset", "effect": "Provider cache time to live."},
+      "defaults.cache.min_prefix": {"type": "int", "allowed": "tokens, 1 or more", "default": "unset", "effect": "Smallest prefix the provider caches."},
+      "defaults.cache.context_window": {"type": "int", "allowed": "tokens, 1 or more", "default": "per model", "effect": "Context window size; read-heavy preference needs at least 1000000."},
+      "defaults.cache.read_heavy_weight": {"type": "int", "allowed": "1 to 10", "default": "3", "effect": "Weight multiplier for read-heavy and review work on cheap-cache models."},
       "defaults.compaction.window": {"type": "int", "allowed": "tokens, 1 or more", "default": "per model", "effect": "Context size at which compaction is advised."},
-      "defaults.compaction.mode": {"type": "enum", "allowed": "auto, task_boundary or never", "default": "per model", "effect": "When compaction is advised."},
+      "defaults.compaction.mode": {"type": "enum", "default": "per model", "effect": "When compaction is advised."},
       "defaults.compaction.min_turns": {"type": "int", "allowed": "turns, 1 or more", "default": "per model", "effect": "Fewest turns before compaction is advised."},
       "defaults.lane.max_context": {"type": "int", "allowed": "tokens, 1 or more", "default": "unset", "effect": "Enforced largest context for a lane on this model."},
       "defaults.lane.max_turns": {"type": "int", "allowed": "turns, 1 or more", "default": "unset", "effect": "Enforced most turns for a lane on this model."},
@@ -380,6 +387,7 @@
       "defaults.result.check": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "Check the result for the required sections before accepting it."},
       "defaults.result.sections": {"type": "string_list", "allowed": "exact section heading lines; empty clears", "default": "per model", "effect": "Heading lines a result must contain."},
       "defaults.result.fallback": {"type": "string", "allowed": "model id", "default": "per model", "effect": "Model for the one fallback attempt when the result check fails."},
+      "defaults.result.fallback_family": {"type": "string", "allowed": "model family selector", "default": "per model", "effect": "Resolve the latest model in this family for the fallback attempt."},
       "defaults.result.fallback_effort": {"type": "string", "allowed": "effort name", "default": "per model", "effect": "Effort for the fallback attempt."},
       "rules": {"type": "array of tables", "allowed": "tables with adapter, model, account, schedule {starts, expires as RFC 3339 timestamps, windows [{weekdays?, start_hour, end_hour}] in UTC} and policy (the same fields as defaults, under rules.policy); weekdays use Monday-based indexes, Monday 0 through Sunday 6", "default": "empty", "effect": "Layered overrides ordered by scope: global, adapter, model, account, model plus account; later rules win at equal scope. Schedule start is inclusive, expiry and window end are exclusive; an overnight window wraps midnight; inactive rules have no effect."}
     }
@@ -455,7 +463,7 @@
       "cargo_build_jobs": {"type": "int", "min": 1, "max": 1024, "auto_value": -1, "default": "Half the available cores, at least 1", "effect": "Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence."},
       "cargo_incremental": {"type": "bool", "allowed": "true or false", "default": "false", "effect": "CARGO_INCREMENTAL for lanes. Incremental sessions grow a lane's target without bound and are rarely reused; a value already in the lane environment takes precedence."},
       "cargo_source_writes": {"type": "bool", "default": true, "effect": "Allow lanes to download and update sources in the host CARGO_HOME; Cargo runs online with open network access. When false, registry/index, registry/cache, registry/src, git/db and git/checkouts are read-only and Cargo runs offline. Cargo lock/tracking files remain writable; credentials and host Cargo config are never writable. Launch diagnostics show the setting and its source."},
-      "cargo_debug": {"type": "string", "allowed": "none, line-directives-only, line-tables-only, limited, full, 0, 1, 2, true or false", "default": "line-tables-only", "effect": "CARGO_PROFILE_DEV_DEBUG for lanes. Line tables keep backtraces at a fraction of the size of full debug information; a value already in the lane environment takes precedence."},
+      "cargo_debug": {"default": "line-tables-only", "effect": "CARGO_PROFILE_DEV_DEBUG for lanes. Line tables keep backtraces at a fraction of the size of full debug information; a value already in the lane environment takes precedence."},
       "build_dir_grace_seconds": {"type": "int", "allowed": "seconds, 0 or more", "default": "900 (15 minutes)", "effect": "A profile directory whose newest file or directory modification is within this many seconds is never removed, even when its Cargo locks are free: test and run binaries execute after Cargo drops its locks, and Cargo may be opening its lock files. Zero removes the protection. It protects only recently written directories: a test or run binary that runs longer than the grace without writing under target/ is unprotected unless a Cargo lock is still held."}
     }
   },

@@ -168,6 +168,20 @@
         );
     }
     #[test]
+    fn account_label_spend_policy_survives_reservation_resolution() {
+        let settings: provenant_providers::accounts::Settings = serde_json::from_value(serde_json::json!({"entries": {
+            "opencode-go": {"adapter":"opencode", "label":"Go account", "key":"go", "plan":"go", "directory":"/tmp/go"}
+        }})).unwrap();
+        let mut config: provenant_routing::RoutingConfig = serde_json::from_value(serde_json::json!({"pacing":{"accounts":{"opencode-go":{"policy":"spend"}}}})).unwrap();
+        super::resolve_pacing_accounts(&mut config, &settings).unwrap();
+        let catalogue = provenant_routing::Catalogue::bundled().unwrap();
+        let model = provenant_routing::ModelId::parse("opencode/opencode-go/deepseek-v4.1-flash").unwrap();
+        let assessment = provenant_routing::monthly_allowance_assessment(&catalogue, &config, provenant_core::WallTime::from_unix_seconds(100).unwrap(), &model, Some("go"), None);
+        if let Some(assessment) = assessment { assert!(!assessment.active); }
+        assert_eq!(provenant_routing::account_pacing(&catalogue, &config, provenant_core::WallTime::from_unix_seconds(100).unwrap(), &model, Some("go")).0, provenant_routing::PacingPolicy::Spend);
+    }
+
+    #[test]
     fn override_references_resolve_only_registered_identities() {
         use provenant_providers::accounts::Settings;
         use provenant_routing::RoutingConfig;

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "scope": {"attempt": "02020202020202020202020202020202", "generation": 1},
+  "guardian_process": null,
+  "attempt": {"device": 0, "inode": 0},
+  "guardian": {"device": 0, "inode": 0},
+  "writer": {"device": 0, "inode": 0},
+  "custody": {"device": 0, "inode": 0}
+}

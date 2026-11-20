@@ -513,6 +513,12 @@ pub fn record_refusal(
         .revision
         .checked_add(1)
         .ok_or(QuotaError::NumberOutOfRange)?;
+    // A pool refusal covers the same routes regardless of which model saw it.
+    // Replace the pool's older observations together, not just this model's.
+    let same_scope = |old_model: &str, old_pool: Option<&str>| match pool {
+        Some(pool) => old_pool == Some(pool),
+        None => old_pool.is_none() && old_model == model,
+    };
     let existing = record
         .refusals
         .iter()
@@ -524,7 +530,7 @@ pub fn record_refusal(
         .unwrap_or_default();
     record
         .refusals
-        .retain(|refusal| refusal.model != model || refusal.pool.as_deref() != pool);
+        .retain(|refusal| !same_scope(&refusal.model, refusal.pool.as_deref()));
     if record.refusals.len() >= MAX_WINDOWS {
         return Err(QuotaError::Invalid("provider refusal bound"));
     }
