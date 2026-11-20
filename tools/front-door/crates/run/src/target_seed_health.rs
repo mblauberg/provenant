@@ -142,7 +142,7 @@ pub fn format_duration(duration: Duration) -> String {
         return format!("{}ms", duration.as_millis());
     }
     for (unit, seconds_per) in [("d", 86_400), ("h", 3_600), ("m", 60)] {
-        if seconds % seconds_per == 0 {
+        if seconds.is_multiple_of(seconds_per) {
             return format!("{}{unit}", seconds / seconds_per);
         }
     }
@@ -509,9 +509,13 @@ mod tests {
             at(Duration::from_secs(60)),
         )
         .unwrap();
-        let health = health(state.path(), key, Duration::from_secs(24 * 3600));
-        assert!(health.age.is_some_and(|age| age == Duration::from_secs(60)));
-        assert!(health.warnings().is_empty(), "{:?}", health.warnings());
+        let snapshot = health(state.path(), key, Duration::from_secs(24 * 3600));
+        assert!(
+            snapshot
+                .age
+                .is_some_and(|age| age == Duration::from_secs(60))
+        );
+        assert!(snapshot.warnings().is_empty(), "{:?}", snapshot.warnings());
         record_refresh(state.path(), key, "current", None, now()).unwrap();
         assert!(
             health(state.path(), key, Duration::from_secs(24 * 3600))
@@ -565,7 +569,7 @@ mod tests {
         record_refresh(state.path(), key, "failed", Some(&"x".repeat(4096)), now()).unwrap();
         let record = read_refresh(state.path(), key).unwrap();
         assert_eq!(
-            record.reason.map(|reason| reason.len()),
+            record.reason.as_ref().map(|reason| reason.len()),
             Some(MAX_REASON_BYTES)
         );
         assert!(

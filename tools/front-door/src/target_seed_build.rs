@@ -15,6 +15,83 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const PUBLICATION_WAIT_SECONDS: u64 = 10;
+/// Bound on the output tail a failing `build.prepare` command carries into its
+/// typed error, its refresh record and the seed result.
+const OUTPUT_TAIL_BYTES: usize = 2 * 1024;
+
+/// The single stderr seam for seed-build operator lines. Warnings and the
+/// `build.prepare` trace are facts for the operator, never refusals by themselves.
+#[allow(clippy::print_stderr)]
+fn seed_build_stderr(line: impl std::fmt::Display) {
+    eprintln!("{line}");
+}
+
+/// A failing `build.prepare` command. It travels as the error of `refresh` or
+/// `build`, so a caller tells it from a generic failure by type. The public
+/// fields let the tick record the command and its bounded output tail without
+/// echoing either in an operator diagnostic.
+#[derive(Debug)]
+pub struct PrepareFailed {
+    pub index: usize,
+    pub argv: Vec<String>,
+    pub exit: Option<i32>,
+    pub tail: String,
+}
+
+impl std::fmt::Display for PrepareFailed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "build.prepare[{}] command failed: {}",
+            self.index,
+            self.argv.join(" ")
+        )?;
+        match self.exit {
+            Some(code) => write!(formatter, " (exit {code})"),
+            None => write!(formatter, " (no exit code)"),
+        }
+    }
+}
+
+impl Error for PrepareFailed {}
+
+/// The `build.prepare` failure an error carries, if any, anywhere in its source
+/// chain, like [`skip_of`] but for a failed command rather than a skip.
+pub fn prepare_failed_of<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a PrepareFailed> {
+    let mut cause = Some(error);
+    while let Some(error) = cause {
+        if let Some(failed) = error.downcast_ref::<PrepareFailed>() {
+            return Some(failed);
+        }
+        cause = error.source();
+    }
+    None
+}
+
+/// What a failed seed command leaves behind: its exit status, when the child
+/// exited normally, and the last [`OUTPUT_TAIL_BYTES`] of its combined output.
+#[derive(Debug)]
+struct CommandFailure {
+    exit: Option<i32>,
+    tail: String,
+}
+
+impl std::fmt::Display for CommandFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("seed command failed")
+    }
+}
+
+impl Error for CommandFailure {}
+
+/// The last 2 KiB of the combined stdout and stderr, lossily decoded and bounded.
+fn output_tail(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut combined = Vec::with_capacity(stdout.len() + stderr.len());
+    combined.extend_from_slice(stdout);
+    combined.extend_from_slice(stderr);
+    let start = combined.len().saturating_sub(OUTPUT_TAIL_BYTES);
+    String::from_utf8_lossy(&combined[start..]).into_owned()
+}
 
 /// Report the inherited compiler-selection keys a seed build removes from its
 /// child environment. A seed build is not a lane: wrappers and rustup overrides
@@ -299,6 +376,51 @@ fn run(cwd: &Path, argv: &[OsString], overrides: &[(OsString, OsString)]) -> Res
     }
     Ok(result.stdout.bytes)
 }
+
+/// Like [`run`], but keeps the combined output tail when a command fails. Both
+/// streams use a tail policy: a long prepare log cannot grow the error without
+/// bound, and the retained bytes are enough to explain a failed generation step.
+/// A tail stream's `truncated` flag is expected, so unlike `run` it is not a
+/// failure on its own.
+fn run_with_tail(
+    cwd: &Path,
+    argv: &[OsString],
+    overrides: &[(OsString, OsString)],
+) -> std::result::Result<Vec<u8>, CommandFailure> {
+    let inherited = std::env::vars_os().collect::<Vec<_>>();
+    let env = seed_build_child_environment(&inherited, overrides);
+    let mut options = ExecOptions::new(argv, cwd, Duration::from_secs(4 * 60 * 60));
+    options.env = Some(&env);
+    options.process_group = true;
+    options.stdout = provenant_os::exec::StreamPolicy::Tail {
+        limit: OUTPUT_TAIL_BYTES,
+    };
+    options.stderr = provenant_os::exec::StreamPolicy::Tail {
+        limit: OUTPUT_TAIL_BYTES,
+    };
+    let failed = |tail: String, exit: Option<i32>| CommandFailure { exit, tail };
+    let executor = SystemExecutor::new(1)
+        .map_err(|error| failed(seed_error("running seed command", &error).to_string(), None))?;
+    let result = executor
+        .execute(options)
+        .map_err(|error| failed(seed_error("running seed command", &error).to_string(), None))?;
+    if result.termination != Termination::Exit(0)
+        || result.timed_out
+        || result.stdout.read_failed
+        || result.stderr.read_failed
+    {
+        let exit = match result.termination {
+            Termination::Exit(code) => i32::try_from(code).ok(),
+            Termination::Signal(_) => None,
+        };
+        return Err(failed(
+            output_tail(&result.stdout.bytes, &result.stderr.bytes),
+            exit,
+        ));
+    }
+    Ok(result.stdout.bytes)
+}
+
 fn git(cwd: &Path, args: &[OsString]) -> Result<Vec<u8>> {
     let executable =
         provenant_os::git::git_executable().ok_or_else(|| io::Error::other("git unavailable"))?;
@@ -755,6 +877,41 @@ fn cargo_build_profile(state: &Path) -> Result<CargoBuildProfile> {
         .ok_or_else(|| io::Error::other("Cargo profile environment is not UTF-8").into())
 }
 
+/// Record a refresh fact for part A's lane-start and doctor readers. A failed
+/// write warns and is otherwise ignored: health is advisory and never changes
+/// whether a build succeeded.
+fn record_refresh_outcome(state: &Path, project_key: &str, outcome: &str, reason: Option<&str>) {
+    let at = match provenant_os::clock::SystemClock.wall_now() {
+        Ok(at) => at,
+        Err(error) => {
+            seed_build_stderr(format!(
+                "warning: could not record seed refresh outcome: clock unavailable: {error}"
+            ));
+            return;
+        }
+    };
+    if let Err(error) =
+        provenant_run::target_seed_health::record_refresh(state, project_key, outcome, reason, at)
+    {
+        seed_build_stderr(format!(
+            "warning: could not record seed refresh outcome for {outcome}: {error}"
+        ));
+    }
+}
+
+/// A short, bounded cause for a recorded refresh failure. Prepare failures name
+/// the command and its output tail; skips name their typed reason; everything
+/// else keeps the error text, which `record_refresh` caps at 2 KiB.
+fn refresh_failure_reason(error: &(dyn Error + 'static)) -> String {
+    if let Some(prepare) = prepare_failed_of(error) {
+        format!("{}: {}", prepare.argv.join(" "), prepare.tail)
+    } else if let Some(skip) = skip_of(error) {
+        format!("{}: {}", skip.reason.cause(), skip)
+    } else {
+        error.to_string()
+    }
+}
+
 /// Rebuild this repository's seed when its verify base has no complete
 /// generation, at most one build at a time. Call after a fetch that may have
 /// advanced the base; it does nothing when the seed is current or a build
@@ -775,8 +932,10 @@ pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
             workspace,
         } => (identity, workspace),
     };
-    refresh_with(state, &identity, |stage| {
+    let project_key = identity.project_key.clone();
+    let outcome = refresh_with(state, &identity, |stage| {
         build_into(
+            state,
             stage,
             project,
             &workspace,
@@ -784,7 +943,24 @@ pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
             &identity.project_key,
             &identity.cargo_profile,
         )
-    })
+    });
+    match &outcome {
+        Ok(Refresh::Built(_)) => record_refresh_outcome(state, &project_key, "built", None),
+        Ok(Refresh::Current) => record_refresh_outcome(state, &project_key, "current", None),
+        Ok(Refresh::Busy) => record_refresh_outcome(state, &project_key, "busy", None),
+        Ok(Refresh::NotCargo) => {}
+        Err(error) => {
+            let (recorded, reason) = if prepare_failed_of(error.as_ref()).is_some() {
+                ("prepare_failed", refresh_failure_reason(error.as_ref()))
+            } else if skip_of(error.as_ref()).is_some() {
+                ("skipped", refresh_failure_reason(error.as_ref()))
+            } else {
+                ("failed", refresh_failure_reason(error.as_ref()))
+            };
+            record_refresh_outcome(state, &project_key, recorded, Some(&reason));
+        }
+    }
+    outcome
 }
 
 /// Raised under the build lock when another refresher published this commit
@@ -890,8 +1066,10 @@ pub fn build(state: &Path, project: &Path) -> Result<String> {
         .ok_or_else(|| io::Error::other("project has no selected Cargo workspace"))?;
     let base = verify_base(state, project, &workspace)?;
     let cargo_profile = cargo_build_profile(state)?;
-    publish(state, |stage| {
+    let project_key = base.project_key.clone();
+    let outcome = publish(state, |stage| {
         build_into(
+            state,
             stage,
             project,
             &workspace,
@@ -899,10 +1077,61 @@ pub fn build(state: &Path, project: &Path) -> Result<String> {
             &base.project_key,
             &cargo_profile,
         )
-    })
+    });
+    match &outcome {
+        Ok(_) => record_refresh_outcome(state, &project_key, "built", None),
+        Err(error) => {
+            let (recorded, reason) = if prepare_failed_of(error.as_ref()).is_some() {
+                ("prepare_failed", refresh_failure_reason(error.as_ref()))
+            } else if skip_of(error.as_ref()).is_some() {
+                ("skipped", refresh_failure_reason(error.as_ref()))
+            } else {
+                ("failed", refresh_failure_reason(error.as_ref()))
+            };
+            record_refresh_outcome(state, &project_key, recorded, Some(&reason));
+        }
+    }
+    outcome
+}
+
+/// Run every `build.prepare` argv in order from the checkout root, before any
+/// Cargo command touches the tree. The port table is read from the live project
+/// and the host state, not from the checkout: the repository declares the
+/// commands, and the checkout supplies only the working directory for them. An
+/// unreadable or invalid table warns and runs nothing; a failing command fails
+/// that build with a typed error carrying its bounded output tail.
+fn run_prepares(state: &Path, project: &Path, checkout_root: &Path) -> Result<()> {
+    let table = match provenant_config::PortTable::read_for(Some(project), state) {
+        Ok(table) => table,
+        Err(error) => {
+            seed_build_stderr(format!(
+                "warning: seed-build build.prepare could not be read ({error}); no prepare command ran"
+            ));
+            return Ok(());
+        }
+    };
+    let layer = provenant_config::port_source_layer(table.build.source);
+    for (index, argv) in table.build.prepare.iter().enumerate() {
+        seed_build_stderr(format!(
+            "seed-build: build.prepare[{index}] (source {layer}): {}",
+            argv.join(" ")
+        ));
+        let argv = argv.iter().map(OsString::from).collect::<Vec<_>>();
+        run_with_tail(checkout_root, &argv, &[]).map_err(|failure| PrepareFailed {
+            index,
+            argv: argv
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect(),
+            exit: failure.exit,
+            tail: failure.tail,
+        })?;
+    }
+    Ok(())
 }
 
 fn build_into(
+    state: &Path,
     stage: &Path,
     project: &Path,
     workspace_relative: &Path,
@@ -913,6 +1142,7 @@ fn build_into(
     let checkout = stage.join("checkout");
     checkout_commit(project, &checkout, commit)?;
     let checkout_root = checkout.canonicalize()?;
+    run_prepares(state, project, &checkout_root)?;
     let worktree = checkout.join(workspace_relative).canonicalize()?;
     if !worktree.starts_with(&checkout_root) || !worktree.join("Cargo.toml").metadata()?.is_file() {
         return Err(io::Error::other(
@@ -1972,5 +2202,221 @@ mod tests {
             provenant_confinement::cache::CACHE_DIRECTORY_TAG_CONTENT
         );
         make_directories_writable(&generation).unwrap();
+    }
+
+    /// A Cargo project whose build succeeds only once a prepare command has
+    /// written a gitignored `src/generated.rs` into the checkout root. The
+    /// prepare script records its working directory so the test can see which
+    /// directory it ran in after the disposable checkout is removed.
+    #[allow(dead_code)] // The harness-free target includes this module without its tests.
+    fn prepared_project(temp: &Path) -> (PathBuf, String, PathBuf) {
+        let project = temp.join("project");
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname='prepare-fixture'\nversion='0.1.0'\nedition='2021'\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("src/main.rs"),
+            "mod generated;\nfn main() { generated::value(); }\n",
+        )
+        .unwrap();
+        fs::write(project.join(".gitignore"), "src/generated.rs\n").unwrap();
+        run(
+            &project,
+            &[
+                OsString::from("cargo"),
+                "generate-lockfile".into(),
+                "--offline".into(),
+            ],
+            &[],
+        )
+        .unwrap();
+        git(&project, &["init".into(), "--initial-branch=main".into()]).unwrap();
+        git(
+            &project,
+            &[
+                "add".into(),
+                "Cargo.toml".into(),
+                "Cargo.lock".into(),
+                "src/main.rs".into(),
+                ".gitignore".into(),
+            ],
+        )
+        .unwrap();
+        provenant_os::fixture::run_git(&project, &["commit", "-m", "base"]).unwrap();
+        let commit =
+            String::from_utf8(git(&project, &["rev-parse".into(), "HEAD".into()]).unwrap())
+                .unwrap()
+                .trim()
+                .to_owned();
+        let marker = temp.join("prepare-cwd");
+        let script = temp.join("generate.sh");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf 'pub fn value() {{}}\\n' > src/generated.rs\nprintf '%s' \"$PWD\" > {}\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        (project, commit, marker)
+    }
+
+    #[allow(dead_code)] // The harness-free target includes this module without its tests.
+    fn write_prepare(project: &Path, commands: Vec<Vec<String>>) {
+        fs::create_dir_all(project.join(".provenant")).unwrap();
+        fs::write(
+            project.join(".provenant/ports.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 2,
+                "build": { "prepare": commands },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn prepare_runs_before_seed_build_in_checkout_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (project, commit, marker) = prepared_project(temp.path());
+        write_prepare(
+            &project,
+            vec![vec![
+                temp.path()
+                    .join("generate.sh")
+                    .to_string_lossy()
+                    .into_owned(),
+            ]],
+        );
+        let stage = temp.path().join("stage");
+        fs::create_dir(&stage).unwrap();
+        let identity = identity("prepare-key", &commit);
+        build_into(
+            state.path(),
+            &stage,
+            &project,
+            Path::new("."),
+            &commit,
+            "prepare-key",
+            &identity.cargo_profile,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            stage
+                .canonicalize()
+                .unwrap()
+                .join("checkout")
+                .to_string_lossy(),
+            "prepare ran in the checkout root, not the workspace subdirectory"
+        );
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn failing_prepare_fails_the_build_and_records_prepare_failed_with_bounded_tail() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (project, commit, _) = prepared_project(temp.path());
+        let script = temp.path().join("fail.sh");
+        fs::write(
+            &script,
+            "#!/bin/sh\nhead -c 8192 /dev/zero | tr '\\0' 'x' >&2\nexit 7\n",
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        write_prepare(&project, vec![vec![script.to_string_lossy().into_owned()]]);
+        let stage = temp.path().join("stage");
+        fs::create_dir(&stage).unwrap();
+        let identity = identity("prepare-key", &commit);
+        let error = build_into(
+            state.path(),
+            &stage,
+            &project,
+            Path::new("."),
+            &commit,
+            "prepare-key",
+            &identity.cargo_profile,
+        )
+        .unwrap_err();
+        let prepare = prepare_failed_of(error.as_ref()).expect("typed prepare failure");
+        assert_eq!(prepare.index, 0);
+        assert_eq!(prepare.exit, Some(7));
+        assert!(prepare.tail.len() <= OUTPUT_TAIL_BYTES);
+        assert!(prepare.tail.contains("xxx"));
+        assert!(
+            !stage.join("target").exists(),
+            "cargo never runs after a failed prepare command"
+        );
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn empty_prepare_changes_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (project, _, marker) = prepared_project(temp.path());
+        // Commit the generated module so this project builds with no prepare
+        // step; the marker script stays on disk but is not referenced.
+        fs::write(project.join("src/generated.rs"), "pub fn value() {}\n").unwrap();
+        git(
+            &project,
+            &["add".into(), "-f".into(), "src/generated.rs".into()],
+        )
+        .unwrap();
+        provenant_os::fixture::run_git(&project, &["commit", "-m", "generated"]).unwrap();
+        let commit =
+            String::from_utf8(git(&project, &["rev-parse".into(), "HEAD".into()]).unwrap())
+                .unwrap()
+                .trim()
+                .to_owned();
+        write_prepare(&project, Vec::new());
+        let stage = temp.path().join("stage");
+        fs::create_dir(&stage).unwrap();
+        let identity = identity("prepare-key", &commit);
+        build_into(
+            state.path(),
+            &stage,
+            &project,
+            Path::new("."),
+            &commit,
+            "prepare-key",
+            &identity.cargo_profile,
+        )
+        .unwrap();
+        assert!(!marker.exists(), "an empty prepare runs no command");
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn refresh_records_outcome_for_health() {
+        let state = tempfile::tempdir().unwrap();
+        let key = "project-key";
+        record_refresh_outcome(state.path(), key, "built", None);
+        assert_eq!(
+            provenant_run::target_seed_health::read_refresh(state.path(), key)
+                .unwrap()
+                .outcome,
+            "built"
+        );
+        record_refresh_outcome(state.path(), key, "failed", Some("cargo failed"));
+        let failed = provenant_run::target_seed_health::read_refresh(state.path(), key).unwrap();
+        assert_eq!(failed.outcome, "failed");
+        assert_eq!(failed.reason.as_deref(), Some("cargo failed"));
+        record_refresh_outcome(
+            state.path(),
+            key,
+            "prepare_failed",
+            Some("node gen.mjs: output tail"),
+        );
+        let prepare = provenant_run::target_seed_health::read_refresh(state.path(), key).unwrap();
+        assert_eq!(prepare.outcome, "prepare_failed");
+        assert_eq!(prepare.reason.as_deref(), Some("node gen.mjs: output tail"));
     }
 }

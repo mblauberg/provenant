@@ -26,6 +26,9 @@ const GC_RETRY_FACTOR: u64 = 4;
 const GC_RESULT: &str = "gc-result.json";
 const MAX_SEED_DISCOVERY_ERRORS: usize = 16;
 const MAX_SEED_ERROR_BYTES: usize = 1024;
+/// The one repair an operator can act on for a failed prepare command. It never
+/// includes the saved command output, which stays in the result file only.
+const SEED_PREPARE_REPAIR: &str = "build.prepare failed: fix the command or the repository's generated inputs, then run provenant worktree seed-build in that repository";
 /// Bound on an error saved in a task result, so a result never outgrows its read cap.
 const MAX_RESULT_ERROR_BYTES: usize = 1024;
 /// Bound on a saved cause quoted in a tick note.
@@ -724,6 +727,13 @@ enum SeedProjectOutcome {
     Failed {
         error: String,
     },
+    /// A `build.prepare` command failed. Serialised with the existing `state`
+    /// tag as `prepare_failed`; the command and output tail are kept in the
+    /// result file but never echoed in an operator diagnostic.
+    PrepareFailed {
+        command: Vec<String>,
+        tail: String,
+    },
 }
 
 impl SeedProjectOutcome {
@@ -735,12 +745,22 @@ impl SeedProjectOutcome {
         }
     }
 
+    fn prepare_failed(prepare: &crate::target_seed_build::PrepareFailed) -> Self {
+        Self::PrepareFailed {
+            command: prepare.argv.clone(),
+            tail: truncate_bytes(prepare.tail.clone(), OUTPUT_TAIL_BYTES),
+        }
+    }
+
     fn failed(message: String) -> Self {
         Self::Failed {
             error: truncate_seed_error(message),
         }
     }
 }
+
+/// Mirrors the builder's 2 KiB bound on a prepare output tail saved in a result.
+const OUTPUT_TAIL_BYTES: usize = 2 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SeedProjectRecord {
@@ -839,8 +859,12 @@ impl SeedResult {
             projects.iter().any(|record| wanted(&record.outcome))
         };
         let state = if error.is_some()
-            || any(|outcome| matches!(outcome, SeedProjectOutcome::Failed { .. }))
-        {
+            || any(|outcome| {
+                matches!(
+                    outcome,
+                    SeedProjectOutcome::Failed { .. } | SeedProjectOutcome::PrepareFailed { .. }
+                )
+            }) {
             "failed"
         } else if any(|outcome| matches!(outcome, SeedProjectOutcome::Busy)) {
             "busy"
@@ -980,10 +1004,17 @@ fn refresh_projects(
                     Ok(Refresh::NotCargo) => SeedProjectOutcome::NotCargo,
                     Ok(Refresh::Current) => SeedProjectOutcome::Current,
                     Ok(Refresh::Busy) => SeedProjectOutcome::Busy,
-                    Err(error) => match crate::target_seed_build::skip_of(error.as_ref()) {
-                        Some(skip) => SeedProjectOutcome::skipped(skip),
-                        None => SeedProjectOutcome::failed(error.to_string()),
-                    },
+                    Err(error) => {
+                        if let Some(skip) = crate::target_seed_build::skip_of(error.as_ref()) {
+                            SeedProjectOutcome::skipped(skip)
+                        } else if let Some(prepare) =
+                            crate::target_seed_build::prepare_failed_of(error.as_ref())
+                        {
+                            SeedProjectOutcome::prepare_failed(prepare)
+                        } else {
+                            SeedProjectOutcome::failed(error.to_string())
+                        }
+                    }
                 },
             };
             SeedProjectRecord::new(project, outcome, cleared_environment.to_vec())
@@ -1354,7 +1385,9 @@ fn safe_seed_failure_diagnostic(error: Option<&str>) -> &'static str {
     let Some(error) = error.filter(|error| !error.is_empty()) else {
         return "The seed refresh failed without a saved cause. Run `provenant worktree seed-build` in the affected repository for current details.";
     };
-    if error.contains("shared Cargo target seed is unavailable while") {
+    if error.contains("build.prepare") {
+        SEED_PREPARE_REPAIR
+    } else if error.contains("shared Cargo target seed is unavailable while") {
         "A Rust or Cargo override prevents reliable shared-seed reuse. Review host overrides, then run `provenant worktree seed-build` in the affected repository."
     } else if error.contains("Cargo configuration cannot be represented")
         || error.contains("cargo_config_")
@@ -1388,7 +1421,9 @@ fn seed_summary(result: &SeedResult) -> String {
             SeedProjectOutcome::Built | SeedProjectOutcome::Current => ok += 1,
             SeedProjectOutcome::Skipped { .. } => skipped += 1,
             SeedProjectOutcome::Busy => busy += 1,
-            SeedProjectOutcome::Failed { .. } => failed += 1,
+            SeedProjectOutcome::Failed { .. } | SeedProjectOutcome::PrepareFailed { .. } => {
+                failed += 1
+            }
             SeedProjectOutcome::NotCargo => {}
         }
     }
@@ -1429,6 +1464,11 @@ fn seed_diagnostic(result: &SeedResult) -> Option<String> {
             &mut notes,
             safe_seed_failure_diagnostic(Some(failure)).to_owned(),
         );
+    }
+    for record in &result.projects {
+        if matches!(record.outcome, SeedProjectOutcome::PrepareFailed { .. }) {
+            push_distinct(&mut notes, SEED_PREPARE_REPAIR.to_owned());
+        }
     }
     if result.state == "failed" && notes.is_empty() {
         push_distinct(&mut notes, safe_seed_failure_diagnostic(None).to_owned());
@@ -2337,6 +2377,52 @@ mod tests {
         ));
         assert_eq!(seed_summary(&result), "ok:1 skipped:1");
         assert!(!SkipReason::Unrecognised.repair().is_empty());
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn prepare_failed_records_the_command_and_tail_without_echoing_it() {
+        let at = WallTime::from_micros(1_000_000).unwrap();
+        let tail = "error: generated module missing\n".repeat(100);
+        let record = SeedProjectRecord {
+            project: "/repo".into(),
+            project_key: "repo".into(),
+            cleared_environment: Vec::new(),
+            outcome: SeedProjectOutcome::PrepareFailed {
+                command: vec!["node".into(), "tools/ensure-generated.mjs".into()],
+                tail: tail.clone(),
+            },
+        };
+        let result = SeedResult::finished(at, None, vec![record]);
+        assert_eq!(result.state, "failed", "a prepare failure fails the pass");
+        assert_eq!(seed_summary(&result), "failed:1");
+        let bytes = serde_json::to_vec(&result).unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(wire["projects"][0]["state"], "prepare_failed");
+        assert_eq!(wire["projects"][0]["tail"], tail);
+        let decoded: SeedResult = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.state, "failed");
+        assert!(matches!(
+            &decoded.projects[0].outcome,
+            SeedProjectOutcome::PrepareFailed { command, tail: saved }
+                if command.len() == 2
+                    && command[0] == "node"
+                    && command[1] == "tools/ensure-generated.mjs"
+                    && saved == &tail
+        ));
+        let diagnostic = seed_diagnostic(&decoded).unwrap();
+        assert!(diagnostic.contains(SEED_PREPARE_REPAIR));
+        assert!(
+            !diagnostic.contains("generated module missing"),
+            "tail stays in the result"
+        );
+
+        // An older result that never had a prepare_failed record still decodes.
+        let older =
+            br#"{"state":"complete","at":"2026-11-19T01:00:00.000000Z","error":null,"projects":[
+            {"project":"/a","project_key":"a","state":"built"}]}"#;
+        let older: SeedResult = serde_json::from_slice(older).unwrap();
+        assert_eq!(seed_summary(&older), "ok:1");
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed
