@@ -113,6 +113,20 @@ expose persisted command output, repository paths or environment values, and doe
 change the tick outcome or retry schedule. Because seeding follows a complete or partial
 collection and never a failed one, an interrupted collection is retried promptly (see
 [scheduled collection](state.md#retention-keeps-evidence)) and seeding resumes with it.
+Seed health is advisory. The last refresh outcome is persisted atomically at
+`<state>/cargo-target-seeds/refresh/<project_key>.json` with a schema, an instant and
+an outcome of `built`, `current`, `busy`, `failed`, `prepare_failed` or `skipped`;
+a reason is bounded to 2 KiB. A writer lane with a private Cargo target and a
+project that has a Cargo manifest warns once at start when no complete generation
+exists, when the newest complete generation for the project is older than
+`build.seed.stale_after` (the age comes from its `complete` marker), or when the
+last refresh outcome is `failed` or `prepare_failed`. `provenant worktree doctor`
+shows the newest generation and age, the last outcome and reason, the effective
+`build.seed.stale_after` with its layer, and the same warnings. Every warning
+names the last outcome, the knob with its effective value and source, and tells
+the reader to run `provenant worktree seed-build` in the repository. A missing,
+corrupt or newer-schema refresh file is treated as no record; a malformed knob
+warns and falls back to 24h from `default`. None of these facts refuses a lane.
 - Why: reuse must not introduce incompatible or partially collected build output.
 
 ## Publication order

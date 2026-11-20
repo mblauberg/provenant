@@ -247,6 +247,58 @@ fn seed_target_human(seed: &provenant_run::WorktreeSeed) -> String {
     seed.target.display().to_string()
 }
 
+/// Render the doctor's seed section from already-resolved policy. The health
+/// module owns all store reads; this function only projects them and repeats
+/// the warnings on stderr so a human run sees them without `--json`.
+fn seed_diagnosis(
+    state: &Path,
+    project_key: &str,
+    stale_after: Duration,
+    source: &str,
+    policy_warning: Option<String>,
+    now: provenant_core::WallTime,
+) -> worktrees::SeedDiagnosis {
+    use std::io::Write;
+    let health = provenant_run::target_seed_health::seed_health(
+        state,
+        project_key,
+        stale_after,
+        source,
+        now,
+    );
+    let newest_generation = health
+        .newest
+        .as_ref()
+        .map(|generation| generation.id.clone());
+    let newest_age = health
+        .age
+        .map(provenant_run::target_seed_health::format_duration);
+    let last_refresh_outcome = health
+        .last_refresh
+        .as_ref()
+        .map(|record| record.outcome.clone());
+    let last_refresh_reason = health
+        .last_refresh
+        .as_ref()
+        .and_then(|record| record.reason.clone());
+    let mut warnings = health.warnings();
+    if let Some(warning) = policy_warning {
+        warnings.insert(0, warning);
+    }
+    for warning in &warnings {
+        let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+    }
+    worktrees::SeedDiagnosis {
+        newest_generation,
+        newest_age,
+        last_refresh_outcome,
+        last_refresh_reason,
+        stale_after: provenant_run::target_seed_health::format_duration(stale_after),
+        stale_after_source: source.to_owned(),
+        warnings,
+    }
+}
+
 /// The terse human form. `--json` keeps the structured path envelope; here a
 /// UTF-8 absolute path reads as a plain path, quoted only when it needs it.
 fn human(mut value: serde_json::Value) -> String {
@@ -364,7 +416,36 @@ fn execute(
                 }
                 Worktree::List => Data::Listed(worktrees::list(context, cancel)?),
                 Worktree::Doctor { path } => {
-                    Data::Diagnosed(worktrees::doctor(context, &path, cancel)?)
+                    let mut diagnosis = worktrees::doctor(context, &path, cancel)?;
+                    if let Ok(now) = SystemClock::new().wall_now() {
+                        let (stale_after, source, policy_warning) =
+                            match provenant_config::PortTable::read_for(
+                                Some(project.as_path()),
+                                roots.state.as_path(),
+                            ) {
+                                Ok(table) => {
+                                    provenant_run::target_seed_health::stale_after_policy(&table)
+                                }
+                                Err(error) => (
+                                    provenant_run::target_seed_health::DEFAULT_STALE_AFTER,
+                                    "default".to_owned(),
+                                    Some(format!(
+                                        "build.seed.stale_after could not be read ({error}); using 24h from default"
+                                    )),
+                                ),
+                            };
+                        let key =
+                            provenant_run::target_seed::project_key(context.repo.common_git_dir());
+                        diagnosis.seed = Some(seed_diagnosis(
+                            roots.state.as_path(),
+                            &key,
+                            stale_after,
+                            &source,
+                            policy_warning,
+                            now,
+                        ));
+                    }
+                    Data::Diagnosed(diagnosis)
                 }
                 Worktree::SessionList => unreachable!(),
                 Worktree::Remove(mut args) => {
@@ -5043,5 +5124,93 @@ mod gc_subpass_removal_tests {
         };
         append_gc_subpass_removals(&mut preview, vec![record]);
         assert!(preview.removals.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod seed_diagnosis_tests {
+    use super::*;
+    use provenant_core::WallTime;
+    use provenant_run::target_seed_health as health;
+    use std::fs;
+
+    #[test]
+    fn doctor_reports_seed_age_and_last_outcome() {
+        let state = tempfile::tempdir().unwrap();
+        let key = "project-a";
+        let now = WallTime::from_micros(1_800_000_000_000_000).unwrap();
+        let built = WallTime::from_micros(now.as_micros() - 3 * 3_600 * 1_000_000).unwrap();
+        let generation = provenant_run::target_seed::store_path(state.path())
+            .join("generations")
+            .join("007");
+        fs::create_dir_all(&generation).unwrap();
+        let manifest = provenant_run::target_seed::Manifest {
+            project_key: key.into(),
+            rustc_vv: "rustc 1.100.0".into(),
+            host_triple: "aarch64-apple-darwin".into(),
+            commit: "abc".into(),
+            profile: "default".into(),
+            cargo_profile: provenant_config::CargoBuildProfile {
+                incremental: "1".into(),
+                debug: "1".into(),
+            },
+            features: Vec::new(),
+            flags: Vec::new(),
+            allocated_bytes: None,
+        };
+        fs::write(
+            generation.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let marker = generation.join("complete");
+        fs::write(&marker, b"complete\n").unwrap();
+        let modified = std::time::UNIX_EPOCH
+            + Duration::from_micros(u64::try_from(built.as_micros()).unwrap());
+        fs::File::options()
+            .write(true)
+            .open(&marker)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&generation, fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        health::record_refresh(
+            state.path(),
+            key,
+            "failed",
+            Some("missing generated module"),
+            built,
+        )
+        .unwrap();
+
+        let diagnosis = seed_diagnosis(
+            state.path(),
+            key,
+            Duration::from_secs(24 * 3_600),
+            "project",
+            None,
+            now,
+        );
+        assert_eq!(diagnosis.newest_generation.as_deref(), Some("007"));
+        assert_eq!(diagnosis.newest_age.as_deref(), Some("3h"));
+        assert_eq!(diagnosis.last_refresh_outcome.as_deref(), Some("failed"));
+        assert_eq!(
+            diagnosis.last_refresh_reason.as_deref(),
+            Some("missing generated module")
+        );
+        assert_eq!(diagnosis.stale_after, "24h");
+        assert_eq!(diagnosis.stale_after_source, "project");
+        assert!(
+            diagnosis
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("failed")
+                    && warning.contains("build.seed.stale_after")
+                    && warning.contains("provenant worktree seed-build"))
+        );
     }
 }

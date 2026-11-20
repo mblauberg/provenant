@@ -28,7 +28,9 @@ pub use context::{
     with_context_using_workers_and_facts,
 };
 pub use custody::*;
-pub use doctor::{WorktreeDiagnosis, WorktreeDiagnosisState, WorktreeRepairKind, doctor};
+pub use doctor::{
+    SeedDiagnosis, WorktreeDiagnosis, WorktreeDiagnosisState, WorktreeRepairKind, doctor,
+};
 pub use gc::{
     CandidateReport, CollectionMode, ForgeObservation, OutputEntry, RetirementFeeds,
     WorktreeGcPolicy, WorktreeGcReport, acknowledge_foreign_preview, branch_candidate, collect,
