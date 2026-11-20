@@ -1268,6 +1268,7 @@ pub fn plan_install(
         extra: Default::default(),
         schema_version: provenant_records::INSTALL_RECEIPT_SCHEMA_VERSION,
         state_format_version: provenant_records::STATE_FORMAT_VERSION,
+        live_record_format: Some(provenant_records::LIVE_RECORD_FORMAT),
         source_digest: release.manifest.source_digest,
         manifest_digest: CanonicalV1::file_digest(&release.manifest_bytes),
         asset_digest: release.manifest.asset_digest,

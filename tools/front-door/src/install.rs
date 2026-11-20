@@ -450,6 +450,9 @@ struct InstallData {
     /// The 1.x configuration this install copied, or would copy in a dry run.
     #[serde(skip_serializing_if = "Option::is_none")]
     state_copy: Option<crate::state_handoff::Handoff>,
+    /// Advisory when this release changes live-attempt records under live lanes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_record_warning: Option<String>,
 }
 impl InstallData {
     fn empty() -> Self {
@@ -460,6 +463,7 @@ impl InstallData {
             peer_agent: None,
             tick_agent: None,
             state_copy: None,
+            live_record_warning: None,
         }
     }
     fn success(outcome: InstallOutcome) -> Self {
@@ -470,6 +474,7 @@ impl InstallData {
             peer_agent: None,
             tick_agent: None,
             state_copy: None,
+            live_record_warning: None,
         }
     }
     fn failure(error: &InstallError) -> Self {
@@ -485,6 +490,7 @@ impl InstallData {
                 peer_agent: None,
                 tick_agent: None,
                 state_copy: None,
+                live_record_warning: None,
             },
             _ => Self::empty(),
         }
@@ -611,6 +617,7 @@ fn output_install(command: &str, applied: Applied, globals: &cli::Globals) -> u8
         .map(crate::state_handoff::Handoff::note)
         .unwrap_or_default();
     let state_copy = applied.state_copy;
+    let live_record_warning = applied.live_record_warning;
     output_install_with(
         &notes,
         command,
@@ -618,7 +625,10 @@ fn output_install(command: &str, applied: Applied, globals: &cli::Globals) -> u8
         applied.result,
         applied.peer_agent,
         applied.tick_agent,
-        |data| data.state_copy = state_copy,
+        |data| {
+            data.state_copy = state_copy;
+            data.live_record_warning = live_record_warning;
+        },
         globals,
     )
 }
@@ -772,7 +782,15 @@ fn output_install_with(
 fn read_install_receipt(
     targets: &Targets,
 ) -> Result<Option<provenant_records::InstallReceipt>, InstallError> {
-    let path = targets.roots.state.as_path().join("install");
+    read_receipt_at(targets.roots.state.as_path())
+}
+
+/// Read the receipt a state root currently owns. The live-record advisory
+/// reads it from the installed root, before the candidate root is published.
+fn read_receipt_at(
+    state: &Path,
+) -> Result<Option<provenant_records::InstallReceipt>, InstallError> {
+    let path = state.join("install");
     let directory = match provenant_os::fs::Directory::open_anchor(&path) {
         Ok(directory) => directory,
         Err(error) if error.is_not_found() => return Ok(None),
@@ -794,6 +812,69 @@ fn read_install_receipt(
         Err(error) if error.is_not_found() => Ok(None),
         Err(error) => Err(InstallError::Fs(error)),
     }
+}
+
+/// The advisory text when this release changes live-attempt records while
+/// attempts are still live. Silent unless both conditions hold; never refuses.
+fn live_record_warning(
+    installed: Option<u32>,
+    store: &provenant_run::RunStore,
+    call: &provenant_run::Request<'_>,
+) -> Option<String> {
+    if installed == Some(provenant_records::LIVE_RECORD_FORMAT) {
+        return None;
+    }
+    let live = provenant_cli::run::live_attempt_ids(store, call).ok()?;
+    if live.is_empty() {
+        return None;
+    }
+    let from = installed
+        .map(|format| format.to_string())
+        .unwrap_or_else(|| "unknown".to_owned());
+    Some(format!(
+        "release changes live-attempt records (format {from} → {}); live attempts: {}; drain them or expect them to settle under the new release",
+        provenant_records::LIVE_RECORD_FORMAT,
+        live.join(", ")
+    ))
+}
+
+/// Best-effort preflight advisory: compare the installed receipt's live-record
+/// format with this release's and name live attempts on stderr. Any failure to
+/// inspect the store stays silent; this never blocks an install.
+fn warn_live_record_change(
+    destination: &provenant_core::Roots,
+    environment: &Resolved,
+    context: &InstallContext<'_>,
+) -> Option<String> {
+    let receipt = read_receipt_at(destination.state.as_path())
+        .ok()
+        .flatten()?;
+    if receipt.live_record_format == Some(provenant_records::LIVE_RECORD_FORMAT) {
+        return None;
+    }
+    let call = provenant_run::Request {
+        clock: context.clock,
+        cancel: context.cancel,
+    };
+    let Ok(fabric) = provenant_cli::fabric::Context::open_read_only(
+        destination.clone(),
+        &environment.home,
+        &environment.project,
+    ) else {
+        return None;
+    };
+    let execution = provenant_run::ExecutionContext {
+        state_root: destination.state.clone(),
+        project_id: fabric.identity.project,
+        actor_id: fabric.identity.inbox.actor,
+        read_prompts: false,
+    };
+    let Ok(Some(store)) = provenant_run::RunStore::open_read_only(&execution, &call) else {
+        return None;
+    };
+    let message = live_record_warning(receipt.live_record_format, &store, &call)?;
+    let _ = writeln!(io::stderr().lock(), "{message}");
+    Some(message)
 }
 
 /// Recorded account directories that are no longer registered. Only judged when
@@ -1056,6 +1137,7 @@ struct Applied {
     peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
     tick_agent: Option<super::tick_agent::Installed>,
     state_copy: Option<crate::state_handoff::Handoff>,
+    live_record_warning: Option<String>,
 }
 
 /// What a sync does beyond reapplying the release.
@@ -1080,6 +1162,7 @@ struct PreparedInstall {
     batches: Vec<Targets>,
     summaries: Vec<HarnessTarget>,
     preview: InstallOutcome,
+    live_record_warning: Option<String>,
 }
 
 fn supports_hooks(batch: &Targets) -> bool {
@@ -1183,10 +1266,12 @@ fn preflight_install(
     }
     // Smoke the source before the handoff may stop 1.x or publish the new root.
     verify_release(&args.source, smoke, context.cancel)?;
+    let live_record_warning = warn_live_record_change(destination, environment, context);
     Ok(PreparedInstall {
         batches,
         summaries,
         preview,
+        live_record_warning,
     })
 }
 
@@ -1277,6 +1362,7 @@ fn apply_install(
         mut batches,
         summaries,
         preview,
+        live_record_warning,
     } = match prepared {
         Some(prepared) => prepared,
         None => preflight_install(
@@ -1295,6 +1381,7 @@ fn apply_install(
             peer_agent: None,
             tick_agent: None,
             state_copy,
+            live_record_warning,
         });
     }
     // Configuration has been validated at the staged root; every actual write
@@ -1453,6 +1540,7 @@ fn apply_install(
         peer_agent,
         tick_agent,
         state_copy,
+        live_record_warning,
     })
 }
 
@@ -2466,6 +2554,144 @@ mod tests {
         assert!(error.repair.unwrap().contains("provenant install"));
     }
 
+    /// A run store owned by one project, optionally holding a live attempt.
+    #[allow(dead_code)]
+    fn store_with_optional_lane(
+        root: &std::path::Path,
+        live: bool,
+    ) -> Result<
+        (
+            provenant_run::ExecutionContext,
+            provenant_run::RunStore,
+            provenant_core::CancelToken,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        use provenant_core::{
+            ActorId, AttemptId, CancelToken, Digest, OperationId, ProjectId, RootInputs, WallTime,
+        };
+        use provenant_os::clock::SystemClock;
+        use provenant_records::CanonicalV1;
+        use provenant_run::{ExecutionContext, PreparedRun, Request, RunStore};
+
+        let home = root.join("home");
+        let assets = root.join("assets");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&assets)?;
+        let mut inputs = RootInputs::new(home, assets);
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let context = ExecutionContext {
+            state_root: roots.state.clone(),
+            project_id: ProjectId::from_bytes([1; 16]),
+            actor_id: ActorId::from_bytes([2; 16]),
+            read_prompts: false,
+        };
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let store = RunStore::open(&context, &call)?;
+        if live {
+            store.create(
+                &PreparedRun {
+                    attempt_id: AttemptId::from_bytes([4; 16]),
+                    operation_id: OperationId::parse("live-record-warning")?,
+                    created_at: WallTime::from_micros(100)?,
+                    prompt: String::new(),
+                    request: serde_json::from_value(serde_json::json!({
+                        "schema_version": 1,
+                        "parent": null,
+                        "task": {
+                            "context": {"graph_id": "live-record", "node_id": "lane", "attempt": 1},
+                            "prompt_digest": CanonicalV1::file_digest(b""),
+                            "route": {"kind": "model", "provider": "codex", "model": "codex/fixture"},
+                            "authority_digest": Digest::from_bytes([0; 32]),
+                            "provider_timeout_seconds": 20,
+                            "delivery_id": null
+                        }
+                    }))?,
+                },
+                &call,
+            )?;
+        }
+        Ok((context, store, cancel))
+    }
+
+    #[test]
+    fn preflight_warns_and_names_live_attempts_when_record_format_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_core::AttemptId;
+        use provenant_os::clock::SystemClock;
+
+        let tmp = tempfile::tempdir()?;
+        let (_context, store, cancel) = store_with_optional_lane(tmp.path(), true)?;
+        let clock = SystemClock::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let warning = live_record_warning(
+            Some(provenant_records::LIVE_RECORD_FORMAT - 1),
+            &store,
+            &call,
+        )
+        .expect("a format change with live attempts warns");
+        assert!(warning.contains("format 0 → 1"), "{warning}");
+        assert!(warning.contains("live attempts:"), "{warning}");
+        assert!(
+            warning.contains(&AttemptId::from_bytes([4; 16]).to_string()),
+            "{warning}"
+        );
+        assert!(warning.contains("drain them"), "{warning}");
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_is_silent_when_format_matches() -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_os::clock::SystemClock;
+
+        let tmp = tempfile::tempdir()?;
+        let (_context, store, cancel) = store_with_optional_lane(tmp.path(), true)?;
+        let clock = SystemClock::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        assert!(
+            live_record_warning(Some(provenant_records::LIVE_RECORD_FORMAT), &store, &call)
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_is_silent_without_live_attempts() -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_os::clock::SystemClock;
+
+        let tmp = tempfile::tempdir()?;
+        let (_context, store, cancel) = store_with_optional_lane(tmp.path(), false)?;
+        let clock = SystemClock::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        assert!(
+            live_record_warning(
+                Some(provenant_records::LIVE_RECORD_FORMAT - 1),
+                &store,
+                &call
+            )
+            .is_none()
+        );
+        Ok(())
+    }
+
     #[test]
     fn failed_smoke_node_is_reported_by_verify() -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
@@ -2608,6 +2834,7 @@ mod tests {
             extra: Default::default(),
             schema_version: provenant_records::INSTALL_RECEIPT_SCHEMA_VERSION,
             state_format_version: provenant_records::STATE_FORMAT_VERSION,
+            live_record_format: Some(provenant_records::LIVE_RECORD_FORMAT),
             source_digest: SourceDigest::from_bytes([1; 32]),
             manifest_digest: FileDigest::from_bytes([2; 32]),
             asset_digest: SourceDigest::from_bytes([3; 32]),
