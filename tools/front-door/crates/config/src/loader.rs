@@ -52,6 +52,7 @@ impl Issue {
 struct Inspection<T> {
     snapshot: ResolvedConfig<T>,
     error: Option<ConfigError>,
+    issues: Vec<Issue>,
 }
 
 /// Invalid optional settings warn and select defaults. The reader, when present, must
@@ -171,6 +172,11 @@ pub(crate) fn validate_edit<T: DeserializeOwned + Serialize>(
     if let Some(previous) = &mut previous {
         normalise_tables(previous);
     }
+    let previous_issues = if before.is_some() {
+        inspect(before, sections)?.issues
+    } else {
+        Vec::new()
+    };
     let root = parse(text, &origin, "")?;
     let sites = sites(&root, text, &origin, "");
     let profile = root
@@ -206,6 +212,44 @@ pub(crate) fn validate_edit<T: DeserializeOwned + Serialize>(
         {
             continue;
         }
+        // The tolerant reader already classified the old findings. Remove only
+        // unchanged warned values from the validation copy, never the document.
+        let mut cleaned = Item::Table(user.clone());
+        let prefix = format!("domains.{}.", entry.name);
+        let mut removals = Vec::new();
+        for issue in &previous_issues {
+            let Some(relative) = issue.location.key_path.strip_prefix(&prefix) else {
+                continue;
+            };
+            if boundary_issue(issue, sections) {
+                continue;
+            }
+            let path: Vec<String> = relative.split('.').map(String::from).collect();
+            let old = previous_section.and_then(|section| item_at_path(section, &path));
+            let new = item_at_path(&Item::Table(user.clone()), &path);
+            if old
+                .as_ref()
+                .zip(new.as_ref())
+                .is_some_and(|(a, b)| a.to_string() == b.to_string())
+            {
+                removals.push(path);
+            }
+        }
+        removals.sort_by(|a, b| {
+            b.iter()
+                .map(|part| (part.parse::<usize>().unwrap_or(0), part))
+                .cmp(
+                    a.iter()
+                        .map(|part| (part.parse::<usize>().unwrap_or(0), part)),
+                )
+        });
+        removals.dedup();
+        for path in removals {
+            remove_item_path(&mut cleaned, &path);
+        }
+        let Some(user) = cleaned.as_table() else {
+            continue;
+        };
         // Complete the owner's compiled defaults before validating, so a
         // partial patch is checked as the effective section it would become.
         let mut table = parse((entry.defaults)(profile), &origin, "")?;
@@ -908,6 +952,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
     }
     Ok(Inspection {
         error: boundary_error,
+        issues: issues.clone(),
         snapshot: ResolvedConfig {
             schema_version: header.schema_version,
             profile: header.profile,
@@ -1627,6 +1672,24 @@ fn remove_array_member_at(item: &mut Item, offset: usize) -> Option<Vec<String>>
         if let Some(path) = found {
             *item = Item::Table(table);
             return Some(path);
+        }
+    }
+    None
+}
+fn item_at_path(item: &Item, path: &[String]) -> Option<Item> {
+    if path.is_empty() {
+        return Some(item.clone());
+    }
+    if let Some(items) = array(item) {
+        let index = path[0].parse::<usize>().ok()?;
+        return item_at_path(items.get(index)?, &path[1..]);
+    }
+    let table = table(item)?;
+    for length in (1..=path.len()).rev() {
+        if let Some(child) = table.get(&path[..length].join("."))
+            && let Some(found) = item_at_path(child, &path[length..])
+        {
+            return Some(found);
         }
     }
     None
