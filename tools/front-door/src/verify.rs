@@ -73,7 +73,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
     };
     let full_after = ports.verify_affected_full_after_duration();
     for warning in &full_after.warnings {
-        eprintln!("warning: {warning}");
+        let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
     }
     let declaration = ports.verify.clone();
     let tier = tier.unwrap_or(&declaration.default_tier).to_owned();
@@ -141,8 +141,93 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
         },
         None => None,
     };
+    // A lane's commits may exist only in its private object directory. Transfer
+    // them into an isolated store before either local checkout or slot staging.
+    let private_store = if let Some(private_commit) =
+        commit.as_ref().filter(|_| git.object_dir.is_some())
+    {
+        let transfer = || -> Result<(crate::scratch_dir::ScratchDir, PathBuf), String> {
+            let dir =
+                crate::scratch_dir::ScratchDir::new_in(&std::env::temp_dir(), "provenant-verify-")
+                    .map_err(|e| e.to_string())?;
+            let store = build::store::ensure(dir.path(), "verify").map_err(|e| e.to_string())?;
+            let source = SnapshotSource::Commit {
+                repo_common_dir: git.common_dir.clone(),
+                commit: private_commit.clone(),
+            };
+            let base = context
+                .verify_base
+                .as_ref()
+                .map(|base| base.commit.as_str());
+            let transfer = |base| {
+                build::snapshot::create_in_slot(
+                    &source,
+                    Some(&git),
+                    &store,
+                    dir.path(),
+                    "verify",
+                    base,
+                )
+            };
+            let with_base = transfer(base).is_ok();
+            if !with_base {
+                transfer(None).map_err(|e| e.to_string())?;
+            }
+            if with_base && let Some(base) = &context.verify_base {
+                let remote = base.remote_ref.trim_start_matches("refs/remotes/");
+                let mut update = std::process::Command::new(&git.git);
+                for (key, _) in std::env::vars_os() {
+                    if key.to_string_lossy().starts_with("GIT_") {
+                        update.env_remove(key);
+                    }
+                }
+                let output = update
+                    .arg("--git-dir")
+                    .arg(&store)
+                    .args([
+                        "update-ref",
+                        &format!("refs/remotes/{remote}"),
+                        &base.commit,
+                    ])
+                    .output()
+                    .map_err(|e| e.to_string())?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "cannot set temporary verify base: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+            }
+            Ok((dir, store))
+        };
+        match transfer() {
+            Ok(store) => Some(store),
+            Err(error) => {
+                return fail(
+                    COMMAND,
+                    Outcome::Unavailable,
+                    "VERIFY_ENGINE_UNAVAILABLE",
+                    &error,
+                    globals,
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let selection_objects = if commit.is_none() {
+        git.object_dir.clone()
+    } else {
+        None
+    };
+    let commit_repo = private_store
+        .as_ref()
+        .map_or(&git.common_dir, |(_, store)| store);
+    let checkout_project = private_store
+        .as_ref()
+        .map_or(project.as_path(), |(_, store)| store.as_path());
     let checkout = match commit.as_deref() {
-        Some(commit) => match DetachedCheckout::new(&project, &ports, commit, "verify") {
+        Some(commit) => match DetachedCheckout::new(checkout_project, &ports, commit, "verify") {
             Ok(checkout) => Some(checkout),
             Err(error) => {
                 return fail(
@@ -158,7 +243,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
     };
     let source = match &commit {
         Some(commit) => SnapshotSource::Commit {
-            repo_common_dir: git.common_dir.clone(),
+            repo_common_dir: commit_repo.clone(),
             commit: commit.clone(),
         },
         None => SnapshotSource::WorkingTree {
@@ -293,16 +378,16 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                 .as_deref()
                 .or(explicit_head.as_deref())
                 .unwrap_or("HEAD");
-            match provenant_select::select(&site.root.join(workspace), &base, head, &policy, &state, &project_key, SystemTime::now()) {
+            match provenant_select::select_with_object_dir(&site.root.join(workspace), &base, head, &policy, &state, &project_key, SystemTime::now(), if site.slot.is_none() { selection_objects.as_deref() } else { None }) {
                 Ok(selection) => extra.push((OsString::from(VERIFY_SELECTION), OsString::from(serde_json::json!({"packages": selection.packages, "full": selection.full, "reason": selection.reason.to_string()}).to_string()))),
-                Err(error) => eprintln!("warning: affected selection unavailable: {error}"),
+                Err(error) => { let _ = writeln!(std::io::stderr().lock(), "warning: affected selection unavailable: {error}"); },
             }
         }
         Ok(extra)
     });
     let priority = context.port.priority_for("tier");
     for warning in &priority.warnings {
-        eprintln!("warning: {warning}");
+        let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
     }
     let priority = match priority.value {
         provenant_config::BuildPriority::Interactive => Priority::Interactive,
@@ -606,7 +691,8 @@ impl Drop for DetachedCheckout {
             .arg(&self.path)
             .output();
         if !matches!(result, Ok(output) if output.status.success()) {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "warning: failed to remove temporary checkout {}",
                 self.path.display()
             );

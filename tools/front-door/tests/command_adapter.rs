@@ -1009,6 +1009,26 @@ fn verify_command_strategy_records_one_job_and_commit_uses_its_tree() -> Result 
     assert_eq!(rows[0]["strategy"], "command");
     assert_eq!(rows[0]["kind"]["tier"]["name"], "security/linux");
     assert_eq!(fs::read_to_string(rig.project.join("version"))?, "modified");
+
+    fs::write(
+        rig.project.join("verify-port.sh"),
+        "#!/bin/sh\ntest \"$(cat version)\" = modified\n",
+    )?;
+    let index_before = fs::read(rig.project.join(".git/index"))?;
+    let output = rig.command(&["verify", "security/linux", "--json"])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let rows = fs::read_to_string(rig.state.join("build/jobs.jsonl"))?;
+    let latest: Value = serde_json::from_str(rows.lines().last().ok_or("missing row")?)?;
+    let snapshot = latest["snapshot"].as_str().ok_or("missing snapshot")?;
+    let show = rig.execute(&git, &["show", &format!("{snapshot}:version")], None)?;
+    assert_eq!(code(&show), 0);
+    assert_eq!(show.stdout.bytes, b"modified");
+    assert_eq!(fs::read(rig.project.join(".git/index"))?, index_before);
     Ok(())
 }
 

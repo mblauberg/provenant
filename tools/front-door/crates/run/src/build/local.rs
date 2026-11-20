@@ -47,10 +47,13 @@ pub(super) fn execute_with_env(
         override_env,
         None,
         None,
-        None,
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "slot execution supplies its site and spawn callback"
+)]
 pub(super) fn execute_in_slot(
     job: &mut Job,
     ctx: &RunContext,
@@ -75,6 +78,10 @@ pub(super) fn execute_in_slot(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "shared execution boundary receives strategy options"
+)]
 fn execute_configured(
     job: &mut Job,
     ctx: &RunContext,
@@ -97,9 +104,30 @@ fn execute_configured(
             Box::new(result),
         ));
     }
+    if slot.is_none() && matches!(job.kind, super::JobKind::Tier { .. }) {
+        match &job.source {
+            super::SnapshotSource::WorkingTree { worktree, git } => {
+                match super::snapshot::working_tree_commit(
+                    worktree,
+                    git,
+                    &std::env::temp_dir().join("provenant-build-snapshots"),
+                ) {
+                    Ok(commit) => outcome.snapshot = Some(commit),
+                    Err(error) => {
+                        let warning =
+                            format!("could not capture verify working tree identity: {error}");
+                        super::warn_and_record(&mut outcome, &warning);
+                    }
+                }
+            }
+            super::SnapshotSource::Commit { commit, .. } => outcome.snapshot = Some(commit.clone()),
+        }
+    }
     let site = ExecSite {
         root: root.clone(),
-        head: slot.map(|(_, _, head, _)| head.to_owned()),
+        head: slot
+            .map(|(_, _, head, _)| head.to_owned())
+            .or_else(|| outcome.snapshot.clone()),
         slot: slot.map(|(index, _, _, _)| index).or(outcome.slot),
     };
     let mut env = override_env.unwrap_or_else(|| job.env.clone());
@@ -182,13 +210,18 @@ fn execute_configured(
         options.group_watchdog = false;
         options.terminate_grace = Duration::from_secs(10);
         options.cancel = Some(&ctx.cancel);
-        options.on_spawn = on_spawn.as_deref_mut();
+        let mut notify_spawn = |pid| {
+            if let Some(callback) = on_spawn.as_mut() {
+                callback(pid);
+            }
+        };
+        options.on_spawn = Some(&mut notify_spawn);
         let mut stdout_filter =
             slot.map(|(_, _, _, worktree)| StreamPathFilter::new(&root, worktree));
         let mut stderr_filter =
             slot.map(|(_, _, _, worktree)| StreamPathFilter::new(&root, worktree));
-        let mut stdout_handle = std::io::stdout();
-        let mut stderr_handle = std::io::stderr();
+        let stdout_handle = std::io::stdout();
+        let stderr_handle = std::io::stderr();
         let mut stdout_lock = stdout_handle.lock();
         let mut stderr_lock = stderr_handle.lock();
         match job.output {

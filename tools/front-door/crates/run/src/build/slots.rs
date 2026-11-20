@@ -199,6 +199,10 @@ impl PreparedSlot {
 }
 
 /// Prepare slot contents and retain both slot and port leases through execution.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "slot Git and process lifecycle boundary"
+)]
 pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot, StageFailure> {
     if let super::rust::RustClass::Local { exception } = super::rust::classify(job) {
         return Err(exception.into());
@@ -374,9 +378,10 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
     let _before = fingerprint_scan(&paths.target, started_at);
     let build_context = build_context(job, context);
     let mut env = super::rust::job_env(&job.env, &build_context, &paths);
-    let port_lease = match lane_port_plan(&context.state)
-        .and_then(|plan| plan.try_acquire().map_err(std::io::Error::other))
-    {
+    let port_lease = match lane_port_plan(&context.state).and_then(|plan| match plan {
+        Some(plan) => plan.try_acquire().map_err(std::io::Error::other),
+        None => Ok(None),
+    }) {
         Ok(Some(lease)) => {
             for (name, value) in lease.environment() {
                 super::set_env(&mut env, name, value);
@@ -679,6 +684,10 @@ fn stage_reset_failure(error: BuildError, reset: super::Reset) -> StageFailure {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "slot Git and process lifecycle boundary"
+)]
 fn ensure_slot_repo(paths: &SlotPaths, store: &Path) -> Result<(), Exception> {
     if !paths.repo.join(".git").exists() {
         let git = provenant_os::git::git_executable().ok_or(Exception::PoolUnavailable)?;
@@ -801,6 +810,10 @@ fn checkout_commit(repo: &Path, commit: &str) -> bool {
     )
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "slot Git and process lifecycle boundary"
+)]
 fn git_status(repo: &Path, args: &[&str]) -> bool {
     let Some(git) = provenant_os::git::git_executable() else {
         return false;
@@ -840,10 +853,9 @@ fn build_context(job: &Job, context: &RunContext) -> BuildContext {
         .iter()
         .find(|(key, _)| key == provenant_core::consumer_env::BUILD_CONTEXT)
         .and_then(|(_, value)| value.to_str())
+        && let Ok(context) = BuildContext::from_json(value)
     {
-        if let Ok(context) = BuildContext::from_json(value) {
-            return context;
-        }
+        return context;
     }
     let get = |name: &str| {
         job.env
@@ -1150,6 +1162,10 @@ fn remaining_recorded_members(
     Ok((known, unknown))
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "slot Git and process lifecycle boundary"
+)]
 fn terminate_recorded_group(marker: &JobMarker) -> std::io::Result<bool> {
     let observed = group_members(marker)?;
     if observed.is_empty() {
@@ -1222,7 +1238,7 @@ fn fingerprint_scan(target: &Path, started_at: SystemTime) -> Vec<(String, bool)
             let package_name = name
                 .rsplit_once('-')
                 .filter(|(_, hash)| hash.len() >= 8 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
-                .map_or(name, |(name, _)| name.to_owned());
+                .map_or_else(|| name.clone(), |(name, _)| name.to_owned());
             let rebuilt = package
                 .metadata()
                 .and_then(|metadata| metadata.modified())
@@ -1233,6 +1249,10 @@ fn fingerprint_scan(target: &Path, started_at: SystemTime) -> Vec<(String, bool)
     units.sort();
     units
 }
+#[allow(
+    clippy::disallowed_methods,
+    reason = "slot Git and process lifecycle boundary"
+)]
 fn slot_changes(repo: &Path) -> Option<SlotChanges> {
     let mut git = Command::new(provenant_os::git::git_executable()?);
     clear_git(&mut git);
@@ -1283,6 +1303,10 @@ pub fn local_outcome(outcome: &mut JobOutcome) {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "scratch Git and process fixtures"
+)]
 mod tests {
     use super::*;
     #[test]

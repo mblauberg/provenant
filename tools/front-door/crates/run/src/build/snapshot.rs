@@ -63,6 +63,7 @@ fn value(out: Output) -> Result<String, BuildError> {
         .map(|s| s.trim().to_owned())
         .map_err(error)
 }
+#[allow(clippy::disallowed_methods, reason = "bound Git snapshot subprocess")]
 fn bound(git: &GitBinding, worktree: &Path, index: &Path) -> Command {
     let mut c = Command::new(&git.git);
     clear_git(&mut c);
@@ -94,6 +95,49 @@ impl Drop for TempIndex {
     }
 }
 
+/// Capture a working tree without changing its index or refs.
+pub fn working_tree_commit(
+    worktree: &Path,
+    git: &GitBinding,
+    tmp: &Path,
+) -> Result<String, BuildError> {
+    fs::create_dir_all(tmp).map_err(io_error)?;
+    let seq = format!(
+        "{}-{}-{}",
+        super::ledger::now_unix_ms(),
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let index = TempIndex(tmp.join(format!("index-{seq}")));
+    if git.index_file.exists() {
+        fs::copy(&git.index_file, &index.0).map_err(io_error)?;
+    } else {
+        checked(bound(git, worktree, &index.0).args(["read-tree", "HEAD"]))?;
+    }
+    checked(bound(git, worktree, &index.0).args(["add", "-A"]))?;
+    let tree = value(checked(bound(git, worktree, &index.0).arg("write-tree"))?)?;
+    let head = bound(git, worktree, &index.0)
+        .args(["rev-parse", "-q", "--verify", "HEAD^{commit}"])
+        .output()
+        .map_err(io_error)?;
+    let mut command = bound(git, worktree, &index.0);
+    command.arg("commit-tree").arg(tree);
+    if head.status.success() {
+        command.arg("-p").arg(value(head)?);
+    } else if head.status.code() != Some(1) {
+        return Err(error(String::from_utf8_lossy(&head.stderr)));
+    }
+    command
+        .args(["-m", "provenant build snapshot"])
+        .env("GIT_AUTHOR_NAME", "Provenant")
+        .env("GIT_AUTHOR_EMAIL", "build@provenant.invalid")
+        .env("GIT_AUTHOR_DATE", "@0 +0000")
+        .env("GIT_COMMITTER_NAME", "Provenant")
+        .env("GIT_COMMITTER_EMAIL", "build@provenant.invalid")
+        .env("GIT_COMMITTER_DATE", "@0 +0000");
+    value(checked(&mut command)?)
+}
+
 /// Pin a commit source without a verify base.
 pub fn create(
     source: &SnapshotSource,
@@ -111,9 +155,13 @@ pub fn create(
 }
 
 /// Create a slot snapshot and pin it, optionally alongside a verify base.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Git snapshot transfer subprocess"
+)]
 pub fn create_in_slot(
     source: &SnapshotSource,
-    _binding: Option<&GitBinding>,
+    binding: Option<&GitBinding>,
     store: &Path,
     tmp: &Path,
     owner: &str,
@@ -136,49 +184,26 @@ pub fn create_in_slot(
     let ref_name = format!("refs/snapshots/{owner}/{seq}");
     let base_ref = format!("refs/bases/{owner}/{seq}");
     let (commit, source_dir, git_bin, object_dir) = match source {
-        SnapshotSource::WorkingTree { worktree, git } => {
-            let index = TempIndex(tmp.join(format!("index-{seq}")));
-            if git.index_file.exists() {
-                fs::copy(&git.index_file, &index.0).map_err(io_error)?;
-            } else {
-                checked(bound(git, worktree, &index.0).args(["read-tree", "HEAD"]))?;
-            }
-            checked(bound(git, worktree, &index.0).args(["add", "-A"]))?;
-            let tree = value(checked(bound(git, worktree, &index.0).arg("write-tree"))?)?;
-            let head = bound(git, worktree, &index.0)
-                .args(["rev-parse", "-q", "--verify", "HEAD^{commit}"])
-                .output()
-                .map_err(io_error)?;
-            let mut command = bound(git, worktree, &index.0);
-            command.arg("commit-tree").arg(tree);
-            if head.status.success() {
-                command.arg("-p").arg(value(head)?);
-            } else if head.status.code() != Some(1) {
-                return Err(error(String::from_utf8_lossy(&head.stderr)));
-            }
-            command
-                .args(["-m", "provenant build snapshot"])
-                .env("GIT_AUTHOR_NAME", "Provenant")
-                .env("GIT_AUTHOR_EMAIL", "build@provenant.invalid")
-                .env("GIT_AUTHOR_DATE", "@0 +0000")
-                .env("GIT_COMMITTER_NAME", "Provenant")
-                .env("GIT_COMMITTER_EMAIL", "build@provenant.invalid")
-                .env("GIT_COMMITTER_DATE", "@0 +0000");
-            (
-                value(checked(&mut command)?)?,
-                git.git_dir.clone(),
-                git.git.clone(),
-                git.object_dir.clone(),
-            )
-        }
+        SnapshotSource::WorkingTree { worktree, git } => (
+            working_tree_commit(worktree, git, tmp)?,
+            git.git_dir.clone(),
+            git.git.clone(),
+            git.object_dir.clone(),
+        ),
         SnapshotSource::Commit {
             repo_common_dir,
             commit,
         } => (
             commit.clone(),
-            repo_common_dir.clone(),
-            provenant_os::git::git_executable().unwrap_or_else(|| PathBuf::from("/usr/bin/git")),
-            None,
+            binding.map_or_else(|| repo_common_dir.clone(), |git| git.git_dir.clone()),
+            binding.map_or_else(
+                || {
+                    provenant_os::git::git_executable()
+                        .unwrap_or_else(|| PathBuf::from("/usr/bin/git"))
+                },
+                |git| git.git.clone(),
+            ),
+            binding.and_then(|git| git.object_dir.clone()),
         ),
     };
     let lock_path = store.with_extension("lock");
@@ -239,6 +264,7 @@ pub fn create_in_slot(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "scratch Git fixtures")]
 mod tests {
     use super::*;
     #[test]
@@ -300,5 +326,88 @@ mod tests {
         .unwrap();
         assert_eq!(a.commit, b.commit);
         assert_eq!(fs::read(index).unwrap(), before);
+    }
+    #[test]
+    fn commit_transfer_reads_private_lane_objects_without_publishing_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["config", "user.email", "test@example.invalid"]);
+        fs::write(repo.join("file"), "private").unwrap();
+        run(&["add", "file"]);
+        run(&["commit", "-qm", "base"]);
+        let tree = run(&["rev-parse", "HEAD^{tree}"]);
+        let objects = tmp.path().join("objects");
+        fs::create_dir_all(objects.join("info")).unwrap();
+        fs::write(
+            objects.join("info/alternates"),
+            format!("{}\n", repo.join(".git/objects").display()),
+        )
+        .unwrap();
+        let out = Command::new("git")
+            .current_dir(&repo)
+            .env("GIT_OBJECT_DIRECTORY", &objects)
+            .args(["commit-tree", &tree, "-m", "private commit"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let commit = String::from_utf8(out.stdout).unwrap().trim().to_owned();
+        assert!(
+            !Command::new("git")
+                .current_dir(&repo)
+                .args(["cat-file", "-e", &commit])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let binding = GitBinding {
+            git: "git".into(),
+            git_dir: repo.join(".git"),
+            common_dir: repo.join(".git"),
+            object_dir: Some(objects),
+            index_file: repo.join(".git/index"),
+            config_global: None,
+        };
+        let source = SnapshotSource::Commit {
+            repo_common_dir: binding.common_dir.clone(),
+            commit: commit.clone(),
+        };
+        let store = super::super::store::ensure(tmp.path(), "private").unwrap();
+        create(&source, Some(&binding), &store, "verify").unwrap();
+        let out = Command::new("git")
+            .arg("--git-dir")
+            .arg(store)
+            .args(["show", &format!("{commit}:file")])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"private");
+        assert!(
+            !Command::new("git")
+                .current_dir(repo)
+                .args(["cat-file", "-e", &commit])
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 }

@@ -365,9 +365,15 @@ impl Executor for HostProbeExecutor<'_> {
             stderr_filter: options
                 .stderr_filter
                 .map(|filter| filter as &mut dyn CaptureFilter),
-            on_spawn: options.on_spawn,
-            stdout_writer: options.stdout_writer,
-            stderr_writer: options.stderr_writer,
+            on_spawn: options
+                .on_spawn
+                .map(|callback| callback as &mut dyn FnMut(u32)),
+            stdout_writer: options
+                .stdout_writer
+                .map(|writer| writer as &mut dyn std::io::Write),
+            stderr_writer: options
+                .stderr_writer
+                .map(|writer| writer as &mut dyn std::io::Write),
             cancel: options.cancel,
             timeout: options.timeout,
             wait_for_completion: options.wait_for_completion,

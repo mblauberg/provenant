@@ -2042,6 +2042,25 @@ fn darwin_cwd(pid: i32) -> Result<CwdObservation, PidError> {
     }
 }
 
+/// Signal a negative process-group ID; callers must validate the recorded group leader.
+pub(crate) fn signal_process_group(pgid: i32, signal: ProcessSignal) -> io::Result<()> {
+    if pgid <= 0 {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    let signal = match signal {
+        ProcessSignal::Stop => libc::SIGSTOP,
+        ProcessSignal::Continue => libc::SIGCONT,
+        ProcessSignal::Terminate => libc::SIGTERM,
+        ProcessSignal::Kill => libc::SIGKILL,
+    };
+    // SAFETY: pgid is positive and negation therefore targets only that group.
+    if unsafe { libc::kill(-pgid, signal) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2539,24 +2558,5 @@ mod tests {
             decode_darwin_path(42, &malformed),
             Err(PidError::MalformedCwdPath { pid: 42, .. })
         ));
-    }
-}
-
-/// Signal a negative process-group ID; callers must validate the recorded group leader.
-pub(crate) fn signal_process_group(pgid: i32, signal: ProcessSignal) -> io::Result<()> {
-    if pgid <= 0 {
-        return Err(io::Error::from_raw_os_error(libc::EINVAL));
-    }
-    let signal = match signal {
-        ProcessSignal::Stop => libc::SIGSTOP,
-        ProcessSignal::Continue => libc::SIGCONT,
-        ProcessSignal::Terminate => libc::SIGTERM,
-        ProcessSignal::Kill => libc::SIGKILL,
-    };
-    // SAFETY: pgid is positive and negation therefore targets only that group.
-    if unsafe { libc::kill(-pgid, signal) } == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
     }
 }

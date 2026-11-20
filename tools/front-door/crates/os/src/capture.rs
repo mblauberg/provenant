@@ -494,6 +494,7 @@ impl Pump<'_> {
             return;
         };
         let mut buffer = [0; INPUT_CHUNK_LIMIT];
+        let mut writer: Option<&mut dyn Write> = None;
         match reader.read(&mut buffer) {
             Ok(0) => {
                 self.frames

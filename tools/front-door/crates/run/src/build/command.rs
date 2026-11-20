@@ -77,7 +77,13 @@ pub(super) fn execute(
         .collect();
     let waited_ms = outcome.waited_ms;
     let result = super::local::execute_with_env(
-        job, ctx, outcome, ExecPlace::Local, None, waited_ms, Some(env),
+        job,
+        ctx,
+        outcome,
+        ExecPlace::Local,
+        None,
+        waited_ms,
+        Some(env),
     );
     for (step, original) in job.steps.iter_mut().zip(originals) {
         step.argv = original;
