@@ -2916,6 +2916,71 @@ mod tests {
 
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
+    fn prepare_from_any_port_layer_runs_in_the_seed_checkout_before_cargo() {
+        for layer in ["host", "host_project", "project"] {
+            let temp = tempfile::tempdir().unwrap();
+            let state = tempfile::tempdir().unwrap();
+            let (project, commit, marker) = prepared_project(temp.path());
+            let script = temp.path().join("generate.sh");
+            let prepare = vec![vec![script.to_string_lossy().into_owned()]];
+            match layer {
+                "host" => {
+                    fs::write(
+                        state.path().join("ports.json"),
+                        serde_json::to_vec(&serde_json::json!({
+                            "schema_version": 2,
+                            "build": {"prepare": prepare},
+                        }))
+                        .unwrap(),
+                    )
+                    .unwrap();
+                }
+                "host_project" => {
+                    let key = provenant_config::project_key_for(&project).unwrap();
+                    let keyed = state.path().join("projects").join(key);
+                    fs::create_dir_all(&keyed).unwrap();
+                    fs::write(
+                        keyed.join("ports.json"),
+                        serde_json::to_vec(&serde_json::json!({
+                            "schema_version": 2,
+                            "build": {"prepare": prepare},
+                        }))
+                        .unwrap(),
+                    )
+                    .unwrap();
+                }
+                "project" => write_prepare(&project, prepare),
+                other => panic!("unexpected layer {other}"),
+            }
+            let stage = temp.path().join("stage");
+            fs::create_dir(&stage).unwrap();
+            let identity = identity("prepare-key", &commit);
+            build_into(
+                state.path(),
+                &stage,
+                &project,
+                Path::new("."),
+                &commit,
+                "prepare-key",
+                &identity.cargo_profile,
+            )
+            .unwrap_or_else(|error| panic!("{layer} prepare build failed: {error}"));
+            assert_eq!(
+                fs::read_to_string(&marker).unwrap_or_else(|error| {
+                    panic!("{layer} prepare did not run in the checkout: {error}")
+                }),
+                stage
+                    .canonicalize()
+                    .unwrap()
+                    .join("checkout")
+                    .to_string_lossy(),
+                "{layer} prepare must run from the checkout root"
+            );
+        }
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
     fn failing_prepare_fails_the_build_and_records_prepare_failed_with_bounded_tail() {
         let temp = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();

@@ -725,6 +725,60 @@ fn config_show_ports(project: &std::path::Path, state: &std::path::Path) -> serd
     })
 }
 
+/// The effective `build.prepare` list with the leaf's own source. A port's
+/// label follows its highest leaf, which may be a different key, so read the
+/// provenance of `build.prepare` rather than `table.build.source`.
+fn config_ports_prepare(table: &provenant_config::PortTable) -> serde_json::Value {
+    let source = table
+        .provenance()
+        .get("build.prepare")
+        .copied()
+        .unwrap_or(table.build.source);
+    serde_json::json!({
+        "value": table.build.prepare,
+        "source": provenant_config::port_source_layer(source),
+    })
+}
+
+#[cfg(test)]
+mod config_ports_tests {
+    #[test]
+    fn reports_effective_prepare_with_its_own_leaf_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        let key = provenant_config::project_key_for(&project).unwrap();
+        let keyed = state.join("projects").join(key);
+        std::fs::create_dir_all(&keyed).unwrap();
+        std::fs::write(
+            state.join("ports.json"),
+            r#"{"build":{"strategy":"lane"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            keyed.join("ports.json"),
+            r#"{"build":{"prepare":[["node","gen.mjs"]]}}"#,
+        )
+        .unwrap();
+        let table = provenant_config::PortTable::read_for(Some(&project), &state).unwrap();
+        let value = super::config_ports_prepare(&table);
+        assert_eq!(value["source"], "host_project");
+        assert_eq!(value["value"][0][1], "gen.mjs");
+
+        // A higher layer setting a different leaf must not relabel prepare.
+        std::fs::write(
+            project.join(".provenant/ports.json"),
+            r#"{"build":{"strategy":"lane"}}"#,
+        )
+        .unwrap();
+        let table = provenant_config::PortTable::read_for(Some(&project), &state).unwrap();
+        assert_eq!(super::config_ports_prepare(&table)["source"], "host_project");
+    }
+}
+
 fn config_setting_value(
     config: &provenant_config::ResolvedConfig<provenant_cli::domains::Domains>,
     sections: &provenant_config::DomainSections<provenant_cli::domains::Domains>,
@@ -772,7 +826,11 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                         })
                     })
                     .collect();
-                serde_json::json!({ "schema_version": table.schema_version, "ports": ports })
+                serde_json::json!({
+                    "schema_version": table.schema_version,
+                    "ports": ports,
+                    "build.prepare": config_ports_prepare(&table),
+                })
             }
             ConfigAction::Detect => serde_json::to_value(config::detect::detect(&context.project))?,
             ConfigAction::Path => {
