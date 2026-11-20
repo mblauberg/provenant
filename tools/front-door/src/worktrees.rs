@@ -4358,6 +4358,7 @@ mod gc_preview_tests {
         data.build_dirs.budget_source = "host".into();
         data.build_dirs.target_idle_setting = "30d".into();
         data.build_dirs.target_idle_source = "compiled default".into();
+        data.build_dirs.byte_method = provenant_run::build_dir_gc::ByteMethod::AllocatedFallback;
         data.build_dirs.busy.push("/cache/b/target".into());
         data.build_dirs.recent.push("/cache/c/target".into());
         for (dry_run, expected, verb) in [
@@ -4404,29 +4405,44 @@ mod gc_preview_tests {
     #[test]
     fn gc_summary_names_the_cargo_target_byte_figure() {
         let mut data = GcData::default();
+        data.report.dry_run = true;
         data.build_dirs.bytes = 4096;
         data.build_dirs.cache_bytes = 8192;
         data.build_dirs.budget_bytes = 16384;
-        data.build_dirs.byte_method = provenant_run::build_dir_gc::ByteMethod::AllocatedFallback;
-        let summary = gc_data_summary(&data);
-        assert!(
-            summary.contains("4096 allocated bytes reclaimable"),
-            "{summary}"
-        );
-        assert!(
-            summary.contains("private bytes unavailable; reporting allocated bytes"),
-            "{summary}"
-        );
-
-        data.build_dirs.byte_method = provenant_run::build_dir_gc::ByteMethod::Private;
-        let summary = gc_data_summary(&data);
-        assert!(
-            summary.contains("4096 private bytes reclaimable"),
-            "{summary}"
-        );
-        assert!(!summary.contains("private bytes unavailable"), "{summary}");
-        let json = serde_json::to_value(gc_result_data(&data, false)).unwrap_or_default();
-        assert_eq!(json["build_dir_byte_method"], "private");
+        for (method, label, warns, json_name) in [
+            (
+                provenant_run::build_dir_gc::ByteMethod::AllocatedFallback,
+                "allocated bytes",
+                true,
+                "allocated_fallback",
+            ),
+            (
+                provenant_run::build_dir_gc::ByteMethod::Private,
+                "private bytes",
+                false,
+                "private",
+            ),
+            (
+                provenant_run::build_dir_gc::ByteMethod::Unmeasured,
+                "unmeasured bytes",
+                false,
+                "unmeasured",
+            ),
+        ] {
+            data.build_dirs.byte_method = method;
+            let summary = gc_data_summary(&data);
+            assert!(
+                summary.contains(&format!("4096 {label} reclaimable")),
+                "{summary}"
+            );
+            assert_eq!(
+                summary.contains("private bytes unavailable; reporting allocated bytes"),
+                warns,
+                "{summary}"
+            );
+            let json = serde_json::to_value(gc_result_data(&data, false)).unwrap_or_default();
+            assert_eq!(json["build_dir_byte_method"], json_name);
+        }
     }
 
     #[test]

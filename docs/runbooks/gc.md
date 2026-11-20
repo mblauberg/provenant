@@ -98,7 +98,13 @@ incomplete previews say so. Seeded targets are clones whose allocated bytes
 include blocks shared with the seed, so private bytes keep the preview from
 overstating what removal frees. The private measure is taken in the same
 bounded census and resumes with it; where the filesystem cannot report private
-bytes, GC says so, reports allocated bytes instead and never reports zero.
+bytes, GC says so, reports allocated bytes instead and never reports zero. The
+budget compares that summed private figure with the configured byte cap; it is
+not a measure of volume occupancy. Because private bytes exclude blocks shared
+with a seed, the sum can stay below the cap while those shared blocks still
+occupy disk, so collection can continue past what occupancy alone would require.
+Eviction remains least-recently-used: the byte figure does not rank targets by
+bytes freed.
 Targets of the removed `lanes.cargo_target = "shared"` mode under
 `~/Library/Caches/provenant-shared-cargo/` count toward both the budget and the
 free-space sweep until full GC retires them. A preview probes and measures each

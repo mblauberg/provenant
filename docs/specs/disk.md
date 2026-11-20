@@ -84,24 +84,27 @@ stopped measurement resumes from the sweep cursor, so each pass makes progress.
 Lane caches and seed generation targets carry Cargo's `CACHEDIR.TAG`; no
 removal depends on it.
 
-`provenant gc` reports a Cargo target's reclaimable bytes as private bytes --
-the blocks no other clone shares -- where the filesystem can report them (APFS
-private size). Seeded worktree targets are clones: their allocated figure
-counts blocks shared with the seed that removal does not free, so private bytes
-keep the preview from overstating reclaimable space and keep the budget from
-favouring targets that free little. The measure is taken inside the target
-census walk at each entry, so it adds no separate full-tree pass, stays within
-`gc.sweep_budget` and resumes with the census cursor. Where the filesystem
-cannot report private bytes, the report says so, reports allocated bytes
-instead and never reports zero. The same figure feeds the budget decision and
-the per-target reclaimable totals; the report names which figure it carries.
-- Why: a clone's allocated bytes are not the space its deletion recovers, and
-  an unmeasured or zero fallback would mislead the same decision.
-
 - Why: worktrees removed without a lane settlement, and chair or hand-made
   worktrees, otherwise keep their targets forever while the cache stays under
   budget; a fixed measurement cap starved every class after the first large
   cache; a seeded target's cloned file times made it look idle at once.
+
+`provenant gc` reports a Cargo target's reclaimable bytes as private bytes --
+the blocks no other clone shares -- where the filesystem can report them (APFS
+private size). Seeded worktree targets are clones: their allocated figure counts
+blocks shared with the seed that removal does not free, so private bytes keep
+the preview from overstating reclaimable space. The measure is taken inside the
+target census walk at each entry, so it adds no separate full-tree pass, stays
+within `gc.sweep_budget` and resumes with the census cursor. Where the
+filesystem cannot report private bytes, the report says so, reports allocated
+bytes instead and never reports zero. The same figure feeds the budget
+arithmetic and the per-target reclaimable totals; the report names which figure
+it carries. The budget compares that sum with the configured byte cap, not
+volume occupancy: private bytes exclude blocks shared with a seed, so the sum
+can stay below the cap while shared blocks still occupy disk. Eviction stays
+least-recently-used; the byte figure does not rank targets by bytes freed.
+- Why: a clone's allocated bytes are not the space its deletion recovers, and
+  an unmeasured or zero fallback would mislead the same decision.
 
 An EPERM process with complete descriptor evidence and no observed cwd or
 descriptor beneath a candidate produces one aggregate warning with a count and

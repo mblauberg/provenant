@@ -25,9 +25,11 @@
 //! elsewhere. Seeded targets are clones: their allocated figure counts blocks
 //! shared with the seed, which deletion does not free. The same walk observes
 //! private size at every entry, so the figure costs no extra pass and resumes
-//! with the census; it feeds both the reclaimable totals and the byte figure
-//! used to decide which targets to collect. The report names which figure it
-//! carries, and never reports zero when private size is unavailable. Both
+//! with the census; it feeds both the reclaimable totals and the budget
+//! arithmetic. Eviction stays least-recently-used, and the private sum can
+//! understate volume occupancy where clones share blocks. The report names
+//! which figure it carries, and never reports zero when private size is
+//! unavailable. Both
 //! target roots are counted, including payload outside a recognised profile,
 //! so incomplete seeds and first builds cannot escape the budget. Explicit GC
 //! and launch admission share the same collector.
@@ -132,19 +134,34 @@ impl LastUse {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ByteMethod {
+    /// No target was measured. The identity when combining reports: a neutral
+    /// report contributes no figure and no fallback warning.
+    #[default]
+    Unmeasured,
     /// Every observation reported a clone-private size.
     Private,
     /// At least one observation had no private size, so allocated bytes are
-    /// reported instead. This is the default until a census measures a target.
-    #[default]
+    /// reported instead.
     AllocatedFallback,
 }
 
 impl ByteMethod {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Unmeasured => "unmeasured bytes",
             Self::Private => "private bytes",
             Self::AllocatedFallback => "allocated bytes",
+        }
+    }
+
+    /// Combine two censuses: a fallback anywhere wins, private survives only
+    /// when every contribution is private, and an unmeasured contribution is
+    /// the identity.
+    pub fn combine(self, next: Self) -> Self {
+        match (self, next) {
+            (Self::AllocatedFallback, _) | (_, Self::AllocatedFallback) => Self::AllocatedFallback,
+            (Self::Private, Self::Private) => Self::Private,
+            (Self::Unmeasured, other) | (other, Self::Unmeasured) => other,
         }
     }
 }
@@ -156,12 +173,14 @@ fn observed_bytes(private: Option<u64>, allocated: u64) -> (u64, bool) {
 }
 
 /// The census reports private bytes only when every measured target reported a
-/// private size. One fallback target makes the whole figure allocated bytes.
+/// private size. One fallback target makes the whole figure allocated bytes;
+/// no targets at all leave it unmeasured rather than claiming a fallback.
 fn census_byte_method(candidates: &[Candidate]) -> ByteMethod {
-    if !candidates.is_empty()
-        && candidates
-            .iter()
-            .all(|candidate| candidate.private_available)
+    if candidates.is_empty() {
+        ByteMethod::Unmeasured
+    } else if candidates
+        .iter()
+        .all(|candidate| candidate.private_available)
     {
         ByteMethod::Private
     } else {
@@ -1526,6 +1545,7 @@ pub fn collect_with_progress(
     }
     let mut snapshot = load_survey_snapshot(host, home, resume_detail, epoch, &mut report);
     let mut survey = survey_with_progress(home, &mut free, &mut snapshot, should_stop);
+    let initial_byte_method = survey.report.byte_method;
     survey.report.budget_bytes = budget.bytes;
     survey.report.budget_setting = budget.setting.clone();
     survey.report.budget_source = budget.source.as_str().to_owned();
@@ -1626,6 +1646,7 @@ pub fn collect_with_progress(
                 budget_bytes: budget.bytes,
                 budget_setting: budget.setting.clone(),
                 budget_source: budget.source.as_str().to_owned(),
+                byte_method: initial_byte_method,
                 ..Report::default()
             };
             if protection.unobserved || current_protection.unobserved {
@@ -1686,9 +1707,7 @@ pub fn collect_with_progress(
                 let next_report = std::mem::take(&mut next.report);
                 aggregate.warnings.extend(next_report.warnings);
                 aggregate.errors.extend(next_report.errors);
-                if next_report.byte_method == ByteMethod::AllocatedFallback {
-                    aggregate.byte_method = ByteMethod::AllocatedFallback;
-                }
+                aggregate.byte_method = aggregate.byte_method.combine(next_report.byte_method);
                 if !next.complete {
                     aggregate.cache_bytes = next.total;
                     aggregate.measurement_skipped = true;
@@ -1719,9 +1738,7 @@ pub fn collect_with_progress(
 
 fn merge_report(into: &mut Report, mut next: Report) {
     into.bytes = into.bytes.saturating_add(next.bytes);
-    if next.byte_method == ByteMethod::AllocatedFallback {
-        into.byte_method = ByteMethod::AllocatedFallback;
-    }
+    into.byte_method = into.byte_method.combine(next.byte_method);
     into.cache_bytes = next.cache_bytes;
     into.removed.append(&mut next.removed);
     into.busy.append(&mut next.busy);
@@ -3864,7 +3881,7 @@ mod tests {
             owner: None,
             last_use: LastUse::FileTimes,
         };
-        assert_eq!(census_byte_method(&[]), ByteMethod::AllocatedFallback);
+        assert_eq!(census_byte_method(&[]), ByteMethod::Unmeasured);
         assert_eq!(
             census_byte_method(&[candidate(true), candidate(true)]),
             ByteMethod::Private
@@ -3875,6 +3892,220 @@ mod tests {
         );
         assert_eq!(ByteMethod::Private.as_str(), "private bytes");
         assert_eq!(ByteMethod::AllocatedFallback.as_str(), "allocated bytes");
+        assert_eq!(ByteMethod::Unmeasured.as_str(), "unmeasured bytes");
+    }
+
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody
+    #[test]
+    fn merge_report_combines_byte_methods_with_unmeasured_identity() {
+        let report = |byte_method| Report {
+            byte_method,
+            ..Report::default()
+        };
+        for (into, next, expected) in [
+            (
+                ByteMethod::Unmeasured,
+                ByteMethod::Unmeasured,
+                ByteMethod::Unmeasured,
+            ),
+            (
+                ByteMethod::Unmeasured,
+                ByteMethod::Private,
+                ByteMethod::Private,
+            ),
+            (
+                ByteMethod::Private,
+                ByteMethod::Unmeasured,
+                ByteMethod::Private,
+            ),
+            (
+                ByteMethod::Private,
+                ByteMethod::Private,
+                ByteMethod::Private,
+            ),
+            (
+                ByteMethod::Private,
+                ByteMethod::AllocatedFallback,
+                ByteMethod::AllocatedFallback,
+            ),
+            (
+                ByteMethod::AllocatedFallback,
+                ByteMethod::Private,
+                ByteMethod::AllocatedFallback,
+            ),
+            (
+                ByteMethod::Unmeasured,
+                ByteMethod::AllocatedFallback,
+                ByteMethod::AllocatedFallback,
+            ),
+        ] {
+            let mut aggregate = report(into);
+            merge_report(&mut aggregate, report(next));
+            assert_eq!(aggregate.byte_method, expected, "{into:?} + {next:?}");
+        }
+    }
+
+    fn collect_empty_budget_report(
+        fixture: &Fixture,
+        state: &tempfile::TempDir,
+        dry_run: bool,
+        epoch: &str,
+    ) -> Report {
+        let budget = provenant_config::CargoCacheBudget {
+            bytes: 0,
+            setting: "0".into(),
+            source: provenant_records::LimitSource::Default,
+        };
+        let mut stop = || false;
+        let mut refresh = TargetProtection::default;
+        collect_with_progress(
+            state.path(),
+            fixture.home.path(),
+            limits(0, 0),
+            dry_run,
+            &budget,
+            &TargetProtection::default(),
+            None,
+            epoch,
+            &mut stop,
+            &mut refresh,
+        )
+        .unwrap()
+    }
+
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody
+    #[test]
+    fn apply_report_keeps_the_survey_byte_method() {
+        let preview_fixture = Fixture::new();
+        preview_fixture.profile('a', "debug", 4096, 100);
+        let preview_state =
+            provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        fs::set_permissions(preview_state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let preview =
+            collect_empty_budget_report(&preview_fixture, &preview_state, true, "0000000000000001");
+        assert_eq!(preview.removed.len(), 1);
+        assert!(preview.bytes > 0);
+
+        let apply_fixture = Fixture::new();
+        apply_fixture.profile('a', "debug", 4096, 100);
+        let apply_state =
+            provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        fs::set_permissions(apply_state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let applied =
+            collect_empty_budget_report(&apply_fixture, &apply_state, false, "0000000000000002");
+        assert_eq!(applied.removed.len(), 1);
+        assert_eq!(applied.bytes, preview.bytes);
+        assert_eq!(applied.byte_method, preview.byte_method);
+    }
+
+    /// A claimed digest cache holding one target with two flat files.
+    fn claimed_target(fixture: &Fixture) -> (PayloadTree, Candidate, Metadata) {
+        let digest = "a".repeat(64);
+        let cache_path = fixture.cache('a');
+        let target_path = cache_path.join("target");
+        fs::create_dir_all(&target_path).unwrap();
+        fs::write(target_path.join("file-0"), vec![1_u8; 512]).unwrap();
+        fs::write(target_path.join("file-1"), vec![2_u8; 1024]).unwrap();
+        let root = Directory::open_anchor(&cache_root(fixture.home.path())).unwrap();
+        let cache_metadata = root.metadata_at(OsStr::new(&digest), false).unwrap();
+        let tree = PayloadTree::claim(&root, OsStr::new(&digest), &cache_metadata).unwrap();
+        let target_metadata = tree.metadata_at(OsStr::new("target")).unwrap();
+        let candidate = Candidate {
+            kind: CacheKind::Lane,
+            cache: digest,
+            target: "target".into(),
+            display: target_path.clone(),
+            bytes: 0,
+            private_available: false,
+            newest: target_metadata.modified_ns,
+            target_modified_ns: target_metadata.modified_ns,
+            identity: (target_metadata.device, target_metadata.inode),
+            owner: None,
+            last_use: LastUse::FileTimes,
+        };
+        (tree, candidate, target_metadata)
+    }
+
+    /// The figure an independent walk of the same flat tree observes: each
+    /// entry's private size where the filesystem reports one, else allocated.
+    fn expected_flat_bytes(tree: &PayloadTree, target_metadata: &Metadata) -> (u64, bool) {
+        let root_private = tree
+            .directory()
+            .private_size_at(OsStr::new("target"))
+            .ok()
+            .flatten();
+        let mut bytes = root_private.unwrap_or(target_metadata.allocated);
+        let mut private_available = root_private.is_some();
+        let target = tree.child(OsStr::new("target")).unwrap();
+        for name in target.entries().unwrap().map(|name| name.unwrap()) {
+            let (entry_bytes, has_private) = observed_bytes(
+                target.directory().private_size_at(&name).ok().flatten(),
+                target.metadata_at(&name).unwrap().allocated,
+            );
+            bytes = bytes.saturating_add(entry_bytes);
+            private_available &= has_private;
+        }
+        (bytes, private_available)
+    }
+
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody
+    #[test]
+    fn private_available_survives_measure_interrupt_and_resume() {
+        let fixture = Fixture::new();
+        let (tree, candidate, target_metadata) = claimed_target(&fixture);
+        let mut stops = [false, false, true].into_iter();
+        let mut stop = || stops.next().unwrap_or(true);
+        let MeasureOutcome::Interrupted(progress) =
+            measure_resumable(&tree, &candidate, &target_metadata, None, &mut stop).unwrap()
+        else {
+            panic!("measurement did not interrupt");
+        };
+        let encoded = serde_json::to_vec(&progress).unwrap();
+        let restored: MeasureProgress = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(restored.private_available, progress.private_available);
+        let mut never = || false;
+        let MeasureOutcome::Complete {
+            bytes,
+            private_available,
+            ..
+        } = measure_resumable(
+            &tree,
+            &candidate,
+            &target_metadata,
+            Some(restored),
+            &mut never,
+        )
+        .unwrap()
+        else {
+            panic!("resumed measurement did not complete");
+        };
+        let (expected_bytes, expected_private) = expected_flat_bytes(&tree, &target_metadata);
+        assert_eq!(bytes, expected_bytes);
+        assert_eq!(private_available, expected_private);
+        assert_eq!(private_available, progress.private_available);
+    }
+
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody
+    #[test]
+    fn measure_accumulates_private_size_when_available() {
+        let fixture = Fixture::new();
+        let (tree, _candidate, target_metadata) = claimed_target(&fixture);
+        let root_private = tree
+            .directory()
+            .private_size_at(OsStr::new("target"))
+            .ok()
+            .flatten();
+        let target_tree = tree.child(OsStr::new("target")).unwrap();
+        let (bytes, _newest, private_available) = measure(
+            &target_tree,
+            0,
+            &mut MeasureBudget::new(false),
+            root_private,
+        )
+        .unwrap();
+        let (expected_bytes, expected_private) = expected_flat_bytes(&tree, &target_metadata);
+        assert_eq!(bytes, expected_bytes);
+        assert_eq!(private_available, expected_private);
     }
 
     fn fixed_time() -> std::time::SystemTime {
