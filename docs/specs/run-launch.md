@@ -184,6 +184,10 @@ first one given. The bundled `smoke` template is the exception for `--worktree`
 and `--branch`/`--base`, which bind to its write node only and enable it. Without
 either, `smoke` runs its read-only nodes and its launch receipt warns which node it
 skipped and why. Remote placement takes neither control.
+A graph reader without an explicit worktree or attempt directory uses its
+selected project as its source, including in explanation. `upgrade --verify`
+and its dry-run preview select a temporary committed scratch project for the
+smoke graph; the runner's working directory does not select the source.
 - Why: a verification graph must run on a real install, and a skipped node
   must not be able to refuse the run it does not take part in.
 
