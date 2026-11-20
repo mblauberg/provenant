@@ -1714,7 +1714,6 @@ mod tests {
             "RUSTC_WRAPPER",
             "RUSTUP_TOOLCHAIN",
             "RUSTFLAGS",
-            "RUSTUP_AUTO_INSTALL",
             "GIT_CONFIG_GLOBAL",
         ] {
             assert!(
@@ -1722,6 +1721,13 @@ mod tests {
                 "{key} must not reach the child"
             );
         }
+        assert_eq!(
+            child
+                .iter()
+                .filter(|(name, _)| name == "RUSTUP_AUTO_INSTALL")
+                .count(),
+            1
+        );
         // The inherited auto-install value is replaced by the safe one, and
         // profile/target values Provenant sets survive exactly once.
         assert_eq!(

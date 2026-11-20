@@ -513,6 +513,10 @@ impl Outcome {
             ..Self::fallback(reason)
         }
     }
+    pub(crate) fn is_skipped(&self) -> bool {
+        self.status == "skipped"
+    }
+
     pub(crate) fn is_seeded(&self) -> bool {
         self.status == "seeded"
     }
@@ -2818,6 +2822,29 @@ mod tests {
         assert!(fixture.cache.join("target").is_dir());
     }
 
+    // These tests exercise independent outcomes, not filesystem reflink support.
+    #[cfg(unix)]
+    fn copy_fixture_target(
+        source: &Path,
+        destination: &provenant_os::fs::Directory,
+    ) -> Result<(), &'static str> {
+        fn copy_entries(source: &Path, destination: &Path) -> std::io::Result<()> {
+            for entry in std::fs::read_dir(source)? {
+                let entry = entry?;
+                let target = destination.join(entry.file_name());
+                if entry.file_type()?.is_dir() {
+                    std::fs::create_dir(&target)?;
+                    copy_entries(&entry.path(), &target)?;
+                } else {
+                    std::fs::copy(entry.path(), target)?;
+                }
+            }
+            Ok(())
+        }
+        copy_entries(source, &destination.anchored_path())
+            .map_err(|_| fallback_reasons::CLONE_FAILED)
+    }
+
     #[cfg(unix)]
     #[test]
     fn lint_target_seeds_independently() {
@@ -2849,9 +2876,7 @@ mod tests {
                 },
                 None,
                 |_| {},
-                |src, dst, budget| {
-                    clone_target_until(src, dst, &provenant_core::CancelToken::new(), budget)
-                },
+                |src, dst, _| copy_fixture_target(src, dst),
                 SeedBudget::for_step,
                 name,
                 true,
@@ -2880,57 +2905,66 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn one_fallback_never_blocks_other() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = tmp.path().join("state");
-        let cache = tmp.path().join("cache");
-        std::fs::create_dir(&cache).unwrap();
-        generation(&state, "001", "v1", "host");
-        let source = crate::target_seed::store_path(&state).join("generations/001/target");
-        let fingerprint = unit(
-            &source,
-            "debug/.fingerprint/dependency",
-            "lib-dependency",
-            &check_dep_info("debug/.fingerprint/dependency/dep-lib-dependency"),
-        );
-        std::fs::write(fingerprint.join("dep-lib-dependency"), b"dependency").unwrap();
-        let profile = provenant_config::LaneBuildSettings::default()
-            .cargo_build_profile(&[])
-            .unwrap();
-        let (main, lint) = crate::writer::seed_both_cargo_targets(|name| {
-            seed_target_cancellable_inner_for_destination(
-                &state,
-                &cache,
-                SeedCompatibility {
-                    version: "v1",
-                    triple: "host",
-                    cargo_profile: &profile,
-                    project_key: "",
-                },
-                None,
-                |_| {},
-                |src, dst, budget| {
-                    if name == "target" {
-                        return Err(fallback_reasons::CLONE_FAILED);
-                    }
-                    clone_target_until(src, dst, &provenant_core::CancelToken::new(), budget)
-                },
-                SeedBudget::for_step,
-                name,
-                true,
-            )
-        });
-        let directory = provenant_os::fs::Directory::open_anchor(tmp.path()).unwrap();
-        crate::writer::record_cargo_setup_file(&directory, "setup.json", &main, &lint).unwrap();
-        let record: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(tmp.path().join("setup.json")).unwrap()).unwrap();
-        assert_eq!(record["status"], "fallback");
-        assert_eq!(record["lint_target"]["status"], "seeded");
-        assert!(!cache.join("target").exists());
-        assert!(
-            cache
-                .join("target-lint/debug/.fingerprint/dependency/dep-lib-dependency")
-                .is_file()
-        );
+        for failed in ["target", "target-lint"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let state = tmp.path().join("state");
+            let cache = tmp.path().join("cache");
+            std::fs::create_dir(&cache).unwrap();
+            generation(&state, "001", "v1", "host");
+            let source = crate::target_seed::store_path(&state).join("generations/001/target");
+            let fingerprint = unit(
+                &source,
+                "debug/.fingerprint/dependency",
+                "lib-dependency",
+                &check_dep_info("debug/.fingerprint/dependency/dep-lib-dependency"),
+            );
+            std::fs::write(fingerprint.join("dep-lib-dependency"), b"dependency").unwrap();
+            let profile = provenant_config::LaneBuildSettings::default()
+                .cargo_build_profile(&[])
+                .unwrap();
+            let (main, lint) = crate::writer::seed_both_cargo_targets(|name| {
+                seed_target_cancellable_inner_for_destination(
+                    &state,
+                    &cache,
+                    SeedCompatibility {
+                        version: "v1",
+                        triple: "host",
+                        cargo_profile: &profile,
+                        project_key: "",
+                    },
+                    None,
+                    |_| {},
+                    |src, dst, _| {
+                        if name == failed {
+                            return Err(fallback_reasons::CLONE_FAILED);
+                        }
+                        copy_fixture_target(src, dst)
+                    },
+                    SeedBudget::for_step,
+                    name,
+                    true,
+                )
+            });
+            let directory = provenant_os::fs::Directory::open_anchor(tmp.path()).unwrap();
+            crate::writer::record_cargo_setup_file(&directory, "setup.json", &main, &lint).unwrap();
+            let record: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(tmp.path().join("setup.json")).unwrap())
+                    .unwrap();
+            let (main_status, lint_status, successful) = if failed == "target" {
+                ("fallback", "seeded", "target-lint")
+            } else {
+                ("seeded", "fallback", "target")
+            };
+            assert_eq!(record["status"], main_status);
+            assert_eq!(record["lint_target"]["status"], lint_status);
+            assert!(!cache.join(failed).exists());
+            assert!(
+                cache
+                    .join(successful)
+                    .join("debug/.fingerprint/dependency/dep-lib-dependency")
+                    .is_file()
+            );
+        }
     }
 
     /// The #3561 protection against the Cargo that is actually pinned, not a tree
