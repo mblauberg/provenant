@@ -1,4 +1,4 @@
 ## Fixes
-### Lanes
+### Lanes and settlement
 - Codex writer token budgets now name their unit in `status` and `result`: `fresh_tokens` (uncached input, cache writes and output/reasoning, with cache reads excluded), the limit's value and the layer that set it, the fresh tokens counted for the attempt and the provider's cumulative input for comparison. The provider's cumulative figure is marked as session-wide when Codex has not attributed it to the attempt, and the adapter's turn-boundary caveat travels with it. (#3573)
 - Codex config-deprecation notices from an inherited config (for example `[features].multi_agent`) are now warnings shown once per attempt beside the applied route, naming `config.toml` and pointing at `providers.codex.clean_config`. They no longer fail the lane or headline its result as provider errors. (#3573)

@@ -1,4 +1,4 @@
-## Changes
+## Behaviour changes
 
 ### Lanes and settlement
 
