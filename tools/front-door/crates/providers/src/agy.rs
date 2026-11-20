@@ -553,10 +553,7 @@ fn prepare(
         subtree("/usr/libexec"),
     ];
     if input.sandboxed() {
-        env.extend([
-            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-        ]);
+        env.extend([("GIT_CONFIG_GLOBAL".into(), "/dev/null".into())]);
     }
     let session_state = if input.sandboxed() {
         crate::SessionStateLocation::AttemptPrivate
@@ -573,6 +570,7 @@ fn prepare(
         cwd: input.cwd.to_owned(),
         setup,
         omitted_discovery,
+        warnings: Vec::new(),
         user_skills: staged_skills,
         tool_requirements: Default::default(),
         git_wrapper: Default::default(),

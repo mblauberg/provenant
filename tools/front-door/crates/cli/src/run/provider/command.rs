@@ -264,7 +264,6 @@ pub(super) fn prepare_command(
                 }
             },
             skill_stage_max_bytes: config.domains.lanes.skill_stage_max_bytes,
-            git_config_allow: &config.domains.lanes.git_config_allow,
             account: None,
             token: None,
             cwd: &cwd,
@@ -293,6 +292,7 @@ pub(super) fn prepare_command(
         task,
         roots.state.as_path(),
     ));
+    launch_warnings.extend(spec.warnings.iter().cloned());
     apply_lane_capabilities(&mut spec.profile.spec, &task.access);
     let common_git_path = repository
         .as_ref()

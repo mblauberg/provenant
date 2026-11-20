@@ -322,22 +322,141 @@ pub(crate) fn resolve_ref(git: &Path, repo: &VerifiedRepo, reference: &str) -> R
     GitOid::parse(std::str::from_utf8(&bytes).map_err(|_| invalid())?.trim()).map_err(|_| invalid())
 }
 
-pub(crate) fn clear_import_refs(
+/// What the primary checkout holds: the branch HEAD names (none when
+/// detached), the commit (none when unborn) and every local and remote-tracking
+/// branch tip. The common Git directory's own HEAD is the primary checkout's,
+/// whichever linked worktree asks.
+pub(crate) struct PrimaryRefs {
+    pub head_ref: Option<String>,
+    pub head: Option<GitOid>,
+    pub refs: std::collections::BTreeMap<String, GitOid>,
+}
+
+pub(crate) fn primary_refs(git: &Path, repo: &VerifiedRepo) -> Result<PrimaryRefs> {
+    let read = |arguments: &[&str]| {
+        command(
+            git,
+            repo.common_git_dir(),
+            repo.root_path(),
+            &args(arguments),
+            None,
+        )
+    };
+    let text = |bytes: Vec<u8>| String::from_utf8(bytes).map(|text| text.trim().to_owned());
+    let head_ref = read(&["symbolic-ref", "-q", "HEAD"])
+        .ok()
+        .and_then(|bytes| text(bytes).ok())
+        .filter(|name| !name.is_empty());
+    let head = read(&["rev-parse", "--verify", "--end-of-options", "HEAD"])
+        .ok()
+        .and_then(|bytes| text(bytes).ok())
+        .and_then(|text| GitOid::parse(&text).ok());
+    let listing = String::from_utf8(read(&[
+        "for-each-ref",
+        "--format=%(objectname) %(refname)",
+        "refs/heads/",
+        "refs/remotes/",
+    ])?)
+    .map_err(|_| invalid())?;
+    let mut refs = std::collections::BTreeMap::new();
+    for line in listing.lines() {
+        let (oid, name) = line.split_once(' ').ok_or_else(invalid)?;
+        refs.insert(name.to_owned(), GitOid::parse(oid).map_err(|_| invalid())?);
+    }
+    Ok(PrimaryRefs {
+        head_ref,
+        head,
+        refs,
+    })
+}
+
+/// The commits at the heads of every linked worktree. The first listed
+/// worktree is the primary checkout and is left out; the bound worktree and
+/// other lanes' worktrees are in.
+pub(crate) fn linked_worktree_heads(git: &Path, repo: &VerifiedRepo) -> Result<Vec<GitOid>> {
+    let listing = String::from_utf8(command(
+        git,
+        repo.common_git_dir(),
+        repo.root_path(),
+        &args(&["worktree", "list", "--porcelain"]),
+        None,
+    )?)
+    .map_err(|_| invalid())?;
+    Ok(listing
+        .split("\n\n")
+        .skip(1)
+        .flat_map(|entry| entry.lines())
+        .filter_map(|line| line.strip_prefix("HEAD "))
+        .filter_map(|oid| GitOid::parse(oid.trim()).ok())
+        .collect())
+}
+
+/// Commits reachable from `tips` and from none of `excluded`, newest first and
+/// at most `limit`, in one `git rev-list` call.
+pub(crate) fn commits_outside(
     git: &Path,
     repo: &VerifiedRepo,
-    attempt: provenant_core::AttemptId,
-    objects: &[GitOid],
-) -> Result<()> {
-    if objects.is_empty() {
+    tips: &[GitOid],
+    excluded: &[GitOid],
+    limit: usize,
+) -> Result<Vec<GitOid>> {
+    if tips.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut input = String::new();
+    for tip in tips {
+        input.push_str(&format!("{tip}\n"));
+    }
+    for tip in excluded {
+        input.push_str(&format!("^{tip}\n"));
+    }
+    let listing = execute_bounded(
+        git,
+        repo.common_git_dir(),
+        repo.root_path(),
+        &args(&["rev-list", &format!("--max-count={limit}"), "--stdin"]),
+        None,
+        Execution {
+            input: Some(input.as_bytes()),
+            ..Default::default()
+        },
+    )?;
+    String::from_utf8(listing)
+        .map_err(|_| invalid())?
+        .lines()
+        .map(|line| GitOid::parse(line.trim()).map_err(|_| invalid()))
+        .collect()
+}
+
+/// List the refs below a Provenant-owned prefix. Ref names come from Git, so
+/// they are already validated; the prefix check keeps the result in namespace.
+fn list_refs(git: &Path, repo: &VerifiedRepo, prefix: &str) -> Result<Vec<String>> {
+    let output = execute(
+        git,
+        repo.common_git_dir(),
+        repo.root_path(),
+        &args(&["for-each-ref", "--format=%(refname)", prefix]),
+        None,
+    )?;
+    Ok(String::from_utf8_lossy(&output)
+        .lines()
+        .filter(|line| line.starts_with(prefix) && line.len() > prefix.len())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Delete refs in one atomic `update-ref --stdin` transaction, never one
+/// process per ref: an attempt may pin thousands of objects. The `start`,
+/// `prepare` and `commit` wrapper keeps the buffered transaction retry-safe on
+/// a native ref-lock collision (`is_atomic_ref_transaction`).
+pub(crate) fn delete_refs(git: &Path, repo: &VerifiedRepo, refs: &[String]) -> Result<()> {
+    if refs.is_empty() {
         return Ok(());
     }
     let mut input = String::from("start\n");
-    input.push_str(
-        &objects
-            .iter()
-            .map(|oid| format!("delete refs/provenant/import-extra/{attempt}/{oid}\n"))
-            .collect::<String>(),
-    );
+    for reference in refs {
+        input.push_str(&format!("delete {reference}\n"));
+    }
     input.push_str("prepare\ncommit\n");
     execute_bounded(
         git,
@@ -351,6 +470,19 @@ pub(crate) fn clear_import_refs(
         },
     )?;
     Ok(())
+}
+
+/// Remove every import-extra pin of one attempt, whatever outcome settled it.
+/// The OIDs are read from the ref store, so cleanup does not depend on the
+/// success path having remembered the objects it imported.
+pub(crate) fn clear_import_refs(git: &Path, repo: &VerifiedRepo, attempt: AttemptId) -> Result<()> {
+    let prefix = format!("refs/provenant/import-extra/{attempt}/");
+    delete_refs(git, repo, &list_refs(git, repo, &prefix)?)
+}
+
+/// Every attempt-scoped import-extra pin, for GC's settled/missing sweep.
+pub(crate) fn all_import_extra_refs(git: &Path, repo: &VerifiedRepo) -> Result<Vec<String>> {
+    list_refs(git, repo, "refs/provenant/import-extra/")
 }
 
 // Shared objects are host-owned. receive-pack checks newly introduced content

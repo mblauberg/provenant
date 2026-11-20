@@ -399,14 +399,12 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
             "{key}"
         );
     }
-    assert_eq!(
+    assert!(
         launch
             .env
             .iter()
-            .filter(|(key, value)| key == "GIT_CONFIG_NOSYSTEM" && value == "1")
-            .count(),
-        1,
-        "a sandboxed launch exports GIT_CONFIG_NOSYSTEM=1 exactly once"
+            .all(|(key, _)| key != "GIT_CONFIG_NOSYSTEM"),
+        "the lane does not force system Git configuration off"
     );
     for path in [
         "/fixture/home/.cargo/bin",
@@ -797,12 +795,17 @@ fn lanes_read_git_global_ignore_and_attributes_only_when_present()
     std::fs::write(git.join("ignore"), "")?;
     std::fs::write(git.join("attributes"), "")?;
     std::fs::write(git.join("config"), "")?;
-    // A sandboxed lane never reads the host configuration file itself: a
-    // writer receives its settings through the allowlisted private config.
+    // A writer includes the host global config and is granted an exact read
+    // on it; a read-only lane has no private config and never reads the file.
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
         let mut paths = granted(access)?;
         paths.sort();
-        assert_eq!(paths, [git.join("attributes"), git.join("ignore")]);
+        let mut expected = vec![git.join("attributes"), git.join("ignore")];
+        if access == Access::WorktreeWrite {
+            expected.push(git.join("config"));
+            expected.sort();
+        }
+        assert_eq!(paths, expected);
     }
     Ok(())
 }

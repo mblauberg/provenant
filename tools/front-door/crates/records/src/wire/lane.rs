@@ -86,6 +86,7 @@ lane_row! {
         priority: Option<i64> => nullable(integer());
         finished_at: Value => any();
         last_output_at: Value => any();
+        last_event_at: Value => any();
         runtime_deadline: Value => any();
         overdue: Option<bool> => nullable(boolean());
         stale: Option<bool> => nullable(boolean());
@@ -126,6 +127,9 @@ lane_row! {
         provider_error: String => string();
         payload: String => choices(&["evicted"]);
         capabilities: Value => array(object(&[("name", string()), ("source", string())], &[]));
+        attempt_directory: crate::StructuredPathWire => nullable(super::schema::worktree_path());
+        child_command: String => nullable(string());
+        last_event_source: LastEventSource => nullable(choices(&["output", "started", "queued"]));
     }
 }
 
@@ -224,6 +228,15 @@ pub struct LaneProjectionFacts {
     pub presence: Option<LanePresence>,
     pub result_path: Option<crate::StructuredPathWire>,
     pub transcript: Option<LaneTranscript>,
+    /// Most recent observed activity event: last output, else launch, else queue.
+    pub last_event_at: Option<provenant_core::WallTime>,
+    /// Which observation supplied `last_event_at`, so a quiet writer's stale
+    /// timestamp is not mistaken for a fresh heartbeat.
+    pub last_event_source: Option<LastEventSource>,
+    /// Host-local attempt directory; never projected across a peer boundary.
+    pub attempt_directory: Option<crate::StructuredPathWire>,
+    /// Masked, bounded argv of the writer's current child command.
+    pub child_command: Option<String>,
     pub cache_read_share: Option<f64>,
     pub provider_seconds: Option<f64>,
     pub host: Option<String>,
@@ -241,6 +254,15 @@ pub enum LanePresence {
     Unattended,
     Unknown,
     Settling,
+}
+
+/// Which observation supplied an attempt's newest event time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LastEventSource {
+    Output,
+    Started,
+    Queued,
 }
 
 fn project_route(route: Option<&crate::run::RouteRecord>) -> Value {
@@ -346,6 +368,9 @@ impl LaneRow {
                 SettlementReason::UncommittedWork => {
                     Some("the writer has uncommitted changes; preserve or commit the edits")
                 }
+                SettlementReason::StrayWork => Some(
+                    "the primary checkout moved and the bound branch gained no commits; the work may be in the primary checkout",
+                ),
                 _ => None,
             };
             if let Some(detail) = detail {
@@ -541,6 +566,8 @@ impl LaneRow {
             priority: lane.priority.map(i64::from),
             finished_at: json!(finished_at),
             last_output_at: json!(lane.last_output_at),
+            last_event_at: json!(facts.last_event_at),
+            last_event_source: facts.last_event_source,
             runtime_deadline: json!(lane.runtime_deadline),
             overdue: facts.overdue,
             stale: facts.stale,
@@ -558,6 +585,8 @@ impl LaneRow {
             cache_read_share: facts.cache_read_share,
             result_path: json!(facts.result_path),
             transcript: facts.transcript,
+            attempt_directory: facts.attempt_directory,
+            child_command: facts.child_command,
             title: lane.title.clone(),
             requested_priority: lane
                 .requested_priority

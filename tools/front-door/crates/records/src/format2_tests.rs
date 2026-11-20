@@ -552,6 +552,32 @@ fn each_record_round_trips_and_keeps_an_unknown_field() {
     );
 }
 
+/// A lane that worked outside its bound worktree (#3611) must not read as a
+/// completed review: a bare `ReviewRequired` derives `Completed`, which
+/// releases graph dependants, so the stray-work signal has its own reason that
+/// keeps them held.
+#[test]
+fn stray_work_holds_dependants_instead_of_completing() {
+    use crate::run::{
+        CauseSource, Outcome, PartialSignal, SettlementNodeOutcome, SettlementReason,
+        TerminalEvidence,
+    };
+    let evidence = TerminalEvidence::ProcessExit;
+    let stray = SettlementReason::classify(
+        Outcome::ReviewRequired,
+        Some(&evidence),
+        &[PartialSignal::StrayWork],
+        None,
+        Ok(None),
+    )
+    .unwrap();
+    assert_eq!(stray.reason, SettlementReason::StrayWork);
+    assert_eq!(stray.outcome, Outcome::ReviewRequired);
+    assert_eq!(stray.source, CauseSource::Host);
+    assert_eq!(stray.node_outcome, SettlementNodeOutcome::Failed);
+    assert_eq!(PartialSignal::StrayWork.as_str(), "stray_work");
+}
+
 /// A declared writer stop restarts with its edits whether or not it committed
 /// them, while a host custody fact still outranks the writer's account.
 #[test]

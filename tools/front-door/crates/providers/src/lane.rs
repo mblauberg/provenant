@@ -13,9 +13,6 @@ use std::{
 pub(crate) struct GitWrapper {
     pub(crate) scrub: bool,
     pub(crate) identity_config: Option<PathBuf>,
-    /// Names of host Git configuration keys withheld from the private config
-    /// (never values); `None` when no allowlist applied.
-    pub(crate) host_config_dropped: Option<Vec<String>>,
     include: Option<String>,
     git: Option<PathBuf>,
     pub(crate) bound: Option<BoundGit>,
@@ -388,10 +385,14 @@ impl crate::LaunchSpec {
     /// lane keeps the user's own gh configuration and login, exactly as a CLI
     /// started by hand would; the wrapper only counts, advises and applies the
     /// project's advisory deny list before running the host-selected `gh`.
+    /// `gh_config` is the host's resolved gh configuration directory: it is
+    /// exported by the wrapper and pinned in the lane environment, so an
+    /// adapter's private `XDG_CONFIG_HOME` cannot hide the host login.
     pub fn configure_gh_shim(
         &mut self,
         scratch: &Path,
         gh: &Path,
+        gh_config: &Path,
         shim: &GhShim<'_>,
     ) -> Result<(), ProviderError> {
         let text = |path: &Path| -> Result<String, ProviderError> {
@@ -402,6 +403,7 @@ impl crate::LaunchSpec {
             Ok(value.to_owned())
         };
         let gh_path = text(gh)?;
+        let gh_config_text = text(gh_config)?;
         let counter = shell_quote(&text(&scratch.join(provenant_config::GH_INVOCATIONS_FILE))?);
         let bin = scratch.join("bin");
         let path_index = self
@@ -426,9 +428,18 @@ impl crate::LaunchSpec {
         );
         self.setup.push(SetupStep::WriteExecutable {
             path: wrapper,
-            bytes: gh_wrapper(&gh_path, None, &counter, shim).into_bytes(),
+            bytes: gh_wrapper(
+                &gh_path,
+                Some(&shell_quote(&gh_config_text)),
+                &counter,
+                shim,
+            )
+            .into_bytes(),
         });
         self.env[path_index].1 = next_path;
+        self.env.retain(|(key, _)| key != "GH_CONFIG_DIR");
+        self.env
+            .push(("GH_CONFIG_DIR".into(), gh_config.as_os_str().to_owned()));
         Ok(())
     }
 }
@@ -563,35 +574,39 @@ fn probe_host_exec_path(
 /// written to the launcher or to any argument.
 const TOKEN_HELPER: &str = "!f() { test \"$1\" = get && test -n \"$GH_TOKEN\" && printf 'username=x-access-token\\npassword=%s\\n' \"$GH_TOKEN\"; }; f";
 
-/// Whether a variable carries command-scope Git configuration, which can name
-/// a credential helper as readily as a configuration file can.
-fn is_git_command_config(name: &std::ffi::OsStr) -> bool {
-    name.to_str().is_some_and(|name| {
-        matches!(name, "GIT_CONFIG_COUNT" | "GIT_CONFIG_PARAMETERS")
-            || name.starts_with("GIT_CONFIG_KEY_")
-            || name.starts_with("GIT_CONFIG_VALUE_")
-    })
-}
-
-/// Drop every inherited command-scope Git configuration variable.
-pub(crate) fn scrub_git_command_config(env: &mut Vec<(OsString, OsString)>) {
-    env.retain(|(key, _)| !is_git_command_config(key));
-}
-
-/// Replace the command-scope configuration with the token helper alone. A
-/// lane never inherits a host credential helper through the environment.
-pub(crate) fn install_token_config(env: &mut Vec<(OsString, OsString)>) {
-    scrub_git_command_config(env);
+/// Append the lane's own credential helper to the command-scope configuration
+/// without discarding the host's entries. The empty `credential.helper` resets
+/// the helper list, so the token helper that follows wins for GitHub pushes
+/// while the host configuration remains visible to the lane.
+pub(crate) fn install_token_config(
+    env: &mut Vec<(OsString, OsString)>,
+) -> Result<(), ProviderError> {
+    let count = match env.iter().find(|(key, _)| key == "GIT_CONFIG_COUNT") {
+        Some((_, value)) => value
+            .to_str()
+            .and_then(|v| v.parse::<usize>().ok())
+            .ok_or(ProviderError::Malformed)?,
+        None => 0,
+    };
+    let next = count.checked_add(2).ok_or(ProviderError::Malformed)?;
+    env.retain(|(key, _)| key != "GIT_CONFIG_COUNT");
     env.extend([
-        ("GIT_CONFIG_COUNT".into(), "2".into()),
-        ("GIT_CONFIG_KEY_0".into(), "credential.helper".into()),
-        ("GIT_CONFIG_VALUE_0".into(), "".into()),
+        ("GIT_CONFIG_COUNT".into(), next.to_string().into()),
         (
-            "GIT_CONFIG_KEY_1".into(),
+            format!("GIT_CONFIG_KEY_{count}").into(),
+            "credential.helper".into(),
+        ),
+        (format!("GIT_CONFIG_VALUE_{count}").into(), "".into()),
+        (
+            format!("GIT_CONFIG_KEY_{}", count + 1).into(),
             "credential.https://github.com.helper".into(),
         ),
-        ("GIT_CONFIG_VALUE_1".into(), TOKEN_HELPER.into()),
+        (
+            format!("GIT_CONFIG_VALUE_{}", count + 1).into(),
+            TOKEN_HELPER.into(),
+        ),
     ]);
+    Ok(())
 }
 
 pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, ProviderError> {
@@ -629,9 +644,6 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
         bytes.extend_from_slice(
             format!("GIT_CONFIG_GLOBAL={global}\nexport GIT_CONFIG_GLOBAL\n").as_bytes(),
         );
-        // System configuration can bring in a host credential helper (macOS
-        // ships `osxkeychain` there), so it is never read, identity or not.
-        bytes.extend_from_slice(b"GIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_NOSYSTEM\n");
     }
     if let Some(exec_path) = host_exec_path(Path::new(std::ffi::OsStr::from_bytes(git))) {
         let exec_path = exec_path.to_str().ok_or_else(|| {
@@ -1681,7 +1693,7 @@ mod tests {
             ("GIT_CONFIG_KEY_0".into(), "fixture.setting".into()),
             ("GIT_CONFIG_VALUE_0".into(), "kept".into()),
         ];
-        install_token_config(&mut env);
+        install_token_config(&mut env)?;
         for (case, executable, with_config, token) in [
             ("native without lane token", &git, false, false),
             ("native with lane token", &git, true, true),
@@ -1735,56 +1747,46 @@ mod tests {
     }
 
     #[test]
-    fn lane_command_config_is_the_token_helper_alone() {
+    fn lane_command_config_appends_the_token_helper_to_host_entries() {
         let get = |env: &[(OsString, OsString)], name: &str| {
             env.iter()
                 .filter(|(key, _)| key == name)
                 .map(|(_, value)| value.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
         };
-        let inherited = || -> Vec<(OsString, OsString)> {
-            vec![
-                ("PATH".into(), "/usr/bin".into()),
-                ("GIT_CONFIG_COUNT".into(), "3".into()),
-                ("GIT_CONFIG_KEY_0".into(), "credential.helper".into()),
-                ("GIT_CONFIG_VALUE_0".into(), "osxkeychain".into()),
-                ("GIT_CONFIG_KEY_2".into(), "credential.helper".into()),
-                ("GIT_CONFIG_VALUE_2".into(), "osxkeychain".into()),
-                (
-                    "GIT_CONFIG_PARAMETERS".into(),
-                    "'credential.helper=osxkeychain'".into(),
-                ),
-            ]
-        };
-        let mut env = inherited();
-        install_token_config(&mut env);
+        let mut env = vec![
+            ("PATH".into(), "/usr/bin".into()),
+            ("GIT_CONFIG_COUNT".into(), "1".into()),
+            ("GIT_CONFIG_KEY_0".into(), "fixture.setting".into()),
+            ("GIT_CONFIG_VALUE_0".into(), "kept".into()),
+            (
+                "GIT_CONFIG_PARAMETERS".into(),
+                "'credential.helper=osxkeychain'".into(),
+            ),
+        ];
+        install_token_config(&mut env).unwrap();
         assert_eq!(get(&env, "PATH"), ["/usr/bin"]);
-        assert_eq!(get(&env, "GIT_CONFIG_COUNT"), ["2"]);
-        assert_eq!(get(&env, "GIT_CONFIG_KEY_0"), ["credential.helper"]);
-        assert_eq!(get(&env, "GIT_CONFIG_VALUE_0"), [""]);
+        assert_eq!(get(&env, "GIT_CONFIG_COUNT"), ["3"]);
+        // The host's own command-scope configuration survives verbatim.
+        assert_eq!(get(&env, "GIT_CONFIG_KEY_0"), ["fixture.setting"]);
+        assert_eq!(get(&env, "GIT_CONFIG_VALUE_0"), ["kept"]);
         assert_eq!(
-            get(&env, "GIT_CONFIG_KEY_1"),
+            get(&env, "GIT_CONFIG_PARAMETERS"),
+            ["'credential.helper=osxkeychain'"]
+        );
+        // The lane's helper is appended on top, resetting the helper list
+        // before selecting the token helper.
+        assert_eq!(get(&env, "GIT_CONFIG_KEY_1"), ["credential.helper"]);
+        assert_eq!(get(&env, "GIT_CONFIG_VALUE_1"), [""]);
+        assert_eq!(
+            get(&env, "GIT_CONFIG_KEY_2"),
             ["credential.https://github.com.helper"]
         );
-        assert_eq!(get(&env, "GIT_CONFIG_VALUE_1"), [TOKEN_HELPER]);
-        assert!(get(&env, "GIT_CONFIG_PARAMETERS").is_empty());
-        assert!(get(&env, "GIT_CONFIG_KEY_2").is_empty());
-        assert!(get(&env, "GIT_CONFIG_VALUE_2").is_empty());
-        assert!(
-            env.iter()
-                .all(|(_, value)| !value.to_string_lossy().contains("osxkeychain"))
-        );
-
-        let mut env = inherited();
-        scrub_git_command_config(&mut env);
-        assert_eq!(
-            env,
-            vec![(OsString::from("PATH"), OsString::from("/usr/bin"))]
-        );
+        assert_eq!(get(&env, "GIT_CONFIG_VALUE_2"), [TOKEN_HELPER]);
     }
 
     #[test]
-    fn git_wrapper_never_reads_system_config() {
+    fn git_wrapper_does_not_force_system_config_off() {
         for identity_config in [None, Some(PathBuf::from("/fixture/identity"))] {
             let wrapper = git_wrapper(
                 Path::new("/usr/bin/git"),
@@ -1796,10 +1798,8 @@ mod tests {
             )
             .unwrap();
             let text = String::from_utf8(wrapper).unwrap();
-            assert!(
-                text.contains("GIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_NOSYSTEM\n"),
-                "{text}"
-            );
+            assert!(!text.contains("GIT_CONFIG_NOSYSTEM"), "{text}");
+            assert!(text.contains("GIT_CONFIG_GLOBAL="), "{text}");
         }
     }
 
@@ -2409,6 +2409,92 @@ mod tests {
     adapter_git_test!(private_git_cursor, "cursor");
     adapter_git_test!(private_git_agy, "agy");
     adapter_git_test!(private_git_opencode, "opencode");
+
+    /// OpenCode re-points `XDG_CONFIG_HOME` at private state. An unsandboxed
+    /// lane must still resolve the host's gh configuration, through the lane
+    /// environment and through the shim, and the shim directory must lead
+    /// `PATH` ahead of every system bin directory.
+    #[test]
+    fn opencode_gh_shim_pins_the_host_config_and_leads_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{Access, Adapter, Prompt, opencode::OpenCode};
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let scratch = root.join("scratch");
+        let host_gh = root.join("host-xdg/gh");
+        fs::create_dir_all(&host_gh)?;
+        fs::write(host_gh.join("hosts.yml"), "github.com:\n  user: fixture\n")?;
+        // The fixture gh succeeds only when pointed at the host directory.
+        let gh = root.join("real-gh");
+        fs::write(
+            &gh,
+            "#!/bin/sh\n[ \"$GH_CONFIG_DIR\" = \"$EXPECTED_GH_CONFIG_DIR\" ] && [ -f \"$GH_CONFIG_DIR/hosts.yml\" ] || exit 1\nprintf 'authenticated\\n'\n",
+        )?;
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o700))?;
+
+        let plan = crate::tests::fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = Prompt::new("fixture".into());
+        let mut spec = OpenCode.prepare(crate::tests::fixture_input(
+            &route, &plan, &prompt, &root, None,
+        ))?;
+        let value = |spec: &crate::LaunchSpec, name: &str| {
+            spec.env
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        };
+        let private_xdg = value(&spec, "XDG_CONFIG_HOME").ok_or("private XDG_CONFIG_HOME")?;
+        assert_ne!(Path::new(&private_xdg), root.join("host-xdg"));
+        assert_eq!(value(&spec, "GH_CONFIG_DIR"), None);
+
+        spec.configure_gh_shim(&scratch, &gh, &host_gh, &Default::default())?;
+
+        // The adapter's private XDG_CONFIG_HOME is untouched; gh is pinned.
+        assert_eq!(value(&spec, "XDG_CONFIG_HOME"), Some(private_xdg.clone()));
+        assert_eq!(
+            value(&spec, "GH_CONFIG_DIR"),
+            Some(host_gh.as_os_str().to_owned())
+        );
+        let path = value(&spec, "PATH").ok_or("PATH")?;
+        let entries: Vec<_> = std::env::split_paths(&path).collect();
+        assert_eq!(entries.first(), Some(&scratch.join("bin")));
+        for system in ["/usr/bin", "/bin", "/opt/homebrew/bin", "/usr/local/bin"] {
+            if let Some(index) = entries.iter().position(|entry| entry == Path::new(system)) {
+                assert!(index > 0, "{system} precedes the shim directory");
+            }
+        }
+        // The wrapper carries the pin even if the caller's environment does not.
+        for step in &spec.setup {
+            match step {
+                SetupStep::CreateDir(path) if path.starts_with(&scratch) => {
+                    fs::create_dir_all(path)?
+                }
+                SetupStep::WriteExecutable { path, bytes } if path.starts_with(&scratch) => {
+                    fs::write(path, bytes)?;
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+                }
+                _ => {}
+            }
+        }
+        let shim = scratch.join("bin/gh");
+        assert!(fs::read_to_string(&shim)?.contains("export GH_CONFIG_DIR"));
+        let argv = [shim.into_os_string(), "auth".into(), "status".into()];
+        let environment = [
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("XDG_CONFIG_HOME".into(), private_xdg),
+            ("EXPECTED_GH_CONFIG_DIR".into(), host_gh.into_os_string()),
+        ];
+        let mut options = ExecOptions::new(&argv, &root, Duration::from_secs(5));
+        options.env = Some(&environment);
+        let outcome = SystemExecutor::new(1)?.execute(options)?;
+        assert_eq!(outcome.termination, Termination::Exit(0));
+        assert_eq!(outcome.stdout.bytes, b"authenticated\n");
+        Ok(())
+    }
 
     #[test]
     fn private_git_command_writer_is_unsupported() {

@@ -66,7 +66,10 @@ writer is on by default and gives it your GitHub credential; set
 delivery. An advisory `gh` deny list (`deny_verbs`, `deny_labels`) goes in
 `projects/PROJECT_ID/github.json`; matching calls warn and continue.
 The provider receipt's `github_credential` names the identity, source and
-delivery each lane got. The `gh` shim warns at every `lanes.gh_budget` calls
+delivery each lane got; for an unsandboxed lane it also names the host gh
+configuration directory the lane is pinned to and the setting that chose it.
+A lane opens its pull request with `gh pr create --body-file`; `pr open` is
+for a settled attempt. The `gh` shim warns at every `lanes.gh_budget` calls
 (default 100, 0 off) and settlement records the count; it never stops a call.
 Writers follow `lanes.ci_scope` (default `none`: push and report, the chair runs
 CI once for the batch); set `--set attempt.ci_scope=targeted` or `full` for a

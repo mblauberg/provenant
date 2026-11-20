@@ -178,10 +178,7 @@ boolean template parameter `plan=true` adds a read-only planner whose result
 the writer consumes. `domains.fabric.implement.plan` sets the default and
 `--explain` reports its source; an explicit parameter takes precedence.
 `deliver` and `batch` accept `plan`, and a batch item may override it with
-`{ item = "slice", with = { plan = true } }`. A junior writer without a plan
-input, write scope or explicit plan parameter emits the advisory
-`unbounded_brief_junior_writer` warning. Set
-`domains.fabric.implement.warn_unbounded_junior=false` to suppress it.
+`{ item = "slice", with = { plan = true } }`.
 
 `batch` expands over `items`, accepting either bare strings or structured item tables
 `{ id, brief | brief_file, route | model, write_scope, after, with }`. Mutual exclusion

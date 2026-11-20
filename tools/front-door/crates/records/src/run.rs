@@ -716,26 +716,6 @@ pub struct RouteRecord {
     pub sandbox_admission: Option<SandboxAdmissionReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_grant_limit: Option<WriteGrantLimitReceipt>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git_config: Option<GitConfigReceipt>,
-}
-
-/// How a sandboxed lane's private Git configuration was built from the
-/// host's: the key names the allowlist withheld (subsections redacted, never
-/// values) and the person's extra allowlist with its source.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct GitConfigReceipt {
-    #[serde(default)]
-    pub dropped: Vec<String>,
-    #[serde(default)]
-    pub allow: Vec<String>,
-    #[serde(default)]
-    pub key: String,
-    #[serde(default)]
-    pub origin: OriginReceipt,
-    #[serde(flatten)]
-    pub extra: crate::ExtraFields,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2031,6 +2011,9 @@ settlement_reasons! {
     ProviderStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
     /// A writer left edits it did not commit.
     UncommittedWork { source: Provider, node: Failed, outcome: Uncommitted, stop: None },
+    /// The bound branch gained no commits while the primary checkout moved: the
+    /// lane's work went to the wrong checkout (#3611).
+    StrayWork { source: Host, node: Failed, outcome: ReviewRequired, stop: None },
     /// Refused before any process started.
     PreLaunchRefusal { source: Host, node: Failed, outcome: Preserve, stop: None },
     Cancelled { source: Owner, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
@@ -2069,6 +2052,7 @@ impl SettlementReason {
                 Some(TerminalCause::EmptyWriterResult) => Self::EmptyResult,
                 Some(TerminalCause::Blocked | TerminalCause::StoppedNoWork) => Self::DeclaredStop,
                 Some(TerminalCause::ProviderEarlyStop) => Self::ProviderStop,
+                _ if partial.contains(&PartialSignal::StrayWork) => Self::StrayWork,
                 _ if handoff
                     .is_ok_and(|handoff| handoff.is_some_and(|handoff| handoff.unfinished())) =>
                 {
@@ -2741,6 +2725,9 @@ pub enum PartialSignal {
     ProviderStop,
     /// A writer left edits it did not commit.
     UncommittedWork,
+    /// The primary checkout moved during the attempt while the bound branch
+    /// gained no commits: the work was made outside the bound worktree.
+    StrayWork,
 }
 impl PartialSignal {
     pub const fn as_str(self) -> &'static str {
@@ -2751,6 +2738,7 @@ impl PartialSignal {
             Self::DeclaredStop => "declared_stop",
             Self::ProviderStop => "provider_stop",
             Self::UncommittedWork => "uncommitted_work",
+            Self::StrayWork => "stray_work",
         }
     }
 }
@@ -3237,13 +3225,6 @@ mod tests {
                 "write_grant_limit",
                 serde_json::json!({
                     "key":"domains.run.write_grant_limit_bytes","value":1048576,"origin":"compiled_default"
-                }),
-            ),
-            (
-                "git_config",
-                serde_json::json!({
-                    "dropped":["credential.helper","http.*.extraheader"],"allow":["push.default"],
-                    "key":"domains.lanes.git_config_allow","origin":{"kind":"compiled"}
                 }),
             ),
         ];

@@ -1,7 +1,7 @@
 //! `land`: the existing CI watch and head-pinned merge, then local
 //! follow-up. No step forces: each one refuses and says why.
+use super::Result;
 use super::git::{Git, plain_ref};
-use super::{Result, successful};
 use crate::{roots, worktrees};
 use provenant_confinement::worktrees::{ObservedProcess, WorkerObserver};
 use provenant_core::GitOid;
@@ -97,8 +97,8 @@ pub(super) fn pull(state: &Path, project: &Path, number: &str) -> Result<Pull> {
 }
 
 // Landing already has the base repository and PR snapshot. Keep contribution
-// bookkeeping local and use its bounded reader for stale bindings so this path
-// does not make separate GraphQL requests.
+// bookkeeping local: landing binds only its own PR and never reads or sweeps
+// other PRs on the branch, so it makes no separate forge requests for them.
 struct LandTracker {
     resolved: roots::Resolved,
     project: Option<provenant_core::ProjectId>,
@@ -141,34 +141,9 @@ impl LandTracker {
             "project is unbound; register the project before binding contributions".into()
         })
     }
-    fn observed_end(
-        &self,
-        reader: &super::wait::Reader<'_>,
-        pr: &provenant_run::PullRequest,
-    ) -> Result<(String, Option<provenant_core::WallTime>)> {
-        let endpoint = format!("repos/{}/pulls/{}", pr.repository, pr.number);
-        let bytes = successful(reader.read(&["gh", "api", &endpoint])?)?;
-        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-        let merged = value.get("merged_at").and_then(serde_json::Value::as_str);
-        let closed = value.get("closed_at").and_then(serde_json::Value::as_str);
-        let state = if merged.is_some() {
-            "MERGED".to_owned()
-        } else {
-            value
-                .get("state")
-                .and_then(serde_json::Value::as_str)
-                .ok_or("missing pull request state")?
-                .to_ascii_uppercase()
-        };
-        Ok((state, end_time(merged.or(closed))?))
-    }
-    fn bind(
-        &self,
-        branch: &str,
-        number: u64,
-        head: GitOid,
-        reader: &super::wait::Reader<'_>,
-    ) -> Result<()> {
+    /// Bind only the PR being landed. Stale bindings for other PRs belong to
+    /// `pr open` / `pr contributions --bind`, never to this path.
+    fn bind(&self, branch: &str, number: u64, head: GitOid) -> Result<()> {
         let project = self.project()?;
         let clock = provenant_os::clock::SystemClock::new();
         let cancel = provenant_core::CancelToken::new();
@@ -178,30 +153,6 @@ impl LandTracker {
         };
         let db = provenant_run::Contributions::open(self.resolved.roots.state.as_path(), &call)?;
         let pr = self.pr(number);
-        for candidate in db.open_bindings(project, branch, &call)? {
-            if candidate == pr {
-                continue;
-            }
-            let swept = (|| -> Result<()> {
-                let (state, ended_at) = self.observed_end(reader, &candidate)?;
-                if matches!(state.as_str(), "CLOSED" | "MERGED") {
-                    db.close_at(project, &candidate, ended_at, &call)?;
-                }
-                Ok(())
-            })();
-            if let Err(error) = swept {
-                if error
-                    .downcast_ref::<super::wait::Failure>()
-                    .is_some_and(|failure| failure.code == "RATE_LIMITED")
-                {
-                    return Err(error);
-                }
-                super::contributions::warn(
-                    Some(candidate.number),
-                    &format!("stale binding sweep failed: {error}"),
-                );
-            }
-        }
         db.bind(project, branch, &pr, head, &call)?;
         Ok(())
     }
@@ -650,14 +601,8 @@ fn follow_up(
     Ok(steps)
 }
 
-fn attribute(
-    tracker: &LandTracker,
-    view: &Pull,
-    number: u64,
-    head: GitOid,
-    reader: &super::wait::Reader<'_>,
-) -> Result<()> {
-    let bound = tracker.bind(&view.branch, number, head, reader);
+fn attribute(tracker: &LandTracker, view: &Pull, number: u64, head: GitOid) -> Result<()> {
+    let bound = tracker.bind(&view.branch, number, head);
     let closed = if matches!(view.state.as_str(), "CLOSED" | "MERGED") {
         tracker.close(number, view)
     } else {
@@ -710,7 +655,7 @@ pub(super) fn batch_track(
     } else {
         match LandTracker::resolve(globals, &repository) {
             Ok(tracker) => {
-                if let Err(error) = attribute(&tracker, &view, number, head, &reader) {
+                if let Err(error) = attribute(&tracker, &view, number, head) {
                     if error
                         .downcast_ref::<super::wait::Failure>()
                         .is_some_and(|failure| failure.code == "RATE_LIMITED")

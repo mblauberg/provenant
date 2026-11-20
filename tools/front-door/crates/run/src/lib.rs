@@ -6,8 +6,8 @@ mod board;
 mod completion;
 pub use board::{BoardLane, BoardPage};
 pub use completion::{
-    BuildCap, PreambleExtras, handoff_progress_guidance, lane_preamble, lane_preamble_with,
-    sanitise_handoff, sanitise_handoff_result,
+    BuildCap, LaneLocation, PreambleExtras, handoff_progress_guidance, lane_preamble,
+    lane_preamble_with, sanitise_handoff, sanitise_handoff_result,
 };
 mod verification;
 pub use verification::{VerificationResolution, conflict_cause};
@@ -93,7 +93,7 @@ pub use plan::{
 pub use retention::{
     AttemptLogRemoval, AttemptTmpRemoval, PayloadEviction, PayloadReport, ProviderStateGc,
     ProviderStateIssue, RetentionScan, ScratchOwner, ScratchOwnerResolver, ScratchPolicy,
-    TOMBSTONE, payload_totals,
+    TOMBSTONE, gc_import_pins, payload_totals,
 };
 pub use writer::{
     BoundSandboxBackend, LaunchConfinement, RepinOutcome, WriterFence, WriterLaunch,

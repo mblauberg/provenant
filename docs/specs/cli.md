@@ -136,9 +136,10 @@ maxima above the default, take effect in one place.
 
 `wait --pr --until complete` defaults to a 60-minute budget from
 `domains.wait.pr_complete_timeout_seconds` (3600 seconds), long enough for a
-normal CI run; an explicit `--timeout` still overrides it. Other waits keep the
-shorter `domains.wait.timeout_seconds` default. Both share the same maximum and
-the same source reporting.
+normal CI run; an explicit `--timeout` still overrides it. Other `wait` budgets
+keep the shorter `domains.wait.timeout_seconds` (300 seconds) default. Both
+`wait` budgets share the same maximum and the same source reporting; the landing
+gate and graph waits use their own knobs (see CI observations below).
 - Why: a normal CI run outlasted the shared five-minute default, so callers had
   to re-arm the same complete wait several times per pull request.
 
@@ -148,8 +149,12 @@ envelope, including without `--follow`.
 
 ### Status selection
 
-Status includes all active graph work; omitted settled work is counted. Human
-and structured output share the selection. `status --mine` reads active custody
+Status includes all active graph work; omitted settled work is counted. A
+settled graph is still listed when its digests report a live attempt: only
+settled graphs without a live lane are hidden and counted as omitted. The
+headline and human output lead with the number of live lanes read from those
+same digests, and `--json` exposes that count as `live_lanes`. Human and
+structured output share the selection. `status --mine` reads active custody
 across projects, or one explicit `--project`, including attempts nested under
 the current chair and unattended items available for adoption. It is short by
 default, expands with `--full`, and exposes typed records and native presence
@@ -175,6 +180,23 @@ incomplete evidence and unreachable peers remain `unknown`; status does not
 mutate or schedule recovery.
 Unattended and settling rows name the scoped `provenant reconcile` action,
 which rechecks custody before settlement.
+`status NAME --full` gives each unsettled attempt row its newest observed event
+time, its host-local attempt directory, the masked and bounded argv of the
+writer's current child command, and its wait reason when one is known. A dead
+or unobservable writer (`unattended`/`unknown`) is still shown, because the
+last-event time matters most there; a settled attempt is not. The event time is
+the most recent supervisor-observed activity, falling back to launch and then
+queue time: a run event carries a sequence, not a wall clock. The line names
+which value supplied it — `output`, `started` or `queued` — so a quiet writer's
+old output is not mistaken for a fresh heartbeat. `child_command` is the
+admission-gated command: it is set only when the child went through the
+admission shim (a lane waiting for or holding a slot), not for an arbitrary
+writer. Admission shims mask and bound the command before publishing a wait or a
+hold, so raw arguments never reach the state directory or a reader. A lane
+waiting for a repository's heavy-job lock reports both the reason and the
+command it is waiting to run, which distinguishes a wait from a hung writer.
+The attempt directory and child command stay host-local and never cross a peer
+boundary.
 
 `adopt KIND:ID` takes custody of an external item; `release KIND:ID` records an
 explicit release. `fabric claim acquire|renew|verify|release` takes the same
@@ -360,7 +382,7 @@ worktree links without following them through the host filesystem.
 
 `pr status [NUMBER ...]` reports each pull request's head, check rollup and failed check names in one batched GraphQL read when available; omitting numbers selects this account's open pull requests. The REST observer shares ETag-backed check pages by repository and head SHA. Batched results have a short per-pull-request freshness window and fall back to REST when GraphQL cannot answer; a REST rate limit falls back to GraphQL when available.
 
-`wait --pr NUMBER` is the one way to block on a pull request. By default a failed check settles the PR immediately; `--until complete` waits until all observed checks finish and no Actions workflow run for the head is active, then reports each failed or cancelled check with its link when available. Every wait reads head-filtered Actions runs through the shared observer; if runs cannot be read or none are found, it warns once per wait and falls back to observed checks. A head with no Actions run yet cannot settle a wait, because a push's workflows start after the push: a reading that would settle (a pass, or any result under `--until complete`) stays pending for `domains.wait.actions_grace_seconds` (default 60, 0 disables) from the first reading of that head, then settles on the observed checks; a failure still settles a default wait at once. A run that stays in `waiting` (a pending environment approval, for example), `queued` or `in_progress` counts as active, so under `--until complete` it holds the wait until the timeout. Failure lines escape terminal controls, clip a check name to 120 bytes and show a link only when it is an http(s) URL of at most 300 bytes without whitespace. This uses the same PR observer and applies separately from the choice of `--all`, `--any` or `--fail-fast` across targets. By default a merged or closed PR settles immediately; completion mode first waits for its observed checks and Actions runs. It reads CI through the shared observer and reports the PR's class as it changes (`--follow` for every transition), always naming the head being watched. `--head SHA` pins the wait to one head: until GitHub reports that exact SHA the reading stays pending whatever the previous head's checks say, so a push's predecessor can never produce a verdict. Without `--head`, when the PR's branch is known locally and its tip differs from GitHub's head, the wait warns and watches the local tip instead. At a timeout it prints the last known check summary (including a complete wait's failing head whose checks still run), naming the checks still pending by their observed names, and, when no check was ever reported, the next step: check the workflow triggers or push an empty commit to start CI. Its budget is `--timeout`, or `domains.wait.pr_complete_timeout_seconds` (default 3600 seconds) under `--until complete` and `domains.wait.timeout_seconds` otherwise, clamped to `domains.wait.max_timeout_seconds`, so the wait, the landing gate and graph waits share one configured policy and one set of exit codes. The last line names every target's settle state (`settled ok`, `failed`, `needs input` or `still running at timeout`) and the one next command, and compact output keeps that line through an owner summary. The observation method is diagnostic detail shown only under `--full` and in the JSON envelope, never as the last line of default output.
+`wait --pr NUMBER` is the one way to block on a pull request. By default a failed check settles the PR immediately; `--until complete` waits until all observed checks finish and no Actions workflow run for the head is active, then reports each failed or cancelled check with its link when available. Every wait reads head-filtered Actions runs through the shared observer; if runs cannot be read or none are found, it warns once per wait and falls back to observed checks. A head with no Actions run yet cannot settle a wait, because a push's workflows start after the push: a reading that would settle (a pass, or any result under `--until complete`) stays pending for `domains.wait.actions_grace_seconds` (default 60, 0 disables) from the first reading of that head, then settles on the observed checks; a failure still settles a default wait at once. A run that stays in `waiting` (a pending environment approval, for example), `queued` or `in_progress` counts as active, so under `--until complete` it holds the wait until the timeout. Failure lines escape terminal controls, clip a check name to 120 bytes and show a link only when it is an http(s) URL of at most 300 bytes without whitespace. This uses the same PR observer and applies separately from the choice of `--all`, `--any` or `--fail-fast` across targets. By default a merged or closed PR settles immediately; completion mode first waits for its observed checks and Actions runs. It reads CI through the shared observer and reports the PR's class as it changes (`--follow` for every transition), always naming the head being watched. `--head SHA` pins the wait to one head: until GitHub reports that exact SHA the reading stays pending whatever the previous head's checks say, so a push's predecessor can never produce a verdict. Without `--head`, when the PR's branch is known locally and its tip differs from GitHub's head, the wait warns and watches the local tip instead. At a timeout it prints the last known check summary (including a complete wait's failing head whose checks still run), naming the checks still pending by their observed names, and, when no check was ever reported, the next step: check the workflow triggers or push an empty commit to start CI. Its budget is `--timeout`, or `domains.wait.pr_complete_timeout_seconds` (default 3600 seconds) under `--until complete` and `domains.wait.timeout_seconds` (default 300 seconds) otherwise, clamped to `domains.wait.max_timeout_seconds`. That is the `wait` budget only. The landing gate uses `domains.pr.land.gate.timeout_seconds` (default 3600 seconds, overridable with `land --wait`); graph waits use `domains.fabric.graph.launch_wait_seconds` (default 55 seconds). These are separate knobs with separate defaults, not one shared policy. The last line names every target's settle state (`settled ok`, `failed`, `needs input` or `still running at timeout`) and the one next command, and compact output keeps that line through an owner summary. The observation method is diagnostic detail shown only under `--full` and in the JSON envelope, never as the last line of default output.
 
 `ci failures pr NUMBER` and `ci failures run ID` report failing test names, panic locations and messages, and error lines from failed job logs. The parser handles nextest and legacy `cargo test` output. Human output is compact by default; `--json` returns structured evidence. Failed logs share the CI observation cache for a short freshness window. Unreadable logs and bounded output remain visible in the result.
 

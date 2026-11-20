@@ -851,22 +851,6 @@ knob = "policy.LAUNCH_PRIVATE_GIT_OBJECTS_NONE"
 justification = "A read-only Git launcher whose directory cannot be encoded in PATH is omitted with a warning; the selected Git executable remains explicitly granted."
 
 [[rule]]
-code = "LAUNCH_PRIVATE_GIT_OBJECTS_NONE_2"
-site = "providers/src/launch.rs#private_git_objects"
-boundary = "none"
-strength = "warn"
-knob = "policy.LAUNCH_PRIVATE_GIT_OBJECTS_NONE_2"
-justification = "A host Git configuration file that cannot be located or read contributes no settings to a sandboxed lane's private Git configuration; the lane launches with a warning."
-
-[[rule]]
-code = "LAUNCH_PRIVATE_GIT_OBJECTS_NONE_3"
-site = "providers/src/launch.rs#private_git_objects"
-boundary = "none"
-strength = "warn"
-knob = "policy.LAUNCH_PRIVATE_GIT_OBJECTS_NONE_3"
-justification = "A filter driver the host marks required but the allowlist withholds leaves the lane's Git without that filter; the lane launches with a warning naming the key, and domains.lanes.git_config_allow can pass the driver."
-
-[[rule]]
 code = "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION"
 site = "providers/src/launch.rs#private_git_objects"
 boundary = "git_isolation"
@@ -1109,6 +1093,15 @@ strength = "warn"
 refusable = true
 knob = "policy.WRITE_SCOPE"
 justification = "Paths inside the writer worktree are advisory scope. Report paths outside the declared scope; only an explicit strict setting refuses settlement."
+
+[[rule]]
+code = "LANE_TOOL_STATE_COMMITTED"
+site = "run/src/writer.rs#WriterLaunch::report_tool_state_paths"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.LANE_TOOL_STATE_COMMITTED"
+justification = "Writer commits that add or modify .local, .config or .cache paths at the repository root warn at settlement and name the paths. Settlement proceeds unless an explicit strict setting refuses."
 
 [[rule]]
 code = "WRITER_CENSUS"

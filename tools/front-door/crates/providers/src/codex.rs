@@ -222,10 +222,7 @@ fn prepare(
         input.policy,
     )?;
     if input.sandboxed() {
-        env.extend([
-            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-        ]);
+        env.extend([("GIT_CONFIG_GLOBAL".into(), "/dev/null".into())]);
     }
     if input.sandboxed() && (staged_skills.root.is_some() || !input.user_skills()) {
         for (key, value) in &mut env {
@@ -267,6 +264,7 @@ fn prepare(
         cwd: input.cwd.to_owned(),
         setup,
         omitted_discovery,
+        warnings: Vec::new(),
         user_skills: staged_skills,
         tool_requirements: Default::default(),
         git_wrapper: Default::default(),

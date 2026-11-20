@@ -79,12 +79,12 @@ project if no own generation exists. The seed builder and writer preparation
 use the same lane profile defaults and preserve explicit environment values;
 incompatible profile generations are skipped. Refresh currentness requires the
 recorded verify-base commit to match; writer selection uses compatible
-generations and Cargo's normal per-unit freshness checks before reusing artifacts. A clone ages every
+generations and Cargo's normal per-unit freshness checks before reusing artifacts. A generation records the allocated size of its built target, measured once at seed-build time, so cloning need not walk the whole seed first. At launch the seed reservation carries that recorded allocated size to the collector, which resolves it against the byte unit its own census used: near-zero clone-private bytes on a reflink filesystem, the full allocated size where private size is unavailable. Because a lane clone reflinks the seed's blocks, under a private-byte census it privately owns almost nothing at clone time, so it reserves no budget and cannot evict an unrelated under-budget target for blocks it never privately consumes; under an allocated-byte census the recorded size is charged and an under-budget target near the limit is evicted to make room. A generation built before the size field existed records none, and the clone reserves nothing for it. Such a seed is accepted quietly rather than warning on every launch: its outcome records `size_recorded: false` in `cargo-target-setup.json`, and eviction accounting resumes once the seed is refreshed with a recorded size. A clone ages every
 dep-info file to the epoch before it is published, so each unit that lists source files (workspace
 members) rebuilds once against the worktree's sources while registry packages, which list none, stay
 fresh. Cargo does not promise a build-directory layout (`.fingerprint/<unit>/` before Cargo 1.100,
 `build/<package>/<hash>/fingerprint/` after) or which units keep dep-info, so the pass is driven by the
-fingerprints themselves. Within the clone's depth limit, the seed budget and cancellation, it finds the
+fingerprints themselves. One host knob `lanes.cargo_seed_budget` (default 5m, ceiling 1h) bounds each step: stage cleanup, generation selection, the clone, and dep-info aging each start with a fresh deadline from the same budget when that step begins, so a slow step cannot consume another's time. In particular stage cleanup gets its own deadline that is not charged to selection, and dep-info aging starts its deadline only after the clone returns. A fallback whose budget ran out names the step and reports the effective setting with its source (host or compiled default) in `cargo-target-setup.json` and the warning. An unreadable host config warns with its path and uses the compiled default, reported as such. Within the clone's depth limit, its own budget and cancellation, it finds the
 `*.json` fingerprints in `fingerprint` and `.fingerprint` directories, reads each one's `local` entries
 (ignoring unknown fields) and ages exactly the files its `CheckDepInfo` entries name, relative to the target
 root. A fingerprint that cannot be read, a named dep-info that is missing or not a path inside the target, or
@@ -209,7 +209,16 @@ or the record or index cannot be read, the index and record are left unchanged
 and status reports `index_out_of_sync` with the reason, the paths and one
 command that resets the index and the record together.
 Import retention refs belong to each attempt, even for an identical commit;
-publication and cleanup remove only that attempt's pins.
+publication and cleanup remove only that attempt's pins. Settlement clears an
+attempt's import pins on every terminal outcome, not just successful
+publication, and GC removes the pins of any settled or missing attempt so ref
+listings stay small. Bulk pin removal is one batched ref transaction, never one
+Git process per pin. The same condition gates the import pin and the
+import-extra refs: when no writer slot is available or the fence listing has
+issues, cleanup keeps both as recovery evidence. GC counts the import pins a
+preview would remove and deletes them only when applied. An unreadable run
+store leaves the pins untouched: GC warns on stderr and carries on with the
+settled-lane and path-based passes instead of skipping the project.
 Lane Git import runs with `-c advice.graftFileDeprecated=false`, and raw git advice
 (such as `hint:` lines) is filtered from stderr before warning so advice lines
 never surface as Provenant warnings.
@@ -217,6 +226,15 @@ never surface as Provenant warnings.
 The GitHub credential receipt governs token delivery even when sandboxing is
 off: `none` withholds host token environment variables, `injected` passes only
 the selected token, and `ambient` preserves the native host environment.
+`ambient` also pins `GH_CONFIG_DIR` to the host's gh configuration directory,
+resolved as gh does on the host (the host's `GH_CONFIG_DIR`, else its
+`XDG_CONFIG_HOME/gh`, else `~/.config/gh`), in the lane environment and in the
+lane's `gh` shim, because an adapter may re-point the lane's own
+`XDG_CONFIG_HOME` at private state. The receipt's `detail` names the directory
+and which host setting chose it. The shim directory leads the lane's `PATH` as
+set by the host; a shell profile that reorders `PATH` does not unpin gh, since
+the pin lives in the environment. A lane opens its own pull request with
+`gh pr create --body-file`; `provenant pr open` needs a settled attempt.
 - Why: untrusted lane state must not alter shared Git or publish over another writer.
 
 ## Writer pin and re-pin

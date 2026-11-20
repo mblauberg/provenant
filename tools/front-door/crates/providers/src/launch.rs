@@ -236,6 +236,10 @@ pub struct LaunchSpec {
     pub setup: Vec<SetupStep>,
     /// Discovered optional grants omitted during preparation.
     pub omitted_discovery: Vec<OmittedGrant>,
+    /// Warnings raised while finalising the lane environment (for example a
+    /// state directory rebound out of the worktree). The launcher surfaces
+    /// these on the launch receipt; they never refuse a launch.
+    pub warnings: Vec<String>,
     /// Exact staged skill content and warnings used by this launch.
     pub user_skills: crate::StagedUserSkills,
     pub(crate) tool_requirements: ToolRequirements,
@@ -338,13 +342,6 @@ impl LaunchSpec {
     }
 
     /// Selected executable facts, after the requirements resolver ran.
-    /// Host Git configuration key names, subsections redacted, that the
-    /// allowlist withheld from a sandboxed lane. `None` when the lane's Git
-    /// view was not built from the allowlist.
-    pub fn git_config_dropped(&self) -> Option<&[String]> {
-        self.git_wrapper.host_config_dropped.as_deref()
-    }
-
     pub fn prepared_tools(&self) -> &[PreparedToolRequirement] {
         &self.tool_requirements.selected
     }
@@ -416,9 +413,6 @@ pub struct PrepareInput<'a> {
     /// depend on the runner.
     pub host_var: &'a dyn Fn(&str) -> Option<OsString>,
     pub skill_stage_max_bytes: u64,
-    /// Extra host Git configuration keys a person passes deliberately to
-    /// sandboxed lanes (`domains.lanes.git_config_allow`).
-    pub git_config_allow: &'a [String],
     /// Claude's login token, read by the host outside the sandbox.
     /// Selected registered identity. Absent preserves the default login source.
     pub account: Option<&'a crate::identity::RegisteredAccount>,
@@ -925,90 +919,57 @@ pub(crate) fn private_git_objects(
         vec![xdg.join("git/config"), input.home.join(".gitconfig")]
     };
     let mut config_text = String::new();
-    if input.sandboxed() {
-        // Credentials reach a sandboxed lane only through its token helper:
-        // host entries are copied through the allowlist, and the lane gets
-        // neither an include nor a read grant on the host files. The system
-        // file comes first, as Git reads it; the lane's Git never reads it
-        // directly because `GIT_CONFIG_NOSYSTEM` stays set.
-        let mut entries = match provenant_os::sys::git_system_config(
-            input.provenant.git,
-            input.cwd,
-            (input.host_var)("GIT_CONFIG_SYSTEM").as_deref(),
-            (input.host_var)("GIT_CONFIG_NOSYSTEM").as_deref(),
-        ) {
-            Ok(entries) => entries,
-            Err(_) => {
-                policy_warning(
-                    input.policy,
-                    "LAUNCH_PRIVATE_GIT_OBJECTS_NONE_2",
-                    "the host system Git configuration could not be read; the lane receives none of its settings",
-                )?;
-                Vec::new()
-            }
-        };
-        for path in globals.iter().filter(|path| path.is_file()) {
-            match provenant_os::sys::git_config_file(input.provenant.git, path, input.cwd) {
-                Ok(read) => entries.extend(read),
-                Err(_) => policy_warning(
-                    input.policy,
-                    "LAUNCH_PRIVATE_GIT_OBJECTS_NONE_2",
-                    format!(
-                        "the host Git configuration {} could not be read; the lane receives none of its settings",
-                        path.display()
-                    ),
-                )?,
-            }
-        }
-        let view =
-            crate::git_config::lane_view(&entries, input.git_config_allow).map_err(|_| {
-                input.policy.boundary_error(
-                    "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
-                    Facts::violation("the host Git identity contains control characters"),
-                    ProviderError::InvalidPath,
-                )
-            })?;
-        for name in &view.required_filters {
-            policy_warning(
-                input.policy,
-                "LAUNCH_PRIVATE_GIT_OBJECTS_NONE_3",
-                format!(
-                    "the host marks Git filter {name} required, but its driver is withheld from the lane, so Git applies no filter there; pass it with {}",
-                    crate::git_config::ALLOW_KEY
-                ),
-            )?;
-        }
-        config_text.push_str(&view.text);
-        spec.git_wrapper.host_config_dropped = Some(view.dropped);
-    } else {
-        // An unsandboxed lane can read the host files directly, so it gets
-        // the host configuration in full, as Git run by hand would.
-        for path in globals.iter().filter(|path| path.is_file()) {
-            let value = path
-                .to_str()
-                .filter(|value| !value.chars().any(char::is_control))
-                .ok_or_else(|| {
-                    input.policy.boundary_error(
-                        "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
-                        Facts::violation("the host Git configuration path cannot be represented for the private Git view"),
-                        ProviderError::InvalidPath,
-                    )
-                })?;
-            config_text.push_str(&format!(
-                "[include]\n\tpath = {}\n",
-                git_config_quote(value)
+    // Every lane, sandboxed or not, reads the host global configuration in
+    // full, as Git run by hand would. The lane's token helper is added on top
+    // below; the host files themselves are not copied or rewritten.
+    for path in globals.iter().filter(|path| path.is_file()) {
+        // Both Git's include and the exact sandbox grant must name the same
+        // physical file: anchor validation rejects symlink spellings.
+        let path = std::fs::canonicalize(path).map_err(|_| {
+            input.policy.boundary_error(
+                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
+                Facts::violation("the host Git configuration could not be bound into the private writer Git view"),
+                ProviderError::InvalidPath,
+            )
+        })?;
+        let value = path.to_str().ok_or_else(|| {
+            input.policy.boundary_error(
+                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
+                Facts::violation("the host Git configuration path cannot be represented for the private writer Git view"),
+                ProviderError::InvalidPath,
+            )
+        })?;
+        if value.chars().any(char::is_control) {
+            return Err(input.policy.boundary_error(
+                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
+                Facts::violation("the host Git configuration path contains control characters"),
+                ProviderError::InvalidPath,
             ));
         }
+        config_text.push_str(&format!(
+            "[include]\n\tpath = {}\n",
+            git_config_quote(value)
+        ));
+        spec.profile.spec.runtime_reads.push(exact(&path));
     }
     config_text.push_str("[user]\n\tuseConfigOnly = true\n");
     spec.setup.push(SetupStep::WriteFile {
         path: config.clone(),
         bytes: config_text.into_bytes(),
     });
-    // Only a sandboxed lane is under the credential boundary; a host-native
-    // lane keeps the host's own Git environment.
+    // Only a sandboxed lane gets the lane's own token helper; a host-native
+    // lane keeps the host's own Git environment. The entries are appended on
+    // top of the host configuration so pushing keeps working.
     if input.sandboxed() {
-        crate::lane::install_token_config(&mut spec.env);
+        crate::lane::install_token_config(&mut spec.env).map_err(|error| {
+            input.policy.boundary_error(
+                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
+                Facts::violation(
+                    "Git credentials could not be isolated in the private writer Git environment",
+                ),
+                error,
+            )
+        })?;
     }
     if let Some((_, current)) = spec
         .env
@@ -1085,7 +1046,7 @@ pub(crate) fn private_git_objects(
 /// Quote a value for a Git config file. The config always enables
 /// `user.useConfigOnly`, so an absent or malformed host identity cannot fall
 /// back to Git's generated username and hostname.
-pub(crate) fn git_config_quote(value: &str) -> String {
+fn git_config_quote(value: &str) -> String {
     let mut quoted = String::from("\"");
     for character in value.chars() {
         match character {
@@ -1157,6 +1118,50 @@ pub(crate) fn prepare_tool_requirements(
     Ok(())
 }
 
+/// Whether `path` is `root` or sits below it, lexically or, when both paths
+/// exist, through their canonical spellings. A worktree reached through a
+/// symlink is still the worktree.
+fn path_inside(path: &Path, root: &Path) -> bool {
+    if path == root || path.starts_with(root) {
+        return true;
+    }
+    match (std::fs::canonicalize(path), std::fs::canonicalize(root)) {
+        (Ok(path), Ok(root)) => path == root || path.starts_with(root),
+        _ => false,
+    }
+}
+
+/// Keep every lane state directory outside the checkout the lane writes. A
+/// tool that resolves its state from one of these variables must never land
+/// that state in the worktree, where a later commit could pick it up. Only
+/// values that resolve inside `cwd` are rebound; host values are left alone.
+fn rebind_worktree_state_env(cwd: &Path, scratch: &Path, spec: &mut LaunchSpec) {
+    for (name, relative) in [
+        ("HOME", "home"),
+        ("XDG_CONFIG_HOME", "xdg/config"),
+        ("XDG_CACHE_HOME", "xdg/cache"),
+        ("XDG_DATA_HOME", "xdg/data"),
+        ("XDG_STATE_HOME", "xdg/state"),
+    ] {
+        let Some(index) = spec.env.iter().position(|(key, _)| key == name) else {
+            continue;
+        };
+        let old = PathBuf::from(&spec.env[index].1);
+        if !path_inside(&old, cwd) {
+            continue;
+        }
+        let replacement = scratch.join(relative);
+        spec.env[index].1 = replacement.clone().into_os_string();
+        spec.setup.push(SetupStep::CreateDir(replacement.clone()));
+        spec.warnings.push(format!(
+            "{name}={} is inside the lane worktree {}; rebound to {} because tool state must not be written into the worktree",
+            old.display(),
+            cwd.display(),
+            replacement.display()
+        ));
+    }
+}
+
 /// Every adapter finishes here, after provider-specific environment changes.
 /// Identity, temporary files and Cargo configuration are lane bindings even
 /// when the host environment is sparse or sandboxing is disabled.
@@ -1178,6 +1183,7 @@ pub(crate) fn finalise_provider_env(
         ("TMPDIR".into(), scratch.into()),
         ("TMPPREFIX".into(), scratch.join("zsh").into()),
     ]);
+    rebind_worktree_state_env(input.cwd, scratch, spec);
     if !input.sandboxed() {
         crate::package_cache::bind_native(input.home, input.cwd, input.host_var, &mut spec.env);
     }
@@ -2424,5 +2430,143 @@ mod selected_node_prefix_tests {
             Some(nvm_prefix),
             "later Homebrew cache configuration must not override the first PATH installation"
         );
+    }
+}
+
+#[cfg(test)]
+mod lane_state_env_tests {
+    use super::*;
+
+    fn spec_with(vars: &[(&str, PathBuf)]) -> LaunchSpec {
+        LaunchSpec {
+            argv: Vec::new(),
+            env: vars
+                .iter()
+                .map(|(key, value)| (OsString::from(*key), value.clone().into_os_string()))
+                .collect(),
+            stdin: Stdin::Null,
+            secret_input: None,
+            cwd: PathBuf::new(),
+            setup: Vec::new(),
+            omitted_discovery: Vec::new(),
+            warnings: Vec::new(),
+            user_skills: Default::default(),
+            tool_requirements: Default::default(),
+            git_wrapper: Default::default(),
+            policy: Policy::default(),
+            credential_roots: provenant_core::CredentialRoots::for_home(Path::new("/fixture/home")),
+            session_state: SessionStateLocation::AttemptPrivate,
+            profile: ProviderProfile {
+                spec: provenant_confinement::permissions::ProviderProfileSpec::default(),
+                observations: Default::default(),
+            },
+            stream: StreamState::new("claude", |_| Ok(Vec::new()), &Policy::default()),
+        }
+    }
+
+    fn env_path(spec: &LaunchSpec, name: &str) -> PathBuf {
+        spec.env
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| PathBuf::from(value))
+            .expect("environment binding")
+    }
+
+    // Spec: docs/specs/run-launch.md#lane-state-stays-outside-the-worktree
+    #[test]
+    fn lane_home_inside_worktree_is_rebound_to_scratch_with_a_warning() {
+        let root = tempfile::tempdir().unwrap();
+        let worktree = root.path().join("worktree");
+        let scratch = root.path().join("scratch");
+        let lane_home = worktree.join("sub/home");
+        let mut spec = spec_with(&[("HOME", lane_home.clone())]);
+
+        rebind_worktree_state_env(&worktree, &scratch, &mut spec);
+
+        assert_eq!(env_path(&spec, "HOME"), scratch.join("home"));
+        assert_eq!(
+            spec.setup,
+            vec![SetupStep::CreateDir(scratch.join("home"))],
+            "the private home must be created with mode 0700 before the launch"
+        );
+        assert_eq!(spec.warnings.len(), 1);
+        let warning = &spec.warnings[0];
+        assert!(warning.contains("HOME"), "{warning}");
+        assert!(
+            warning.contains(&lane_home.display().to_string()),
+            "{warning}"
+        );
+        assert!(
+            warning.contains(&scratch.join("home").display().to_string()),
+            "{warning}"
+        );
+        assert!(warning.contains("worktree"), "{warning}");
+    }
+
+    #[test]
+    fn xdg_state_inside_worktree_is_rebound() {
+        let root = tempfile::tempdir().unwrap();
+        let worktree = root.path().join("worktree");
+        let scratch = root.path().join("scratch");
+        let lane_state = worktree.join(".local/state");
+        let mut spec = spec_with(&[
+            ("HOME", root.path().join("host-home")),
+            ("XDG_STATE_HOME", lane_state.clone()),
+        ]);
+
+        rebind_worktree_state_env(&worktree, &scratch, &mut spec);
+
+        assert_eq!(env_path(&spec, "HOME"), root.path().join("host-home"));
+        assert_eq!(env_path(&spec, "XDG_STATE_HOME"), scratch.join("xdg/state"));
+        assert!(
+            spec.setup
+                .contains(&SetupStep::CreateDir(scratch.join("xdg/state"))),
+            "{:?}",
+            spec.setup
+        );
+        assert_eq!(spec.warnings.len(), 1);
+        let warning = &spec.warnings[0];
+        assert!(warning.contains("XDG_STATE_HOME"), "{warning}");
+        assert!(
+            warning.contains(&lane_state.display().to_string()),
+            "{warning}"
+        );
+    }
+
+    #[test]
+    fn home_outside_worktree_is_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let worktree = root.path().join("worktree");
+        let scratch = root.path().join("scratch");
+        let host_home = root.path().join("host-home");
+        let mut spec = spec_with(&[("HOME", host_home.clone())]);
+
+        rebind_worktree_state_env(&worktree, &scratch, &mut spec);
+
+        assert_eq!(env_path(&spec, "HOME"), host_home);
+        assert!(spec.warnings.is_empty(), "{:?}", spec.warnings);
+        assert!(spec.setup.is_empty(), "{:?}", spec.setup);
+    }
+
+    #[test]
+    fn state_reached_through_a_symlink_is_rebound_canonically() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let worktree = std::fs::canonicalize(root.path())
+            .unwrap()
+            .join("real-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let alias = root.path().join("alias-worktree");
+        symlink(&worktree, &alias).unwrap();
+        let scratch = root.path().join("scratch");
+        let state = alias.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let mut spec = spec_with(&[("XDG_CACHE_HOME", state)]);
+
+        rebind_worktree_state_env(&worktree, &scratch, &mut spec);
+
+        assert_eq!(env_path(&spec, "XDG_CACHE_HOME"), scratch.join("xdg/cache"));
+        assert_eq!(spec.warnings.len(), 1);
     }
 }

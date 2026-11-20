@@ -1040,10 +1040,7 @@ fn prepare(
     let mut tool_exec_roots = ["/bin", "/usr/bin", "/usr/libexec"].map(subtree).to_vec();
     let tool_writes = Vec::new();
     if input.sandboxed() {
-        env.extend([
-            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-        ]);
+        env.extend([("GIT_CONFIG_GLOBAL".into(), "/dev/null".into())]);
     }
     // The git wrapper script remains available to Bash.
     tool_exec_roots.push(subtree(scratch.join("bin")));
@@ -1065,6 +1062,7 @@ fn prepare(
         cwd: input.cwd.to_owned(),
         setup,
         omitted_discovery,
+        warnings: Vec::new(),
         user_skills: staged_skills,
         tool_requirements: Default::default(),
         git_wrapper: Default::default(),

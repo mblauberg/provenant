@@ -12,7 +12,6 @@ mod contract;
 pub mod cursor;
 pub mod duration;
 mod dylib;
-pub mod git_config;
 pub use dylib::{ClosureOutcome, DependencyClosure, IncompleteReason};
 pub mod host;
 pub mod identity;
@@ -48,6 +47,7 @@ pub fn bare_spec(path: &str) -> LaunchSpec {
         cwd: std::path::PathBuf::from("/"),
         setup: Vec::new(),
         omitted_discovery: Vec::new(),
+        warnings: Vec::new(),
         user_skills: Default::default(),
         tool_requirements: Default::default(),
         git_wrapper: Default::default(),

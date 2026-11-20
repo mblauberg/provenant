@@ -40,6 +40,10 @@ pub(crate) const SEED_WAIT_LOCK: &str = "seed-wait.lock";
 #[cfg(test)]
 thread_local! {
     pub(crate) static FAIL_IMPORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The rendered tool-state settlement warning, for tests that cannot read
+    /// the process-wide stderr stream without racing other tests.
+    pub(crate) static TOOL_STATE_WARNINGS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn error<E: std::fmt::Display>(
@@ -1035,6 +1039,37 @@ fn status_paths_raw(output: &[u8], include_sources: bool) -> Result<Vec<Vec<u8>>
     Ok(paths)
 }
 
+/// Paths behind the shared settlement diff: committed changes first, then
+/// untracked worktree entries, both as raw Git path bytes.
+type SettlementPaths = (Vec<Vec<u8>>, Vec<Vec<u8>>);
+
+/// Tool-state paths at the repository root: only the first path segment is
+/// considered, so `.github/x` and `src/.config` are ordinary project paths.
+fn tool_state_paths(paths: &[Vec<u8>]) -> Vec<String> {
+    const ROOTS: [&[u8]; 3] = [b".local", b".config", b".cache"];
+    let mut selected: Vec<Vec<u8>> = paths
+        .iter()
+        .filter(|path| ROOTS.contains(&path.split(|byte| *byte == b'/').next().unwrap_or(&[])))
+        .cloned()
+        .collect();
+    selected.sort();
+    selected.dedup();
+    selected
+        .into_iter()
+        .map(|path| String::from_utf8_lossy(&path).into_owned())
+        .collect()
+}
+
+/// The warning detail names the count and up to the first ten paths.
+fn tool_state_detail(paths: &[String]) -> String {
+    let shown: Vec<&str> = paths.iter().take(10).map(String::as_str).collect();
+    format!(
+        "{} tool-state paths committed: {}",
+        paths.len(),
+        shown.join(", ")
+    )
+}
+
 /// Hex digits in a short commit name.
 pub(crate) const SHORT_SHA: usize = 9;
 /// Changed paths named in a budget commit message and placeholder result.
@@ -1144,6 +1179,137 @@ struct GitPins {
     base: GitOid,
 }
 
+/// The primary checkout as launch found it, sealed beside the attempt: the
+/// branch it sat on and every local and remote-tracking branch tip. A lane bound
+/// to a linked worktree that works in the primary checkout instead leaves
+/// commits or a branch there that this record does not account for (#3611).
+const PRIMARY_PIN: &str = "primary-checkout.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PrimaryPin {
+    #[serde(default, flatten)]
+    extra: provenant_records::ExtraFields,
+    schema_version: u64,
+    scope: provenant_records::custody::Scope,
+    checkout: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    head_ref: Option<String>,
+    refs: std::collections::BTreeMap<String, GitOid>,
+}
+
+/// Work a writer made outside its bound worktree, seen at settlement.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct StrayWork {
+    /// The finding: the stray branch or commits and where they were made.
+    pub note: String,
+}
+
+/// Commits the report lists and the cap on how many Git is asked for.
+const STRAY_COMMITS_LISTED: usize = 5;
+const STRAY_COMMITS_COUNTED: usize = 20;
+
+/// What to ask Git about the primary checkout, from its launch record and its
+/// state now. Stray work is either (a) the primary sitting on a branch that did
+/// not exist at launch, or (b) commits reachable from its HEAD or from new or
+/// advanced local branches that no launch tip, no remote-tracking tip that
+/// existed at launch (a pull's fetch moves those) and no other linked worktree
+/// HEAD (the bound branch and other lanes' branches) reaches.
+struct StrayPlan {
+    new_branch: Option<String>,
+    tips: Vec<GitOid>,
+    tip_names: Vec<String>,
+    excluded: Vec<GitOid>,
+}
+
+fn short_branch(name: &str) -> &str {
+    name.strip_prefix("refs/heads/").unwrap_or(name)
+}
+
+impl StrayPlan {
+    fn new(
+        launch_head: Option<&str>,
+        launch: &std::collections::BTreeMap<String, GitOid>,
+        now: &crate::objects::PrimaryRefs,
+    ) -> Self {
+        let new_branch = now
+            .head_ref
+            .as_deref()
+            .filter(|name| name.starts_with("refs/heads/"))
+            .filter(|name| !launch.contains_key(*name) && launch_head != Some(*name))
+            .map(|name| short_branch(name).to_owned());
+        let mut tips = Vec::new();
+        let mut tip_names = Vec::new();
+        if let Some(head) = now.head {
+            tips.push(head);
+            tip_names.push(
+                now.head_ref
+                    .as_deref()
+                    .map_or("a detached HEAD".to_owned(), |name| {
+                        short_branch(name).to_owned()
+                    }),
+            );
+        }
+        for (name, tip) in &now.refs {
+            if name.starts_with("refs/heads/") && launch.get(name) != Some(tip) {
+                tips.push(*tip);
+                if !tip_names.iter().any(|seen| seen == short_branch(name)) {
+                    tip_names.push(short_branch(name).to_owned());
+                }
+            }
+        }
+        let mut excluded: Vec<GitOid> = launch.values().copied().collect();
+        excluded.extend(
+            now.refs
+                .iter()
+                .filter(|(name, _)| name.starts_with("refs/remotes/") && launch.contains_key(*name))
+                .map(|(_, tip)| *tip),
+        );
+        Self {
+            new_branch,
+            tips,
+            tip_names,
+            excluded,
+        }
+    }
+
+    /// None when neither signal fired.
+    fn report(&self, checkout: &str, worktree: &Path, commits: &[GitOid]) -> Option<StrayWork> {
+        if self.new_branch.is_none() && commits.is_empty() {
+            return None;
+        }
+        let mut findings = Vec::new();
+        if let Some(branch) = &self.new_branch {
+            findings.push(format!(
+                "it now sits on branch {branch}, which did not exist at launch"
+            ));
+        }
+        if !commits.is_empty() {
+            let count = if commits.len() > STRAY_COMMITS_COUNTED {
+                format!("{STRAY_COMMITS_COUNTED}+")
+            } else {
+                commits.len().to_string()
+            };
+            let listed = commits
+                .iter()
+                .take(STRAY_COMMITS_LISTED)
+                .map(|commit| commit.to_string().chars().take(12).collect::<String>())
+                .collect::<Vec<_>>()
+                .join(", ");
+            findings.push(format!(
+                "{count} commit(s) ({listed}) on {} that no launch ref, fetched remote-tracking ref or other worktree reaches",
+                self.tip_names.join(", ")
+            ));
+        }
+        Some(StrayWork {
+            note: format!(
+                "stray work in the primary checkout {checkout}: {}; the lane worked outside its bound worktree {}",
+                findings.join("; "),
+                worktree.display()
+            ),
+        })
+    }
+}
+
 struct LaunchBases {
     host: GitOid,
     work: GitOid,
@@ -1201,6 +1367,12 @@ pub(crate) fn cleanup_git_pins(
             "open writer repository for Git ref cleanup",
             Some(&writer.project),
         ))?;
+    // The same recovery condition that protects the import pin protects the
+    // import-extra refs: a refused import or a broken writer fence keeps its
+    // pins as evidence, so only delete them when the import pin is removed.
+    if remove_import_pin {
+        crate::objects::clear_import_refs(utility.git_program_path(), &repo, scope.attempt)?;
+    }
     let mut refs = vec![format!("refs/provenant/lane-base/{}", scope.attempt)];
     if remove_import_pin && let Some(head) = head {
         refs.push(crate::objects::import_pin(scope.attempt, head));
@@ -1510,10 +1682,17 @@ impl LaunchConfinement {
     /// Reclaim least-recently-used unheld profiles after target seeding. Failure
     /// is advisory: a lane starts and the effective limit/source are reported.
     pub(crate) fn enforce_cargo_cache_budget(&self) {
-        self.enforce_cargo_cache_budget_reserving(0);
+        self.enforce_cargo_cache_budget_reserving(crate::build_dir_gc::SeedReservation::default());
     }
 
-    fn enforce_cargo_cache_budget_reserving(&self, projected_bytes: u64) {
+    /// `reservation` carries the incoming seed's recorded allocated size. The
+    /// collector resolves it against the byte unit its census used: near zero
+    /// for a private-byte census, the full allocated size for an allocated-byte
+    /// census. The caller never picks the unit.
+    fn enforce_cargo_cache_budget_reserving(
+        &self,
+        reservation: crate::build_dir_gc::SeedReservation,
+    ) {
         let Some(budget) = &self.cargo_cache_budget else {
             return;
         };
@@ -1541,7 +1720,7 @@ impl LaunchConfinement {
             &self.state_root,
             &self.home,
             crate::build_dir_gc::Limits {
-                max_bytes: budget.bytes.saturating_sub(projected_bytes),
+                max_bytes: budget.bytes,
                 free_floor: 0,
                 grace_seconds: 0,
                 idle_seconds: 0,
@@ -1551,6 +1730,7 @@ impl LaunchConfinement {
             budget,
             &self.cargo_target_protection,
             &mut refresh_protection,
+            reservation,
         );
         let report = match result {
             Ok(report) => report,
@@ -1574,6 +1754,10 @@ impl LaunchConfinement {
                 "warning: Cargo cache collection: {error}"
             );
         }
+        // The census named its unit; project the incoming clone in that same
+        // unit so the over-budget warning cannot disagree with the reservation
+        // the collector just applied.
+        let projected_bytes = reservation.resolved(report.byte_method);
         if report.cache_bytes.saturating_add(projected_bytes) > budget.bytes {
             let _ = writeln!(
                 std::io::stderr().lock(),
@@ -1791,15 +1975,21 @@ impl LaunchConfinement {
             &self.home,
             environment,
             cancel,
-            |projected_bytes| match projected_bytes {
-                Some(projected_bytes) => {
-                    self.enforce_cargo_cache_budget_reserving(projected_bytes);
-                }
-                None => {
-                    use std::io::Write;
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "warning: seed size is unknown; skipping Cargo cache eviction for this launch"
+            |allocated_bytes| {
+                // A generation built before sizes were recorded has no figure
+                // to reserve, so nothing is evicted for it. The outcome records
+                // `size_recorded: false` in cargo-target-setup.json instead of
+                // warning every launch; accounting resumes once the seed is
+                // refreshed with a recorded size.
+                //
+                // Carry the seed's recorded allocated size to the collector.
+                // It resolves the reservation against the byte unit its census
+                // used: near zero for a private-byte census, the full allocated
+                // size where private size is unavailable. The caller never
+                // chooses the unit.
+                if let Some(allocated_bytes) = allocated_bytes {
+                    self.enforce_cargo_cache_budget_reserving(
+                        crate::build_dir_gc::SeedReservation::clone_of(allocated_bytes),
                     );
                 }
             },
@@ -2479,6 +2669,290 @@ mod cargo_setup_tests {
             .status()?;
         assert!(status.success());
         Ok(true)
+    }
+
+    fn oid(digit: char) -> GitOid {
+        GitOid::parse(&digit.to_string().repeat(40)).unwrap()
+    }
+
+    fn refs(entries: &[(&str, char)]) -> std::collections::BTreeMap<String, GitOid> {
+        entries
+            .iter()
+            .map(|(name, digit)| ((*name).to_owned(), oid(*digit)))
+            .collect()
+    }
+
+    fn primary(
+        head_ref: &str,
+        head: char,
+        entries: &[(&str, char)],
+    ) -> crate::objects::PrimaryRefs {
+        crate::objects::PrimaryRefs {
+            head_ref: Some(head_ref.to_owned()),
+            head: Some(oid(head)),
+            refs: refs(entries),
+        }
+    }
+
+    const MAIN: &str = "refs/heads/main";
+    const ORIGIN_MAIN: &str = "refs/remotes/origin/main";
+
+    // Spec: docs/specs/run-settlement.md#stray-lane-work
+    #[test]
+    fn a_branch_that_did_not_exist_at_launch_is_stray_work() {
+        let launch = refs(&[(MAIN, 'a'), (ORIGIN_MAIN, 'a')]);
+        let worktree = Path::new("/repo/.worktrees/lane");
+        let on_new = primary(
+            "refs/heads/stray",
+            'a',
+            &[(MAIN, 'a'), ("refs/heads/stray", 'a'), (ORIGIN_MAIN, 'a')],
+        );
+        let plan = StrayPlan::new(Some(MAIN), &launch, &on_new);
+        assert_eq!(plan.new_branch.as_deref(), Some("stray"));
+        let found = plan
+            .report("/repo", worktree, &[])
+            .expect("sitting on a new branch is a finding with no commits at all");
+        for fragment in [
+            "/repo",
+            "branch stray",
+            "did not exist at launch",
+            "/repo/.worktrees/lane",
+        ] {
+            assert!(found.note.contains(fragment), "{fragment}: {}", found.note);
+        }
+        // A new branch left behind with nothing on it, and not checked out, is no work.
+        let left = primary(
+            MAIN,
+            'a',
+            &[(MAIN, 'a'), ("refs/heads/stray", 'a'), (ORIGIN_MAIN, 'a')],
+        );
+        let plan = StrayPlan::new(Some(MAIN), &launch, &left);
+        assert_eq!(plan.new_branch, None);
+        assert_eq!(plan.report("/repo", worktree, &[]), None);
+        // The branch the primary sat on at launch is never new, even when unborn.
+        let unborn = primary(MAIN, 'a', &[]);
+        assert_eq!(
+            StrayPlan::new(Some(MAIN), &std::collections::BTreeMap::new(), &unborn).new_branch,
+            None
+        );
+    }
+
+    // Spec: docs/specs/run-settlement.md#stray-lane-work
+    #[test]
+    fn commits_on_new_or_advanced_branches_are_candidates_even_after_switching_back() {
+        let launch = refs(&[(MAIN, 'a'), (ORIGIN_MAIN, 'a')]);
+        let switched_back = primary(
+            MAIN,
+            'a',
+            &[(MAIN, 'a'), ("refs/heads/stray", 'b'), (ORIGIN_MAIN, 'a')],
+        );
+        let plan = StrayPlan::new(Some(MAIN), &launch, &switched_back);
+        assert_eq!(plan.new_branch, None);
+        assert!(
+            plan.tips.contains(&oid('b')),
+            "the new branch tip is asked about"
+        );
+        assert!(
+            !plan.excluded.contains(&oid('b')),
+            "nothing accounts for it"
+        );
+        let found = plan
+            .report("/repo", Path::new("/w"), &[oid('b')])
+            .expect("commits outside every known ref are a finding");
+        assert!(found.note.contains("1 commit(s)"), "{}", found.note);
+        assert!(found.note.contains("stray"), "{}", found.note);
+        let advanced = primary(MAIN, 'c', &[(MAIN, 'c'), (ORIGIN_MAIN, 'a')]);
+        let plan = StrayPlan::new(Some(MAIN), &launch, &advanced);
+        assert!(plan.tips.contains(&oid('c')));
+        assert!(plan.tip_names.iter().any(|name| name == "main"));
+    }
+
+    // Spec: docs/specs/run-settlement.md#stray-lane-work
+    #[test]
+    fn a_pull_fast_forward_is_not_stray_work() {
+        let launch = refs(&[(MAIN, 'a'), (ORIGIN_MAIN, 'a')]);
+        // The fetch moved origin/main and the merge carried main to it.
+        let pulled = primary(
+            MAIN,
+            'b',
+            &[
+                (MAIN, 'b'),
+                (ORIGIN_MAIN, 'b'),
+                ("refs/remotes/origin/new", 'c'),
+            ],
+        );
+        let plan = StrayPlan::new(Some(MAIN), &launch, &pulled);
+        assert_eq!(plan.new_branch, None);
+        assert!(
+            plan.excluded.contains(&oid('b')),
+            "the current tip of a remote-tracking ref that existed at launch accounts for it"
+        );
+        assert!(
+            !plan.excluded.contains(&oid('c')),
+            "a remote-tracking ref created after launch accounts for nothing"
+        );
+        assert!(
+            !plan.tips.contains(&oid('c')),
+            "remote-tracking refs are never the lane's work"
+        );
+    }
+
+    // Spec: docs/specs/run-settlement.md#stray-lane-work
+    #[test]
+    fn git_separates_a_pull_and_lane_commits_from_work_left_in_the_primary_checkout()
+    -> FixtureResult<()> {
+        if clean_environment_child(stringify!(
+            git_separates_a_pull_and_lane_commits_from_work_left_in_the_primary_checkout
+        ))? {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let project = root.join("project");
+        let git_dir = root.join("metadata/project.git");
+        let caller = root.join("caller");
+        let writer = project.join(".worktrees/writer");
+        let origin = root.join("origin.git");
+        let other = root.join("other");
+        let home = root.join("home");
+        let state = root.join("state");
+        for path in [
+            &project,
+            git_dir.parent().ok_or("metadata parent")?,
+            writer.parent().ok_or("writer parent")?,
+            &home,
+        ] {
+            std::fs::create_dir_all(path)?;
+        }
+        provenant_os::fixture::private_state_dir(&state)?;
+        let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
+        let run_git = |cwd: &Path, args: &[&str]| -> FixtureResult<String> {
+            let output = provenant_os::fixture::git_command_at(&git)
+                .env_clear()
+                .envs(provenant_os::fixture::fixture_git_settings())
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .current_dir(cwd)
+                .args(args)
+                .output()?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+            }
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        let path_text = |path: &Path| -> FixtureResult<String> {
+            Ok(path.to_str().ok_or("fixture path")?.to_owned())
+        };
+        run_git(
+            &root,
+            &[
+                "init",
+                "-q",
+                "--separate-git-dir",
+                &path_text(&git_dir)?,
+                &path_text(&project)?,
+            ],
+        )?;
+        run_git(&project, &["config", "user.name", "Fixture"])?;
+        run_git(
+            &project,
+            &["config", "user.email", "fixture@example.invalid"],
+        )?;
+        run_git(&project, &["commit", "--allow-empty", "-qm", "initial"])?;
+        let main = run_git(&project, &["symbolic-ref", "--short", "HEAD"])?;
+        run_git(&root, &["init", "-q", "--bare", &path_text(&origin)?])?;
+        run_git(&project, &["remote", "add", "origin", &path_text(&origin)?])?;
+        run_git(&project, &["push", "-q", "origin", &main])?;
+        run_git(&project, &["fetch", "-q", "origin"])?;
+        for (branch, path) in [("chore/caller", &caller), ("chore/writer", &writer)] {
+            run_git(
+                &project,
+                &["worktree", "add", "-qb", branch, &path_text(path)?],
+            )?;
+        }
+        let mut roots = provenant_core::RootInputs::new(home.clone(), project.clone());
+        roots.state_dir = Some(state.clone());
+        let roots = roots.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let utility = UtilityRuntime::read_only(&git, &state)?;
+        let executor = SystemExecutor::new(1)?;
+        let discovered =
+            utility.project_location(&executor, &project, budget()?, &CancelToken::new())?;
+        let binding = provenant_config::bind_project(&roots, discovered.location)?;
+        let request = resolve_writer(&state, &caller, Path::new(".worktrees/writer"))?;
+        let launch = prepare_writer(&request, &state, binding.project_id())?;
+
+        let (checkout, at_launch) = launch.primary_state(&git)?.ok_or("primary state")?;
+        assert_eq!(checkout, project.display().to_string());
+        let (launch_head, launch_refs) = (at_launch.head_ref, at_launch.refs);
+        let origin_main = format!("refs/remotes/origin/{main}");
+        assert!(launch_refs.contains_key(&origin_main), "{launch_refs:?}");
+        let assess = || -> FixtureResult<Option<StrayWork>> {
+            Ok(launch.assess_primary(&git, launch_head.as_deref(), &launch_refs)?)
+        };
+        assert_eq!(assess()?, None, "nothing has happened yet");
+
+        // A commit in the bound worktree is the lane doing its job.
+        run_git(&writer, &["commit", "--allow-empty", "-qm", "lane work"])?;
+        assert_eq!(assess()?, None, "the bound branch is accounted for");
+
+        // The chair pulls: origin/main and main both move, and nothing is stray.
+        run_git(
+            &root,
+            &["clone", "-q", &path_text(&origin)?, &path_text(&other)?],
+        )?;
+        run_git(
+            &other,
+            &[
+                "-c",
+                "user.name=Other",
+                "-c",
+                "user.email=other@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "upstream",
+            ],
+        )?;
+        run_git(&other, &["push", "-q", "origin", &main])?;
+        run_git(&project, &["fetch", "-q", "origin"])?;
+        run_git(
+            &project,
+            &["merge", "-q", "--ff-only", &format!("origin/{main}")],
+        )?;
+        assert_eq!(
+            assess()?,
+            None,
+            "a pull fast-forward is not the lane's work"
+        );
+
+        // A commit made directly in the primary checkout is.
+        run_git(&project, &["commit", "--allow-empty", "-qm", "stray"])?;
+        let found = assess()?.ok_or("a primary commit is a finding")?;
+        assert!(found.note.contains("1 commit(s)"), "{}", found.note);
+        assert!(found.note.contains(&main), "{}", found.note);
+        run_git(
+            &project,
+            &["reset", "-q", "--hard", &format!("origin/{main}")],
+        )?;
+        assert_eq!(assess()?, None, "back on the fetched tip");
+
+        // A branch the primary sits on that did not exist at launch is.
+        run_git(&project, &["checkout", "-qb", "stray"])?;
+        let found = assess()?.ok_or("a new branch is a finding")?;
+        assert!(found.note.contains("branch stray"), "{}", found.note);
+
+        // Commits on it are found even after switching back.
+        run_git(
+            &project,
+            &["commit", "--allow-empty", "-qm", "stray on branch"],
+        )?;
+        run_git(&project, &["checkout", "-q", &main])?;
+        let found = assess()?.ok_or("commits on a new branch are a finding")?;
+        assert!(found.note.contains("1 commit(s)"), "{}", found.note);
+        assert!(found.note.contains("stray"), "{}", found.note);
+        Ok(())
     }
 
     // Spec: docs/specs/run-git.md#project-layout-ownership
@@ -3556,6 +4030,7 @@ impl WriterLaunch {
             })?,
             crate::RECORD_LIMIT,
         )?;
+        self.record_primary_position(utility.git_program_path(), attempt, scope);
         let reference = format!("refs/provenant/lane-base/{}", scope.attempt);
         match crate::objects::resolve_ref(
             utility.git_program_path(),
@@ -3589,72 +4064,14 @@ impl WriterLaunch {
         )?;
         Ok(())
     }
-    fn report_write_scope(
+    /// Committed paths in `base..head` and untracked worktree paths, read once
+    /// through the clean-view Git helper shared by the settlement reports.
+    fn commit_diff_paths(
         &self,
-        attempt: &Directory,
         base: GitOid,
         head: GitOid,
         source: Option<&crate::objects::ObjectSource>,
-        policy: &provenant_records::policy::Policy,
-    ) -> Result<()> {
-        let Some(raw) =
-            crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
-        else {
-            return Ok(());
-        };
-        let request: crate::CanonicalRequest = crate::db::decode(&raw)?;
-        let scope = &request.task.profile.write_scope;
-        if scope.is_empty() {
-            return Ok(());
-        }
-        let scope: Vec<_> = scope.iter().map(Path::new).collect();
-        if scope.is_empty() {
-            return Ok(());
-        }
-        let saved = crate::artifacts::read_sealed(
-            attempt,
-            "policy-write-scope.json",
-            provenant_records::run::TERMINAL_RECORD_LIMIT,
-        )
-        .map_err(|_| invalid_write_scope_snapshot(policy))?;
-        if let Some(raw) = saved {
-            let report: provenant_records::handoff::WriteScopeReport = crate::db::decode(&raw)?;
-            let provenant_records::handoff::WriteScopeReport::Full {
-                schema_version,
-                code,
-                base: saved_base,
-                head: saved_head,
-                out_of_scope_paths,
-                ..
-            } = report
-            else {
-                return Err(invalid_write_scope_snapshot(policy));
-            };
-            if schema_version != 1
-                || code != "WRITE_SCOPE"
-                || saved_base != base.to_string()
-                || saved_head != head.to_string()
-            {
-                return Err(invalid_write_scope_snapshot(policy));
-            }
-            let effect = policy.check(
-                "WRITE_SCOPE",
-                provenant_records::policy::Facts {
-                    violated: !out_of_scope_paths.is_empty(),
-                    detail: format!(
-                        "{} paths outside declared write scope; see policy-write-scope.json",
-                        out_of_scope_paths.len()
-                    ),
-                },
-            );
-            if let Some(message) = effect.message() {
-                let _ = writeln!(std::io::stderr().lock(), "policy: {message}");
-            }
-            if effect.blocks() {
-                return Err(RunError::Validation("WRITE_SCOPE: strict scope policy"));
-            }
-            return Ok(());
-        }
+    ) -> Result<SettlementPaths> {
         let repo = self.worktree.repo();
         let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
         let source_refs = source
@@ -3725,12 +4142,87 @@ impl WriterLaunch {
                 )?;
                 Ok((changed, status))
             })?;
-        let mut paths: Vec<Vec<u8>> = changed
+        let mut committed: Vec<Vec<u8>> = changed
             .split(|byte| *byte == 0)
             .filter(|path| !path.is_empty())
             .map(<[u8]>::to_vec)
             .collect();
-        paths.extend(status_paths_raw(&status, true)?);
+        committed.sort();
+        committed.dedup();
+        let mut untracked = status_paths_raw(&status, true)?;
+        untracked.sort();
+        untracked.dedup();
+        Ok((committed, untracked))
+    }
+
+    fn report_write_scope(
+        &self,
+        attempt: &Directory,
+        base: GitOid,
+        head: GitOid,
+        source: Option<&crate::objects::ObjectSource>,
+        policy: &provenant_records::policy::Policy,
+    ) -> Result<()> {
+        let Some(raw) =
+            crate::artifacts::read_sealed(attempt, "request.json", crate::RECORD_LIMIT)?
+        else {
+            return Ok(());
+        };
+        let request: crate::CanonicalRequest = crate::db::decode(&raw)?;
+        let scope = &request.task.profile.write_scope;
+        if scope.is_empty() {
+            return Ok(());
+        }
+        let scope: Vec<_> = scope.iter().map(Path::new).collect();
+        if scope.is_empty() {
+            return Ok(());
+        }
+        let saved = crate::artifacts::read_sealed(
+            attempt,
+            "policy-write-scope.json",
+            provenant_records::run::TERMINAL_RECORD_LIMIT,
+        )
+        .map_err(|_| invalid_write_scope_snapshot(policy))?;
+        if let Some(raw) = saved {
+            let report: provenant_records::handoff::WriteScopeReport = crate::db::decode(&raw)?;
+            let provenant_records::handoff::WriteScopeReport::Full {
+                schema_version,
+                code,
+                base: saved_base,
+                head: saved_head,
+                out_of_scope_paths,
+                ..
+            } = report
+            else {
+                return Err(invalid_write_scope_snapshot(policy));
+            };
+            if schema_version != 1
+                || code != "WRITE_SCOPE"
+                || saved_base != base.to_string()
+                || saved_head != head.to_string()
+            {
+                return Err(invalid_write_scope_snapshot(policy));
+            }
+            let effect = policy.check(
+                "WRITE_SCOPE",
+                provenant_records::policy::Facts {
+                    violated: !out_of_scope_paths.is_empty(),
+                    detail: format!(
+                        "{} paths outside declared write scope; see policy-write-scope.json",
+                        out_of_scope_paths.len()
+                    ),
+                },
+            );
+            if let Some(message) = effect.message() {
+                let _ = writeln!(std::io::stderr().lock(), "policy: {message}");
+            }
+            if effect.blocks() {
+                return Err(RunError::Validation("WRITE_SCOPE: strict scope policy"));
+            }
+            return Ok(());
+        }
+        let (mut paths, untracked) = self.commit_diff_paths(base, head, source)?;
+        paths.extend(untracked);
         use std::os::unix::ffi::OsStringExt;
         paths.retain(|path| {
             let path = PathBuf::from(OsString::from_vec(path.clone()));
@@ -3779,6 +4271,44 @@ impl WriterLaunch {
         }
         if effect.blocks() {
             return Err(RunError::Validation("WRITE_SCOPE: strict scope policy"));
+        }
+        Ok(())
+    }
+
+    /// Warn when a writer's commits carry tool state at the repository root.
+    /// This is observational: a missing diff only warns, and settlement
+    /// proceeds unless an operator explicitly selected a strict stop.
+    fn report_tool_state_paths(
+        &self,
+        base: GitOid,
+        head: GitOid,
+        source: Option<&crate::objects::ObjectSource>,
+        policy: &provenant_records::policy::Policy,
+    ) -> Result<()> {
+        let committed = self.commit_diff_paths(base, head, source);
+        let (violated, detail) = match &committed {
+            Ok((committed, _)) => {
+                let paths = tool_state_paths(committed);
+                (!paths.is_empty(), tool_state_detail(&paths))
+            }
+            Err(error) => (true, format!("tool-state path report unavailable: {error}")),
+        };
+        let effect = policy.check(
+            "LANE_TOOL_STATE_COMMITTED",
+            provenant_records::policy::Facts { violated, detail },
+        );
+        if let Some(message) = effect.message() {
+            let rendered = format!("policy: {message}");
+            #[cfg(test)]
+            TOOL_STATE_WARNINGS.with(|warnings| warnings.borrow_mut().push(rendered.clone()));
+            let _ = writeln!(std::io::stderr().lock(), "{rendered}");
+        }
+        // A failure to inspect the diff never blocks settlement. A block here
+        // can only come from a user-selected strict setting, so honour it.
+        if committed.is_ok() && effect.blocks() {
+            return Err(RunError::Validation(
+                "LANE_TOOL_STATE_COMMITTED: strict tool-state policy",
+            ));
         }
         Ok(())
     }
@@ -3873,9 +4403,10 @@ impl WriterLaunch {
             None => self.effective_head(attempt)?,
         };
         settlement.set_head(verified_tip)?;
+        let work_base = launch_bases(attempt, base)?.work;
         if let Err(error) = self.report_write_scope(
             attempt,
-            launch_bases(attempt, base)?.work,
+            work_base,
             verified_tip,
             source.as_ref(),
             enforcement,
@@ -3896,6 +4427,7 @@ impl WriterLaunch {
                 let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
             }
         }
+        self.report_tool_state_paths(work_base, verified_tip, source.as_ref(), enforcement)?;
         let import_cancel = settlement.cancellation();
         let merge_objects = source
             .as_ref()
@@ -3999,7 +4531,6 @@ impl WriterLaunch {
                     &git_executable,
                     self.worktree.repo(),
                     custody.scope().attempt,
-                    &merge_objects,
                 )?;
             }
             if !merge_objects.is_empty() {
@@ -4362,6 +4893,94 @@ fn invalid_write_scope_snapshot(policy: &provenant_records::policy::Policy) -> R
 }
 
 impl WriterLaunch {
+    /// The primary checkout and what it holds now. None for a bare repository,
+    /// which has no primary checkout.
+    fn primary_state(&self, git: &Path) -> Result<Option<(String, crate::objects::PrimaryRefs)>> {
+        let Some(checkout) = self.project_root() else {
+            return Ok(None);
+        };
+        let state = crate::objects::primary_refs(git, self.worktree.repo())?;
+        Ok(Some((checkout.display().to_string(), state)))
+    }
+
+    /// Record the primary checkout's branch and ref tips at launch so
+    /// settlement can tell what the lane added there. Best effort: a warning,
+    /// never a refusal.
+    fn record_primary_position(
+        &self,
+        git: &Path,
+        attempt: &Directory,
+        scope: provenant_records::custody::Scope,
+    ) {
+        let sealed = self.primary_state(git).and_then(|state| {
+            let Some((checkout, state)) = state else {
+                return Ok(());
+            };
+            let bytes = crate::db::bytes(&PrimaryPin {
+                extra: Default::default(),
+                schema_version: 1,
+                scope,
+                checkout,
+                head_ref: state.head_ref,
+                refs: state.refs,
+            })?;
+            crate::artifacts::seal(attempt, PRIMARY_PIN, &bytes, crate::RECORD_LIMIT)
+        });
+        if let Err(error) = sealed {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: could not record the primary checkout position: {error}"
+            );
+        }
+    }
+
+    /// Whether the lane left work in the primary checkout: it sits on a branch
+    /// that did not exist at launch, or holds commits no launch ref, fetched
+    /// remote-tracking ref or other worktree reaches. No recorded launch
+    /// position means no finding.
+    pub(crate) fn stray_work(
+        &self,
+        attempt: &Directory,
+        state: &Path,
+    ) -> Result<Option<StrayWork>> {
+        let Some(raw) = crate::artifacts::read_sealed(attempt, PRIMARY_PIN, crate::RECORD_LIMIT)?
+        else {
+            return Ok(None);
+        };
+        let pin: PrimaryPin = crate::db::decode(&raw)?;
+        let utility = runtime(state)?;
+        self.assess_primary(
+            utility.git_program_path(),
+            pin.head_ref.as_deref(),
+            &pin.refs,
+        )
+    }
+
+    fn assess_primary(
+        &self,
+        git: &Path,
+        launch_head: Option<&str>,
+        launch_refs: &std::collections::BTreeMap<String, GitOid>,
+    ) -> Result<Option<StrayWork>> {
+        let Some((checkout, now)) = self.primary_state(git)? else {
+            return Ok(None);
+        };
+        let plan = StrayPlan::new(launch_head, launch_refs, &now);
+        let repo = self.worktree.repo();
+        let mut excluded = plan.excluded.clone();
+        excluded.extend(crate::objects::linked_worktree_heads(git, repo)?);
+        // The bound branch is the lane's own, whatever its worktree lists.
+        excluded.extend(now.refs.get(self.branch.as_str()).copied());
+        let commits = crate::objects::commits_outside(
+            git,
+            repo,
+            &plan.tips,
+            &excluded,
+            STRAY_COMMITS_COUNTED + 1,
+        )?;
+        Ok(plan.report(&checkout, self.worktree.path(), &commits))
+    }
+
     /// A diagnostic naming the edits a writer left uncommitted, or `None` when
     /// it committed or its tree is clean. Call it after `terminal` succeeds.
     pub(crate) fn uncommitted(
