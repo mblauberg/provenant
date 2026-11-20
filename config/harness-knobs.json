@@ -79,7 +79,7 @@
       "refresh_budget_seconds": {"type": "int", "allowed": "1 to 600 seconds", "min": 1, "max": 600, "default": "120", "effect": "Wall-clock budget for one quota refresh cycle."},
       "refresh_min_budget_seconds": {"type": "int", "allowed": "1 to 600 seconds", "min": 1, "max": 600, "default": "60", "effect": "Minimum wall-clock budget kept for a quota refresh after other work."},
       "login_expiry_warning_seconds": {"type": "int", "allowed": "0 or more seconds", "min": 0, "default": "864000", "effect": "Warn this many seconds before a provider login expires."},
-      "display.headline": {"type": "enum", "allowed": "auto, 5h or weekly", "values": ["auto", "5h", "weekly"], "default": "auto", "effect": "Which quota window the headline shows: auto, 5h or weekly."},
+      "display.headline": {"type": "enum", "effect": "Which quota window the headline shows: auto, 5h or weekly."},
       "polling_intervals.{adapter}.timer_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "unset", "effect": "Timer cadence for quota polling of this adapter."},
       "polling_intervals.{adapter}.panel_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "unset", "effect": "Panel refresh cadence for quota polling of this adapter."},
       "calibration.{account}.five_hour": {"type": "int", "allowed": "0 to 100", "min": 0, "max": 100, "default": "unset", "effect": "Calibrated five-hour usage percentage for this account."},
@@ -169,7 +169,7 @@
       "projects.{project}.writer_writes": {"type": "string_list", "allowed": "up to 16 absolute, safe directory paths outside credential roots", "default": "host writer_writes", "effect": "Replace the host writer_writes list for this project; an empty list grants no host-configured writer roots. Origin: host configuration [domains.run.projects.<project ID>]."},
       "host_policy.deny_read": {"type": "array", "allowed": "list of paths", "default": "unset", "effect": "Paths the host denies to writer lanes for reads; invalid entries warn at launch and never relax mandatory boundaries."},
       "host_policy.deny_write": {"type": "array", "allowed": "list of paths", "default": "unset", "effect": "Paths the host denies to writer lanes for writes; invalid entries warn at launch and never relax mandatory boundaries."},
-      "host_policy.network": {"type": "enum", "allowed": "open, local or provider", "default": "unset", "effect": "Host network policy applied to writer lanes."},
+      "host_policy.network": {"type": "enum", "default": "unset", "effect": "Host network policy applied to writer lanes."},
       "resource_sample_interval_ms": {"type": "int", "allowed": "0 to 60000 milliseconds", "min": 0, "max": 60000, "default": "0", "effect": "Interval for sampling lane resource use; zero disables sampling."},
       "admission_seconds": {"type": "int", "allowed": "0 or more seconds", "min": 0, "default": "unset", "effect": "Default admission deadline in seconds before launch."},
       "projects.{project}.review_exempt": {"type": "array", "allowed": "list of paths", "default": "host review_exempt", "effect": "Replace the host review-exempt paths for this project."},
@@ -290,7 +290,7 @@
       "tiers.{tier}.progress_seconds": {"type": "int", "allowed": "1 or more seconds", "min": 1, "default": "unset", "effect": "Progress-reporting interval for this risk tier's landing wait."},
       "projects.{project}.reuse_tested_tree": {"type": "bool", "allowed": "true or false", "default": "unset", "effect": "Reuse a tested source tree for this project's landing candidate."},
       "tiers.{tier}.reuse_tested_tree": {"type": "bool", "allowed": "true or false", "default": "unset", "effect": "Reuse a tested source tree for this risk tier's landing candidate."},
-      "strategy": {"type": "enum", "allowed": "integration strategy", "default": "batch", "effect": "Landing integration strategy."},
+      "strategy": {"type": "enum", "effect": "Landing integration strategy."},
       "compose": {"type": "table", "allowed": "partial landing composition table", "default": "empty", "effect": "Composition of a landing candidate."},
       "branches": {"type": "array", "allowed": "list of branches", "default": "unset", "effect": "Branches considered by a landing candidate."},
       "compose.dependencies": {"type": "string", "allowed": "string", "default": "unset", "effect": "Dependency component of the landing composition."},
@@ -304,8 +304,8 @@
       "approval_sources": {"type": "array", "allowed": "list of approval sources", "default": "[\"provenant_review\", \"forge\"]", "effect": "Sources that may approve a landing candidate."},
       "projects.{project}.approval_carry": {"type": "string_list", "allowed": "list of clean deltas", "default": "unset", "effect": "Clean deltas that carry an approval for this project."},
       "tiers.{tier}.approval_carry": {"type": "string_list", "allowed": "list of clean deltas", "default": "unset", "effect": "Clean deltas that carry an approval for this risk tier."},
-      "projects.{project}.strategy": {"type": "enum", "allowed": "integration strategy", "default": "unset", "effect": "Landing integration strategy for this project."},
-      "tiers.{tier}.strategy": {"type": "enum", "allowed": "integration strategy", "default": "unset", "effect": "Landing integration strategy for this risk tier."},
+      "projects.{project}.strategy": {"type": "enum", "default": "unset", "effect": "Landing integration strategy for this project."},
+      "tiers.{tier}.strategy": {"type": "enum", "default": "unset", "effect": "Landing integration strategy for this risk tier."},
       "projects.{project}.approval_sources": {"type": "array", "allowed": "list of approval sources", "default": "unset", "effect": "Approval sources for this project's landing candidate."},
       "tiers.{tier}.approval_sources": {"type": "array", "allowed": "list of approval sources", "default": "unset", "effect": "Approval sources for this risk tier's landing candidate."}
     }
@@ -436,7 +436,7 @@
         "default": [],
         "effect": "Read-and-execute directory subtrees relative to the primary checkout. Entries escaping that checkout, missing, protected, credential or writable targets are ignored with a warning naming the configuration key."
       },
-      "projects.{project}.user_skills": {"type": "enum", "allowed": "discover or off", "default": "host user_skills", "effect": "Override host user skill discovery for this project."}
+      "projects.{project}.user_skills": {"type": "enum", "default": "host user_skills", "effect": "Override host user skill discovery for this project."}
     }
   },
   "host_lane_build_settings": {
@@ -586,7 +586,7 @@
       "entries.{id}.order": {"type": "int", "allowed": "1 to 999", "min": 1, "max": 999, "default": "unset", "effect": "Display order for this account entry."},
       "entries.{id}.hidden": {"type": "bool", "allowed": "true or false", "default": "unset", "effect": "Hide this account entry from account listings."},
       "entries.{id}.display_name": {"type": "string", "allowed": "string", "default": "unset", "effect": "Display name for this account entry."},
-      "entries.{id}.headline": {"type": "enum", "allowed": "auto, 5h or weekly", "values": ["auto", "5h", "weekly"], "default": "unset", "effect": "Headline quota window for this account."},
+      "entries.{id}.headline": {"type": "enum", "default": "unset", "effect": "Headline quota window for this account."},
       "shared_settings.source": {"type": "string", "allowed": "string", "default": "unset", "effect": "Source of shared account settings."},
       "shared_settings.keys": {"type": "array", "allowed": "list of keys", "default": "unset", "effect": "Keys read from the shared account settings source."}
     }
@@ -604,11 +604,11 @@
       "outcome_priors.exploration_percent": {"type": "int", "allowed": "0 to 100", "min": 0, "max": 100, "default": "10", "effect": "Percentage of launches reserved for exploring routes with little outcome evidence."},
       "capability_preferences.{selector}.{capability}": {"type": "int", "allowed": "1 to 100", "min": 1, "max": 100, "default": "unset", "effect": "Preference weight for a capability under a route selector."},
       "review.floors.{floor}.paths": {"type": "string_list", "allowed": "list of globs", "default": "[\"docs/**\", \"**/*.md\"]", "effect": "Changed paths that trigger this review floor."},
-      "review.floors.{floor}.tier": {"type": "enum", "allowed": "review floor tier", "default": "routine", "effect": "Risk tier assigned when this review floor matches."},
+      "review.floors.{floor}.tier": {"type": "enum", "default": "routine", "effect": "Risk tier assigned when this review floor matches."},
       "review.floors.{floor}.lenses": {"type": "string_list", "allowed": "list of lens names", "default": "empty", "effect": "Review lenses added when this floor matches."},
       "review.shapes.{shape}.frame": {"type": "bool", "allowed": "true or false", "default": false, "effect": "Whether this review shape frames its findings."},
       "review.shapes.{shape}.verifiers": {"type": "int", "allowed": "0 to 32", "min": 0, "max": 32, "default": "0", "effect": "Number of verifiers this review shape uses."},
-      "review.shapes.{shape}.synthesis": {"type": "enum", "allowed": "model or reduce", "values": ["model", "reduce"], "default": "reduce", "effect": "How this review shape synthesises findings."},
+      "review.shapes.{shape}.synthesis": {"type": "enum", "default": "reduce", "effect": "How this review shape synthesises findings."},
       "settlement_retries": {"type": "int", "allowed": "0 to 32", "min": 0, "max": 32, "default": "2", "effect": "Number of times a failed settlement is retried."},
       "capacity_retry_seconds": {"type": "int", "allowed": "0 to 604800 seconds", "min": 0, "max": 604800, "default": "30", "effect": "Base wait between capacity retries."},
       "capacity_retry_max_seconds": {"type": "int", "allowed": "0 to 604800 seconds", "min": 0, "max": 604800, "default": "600", "effect": "Maximum wait between capacity retries."},
@@ -618,7 +618,7 @@
   "domain_steer_settings": {
     "path": "domains.fabric.steer",
     "settings": {
-      "fallback": {"type": "enum", "allowed": "fresh_with_handoff or refuse", "values": ["fresh_with_handoff", "refuse"], "default": "fresh_with_handoff", "effect": "What to do when a stopped session is unavailable: start fresh with a handoff or refuse."},
+      "fallback": {"type": "enum", "effect": "What to do when a stopped session is unavailable: start fresh with a handoff or refuse."},
       "restart_spacing_ms": {"type": "int", "allowed": "0 to 600000 milliseconds", "min": 0, "max": 600000, "default": "2000", "effect": "Minimum spacing between steer restarts; 0 disables the stagger."}
     }
   },
