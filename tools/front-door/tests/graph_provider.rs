@@ -393,9 +393,22 @@ fn fixture() -> Result {
             return Ok(());
         }
         assert!(std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_none());
-        let fd: i32 = std::env::var("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR")?.parse()?;
-        let token = provenant_os::sys::fixture_read_secret_pipe(fd)?;
-        assert_eq!(token, b"credential-sentinel-2719-violet-fox");
+        // Isolated lanes receive the host-read token through a secret pipe.
+        // Host access removed that pipe: the CLI authenticates natively from
+        // the selected account's own config directory, which Provenant does
+        // not rewrite. Both cases must still carry the selected credential
+        // source; only the delivery mechanism differs.
+        if let Some(fd) = std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR") {
+            let fd: i32 = fd.to_str().ok_or("token descriptor")?.parse()?;
+            let token = provenant_os::sys::fixture_read_secret_pipe(fd)?;
+            assert_eq!(token, b"credential-sentinel-2719-violet-fox");
+        } else {
+            assert!(
+                dir.join(".credentials.json").is_file(),
+                "host access must use the selected account's native login: {}",
+                dir.display()
+            );
+        }
         let mut prompt = String::new();
         io::stdin().read_to_string(&mut prompt)?;
         if prompt.contains("fixture host-native") {

@@ -42,11 +42,15 @@ pub struct HostDeliveryContext {
     lane_sandboxed: Option<bool>,
     #[serde(default)]
     trusted_worktree: Option<PathBuf>,
-    /// The primary checkout a host lane's worktree was linked from. Its Git
-    /// configuration is host-owned, not another lane's writable area.
+    /// The host-owned repository a host lane's worktree was linked from: the
+    /// primary checkout, or a bare/relocated common Git directory whose config
+    /// is host-owned rather than another lane's writable area.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host_project: Option<PathBuf>,
-    #[serde(default)]
+    /// Consulted while preparing delivery on the host, never by the guardian.
+    /// Serializing the compiled rule table would overflow the handoff's holder
+    /// context limit and turn a launched lane into an unconfirmed handoff.
+    #[serde(skip)]
     policy: provenant_records::policy::Policy,
     tools: Option<HostTools>,
     bound: Option<BoundDelivery>,
@@ -2236,13 +2240,23 @@ impl HostDeliveryContext {
         self.discover_common_git_dir(&writer.project, stage)
     }
 
-    /// A host lane reads the primary checkout's Git configuration; that
-    /// checkout is host-owned, unlike another lane's worktree. Its location is
-    /// the parent of the shared `.git` directory, not the writer's cwd.
+    /// A host lane reads the host-owned Git configuration; that is not another
+    /// lane's worktree. A regular checkout keeps its metadata in a `.git`
+    /// directory, so the host-owned project is its parent. A bare repository
+    /// (or a relocated common directory) has no such parent checkout: the
+    /// common directory itself holds the host's config and the lanes'
+    /// worktrees, and Git's own inventory reports it as a worktree. Exempt it
+    /// too, while `LaneRoots::contains` still protects other lanes' worktrees
+    /// beneath it.
     fn set_host_project(&mut self, common_git_dir: &Path) {
-        if !self.isolated() && common_git_dir.file_name() == Some(std::ffi::OsStr::new(".git")) {
-            self.host_project = common_git_dir.parent().map(Path::to_path_buf);
+        if self.isolated() {
+            return;
         }
+        self.host_project = if common_git_dir.file_name() == Some(std::ffi::OsStr::new(".git")) {
+            common_git_dir.parent().map(Path::to_path_buf)
+        } else {
+            Some(common_git_dir.to_path_buf())
+        };
     }
 
     pub(super) fn common_git_dir(&self, project: &Path, stage: Stage) -> Result<PathBuf> {
@@ -3932,6 +3946,23 @@ pub(crate) fn deliver_once(
 #[cfg(test)]
 mod stored_format_tests {
     use super::*;
+
+    #[test]
+    fn compiled_policy_stays_off_the_guardian_handoff_wire() {
+        // Delivery consults the compiled policy on the host, before the context
+        // is sealed into the holder handoff. Serializing it would repeat the
+        // whole rule table into every launch message and overflow the guardian's
+        // holder-context limit, turning a launched lane into an unknown handoff.
+        let host = HostDeliveryContext::new(Vec::new())
+            .with_policy(provenant_records::policy::Policy::default());
+        let encoded = serde_json::to_vec(&host).expect("host delivery encodes");
+        assert!(
+            !encoded
+                .windows(b"\"rules\"".len())
+                .any(|window| window == b"\"rules\""),
+            "the compiled rule table must not reach the handoff wire"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
