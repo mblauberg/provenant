@@ -280,6 +280,9 @@ pub enum Build {
         /// Reset only this slot index
         #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64))]
         slot: Option<u64>,
+        /// Recreate the checkout and target cache
+        #[arg(long)]
+        full: bool,
     },
     /// Run build slot maintenance for a project
     Maintain,

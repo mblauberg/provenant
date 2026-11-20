@@ -47,7 +47,6 @@ pub(super) fn execute_with_env(
         override_env,
         None,
         None,
-        None,
     )
 }
 
@@ -174,6 +173,11 @@ fn execute_configured(
         };
         let remaining =
             Duration::from_micros(deadline_micros.saturating_sub(clock.mono_now().as_micros()));
+        let mut notify_spawn = |pid| {
+            if let Some(callback) = on_spawn.as_mut() {
+                callback(pid);
+            }
+        };
         let mut options = ExecOptions::new(&argv, &cwd, remaining);
         options.env = Some(&env);
         options.process_group = true;
@@ -181,13 +185,13 @@ fn execute_configured(
         options.group_watchdog = false;
         options.terminate_grace = Duration::from_secs(10);
         options.cancel = Some(&ctx.cancel);
-        options.on_spawn = on_spawn.as_deref_mut();
+        options.on_spawn = Some(&mut notify_spawn);
         let mut stdout_filter =
             slot.map(|(_, _, _, worktree)| StreamPathFilter::new(&root, worktree));
         let mut stderr_filter =
             slot.map(|(_, _, _, worktree)| StreamPathFilter::new(&root, worktree));
-        let mut stdout_handle = std::io::stdout();
-        let mut stderr_handle = std::io::stderr();
+        let stdout_handle = std::io::stdout();
+        let stderr_handle = std::io::stderr();
         let mut stdout_lock = stdout_handle.lock();
         let mut stderr_lock = stderr_handle.lock();
         match job.output {

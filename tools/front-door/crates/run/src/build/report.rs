@@ -139,7 +139,7 @@ where
         }
         if row.reset == Reset::Quarantine
             || row.exception == Some(Exception::AllQuarantined)
-            || (row.infra.is_some() && !row.cancelled)
+            || (row.infra.is_some() && row.infra != Some(super::InfraKind::Clock) && !row.cancelled)
         {
             report.recovery_failures += 1;
         }

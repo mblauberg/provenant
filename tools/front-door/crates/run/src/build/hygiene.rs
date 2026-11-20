@@ -198,12 +198,100 @@ pub struct GcReport {
     pub warnings: Vec<String>,
 }
 
-/// Report that collection is unavailable until store and slot custody integrate.
-pub fn gc(_home: &Path, _state: &Path, _limit: u64, _now: SystemTime) -> GcReport {
-    GcReport {
-        warnings: vec!["build GC is unavailable: slot and store custody are not integrated".into()],
-        ..GcReport::default()
+/// Collect idle slot payloads while retaining the lock inode for other waiters.
+pub fn gc(home: &Path, state: &Path, limit: u64, now: SystemTime) -> GcReport {
+    gc_with_retention(
+        home,
+        state,
+        limit,
+        now,
+        std::time::Duration::from_secs(7 * 86400),
+        std::time::Duration::from_secs(7 * 86400),
+    )
+}
+
+/// Collect with the resolved project retention settings.
+pub fn gc_with_retention(
+    home: &Path,
+    state: &Path,
+    limit: u64,
+    now: SystemTime,
+    idle: std::time::Duration,
+    retention: std::time::Duration,
+) -> GcReport {
+    use provenant_os::fs::{Directory, LockMode};
+    use std::ffi::OsStr;
+    let mut report = GcReport::default();
+    let now_ms = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
+    for row in status(home, state) {
+        let paths = SlotPaths::new(home, &row.project_key, row.index);
+        let Ok(dir) = Directory::open_anchor(&paths.root) else {
+            continue;
+        };
+        let Ok(_guard) = dir.try_lock(OsStr::new("lock"), LockMode::Exclusive) else {
+            continue;
+        };
+        // Re-read under the lock: status is deliberately an unlocked observation.
+        let record = match SlotRecord::read(&paths.record) {
+            Ok(Some(record)) => record,
+            Ok(None) => continue,
+            Err(error) => {
+                report
+                    .warnings
+                    .push(format!("cannot read slot record: {error}"));
+                continue;
+            }
+        };
+        let last = record
+            .last_job
+            .as_ref()
+            .map_or(record.created_unix_ms, |job| job.finished_unix_ms);
+        if row.index < limit
+            && (last > now_ms || now_ms - last <= idle.as_millis().min(u128::from(u64::MAX)) as u64)
+        {
+            continue;
+        }
+        match full_reset(&paths) {
+            Ok(()) => {
+                // Retain the slot directory and lock inode; unlinking it while a waiter
+                // has the inode open would let a new holder acquire a different lock.
+                if let Err(error) = dir.unlink(OsStr::new("slot.json")) {
+                    report
+                        .warnings
+                        .push(format!("cannot remove slot record: {error}"));
+                } else {
+                    report.removed_slots += 1;
+                    report.removed_bytes +=
+                        row.allocated_bytes.saturating_sub(allocated(&paths.root));
+                }
+            }
+            Err(error) => report
+                .warnings
+                .push(format!("cannot collect slot: {error}")),
+        }
     }
+    let stores = super::paths::store_root(state);
+    if let Ok(entries) = std::fs::read_dir(stores) {
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str().and_then(|name| name.strip_suffix(".git")) else {
+                continue;
+            };
+            if let Err(error) = super::store::gc(state, name, retention, now) {
+                report
+                    .warnings
+                    .push(format!("cannot collect build store {name}: {error}"));
+            }
+        }
+    }
+    report
 }
 
 /// One observed slot row for the status command.
@@ -332,5 +420,35 @@ mod tests {
         outcome.infra = Some(InfraKind::Clock);
         assert_eq!(after_job(&mut record, &outcome, 99), Reset::None);
         assert!(record.health.infra_failures_unix_ms.is_empty());
+    }
+    #[test]
+    fn gc_skips_locked_slot() {
+        use provenant_os::fs::{Directory, LockMode};
+        use std::ffi::OsStr;
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let state = temp.path().join("state");
+        let paths = SlotPaths::new(&home, "project", 0);
+        std::fs::create_dir_all(&paths.target).unwrap();
+        std::fs::write(paths.target.join("artifact"), b"cached").unwrap();
+        SlotRecord {
+            schema: 1,
+            project_key: "project".into(),
+            index: 0,
+            created_unix_ms: 1,
+            ..SlotRecord::default()
+        }
+        .write(&paths.record)
+        .unwrap();
+        let dir = Directory::open_anchor(&paths.root).unwrap();
+        let guard = dir
+            .try_lock(OsStr::new("lock"), LockMode::Exclusive)
+            .unwrap();
+        let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(900_000);
+        assert_eq!(gc(&home, &state, 1, now).removed_slots, 0);
+        assert!(paths.target.join("artifact").exists());
+        drop(guard);
+        assert_eq!(gc(&home, &state, 1, now).removed_slots, 1);
+        assert!(!paths.target.exists());
     }
 }

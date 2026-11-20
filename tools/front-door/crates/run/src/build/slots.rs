@@ -189,6 +189,7 @@ pub struct PreparedSlot {
     started_ms: u64,
     started_at: SystemTime,
     warnings: Vec<String>,
+    clock_reset: bool,
 }
 impl PreparedSlot {
     pub fn add_env(&mut self, values: Vec<(std::ffi::OsString, std::ffi::OsString)>) {
@@ -225,13 +226,17 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
             ..SlotRecord::default()
         });
     ensure_slot_repo(&paths, &store)?;
+    let mut clock_reset = false;
     match super::hygiene::before_job(&mut record, super::ledger::now_unix_ms()) {
         super::hygiene::PreJob::Proceed => {}
         super::hygiene::PreJob::LightReset => {
             super::hygiene::light_reset(&paths).map_err(|_| Exception::PoolUnavailable)?
         }
         super::hygiene::PreJob::FullReset => {
-            super::hygiene::full_reset(&paths).map_err(|_| Exception::PoolUnavailable)?
+            clock_reset = true;
+            super::hygiene::full_reset(&paths).map_err(|_| Exception::PoolUnavailable)?;
+            record.prepare_digest = None;
+            ensure_slot_repo(&paths, &store)?;
         }
     }
     let binding = match &job.source {
@@ -307,6 +312,7 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
             super::Reset::Full => {
                 super::hygiene::full_reset(&paths)
                     .map_err(|error| stage_reset_failure(error, reset))?;
+                record.prepare_digest = None;
                 ensure_slot_repo(&paths, &store)?;
             }
         }
@@ -374,9 +380,10 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
     let _before = fingerprint_scan(&paths.target, started_at);
     let build_context = build_context(job, context);
     let mut env = super::rust::job_env(&job.env, &build_context, &paths);
-    let port_lease = match lane_port_plan(&context.state)
-        .and_then(|plan| plan.try_acquire().map_err(std::io::Error::other))
-    {
+    let port_lease = match lane_port_plan(&context.state).and_then(|plan| match plan {
+        Some(plan) => plan.try_acquire().map_err(std::io::Error::other),
+        None => Ok(None),
+    }) {
         Ok(Some(lease)) => {
             for (name, value) in lease.environment() {
                 super::set_env(&mut env, name, value);
@@ -412,6 +419,7 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
         started_ms,
         started_at,
         warnings,
+        clock_reset,
     })
 }
 
@@ -425,6 +433,13 @@ pub fn execute_staged(
     let mut owned_job = job_without_prelude(job);
     let mut outcome = super::outcome_seed(&owned_job, context, super::ledger::now_unix_ms());
     outcome.warnings.append(&mut staged.warnings);
+    if staged.clock_reset {
+        outcome.infra = Some(super::InfraKind::Clock);
+        outcome.reset = super::Reset::Full;
+        outcome
+            .warnings
+            .push("clock moved backwards; slot fully reset".into());
+    }
     outcome.slot = Some(index);
     outcome.snapshot = Some(staged.snapshot.commit.clone());
     outcome.prev_snapshot = staged
@@ -566,7 +581,24 @@ pub fn execute_staged(
         finished_unix_ms: outcome.finished_unix_ms,
     });
     let finished = outcome.finished_unix_ms;
-    outcome.reset = super::hygiene::after_job(&mut staged.record, &outcome, finished);
+    let post_reset = super::hygiene::after_job(&mut staged.record, &outcome, finished);
+    if post_reset != super::Reset::None {
+        outcome.reset = post_reset;
+    }
+    let reset_result = match post_reset {
+        super::Reset::Light => super::hygiene::light_reset(&staged.paths),
+        super::Reset::Full => {
+            staged.record.prepare_digest = None;
+            super::hygiene::full_reset(&staged.paths)
+        }
+        _ => Ok(()),
+    };
+    if let Err(error) = reset_result {
+        staged.record.health.state = SlotState::Quarantined;
+        staged.record.health.quarantine_reason = Some(format!("reset failed: {error}"));
+        outcome.reset = super::Reset::Quarantine;
+        outcome.warnings.push(format!("slot reset failed: {error}"));
+    }
     if let Err(error) = staged.record.write(&staged.paths.record) {
         outcome
             .warnings
@@ -1222,7 +1254,7 @@ fn fingerprint_scan(target: &Path, started_at: SystemTime) -> Vec<(String, bool)
             let package_name = name
                 .rsplit_once('-')
                 .filter(|(_, hash)| hash.len() >= 8 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
-                .map_or(name, |(name, _)| name.to_owned());
+                .map_or_else(|| name.clone(), |(name, _)| name.to_owned());
             let rebuilt = package
                 .metadata()
                 .and_then(|metadata| metadata.modified())
