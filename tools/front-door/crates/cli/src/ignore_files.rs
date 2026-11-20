@@ -210,7 +210,9 @@ fn remedy_for(ports: &PortTable) -> String {
     let layout = &ports.worktree_layout;
     let source = match layout.source {
         PortSource::Builtin => "compiled default".to_owned(),
+        PortSource::Detected => "detected from the checkout".to_owned(),
         PortSource::Host => "host ports.json in the state directory".to_owned(),
+        PortSource::HostProject => "host-project ports.json in the state directory".to_owned(),
         PortSource::Project => provenant_config::PORTS_CONFIG.to_owned(),
     };
     format!(

@@ -39,7 +39,17 @@
       "providers.{provider}.runtime_deadline_seconds",
       "providers.codex.clean_config",
       "gc.graph_checkpoint_days",
-      "gc.sweep_budget"
+      "gc.sweep_budget",
+      "build.strategy",
+      "build.prepare",
+      "build.seed.stale_after",
+      "build.wrapper.argv",
+      "build.command.argv",
+      "build.offload",
+      "build.overflow",
+      "build.clean",
+      "build.stacks",
+      "build.snapshot_retention"
   ],
   "host_gc_settings": {
     "path": "gc",
@@ -516,6 +526,21 @@
       "policy.WORKTREE_MANAGED_PATH": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A requested worktree path that differs from the managed layout is used with a warning. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.PORTS_CONFIG_UNAVAILABLE": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "An unreadable or denied ports.json falls back to the compiled layout with a warning. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Incomplete provider identity evidence with no conflict warns and settles on the observed exit and result; a conflict still refuses. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."}
+    }
+  },
+  "port_build_settings": {
+    "path": "build",
+    "settings": {
+      "strategy": {"type": "string", "allowed": "slots, lane_seed, lane, wrapper, command", "default": "lane_seed", "effect": "Build strategy port. Declared and layered now; a later slice consumes it. The builtin stays lane_seed so this slice changes no behaviour."},
+      "prepare": {"type": "argv_list", "allowed": "ordered arrays of argv; each program is non-empty", "default": "[]", "effect": "Ordered argv arrays run from the checkout root before a seed build; a failing command fails that build."},
+      "seed.stale_after": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "24h", "effect": "Age after which a seed is stale. A bad value warns and falls back to 24h with source default."},
+      "wrapper.argv": {"type": "argv", "allowed": "argv array with a non-empty program when set", "default": "[]", "effect": "Wrapper argv for the wrapper strategy; declared now and consumed by a later slice."},
+      "command.argv": {"type": "argv", "allowed": "argv array with a non-empty program when set", "default": "[]", "effect": "Replacement build command argv for the command strategy; declared now and consumed by a later slice."},
+      "offload": {"type": "string", "allowed": "generic build offload policy name", "default": "auto", "effect": "Offload policy for the build port; declared now and consumed by a later slice."},
+      "overflow": {"type": "string", "allowed": "generic build overflow policy name", "default": "local", "effect": "Overflow policy when build slots are busy; declared now and consumed by a later slice."},
+      "clean": {"type": "string", "allowed": "generic build clean policy name", "default": "none", "effect": "Clean policy before a build; declared now and consumed by a later slice."},
+      "stacks": {"type": "string_list", "allowed": "stack override names", "default": "[]", "effect": "Stack overrides for a consumer repository; declared now and consumed by a later slice."},
+      "snapshot_retention": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "7d", "effect": "How long a build snapshot is retained; declared now and consumed by a later slice."}
     }
   },
   "knobs": {

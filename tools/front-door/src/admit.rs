@@ -357,6 +357,7 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
                 class,
                 state_buf.as_deref().unwrap_or(Path::new("")),
                 None,
+                None,
             )
         });
 
@@ -697,7 +698,9 @@ fn execute_command_port(
 fn source_name(source: provenant_config::PortSource) -> &'static str {
     match source {
         provenant_config::PortSource::Builtin => "default",
+        provenant_config::PortSource::Detected => "detected",
         provenant_config::PortSource::Host => "host",
+        provenant_config::PortSource::HostProject => "host_project",
         provenant_config::PortSource::Project => "project",
     }
 }

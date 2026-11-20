@@ -19,14 +19,22 @@ behaviour and [GC](gc.md) for retention configuration.
 
 ## Port table
 
-The port table layers compiled builtins, host `state/ports.json`, then project
-`.provenant/ports.json`. A layer only needs the fields it changes: object fields
-deep-merge over the lower layer, so `{"verify": {"base": "origin/master"}}`
-keeps the other verify fields from the layers below it. `schema_version` is
-optional in a layer; it defaults to the current version, and a mismatch warns
-rather than refuses a compatible shape. `provenant config show --full` lists the
-effective `verify.base` and `verify.remote` with the layer or inferred ref that
-supplied each value.
+The port table applies layers in precedence order, lowest to highest:
+`builtin` < `detected` < `host` < `host-project` < `project`. Compiled builtins
+come first, then auto-detected defaults, then host `state/ports.json`, then
+`state/projects/<project_key>/ports.json`, and finally project
+`.provenant/ports.json`. The keyed host-project layer lets a consumer repository
+be configured entirely from host state with no files in its tree; a missing
+project key or keyed layer is skipped silently. A layer only needs the fields it
+changes: object fields deep-merge over the lower layer, so
+`{"verify": {"base": "origin/master"}}` keeps the other verify fields from the
+layers below it. `schema_version` is optional in a layer; it defaults to the
+current version, and a mismatch warns rather than refuses a compatible shape.
+Provenance is tracked per dotted leaf (for example `build.prepare`,
+`verify.base`, `verify.tiers.0.commands`): each leaf reports the highest layer
+that set it, and a port's label is derived from those leaves. `provenant config
+show --full` lists every effective leaf, including build and tier values, with
+the layer or inferred ref that supplied it.
 
 When no layer sets `verify.base`, Provenant infers it from
 `refs/remotes/<remote>/HEAD` for the effective `verify.remote` and marks the
@@ -42,22 +50,28 @@ This repository keeps its source at `config/ports.json` and links the optional
 `scripts/verify-nextest` belong in that source (direct CI reads it without
 Provenant); the builtin verify tiers are neutral cargo commands.
 
-The `build` port carries the shared seed-build interface. `build.prepare` is an
+The `build` port carries the shared seed-build interface. Its compiled defaults
+are `strategy = "lane_seed"`, `prepare = []`, `seed.stale_after = "24h"`,
+`wrapper.argv = []`, `command.argv = []`, `offload = "auto"`,
+`overflow = "local"`, `clean = "none"`, `stacks = []` and
+`snapshot_retention = "7d"`. `strategy` documents `slots`, `lane_seed`, `lane`,
+`wrapper` and `command`; only `lane_seed` is consumed today. The strategy,
+wrapper, command, offload, overflow, clean, stacks and retention keys only
+declare their shape here; later slices consume them. `build.prepare` is an
 ordered list of argv arrays: each command runs in order with the checkout root
 as its working directory before every seed generation build (and, later, slot
 builds), in the same sanitised child environment as the Cargo steps. A failing
 command fails that build with a `prepare_failed` outcome that records the
 command and the last 2 KiB of the combined output; an unreadable or invalid
-table warns and runs no prepare command. Set it in host `state/ports.json` or
-project `.provenant/ports.json`; arrays replace rather than concatenate across
-layers, and a layer reports its source as `host` or `project`. A host-project
-layer is documented by a later slice. `build.seed.stale_after` is the age
-after which a seed is considered stale, expressed in the host-gc duration syntax
-(0 or whole seconds, minutes, hours, days or weeks, e.g. `24h`, the default); a
-reader warns and falls back to `24h` on a bad value, reported with source
-`default`; a valid value reports the layer that declared it (`builtin`, `host`
-or `project`). Both keys layer like other port fields, so a layer can set only
-the one it changes. A writer lane with a private Cargo target warns once when a
+table warns and runs no prepare command. Arrays replace rather than concatenate
+across layers. `build.seed.stale_after` is the age after which a seed is
+considered stale, expressed in the host-gc duration syntax (0 or whole seconds,
+minutes, hours, days or weeks, e.g. `24h`, the default); a reader warns and
+falls back to `24h` on a bad value, reported with source `default`; a valid
+value reports the layer that declared it (`builtin`, `detected`, `host`,
+`host_project` or `project`). Every key layers like other port fields, so a
+layer can set only the one it changes, and each leaf reports its source. A
+writer lane with a private Cargo target warns once when a
 project has no complete seed generation, when the newest one is older than
 `build.seed.stale_after` (aged from its `complete` marker), or when the last
 refresh outcome is `failed` or `prepare_failed`. `provenant worktree doctor`
@@ -77,6 +91,11 @@ seeding:
   }
 }
 ```
+
+A later slice removes the `build_admission` command key as a breaking
+configuration change; the key remains declared here for now. Build admission is
+chosen through `build.strategy` and its named `[admission.<class>]` limits, and
+this slice does not remove or reinterpret the old key.
 
 ## Provider model scope
 

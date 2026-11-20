@@ -2,7 +2,6 @@
 #[cfg(any(unix, test))]
 use crate::cargo_seed::{Refusal, codes};
 use provenant_os::fs::{Directory, LockGuard, LockMode};
-use sha2::{Digest, Sha256};
 use std::{
     ffi::{OsStr, OsString},
     io,
@@ -63,11 +62,9 @@ pub fn allocated_tree_bytes(_path: &Path) -> Option<u64> {
 
 /// Hash a verified repository handle's canonical common Git directory for
 /// stable host-seed ownership. Linked checkouts share that directory and key.
-pub fn project_key(common_git_dir: &Path) -> String {
-    provenant_core::hex(&Sha256::digest(
-        common_git_dir.as_os_str().as_encoded_bytes(),
-    ))
-}
+/// The definition now lives in config so the host-project configuration layer
+/// and target-seed ownership key every checkout identically.
+pub use provenant_config::project_key;
 
 /// Select the project's Cargo build directory using the same workspace selector
 /// as the verification tiers. Read only data here: lane preparation must never
@@ -547,6 +544,12 @@ fn lane_release_pin(worktree: &Path, home: &Path, host_state: &Path) -> Result<S
 #[cfg(test)]
 mod lane_probe_tests {
     use super::*;
+
+    #[test]
+    fn project_key_reexport_matches_config() {
+        let path = Path::new("/repo/project/.git");
+        assert_eq!(project_key(path), provenant_config::project_key(path));
+    }
 
     #[test]
     fn seed_cargo_resolves_from_fixture_cargo_home_without_path() {

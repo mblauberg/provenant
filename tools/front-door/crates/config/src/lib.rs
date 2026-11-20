@@ -67,8 +67,8 @@ pub use ports::{
     VerifyPort, VerifySelection, VerifyTier, WorktreeLayoutPort, dispatch_port_backend,
     execute_port_command, execute_port_command_with_input, infer_verify_base, land_backend,
     port_command_environment, port_command_receipt_proof, port_command_receipts, port_source_layer,
-    record_port_command, remove_port_command_receipt, try_lock_port_command_receipts,
-    verify_base_unset_error,
+    project_key, project_key_for, record_port_command, remove_port_command_receipt,
+    try_lock_port_command_receipts, verify_base_unset_error,
 };
 mod release;
 pub mod repository_files;

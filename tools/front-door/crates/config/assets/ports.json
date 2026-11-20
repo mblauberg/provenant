@@ -116,6 +116,18 @@
     "prepare": [],
     "seed": {
       "stale_after": "24h"
-    }
+    },
+    "strategy": "lane_seed",
+    "wrapper": {
+      "argv": []
+    },
+    "command": {
+      "argv": []
+    },
+    "offload": "auto",
+    "overflow": "local",
+    "clean": "none",
+    "stacks": [],
+    "snapshot_retention": "7d"
   }
 }
