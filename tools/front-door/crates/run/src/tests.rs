@@ -2859,13 +2859,7 @@ fn a_store_failure_omits_source_text_at_every_destination() {
         rusqlite::ffi::Error::new(1),
         Some("no such table: TOKEN_SENTINEL /private/host\u{1b}".to_owned()),
     ));
-    for destination in [
-        Destination::Local,
-        Destination::Remote {
-            repository: None,
-            home: None,
-        },
-    ] {
+    for destination in [Destination::Local, Destination::Remote] {
         let diagnostic = error.diagnostic(destination);
         assert_eq!(diagnostic.code, "IO");
         assert!(diagnostic.detail.is_none());

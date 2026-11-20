@@ -1,6 +1,6 @@
 //! Safe, bounded diagnostic facts shared by command, graph and transport edges.
 use serde::{Deserialize, Serialize};
-use std::path::{Component, Path};
+use std::path::Path;
 
 /// Maximum UTF-8 bytes in each projected field, after terminal escaping.
 pub const MAX_DIAGNOSTIC_BYTES: usize = 1024;
@@ -744,62 +744,26 @@ pub fn safe_text(value: &str) -> String {
 
 /// Destination is selected by the audience, not the transport. Local includes
 /// authorised execution context; Remote denotes disclosure outside that authority
-/// and needs a publication projection as well as approved path anchors.
+/// and needs a publication projection.
 #[derive(Debug, Clone, Copy)]
-pub enum Destination<'a> {
+pub enum Destination {
     Local,
-    Remote {
-        repository: Option<&'a Path>,
-        home: Option<&'a Path>,
-    },
+    Remote,
 }
 
 /// A publication implementation must project for the selected audience before
 /// sending bytes. Failure withholds that publication; it does not alter input.
 pub trait PublicationProjection {
     type Error;
-    fn project(&self, destination: Destination<'_>, raw: &[u8]) -> Result<Vec<u8>, Self::Error>;
-}
-
-pub fn safe_path(path: &Path, destination: Destination<'_>) -> Option<String> {
-    if path.components().any(|c| matches!(c, Component::ParentDir)) {
-        return None;
-    }
-    let display = match destination {
-        Destination::Local => path.to_string_lossy().into_owned(),
-        Destination::Remote { repository, home } => {
-            if let Some(relative) = repository.and_then(|root| path.strip_prefix(root).ok()) {
-                format!("./{}", relative.display())
-            } else {
-                let relative = home.and_then(|root| path.strip_prefix(root).ok())?;
-                format!("~/{}", relative.display())
-            }
-        }
-    };
-    let escaped = safe_text(&display);
-    if display
-        .chars()
-        .map(|c| {
-            if terminal_control(c) {
-                c.escape_default().to_string().len()
-            } else {
-                c.len_utf8()
-            }
-        })
-        .sum::<usize>()
-        > MAX_DIAGNOSTIC_BYTES
-    {
-        return None;
-    }
-    Some(escaped)
+    fn project(&self, destination: Destination, raw: &[u8]) -> Result<Vec<u8>, Self::Error>;
 }
 
 /// Quote a path as one shell argument after applying destination disclosure.
-pub fn shell_path(path: &Path, destination: Destination<'_>) -> Option<String> {
+pub fn shell_path(path: &Path, destination: Destination) -> Option<String> {
     if !matches!(destination, Destination::Local) || path.to_str()?.chars().any(terminal_control) {
         return None;
     }
-    let path = safe_path(path, destination)?;
+    let path = path.to_str()?;
     Some(format!("'{}'", path.replace('\'', "'\\''")))
 }
 
@@ -943,32 +907,13 @@ mod tests {
         assert!(!bidi.contains('\u{202e}'));
     }
     #[test]
-    fn destination_paths_require_anchors_and_shell_quotes() {
-        let remote = Destination::Remote {
-            repository: Some(Path::new("/repo")),
-            home: Some(Path::new("/home/me")),
-        };
-        assert_eq!(
-            safe_path(Path::new("/repo/a b"), remote).as_deref(),
-            Some("./a b")
-        );
-        assert_eq!(
-            safe_path(Path::new("/home/me/keys"), remote).as_deref(),
-            Some("~/keys")
-        );
-        assert_eq!(safe_path(Path::new("/elsewhere/a"), remote), None);
-        assert_eq!(safe_path(Path::new("/repo/../elsewhere"), remote), None);
+    fn shell_paths_are_local_and_safely_quoted() {
         assert_eq!(
             shell_path(Path::new("/repo/a'b"), Destination::Local).as_deref(),
             Some("'/repo/a'\\''b'")
         );
         let bidi_path = Path::new("/repo/a\u{202e}b");
         assert_eq!(shell_path(bidi_path, Destination::Local), None);
-        assert!(
-            safe_path(bidi_path, Destination::Local)
-                .unwrap()
-                .contains("\\u{202e}")
-        );
     }
 
     #[test]

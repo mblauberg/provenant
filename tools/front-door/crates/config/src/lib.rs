@@ -117,7 +117,7 @@ pub use schema::{
     dedicated_command, probe_field, schema,
 };
 
-use serde::{Deserialize, Serialize, Serializer};
+use serde::Serialize;
 use std::{collections::BTreeMap, fmt, path::PathBuf};
 use thiserror::Error;
 
@@ -277,30 +277,6 @@ fn close_matches(close: &[String]) -> String {
         String::new()
     } else {
         format!("; did you mean {}?", close.join(", "))
-    }
-}
-
-/// Secret values can be decoded and used by their owner but every serialiser
-/// and Debug formatter emits a placeholder. Display/show cannot expose `T`.
-#[derive(Clone, PartialEq, Eq, Deserialize)]
-#[serde(transparent)]
-pub struct Redacted<T>(T);
-impl<T> Redacted<T> {
-    pub fn new(value: T) -> Self {
-        Self(value)
-    }
-    pub fn expose(&self) -> &T {
-        &self.0
-    }
-}
-impl<T> Serialize for Redacted<T> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str("[redacted]")
-    }
-}
-impl<T> fmt::Debug for Redacted<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("[redacted]")
     }
 }
 

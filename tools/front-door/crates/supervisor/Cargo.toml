@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 provenant-os = { workspace = true }
+provenant-redact = { workspace = true }
 provenant-core = { workspace = true }
 provenant-records = { workspace = true }
 serde_json = { workspace = true }

@@ -112,14 +112,7 @@ fn file_error(
     path: &Path,
     reason: &str,
 ) -> Box<provenant_records::diagnostic::Diagnostic> {
-    let path = provenant_records::diagnostic::safe_path(
-        path,
-        provenant_records::diagnostic::Destination::Local,
-    );
-    cli_input_error(&format!(
-        "{flag} {}: {reason}",
-        path.as_deref().unwrap_or("input"),
-    ))
+    cli_input_error(&format!("{flag} {}: {reason}", path.display()))
 }
 
 /// `NAME STATE MODEL WORKTREE`, naming the handle that
@@ -1305,6 +1298,17 @@ mod tests {
     #[test]
     fn compact_run_prints_field_only_policy_warnings() {
         let input = json!({"brief":"password=example-compact-3391"});
+        {
+            let _mode = provenant_redact::scoped(provenant_redact::Mode::Off);
+            assert!(
+                provenant_fabric_runtime::graph::refusal::input_warnings(
+                    &input,
+                    &Default::default()
+                )
+                .is_empty()
+            );
+        }
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         let warnings =
             provenant_fabric_runtime::graph::refusal::input_warnings(&input, &Default::default());
         let data = json!({"checkpoint":{"graph_id":"example","nodes":[]},"status":"pending","warnings":warnings});

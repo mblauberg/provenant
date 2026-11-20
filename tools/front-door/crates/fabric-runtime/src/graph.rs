@@ -660,7 +660,7 @@ pub trait AttemptOwner {
         })
     }
 
-    /// Write each requested upstream result, verified and redacted as
+    /// Write each requested upstream result, verified and displayed as
     /// `provenant output --full` reads it, into a directory only this attempt
     /// may read, within `cap` bytes in total. Idempotent by `key`. A host that
     /// cannot materialise returns `None` and the prompt keeps its excerpts.
@@ -2590,6 +2590,60 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
             .as_ref()
             .and_then(|reference| owner.applied_route(reference).ok().flatten()),
     };
+    let applied_route = applied_route.map(|mut applied| {
+        if applied.adapter.is_none() {
+            applied.adapter = route.adapter.clone();
+        }
+        if applied.model.is_none() {
+            applied.model = route.model.clone();
+        }
+        if applied.effort.is_none() {
+            applied.effort = route.effort.clone();
+        }
+        if applied.account.is_none() {
+            applied.account = route.account.clone();
+        }
+        if applied.required_family.is_none() {
+            applied.required_family = route.required_family.clone();
+        }
+        if applied.peer_source_head.is_none() {
+            applied.peer_source_head = route.peer_source_head.clone();
+        }
+        if applied.peer_requested_route.is_none() {
+            applied.peer_requested_route = route.peer_requested_route.clone();
+        }
+        if applied.peer_network.is_none() {
+            applied.peer_network = route.peer_network;
+        }
+        if applied.peer_retry_limit.is_none() {
+            applied.peer_retry_limit = route.peer_retry_limit;
+        }
+        if route.name.is_some() {
+            applied.name = route.name.clone();
+        }
+        if route.alias.is_some() {
+            applied.alias = route.alias.clone();
+        }
+        if route.tier.is_some() {
+            applied.tier = route.tier.clone();
+        }
+        if applied.account_key.is_none() {
+            applied.account_key = route.account_key.clone();
+        }
+        if applied.source.is_none() {
+            applied.source = route.source.clone();
+        }
+        if applied.pool_selection.is_none() {
+            applied.pool_selection = route.pool_selection.clone();
+        }
+        for (key, value) in &route.extra {
+            applied
+                .extra
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+        applied
+    });
     transitions::apply_route(&mut checkpoint.nodes[node_index], applied_route);
     let (fallback_evidence, evidence_unreadable) = match &observation {
         AttemptObservation::Terminal {

@@ -55,6 +55,10 @@ pub struct EnvVar {
 }
 
 pub const AGENT_LABEL: &str = "PROVENANT_AGENT_LABEL";
+pub const ROUTE: &str = "PROVENANT_ROUTE";
+pub const MODEL: &str = "PROVENANT_MODEL";
+pub const EFFORT: &str = "PROVENANT_EFFORT";
+pub const ACCOUNT: &str = "PROVENANT_ACCOUNT";
 pub const LANE_DEPTH: &str = "PROVENANT_LANE_DEPTH";
 pub const PARENT_ATTEMPT_ID: &str = "PROVENANT_PARENT_ATTEMPT_ID";
 pub const HOME: &str = "HOME";
@@ -123,6 +127,34 @@ const ADMISSION: &str = "admission port commands";
 
 /// Every declared variable. Order is presentation order only.
 pub const CONSUMER_ENV: &[EnvVar] = &[
+    var(
+        ROUTE,
+        Lane,
+        Evolving,
+        "Applied adapter/model with optional @effort.",
+        "when the applied model is known",
+    ),
+    var(
+        MODEL,
+        Lane,
+        Evolving,
+        "Applied model identifier.",
+        "when the applied model is known",
+    ),
+    var(
+        EFFORT,
+        Lane,
+        Evolving,
+        "Applied effort.",
+        "when an effort is applied",
+    ),
+    var(
+        ACCOUNT,
+        Lane,
+        Evolving,
+        "Applied account label.",
+        "when an account label is known",
+    ),
     var(
         SANDBOX,
         Lane,

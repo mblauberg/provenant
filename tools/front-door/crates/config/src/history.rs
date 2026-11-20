@@ -1,6 +1,6 @@
 //! Bounded, append-only configuration history: one JSON line per applied
 //! edit in `<state>/config-history.jsonl`, published by atomic replacement.
-//! Values that look like secrets are never recorded.
+//! Credential-shaped values are masked when redaction is enabled.
 use crate::ConfigError;
 use jiff::Timestamp;
 use provenant_os::fs::{Directory, PublishMode};
@@ -59,7 +59,7 @@ impl HistoryLimits {
     }
 }
 
-/// Fields that differ between two config documents, secrets redacted.
+/// Fields that differ between two config documents, subject to the configured mode.
 pub(crate) fn changes(before: &str, after: &str) -> Vec<FieldChange> {
     let flatten = |text: &str| {
         let mut leaves = BTreeMap::new();
@@ -79,8 +79,8 @@ pub(crate) fn changes(before: &str, after: &str) -> Vec<FieldChange> {
         if was != is {
             out.push(FieldChange {
                 path: path.clone(),
-                before: was.map(|v| record(path, v)),
-                after: is.map(|v| record(path, v)),
+                before: was.map(record),
+                after: is.map(record),
                 extra: Default::default(),
             });
         }
@@ -108,8 +108,8 @@ fn leaves_of(value: &Value, path: String, out: &mut BTreeMap<String, Value>) {
     }
 }
 
-fn record(path: &str, value: &Value) -> Value {
-    if secret_path(path) || secret_value(value) {
+fn record(value: &Value) -> Value {
+    if provenant_redact::mode().masks_egress() && secret_value(value) {
         return Value::from(REDACTED);
     }
     match value {
@@ -120,29 +120,11 @@ fn record(path: &str, value: &Value) -> Value {
         _ => value.clone(),
     }
 }
-fn secret_path(path: &str) -> bool {
-    let path = path.to_ascii_lowercase();
-    [
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "credential",
-        "api_key",
-        "apikey",
-        "private_key",
-        "bearer",
-    ]
-    .iter()
-    .any(|word| path.contains(word))
-}
 fn secret_value(value: &Value) -> bool {
     match value {
         Value::String(text) => secret_text(text),
         Value::Array(items) => items.iter().any(secret_value),
-        Value::Object(map) => map
-            .iter()
-            .any(|(key, value)| secret_path(key) || secret_value(value)),
+        Value::Object(map) => map.values().any(secret_value),
         _ => false,
     }
 }
@@ -159,7 +141,9 @@ fn secret_text(text: &str) -> bool {
         "AKIA\0",
         "Bearer \0",
     ];
-    if text.contains("-----BEGIN")
+    let shaped = provenant_redact::has_token_shape(text.as_bytes()).unwrap_or(false);
+    if shaped
+        || text.contains("-----BEGIN")
         || PREFIXES
             .iter()
             .any(|prefix| text.starts_with(prefix.strip_suffix('\0').unwrap_or(prefix)))
@@ -322,10 +306,11 @@ mod tests {
 
     #[test]
     fn secret_looking_values_are_redacted() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         for (after, paths, secrets, plain_path) in [
             (
                 "schema_version = 1\n[x]\napi_token = \"abc\"\nnote = \"ghp_0123456789abcdef\"\nplain = \"fine\"\nlist = [\"sk-live\"]\n",
-                &["x.api_token", "x.note", "x.list"][..],
+                &["x.note", "x.list"][..],
                 &["ghp_", "sk-live"][..],
                 Some("x.plain"),
             ),
@@ -344,6 +329,9 @@ mod tests {
             for path in paths {
                 assert_eq!(by_path[*path].after, Some(Value::from(REDACTED)), "{path}");
             }
+            if let Some(change) = by_path.get("x.api_token") {
+                assert_eq!(change.after, Some(Value::from("abc")));
+            }
             let encoded = serde_json::to_string(&found).unwrap();
             for secret in secrets {
                 assert!(!encoded.contains(secret));
@@ -352,6 +340,20 @@ mod tests {
                 assert_eq!(by_path[path].after, Some(Value::from("fine")));
             }
         }
+    }
+
+    #[test]
+    fn history_is_raw_when_redaction_is_off() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Off);
+        let found = changes(
+            "schema_version = 1\n",
+            "schema_version = 1\n[x]\napi_token = \"ghp_0123456789abcdef\"\n",
+        );
+        assert!(
+            found
+                .iter()
+                .any(|entry| entry.after == Some(Value::from("ghp_0123456789abcdef")))
+        );
     }
 
     #[test]

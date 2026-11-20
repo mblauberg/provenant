@@ -271,6 +271,9 @@ impl AttemptOwner for FakeOwner {
             peer_requested_route: None,
             peer_network: None,
             peer_retry_limit: None,
+            account_key: None,
+            source: None,
+            pool_selection: None,
             extra: Default::default(),
             adapter: Some("fixture".into()),
             model: Some(model.clone()),
@@ -485,6 +488,9 @@ fn route(adapter: &str) -> GraphRoute {
         peer_requested_route: None,
         peer_network: None,
         peer_retry_limit: None,
+        account_key: None,
+        source: None,
+        pool_selection: None,
         extra: Default::default(),
         account: None,
         adapter: Some(adapter.to_owned()),
@@ -503,6 +509,9 @@ fn pool_route(alias: &str) -> GraphRoute {
         peer_requested_route: None,
         peer_network: None,
         peer_retry_limit: None,
+        account_key: None,
+        source: None,
+        pool_selection: None,
         alias: Some(alias.into()),
         adapter: None,
         model: None,
@@ -651,6 +660,58 @@ fn separation_run(
     )
     .unwrap();
     (owner, run.checkpoint)
+}
+
+#[test]
+fn applied_route_retains_metadata_and_warns_without_dropping_it() {
+    let mut owner = FakeOwner {
+        observations: [done_as("h/1")].into(),
+        ..Default::default()
+    };
+    let mut progress = advance(
+        &graph(vec![node("lane", route("fixture"))]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap()
+    .checkpoint
+    .nodes
+    .remove(0);
+    let mut applied = route("fixture");
+    applied.model = Some("opus[1m]".into());
+    applied.account = Some("work account".into());
+    applied.alias = Some("senior".into());
+    applied.name = Some("named route".into());
+    applied.effort = Some("x".repeat(257));
+    applied.tier = Some("line\nbreak".into());
+    applied
+        .extra
+        .insert("future_field".into(), serde_json::json!("catalogue"));
+    transitions::apply_route(&mut progress, Some(applied.clone()));
+    assert_eq!(
+        progress
+            .attempts
+            .last()
+            .unwrap()
+            .input_manifest
+            .as_ref()
+            .unwrap()
+            .applied_route
+            .as_ref(),
+        Some(&applied)
+    );
+    assert!(
+        progress
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("effort") && warning.contains("256"))
+    );
+    assert!(
+        progress
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("tier") && warning.contains("control"))
+    );
 }
 
 const DISPOSITIONS: [&str; 3] = ["accepted", "rejected", "deferred"];

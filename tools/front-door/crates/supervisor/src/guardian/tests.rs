@@ -453,6 +453,7 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
     )
     .unwrap();
     let message = LaunchMessage {
+        redaction: "off".into(),
         resource_sample_interval_ms: None,
         publication_values: Default::default(),
         policy: Default::default(),
@@ -910,6 +911,7 @@ fn spawn_missing_attempt_guardian(
     )
     .unwrap();
     let message = LaunchMessage {
+        redaction: "off".into(),
         resource_sample_interval_ms: None,
         publication_values: Default::default(),
         policy: Default::default(),
@@ -1477,6 +1479,7 @@ fn settlement_lock_clone_failure_retains_exclusion_and_returns_reconcile_hint() 
 #[test]
 fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
     let message = LaunchMessage {
+        redaction: "off".into(),
         resource_sample_interval_ms: None,
         publication_values: provenant_os::exec::SecretValues(vec![
             b"ambient-test-credential-3391".to_vec(),

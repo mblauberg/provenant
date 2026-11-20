@@ -359,12 +359,13 @@ and model identity checks.
 Host-local stdout and stderr captures retain raw provider bytes for replay.
 Filtering JSONL before retention can destroy framing and hide the final answer.
 Local results and provider continuation state are retained without shape-based
-rewriting. External publication masks known credentials and typed secret fields;
-a projection failure withholds publication without changing the local execution
-outcome. Raw and exported metadata each bind the bytes they describe; local
+rewriting. External publication follows the `redaction` setting: `off` passes
+text unchanged, while `secrets` and `full` mask credential values and token
+shapes. A failure of an enabled projection withholds publication without changing
+the local execution outcome. Raw and exported metadata each bind the bytes they describe; local
 capture paths are private evidence, not safe publication artifacts. A publication
 failure withholds delivery while preserving local sealed bytes.
-- Why: publication must not disclose credentials or corrupt local evidence.
+- Why: the selected disclosure policy must not corrupt local evidence.
 
 Reconciliation never replays an uncertain launch. Cleanup does not delete under
 a reservation or follow links, and preserves lock identity.

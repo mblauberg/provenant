@@ -11,13 +11,7 @@ impl TryFrom<String> for GraphIdentifier {
     type Error = &'static str;
     fn try_from(value: String) -> Result<Self, Self::Error> {
         if super::valid_node_identifier(&value) {
-            // This is a disclosure fact, never the graph's control identity.
-            // Keep the typed cause even when its identifier needs masking.
-            let safe = match provenant_redact::publication_text(value.as_bytes(), []) {
-                Ok(bytes) if bytes == value.as_bytes() => Some(value),
-                _ => None,
-            };
-            Ok(Self(safe))
+            Ok(Self(Some(value)))
         } else {
             Err("invalid graph identifier")
         }
@@ -446,7 +440,8 @@ mod tests {
 
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     #[test]
-    fn secret_shaped_identifiers_keep_cycle_causes_and_registered_values_are_masked() {
+    fn secret_shaped_identifiers_remain_visible_in_cycle_causes() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
         let example = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
         let graph: super::super::GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":2,"graph_id":"shape-cycle","nodes":[
@@ -469,26 +464,31 @@ mod tests {
         );
         for value in [example, "redacted"] {
             let _scope = provenant_redact::publication_scope([value.as_bytes().to_vec()]).unwrap();
-            let masked = GraphIdentifier::try_from(value.to_owned()).unwrap();
-            assert_eq!(masked.to_string(), "[masked]");
+            let identifier = GraphIdentifier::try_from(value.to_owned()).unwrap();
+            assert_eq!(identifier.to_string(), value);
             assert_eq!(
-                format!("node {masked}: structural limit"),
-                "node [masked]: structural limit"
+                format!("node {identifier}: structural limit"),
+                format!("node {value}: structural limit")
             );
             let extension = ExtensionCause::loop_rule(
                 &format!("loop.{value}.rounds=3"),
                 ExtensionRule::NonIncreasing,
             );
-            assert!(extension.to_string().contains(" for loop [masked]"));
-            assert!(serde_json::to_value(&masked).unwrap().is_null());
+            assert!(
+                extension
+                    .to_string()
+                    .contains(&format!(" for loop {value}"))
+            );
+            assert_eq!(serde_json::to_value(&identifier).unwrap(), value);
             let restored: GraphIdentifier =
-                serde_json::from_value(serde_json::to_value(masked).unwrap()).unwrap();
-            assert_eq!(restored.to_string(), "[masked]");
+                serde_json::from_value(serde_json::to_value(identifier).unwrap()).unwrap();
+            assert_eq!(restored.to_string(), value);
         }
     }
 
     #[test]
     fn schema_paths_never_resume_schema_names_inside_caller_maps() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         for value in [
             serde_json::json!({"nodes":[{"CALLER_MARKER":{"brief":"password=fixture-secret-3391"}}]}),
             serde_json::json!({"context":{"brief":{"prompt":"password=fixture-secret-3391"}}}),
@@ -505,6 +505,7 @@ mod tests {
 
     #[test]
     fn secret_shaped_inputs_warn_without_disclosing_values_under_every_policy() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         use provenant_records::policy::{Policy, Source, Strength};
         use std::collections::BTreeMap;
 

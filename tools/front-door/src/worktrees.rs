@@ -94,12 +94,11 @@ fn warn_fetch(error: &Error) {
 }
 
 pub(crate) fn local_worktree_message(error: &WorktreeError) -> String {
-    use provenant_records::diagnostic::{Destination, safe_path, safe_text};
+    use provenant_records::diagnostic::safe_text;
     match error {
         WorktreeError::CensusUnknown { path, detail }
         | WorktreeError::UnknownOccupancy { path, detail } => {
-            let scope = safe_path(path, Destination::Local)
-                .unwrap_or_else(|| "the requested worktree".into());
+            let scope = path.display();
             format!("{error}: {scope}: {}", safe_text(detail))
         }
         _ => error.to_string(),

@@ -6,7 +6,10 @@ Start an approved writer with the `implement` template (`deliver` for the
 composite through CI, review and landing), inspect `--explain`, then submit
 without it. A worktree's owning lane decides who else writes in it; authorised
 writers share its occupancy lease. Independent slices use separate worktrees
-and integrate into one branch before full review. Mechanism (confinement, redaction, custody, settlement,
+and integrate into one branch before full review. Redaction defaults to `off`;
+set `redaction` to `secrets` for credential masking at egress or `full` for
+local and egress text masking. `config show` reports the setting and source.
+Mechanism (confinement, redaction, custody, settlement,
 priorities) is in the [run spec](../specs/run.md) and
 [supervisor spec](../specs/supervisor.md); templates are in
 [routing and templates](routing-and-templates.md).

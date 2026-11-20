@@ -185,8 +185,8 @@ pub fn project_lane_with_admission(
 
 /// Project a row for a reader that may be on another host. Presence comes from
 /// this host's sealed evidence without a census, so a finished attempt reads
-/// as settling, but no host-local artefact path or host file fact is
-/// projected: the row may cross a peer boundary.
+/// as settling. The row includes artefact paths while retaining host file
+/// observation boundaries.
 pub fn project_lane_presence_only(
     lane: &run::AttemptRecord,
     root: &Path,
@@ -208,7 +208,7 @@ pub fn project_lane_presence_only(
 enum HostView {
     /// Nothing: running attempts stay unknown and no host path is projected.
     Unobserved,
-    /// Presence evidence only; host-local paths and file facts stay private.
+    /// Presence evidence without additional host file observation.
     PresenceOnly,
     /// Presence plus host-local artefact paths for a caller on this host.
     Local,
@@ -387,7 +387,8 @@ fn project_lane_inner(
                     .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok()),
             }
         });
-    let result_path = host_artifacts
+    let path_visible = view.observes_presence();
+    let result_path = path_visible
         .then(|| {
             lane.result
                 .as_ref()
@@ -395,8 +396,8 @@ fn project_lane_inner(
         })
         .flatten()
         .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok());
-    // The directory is a host-local artefact path: peer rows project no path.
-    let attempt_directory = host_artifacts
+    // The path is metadata; presence does not require exposing host file facts.
+    let attempt_directory = path_visible
         .then(|| root.join("attempts").join(lane.attempt_id.to_string()))
         .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok());
     // There is no wall-clock column on a run event; the newest observed
@@ -640,27 +641,16 @@ pub(super) fn route_label(record: &run::AttemptRecord) -> String {
             (None, effort.clone())
         }
     };
-    let Some(model) = ran
-        .and_then(|route| {
-            let model = route.model.clone()?;
-            Some(match &route.provider {
-                Some(provider) if !model.starts_with(&format!("{provider}/")) => {
-                    format!("{provider}/{model}")
-                }
-                _ => model,
-            })
-        })
-        .or(requested_model)
-    else {
-        return "unresolved".into();
-    };
-    match ran
-        .and_then(|route| route.effort.clone())
-        .or(requested_effort)
-    {
-        Some(effort) => format!("{model}@{effort}"),
-        None => model,
-    }
+    let model = ran
+        .and_then(|route| route.model.as_deref())
+        .or(requested_model.as_deref());
+    let provider = ran
+        .filter(|route| route.model.is_some())
+        .and_then(|route| route.provider.as_deref());
+    let effort = ran
+        .and_then(|route| route.effort.as_deref())
+        .or(requested_effort.as_deref());
+    run::route_label(provider, model, effort).unwrap_or_else(|| "unresolved".into())
 }
 
 /// Receipt facts shared by explicit PR opening and graph delivery. Workflow
@@ -815,7 +805,7 @@ mod tests {
 
     // Spec: docs/specs/cli.md#status-selection
     #[test]
-    fn project_lane_inner_keeps_host_artifacts_private_from_peers() {
+    fn project_lane_inner_keeps_peer_paths_and_limits_host_observation() {
         let temp = tempfile::tempdir().expect("tempdir");
         let scratch = temp.path().join("scratch");
         std::fs::create_dir_all(scratch.join(provenant_os::admission::SHIM_DIRECTORY))
@@ -835,7 +825,7 @@ mod tests {
         assert_eq!(host.child_command.as_deref(), Some("cargo test --locked"));
 
         let peer = project_lane_presence_only(&lane, temp.path(), None);
-        assert!(peer.attempt_directory.is_none(), "{peer:?}");
+        assert!(peer.attempt_directory.is_some(), "{peer:?}");
         assert!(peer.child_command.is_none(), "{peer:?}");
     }
 

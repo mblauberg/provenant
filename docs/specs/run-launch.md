@@ -169,6 +169,9 @@ worktree. The paragraph is advice, never a fence, and it says an absolute path
 elsewhere in the lane's context does not override it. Launch also records the
 primary checkout's branch and ref tips (`primary-checkout.json` beside the
 attempt) so settlement can detect stray work (see run-settlement, Stray lane work).
+The lane receives `PROVENANT_ROUTE`, `PROVENANT_MODEL`, `PROVENANT_EFFORT` and
+`PROVENANT_ACCOUNT`. Its preamble describes its own route as
+`Route: adapter/model@effort, account <label> (source <s>)`.
 - Why: opencode's system prompt names the Git common directory's project, the
   primary checkout, as the workspace root of a linked worktree. A brief that said
   only "your worktree" lost to that absolute path, and Hy 4 lanes edited,

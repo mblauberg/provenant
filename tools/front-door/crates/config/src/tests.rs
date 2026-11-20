@@ -941,41 +941,39 @@ fn compiled_default_failures_are_never_attributed_to_the_user_file() {
 }
 
 #[test]
-fn show_uses_registered_domains_and_redacts_secret_leaves() {
+fn show_preserves_registered_domain_values() {
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct Secrets {
-        token: Redacted<String>,
+    struct Settings {
+        token: String,
         labels: Vec<String>,
     }
-    impl DomainConfig for Secrets {}
+    impl DomainConfig for Settings {}
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct SecretDomains {
-        secret: Secrets,
+    struct SettingsDomains {
+        secret: Settings,
     }
     fn defaults(_: Profile) -> &'static str {
-        "token='compiled-private'\nlabels=['one', 'two']"
+        "token='compiled-placeholder'\nlabels=['one']"
     }
-    const SECRETS: DomainSections<SecretDomains> =
-        DomainSections::new(&[DomainSection::new::<Secrets>("secret", defaults)]);
+    const SECTIONS: DomainSections<SettingsDomains> =
+        DomainSections::new(&[DomainSection::new::<Settings>("secret", defaults)]);
     let fixture = Files::new();
     std::fs::create_dir(fixture.roots.state.as_path()).unwrap();
     std::fs::write(
         fixture.config(),
-        "schema_version=1\n[domains.secret]\ntoken='user-private'\nlabels=['three']",
+        "schema_version=1\n[domains.secret]\ntoken='user-placeholder'\nlabels=['three']",
     )
     .unwrap();
-    let snapshot = config_show(&fixture.roots, &SECRETS).unwrap();
-    assert_eq!(snapshot.domains.secret.token.expose(), "user-private");
-    let rendered = serde_json::to_string(&snapshot).unwrap();
-    assert!(!rendered.contains("user-private"));
-    assert!(!rendered.contains("compiled-private"));
-    assert!(rendered.contains("[redacted]"));
-    assert!(!format!("{snapshot:?}").contains("user-private"));
+    let snapshot = config_show(&fixture.roots, &SECTIONS).unwrap();
+    assert_eq!(snapshot.domains.secret.token, "user-placeholder");
+    assert!(
+        serde_json::to_string(&snapshot)
+            .unwrap()
+            .contains("user-placeholder")
+    );
     test_support::assert_leaf_origins(&snapshot);
-    let sample = config_show(&fixture.roots, &SECRETS).unwrap();
-    test_support::assert_leaf_origins(&sample);
 }
 
 fn assert_refusal(error: &ConfigError, expected: &str) {
@@ -2007,4 +2005,21 @@ fn provider_model_scope_defaults_overrides_and_pin_policy() {
     let recovered = load(&roots(), Some(invalid.as_slice())).unwrap();
     assert!(!recovered.warnings.is_empty());
     assert!(!recovered.providers["cursor"].permits_model("claude-sonnet"));
+}
+
+#[test]
+fn config_show_includes_redaction_value_and_source() {
+    let fixture = Files::new();
+    let shown = config_show(&fixture.roots, &domains::NO_DOMAINS).unwrap();
+    assert_eq!(shown.knobs["redaction"].value, "off");
+    assert_eq!(shown.knobs["redaction"].source, KnobSource::Default);
+    std::fs::create_dir(fixture.roots.state.as_path()).unwrap();
+    std::fs::write(
+        fixture.config(),
+        "schema_version = 1\n[knobs]\nredaction = 'secrets'\n",
+    )
+    .unwrap();
+    let shown = config_show(&fixture.roots, &domains::NO_DOMAINS).unwrap();
+    assert_eq!(shown.knobs["redaction"].value, "secrets");
+    assert_eq!(shown.knobs["redaction"].source, KnobSource::Override);
 }

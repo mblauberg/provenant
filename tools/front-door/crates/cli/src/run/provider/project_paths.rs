@@ -16,23 +16,6 @@ pub(super) struct Context<'a> {
     pub policy: &'a provenant_records::policy::Policy,
 }
 
-fn display_path(path: &Path, primary: &Path, home: &Path) -> String {
-    if path
-        .to_str()
-        .is_none_or(|text| text.chars().any(char::is_control))
-    {
-        return "<unrepresentable path; inspect project configuration on host>".into();
-    }
-    if let Ok(relative) = path.strip_prefix(primary) {
-        return format!("./{}", relative.display());
-    }
-    if let Ok(relative) = path.strip_prefix(home) {
-        return format!("~/{}", relative.display());
-    }
-    // A receipt can leave this host. An external path has no portable anchor.
-    "<external path; inspect project configuration on host>".into()
-}
-
 fn overlaps(root: &Path, other: &Path) -> bool {
     root.starts_with(other) || other.starts_with(root)
 }
@@ -254,10 +237,10 @@ fn apply_to(
                                 "code": "project_agent_configuration_overlap",
                                 "source": source,
                                 "key": key,
-                                "path": display_path(&config, primary, context.home),
+                                "path": config.to_string_lossy(),
                             }));
                         }
-                        let record = json!({"path": display_path(&grant.path, primary, context.home), "source": key});
+                        let record = json!({"path": grant.path.to_string_lossy(), "source": key});
                         if is_exec {
                             profile.spec.runtime_reads.push(grant.clone());
                             profile.spec.tool_exec_roots.push(grant);
@@ -286,7 +269,7 @@ fn apply_to(
                                 "credential_source": (reason == "credential_root")
                                     .then(|| credential_source(entry, is_exec, primary, &context))
                                     .flatten(),
-                                "path": display_path(entry, primary, context.home),
+                                "path": entry.to_string_lossy(),
                             }));
                         }
                     }
@@ -301,6 +284,14 @@ fn apply_to(
 mod tests {
     use super::*;
     use provenant_confinement::permissions::{NetworkAccess, ProviderProfile, ProviderProfileSpec};
+
+    fn warnings_include_external_path(record: &Value, home: &Path) -> bool {
+        record["warnings"].as_array().is_some_and(|warnings| {
+            warnings
+                .iter()
+                .any(|warning| warning["path"] == home.to_string_lossy().as_ref())
+        })
+    }
 
     #[test]
     fn project_paths_are_resolved_once_and_receipt_matches_applied_grants()
@@ -421,7 +412,10 @@ mod tests {
                     grant(primary.join(".ssh"))
                 ]
             );
-            assert_eq!(record["exec_roots"][0]["path"], "./.local-tools");
+            assert_eq!(
+                record["exec_roots"][0]["path"],
+                primary.join(".local-tools").to_string_lossy().as_ref()
+            );
             assert_eq!(!profile.spec.tool_writes.is_empty(), writer);
             assert_eq!(
                 record["shared_paths"].as_array().ok_or("array")?.len(),
@@ -437,13 +431,25 @@ mod tests {
             )));
             assert!(profile.spec.runtime_reads.contains(&grant(admin.clone())));
             let serialized = serde_json::to_string(&record)?;
-            assert!(!serialized.contains(root.to_str().ok_or("utf8")?));
+            assert!(serialized.contains(root.to_str().ok_or("utf8")?));
+            if writer {
+                assert!(
+                    record["shared_paths"]
+                        .as_array()
+                        .ok_or("array")?
+                        .iter()
+                        .any(
+                            |entry| entry["path"] == home.join("shared").to_string_lossy().as_ref()
+                        )
+                );
+            }
+            assert!(warnings_include_external_path(&record, &home));
             let warnings = record["warnings"].as_array().ok_or("warnings")?;
             if writer {
                 assert!(warnings.iter().any(|warning| {
                     warning["code"] == "project_agent_configuration_overlap"
                         && warning["source"] == "project-local agent configuration (.claude)"
-                        && warning["path"] == "./.claude"
+                        && warning["path"] == primary.join(".claude").to_string_lossy().as_ref()
                 }));
                 assert!(
                     profile
@@ -989,7 +995,10 @@ mod tests {
                 policy: &provenant_records::policy::Policy::default(),
             },
         );
-        assert_eq!(record["shared_paths"][0]["path"], "./.agent-run/locks");
+        assert_eq!(
+            record["shared_paths"][0]["path"],
+            shared.to_string_lossy().as_ref()
+        );
         let sbpl = provenant_confinement::permissions::snapshot::render(
             plan.permissions(),
             &profile,
