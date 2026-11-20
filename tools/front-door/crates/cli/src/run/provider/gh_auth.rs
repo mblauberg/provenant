@@ -75,10 +75,76 @@ pub(super) enum Delivery {
     /// `GH_TOKEN` (sandboxed lanes).
     Injected(TokenOrigin),
     /// An unsandboxed lane reads the user's own login stores, as a CLI
-    /// started by hand would; nothing is injected.
-    Ambient,
+    /// started by hand would; no token is injected. The host's gh
+    /// configuration directory is pinned in the lane environment, because an
+    /// adapter may re-point `XDG_CONFIG_HOME` at private state.
+    Ambient(HostConfig),
     /// The lane gets no credential from the host, for the stated reason.
     None(String),
+}
+
+/// Which host setting selected gh's configuration directory, in gh's own
+/// precedence order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ConfigSource {
+    /// The host's `GH_CONFIG_DIR`.
+    GhConfigDir,
+    /// `gh` under the host's `XDG_CONFIG_HOME`.
+    XdgConfigHome,
+    /// The default `~/.config/gh`.
+    Home,
+}
+
+impl ConfigSource {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::GhConfigDir => "host GH_CONFIG_DIR",
+            Self::XdgConfigHome => "host XDG_CONFIG_HOME/gh",
+            Self::Home => "default ~/.config/gh",
+        }
+    }
+}
+
+/// The host's gh configuration directory and the setting that chose it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct HostConfig {
+    pub(super) path: std::path::PathBuf,
+    pub(super) source: ConfigSource,
+}
+
+impl HostConfig {
+    /// Resolve the directory the way gh does on the host: `GH_CONFIG_DIR`,
+    /// else `$XDG_CONFIG_HOME/gh`, else `~/.config/gh`. Only host-sealed
+    /// values are read; the lane's own `XDG_CONFIG_HOME` never selects it.
+    pub(super) fn resolve(home: &Path, host_paths: &impl Fn(&str) -> Option<OsString>) -> Self {
+        let absolute = |key: &str| {
+            host_paths(key)
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_absolute())
+        };
+        if let Some(path) = absolute("GH_CONFIG_DIR") {
+            Self {
+                path,
+                source: ConfigSource::GhConfigDir,
+            }
+        } else if let Some(path) = absolute("XDG_CONFIG_HOME") {
+            Self {
+                path: path.join("gh"),
+                source: ConfigSource::XdgConfigHome,
+            }
+        } else {
+            Self {
+                path: home.join(".config/gh"),
+                source: ConfigSource::Home,
+            }
+        }
+    }
+
+    /// Pin gh to this directory in a lane environment.
+    pub(super) fn pin(&self, environment: &mut Vec<(OsString, OsString)>) {
+        environment.retain(|(key, _)| key != "GH_CONFIG_DIR");
+        environment.push(("GH_CONFIG_DIR".into(), self.path.as_os_str().to_owned()));
+    }
 }
 
 /// The one GitHub credential decision for a lane.
@@ -110,7 +176,7 @@ impl Selection {
                 return true;
             };
             match self.delivery {
-                Delivery::Ambient => true,
+                Delivery::Ambient(_) => true,
                 Delivery::Injected(_) => key == SELECTED_TOKEN,
                 Delivery::None(_) => false,
             }
@@ -121,9 +187,13 @@ impl Selection {
     pub(super) fn receipt(&self) -> serde_json::Value {
         let (delivery, detail) = match &self.delivery {
             Delivery::Injected(origin) => ("injected", origin.as_str().to_owned()),
-            Delivery::Ambient => (
+            Delivery::Ambient(config) => (
                 "ambient",
-                "unsandboxed lane reads the host's gh login".to_owned(),
+                format!(
+                    "unsandboxed lane reads the host's gh login; GH_CONFIG_DIR={} (source: {})",
+                    config.path.display(),
+                    config.source.as_str()
+                ),
             ),
             Delivery::None(reason) => ("none", reason.clone()),
         };
@@ -167,7 +237,7 @@ pub(super) fn inject(
     cache: &mut LoginCache,
     environment: &mut Vec<(OsString, OsString)>,
 ) -> Result<TokenOrigin, String> {
-    let config = config_directory(home, host_paths);
+    let config = HostConfig::resolve(home, host_paths).path;
     if !environment.iter().any(|(key, _)| key == "GH_CONFIG_DIR") {
         environment.push(("GH_CONFIG_DIR".into(), config.as_os_str().to_owned()));
     }
@@ -193,24 +263,6 @@ pub(super) fn inject(
             "GitHub login lookup failed ({cause}); this lane starts without a GitHub token, so git push and gh may be unauthenticated"
         )),
     }
-}
-
-/// Resolve only host-sealed paths. A guardian has cleared its ambient
-/// environment; the lane's private HOME cannot select the host login store.
-fn config_directory(
-    home: &Path,
-    host_paths: &impl Fn(&str) -> Option<OsString>,
-) -> std::path::PathBuf {
-    host_paths("GH_CONFIG_DIR")
-        .map(std::path::PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| {
-            host_paths("XDG_CONFIG_HOME")
-                .map(std::path::PathBuf::from)
-                .filter(|path| path.is_absolute())
-                .map(|path| path.join("gh"))
-        })
-        .unwrap_or_else(|| home.join(".config/gh"))
 }
 
 /// Let Codex shells use the prepared launch environment, including native
@@ -381,16 +433,34 @@ mod tests {
             "XDG_CONFIG_HOME" => Some("/fixture/xdg".into()),
             _ => None,
         };
+        let resolve = |host: &dyn Fn(&str) -> Option<OsString>| HostConfig::resolve(home, &host);
         assert_eq!(
-            config_directory(home, &host),
-            Path::new("/fixture/relocated-gh")
+            resolve(&host),
+            HostConfig {
+                path: "/fixture/relocated-gh".into(),
+                source: ConfigSource::GhConfigDir
+            }
         );
         assert_eq!(
-            config_directory(home, &|key| (key == "XDG_CONFIG_HOME")
-                .then(|| "/fixture/xdg".into())),
-            Path::new("/fixture/xdg/gh")
+            resolve(&|key| (key == "XDG_CONFIG_HOME").then(|| "/fixture/xdg".into())),
+            HostConfig {
+                path: "/fixture/xdg/gh".into(),
+                source: ConfigSource::XdgConfigHome
+            }
         );
-        assert_eq!(config_directory(home, &|_| None), home.join(".config/gh"));
+        assert_eq!(
+            resolve(&|_| None),
+            HostConfig {
+                path: home.join(".config/gh"),
+                source: ConfigSource::Home
+            }
+        );
+        // A relative host value is not a directory gh could resolve on the
+        // host; fall through to the next setting, as the precedence does.
+        assert_eq!(
+            resolve(&|key| (key == "GH_CONFIG_DIR").then(|| "relative".into())).source,
+            ConfigSource::Home
+        );
     }
 
     #[test]
@@ -528,9 +598,22 @@ mod tests {
         assert_eq!(injected["delivery"], "injected");
         assert_eq!(injected["detail"], "gh auth token");
         assert_eq!(injected["mediation"], "gh wrapper (advisory)");
-        let ambient = Selection::new(Delivery::Ambient, true).receipt();
+        let ambient_config = HostConfig {
+            path: "/fixture/host-gh".into(),
+            source: ConfigSource::XdgConfigHome,
+        };
+        let ambient = Selection::new(Delivery::Ambient(ambient_config.clone()), true).receipt();
         assert_eq!(ambient["identity"], "user");
         assert_eq!(ambient["delivery"], "ambient");
+        let detail = ambient["detail"].as_str().unwrap();
+        assert!(
+            detail.contains("GH_CONFIG_DIR=/fixture/host-gh"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("source: host XDG_CONFIG_HOME/gh"),
+            "{detail}"
+        );
         let none = Selection::new(Delivery::None("access policy".into()), false).receipt();
         assert!(none["identity"].is_null());
         assert_eq!(none["delivery"], "none");
@@ -540,7 +623,10 @@ mod tests {
                 Delivery::Injected(TokenOrigin::StoredLogin),
                 vec![SELECTED_TOKEN],
             ),
-            (Delivery::Ambient, TOKEN_ENVIRONMENT.to_vec()),
+            (
+                Delivery::Ambient(ambient_config.clone()),
+                TOKEN_ENVIRONMENT.to_vec(),
+            ),
             (Delivery::None("access policy".into()), vec![]),
         ] {
             let selection = Selection::new(delivery, false);
