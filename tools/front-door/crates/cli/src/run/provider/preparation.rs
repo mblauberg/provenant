@@ -4798,8 +4798,9 @@ pub(super) fn prepare_candidates_inner(
         // Check the effective catalogue already loaded for this launch (bundled
         // plus discovered models), the same lookup and revision `route list`
         // uses. An eligibility left over from a different revision must not
-        // make a discovered exact model look uncatalogued at launch.
-        if catalogue.model(&model_id).is_none() {
+        // make a discovered exact model look uncatalogued at launch. A family
+        // alias such as `claude/sonnet` resolves to an exact model here too.
+        if catalogue.resolve_family_alias(&model_id).is_none() {
             let warning = format!(
                 "model {}/{} is not in the catalogue; the provider will check it",
                 route.adapter, route.model

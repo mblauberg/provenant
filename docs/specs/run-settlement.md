@@ -209,6 +209,19 @@ A missing required writer handoff seals `handoff_missing` and goes to the chair;
 - Why: all readers need the same cause for the next decision; host stops must
   preserve valid handoffs and never count as negative provider-quality evidence.
 
+## Identity mismatch keeps writer work
+
+A writer whose sealed head moved from its pinned base keeps that commit when
+the observed provider identity contradicts the requested route. Settlement
+records `review_required` with the typed `identity_mismatch` cause, the head
+and a warning naming both the requested and observed identities; neither the
+commit nor the mismatch evidence is discarded, and the lane is not reported as
+failed. A writer with no verified moved head keeps the fatal mismatch decision,
+as does every read-only lane.
+- Why: a wrong provider identity is a reason for a chair to review real work,
+  not a reason to throw that work away.
+- Owner: `crates/run/src/holder.rs`, `crates/run/src/store.rs`
+
 ## Stray lane work
 
 A writer's work is the commits on its bound branch. Launch records the primary

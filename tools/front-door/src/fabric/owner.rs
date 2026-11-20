@@ -3582,7 +3582,9 @@ impl BoundGraphOwner<'_> {
                 // bundled catalogue. One lookup shared with the CLI warning.
                 && let Ok(catalogue) =
                     provenant_cli::route::effective_catalogue(&self.factory.context.roots)
-                && catalogue.model(&model).is_none()
+                // A family alias such as `claude/sonnet` resolves to an exact
+                // catalogue model; only a truly unknown model warns here.
+                && catalogue.resolve_family_alias(&model).is_none()
         {
             let warning = format!(
                 "model {} is not in the catalogue; the provider will check it",
