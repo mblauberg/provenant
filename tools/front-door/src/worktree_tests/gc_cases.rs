@@ -1713,3 +1713,33 @@ pub(super) fn gc_reports_settled_lane_store_error_and_continues() -> Result {
     );
     Ok(())
 }
+
+/// The import-pin sweep reports a count in the preview and only deletes in
+/// apply. The pin of a missing attempt is eligible for collection.
+pub(super) fn gc_preview_reports_import_pins_and_apply_removes_them() -> Result {
+    let rig = repository()?;
+    // A bound project has a utility home and a run store by the time GC runs;
+    // preview opens both read-only and finds nothing in a fresh state.
+    ok(&rig, &["worktree", "create", "gc-pins", "--json"])?;
+    let (_, context) = writer_context(&rig)?;
+    drop(open_writer_store(&context)?);
+    let oid = git(&rig, &["rev-parse", "HEAD"])?;
+    let missing = provenant_core::AttemptId::from_bytes([0x9a; 16]);
+    let reference = format!("refs/provenant/import-extra/{missing}/object");
+    git(&rig, &["update-ref", &reference, &oid])?;
+
+    let preview = ok(&rig, &["gc", "--dry-run", "--json"])?;
+    assert_eq!(preview["data"]["import_pins"], 1, "{preview}");
+    assert_eq!(
+        git(&rig, &["for-each-ref", "--format=%(refname)", &reference])?,
+        reference,
+        "a preview must not delete import pins"
+    );
+
+    ok(&rig, &["gc", "--apply", "--json"])?;
+    assert!(
+        git(&rig, &["for-each-ref", "--format=%(refname)", &reference])?.is_empty(),
+        "apply must delete the pin of a missing attempt"
+    );
+    Ok(())
+}
