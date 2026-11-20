@@ -2850,11 +2850,8 @@ fn reset_label(resets_at: &str, now: i64, time_zone: &jiff::tz::TimeZone) -> Opt
 }
 
 fn refusal_reset_source(adapter: &str) -> &'static str {
-    if adapter == "opencode" {
-        "provider retry-after"
-    } else {
-        "provider reset"
-    }
+    provenant_records::AdapterSpec::get(adapter)
+        .map_or("provider reset", |spec| spec.refusal_reset_source)
 }
 
 /// Avoid repeating the account-level free-pool expiry already printed beside its status.
