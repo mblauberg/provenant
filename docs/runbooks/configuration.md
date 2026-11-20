@@ -43,9 +43,15 @@ This repository keeps its source at `config/ports.json` and links the optional
 Provenant); the builtin verify tiers are neutral cargo commands.
 
 The `build` port carries the shared seed-build interface. `build.prepare` is an
-ordered list of argv arrays: each command runs with the checkout root as its
-working directory before a seed build, and a failing command fails that build
-(the runner is implemented by a later slice). `build.seed.stale_after` is the age
+ordered list of argv arrays: each command runs in order with the checkout root
+as its working directory before every seed generation build (and, later, slot
+builds), in the same sanitised child environment as the Cargo steps. A failing
+command fails that build with a `prepare_failed` outcome that records the
+command and the last 2 KiB of the combined output; an unreadable or invalid
+table warns and runs no prepare command. Set it in host `state/ports.json` or
+project `.provenant/ports.json`; arrays replace rather than concatenate across
+layers, and a layer reports its source as `host` or `project`. A host-project
+layer is documented by a later slice. `build.seed.stale_after` is the age
 after which a seed is considered stale, expressed in the host-gc duration syntax
 (0 or whole seconds, minutes, hours, days or weeks, e.g. `24h`, the default); a
 reader warns and falls back to `24h` on a bad value, reported with source

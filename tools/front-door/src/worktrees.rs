@@ -5128,6 +5128,7 @@ mod gc_subpass_removal_tests {
 }
 
 #[cfg(test)]
+#[allow(unused_imports)] // The harness-free target includes this module without its tests.
 mod seed_diagnosis_tests {
     use super::*;
     use provenant_core::WallTime;

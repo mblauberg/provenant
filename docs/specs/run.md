@@ -86,7 +86,19 @@ and rustc children rather than refusing. It keeps the values it sets itself
 with the cleared key names and never their values, and records those names in
 `seed-result.json`. A cleared key is not recorded as a build flag. A lane whose
 own environment changes the compiler still cannot use such a seed: the
-eligibility check warns and leaves that lane cold. Refresh currentness requires the
+eligibility check warns and leaves that lane cold.
+`build.prepare` is an ordered list of argv arrays. After the verify base is
+checked out and before the first Cargo command, every command runs in order with
+the checkout root as its working directory (not the selected workspace
+subdirectory), in the same sanitised child environment as the seed build's
+Cargo commands. The runner reads the live project and host port tables; the
+repository only declares the command, nothing is added to it, and an unreadable
+or invalid table warns and runs no prepare command. A failing command fails that
+build: the project's outcome is `prepare_failed` with the command and the last
+2 KiB of the combined output in `seed-result.json` and the refresh record, while
+the operator note gives a repair and never echoes the output. The same prepare
+list runs before every seed generation build and, later, slot builds. Refresh
+currentness requires the
 recorded verify-base commit to match; writer selection uses compatible
 generations and Cargo's normal per-unit freshness checks before reusing artifacts. A generation records the allocated size of its built target, measured once at seed-build time, so cloning need not walk the whole seed first. At launch the seed reservation carries that recorded allocated size to the collector, which resolves it against the byte unit its own census used: near-zero clone-private bytes on a reflink filesystem, the full allocated size where private size is unavailable. Because a lane clone reflinks the seed's blocks, under a private-byte census it privately owns almost nothing at clone time, so it reserves no budget and cannot evict an unrelated under-budget target for blocks it never privately consumes; under an allocated-byte census the recorded size is charged and an under-budget target near the limit is evicted to make room. A generation built before the size field existed records none, and the clone reserves nothing for it. Such a seed is accepted quietly rather than warning on every launch: its outcome records `size_recorded: false` in `cargo-target-setup.json`, and eviction accounting resumes once the seed is refreshed with a recorded size. A clone ages every
 dep-info file to the epoch before it is published, so each unit that lists source files (workspace
