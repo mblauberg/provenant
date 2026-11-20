@@ -1395,7 +1395,12 @@ pub fn peer(
                 extra: Default::default(),
             },
             PeerAction::Doctor { .. } => {
-                match crate::hosts::local(&home, &context.roots).and_then(|report| {
+                match crate::hosts::local(
+                    &home,
+                    &context.roots,
+                    &provenant_confinement::worktrees::SystemWorkerObserver,
+                )
+                .and_then(|report| {
                     serde_json::to_value(report)
                         .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
                 }) {

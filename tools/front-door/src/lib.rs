@@ -1128,7 +1128,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Hosts { command: None } => fabric::hosts(globals, process.workers()),
         Command::Hosts {
             command: Some(command),
-        } => hosts::run(command, globals),
+        } => hosts::run(command, globals, process.workers()),
         Command::Accounts(provenant_cli::accounts::Accounts::Sync {
             dry_run,
             adopt,

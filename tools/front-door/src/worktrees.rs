@@ -364,7 +364,16 @@ fn execute(
                 }
                 Worktree::List => Data::Listed(worktrees::list(context, cancel)?),
                 Worktree::Doctor { path } => {
-                    Data::Diagnosed(worktrees::doctor(context, &path, cancel)?)
+                    let snapshot =
+                        crate::gc_support::lane_states(roots, context.binding.project_id(), cancel)
+                            .ok();
+                    let terminal = |candidate: &Path| {
+                        snapshot
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.get(candidate).copied())
+                            .unwrap_or(false)
+                    };
+                    Data::Diagnosed(worktrees::doctor(context, &path, &terminal, cancel)?)
                 }
                 Worktree::SessionList => unreachable!(),
                 Worktree::Remove(mut args) => {
@@ -542,6 +551,13 @@ struct GcData {
     discard_archive_retention_source: String,
     staging_busy: Vec<PathBuf>,
     worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
+    /// Advisory processes found in settled worktrees and attempts by the one
+    /// bounded census this pass. Never a signal target.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    held_processes: Vec<worktrees::HeldProcess>,
+    /// The bounded dweller census did not finish, so held rows may be missing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    held_incomplete: bool,
     alerts: Vec<String>,
     unobserved_projects: Vec<PathBuf>,
     skipped_transient: Vec<PathBuf>,
@@ -954,6 +970,14 @@ fn gc_compact_summary(data: &GcData) -> String {
         summary.push_str(alert);
         summary.push('\n');
     }
+    for process in &data.held_processes {
+        summary.push_str(&process.advisory());
+        summary.push('\n');
+    }
+    if data.held_incomplete {
+        summary.push_str(worktrees::HELD_CENSUS_INCOMPLETE_WARNING);
+        summary.push('\n');
+    }
     summary
 }
 
@@ -1353,6 +1377,12 @@ fn gc_data_summary(data: &GcData) -> String {
     for path in &data.skipped_transient {
         human.push_str(&format!("skipped transient project {}\n", path.display()));
     }
+    for process in &data.held_processes {
+        human.push_str(&format!("{}\n", process.advisory()));
+    }
+    if data.held_incomplete {
+        human.push_str(&format!("{}\n", worktrees::HELD_CENSUS_INCOMPLETE_WARNING));
+    }
     for alert in &data.alerts {
         human.push_str(&format!("{alert}\n"));
     }
@@ -1425,6 +1455,8 @@ enum GcOutput<'a> {
         errors: &'a [provenant_run::ProviderStateIssue],
         unobserved_projects: &'a [PathBuf],
         alerts: &'a [String],
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        held_processes: &'a [worktrees::HeldProcess],
         notice: &'a Option<String>,
     },
 }
@@ -1505,6 +1537,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         errors: &data.provider_state.errors,
         unobserved_projects: &data.unobserved_projects,
         alerts: &data.alerts,
+        held_processes: &data.held_processes,
         notice: &data.notice,
     }
 }
@@ -1527,6 +1560,10 @@ struct GcProject {
     path: PathBuf,
     /// Import-extra pins the sweep removed (apply) or would remove (preview).
     import_pins: usize,
+    /// Advisory dwellers found by one census over terminal worktrees and
+    /// settled attempt directories. Never used to signal a process.
+    held_processes: Vec<worktrees::HeldProcess>,
+    held_incomplete: bool,
 }
 
 /// Open a checkout normally, or a bare common directory only through an
@@ -1553,6 +1590,52 @@ fn open_gc_repo(
             Err(error.into())
         }
     }
+}
+
+/// One bounded census over the terminal worktrees and settled attempt
+/// directories of a project. The result is reported by gc preview and apply;
+/// it never selects a PID to signal, and it excludes the caller's own session.
+fn settled_held_processes(
+    roots: &provenant_core::Roots,
+    context: &worktrees::WorktreeContext<'_>,
+    lanes: &[worktrees::WorktreeInfo],
+    cancel: &CancelToken,
+) -> worktrees::HeldReport {
+    let project = context.binding.project_id();
+    let terminal = crate::gc_support::lane_states(roots, project, cancel).ok();
+    let mut report_roots = Vec::new();
+    for lane in lanes {
+        if !terminal
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.get(&lane.path) == Some(&true))
+        {
+            continue;
+        }
+        report_roots.push(lane.path.clone());
+        let Some(branch) = lane
+            .branch
+            .as_deref()
+            .and_then(|branch| branch.strip_prefix("refs/heads/"))
+        else {
+            continue;
+        };
+        let Ok(ids) = crate::provider_retention::branch_attempts(roots, project, branch) else {
+            continue;
+        };
+        // Same terminal-and-released filter as hosts doctor.
+        report_roots.extend(crate::gc_support::settled_attempt_roots(
+            roots, project, cancel, &ids,
+        ));
+    }
+    if report_roots.is_empty() {
+        return worktrees::HeldReport::default();
+    }
+    let started = context.clock.mono_now().as_micros();
+    let within_budget = || {
+        context.clock.mono_now().as_micros().saturating_sub(started)
+            < worktrees::HELD_CENSUS_BUDGET_MICROS
+    };
+    worktrees::held_report(context.workers, &report_roots, &within_budget)
 }
 
 #[allow(clippy::too_many_arguments)] // Project context and sweep deadline stay explicit at this boundary.
@@ -1603,6 +1686,12 @@ fn gc_project(
                     "GC requires a verified primary checkout or bound bare owner",
                 ));
             }
+            let lanes = if read_only {
+                worktrees::list_for_gc_preview(context, cancel)?
+            } else {
+                worktrees::list_for_gc(context, cancel)?
+            };
+            let report = settled_held_processes(roots, context, &lanes, cancel);
             // Settlement clears these pins on every outcome. GC is the
             // backstop for pins left by an earlier version or an attempt
             // whose record has since gone. The preview counts them without
@@ -1649,11 +1738,9 @@ fn gc_project(
                         .join("worktrees")
                         .join(context.binding.project_id().to_string()),
                 )?,
-                lanes: if read_only {
-                    worktrees::list_for_gc_preview(context, cancel)?
-                } else {
-                    worktrees::list_for_gc(context, cancel)?
-                },
+                lanes,
+                held_processes: report.processes,
+                held_incomplete: report.incomplete,
             })
         },
     )
@@ -1698,16 +1785,16 @@ pub(crate) fn retention_event(
     resolved: &roots::Resolved,
     subjects: &[Subject],
     evidence: &LandedEvidence,
+    workers: &dyn WorkerObserver,
 ) -> Result<(), Error> {
     let facts = worktrees::RepoFacts::default();
-    let workers = worktrees::SystemWorkerObserver;
     let config = provenant_cli::config_reads::read_for(&resolved.roots, "gc")?;
     with_context_using_facts(
         &resolved.roots,
         &resolved.home,
         &resolved.project,
         MUTATION_TIMEOUT,
-        &workers,
+        workers,
         &facts,
         |context, cancel| {
             let lanes = worktrees::list_for_gc_matching(context, cancel, |path, branch| {
@@ -2589,6 +2676,11 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .map_err(|_| Error::GcObservation("invalid alert threshold"))?
         .unwrap_or(0)
         .max(free_floor);
+    let held_processes: Vec<_> = projects
+        .iter()
+        .flat_map(|project| project.held_processes.iter().cloned())
+        .collect();
+    let held_incomplete = projects.iter().any(|project| project.held_incomplete);
     let import_pins = projects.iter().map(|project| project.import_pins).sum();
     let mut adapters = GcAdapters {
         command,
@@ -2620,6 +2712,8 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             sweep_budget_seconds,
             sweep_budget_source: sweep_budget_source.clone(),
             sweep_warning,
+            held_processes,
+            held_incomplete,
             unobserved_projects,
             skipped_transient,
             discard_archive_retention_seconds: config
@@ -4566,6 +4660,32 @@ mod gc_preview_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn gc_reports_settled_dwellers_and_warns_when_census_is_incomplete() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("settled-lane");
+        let data = GcData {
+            held_processes: vec![worktrees::HeldProcess {
+                root: provenant_records::StructuredPathWire::from_path(&root).unwrap(),
+                pid: 4242,
+                command: Some("zsh -c burn".into()),
+                evidence: worktrees::ProcessEvidenceKind::WorkingDirectory,
+                path: None,
+                report: String::new(),
+            }],
+            held_incomplete: true,
+            ..GcData::default()
+        };
+        let human = gc_data_summary(&data);
+        assert!(human.contains("4242"), "{human}");
+        assert!(human.contains("zsh -c burn"), "{human}");
+        assert!(human.contains("report only"), "{human}");
+        assert!(
+            human.contains(worktrees::HELD_CENSUS_INCOMPLETE_WARNING),
+            "{human}"
+        );
     }
 
     /// A sweep that stops before a class never reports that class's empty

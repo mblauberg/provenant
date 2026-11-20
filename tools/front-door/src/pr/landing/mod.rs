@@ -579,6 +579,7 @@ pub(crate) fn submit(
         policy,
         gate: &definition,
         reviews: &reviews,
+        workers,
         review_scope: review_scope.clone(),
         shadow,
         last: None,
