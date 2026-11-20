@@ -782,6 +782,7 @@ mod tests {
             | Cause::UnknownAvailability
             | Cause::StaleAvailability
             | Cause::UnknownAccount
+            | Cause::UnresolvedAccount
             | Cause::DisclosureDenied
             | Cause::ConfinementUnavailable
             | Cause::UnsupportedEffort
