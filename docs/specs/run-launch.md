@@ -221,8 +221,8 @@ The `policy.<CODE>` knobs are documented in `config/harness-knobs.json`.
 Every provider lane has its native tool and shell surface. Read-only mode
 constrains filesystem writes; it does not remove shell, editing or web tools
 from the provider. The common confinement planner owns worktree writes, reads
-of the primary and sibling checkouts, explicit read roots, credential denials
-and network reach. Network defaults to open, and explicit network reach is
+of the primary and sibling checkouts, explicit read roots, isolated-mode
+credential denials and network reach. Network defaults to open, and explicit network reach is
 applied by that same planner for every adapter. Every launch finalises the
 host Cargo home and lane target binding through the common environment path.
 Private harness instruction files receive the canonical global rules compiled
@@ -231,17 +231,37 @@ without depending on the installed asset layout. Native integration differences
 belong to `AdapterSpec`, with a reason and source for an unavailable capability.
 - Why: provider selection must not silently narrow a lane's working surface.
 
+Credential-root classification identifies the most specific declared store
+and its source. Under `lanes.access=isolated`, a declared store or exact
+credential file that overlaps a lane root, and a store that cannot be resolved
+precisely, keeps its existing preparation refusal. Under `host`, the same
+overlap or unresolved store warns with the paths, effective access and source,
+then preparation continues. Credential-overlapping grants and discovered
+tool paths follow that access choice as well: isolated keeps its refusals and
+omissions; host accepts the grant and keeps the discovered path. In a host
+profile, credential, keychain/security and process inspection, signal and
+task-port denies are absent. Sandboxing
+continues to enforce its write roots, network policy and explicit denies. The
+isolated profile retains its credential write restrictions, including the
+protection against replacing credential files.
+- Why: same-host credential classification must not become a launch boundary.
+
 ### Lane access
 
-`LaneAccess` resolves `lanes.access` to `host` by default or `isolated`. Host
-access means a same-host lane inherits the host environment, provider home,
-profile and login, Git configuration and credential reads, whether sandboxed
-or not. Isolated reproduces the pre-2.5.3 behaviour: sandboxed lanes get a
-private environment and provider home, filtered Git configuration and
-credential denies, and hosted-cloud credential variables are stripped from
-every lane. Cross-host credential grants are unchanged. This seam records the
-selected model; the enforcement changes are delivered by the remaining #3712
-slices.
+`LaneAccess` resolves `lanes.access` to `host` by default or `isolated`. The
+host model specifies that a same-host lane has the host environment, provider
+home, profile and login, Git configuration and credential reads, whether
+sandboxed or not. This slice applies that model to credential roots, keychain
+and host-process access: host-mode sandboxing still confines writes, network and explicit
+denies, while credential, keychain/security and process inspection, signal and
+task-port denials are lifted. An
+overlapping or unresolved credential root warns and proceeds in host mode;
+isolated retains the existing refusals. Each warning names the effective
+access and its source. Cross-host credential grants are unchanged. Remaining
+#3712 slices apply the model to environment, provider-home and Git behavior.
+`isolated` retains today's restrictions, including the private sandboxed
+environment and provider home, filtered Git configuration, credential denies,
+and hosted-cloud credential-variable stripping.
 
 `resolve_lane_access` gives an explicit launch, template or tier knob priority
 over route policy, then uses the host or project knob, then the default. The

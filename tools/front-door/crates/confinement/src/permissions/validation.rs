@@ -9,6 +9,7 @@ use provenant_os::fs::{Directory, FileKind};
 #[cfg(any(target_os = "macos", test))]
 use provenant_records::policy::Effect;
 use provenant_records::policy::{Facts, Policy};
+use provenant_records::{LaneAccess, LaneAccessReceipt};
 use std::ffi::OsStr;
 #[cfg(target_os = "macos")]
 use std::io::Read;
@@ -31,8 +32,9 @@ pub(super) fn verify_worktree_authority(
     authority: &WorktreeWriteAuthority,
     anchors: &Anchors<'_>,
     credentials: &CredentialRoots,
+    access: &LaneAccessReceipt,
 ) -> Result<WorktreeWriteGrants, PermissionError> {
-    verify_worktree_authority_inner(authority, anchors, credentials).map_err(|error| {
+    verify_worktree_authority_inner(authority, anchors, credentials, access).map_err(|error| {
         boundary_error("VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION", error)
     })
 }
@@ -42,7 +44,15 @@ fn verify_worktree_authority_inner(
     authority: &WorktreeWriteAuthority,
     anchors: &Anchors<'_>,
     credentials: &CredentialRoots,
+    access: &LaneAccessReceipt,
 ) -> Result<WorktreeWriteGrants, PermissionError> {
+    let host_credentials;
+    let credentials = if access.access == LaneAccess::Host {
+        host_credentials = CredentialRoots::default();
+        &host_credentials
+    } else {
+        credentials
+    };
     let (verified, selected_ref) = anchors
         .worktree
         .ok_or(PermissionError::GitWriteAuthorityMissing)?;
@@ -207,7 +217,7 @@ pub(super) fn validate_profile_spec(
     validate_profile_spec_impl(spec, None, credentials, MAX_PATH_GRANTS)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 pub(super) fn validate_profile_spec_with_home(
     spec: &ProviderProfileSpec,
     home: &Path,
@@ -218,13 +228,45 @@ pub(super) fn validate_profile_spec_with_home(
 }
 
 #[cfg(any(target_os = "macos", test))]
+pub(crate) fn validate_profile_spec_with_home_for_access(
+    spec: &ProviderProfileSpec,
+    home: &Path,
+    credentials: &CredentialRoots,
+    grant_limit: usize,
+    access: &LaneAccessReceipt,
+) -> Result<(), PermissionError> {
+    validate_profile_spec_inner(spec, Some(home), credentials, grant_limit, Some(access)).map_err(
+        |error| {
+            use PermissionError as E;
+            let code = match &error {
+                E::CredentialRoot
+                | E::CredentialRootAt { .. }
+                | E::CredentialGrant { .. }
+                | E::CredentialStore { .. }
+                | E::InvalidFixture => Some("VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_CREDENTIALS"),
+                E::ProcessPolicyMissing => Some("VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_AUTHORITY"),
+                E::InvalidPath(_) | E::BroadRoot | E::NonUtf8Path => {
+                    Some("VALIDATION_VALIDATE_PROFILE_SPEC_IMPL_AUTHORITY_2")
+                }
+                E::GrantLimitExceeded { .. } => None,
+                _ => None,
+            };
+            match code {
+                Some(code) => boundary_error(code, error),
+                None => error,
+            }
+        },
+    )
+}
+
+#[cfg(test)]
 fn validate_profile_spec_impl(
     spec: &ProviderProfileSpec,
     home: Option<&Path>,
     credentials: &CredentialRoots,
     grant_limit: usize,
 ) -> Result<(), PermissionError> {
-    validate_profile_spec_inner(spec, home, credentials, grant_limit).map_err(|error| {
+    validate_profile_spec_inner(spec, home, credentials, grant_limit, None).map_err(|error| {
         use PermissionError as E;
         let code = match &error {
             E::CredentialRoot
@@ -254,6 +296,7 @@ fn validate_profile_spec_inner(
     home: Option<&Path>,
     credentials: &CredentialRoots,
     grant_limit: usize,
+    access: Option<&LaneAccessReceipt>,
 ) -> Result<(), PermissionError> {
     for (family, count, limit) in [
         (
@@ -302,7 +345,7 @@ fn validate_profile_spec_inner(
         return Err(PermissionError::ProcessPolicyMissing);
     }
     for executable in &spec.process_executables {
-        validate_read_exec_grant(executable, credentials).map_err(|error| {
+        validate_read_exec_grant_for_profile(executable, credentials, access).map_err(|error| {
             if home.is_some() {
                 error.with_credential_path(&executable.path, home)
             } else {
@@ -314,7 +357,7 @@ fn validate_profile_spec_inner(
         }
     }
     if let Some(socket) = &spec.fabric_socket {
-        validate_noncredential_grant(socket, credentials).map_err(|error| {
+        validate_noncredential_grant_for_profile(socket, credentials, access).map_err(|error| {
             if home.is_some() {
                 error.with_credential_path(&socket.path, home)
             } else {
@@ -326,7 +369,7 @@ fn validate_profile_spec_inner(
         }
     }
     for grant in &spec.runtime_reads {
-        validate_read_exec_grant(grant, credentials).map_err(|error| {
+        validate_read_exec_grant_for_profile(grant, credentials, access).map_err(|error| {
             if home.is_some() {
                 error.with_credential_path(&grant.path, home)
             } else {
@@ -388,7 +431,7 @@ fn validate_profile_spec_inner(
         }
     }
     for grant in &spec.continuation_reads {
-        validate_noncredential_grant(grant, credentials).map_err(|error| {
+        validate_noncredential_grant_for_profile(grant, credentials, access).map_err(|error| {
             if home.is_some() {
                 error.with_credential_path(&grant.path, home)
             } else {
@@ -397,7 +440,7 @@ fn validate_profile_spec_inner(
         })?;
     }
     for root in &spec.tool_exec_roots {
-        validate_read_exec_grant(root, credentials).map_err(|error| {
+        validate_read_exec_grant_for_profile(root, credentials, access).map_err(|error| {
             if home.is_some() {
                 error.with_credential_path(&root.path, home)
             } else {
@@ -415,6 +458,7 @@ fn validate_profile_spec_inner(
             .iter()
             .flat_map(|auth| auth.roots.iter().chain(&auth.in_place_writes))
             .any(|root| grant.overlaps(root))
+            && !access.is_some_and(|receipt| receipt.access == LaneAccess::Host)
         {
             return Err(if home.is_some() {
                 PermissionError::credential_root_at(
@@ -428,7 +472,7 @@ fn validate_profile_spec_inner(
         }
     }
     for grant in &spec.tool_writes {
-        validate_noncredential_grant(grant, credentials).map_err(|error| {
+        validate_noncredential_grant_for_profile(grant, credentials, access).map_err(|error| {
             if home.is_some() {
                 error.with_credential_path(&grant.path, home)
             } else {
@@ -467,6 +511,40 @@ pub(crate) fn validate_noncredential_grant(
         return Err(PermissionError::credential_store(&grant.path, root));
     }
     Ok(())
+}
+
+pub(crate) fn validate_noncredential_grant_for_access(
+    grant: &PathGrant,
+    credentials: &CredentialRoots,
+    access: &LaneAccessReceipt,
+) -> Result<(), PermissionError> {
+    grant.validate()?;
+    if access.access == LaneAccess::Host {
+        return Ok(());
+    }
+    validate_noncredential_grant(grant, credentials)
+}
+
+fn validate_noncredential_grant_for_profile(
+    grant: &PathGrant,
+    credentials: &CredentialRoots,
+    access: Option<&LaneAccessReceipt>,
+) -> Result<(), PermissionError> {
+    match access {
+        Some(access) => validate_noncredential_grant_for_access(grant, credentials, access),
+        None => validate_noncredential_grant(grant, credentials),
+    }
+}
+
+/// Return the classified root that overlaps a grant, if any. Callers that
+/// admit a host-access grant use this to report the same warning at their
+/// launch boundary.
+pub fn credential_overlap_for_grant<'a>(
+    grant: &PathGrant,
+    read: bool,
+    credentials: &'a CredentialRoots,
+) -> Option<&'a provenant_core::CredentialRoot> {
+    refuses_credential_grant(grant, read, credentials)
 }
 
 /// Whether a lane root overlaps a concrete credential store in the shared
@@ -570,6 +648,29 @@ pub(crate) fn validate_read_exec_grant(
         return Err(PermissionError::credential_store(&grant.path, root));
     }
     Ok(())
+}
+
+pub(crate) fn validate_read_exec_grant_for_access(
+    grant: &PathGrant,
+    credentials: &CredentialRoots,
+    access: &LaneAccessReceipt,
+) -> Result<(), PermissionError> {
+    grant.validate()?;
+    if access.access == LaneAccess::Host {
+        return Ok(());
+    }
+    validate_read_exec_grant(grant, credentials)
+}
+
+fn validate_read_exec_grant_for_profile(
+    grant: &PathGrant,
+    credentials: &CredentialRoots,
+    access: Option<&LaneAccessReceipt>,
+) -> Result<(), PermissionError> {
+    match access {
+        Some(access) => validate_read_exec_grant_for_access(grant, credentials, access),
+        None => validate_read_exec_grant(grant, credentials),
+    }
 }
 
 /// Exactly `<home>/.codex/packages/standalone/releases/<release>` or a path

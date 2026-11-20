@@ -1,3 +1,22 @@
+fn isolated_writer_access_receipt() -> provenant_records::LaneAccessReceipt {
+    provenant_records::LaneAccessReceipt {
+        access: provenant_records::LaneAccess::Isolated,
+        source: provenant_records::LaneAccessSource::Default,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    }
+}
+
+fn writer_access_receipt_for_plan(
+    plan: &provenant_confinement::ConfinedPlan,
+) -> provenant_records::LaneAccessReceipt {
+    plan.permissions()
+        .policy
+        .as_ref()
+        .map(|policy| policy.mandatory().lane_access().clone())
+        .unwrap_or_else(isolated_writer_access_receipt)
+}
+
 #[test]
 fn writer_plan_stages_scratch_missing_auth() -> Result<(), Box<dyn std::error::Error>> {
     writer_preparation_fixture(false, false, "missing")
@@ -887,6 +906,7 @@ printf 'agy 1.0.0\n'
                     authority,
                     &home,
                     &confinement.plan.permissions().credential_roots,
+            &writer_access_receipt_for_plan(&confinement.plan),
                 )?;
             }
             let directories =
@@ -1578,6 +1598,7 @@ printf 'agy 1.0.0\n'
             authority,
             &home,
             &confinement.plan.permissions().credential_roots,
+            &writer_access_receipt_for_plan(&confinement.plan),
         )?;
     }
     // Run the real canonical-anchor check on every host-config read. The

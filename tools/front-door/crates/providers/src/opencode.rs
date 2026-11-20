@@ -294,6 +294,12 @@ fn prepare(
             &mut runtime_reads,
             start,
             &input.credential_roots,
+            input
+                .confined
+                .permissions()
+                .policy
+                .as_ref()
+                .map(|policy| policy.mandatory().lane_access()),
             input.policy,
             crate::launch::OmissionSource::Toolchain,
             &mut omitted_discovery,
@@ -337,6 +343,12 @@ fn prepare(
         &mut runtime_reads,
         optional_start,
         &input.credential_roots,
+        input
+            .confined
+            .permissions()
+            .policy
+            .as_ref()
+            .map(|policy| policy.mandatory().lane_access()),
         input.policy,
         crate::launch::OmissionSource::ProviderConfig,
         &mut omitted_discovery,

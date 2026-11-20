@@ -189,7 +189,11 @@ pub(super) fn write_roots(
 /// Preflight still validates the fixed authority roots without walking the home.
 pub(super) enum InventoryContext<'a> {
     Preflight,
-    Launch(&'a run::TaskRequest, &'a str),
+    Launch(
+        &'a run::TaskRequest,
+        &'a str,
+        &'a provenant_records::LaneAccessReceipt,
+    ),
     #[cfg(any(test, feature = "fixture"))]
     Sandboxed,
 }
@@ -206,6 +210,22 @@ pub(super) fn confinement_request(
     publishing: bool,
     sandbox_context: InventoryContext<'_>,
 ) -> Result<PlanRequest, provenant_confinement::permissions::PermissionError> {
+    let lane_access = match &sandbox_context {
+        InventoryContext::Launch(_, _, receipt) => (*receipt).clone(),
+        InventoryContext::Preflight => provenant_records::LaneAccessReceipt {
+            access: provenant_records::LaneAccess::Host,
+            source: provenant_records::LaneAccessSource::Default,
+            key: "lanes.access".into(),
+            extra: Default::default(),
+        },
+        #[cfg(any(test, feature = "fixture"))]
+        InventoryContext::Sandboxed => provenant_records::LaneAccessReceipt {
+            access: provenant_records::LaneAccess::Isolated,
+            source: provenant_records::LaneAccessSource::Default,
+            key: "lanes.access".into(),
+            extra: Default::default(),
+        },
+    };
     let mode = match writer {
         Some(writer) => {
             let mut authority = WorktreeWriteAuthority::for_worktree(
@@ -213,6 +233,7 @@ pub(super) fn confinement_request(
                 &writer.branch,
                 roots.home,
                 roots.credential_roots,
+                &lane_access,
             )?;
             authority.set_publishing(publishing);
             AccessMode::WorktreeWrite(Box::new(authority))
@@ -243,7 +264,7 @@ pub(super) fn confinement_request(
         InventoryContext::Preflight => false,
         #[cfg(any(test, feature = "fixture"))]
         InventoryContext::Sandboxed => true,
-        InventoryContext::Launch(task, route) => {
+        InventoryContext::Launch(task, route, _) => {
             let minimal = provenant_confinement::permissions::MandatoryRoots::new(
                 roots.home,
                 roots.state,
@@ -272,6 +293,7 @@ pub(super) fn confinement_request(
             roots.github_roots,
             roots.protected_worktrees,
             sandboxed,
+            lane_access,
         )?;
     if writer.is_none() && access.source_root.is_some() && !access.source_live {
         // The host materialises a commit source beside candidate scratch under
@@ -847,6 +869,11 @@ fn credential_declarations(
     unique
 }
 
+fn report_credential_warning(message: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+}
+
 /// Inventory names and registration metadata only; credential contents are
 /// never needed to establish the mandatory boundary.
 pub(super) fn credential_roots(
@@ -854,19 +881,46 @@ pub(super) fn credential_roots(
     home: &Path,
     settings: &provenant_providers::accounts::Settings,
     lane_roots: &[&Path],
+    access: Option<&provenant_records::LaneAccessReceipt>,
+    policy: &provenant_records::policy::Policy,
 ) -> Result<provenant_core::CredentialRoots, String> {
     use provenant_core::{CredentialInventory, CredentialRoots, CredentialScope};
     let declarations = credential_declarations(registry, home, settings);
+    let isolated = access.is_some_and(|receipt| receipt.access.is_isolated());
+    let warn = |detail: String| {
+        if let Some(receipt) = access {
+            let detail = format!(
+                "{detail} (lanes.access={}, source: {})",
+                receipt.access.as_str(),
+                receipt.source.as_str()
+            );
+            if let Some(message) = policy
+                .check(
+                    "CREDENTIAL_ROOTS_OVERLAP_NONE",
+                    provenant_records::policy::Facts::violation(detail),
+                )
+                .message()
+            {
+                report_credential_warning(message);
+            }
+        }
+    };
     let resolve = |path: &Path| {
         provenant_confinement::permissions::resolve_boundary_path(path)
             .map_err(|error| error.to_string())
     };
     let resolve_declared = |path: &Path, source: &str| {
-        resolve(path).map_err(|error| {
-            format!(
+        resolve(path).or_else(|error| {
+            let detail = format!(
                 "{source} at {} cannot be resolved precisely: {error}",
                 path.display()
-            )
+            );
+            if isolated {
+                Err(detail)
+            } else {
+                warn(detail);
+                Ok(path.to_owned())
+            }
         })
     };
     for decl in &declarations {
@@ -899,11 +953,25 @@ pub(super) fn credential_roots(
                 .iter()
                 .any(|lane| root.path.starts_with(lane) || path.starts_with(lane))
             {
-                return Err(format!(
-                    "{}: declared credential file {} lies inside lane root",
+                let detail = format!(
+                    "{}: declared credential file {} lies inside lane root(s) {}",
                     root.source,
-                    root.path.display()
-                ));
+                    root.path.display(),
+                    lanes
+                        .iter()
+                        .filter(|lane| root.path.starts_with(lane) || path.starts_with(lane))
+                        .map(|lane| lane.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                if isolated {
+                    return Err(format!(
+                        "{}: declared credential file {} lies inside lane root",
+                        root.source,
+                        root.path.display()
+                    ));
+                }
+                warn(detail);
             }
             roots.add_entry(root.clone());
             continue;
@@ -913,11 +981,25 @@ pub(super) fn credential_roots(
             .iter()
             .any(|lane| root.path.starts_with(lane) || resolved_store.starts_with(lane))
         {
-            return Err(format!(
-                "{}: credential store {} is equal to or inside lane root",
+            let detail = format!(
+                "{}: credential store {} is equal to or inside lane root(s) {}",
                 root.source,
-                resolved_store.display()
-            ));
+                resolved_store.display(),
+                lanes
+                    .iter()
+                    .filter(|lane| root.path.starts_with(lane) || resolved_store.starts_with(lane))
+                    .map(|lane| lane.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            if isolated {
+                return Err(format!(
+                    "{}: credential store {} is equal to or inside lane root",
+                    root.source,
+                    resolved_store.display()
+                ));
+            }
+            warn(detail);
         }
         roots.add_entry(root.clone());
         let inventory = match &decl.inventory {
@@ -958,11 +1040,25 @@ pub(super) fn credential_roots(
                 .iter()
                 .any(|lane| path.starts_with(lane) || resolved.starts_with(lane))
             {
-                return Err(format!(
-                    "{}: declared credential file {} lies inside lane root",
+                let detail = format!(
+                    "{}: declared credential file {} lies inside lane root(s) {}",
                     root.source,
-                    path.display()
-                ));
+                    path.display(),
+                    lanes
+                        .iter()
+                        .filter(|lane| path.starts_with(lane) || resolved.starts_with(lane))
+                        .map(|lane| lane.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                if isolated {
+                    return Err(format!(
+                        "{}: declared credential file {} lies inside lane root",
+                        root.source,
+                        path.display()
+                    ));
+                }
+                warn(detail);
             }
             roots.add(
                 path,
@@ -974,23 +1070,112 @@ pub(super) fn credential_roots(
     }
     let roots = roots.with_lane_roots(lanes);
 
-    bind_credential_roots(roots)
+    if isolated {
+        bind_credential_roots(roots)
+    } else {
+        roots.with_aliases(|path| resolve_declared(path, "credential root"))
+    }
 }
 
-/// Resolve declarations for source admission without classifying a launch.
-pub fn declared_credentials(
-    registry: &Registry<'_>,
-) -> Result<provenant_core::CredentialRoots, String> {
-    let home = registry.home.ok_or("home directory is unavailable")?;
-    let roots = registry
-        .roots
-        .ok_or("host account registry is unavailable")?;
-    let settings = crate::config_reads::read_for(roots, "run")
-        .map_err(|error| error.to_string())?
-        .domains
-        .accounts
-        .unique_accounts();
-    credential_roots(registry, home, &settings, &[])
+/// Retain the dispatch flag credential checks after the route access is known.
+/// Early parsing cannot make this decision because access may be route-specific.
+pub(super) fn credential_access_grant_refusal(
+    access: &run::LaneAccessRequest,
+    credentials: &provenant_core::CredentialRoots,
+    receipt: &provenant_records::LaneAccessReceipt,
+    policy: &provenant_records::policy::Policy,
+) -> Option<String> {
+    for (flag, paths, read) in [
+        ("--write-root", &access.write_roots, false),
+        ("--read-root", &access.attachments, true),
+        ("--read-root", &access.read_roots, true),
+    ] {
+        for path in paths {
+            if let Some(root) =
+                credentials.refusal(path, provenant_core::CredentialScope::Subtree, read)
+            {
+                if receipt.access.is_isolated() {
+                    return Some(format!(
+                        "{flag} {} overlaps declared credential root {} (source: {})",
+                        path.display(),
+                        root.path.display(),
+                        root.source
+                    ));
+                }
+                let detail = format!(
+                    "{flag} {} overlaps declared credential root {} (declaration: {}; lanes.access={}, source: {})",
+                    path.display(),
+                    root.path.display(),
+                    root.source,
+                    receipt.access.as_str(),
+                    receipt.source.as_str()
+                );
+                if let Some(message) = policy
+                    .check(
+                        "CREDENTIAL_ROOTS_OVERLAP_NONE",
+                        provenant_records::policy::Facts::violation(detail),
+                    )
+                    .message()
+                {
+                    report_credential_warning(message);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Surface credential overlaps in the final provider profile with the resolved policy.
+pub(super) fn warn_profile_credential_grants(
+    profile: &provenant_confinement::permissions::ProviderProfileSpec,
+    credentials: &provenant_core::CredentialRoots,
+    receipt: &provenant_records::LaneAccessReceipt,
+    policy: &provenant_records::policy::Policy,
+) {
+    if receipt.access.is_isolated() {
+        return;
+    }
+    let reads = profile
+        .process_executables
+        .iter()
+        .chain(&profile.runtime_reads)
+        .chain(&profile.tool_exec_roots);
+    let writes = profile
+        .continuation_reads
+        .iter()
+        .chain(&profile.state_writes)
+        .chain(&profile.tool_writes)
+        .chain(profile.fabric_socket.iter());
+    let mut reported = std::collections::BTreeSet::new();
+    for (grant, read) in reads
+        .map(|grant| (grant, true))
+        .chain(writes.map(|grant| (grant, false)))
+    {
+        if let Some(root) = provenant_confinement::permissions::credential_overlap_for_grant(
+            grant,
+            read,
+            credentials,
+        ) && reported.insert((grant.path.clone(), root.path.clone()))
+        {
+            let detail = format!(
+                "provider grant {} overlaps credential root {} (declaration: {}; lanes.access={}, source: {})",
+                grant.path.display(),
+                root.path.display(),
+                root.source,
+                receipt.access.as_str(),
+                receipt.source.as_str()
+            );
+            if let Some(message) = policy
+                .check(
+                    "CREDENTIAL_ROOTS_OVERLAP_NONE",
+                    provenant_records::policy::Facts::violation(detail),
+                )
+                .message()
+            {
+                report_credential_warning(message);
+            }
+        }
+    }
 }
 
 fn bind_credential_roots(
@@ -1282,23 +1467,15 @@ pub(super) fn source_cwd(
     let state = registry
         .state_root
         .ok_or_else(|| SourceCwdError::Operational("state root is unavailable".into()))?;
-    let credentials = declared_credentials(registry).map_err(|error| {
-        source_cwd_authority(format!("credential declarations unavailable: {error}"))
-    })?;
     let Some(source) = &task.access.source_root else {
         if task.access.source_identity.is_some() || task.access.source_live {
             return Err(source_cwd_authority(
                 "graph source identity has no checkout".into(),
             ));
         }
-        let admission = crate::run::admit_source_root(
-            cwd,
-            state,
-            cwd,
-            &credentials,
-            crate::run::SourceAdmissionMode::Live,
-        )
-        .map_err(source_admission_error)?;
+        let admission =
+            crate::run::admit_source_root(cwd, state, cwd, crate::run::SourceAdmissionMode::Live)
+                .map_err(source_admission_error)?;
         report_source_warnings(&admission, registry, task);
         return Ok(admission.path);
     };
@@ -1318,8 +1495,8 @@ pub(super) fn source_cwd(
     } else {
         crate::run::SourceAdmissionMode::Registered
     };
-    let admission = crate::run::admit_source_root(cwd, state, source, &credentials, mode)
-        .map_err(source_admission_error)?;
+    let admission =
+        crate::run::admit_source_root(cwd, state, source, mode).map_err(source_admission_error)?;
     report_source_warnings(&admission, registry, task);
     if !task.access.source_live && admission.path != *source {
         return Err(source_cwd_authority(

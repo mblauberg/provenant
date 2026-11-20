@@ -1832,11 +1832,20 @@ impl LaunchConfinement {
         let AccessMode::WorktreeWrite(authority) = &self.plan.permissions().mode else {
             return Ok(());
         };
+        let isolated_access;
+        let lane_access = match self.plan.permissions().policy.as_ref() {
+            Some(policy) => policy.mandatory().lane_access(),
+            None => {
+                isolated_access = isolated_lane_access_receipt();
+                &isolated_access
+            }
+        };
         prepare_writer_git(
             writer,
             &self.state_root,
             &self.home,
             Some((authority, &self.plan.permissions().credential_roots)),
+            lane_access,
             cancel,
             policy,
         )
@@ -2053,12 +2062,21 @@ impl LaunchConfinement {
         if let (Some(writer), AccessMode::WorktreeWrite(authority)) =
             (&self.writer, &self.plan.permissions().mode)
         {
+            let isolated_access;
+            let lane_access = match self.plan.permissions().policy.as_ref() {
+                Some(policy) => policy.mandatory().lane_access(),
+                None => {
+                    isolated_access = isolated_lane_access_receipt();
+                    &isolated_access
+                }
+            };
             prepare_writer_directories(
                 &writer.worktree,
                 &writer.branch,
                 authority,
                 &self.home,
                 &self.plan.permissions().credential_roots,
+                lane_access,
             )
             .map_err(RunError::Confinement)?;
             // Custom targets need directories now; private targets are created
@@ -2107,6 +2125,15 @@ impl LaunchConfinement {
     }
 }
 
+fn isolated_lane_access_receipt() -> provenant_records::LaneAccessReceipt {
+    provenant_records::LaneAccessReceipt {
+        access: provenant_records::LaneAccess::Isolated,
+        source: provenant_records::LaneAccessSource::Default,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    }
+}
+
 fn prepare_writer_git(
     writer: &mut WriterLaunch,
     state: &Path,
@@ -2115,6 +2142,7 @@ fn prepare_writer_git(
         &provenant_confinement::permissions::WorktreeWriteAuthority,
         &provenant_core::CredentialRoots,
     )>,
+    lane_access: &provenant_records::LaneAccessReceipt,
     cancel: &CancelToken,
     _policy: &provenant_records::policy::Policy,
 ) -> Result<()> {
@@ -2163,6 +2191,7 @@ fn prepare_writer_git(
             authority,
             home,
             credentials,
+            lane_access,
         )
         .map_err(RunError::Confinement)?;
     }
@@ -2717,6 +2746,7 @@ mod cargo_setup_tests {
                 &self.state,
                 &self.root,
                 None,
+                &isolated_lane_access_receipt(),
                 &CancelToken::new(),
                 &provenant_records::policy::Policy::default(),
             )?;

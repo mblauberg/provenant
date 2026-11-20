@@ -7,6 +7,7 @@ pub(super) struct Context<'a> {
     pub cwd: &'a Path,
     pub home: &'a Path,
     pub credential_roots: &'a provenant_core::CredentialRoots,
+    pub lane_access: &'a provenant_records::LaneAccessReceipt,
     pub state_root: &'a Path,
     pub common_git: Option<&'a Path>,
     pub worktree_gitdir: Option<&'a Path>,
@@ -96,7 +97,9 @@ fn resolve(
     {
         return Err("git_directory");
     }
-    if provenant_confinement::refuses_lane_root(&path, exec, context.credential_roots) {
+    if context.lane_access.access.is_isolated()
+        && provenant_confinement::refuses_lane_root(&path, exec, context.credential_roots)
+    {
         return Err("credential_root");
     }
     if plan
@@ -232,6 +235,16 @@ fn apply_to(
                 });
                 match result {
                     Ok(grant) => {
+                        let receipt = context.lane_access;
+                        if !receipt.access.is_isolated()
+                            && let Some(root) = context.credential_roots.refusal(&grant.path, if grant.scope == PathScope::Subtree { provenant_core::CredentialScope::Subtree } else { provenant_core::CredentialScope::Exact }, is_exec)
+                            && let Some(message) = context.policy.check(
+                                "PROJECT_PATHS_CREDENTIAL_NONE",
+                                provenant_records::policy::Facts::violation(format!("configured project path {} overlaps credential root {} (declaration: {}; lanes.access={}, source: {})", grant.path.display(), root.path.display(), root.source, receipt.access.as_str(), receipt.source.as_str())),
+                            ).message()
+                        {
+                            warnings.push(json!({"code": "project_credential_overlap", "policy_code": "PROJECT_PATHS_CREDENTIAL_NONE", "key": key, "path": grant.path.to_string_lossy(), "policy_message": message}));
+                        }
                         for (config, source) in agent_configuration_overlaps(&grant.path, primary) {
                             warnings.push(json!({
                                 "code": "project_agent_configuration_overlap",
@@ -396,6 +409,12 @@ mod tests {
                     cwd: &cwd,
                     home: &home,
                     credential_roots: &credential_roots,
+                    lane_access: &provenant_records::LaneAccessReceipt {
+                        access: provenant_records::LaneAccess::Isolated,
+                        source: provenant_records::LaneAccessSource::Default,
+                        key: "lanes.access".into(),
+                        extra: Default::default(),
+                    },
                     state_root: &root.join("state"),
                     common_git: Some(&common),
                     worktree_gitdir: Some(&admin),
@@ -484,6 +503,54 @@ mod tests {
                     .map(|entry| entry.source.as_str())
                     .ok_or("SSH credential declaration")?;
                 assert_eq!(credential_warning["credential_source"], declared_source);
+                let receipt = provenant_records::LaneAccessReceipt {
+                    access: provenant_records::LaneAccess::Host,
+                    source: provenant_records::LaneAccessSource::Default,
+                    key: "lanes.access".into(),
+                    extra: Default::default(),
+                };
+                let mut host_profile = ProviderProfile {
+                    spec: ProviderProfileSpec::default(),
+                    observations: Default::default(),
+                };
+                let record = apply_to(
+                    &mut Vec::new(),
+                    &mut host_profile,
+                    &mode_plan,
+                    Context {
+                        cwd: &cwd,
+                        home: &home,
+                        credential_roots: &credential_roots,
+                        lane_access: &receipt,
+                        state_root: &root.join("state"),
+                        common_git: Some(&common),
+                        worktree_gitdir: Some(&admin),
+                        writer,
+                        settings: Some(&settings),
+                        project: "example",
+                        policy: &provenant_records::policy::Policy::default(),
+                    },
+                );
+                assert!(
+                    host_profile
+                        .spec
+                        .tool_writes
+                        .contains(&grant(home.join(".ssh")))
+                );
+                let warning = record["warnings"]
+                    .as_array()
+                    .ok_or("warnings")?
+                    .iter()
+                    .find(|warning| warning["code"] == "project_credential_overlap")
+                    .ok_or("host warning")?;
+                let message = warning["policy_message"]
+                    .as_str()
+                    .ok_or("warning message")?;
+                assert!(
+                    message.contains("lanes.access=host")
+                        && message.contains("source: default")
+                        && message.contains(home.join(".ssh").to_str().ok_or("path")?)
+                );
             }
             assert!(
                 profile
@@ -544,6 +611,12 @@ mod tests {
                 cwd: &primary,
                 home: &home,
                 credential_roots: &provenant_core::CredentialRoots::for_home(&home),
+                lane_access: &provenant_records::LaneAccessReceipt {
+                    access: provenant_records::LaneAccess::Isolated,
+                    source: provenant_records::LaneAccessSource::Default,
+                    key: "lanes.access".into(),
+                    extra: Default::default(),
+                },
                 state_root: &root.join("state"),
                 common_git: Some(&common),
                 worktree_gitdir: Some(&common),
@@ -635,6 +708,12 @@ mod tests {
                     cwd: &primary,
                     home: &home,
                     credential_roots: &provenant_core::CredentialRoots::for_home(&home),
+                    lane_access: &provenant_records::LaneAccessReceipt {
+                        access: provenant_records::LaneAccess::Isolated,
+                        source: provenant_records::LaneAccessSource::Default,
+                        key: "lanes.access".into(),
+                        extra: Default::default(),
+                    },
                     state_root: &root,
                     common_git: Some(&common),
                     worktree_gitdir: None,
@@ -716,6 +795,12 @@ mod tests {
                 cwd: &primary,
                 home: &home,
                 credential_roots: &provenant_core::CredentialRoots::for_home(&home),
+                lane_access: &provenant_records::LaneAccessReceipt {
+                    access: provenant_records::LaneAccess::Isolated,
+                    source: provenant_records::LaneAccessSource::Default,
+                    key: "lanes.access".into(),
+                    extra: Default::default(),
+                },
                 state_root: &root,
                 common_git: None,
                 worktree_gitdir: None,
@@ -836,6 +921,12 @@ mod tests {
                     cwd: &primary,
                     home: &home,
                     credential_roots: &provenant_core::CredentialRoots::for_home(&home),
+                    lane_access: &provenant_records::LaneAccessReceipt {
+                        access: provenant_records::LaneAccess::Isolated,
+                        source: provenant_records::LaneAccessSource::Default,
+                        key: "lanes.access".into(),
+                        extra: Default::default(),
+                    },
                     state_root: &root,
                     common_git: Some(&common),
                     worktree_gitdir: None,
@@ -986,6 +1077,12 @@ mod tests {
                 cwd: &cwd,
                 home: &home,
                 credential_roots: &provenant_core::CredentialRoots::for_home(&home),
+                lane_access: &provenant_records::LaneAccessReceipt {
+                    access: provenant_records::LaneAccess::Isolated,
+                    source: provenant_records::LaneAccessSource::Default,
+                    key: "lanes.access".into(),
+                    extra: Default::default(),
+                },
                 state_root: &state,
                 common_git: Some(&common),
                 worktree_gitdir: Some(&admin),

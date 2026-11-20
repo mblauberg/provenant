@@ -803,7 +803,7 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         host: Some(&host),
         ..Default::default()
     };
-    let inventory = credential_roots(&registry, &home, &settings, &[])?;
+    let inventory = credential_roots(&registry, &home, &settings, &[], None, &provenant_records::policy::Policy::default())?;
     assert!(
         inventory
             .skill_entry_refusal(&skills.join("SKILL.md"), &skills)
@@ -2046,7 +2046,6 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
         state_root: Some(&state),
         ..Default::default()
     };
-    let credentials = crate::run::declared_credentials(&registry)?;
     let mut task = super::super::tests::trace_run(
         50,
         AttemptId::from_bytes([81; 16]),
@@ -2086,7 +2085,6 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
             &project,
             &state,
             &source,
-            &credentials,
             crate::run::SourceAdmissionMode::Registered,
         )?;
         assert_eq!(admission.path, source);
@@ -2129,14 +2127,10 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
         &project,
         &state,
         &protected,
-        &credentials,
         crate::run::SourceAdmissionMode::Registered,
-    )
-    .unwrap_err();
-    let prepared = source_cwd(&registry, &task).unwrap_err();
-    assert_eq!(admission.code, "CONFINEMENT_SOURCE_CWD_AUTHORITY");
-    assert_eq!(admission.reason, prepared.to_string());
-    assert!(admission.reason.contains("built-in secret store"));
+    )?;
+    assert_eq!(admission.path, protected);
+    assert!(source_cwd(&registry, &task).is_ok());
     Ok(())
 }
 
