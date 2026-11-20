@@ -909,7 +909,7 @@ fn remote_outcomes(
                 .ok()
         })
     } else {
-        match remote_tip(context, push_url, &reference) {
+        match remote_tip(context, remote, push_url, &reference) {
             Ok(tip) => tip,
             Err(error) => return vec![out(ArtefactState::Failed).with_reason(error)],
         }
@@ -1167,7 +1167,7 @@ fn remote_outcomes(
         };
     }
     let mut outcomes = Vec::new();
-    match delete_remote(context, push_url, &reference, tip) {
+    match delete_remote(context, remote, push_url, &reference, tip) {
         Ok(()) => match update_reference_step(
             retirement,
             &retirement_record,
@@ -1259,18 +1259,64 @@ fn stale_tracking(
     }
 }
 
+// Resolve credentials from host Git configuration, but never let a changed
+// remote redirect a recorded ref to another endpoint.
+fn resolved_endpoint(
+    context: &WorktreeContext<'_>,
+    remote: &str,
+    identity: &str,
+) -> Result<String, String> {
+    let result = host_git_with_stderr(
+        context.repo.root_path(),
+        context.executor,
+        &["remote", "get-url", "--push", "--all", remote],
+        REMOTE_READ,
+        false,
+    )
+    .map_err(|_| "cannot resolve remote endpoint".to_owned())?;
+    if result.termination != Termination::Exit(0) {
+        return Err("cannot resolve remote endpoint".into());
+    }
+    let text = std::str::from_utf8(&result.stdout.bytes)
+        .map_err(|_| "invalid remote endpoint".to_owned())?;
+    let mut lines = text.lines();
+    let url = lines
+        .next()
+        .filter(|url| !url.is_empty())
+        .ok_or("missing remote endpoint")?;
+    if lines.next().is_some() {
+        return Err("multiple remote endpoints".into());
+    }
+    let resolved = if !url.contains(':') && !std::path::Path::new(url).is_absolute() {
+        std::fs::canonicalize(context.repo.root_path().join(url))
+            .map_err(|_| "cannot resolve remote endpoint".to_owned())?
+            .to_str()
+            .ok_or("invalid remote endpoint")?
+            .to_owned()
+    } else {
+        url.to_owned()
+    };
+    if provenant_records::custody::endpoint_identity(&resolved) != identity {
+        return Err("remote endpoint changed since delivery".into());
+    }
+    Ok(resolved)
+}
+
 /// The remote's advertised tip for one full ref, or `None` when absent.
 fn remote_tip(
     context: &WorktreeContext<'_>,
+    remote: &str,
     push_url: &str,
     reference: &GitRefName,
 ) -> Result<Option<GitOid>, String> {
-    let listed = host_git_with_stderr(
+    let endpoint = resolved_endpoint(context, remote, push_url)?;
+    let listed = crate::gc_support::host_git_with_endpoint(
         context.repo.root_path(),
         context.executor,
-        &["ls-remote", "--", push_url, reference.as_str()],
+        &["ls-remote", "--", "provenant-cleanup", reference.as_str()],
         REMOTE_READ,
         false,
+        &endpoint,
     )
     .map_err(|error| format!("cannot read the remote branch: {error}"))?;
     if listed.termination != Termination::Exit(0) {
@@ -1297,13 +1343,15 @@ fn remote_tip(
 /// Delete a remote branch only while it is still at `expected`.
 fn delete_remote(
     context: &WorktreeContext<'_>,
+    remote: &str,
     push_url: &str,
     reference: &GitRefName,
     expected: GitOid,
 ) -> Result<(), String> {
     let lease = format!("--force-with-lease={}:{expected}", reference.as_str());
     let refspec = format!(":{}", reference.as_str());
-    let pushed = host_git_with_stderr(
+    let endpoint = resolved_endpoint(context, remote, push_url)?;
+    let pushed = crate::gc_support::host_git_with_endpoint(
         context.repo.root_path(),
         context.executor,
         &[
@@ -1312,15 +1360,21 @@ fn delete_remote(
             "--no-verify",
             &lease,
             "--",
-            push_url,
+            "provenant-cleanup",
             &refspec,
         ],
         REMOTE_WRITE,
         true,
+        &endpoint,
     )
     .map_err(|error| format!("leased remote deletion did not complete: {error}"))?;
     if pushed.termination == Termination::Exit(0) {
         return Ok(());
+    }
+    // A transport diagnostic can echo URL userinfo. Do not persist or report
+    // that output when the resolved endpoint carries it.
+    if provenant_records::custody::endpoint_identity(&endpoint) != endpoint {
+        return Err("remote refused the leased deletion".into());
     }
     let stderr = String::from_utf8_lossy(&pushed.stderr.bytes);
     let detail = stderr
@@ -1343,18 +1397,20 @@ fn remote_default(
     push_url: &str,
     cancel: &CancelToken,
 ) -> Result<LandingTarget, String> {
+    let endpoint = resolved_endpoint(context, remote, push_url)?;
     let run = |args: &[&str], timeout: Duration| {
-        host_git_with_stderr(
+        crate::gc_support::host_git_with_endpoint(
             context.repo.root_path(),
             context.executor,
             args,
             timeout,
             false,
+            &endpoint,
         )
         .map_err(|error| error.to_string())
     };
     let advertised = run(
-        &["ls-remote", "--symref", "--", push_url, "HEAD"],
+        &["ls-remote", "--symref", "--", "provenant-cleanup", "HEAD"],
         REMOTE_READ,
     )?;
     if advertised.termination != Termination::Exit(0) {
@@ -1382,7 +1438,7 @@ fn remote_default(
             "--no-write-fetch-head",
             "--refmap=",
             "--",
-            push_url,
+            "provenant-cleanup",
             &refspec,
         ],
         REMOTE_WRITE,
@@ -1946,6 +2002,25 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_resolves_credentials_and_rejects_changed_endpoint()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = CleanupFixture::new()?;
+        let url = format!("file://user:secret@localhost{}", fixture.remote.display());
+        provenant_os::fixture::run_git(&fixture.project, &["remote", "set-url", "bound", &url])?;
+        let identity = provenant_records::custody::endpoint_identity(&url);
+        fixture.with_context(|context, _cancel| {
+            let reference = GitRefName::branch("lane/old").unwrap();
+            assert_eq!(
+                remote_tip(context, "bound", &identity, &reference).unwrap(),
+                Some(fixture.unlanded)
+            );
+            assert!(resolved_endpoint(context, "bound", "file://localhost/other.git").is_err());
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
     fn ancient_unlanded_local_and_remote_refs_survive_automatic_cleanup()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_os::fixture::run_git;
@@ -2052,6 +2127,7 @@ mod tests {
             assert_eq!(
                 remote_tip(
                     context,
+                    "bound",
                     fixture.remote.to_str().unwrap(),
                     &GitRefName::branch("lane/remote-old").unwrap()
                 )
@@ -2139,6 +2215,7 @@ mod tests {
             assert_eq!(
                 remote_tip(
                     context,
+                    "bound",
                     fixture.remote.to_str().unwrap(),
                     &GitRefName::branch("lane/changed").unwrap()
                 )
@@ -2419,6 +2496,7 @@ mod tests {
             assert_eq!(
                 remote_tip(
                     context,
+                    "bound",
                     fixture.remote.to_str().unwrap(),
                     &GitRefName::branch("lane/old").unwrap()
                 )

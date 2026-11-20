@@ -616,7 +616,7 @@ pub struct WriterIntegration {
     pub extra: crate::ExtraFields,
     /// The bound remote name, or empty for a ref in the local repository.
     pub remote: String,
-    /// The bound push URL; absent for a local ref.
+    /// Credential-free identity of the bound push URL; absent for a local ref.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_url: Option<String>,
     /// Full destination ref, such as `refs/heads/main`.

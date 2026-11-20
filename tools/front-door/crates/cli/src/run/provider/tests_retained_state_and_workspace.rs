@@ -79,6 +79,8 @@ fn retained_state_copy_refuses_a_filesystem_boundary() -> Result<(), Box<dyn std
         entries: RETAINED_STATE.entries,
         bytes: RETAINED_STATE.bytes,
         device: from.metadata()?.device ^ 1,
+        lane_access: None,
+        enforcement: &Default::default(),
     };
     let opened = std::rc::Rc::new(std::cell::Cell::new(false));
     let seen = std::rc::Rc::clone(&opened);
@@ -466,6 +468,7 @@ fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
             state_root: &state,
             config_root: &state,
             private_state: &child_state,
+            lane_access: None,
         },
         &provenant_records::policy::Policy::default(),
     )?;
@@ -564,6 +567,7 @@ fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
                 state_root: &state,
                 config_root: &state,
                 private_state: &child_state,
+            lane_access: None,
             },
             &Default::default(),
         )

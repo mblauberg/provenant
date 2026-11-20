@@ -247,20 +247,25 @@ impl SandboxMode {
         self.effective && self.backend_requirement == BackendRequirement::Required
     }
 
-    /// Finalise a selected profile against the actual backend before sealing
-    /// its receipt. Every compiled profile carries mandatory credential, Git,
-    /// and authority protections, so unavailable enforcement is a capability
-    /// failure. A route that already resolves to trusted, no-profile execution
-    /// may continue within its inherited OS sandbox without claiming it
-    /// provides equivalent roots.
-    pub fn resolve_backend(&self, availability: Availability) -> Result<(), PermissionError> {
+    /// Resolve the selected profile against the available backend. Host access
+    /// may continue without it; isolated access retains the existing refusal.
+    pub fn resolve_backend(
+        &mut self,
+        availability: Availability,
+        isolated: bool,
+    ) -> Result<(), PermissionError> {
         if !self.requires_backend() {
             return Ok(());
         }
         match availability {
             Availability::Available { .. } => Ok(()),
-            Availability::Unavailable { reason } => {
+            Availability::Unavailable { reason } if isolated => {
                 Err(PermissionError::BackendNotAvailable(reason))
+            }
+            Availability::Unavailable { reason } => {
+                self.effective = false;
+                self.warning = Some(format!("sandbox unavailable: {reason}"));
+                Ok(())
             }
         }
     }
@@ -900,6 +905,25 @@ mod tests {
     /// project row exists, typed exactly as the host field it replaces. The
     /// field list comes from the type itself.
     #[test]
+    fn unavailable_backend_follows_lane_access() {
+        use crate::permissions::{Availability, AvailabilityReason};
+        let availability = Availability::Unavailable {
+            reason: AvailabilityReason::ProbeFailed,
+        };
+        let mut isolated = SandboxMode::required(true, true, SandboxSource::Knob, None);
+        assert!(isolated.resolve_backend(availability, true).is_err());
+        assert!(isolated.effective);
+        let mut host = SandboxMode::required(true, true, SandboxSource::Knob, None);
+        assert!(host.resolve_backend(availability, false).is_ok());
+        assert!(!host.effective);
+        assert!(
+            host.warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("probe failed"))
+        );
+    }
+
+    #[test]
     fn every_project_field_is_declared_like_the_host_field_it_replaces() {
         let fields = serde_json::to_value(ProjectRunConfig::default()).unwrap();
         let fields = fields.as_object().unwrap();
@@ -1106,13 +1130,13 @@ mod tests {
                 },
             ] {
                 for knob in [None, Some("auto"), Some("off"), Some("on")] {
-                    let mode = default_config.sandbox_for(SandboxInputs {
+                    let mut mode = default_config.sandbox_for(SandboxInputs {
                         restrictions,
                         knob,
                         ..lane_input("command/probe")
                     });
                     assert!(mode.effective, "{restriction:?} selects a profile");
-                    let result = mode.resolve_backend(availability);
+                    let result = mode.resolve_backend(availability, true);
                     match availability {
                         Availability::Available { .. } => {
                             assert!(result.is_ok());
@@ -1175,7 +1199,7 @@ mod tests {
                     os_sandboxed: true,
                     ..lane_input("codex/gpt-5.5")
                 };
-                let mode = default_config.sandbox_for(input);
+                let mut mode = default_config.sandbox_for(input);
                 assert!(
                     mode.effective,
                     "inherited OS sandbox must always be reported effective"
@@ -1196,9 +1220,12 @@ mod tests {
                         BackendRequirement::Required
                     }
                 );
-                let result = mode.resolve_backend(Availability::Unavailable {
-                    reason: crate::permissions::AvailabilityReason::ProbeFailed,
-                });
+                let result = mode.resolve_backend(
+                    Availability::Unavailable {
+                        reason: crate::permissions::AvailabilityReason::ProbeFailed,
+                    },
+                    true,
+                );
                 if trusted_inherited {
                     assert!(result.is_ok());
                 } else {
@@ -1212,7 +1239,7 @@ mod tests {
             }
         }
 
-        let listed_inherited = config_with_routes.sandbox_for(SandboxInputs {
+        let mut listed_inherited = config_with_routes.sandbox_for(SandboxInputs {
             route: "opencode/opencode/glm-5.3-flash-free",
             os_sandboxed: true,
             ..lane_input("opencode/opencode/glm-5.3-flash-free")
@@ -1223,9 +1250,12 @@ mod tests {
             "a configured route remains profile-bound inside an inherited sandbox"
         );
         assert!(matches!(
-            listed_inherited.resolve_backend(Availability::Unavailable {
-                reason: crate::permissions::AvailabilityReason::ProbeFailed,
-            }),
+            listed_inherited.resolve_backend(
+                Availability::Unavailable {
+                    reason: crate::permissions::AvailabilityReason::ProbeFailed,
+                },
+                true
+            ),
             Err(crate::permissions::PermissionError::BackendNotAvailable(
                 crate::permissions::AvailabilityReason::ProbeFailed
             ))
@@ -1234,7 +1264,7 @@ mod tests {
         // Restrictions still require a freshly resolved profile, even when
         // the process is already sandboxed and the trusted knob is off.
         let restriction = [SandboxRestriction::Network];
-        let restricted_inherited = default_config.sandbox_for(SandboxInputs {
+        let mut restricted_inherited = default_config.sandbox_for(SandboxInputs {
             knob: Some("off"),
             restrictions: &restriction,
             os_sandboxed: true,
@@ -1245,9 +1275,12 @@ mod tests {
             BackendRequirement::Required
         );
         assert!(matches!(
-            restricted_inherited.resolve_backend(Availability::Unavailable {
-                reason: crate::permissions::AvailabilityReason::ProbeFailed,
-            }),
+            restricted_inherited.resolve_backend(
+                Availability::Unavailable {
+                    reason: crate::permissions::AvailabilityReason::ProbeFailed,
+                },
+                true
+            ),
             Err(crate::permissions::PermissionError::BackendNotAvailable(
                 crate::permissions::AvailabilityReason::ProbeFailed
             ))
@@ -1255,16 +1288,19 @@ mod tests {
 
         // Explicit trusted mode keeps the lane runnable without compiling a
         // profile, including where a backend is not available.
-        let trusted = default_config.sandbox_for(SandboxInputs {
+        let mut trusted = default_config.sandbox_for(SandboxInputs {
             knob: Some("off"),
             ..lane_input("command/probe")
         });
         assert!(!trusted.effective);
         assert!(
             trusted
-                .resolve_backend(Availability::Unavailable {
-                    reason: crate::permissions::AvailabilityReason::UnsupportedPlatform,
-                })
+                .resolve_backend(
+                    Availability::Unavailable {
+                        reason: crate::permissions::AvailabilityReason::UnsupportedPlatform,
+                    },
+                    true
+                )
                 .is_ok()
         );
         assert!(!trusted.effective);

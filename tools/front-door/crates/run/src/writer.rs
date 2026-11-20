@@ -330,6 +330,7 @@ pub(crate) struct StopWorkPolicy<'a> {
     pub trigger: provenant_records::run::StopWorkTrigger,
     pub publish: Option<&'a crate::HostDeliveryContext>,
     pub writer: &'a provenant_records::run::WriterRequest,
+    pub route: Option<&'a provenant_records::run::RouteRecord>,
     pub publish_granted: bool,
 }
 
@@ -1816,6 +1817,7 @@ impl LaunchConfinement {
         &mut self,
         cancel: &CancelToken,
         policy: &provenant_records::policy::Policy,
+        access: Option<&provenant_records::LaneAccessReceipt>,
     ) -> Result<()> {
         let Some(writer) = self.writer.as_mut() else {
             return Ok(());
@@ -1848,6 +1850,7 @@ impl LaunchConfinement {
             lane_access,
             cancel,
             policy,
+            (access, Some(self.sandbox.effective)),
         )
     }
     /// Prepare a private target from host-built output while writer custody is held.
@@ -2144,7 +2147,8 @@ fn prepare_writer_git(
     )>,
     lane_access: &provenant_records::LaneAccessReceipt,
     cancel: &CancelToken,
-    _policy: &provenant_records::policy::Policy,
+    policy: &provenant_records::policy::Policy,
+    access: (Option<&provenant_records::LaneAccessReceipt>, Option<bool>),
 ) -> Result<()> {
     let utility = runtime(state)?;
     let root_identity = writer.worktree.identity();
@@ -2209,6 +2213,8 @@ fn prepare_writer_git(
         state,
         cancel,
         &writer.facts,
+        access,
+        policy,
     )?;
     // Fetch may race with sibling config writes. Reopen after it and let Git's
     // config.lock serialize the independent upstream updates.
@@ -2749,6 +2755,7 @@ mod cargo_setup_tests {
                 &isolated_lane_access_receipt(),
                 &CancelToken::new(),
                 &provenant_records::policy::Policy::default(),
+                (None, None),
             )?;
             Ok(())
         }
@@ -4755,6 +4762,14 @@ impl WriterLaunch {
                         crate::HostDeliveryContext::destination(crate::DeliveryMode::Push, branch)?
                             .ok_or(RunError::Validation("stop publication destination missing"))?;
                     crate::HostDeliveryContext::capture()
+                        .with_lane_access(
+                            policy.route.and_then(|route| route.lane_access.clone()),
+                            policy
+                                .route
+                                .and_then(|route| route.sandbox.as_ref())
+                                .map(|sandbox| sandbox.effective),
+                        )
+                        .with_policy(enforcement.clone())
                         .with_repo_facts(&self.facts)
                         .with_host_state(state)
                         .prepare_stop_publish_recovery(
