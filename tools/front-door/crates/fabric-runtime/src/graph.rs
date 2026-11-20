@@ -2880,8 +2880,8 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
             // Persist the durable pause before observing attempts. A resume
             // against tighter limits still owes every launched attempt its
             // settlement: returning here would leave a finished node running
-            // forever. The pause admits no new launch (see the guard in the
-            // attempt loop) but never stops observing work the host already
+            // forever. A resume under the pause admits no new launch (see
+            // the guard in the attempt loop) but never stops observing work the host already
             // accepted; it survives while any node is live and clears when
             // the graph fully settles or limits are raised (#3558).
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
@@ -3282,13 +3282,14 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                 let key = transitions::attempt_key(&plan, node_index, &checkpoint, route_index)
                     .map_err(|error| GraphError::Invalid(error.into()))?;
 
-                // A structural pause admits no new launch. Staging a fresh
-                // attempt is already refused under any pause; a saved attempt
-                // with no host reference would be started by the observation
-                // below, so wait unless the host has already accepted it. An
-                // attempt with a reference is only observed, so a resume
-                // under tighter limits still settles finished work (#3558).
-                if checkpoint.pause_cause() == Some(PauseCause::StructuralLimit)
+                // A resume under tighter limits admits no new launch: a saved
+                // attempt with no host reference would be started by the
+                // observation below, so it waits unless the host has already
+                // accepted it. An attempt with a reference is only observed,
+                // so finished work still settles (#3558). An ordinary advance
+                // keeps its pinned behaviour of re-submitting a saved attempt.
+                if resume
+                    && checkpoint.pause_cause() == Some(PauseCause::StructuralLimit)
                     && let Some(last) = checkpoint.nodes[node_index].attempts.last()
                     && last.state != AttemptState::Terminal
                     && last.attempt_ref.is_none()
