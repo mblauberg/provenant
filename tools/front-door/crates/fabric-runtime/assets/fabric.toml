@@ -41,7 +41,6 @@ store_busy_timeout_ms = 30000 # wait for a contended store before reporting cont
 # --plan is auto and the work is large or underspecified.
 [implement]
 plan = false
-warn_unbounded_junior = true
 
 [batch]
 max_parallel = 4 # cap on concurrent slices running at once, 1-64
