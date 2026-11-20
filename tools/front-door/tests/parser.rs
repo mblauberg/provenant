@@ -349,15 +349,11 @@ fn config_detection_and_project_path_are_inspectable() -> Result {
     let out = rig.command(&["config", "path", "--project", "--json"])?;
     assert_eq!(code(&out), 0, "{out:?}");
     let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
-    let key = provenant_config::project_key_for(&rig.project).ok_or("project key")?;
+    let dir = provenant_config::host_project_dir(&rig.state, &rig.project)
+        .ok_or("host project directory")?;
     assert_eq!(
         value["data"]["path"],
-        rig.state
-            .join("projects")
-            .join(key)
-            .join("ports.json")
-            .to_str()
-            .ok_or("path")?
+        dir.join("ports.json").to_str().ok_or("path")?
     );
     assert_eq!(value["data"]["exists"], false);
     let out = rig.command(&["config", "show", "--full", "--json"])?;

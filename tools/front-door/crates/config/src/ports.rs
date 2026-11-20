@@ -1594,14 +1594,16 @@ impl PortTable {
                 &mut on_malformed,
             )?;
             // A consumer repository can be configured entirely from host
-            // state: its keyed layer sits between host and project. A missing
-            // key or file simply skips this layer.
-            if let Some(key) = project.and_then(project_key_for) {
-                let path = host_state.join("projects").join(key).join("ports.json");
+            // state: its binding layer sits between host and project. The
+            // directory is the ProjectId binding directory named by `config
+            // path`; a missing binding or file skips this layer silently.
+            if let Some(dir) =
+                project.and_then(|project| crate::host_project_dir(host_state, project))
+            {
                 apply_layer(
                     &mut document,
                     &mut provenance,
-                    &path,
+                    &dir.join("ports.json"),
                     PortSource::HostProject,
                     &mut on_unknown,
                     &mut on_malformed,
@@ -2501,21 +2503,21 @@ mod tests {
         }
     }
 
-    fn checkout_with_key(temp: &Path) -> (PathBuf, PathBuf, String) {
+    fn checkout_with_key(temp: &Path) -> (PathBuf, PathBuf, PathBuf) {
         let host = temp.join("host");
         let project = temp.join("project");
         std::fs::create_dir_all(&host).unwrap();
         std::fs::create_dir_all(project.join(".git")).unwrap();
         std::fs::create_dir_all(project.join(".provenant")).unwrap();
-        let key = project_key_for(&project).expect("a checkout resolves its project key");
-        (host, project, key)
+        let dir = crate::host_project_dir(&host, &project)
+            .expect("a checkout resolves its host project directory");
+        (host, project, dir)
     }
 
     #[test]
     fn host_project_layer_order_for_ports() {
         let temp = tempfile::tempdir().unwrap();
-        let (host, project, key) = checkout_with_key(temp.path());
-        let keyed = host.join("projects").join(&key);
+        let (host, project, keyed) = checkout_with_key(temp.path());
         std::fs::create_dir_all(&keyed).unwrap();
 
         // builtin < host < host-project < project: each leaf overrides the
@@ -2573,8 +2575,7 @@ mod tests {
     #[test]
     fn provenance_reports_highest_layer_per_leaf() {
         let temp = tempfile::tempdir().unwrap();
-        let (host, project, key) = checkout_with_key(temp.path());
-        let keyed = host.join("projects").join(&key);
+        let (host, project, keyed) = checkout_with_key(temp.path());
         std::fs::create_dir_all(&keyed).unwrap();
         std::fs::write(
             host.join("ports.json"),

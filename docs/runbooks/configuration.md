@@ -22,10 +22,12 @@ behaviour and [GC](gc.md) for retention configuration.
 The port table applies layers in precedence order, lowest to highest:
 `builtin` < `detected` < `host` < `host-project` < `project`. Compiled builtins
 come first, then auto-detected defaults, then host `state/ports.json`, then
-`state/projects/<project_key>/ports.json`, and finally project
-`.provenant/ports.json`. The keyed host-project layer lets a consumer repository
+`state/projects/<project_id>/ports.json`, and finally project
+`.provenant/ports.json`. The host-project directory is the ProjectId binding
+directory, the same path `provenant config path` reports; the 64-hex target-seed
+key is never used for it. The keyed host-project layer lets a consumer repository
 be configured entirely from host state with no files in its tree; a missing
-project key or keyed layer is skipped silently. A layer only needs the fields it
+binding or layer is skipped silently. A layer only needs the fields it
 changes: object fields deep-merge over the lower layer, so
 `{"verify": {"base": "origin/master"}}` keeps the other verify fields from the
 layers below it. `schema_version` is optional in a layer; it defaults to the
