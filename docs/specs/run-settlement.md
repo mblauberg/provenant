@@ -85,6 +85,19 @@ import and never retries it. Refusals that depend on a moving branch stay retrya
 - Why: rebasing a lane onto the branch it feeds is legitimate, and a refusal that
   cannot change must not leave a finished lane running.
 
+Settlement warns, without refusing, when a writer's commits between the launch
+base and the verified tip add or modify tool-state paths at the repository root:
+paths whose first segment is `.local`, `.config` or `.cache`. `WriterLaunch`'s
+tool-state report reuses the committed diff behind the declared write-scope
+report and names up to ten of the paths, so an incidental tool file cannot hide
+in a lane's commits. Ordinary dot paths such as `.github/x` and `src/.config`
+are not tool state. A failure to inspect the diff warns and continues; only an
+operator's strict `LANE_TOOL_STATE_COMMITTED` setting turns the observation into
+a configured stop.
+- Why: a lane committed its tool's device identity under `.local/state/` and
+  nothing flagged it. Tool state does not belong in a project commit, but a
+  warning must not discard an otherwise valid lane's work.
+
 ## Outcome before release
 
 The shared Run settlement driver commits the provider outcome, result and
