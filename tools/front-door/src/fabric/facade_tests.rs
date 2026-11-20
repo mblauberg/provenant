@@ -299,6 +299,117 @@ fn peer_remote_base_pins_a_commit_reachable_from_the_remote()
     Ok(())
 }
 
+// Spec: docs/specs/fabric.md#publication-boundary
+#[cfg(test)]
+#[test]
+fn peer_base_resolution_fetches_a_commit_missing_from_a_stale_clone()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
+    use provenant_records::Outcome;
+    use std::collections::BTreeMap;
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|path| (path, Occupancy::Available))
+                .collect()
+        }
+    }
+    let rig = crate::worktree_tests::repository()?;
+    provenant_os::fixture::private_state_dir(&rig.state)?;
+    let temp = tempfile::tempdir()?;
+    let origin = temp.path().join("origin.git");
+    let upstream = temp.path().join("upstream");
+    std::fs::create_dir_all(&origin)?;
+    provenant_os::fixture::run_git(&origin, &["init", "--bare", "-q"])?;
+    // Seed the peer clone's origin at the commit the peer already has.
+    provenant_os::fixture::run_git(
+        &rig.project,
+        &["remote", "add", "origin", origin.to_str().ok_or("origin path")?],
+    )?;
+    provenant_os::fixture::run_git(&rig.project, &["push", "origin", "HEAD:refs/heads/main"])?;
+    let base = String::from_utf8(provenant_os::fixture::run_git(
+        &rig.project,
+        &["rev-parse", "HEAD"],
+    )?)?;
+    let base = base.trim().to_owned();
+    // Move the origin forward from a separate clone; the peer clone is behind.
+    provenant_os::fixture::run_git(
+        temp.path(),
+        &[
+            "clone",
+            "-q",
+            origin.to_str().ok_or("origin path")?,
+            upstream.to_str().ok_or("upstream path")?,
+        ],
+    )?;
+    provenant_os::fixture::run_git(&upstream, &["config", "user.name", "Fixture"])?;
+    provenant_os::fixture::run_git(&upstream, &["config", "user.email", "fixture@example.invalid"])?;
+    provenant_os::fixture::run_git(&upstream, &["commit", "--allow-empty", "-qm", "ahead"])?;
+    provenant_os::fixture::run_git(&upstream, &["push", "origin", "HEAD:refs/heads/main"])?;
+    let ahead = String::from_utf8(provenant_os::fixture::run_git(&upstream, &["rev-parse", "HEAD"])?)?;
+    let ahead = ahead.trim().to_owned();
+    assert_ne!(ahead, base);
+    assert!(
+        provenant_os::fixture::run_git(&rig.project, &["cat-file", "-e", &ahead]).is_err(),
+        "the peer clone must start without the pinned commit"
+    );
+
+    let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+    let factory = Factory {
+        context: Context::open(roots, &rig.home, &rig.project)?,
+        project_attribution: false,
+        clock: SystemClock::new(),
+        backoff: ThreadPause,
+        executor: SystemExecutor::new(1)?,
+        home: rig.home.clone(),
+        cwd: rig.project.clone(),
+        assets: rig.project.clone(),
+        host_launch: None,
+        workers: &Free,
+    };
+    let facts = provenant_confinement::worktrees::RepoFacts::default();
+    let cancel = CancelToken::new();
+
+    // Resolution fetches the missing commit from origin, then pins it.
+    let resolved = factory.resolve_base(&factory.cwd, &ahead, &facts, &cancel)?;
+    assert_eq!(resolved.to_string(), ahead);
+    assert!(
+        provenant_os::fixture::run_git(&rig.project, &["cat-file", "-e", &ahead]).is_ok(),
+        "the fetch must bring the pinned commit into the peer clone"
+    );
+
+    // A commit still missing after the fetch is a host-state refusal naming the
+    // clone and the fetch outcome, never an invalid-input error.
+    let absent = "f".repeat(40);
+    let error = factory
+        .resolve_base(&factory.cwd, &absent, &facts, &cancel)
+        .expect_err("an absent commit must be refused");
+    match &error {
+        FacadeError::BaseFetchFailed { clone, fetch } => {
+            assert_eq!(clone, &rig.project.to_string_lossy().into_owned());
+            assert!(fetch.contains("origin"), "fetch outcome: {fetch}");
+        }
+        other => panic!("expected a host-state base failure, got {other:?}"),
+    }
+    let diagnostic = error.diagnostic();
+    let text = format!(
+        "{} {}",
+        diagnostic.detail.as_deref().unwrap_or_default(),
+        diagnostic.next.as_deref().unwrap_or_default()
+    );
+    assert!(text.contains("peer clone"), "diagnostic: {text}");
+    assert!(text.contains("origin"), "diagnostic: {text}");
+    assert_ne!(error.code(), "invalid_input");
+    assert_eq!(
+        provenant_cli::fabric::facade_outcome(&error),
+        (Outcome::Refused, provenant_run::ErrorKind::BaseUnreachable)
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 #[test]
 fn graph_document_decoder_checks_header_before_typed_graph() {
