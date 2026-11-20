@@ -4013,16 +4013,16 @@ pub(super) fn prepare_candidates_inner(
         }
         let opencode_profile = config
             .providers
-            .get("opencode")
+            .get(adapter.id())
             .map_or(provenant_config::OpenCodeProfile::Host, |settings| {
                 settings.profile
             });
-        let opencode_host = adapter.id() == "opencode"
+        let opencode_host = adapter_spec.is_some_and(|spec| spec.host_profile)
             && opencode_profile == provenant_config::OpenCodeProfile::Host;
         let opencode_homes = provenant_providers::opencode::host_xdg_homes(&home, &|key| {
             host_provider_var(registry, key)
         });
-        let opencode_data = opencode_homes[1].join("opencode");
+        let opencode_data = opencode_homes[1].join(adapter.id());
         let mut effective_resume = resume;
         let mut continuation_warning = None;
         let continuation = match resume {
@@ -4040,7 +4040,7 @@ pub(super) fn prepare_candidates_inner(
             ) {
                 Ok(continuation) => Some(continuation),
                 Err(error)
-                    if adapter.id() == "opencode"
+                    if adapter_spec.is_some_and(|spec| spec.host_profile)
                         && matches!(
                             error,
                             ContinuationError::Provider(
@@ -4112,7 +4112,7 @@ pub(super) fn prepare_candidates_inner(
         let credential_roots = if opencode_host {
             let profile_roots: Vec<_> = opencode_homes
                 .iter()
-                .map(|home| home.join("opencode"))
+                .map(|home| home.join(adapter.id()))
                 .collect();
             credential_roots
                 .without_roots_with_aliases(
@@ -4592,8 +4592,8 @@ pub(super) fn prepare_candidates_inner(
             provenant_providers::SessionStateLocation::AttemptPrivate => None,
             provenant_providers::SessionStateLocation::Native { root }
                 if (!sandbox.effective
-                    || (adapter.id() == "opencode"
-                        && config.providers.get("opencode").is_none_or(|settings| {
+                    || (adapter_spec.is_some_and(|spec| spec.host_profile)
+                        && config.providers.get(adapter.id()).is_none_or(|settings| {
                             settings.profile == provenant_config::OpenCodeProfile::Host
                         })))
                     && root.is_absolute() =>
@@ -5092,7 +5092,7 @@ pub(super) fn prepare_candidates_inner(
                 .map(|tool| tool.receipt())
                 .collect(),
         ))?);
-        if adapter.id() == "opencode" {
+        if adapter_spec.is_some_and(|spec| spec.host_profile) {
             let message = opencode_profile_message(
                 opencode_profile,
                 config.origins.get("providers.opencode.profile"),

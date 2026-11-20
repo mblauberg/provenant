@@ -942,6 +942,13 @@ fn opencode_host_continuation_uses_the_recorded_host_store_by_session_id()
     let state = base.join("state");
     let host_data = base.join("xdg-data/opencode");
     std::fs::create_dir_all(&host_data)?;
+    // A host-profile launch still binds the adapter's local account: the host
+    // profile is where that account's session store lives, not a substitute for
+    // the account identity a continuation must carry.
+    let account_key = provenant_records::AdapterSpec::get("opencode")
+        .ok_or("opencode adapter spec")?
+        .local_account
+        .1;
     let route = ResolvedRoute {
         selection_context: Default::default(),
         diagnostics: Default::default(),
@@ -951,7 +958,7 @@ fn opencode_host_continuation_uses_the_recorded_host_store_by_session_id()
         model: "fixture-model".into(),
         effort: None,
         catalogue_revision: "fixture".into(),
-        account_key: None,
+        account_key: Some(account_key.into()),
         host: "fixture".into(),
         alternatives: RouteAlternatives::default(),
         exclusions: Vec::new(),
@@ -977,7 +984,7 @@ fn opencode_host_continuation_uses_the_recorded_host_store_by_session_id()
         "project_id": project,
         "attempt_number": 1, "revision": 1, "generation": 0,
         "requested_route": {"kind": "model", "provider": "opencode", "model": "fixture-model"},
-        "applied_route": {"provider": "opencode", "model": "opencode/fixture-model"},
+        "applied_route": {"provider": "opencode", "model": "opencode/fixture-model", "account_key": account_key},
         "authority_digest": Digest::from_bytes([0; 32]), "read_only_writable": [], "protected_paths": [], "trace": {},
         "session": "host-session", "queued_at": "2026-10-25T00:00:00.000000Z",
         "state": {"state": "queued"}, "usage": {},
