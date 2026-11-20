@@ -1,11 +1,23 @@
-//! Slot reset and maintenance seam; S4 supplies reset and garbage collection.
+//! Slot reset, garbage collection and best-effort maintenance.
 
 use super::{
     BuildError, InfraKind, JobOutcome, Reset,
     slots::{SlotPaths, SlotRecord, SlotState},
 };
+use provenant_config::{PortTable, ResolvedAdmissionClass};
+use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
+use provenant_os::{
+    clock::SystemClock,
+    exec::{ExecOptions, StreamPolicy, SystemExecutor, Termination, run_text},
+    fs::{Directory, LockMode},
+};
 use serde::{Deserialize, Serialize};
-use std::{path::Path, time::SystemTime};
+use std::{
+    collections::BTreeMap,
+    ffi::{OsStr, OsString},
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime},
+};
 
 /// Pre-job action selected by the clock guard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,7 +135,7 @@ pub fn full_reset(slot: &SlotPaths) -> Result<(), BuildError> {
             kind: InfraKind::SlotLayout,
             detail: e.to_string(),
         })?;
-    for name in ["target", "repo"] {
+    for name in ["target", "repo", "tmp"] {
         let name = OsStr::new(name);
         let metadata = match root.metadata_at(name, false) {
             Ok(metadata) if metadata.kind == FileKind::Directory => metadata,
@@ -190,11 +202,15 @@ fn remove_contents(tree: &provenant_os::fs::PayloadTree, depth: usize) -> Result
     Ok(())
 }
 
-/// Result of slot and store garbage collection.
+/// Result of slot, store and ledger garbage collection.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcReport {
     pub removed_slots: u64,
     pub removed_bytes: u64,
+    /// Ledger files rotated out of `jobs.jsonl`.
+    pub rotated_ledgers: u64,
+    /// Rotated ledger files older than the retention window that were removed.
+    pub expired_ledgers: u64,
     pub warnings: Vec<String>,
 }
 
@@ -205,77 +221,96 @@ pub fn gc(home: &Path, state: &Path, limit: u64, now: SystemTime) -> GcReport {
         state,
         limit,
         now,
-        std::time::Duration::from_secs(7 * 86400),
-        std::time::Duration::from_secs(7 * 86400),
+        Duration::from_secs(7 * 86400),
+        Duration::from_secs(7 * 86400),
     )
 }
 
-/// Collect with the resolved project retention settings.
+/// Collect with one idle/retention pair for every project.
 pub fn gc_with_retention(
     home: &Path,
     state: &Path,
     limit: u64,
     now: SystemTime,
-    idle: std::time::Duration,
-    retention: std::time::Duration,
+    idle: Duration,
+    retention: Duration,
 ) -> GcReport {
-    use provenant_os::fs::{Directory, LockMode};
-    use std::ffi::OsStr;
+    gc_projects(home, state, limit, now, |_| (idle, retention))
+}
+
+/// Collect using each project's resolved `build.slot_idle` and
+/// `build.snapshot_retention`. The settings closure returns `(idle, retention)`
+/// and is called once per project key found in the slot cache or store.
+pub fn gc_projects<F>(
+    home: &Path,
+    state: &Path,
+    limit: u64,
+    now: SystemTime,
+    settings: F,
+) -> GcReport
+where
+    F: Fn(&str) -> (Duration, Duration),
+{
     let mut report = GcReport::default();
-    let now_ms = now
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64;
+    let now_ms = unix_millis(now);
+    let mut projects: BTreeMap<String, Vec<SlotStatus>> = BTreeMap::new();
     for row in status(home, state) {
-        let paths = SlotPaths::new(home, &row.project_key, row.index);
-        let Ok(dir) = Directory::open_anchor(&paths.root) else {
-            continue;
-        };
-        let Ok(_guard) = dir.try_lock(OsStr::new("lock"), LockMode::Exclusive) else {
-            continue;
-        };
-        // Re-read under the lock: status is deliberately an unlocked observation.
-        let record = match SlotRecord::read(&paths.record) {
-            Ok(Some(record)) => record,
-            Ok(None) => continue,
-            Err(error) => {
-                report
-                    .warnings
-                    .push(format!("cannot read slot record: {error}"));
+        projects
+            .entry(row.project_key.clone())
+            .or_default()
+            .push(row);
+    }
+    for (project_key, rows) in &projects {
+        let (idle, _) = settings(project_key);
+        for row in rows {
+            let paths = SlotPaths::new(home, project_key, row.index);
+            let Ok(dir) = Directory::open_anchor(&paths.root) else {
                 continue;
-            }
-        };
-        let last = record
-            .last_job
-            .as_ref()
-            .map_or(record.created_unix_ms, |job| job.finished_unix_ms);
-        if row.index < limit
-            && (last > now_ms || now_ms - last <= idle.as_millis().min(u128::from(u64::MAX)) as u64)
-        {
-            continue;
-        }
-        match full_reset(&paths) {
-            Ok(()) => {
-                // Retain the slot directory and lock inode; unlinking it while a waiter
-                // has the inode open would let a new holder acquire a different lock.
-                if let Err(error) = dir.unlink(OsStr::new("slot.json")) {
+            };
+            let Ok(_guard) = dir.try_lock(OsStr::new("lock"), LockMode::Exclusive) else {
+                continue;
+            };
+            // Re-read under the lock: status is deliberately an unlocked observation.
+            let record = match SlotRecord::read(&paths.record) {
+                Ok(Some(record)) => record,
+                Ok(None) => continue,
+                Err(error) => {
                     report
                         .warnings
-                        .push(format!("cannot remove slot record: {error}"));
-                } else {
-                    report.removed_slots += 1;
-                    report.removed_bytes +=
-                        row.allocated_bytes.saturating_sub(allocated(&paths.root));
+                        .push(format!("cannot read slot record: {error}"));
+                    continue;
                 }
+            };
+            let last = record
+                .last_job
+                .as_ref()
+                .map_or(record.created_unix_ms, |job| job.finished_unix_ms);
+            if row.index < limit && (last > now_ms || now_ms - last <= millis(idle)) {
+                continue;
             }
-            Err(error) => report
-                .warnings
-                .push(format!("cannot collect slot: {error}")),
+            match full_reset(&paths) {
+                Ok(()) => {
+                    // Retain the slot directory and lock inode; unlinking it while a waiter
+                    // has the inode open would let a new holder acquire a different lock.
+                    if let Err(error) = dir.unlink(OsStr::new("slot.json")) {
+                        report
+                            .warnings
+                            .push(format!("cannot remove slot record: {error}"));
+                    } else {
+                        report.removed_slots += 1;
+                        report.removed_bytes +=
+                            row.allocated_bytes.saturating_sub(allocated(&paths.root));
+                    }
+                }
+                Err(error) => report
+                    .warnings
+                    .push(format!("cannot collect slot: {error}")),
+            }
         }
     }
-    let stores = super::paths::store_root(state);
-    if let Ok(entries) = std::fs::read_dir(stores) {
+    // Stores exist independently of slots: every store gets its expired pins
+    // collected, including projects that also have slots.
+    if let Ok(entries) = std::fs::read_dir(super::paths::store_root(state)) {
         for entry in entries.flatten() {
             if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                 continue;
@@ -284,6 +319,7 @@ pub fn gc_with_retention(
             let Some(name) = name.to_str().and_then(|name| name.strip_suffix(".git")) else {
                 continue;
             };
+            let (_, retention) = settings(name);
             if let Err(error) = super::store::gc(state, name, retention, now) {
                 report
                     .warnings
@@ -291,7 +327,27 @@ pub fn gc_with_retention(
             }
         }
     }
+    match super::ledger::rotate(state, now) {
+        Ok(rotation) => {
+            report.rotated_ledgers = u64::from(rotation.rotated);
+            report.expired_ledgers = rotation.expired;
+        }
+        Err(error) => report
+            .warnings
+            .push(format!("cannot rotate build ledger: {error}")),
+    }
     report
+}
+
+fn unix_millis(now: SystemTime) -> u64 {
+    now.duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 /// One observed slot row for the status command.
@@ -369,24 +425,400 @@ fn allocated(path: &Path) -> u64 {
     total
 }
 
+/// Hourly prewarm budget and the last time each project was warmed.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MaintenanceState {
+    pub schema: u32,
+    #[serde(default)]
+    pub last_prewarm: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub hour_budget_used: HourBudget,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct HourBudget {
+    pub hour: u64,
+    pub count: u64,
+}
+
 /// Result of a maintenance/prewarm request.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaintainOutcome {
     pub ran: bool,
+    pub canary: bool,
+    pub exit_code: Option<i32>,
     pub warning: Option<String>,
 }
 
-/// Report unavailable until non-blocking slot maintenance is integrated.
-pub fn maintain(_state: &Path, _home: &Path, _project: &Path, _now: SystemTime) -> MaintainOutcome {
-    MaintainOutcome {
-        ran: false,
-        warning: Some("build maintenance is unavailable: slot execution is not integrated".into()),
+fn with_maintenance_state<T>(
+    state: &Path,
+    change: impl FnOnce(&mut MaintenanceState) -> Result<T, String>,
+) -> Result<T, String> {
+    let root = super::paths::build_root(state);
+    std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    let directory = Directory::open_anchor(&root).map_err(|error| error.to_string())?;
+    let clock = SystemClock::new();
+    let lock = directory
+        .lock(
+            OsStr::new("maintenance.lock"),
+            LockMode::Exclusive,
+            WaitBudget::up_to(clock.mono_now(), DurationMicros::from_micros(10_000_000)),
+            &CancelToken::new(),
+            &clock,
+        )
+        .map_err(|error| error.to_string())?;
+    let path = super::paths::maintenance_path(state);
+    let mut record: MaintenanceState = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| MaintenanceState {
+            schema: 1,
+            ..MaintenanceState::default()
+        });
+    let result = change(&mut record)?;
+    if record.schema == 0 {
+        record.schema = 1;
     }
+    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let bytes = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
+    std::fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
+    std::fs::rename(&temporary, &path).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        error.to_string()
+    })?;
+    drop(lock);
+    Ok(result)
+}
+
+/// Run a read-only Git query with a clean environment.
+fn git_text(git: &Path, project: &Path, args: &[&str]) -> Option<String> {
+    let mut argv = vec![git.as_os_str().to_owned()];
+    argv.extend(args.iter().map(OsString::from));
+    let clean: Vec<(OsString, OsString)> = [
+        ("HOME", "/nonexistent"),
+        ("XDG_CONFIG_HOME", "/nonexistent"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_SYSTEM", "/dev/null"),
+        ("GIT_TERMINAL_PROMPT", "0"),
+        ("LC_ALL", "C"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+    .collect();
+    let executor = SystemExecutor::new(1).ok()?;
+    let mut options = ExecOptions::new(&argv, project, Duration::from_secs(10));
+    options.env = Some(&clean);
+    options.stdout = StreamPolicy::Capture { limit: 4096 };
+    options.stderr = StreamPolicy::Capture { limit: 4096 };
+    let result = run_text(&executor, options).ok()?;
+    if result.outcome.termination != Termination::Exit(0) || result.outcome.timed_out {
+        return None;
+    }
+    let text = result.stdout.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// Count admission slots that another job currently holds.
+fn held_builds(state: &Path) -> Option<u64> {
+    use provenant_os::admission::class_directory;
+    let directory = Directory::open_anchor(&class_directory(state, "build")).ok()?;
+    let mut held = 0;
+    for index in 0..1024 {
+        let name = OsString::from(format!("slot-{index}.lock"));
+        match directory.try_lock_existing(&name, LockMode::Exclusive) {
+            Ok(_guard) => {}
+            Err(provenant_os::fs::FsError::LockTimeout { .. }) => held += 1,
+            Err(_) => break,
+        }
+    }
+    Some(held)
+}
+
+/// Whether this project recorded a job in the trailing 24 hours.
+pub fn has_recent_job(state: &Path, project_key: &str, now_ms: u64) -> bool {
+    use std::io::BufRead;
+    let cutoff = now_ms.saturating_sub(86_400_000);
+    let root = super::paths::build_root(state);
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name != "jobs.jsonl" && !(name.starts_with("jobs-") && name.ends_with(".jsonl")) {
+            continue;
+        }
+        let Ok(file) = std::fs::File::open(entry.path()) else {
+            continue;
+        };
+        for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+            if let Ok(row) = serde_json::from_str::<super::JobOutcome>(&line)
+                && row.project_key == project_key
+                && row.finished_unix_ms >= cutoff
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Try to take an idle slot without waiting; returns its index.
+fn probe_slot(state: &Path, limit: u64) -> Option<u64> {
+    use provenant_os::admission::AdmissionSlots;
+    let slots = AdmissionSlots::open(state, "build").ok()?;
+    let order: Vec<u64> = (0..limit).collect();
+    let guard = slots.try_acquire_ordered(&order).ok()??;
+    Some(guard.index())
+}
+
+/// Run one best-effort prewarm, or a freshness canary when the chosen slot is stale.
+/// Budget, load, recency and admission are checked before any process is spawned;
+/// every failure is a warning rather than a refusal.
+pub fn maintain(state: &Path, home: &Path, project: &Path, now: SystemTime) -> MaintainOutcome {
+    let mut outcome = MaintainOutcome::default();
+    let now_ms = unix_millis(now);
+    let ports = match PortTable::read_for(Some(project), state) {
+        Ok(ports) => ports,
+        Err(error) => {
+            outcome.warning = Some(format!(
+                "build maintenance configuration unavailable: {error}"
+            ));
+            return outcome;
+        }
+    };
+    let budget = ports.build.prewarm_budget;
+    if budget == 0 {
+        outcome.warning = Some("build maintenance disabled by build.prewarm_budget=0".into());
+        return outcome;
+    }
+    let key = provenant_config::project_key_for(project)
+        .unwrap_or_else(|| provenant_config::project_key(project));
+    let limit = ResolvedAdmissionClass::resolve("build", state, Some(project), Some(&key)).slots;
+    if limit == 0 {
+        outcome.warning = Some("build maintenance needs at least one build slot".into());
+        return outcome;
+    }
+    if !has_recent_job(state, &key, now_ms) {
+        outcome.warning = Some("no build job for this project in the last 24 hours".into());
+        return outcome;
+    }
+    let cpus = std::thread::available_parallelism().map_or(1, |value| value.get()) as f64;
+    let load_ceiling = (ports.verify.load_per_cpu * cpus).floor() as u64;
+    match held_builds(state) {
+        Some(held) if held < load_ceiling => {}
+        Some(held) => {
+            outcome.warning = Some(format!(
+                "build load {held} is at or above the prewarm ceiling {load_ceiling}"
+            ));
+            return outcome;
+        }
+        None => {
+            outcome.warning = Some("build load could not be sampled; skipping prewarm".into());
+            return outcome;
+        }
+    }
+    let hour = now_ms / 3_600_000;
+    let allowed = with_maintenance_state(state, |record| {
+        if record.hour_budget_used.hour != hour {
+            record.hour_budget_used = HourBudget::default();
+        }
+        Ok(record.hour_budget_used.count < budget)
+    });
+    match allowed {
+        Ok(true) => {}
+        Ok(false) => {
+            outcome.warning = Some("hourly build maintenance budget is spent".into());
+            return outcome;
+        }
+        Err(error) => {
+            outcome.warning = Some(format!("cannot read build maintenance budget: {error}"));
+            return outcome;
+        }
+    }
+    let Some(index) = probe_slot(state, limit) else {
+        outcome.warning = Some("no idle build slot for maintenance".into());
+        return outcome;
+    };
+    let paths = SlotPaths::new(home, &key, index);
+    let canary = SlotRecord::read(&paths.record)
+        .ok()
+        .flatten()
+        .and_then(|record| record.last_canary_unix_ms)
+        .is_none_or(|last| {
+            now_ms.saturating_sub(last)
+                >= ports
+                    .build
+                    .canary_every_duration()
+                    .value
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64
+        });
+    let Some(git) = provenant_os::git::git_executable() else {
+        outcome.warning = Some("Git executable unavailable for build maintenance".into());
+        return outcome;
+    };
+    let base = ports.verify.base.clone();
+    if base.trim().is_empty() {
+        outcome.warning = Some("verify.base is unset; cannot pin the maintenance tree".into());
+        return outcome;
+    }
+    let Some(commit) = git_text(
+        &git,
+        project,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{base}^{{commit}}"),
+        ],
+    )
+    .filter(|commit| commit.bytes().all(|byte| byte.is_ascii_hexdigit())) else {
+        outcome.warning = Some(format!("cannot resolve verify base {base} for maintenance"));
+        return outcome;
+    };
+    let common_dir = match git_text(&git, project, &["rev-parse", "--git-common-dir"]) {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            let path = if path.is_absolute() {
+                path
+            } else {
+                project.join(path)
+            };
+            std::fs::canonicalize(path).unwrap_or(project.to_path_buf())
+        }
+        None => {
+            outcome.warning = Some("cannot locate the project's Git common directory".into());
+            return outcome;
+        }
+    };
+    let mut env = provenant_config::port_command_environment(
+        std::env::vars_os().collect::<Vec<_>>(),
+        &[] as &[(OsString, OsString)],
+    );
+    env.push((
+        OsString::from("PROVENANT_BUILD_MAINTENANCE_SLOT"),
+        OsString::from(index.to_string()),
+    ));
+    if canary {
+        env.push((
+            OsString::from("PROVENANT_BUILD_MAINTENANCE_CANARY"),
+            OsString::from("1"),
+        ));
+    }
+    let job = super::Job {
+        id: format!(
+            "maintain-{}-{}",
+            std::process::id(),
+            super::ledger::now_unix_ms()
+        ),
+        project_key: key.clone(),
+        project: project.to_path_buf(),
+        origin: super::Origin::Maintenance,
+        owner: format!("maintain-{}", std::process::id()),
+        kind: super::JobKind::Maintenance { canary },
+        priority: super::Priority::Prewarm,
+        source: super::SnapshotSource::Commit {
+            repo_common_dir: common_dir,
+            commit: commit.clone(),
+        },
+        verify_base: Some(super::BaseRef {
+            remote_ref: base,
+            commit,
+        }),
+        steps: vec![super::Step {
+            cwd_rel: PathBuf::new(),
+            argv: super::rust::maintenance_argv(),
+        }],
+        stop_on_failure: true,
+        env,
+        output: super::Output::Capture {
+            limit_bytes: 1024 * 1024,
+        },
+        timeout: Some(Duration::from_secs(
+            provenant_core::MAX_LANE_RUNTIME_SECONDS,
+        )),
+        sandboxed: false,
+        prelude: None,
+    };
+    let context = super::RunContext {
+        state: state.to_path_buf(),
+        home: home.to_path_buf(),
+        strategy: super::strategy(&ports.build).value,
+        cancel: CancelToken::new(),
+    };
+    let result = super::run(job, &context);
+    outcome.ran = true;
+    outcome.canary = canary;
+    match &result {
+        Ok(result) => {
+            outcome.exit_code = result.outcome.exit.map(|exit| exit.process_code());
+            if let Some(warning) = result
+                .outcome
+                .warnings
+                .iter()
+                .find(|warning| warning.contains("freshness_failure"))
+            {
+                outcome.warning = Some(warning.clone());
+            }
+            if canary
+                && outcome.exit_code.is_some_and(|code| code == 0)
+                && let Ok(Some(mut record)) = SlotRecord::read(&paths.record)
+            {
+                record.last_canary_unix_ms = Some(now_ms);
+                let _ = record.write(&paths.record);
+            }
+        }
+        Err(error) => outcome.warning = Some(error.to_string()),
+    }
+    if let Err(error) = with_maintenance_state(state, |record| {
+        if record.hour_budget_used.hour != hour {
+            record.hour_budget_used = HourBudget { hour, count: 0 };
+        }
+        record.hour_budget_used.count = record.hour_budget_used.count.saturating_add(1);
+        record.last_prewarm.insert(key.clone(), now_ms);
+        Ok(())
+    }) && outcome.warning.is_none()
+    {
+        outcome.warning = Some(format!("cannot record build maintenance budget: {error}"));
+    }
+    outcome
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maintenance_budget_is_recorded_and_enforced() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        with_maintenance_state(&state, |record| {
+            record.hour_budget_used = HourBudget { hour: 42, count: 0 };
+            record.hour_budget_used.count += 1;
+            Ok(())
+        })
+        .unwrap();
+        let spent = with_maintenance_state(&state, |record| Ok(record.hour_budget_used.count >= 1))
+            .unwrap();
+        assert!(spent);
+        let new_hour =
+            with_maintenance_state(&state, |record| Ok(record.hour_budget_used.hour != 42))
+                .unwrap();
+        assert!(!new_hour);
+    }
+
+    #[test]
+    fn full_reset_removes_the_tmp_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let paths = SlotPaths::new(&home, "project", 0);
+        std::fs::create_dir_all(&paths.tmp).unwrap();
+        std::fs::write(paths.tmp.join("index-copy"), b"scratch").unwrap();
+        full_reset(&paths).unwrap();
+        assert!(!paths.tmp.exists());
+    }
+
     #[test]
     fn failure_ladder_window_and_cancellation() {
         let mut record = SlotRecord::default();

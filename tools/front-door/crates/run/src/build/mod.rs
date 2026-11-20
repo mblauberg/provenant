@@ -401,8 +401,14 @@ pub fn run(job: Job, ctx: &RunContext) -> Result<JobResult, BuildError> {
     let enqueued = started;
     let base = outcome_seed(&job, ctx, enqueued);
     let scratch = env_path(&job.env, "PROVENANT_ADMISSION_WAIT_DIR");
+    // Maintenance canaries are judged here so the verdict lands on the single
+    // row this invocation appends. The markers are stripped from step env by
+    // the slot's job_env, so they never reach the build itself.
+    let canary = env_value(&job.env, "PROVENANT_BUILD_MAINTENANCE_CANARY") == Some("1");
+    let maintenance_slot = env_value(&job.env, "PROVENANT_BUILD_MAINTENANCE_SLOT")
+        .and_then(|value| value.parse::<u64>().ok());
     let result = dispatch(job, ctx, base, started);
-    let (result, outcome) = match result {
+    let (mut result, mut outcome) = match result {
         Ok(result) => {
             let outcome = result.outcome.clone();
             (Ok(result), outcome)
@@ -415,8 +421,33 @@ pub fn run(job: Job, ctx: &RunContext) -> Result<JobResult, BuildError> {
             (Err(error), outcome)
         }
     };
+    if canary && !outcome.cancelled && freshness_failed(&outcome) {
+        outcome.reset = Reset::Full;
+        outcome
+            .warnings
+            .push("freshness_failure: maintenance canary failed on the verify base".to_owned());
+        if let Some(index) = maintenance_slot {
+            let paths = slots::SlotPaths::new(&ctx.home, &outcome.project_key, index);
+            if let Err(error) = hygiene::full_reset(&paths) {
+                outcome
+                    .warnings
+                    .push(format!("freshness_failure: full reset failed: {error}"));
+            }
+        }
+        if let Ok(success) = &mut result {
+            success.outcome = outcome.clone();
+        }
+    }
     ledger::append(&outcome, &ctx.state, scratch.as_deref());
     result
+}
+
+/// A canary fails when it did not exit cleanly on the CI-green verify base.
+fn freshness_failed(outcome: &JobOutcome) -> bool {
+    outcome.infra.is_some()
+        || outcome
+            .exit
+            .is_none_or(|exit| exit.code != Some(0) || exit.signal.is_some())
 }
 
 fn dispatch(
@@ -763,5 +794,24 @@ pub(crate) fn job_root(job: &Job) -> &Path {
             .find(|(key, _)| key == "PROVENANT_BUILD_LOCAL_ROOT")
             .map(|(_, value)| Path::new(value))
             .unwrap_or(&job.project),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canary_failure_requires_a_clean_exit() {
+        let mut row = report::test_row();
+        row.exit = Some(ExitStatus::code(0));
+        assert!(!freshness_failed(&row));
+        row.exit = Some(ExitStatus::code(1));
+        assert!(freshness_failed(&row));
+        row.exit = None;
+        assert!(freshness_failed(&row));
+        row.exit = Some(ExitStatus::code(0));
+        row.infra = Some(InfraKind::Git);
+        assert!(freshness_failed(&row));
     }
 }
