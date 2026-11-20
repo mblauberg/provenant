@@ -76,8 +76,8 @@ for a family absent from a partial listing. A graph route's family alias such as
 matching exact model, so launch does not warn that the alias is uncatalogued; an
 unknown or ambiguous alias still warns. That resolution happens once at launch
 selection: the provider is launched with the exact model and the launch receipt
-and identity comparison carry it too, with the requested alias retained as
-`requested_model` beside it. Discovery messages are transient command
+and identity comparison carry it too, while the attempt's requested route keeps
+the alias. Discovery messages are transient command
 output, not part of the persisted quota report. Route listings name the source of
 model, valid pair, named route and pool entries, and the configuration layer that
 set each pool weight (bundled, host config or project config), in human and JSON
