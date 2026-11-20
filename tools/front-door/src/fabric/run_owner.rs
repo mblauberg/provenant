@@ -594,7 +594,7 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                         path: None,
                         delivery_limit: None,
                         delivery_stage: None,
-                        resource: Some(Box::new(*fact)),
+                        resource: Some(Box::new(fact.clone())),
                         input_failure: None,
                         cause: None,
                     };
@@ -605,7 +605,7 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                 // retain the projected fact detail.
                 if fail.kind == provenant_run::ErrorKind::Confinement {
                     return FacadeError::ConfinementRefused {
-                        resource: Some(*fact),
+                        resource: Some(fact.clone()),
                     };
                 }
                 if let FacadeError::RunKind { run_code, next, .. } =
@@ -615,7 +615,7 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                         run_code,
                         next,
                         detail: None,
-                        resource: Some(Box::new(*fact)),
+                        resource: Some(Box::new(fact.clone())),
                     };
                 }
             }
@@ -700,7 +700,7 @@ pub(crate) fn dispatch_refused(fail: provenant_cli::run::Fail) -> FacadeError {
         return FacadeError::DispatchRefused {
             fact: Some(
                 provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::Resource(
-                    *fact,
+                    fact.clone(),
                 ),
             ),
             disk: None,

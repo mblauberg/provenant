@@ -238,9 +238,75 @@ fn pacing_reserve_warns_without_excluding_accounts() -> Result<(), Box<dyn std::
             provenant_records::diagnostic::ResourceFact::PacingReserve {
                 percent: expected_percent,
                 setting: expected_setting,
-                origin: expected_origin
+                origin: expected_origin,
+                account: "codex/opaque-account".into(),
+                window: "five_hour".into(),
+                setting_path: match expected_setting {
+                    provenant_records::diagnostic::PacingReserveSetting::Account =>
+                        "domains.routing.pacing.accounts.codex/opaque-account.reserve.five_hour",
+                    _ => "domains.routing.pacing_reserve.codex.five_hour_percent",
+                }
+                .into(),
             }
         );
+        if expected_setting == provenant_records::diagnostic::PacingReserveSetting::Account {
+            config.launch_policy.overlay(
+                &std::collections::BTreeMap::from([(
+                    "PACING_ACCOUNT".into(),
+                    provenant_records::policy::Strength::Refuse,
+                )]),
+                provenant_records::policy::Source::Dispatch,
+            );
+            let mut held_context = context(&catalogue, &config, now()?);
+            held_context.registry = &registry;
+            held_context.availability = &availability;
+            held_context.access = &access;
+            held_context.quota = &observations;
+            let held = resolve(&request("codex/test")?, &held_context)?;
+            assert!(matches!(
+                held.readiness,
+                RouteReadiness::Unavailable {
+                    reason: RouteExclusionReason::PacingReserve,
+                    ..
+                }
+            ));
+            assert_eq!(held.diagnostics.pacing_reserve_fact.as_ref(), Some(&fact));
+            let skipped = provenant_records::run::SkippedRoute {
+                route: "codex/test".into(),
+                cause: Some(RouteExclusionReason::PacingReserve),
+                guard_resource: Some(fact.clone()),
+                ..Default::default()
+            };
+            let summary = skipped.describe();
+            for value in [
+                "codex/opaque-account",
+                "five_hour",
+                "domains.routing.pacing.accounts.codex/opaque-account.reserve.five_hour",
+                "host configuration",
+            ] {
+                assert!(summary.contains(value), "{summary}");
+            }
+            let diagnostic =
+                fact.project(provenant_records::diagnostic::Diagnostic::new("REFUSED"));
+            let detail = diagnostic.detail.ok_or("reserve detail")?;
+            let next = diagnostic.next.ok_or("reserve next")?;
+            for value in [
+                "codex/opaque-account",
+                "five_hour",
+                "domains.routing.pacing.accounts.codex/opaque-account.reserve.five_hour",
+                "host configuration",
+            ] {
+                assert!(detail.contains(value), "{detail}");
+            }
+            assert!(next.contains("codex/opaque-account"), "{next}");
+            assert!(next.contains("five_hour"), "{next}");
+            assert!(
+                next.contains(
+                    "domains.routing.pacing.accounts.codex/opaque-account.reserve.five_hour"
+                ),
+                "{next}"
+            );
+        }
     }
     let invalid: RoutingConfig = serde_json::from_value(serde_json::json!({
         "pacing_reserve": {"codex": {"five_hour_percent": 101}}

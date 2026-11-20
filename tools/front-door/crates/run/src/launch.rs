@@ -337,13 +337,13 @@ impl PrepareRefusal {
         if let Some(route) = self.skipped_routes.iter().find(|route| {
             route.cause == Some(provenant_records::RouteExclusionReason::PacingReserve)
         }) {
-            match route.guard_resource {
+            match route.guard_resource.clone() {
                 Some(fact @ provenant_records::diagnostic::ResourceFact::PacingReserve { .. }) => {
                     RefusalKind::PacingReserveResource(fact)
                 }
                 _ => RefusalKind::PacingReserve,
             }
-        } else if let Some(fact) = self.resource {
+        } else if let Some(fact) = self.resource.clone() {
             RefusalKind::PreparationResource(fact)
         } else if self.boundary_class != provenant_records::diagnostic::BoundaryClass::None {
             RefusalKind::PreparationBoundary(self.boundary_class)
@@ -368,6 +368,9 @@ fn pacing_refusal_retains_the_selected_reserve_fact() {
         percent: 15,
         setting: PacingReserveSetting::AdapterFiveHour,
         origin: PacingSettingSource::ShippedDefault,
+        account: "codex/opaque-account".into(),
+        window: "five_hour".into(),
+        setting_path: "domains.routing.pacing_reserve.codex.five_hour_percent".into(),
     };
     let mut skipped = SkippedRoute {
         skipped_accounts: Vec::new(),
@@ -378,11 +381,11 @@ fn pacing_refusal_retains_the_selected_reserve_fact() {
         detail: "opaque source".into(),
         ..Default::default()
     };
-    skipped.set_guard_facts(None, Some(fact)).unwrap();
+    skipped.set_guard_facts(None, Some(fact.clone())).unwrap();
     let mut refusal = PrepareRefusal::boxed(TerminalCause::RouteResolutionRefused, "opaque source");
     refusal.skipped_routes.push(skipped);
     let kind = refusal.kind();
-    assert!(matches!(kind, RefusalKind::PacingReserveResource(value) if value == fact));
+    assert!(matches!(&kind, RefusalKind::PacingReserveResource(value) if value == &fact));
     let diagnostic = kind.diagnostic().unwrap();
     assert_eq!(diagnostic.code, "REFUSED");
     let detail = diagnostic.detail.unwrap();
@@ -974,7 +977,7 @@ impl RefusalKind {
         Some(
             fact.project(Diagnostic::new(kind.code()).category(kind.category()))
                 .fact(provenant_records::diagnostic::DiagnosticFact::Resource(
-                    *fact,
+                    fact.clone(),
                 )),
         )
     }
@@ -2108,7 +2111,7 @@ impl RunStore {
                         Box::new((refusal.kind(), refusal))
                     }),
                 Err(refusal) => {
-                    let kind = if let Some(fact) = refusal.resource {
+                    let kind = if let Some(fact) = refusal.resource.clone() {
                         RefusalKind::PolicyResource(fact)
                     } else if refusal.boundary_class
                         != provenant_records::diagnostic::BoundaryClass::None
@@ -2191,7 +2194,7 @@ impl RunStore {
                         // A pacing refusal names its route, account, window and
                         // sourced setting; the usual short summary truncates those facts.
                         let limit = if matches!(
-                            refusal.resource,
+                            &refusal.resource,
                             Some(provenant_records::diagnostic::ResourceFact::PacingReserve { .. })
                         ) || refusal.skipped_routes.iter().any(|route| {
                             route.cause

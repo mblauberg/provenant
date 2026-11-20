@@ -348,9 +348,9 @@ fn push_fields(
             restart_required,
         });
     }
-    // A keyed shape with no configured row still needs its type and bounds.
+    // Keyed patterns remain editable independently of materialised rows.
     for (index, field) in metadata.iter().enumerate() {
-        if used[index] {
+        if used[index] && !field.path.split('.').any(is_placeholder) {
             continue;
         }
         fields.push(SchemaField {

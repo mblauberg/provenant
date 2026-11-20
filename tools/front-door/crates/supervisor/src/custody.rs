@@ -1920,7 +1920,7 @@ impl ProcessExit {
             omitted_reaped: self.omitted_reaped,
             spared: self.spared.clone(),
             omitted_spared: self.omitted_spared,
-            launch_refusal: self.launch_refusal,
+            launch_refusal: self.launch_refusal.clone(),
             warnings: self.warnings.clone(),
             omitted_warnings: self.omitted_warnings,
             terminal_observed: self.terminal_observed,

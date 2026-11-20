@@ -1101,8 +1101,10 @@ fn pacing_factor_basis_points(
                 .check(
                     pacing_rule(profile, model),
                     provenant_records::policy::Facts::violation(format!(
-                        "pacing reserve window={}",
-                        window.pool
+                        "pacing reserve window={} pool={} knob={}",
+                        window.name(),
+                        window.pool,
+                        window.setting_path(model.adapter(), account, context.config)
                     )),
                 )
                 .message()
@@ -1236,6 +1238,47 @@ struct ReserveWindow {
     percent: u8,
     profile: bool,
     seven_day: bool,
+    setting_window: PacingWindow,
+}
+
+impl ReserveWindow {
+    fn name(&self) -> &'static str {
+        match self.setting_window {
+            PacingWindow::FiveHour => "five_hour",
+            PacingWindow::SevenDay => "seven_day",
+            PacingWindow::Monthly => "monthly",
+            PacingWindow::Rolling => "rolling",
+            PacingWindow::Daily => "daily",
+        }
+    }
+
+    fn setting_path(&self, adapter: &str, account: Option<&str>, config: &RoutingConfig) -> String {
+        if self.profile {
+            if let Some(account) = account.filter(|key| {
+                config
+                    .pacing
+                    .accounts
+                    .contains_key(&format!("{adapter}/{key}"))
+            }) {
+                format!(
+                    "domains.routing.pacing.accounts.{adapter}/{account}.reserve.{}",
+                    self.name()
+                )
+            } else {
+                format!(
+                    "domains.routing.pacing.free.{adapter}.reserve.{}",
+                    self.name()
+                )
+            }
+        } else {
+            let field = if self.seven_day {
+                "seven_day_percent"
+            } else {
+                "five_hour_percent"
+            };
+            format!("domains.routing.pacing_reserve.{adapter}.{field}")
+        }
+    }
 }
 
 fn pacing_rule(profile: Option<&PacingProfile>, model: &ModelId) -> &'static str {
@@ -1272,9 +1315,9 @@ fn pacing_reserve_window(
             p.reserve
                 .iter()
                 .find(|(k, _)| window_matches(window, **k, adapter))
-                .map(|(_, value)| *value)
+                .map(|(kind, value)| (*kind, *value))
         });
-        let percent = selected.unwrap_or(match kind {
+        let percent = selected.map(|(_, value)| value).unwrap_or(match kind {
             Some(PacingWindow::FiveHour | PacingWindow::Rolling) => reserve.five_hour_percent,
             Some(PacingWindow::SevenDay) => reserve.seven_day_percent,
             _ => 0,
@@ -1283,6 +1326,10 @@ fn pacing_reserve_window(
             percent,
             selected.is_some(),
             matches!(kind, Some(PacingWindow::SevenDay)),
+            selected
+                .map(|(kind, _)| kind)
+                .or(kind)
+                .unwrap_or(PacingWindow::Rolling),
         )
     };
     snapshot
@@ -1290,7 +1337,7 @@ fn pacing_reserve_window(
         .iter()
         .filter(|w| selected_window(w, profile, adapter, model_pool))
         .find(|window| {
-            let (percent, _, _) = reserve_for(window);
+            let (percent, _, _, _) = reserve_for(window);
             percent > 0
                 && (window.resets_unix_seconds.is_some_and(|reset| reset > now)
                     || (window.resets_unix_seconds.is_none()
@@ -1308,12 +1355,13 @@ fn pacing_reserve_window(
                 && window.used_basis_points >= 10_000 - u64::from(percent) * 100
         })
         .map(|window| {
-            let (percent, profile, seven_day) = reserve_for(window);
+            let (percent, profile, seven_day, setting_window) = reserve_for(window);
             ReserveWindow {
                 pool: window.pool.clone(),
                 percent,
                 profile,
                 seven_day,
+                setting_window,
             }
         })
 }
@@ -2006,8 +2054,11 @@ fn account_load(
                 "default:pacing_reserve"
             };
             let detail = format!(
-                "pacing reserve {}% window={}; ranking penalty; source={source}",
-                window.percent, window.pool
+                "pacing reserve {}% window={} pool={}; ranking penalty; source={source}; knob={}",
+                window.percent,
+                window.name(),
+                window.pool,
+                window.setting_path(model.adapter(), key, context.config)
             );
             if context
                 .config
@@ -2302,7 +2353,21 @@ fn candidate(
             } else {
                 PacingSettingSource::ShippedDefault
             };
+            let window_name = window.name();
+            let account = format!(
+                "{}/{}",
+                model.adapter(),
+                availability.account_key.as_deref().unwrap_or("unknown")
+            );
+            let setting_path = window.setting_path(
+                model.adapter(),
+                availability.account_key.as_deref(),
+                context.config,
+            );
             diagnostics.pacing_reserve_fact = Some(ResourceFact::PacingReserve {
+                account,
+                window: window_name.into(),
+                setting_path,
                 percent: window.percent,
                 setting,
                 origin,

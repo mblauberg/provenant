@@ -157,7 +157,7 @@ fn uniform_candidate_resource(
     if count == 0 || resources.len() != count {
         return None;
     }
-    let mut facts = resources.values().copied();
+    let mut facts = resources.values().cloned();
     let first = facts.next()?;
     facts.all(|fact| fact == first).then_some(first)
 }
@@ -171,7 +171,7 @@ fn attach_candidate_guard_facts(
         reason
             .set_guard_facts(
                 boundaries.get(&index).copied(),
-                resources.get(&index).copied(),
+                resources.get(&index).cloned(),
             )
             .map_err(|error| PrepareError::Other(error.to_string()))?;
     }
@@ -179,26 +179,31 @@ fn attach_candidate_guard_facts(
 }
 
 fn resolve_pacing_source(
-    fact: provenant_records::diagnostic::ResourceFact,
+    mut fact: provenant_records::diagnostic::ResourceFact,
     adapter: &str,
     origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
 ) -> provenant_records::diagnostic::ResourceFact {
     use provenant_records::diagnostic::{PacingReserveSetting, PacingSettingSource, ResourceFact};
     let ResourceFact::PacingReserve {
-        percent,
         setting,
-        origin: PacingSettingSource::Unresolved,
-    } = fact
+        origin,
+        setting_path,
+        ..
+    } = &mut fact
     else {
         return fact;
     };
+    if *origin != PacingSettingSource::Unresolved {
+        return fact;
+    }
     let field = match setting {
         PacingReserveSetting::AdapterFiveHour => "five_hour_percent",
         PacingReserveSetting::AdapterSevenDay => "seven_day_percent",
         _ => return fact,
     };
     let key = format!("domains.routing.pacing_reserve.{adapter}.{field}");
-    let origin = if matches!(
+    debug_assert_eq!(*setting_path, key);
+    *origin = if matches!(
         origins.get(&key),
         Some(provenant_config::Origin::User { .. })
     ) {
@@ -206,11 +211,7 @@ fn resolve_pacing_source(
     } else {
         PacingSettingSource::ShippedDefault
     };
-    ResourceFact::PacingReserve {
-        percent,
-        setting,
-        origin,
-    }
+    fact
 }
 
 pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Option<String> {
@@ -980,7 +981,7 @@ impl PrepareError {
                 let policy_code = continuation_rule.or_else(|| {
                     policy_code_for_boundary(boundary_class)
                         .map(str::to_owned)
-                        .or_else(|| policy_code_for_resource(candidate_resource))
+                        .or_else(|| policy_code_for_resource(candidate_resource.clone()))
                 });
                 let host_message = candidate_refusal_message(&skipped_routes, fallback_outcome);
                 let message = host_message.clone().unwrap_or(message);
@@ -1438,7 +1439,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         limit: 3,
         origin: provenant_records::diagnostic::SettingSource::Configuration,
     };
-    resources.insert(0, fact);
+    resources.insert(0, fact.clone());
     assert_eq!(uniform_candidate_resource(1, &resources), Some(fact));
     assert_eq!(uniform_candidate_resource(2, &resources), None);
 }
@@ -1742,7 +1743,7 @@ impl PlanCheckError {
         refusal.boundary_class = boundary;
         refusal.policy_code = self.policy_code().map(str::to_owned);
         refusal.terminal_note = Some(skipped.detail.clone());
-        refusal.resource = skipped.guard_resource;
+        refusal.resource = skipped.guard_resource.clone();
         refusal.skipped_routes.push(skipped);
         if let Self::ReadOnly(ReadOnlyPlanError::ProjectBindingDirectory(diagnostic)) = self {
             refusal.terminal_cause =
@@ -3852,7 +3853,7 @@ pub(super) fn prepare_candidates_inner(
             if matches!(
                 reason,
                 provenant_records::RouteExclusionReason::PacingReserve
-            ) && let Some(fact) = route.diagnostics.pacing_reserve_fact
+            ) && let Some(fact) = route.diagnostics.pacing_reserve_fact.clone()
                 && matches!(
                     fact,
                     provenant_records::diagnostic::ResourceFact::PacingReserve { .. }

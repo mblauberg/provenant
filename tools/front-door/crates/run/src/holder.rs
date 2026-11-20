@@ -3419,7 +3419,7 @@ impl RunStore {
             );
         }
         let mut terminal_note = if exit.never_spawned && !cancelled {
-            exit.launch_refusal.map(|fact| {
+            exit.launch_refusal.as_ref().map(|fact| {
                 let diagnostic = fact.project(provenant_records::diagnostic::Diagnostic::new(
                     ErrorKind::Refused.code(),
                 ));

@@ -542,10 +542,13 @@ fn pacing_dispatch_refusal_keeps_the_route_and_monthly_window_note() {
         percent: 10,
         setting: PacingReserveSetting::Account,
         origin: PacingSettingSource::Configuration,
+        account: "codex/opaque-account".into(),
+        window: "five_hour".into(),
+        setting_path: "domains.routing.pacing.accounts.codex/opaque-account.reserve.five_hour".into(),
     };
     let projection = fact
         .project(Diagnostic::new("REFUSED").category("refused"))
-        .fact(DiagnosticFact::Resource(fact));
+        .fact(DiagnosticFact::Resource(fact.clone()));
     let failure = provenant_cli::run::Fail {
         status: provenant_records::Outcome::Refused,
         kind: provenant_run::ErrorKind::Refused,

@@ -636,6 +636,19 @@ fn config_set_accepts_documented_domain_settings() -> Result {
 }
 
 #[test]
+fn config_set_accepts_multiple_distinct_keyed_accounts() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    for key in ["codex/account-a", "codex/account-b"] {
+        let path = format!("domains.routing.pacing.accounts.{key}.monthly.enabled");
+        let output = rig.command(&["config", "set", &path, "false", "--json"])?;
+        assert_eq!(code(&output), 0, "{output:?}");
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(result["data"]["effective"]["value"], false);
+    }
+    Ok(())
+}
+
+#[test]
 fn config_set_and_check_agree_on_existing_findings() -> Result {
     for (text, succeeds, warning) in [
         ("schema_version=1\n", true, None),

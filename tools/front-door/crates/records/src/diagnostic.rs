@@ -307,17 +307,6 @@ pub enum PacingReserveSetting {
     Account,
     Free,
 }
-impl PacingReserveSetting {
-    pub fn setting(self) -> &'static str {
-        match self {
-            Self::AdapterFiveHour => "domains.routing.pacing_reserve.<adapter>.five_hour_percent",
-            Self::AdapterSevenDay => "domains.routing.pacing_reserve.<adapter>.seven_day_percent",
-            Self::Account => "domains.routing.pacing.accounts",
-            Self::Free => "domains.routing.pacing.free",
-        }
-    }
-}
-
 /// Source of the reserve selected by routing. Adapter overrides need the
 /// configuration loader's per-field origin before they are projected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -375,7 +364,7 @@ impl ContinuationCopyLimit {
 }
 
 /// Closed resource facts safe to project across host boundaries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResourceFact {
     Disk {
@@ -417,6 +406,9 @@ pub enum ResourceFact {
         percent: u8,
         setting: PacingReserveSetting,
         origin: PacingSettingSource,
+        account: String,
+        window: String,
+        setting_path: String,
     },
     MemoryPressure {
         level: PressureLevel,
@@ -467,9 +459,9 @@ impl ResourceFact {
             Self::LanePorts { blocks, origin } => diagnostic
                 .detail(format!("no free lane port block; domains.fabric.lanes.lane_port_blocks is {blocks} (source: {})", origin.description()))
                 .next("wait for a lane port block or raise or disable domains.fabric.lanes.lane_port_blocks"),
-            Self::PacingReserve { percent, setting, origin } => diagnostic
-                .detail(format!("selected account is held by a {percent}% pacing reserve; {} (source: {})", setting.setting(), origin.description()))
-                .next(format!("wait for the pacing window or adjust {}", setting.setting())),
+            Self::PacingReserve { percent, origin, account, window, setting_path, .. } => diagnostic
+                .detail(format!("selected account is held by a {percent}% pacing reserve; account={}; window={}; {} (source: {})", safe_text(account), safe_text(window), safe_text(setting_path), origin.description()))
+                .next(format!("wait for account {} and its {} pacing window or adjust {}", safe_text(account), safe_text(window), safe_text(setting_path))),
             Self::MemoryPressure { level, threshold, origin } => diagnostic
                 .detail(format!("host memory pressure is {}; domains.fabric.lanes.memory_pressure_threshold is {} (source: {})", level.name(), threshold.name(), origin.description()))
                 .next("reduce host memory pressure before retrying"),

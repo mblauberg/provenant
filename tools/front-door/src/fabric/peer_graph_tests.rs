@@ -883,7 +883,7 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
                 cause: Some(provenant_records::RouteExclusionReason::PacingReserve),
                 detail: "PRIVATE_PACING_SENTINEL".into(),
             };
-            route.set_guard_facts(None, Some(self.0)).unwrap();
+            route.set_guard_facts(None, Some(self.0.clone())).unwrap();
             let mut refusal = provenant_run::PrepareRefusal::boxed(
                 provenant_records::run::TerminalCause::RouteResolutionRefused,
                 "PRIVATE_PACING_SENTINEL",
@@ -935,10 +935,13 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
         percent: 23,
         setting: PacingReserveSetting::AdapterFiveHour,
         origin: PacingSettingSource::Configuration,
+        account: "codex/opaque-account".into(),
+        window: "five_hour".into(),
+        setting_path: "domains.routing.pacing_reserve.codex.five_hour_percent".into(),
     };
     let started = session.store.start(
         record.attempt_id,
-        &Pacing(fact),
+        &Pacing(fact.clone()),
         &|_, _| Ok(Vec::new()),
         &call,
     )?;
@@ -979,9 +982,9 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
         let wire = serde_json::to_string(&error)?;
         assert!(!wire.contains("PRIVATE_PACING_SENTINEL"));
         let decoded: FacadeError = serde_json::from_str(&wire)?;
-        assert!(matches!(decoded, FacadeError::DispatchRefused {
+        assert!(matches!(&decoded, FacadeError::DispatchRefused {
             fact: Some(provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::Resource(actual)), ..
-        } if actual == fact));
+        } if actual == &fact));
         let diagnostic = decoded.diagnostic();
         assert!(diagnostic.detail.as_deref().is_some_and(|detail| {
             detail.contains("23") && detail.contains("domains.routing.pacing_reserve")

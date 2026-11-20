@@ -1810,7 +1810,7 @@ impl SkippedRoute {
         if let Some(guard) = self.continuation_guard {
             diagnostic = guard.project(diagnostic);
         }
-        match self.guard_resource {
+        match self.guard_resource.clone() {
             Some(fact) => fact
                 .project(diagnostic)
                 .fact(crate::diagnostic::DiagnosticFact::Resource(fact)),
@@ -2996,6 +2996,9 @@ mod tests {
                 percent: 10,
                 setting: crate::diagnostic::PacingReserveSetting::Account,
                 origin: crate::diagnostic::PacingSettingSource::Configuration,
+                account: "codex/opaque-account".into(),
+                window: "five_hour".into(),
+                setting_path: "domains.routing.pacing.accounts.codex/opaque-account.reserve.five_hour".into(),
             }),
             ..Default::default()
         };
