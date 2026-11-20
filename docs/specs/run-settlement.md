@@ -209,7 +209,6 @@ A missing required writer handoff seals `handoff_missing` and goes to the chair;
 - Why: all readers need the same cause for the next decision; host stops must
   preserve valid handoffs and never count as negative provider-quality evidence.
 
-<<<<<<< HEAD
 ## Identity mismatch keeps writer work
 
 A writer whose sealed head moved from its pinned base keeps that commit when
@@ -222,7 +221,7 @@ as does every read-only lane.
 - Why: a wrong provider identity is a reason for a chair to review real work,
   not a reason to throw that work away.
 - Owner: `crates/run/src/holder.rs`, `crates/run/src/store.rs`
-=======
+
 ## Stray lane work
 
 A writer's work is the commits on its bound branch. Launch records the primary
@@ -258,7 +257,6 @@ already needs the chair.
   attempt is still flagged, because Git cannot tell it from a lane's. The check
   asks for review; it never refuses or stops a lane.
 - Owner: `crates/run/src/writer.rs`, `crates/run/src/holder.rs`
->>>>>>> origin/main
 
 ## Guardian loss proof
 
