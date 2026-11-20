@@ -647,9 +647,6 @@ impl provenant_supervisor::Holder for FixtureHolder<'_> {
     // Every defaulted method must forward: a swallowed `outcome` leaves the
     // record non-terminal, so the wrapped `terminal` refuses and settlement
     // retries until the test times out.
-    fn has_live_children(&self, context: &[u8]) -> provenant_supervisor::custody::Result<bool> {
-        self.0.has_live_children(context)
-    }
     fn provider_exited(
         &self,
         context: &[u8],
