@@ -1682,10 +1682,18 @@ impl LaunchConfinement {
     /// Reclaim least-recently-used unheld profiles after target seeding. Failure
     /// is advisory: a lane starts and the effective limit/source are reported.
     pub(crate) fn enforce_cargo_cache_budget(&self) {
-        self.enforce_cargo_cache_budget_reserving(0);
+        self.enforce_cargo_cache_budget_reserving(crate::build_dir_gc::SeedReservation::default());
     }
 
-    fn enforce_cargo_cache_budget_reserving(&self, projected_bytes: u64) {
+    /// `reservation` is in the census's byte unit, owned by `build_dir_gc`. A
+    /// seed clone reflinks shared blocks and reserves almost no private bytes;
+    /// reserving the seed's allocated size here would evict unrelated warm
+    /// targets for blocks the clone never privately consumes.
+    fn enforce_cargo_cache_budget_reserving(
+        &self,
+        reservation: crate::build_dir_gc::SeedReservation,
+    ) {
+        let projected_bytes = reservation.private_bytes();
         let Some(budget) = &self.cargo_cache_budget else {
             return;
         };
@@ -1713,7 +1721,7 @@ impl LaunchConfinement {
             &self.state_root,
             &self.home,
             crate::build_dir_gc::Limits {
-                max_bytes: budget.bytes.saturating_sub(projected_bytes),
+                max_bytes: crate::build_dir_gc::budget_limit_reserving(budget.bytes, reservation),
                 free_floor: 0,
                 grace_seconds: 0,
                 idle_seconds: 0,
@@ -1963,14 +1971,21 @@ impl LaunchConfinement {
             &self.home,
             environment,
             cancel,
-            |projected_bytes| {
+            |allocated_bytes| {
                 // A generation built before sizes were recorded has no figure
                 // to reserve, so nothing is evicted for it. The outcome records
                 // `size_recorded: false` in cargo-target-setup.json instead of
                 // warning every launch; accounting resumes once the seed is
                 // refreshed with a recorded size.
-                if let Some(projected_bytes) = projected_bytes {
-                    self.enforce_cargo_cache_budget_reserving(projected_bytes);
+                //
+                // A lane clone is always a reflink (`clone_file_from`), so the
+                // private-byte figure is owned by the GC module and is near
+                // zero: the seed's allocated size is not reserved against a
+                // private-byte census. No copy fallback exists here.
+                if allocated_bytes.is_some() {
+                    self.enforce_cargo_cache_budget_reserving(
+                        crate::build_dir_gc::SeedReservation::shared_clone(),
+                    );
                 }
             },
         )

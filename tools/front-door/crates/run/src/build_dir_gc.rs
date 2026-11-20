@@ -188,6 +188,46 @@ fn census_byte_method(candidates: &[Candidate]) -> ByteMethod {
     }
 }
 
+/// Headroom the cache census leaves for an incoming Cargo seed clone. The
+/// figure is in the **same unit the census budgets** (`ByteMethod`): clone-
+/// private bytes on a reflink filesystem, allocated bytes where private size is
+/// unavailable. Keeping the unit here, beside the census that consumes it,
+/// stops a caller from reserving a seed manifest's allocated size against a
+/// private-byte limit and evicting unrelated targets for shared blocks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SeedReservation(u64);
+
+impl SeedReservation {
+    /// A copy-on-write clone (`clone_file_from` / reflink). The clone shares
+    /// every data block with the seed at clone time, so it privately owns only
+    /// its new inodes and directory entries: near zero against the seed's
+    /// allocated size. Cargo writes private blocks later, and the next census
+    /// measures them, so nothing is reserved up front.
+    pub(crate) fn shared_clone() -> Self {
+        Self(0)
+    }
+
+    /// A full copy fallback (not used for lane seeds): every allocated block
+    /// becomes private to the clone, so the whole figure is reserved. Present
+    /// so the unit distinction is explicit and testable.
+    #[cfg(test)]
+    pub(crate) fn copy(allocated_bytes: u64) -> Self {
+        Self(allocated_bytes)
+    }
+
+    /// The reservation in the census's byte unit.
+    pub(crate) fn private_bytes(self) -> u64 {
+        self.0
+    }
+}
+
+/// The effective launch-admission byte limit after reserving private-byte
+/// headroom for a seed clone. The subtraction lives here, next to the census,
+/// so both sides of the budget arithmetic share a unit.
+pub(crate) fn budget_limit_reserving(budget_bytes: u64, reservation: SeedReservation) -> u64 {
+    budget_bytes.saturating_sub(reservation.private_bytes())
+}
+
 impl TargetReason {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -4466,6 +4506,62 @@ mod tests {
         assert_eq!(report.budget_setting, "1K");
         assert_eq!(report.budget_source, "default");
         assert!(profile.join("deps/payload").is_file());
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn a_large_shared_seed_reserves_no_private_budget_and_keeps_an_under_budget_target() {
+        let fixture = Fixture::new();
+        // An unrelated warm target comfortably under the configured budget.
+        let warm = fixture.profile('a', "debug", 4096, 100);
+        let budget_bytes = 128 * 1024;
+        let budget = provenant_config::CargoCacheBudget {
+            bytes: budget_bytes,
+            setting: "128K".into(),
+            source: provenant_records::LimitSource::Default,
+        };
+        // A generation whose allocated size alone would take the effective
+        // limit below the warm target's size: reserving it in full is the bug.
+        let seed_allocated_bytes = budget_bytes;
+
+        // A reflink clone reserves only its private bytes (near zero at clone
+        // time), so the limit stays at the budget and the warm target survives.
+        let shared = SeedReservation::shared_clone();
+        assert_eq!(shared.private_bytes(), 0);
+        let shared_limit = budget_limit_reserving(budget_bytes, shared);
+        assert_eq!(shared_limit, budget_bytes);
+        let shared_report = collect_with_protection(
+            fixture.home.path(),
+            fixture.home.path(),
+            limits(shared_limit, 0),
+            false,
+            &budget,
+            &TargetProtection::default(),
+        )
+        .unwrap();
+        assert!(
+            !shared_report.removed_contains(&warm),
+            "a shared clone must not evict an under-budget target for blocks it never privately consumes"
+        );
+        assert!(warm.exists());
+
+        // A full copy reserves the seed's whole allocated size, dropping the
+        // limit to zero and evicting the warm target: the reservation unit is
+        // what changes the outcome, so the first assertion is not vacuous.
+        let copy_limit =
+            budget_limit_reserving(budget_bytes, SeedReservation::copy(seed_allocated_bytes));
+        assert_eq!(copy_limit, 0);
+        let copy_report = collect_with_protection(
+            fixture.home.path(),
+            fixture.home.path(),
+            limits(copy_limit, 0),
+            false,
+            &budget,
+            &TargetProtection::default(),
+        )
+        .unwrap();
+        assert!(copy_report.removed_contains(&warm));
+        assert!(!warm.exists());
     }
 
     #[test]
