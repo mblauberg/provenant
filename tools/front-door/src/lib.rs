@@ -753,11 +753,7 @@ mod config_ports_tests {
         let key = provenant_config::project_key_for(&project).unwrap();
         let keyed = state.join("projects").join(key);
         std::fs::create_dir_all(&keyed).unwrap();
-        std::fs::write(
-            state.join("ports.json"),
-            r#"{"build":{"strategy":"lane"}}"#,
-        )
-        .unwrap();
+        std::fs::write(state.join("ports.json"), r#"{"build":{"strategy":"lane"}}"#).unwrap();
         std::fs::write(
             keyed.join("ports.json"),
             r#"{"build":{"prepare":[["node","gen.mjs"]]}}"#,
@@ -775,7 +771,10 @@ mod config_ports_tests {
         )
         .unwrap();
         let table = provenant_config::PortTable::read_for(Some(&project), &state).unwrap();
-        assert_eq!(super::config_ports_prepare(&table)["source"], "host_project");
+        assert_eq!(
+            super::config_ports_prepare(&table)["source"],
+            "host_project"
+        );
     }
 }
 
@@ -829,7 +828,9 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 serde_json::json!({
                     "schema_version": table.schema_version,
                     "ports": ports,
-                    "build.prepare": config_ports_prepare(&table),
+                    "build": {
+                        "prepare": config_ports_prepare(&table),
+                    },
                 })
             }
             ConfigAction::Detect => serde_json::to_value(config::detect::detect(&context.project))?,

@@ -2976,6 +2976,23 @@ mod tests {
                     .to_string_lossy(),
                 "{layer} prepare must run from the checkout root"
             );
+            // Assert the ordering directly: prepare writes `src/generated.rs`
+            // (which `main.rs` needs to compile) and the marker as its last
+            // action, so a successful build already proves prepare preceded
+            // Cargo. Compare their timestamps to make that order explicit in a
+            // fresh target directory, where Cargo writes its rustc cache first.
+            let prepared = fs::metadata(&marker)
+                .unwrap_or_else(|error| panic!("{layer}: no prepare stamp: {error}"))
+                .modified()
+                .unwrap();
+            let cargo_start = fs::metadata(stage.join("target/.rustc_info.json"))
+                .unwrap_or_else(|error| panic!("{layer}: Cargo left no target cache: {error}"))
+                .modified()
+                .unwrap();
+            assert!(
+                cargo_start >= prepared,
+                "{layer}: Cargo ran before prepare ({cargo_start:?} < {prepared:?})"
+            );
         }
     }
 
