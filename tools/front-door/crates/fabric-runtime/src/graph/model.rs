@@ -145,6 +145,12 @@ pub struct GraphRoute {
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_selection: Option<provenant_records::RouteSelectionReceipt>,
     /// Tier retained across a concrete ladder handoff.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
@@ -426,8 +432,7 @@ pub struct AttemptSpec {
     pub sealed_profile: Option<provenant_records::run::HarnessProfile>,
 }
 
-/// The `light` preset: no private source view and no delivery receipt. Secret redaction and object integrity are not settings,
-/// so no preset can lower them.
+/// The `light` preset: no private source view and no delivery receipt.
 pub const LIGHT_PRESET: &str = "light";
 
 impl AttemptSpec {

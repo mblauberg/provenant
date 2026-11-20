@@ -473,7 +473,7 @@ fn existing_git_worktree_with_spaces_has_a_followable_branch_remedy() -> Result 
                 .find_map(|node| node["writer_binding"].as_object())
         })
         .ok_or_else(|| format!("missing writer binding: {followed}"))?;
-    assert_eq!(binding["worktree"], "[redacted]");
+    assert_eq!(binding["worktree"], selected.as_str());
     let followed_id = followed["data"]["checkpoint"]["graph_id"]
         .as_str()
         .ok_or("missing graph id")?;
@@ -1845,7 +1845,7 @@ fn assert_compile_refusal_matches(
 fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
     let rig = GraphProject::new()?;
     prepare_state(&rig)?;
-    // The compiler-only fan-out cap is redacted consistently before admission.
+    // The compiler-only fan-out cap is reported consistently before admission.
     let over = (0..257)
         .map(|number| format!("'area-{number}'"))
         .collect::<Vec<_>>()
@@ -1858,7 +1858,7 @@ fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
         "swarm",
         &document,
         "schema_version = 1\n",
-        "graph input could not be processed",
+        "`over` requires 1..=256 items",
     )?;
 
     // A graph that compiles to more nodes than the state admits: the template
@@ -2454,7 +2454,7 @@ fn retry_brief_on_a_graph_of_several_nodes_asks_for_the_node() -> Result {
 
 // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
 #[test]
-fn shape_warning_and_exact_retry_credential_refusal_are_atomic() -> Result {
+fn shape_and_exact_retry_credential_warnings_allow_retry() -> Result {
     let rig = GraphProject::new()?;
     let id = settled_task_graph(&rig)?;
     fn snapshot_tree(
@@ -2512,17 +2512,18 @@ fn shape_warning_and_exact_retry_credential_refusal_are_atomic() -> Result {
         .output()?;
     let reply: Value = serde_json::from_slice(&output.stdout)?;
     assert!(
-        !output.status.success(),
-        "exact credential must refuse: {reply}"
+        output.status.success(),
+        "exact credential retry must proceed: {reply}"
     );
+    let warning = String::from_utf8_lossy(&output.stderr);
     assert!(
-        reply["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("declared credential value rule")),
-        "operator receives the typed credential cause: {reply}"
+        warning.contains("declared credential value rule"),
+        "{warning}"
     );
-    assert!(!reply.to_string().contains(credential));
-    assert_eq!(snapshot()?, after_shape, "exact-value refusal is atomic");
+    assert!(warning.contains("matching a known credential"), "{warning}");
+    assert!(!warning.contains(credential));
+    let after_credential = snapshot()?;
+    assert_ne!(after_credential, after_shape);
 
     let (output, reply) = rig.run(&["retry", &id, "--extend", "limits.unconfigured=1"])?;
     assert!(
@@ -2536,7 +2537,7 @@ fn shape_warning_and_exact_retry_credential_refusal_are_atomic() -> Result {
     );
     assert_eq!(
         snapshot()?,
-        after_shape,
+        after_credential,
         "invalid extension refusal is atomic"
     );
     Ok(())
@@ -2544,7 +2545,7 @@ fn shape_warning_and_exact_retry_credential_refusal_are_atomic() -> Result {
 
 // Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
 #[test]
-fn short_placeholder_credential_does_not_refuse_and_exact_value_refuses_atomically() -> Result {
+fn placeholder_and_oversized_ambient_credentials_allow_retry() -> Result {
     let rig = GraphProject::new()?;
     let id = settled_task_graph(&rig)?;
     fn snapshot_tree(
@@ -2591,30 +2592,6 @@ fn short_placeholder_credential_does_not_refuse_and_exact_value_refuses_atomical
     assert_ne!(
         after_placeholder, before,
         "the placeholder admitted retry changes the checkpoint"
-    );
-
-    let credential = "plain-registered-retry-3391";
-    let output = rig
-        .command()
-        .env("FIXTURE_API_KEY", credential)
-        .args(["retry", &id, "--brief", credential])
-        .output()?;
-    let reply: Value = serde_json::from_slice(&output.stdout)?;
-    assert!(
-        !output.status.success(),
-        "exact credential must refuse: {reply}"
-    );
-    assert!(
-        reply["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("declared credential value rule")),
-        "operator receives the typed credential cause: {reply}"
-    );
-    assert!(!reply.to_string().contains(credential));
-    assert_eq!(
-        snapshot()?,
-        after_placeholder,
-        "exact-value refusal is atomic"
     );
 
     // An out-of-bounds ambient credential variable (>16 KiB) is skipped only

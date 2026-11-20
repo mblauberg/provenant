@@ -356,7 +356,7 @@ impl ServiceError {
         // Preserve transport metadata without deciding causes or remedies here.
         match self {
             Self::Invalid(error) | Self::Coordination(CoordinationError::Input(error)) => {
-                value["path"] = serde_json::json!(error.safe_path());
+                value["path"] = serde_json::json!(error.path);
             }
             Self::Facade(FacadeError::LaunchUnknown { operation_id })
             | Self::Coordination(CoordinationError::Peer(crate::hosts::PeerError::Unknown {

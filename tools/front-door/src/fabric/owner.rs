@@ -1977,23 +1977,27 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             actor: None,
             chair: None,
         };
-        Ok(owner
-            .snapshot(target, self.budget, self.cancel)?
+        let record = owner.snapshot(target, self.budget, self.cancel)?;
+        let (name, alias) = match record.requested_route {
+            provenant_records::run::RequestedRoute::Adapter { name, .. } => (Some(name), None),
+            provenant_records::run::RequestedRoute::Named { name, .. }
+            | provenant_records::run::RequestedRoute::Review { name, .. } => (None, Some(name)),
+            provenant_records::run::RequestedRoute::Model { .. } => (None, None),
+        };
+        Ok(record
             .applied_route
             .map(|route| provenant_fabric_runtime::graph::GraphRoute {
-                required_family: None,
-                peer_source_head: None,
-                peer_requested_route: None,
-                peer_network: None,
-                peer_retry_limit: None,
-                extra: Default::default(),
+                account_key: route.account_key,
+                source: route.source,
+                pool_selection: route.pool_selection,
+                extra: route.extra,
                 adapter: route.provider,
                 model: route.model,
                 effort: route.effort,
                 account: route.account_label,
-                name: None,
-                alias: None,
-                tier: None,
+                name: name.or(route.host_native),
+                alias,
+                ..Default::default()
             }))
     }
 

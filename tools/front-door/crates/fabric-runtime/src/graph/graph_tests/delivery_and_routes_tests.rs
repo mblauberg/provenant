@@ -621,7 +621,7 @@ fn exhausted_pool_names_the_cause_and_the_pool() {
         peer_source_head: None,
         peer_requested_route: None,
         peer_network: None,
-        peer_retry_limit: None,
+        peer_retry_limit: None, account_key: None, source: None, pool_selection: None,
         extra: Default::default(),
         adapter: None,
         name: None,
