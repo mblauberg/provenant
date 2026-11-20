@@ -512,15 +512,24 @@ pub(crate) fn persist_provider_refusal_once(
                 && record.account.account_key == account.account_key
         })
         .cloned();
-    if replay
-        && current.as_ref().is_some_and(|record| {
-            record.refusals.iter().any(|refusal| {
-                refusal.model == model.strip_prefix(&format!("{adapter}/")).unwrap_or(model)
-                    && refusal.pool.as_deref() == pool
-                    && refusal.observed_unix_seconds >= now_unix_seconds
-            })
-        })
-    {
+    let local_model = model.strip_prefix(&format!("{adapter}/")).unwrap_or(model);
+    let same_scope = |other_model: &str, other_pool: Option<&str>| match pool {
+        Some(pool) => other_pool == Some(pool),
+        None => other_pool.is_none() && other_model == local_model,
+    };
+    // Replayed settlement evidence must not undo a later observation or a
+    // recorded clearing. A live refusal at the same second is new evidence.
+    if current.as_ref().is_some_and(|record| {
+        record.refusals.iter().any(|refusal| {
+            same_scope(&refusal.model, refusal.pool.as_deref())
+                && (refusal.observed_unix_seconds > now_unix_seconds
+                    || (replay && refusal.observed_unix_seconds == now_unix_seconds))
+        }) || (replay
+            && record.cleared_refusals.iter().any(|clearing| {
+                same_scope(&clearing.model, clearing.pool.as_deref())
+                    && clearing.observed_unix_seconds >= now_unix_seconds
+            }))
+    }) {
         return Ok(());
     }
     let account = current.as_ref().map_or(&account, |record| &record.account);
@@ -4777,6 +4786,54 @@ mod tests {
     }
 
     // Spec: docs/specs/routing.md#unknown-never-means-ready
+    #[test]
+    fn newest_pool_refusal_replaces_longer_reset_and_stale_replay()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let route = |model: &str| provenant_records::run::RouteRecord {
+            provider: Some("opencode".into()),
+            model: Some(format!("opencode/{model}")),
+            account_key: Some("key".into()),
+            account_label: Some("zen".into()),
+            ..Default::default()
+        };
+        let pool = Some("opencode-free");
+        persist_provider_refusal(temp.path(), &route("first"), pool, 100, Some(900))?;
+        persist_provider_refusal(temp.path(), &route("second"), pool, 200, Some(400))?;
+        persist_provider_refusal_once(temp.path(), &route("first"), pool, 100, Some(900), true)?;
+        let records = read_cache_at(temp.path())?;
+        assert_eq!(records[0].refusals.len(), 1);
+        assert_eq!(records[0].refusals[0].model, "second");
+        assert_eq!(records[0].refusals[0].resets_unix_seconds, Some(400));
+        Ok(())
+    }
+
+    #[test]
+    fn manual_clear_survives_settlement_replay_until_new_refusal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let route = provenant_records::run::RouteRecord {
+            provider: Some("opencode".into()),
+            model: Some("opencode/first".into()),
+            account_key: Some("key".into()),
+            account_label: Some("zen".into()),
+            ..Default::default()
+        };
+        let pool = Some("opencode-free");
+        persist_provider_refusal(temp.path(), &route, pool, 100, Some(900))?;
+        assert_eq!(clear_report(temp.path(), "zen", None, 150)?.0["count"], 1);
+        persist_provider_refusal_once(temp.path(), &route, pool, 100, Some(900), true)?;
+        assert!(read_cache_at(temp.path())?[0].refusals.is_empty());
+        persist_provider_refusal(temp.path(), &route, pool, 200, Some(400))?;
+        let records = read_cache_at(temp.path())?;
+        assert_eq!(records[0].refusals[0].resets_unix_seconds, Some(400));
+        Ok(())
+    }
+
     #[test]
     fn quota_clear_removes_recorded_refusals_and_reports_what_it_cleared()
     -> Result<(), Box<dyn std::error::Error>> {
