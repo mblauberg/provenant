@@ -126,6 +126,11 @@ consumer items change in a minor release and stable items only in a major one
 ([consumer contract](docs/specs/consumer-contract.md#stability-tiers)).
 `scripts/collate-release-notes` warns on a patch cut that has them.
 
+Release checklist: bump `LIVE_RECORD_FORMAT` in
+`tools/front-door/crates/records/src/install.rs` on any release that changes
+files a live attempt's supervisor or settlement reads, so install can warn
+before swapping under live lanes.
+
 Keep secrets, private paths and inappropriate third-party material out of
 published files and history. Follow the [GitHub workflow](docs/runbooks/github-workflow.md)
 for review and landing.

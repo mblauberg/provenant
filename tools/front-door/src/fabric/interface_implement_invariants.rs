@@ -34,24 +34,24 @@ mod implementation_graph_contract {
 
     // Spec: docs/specs/fabric.md#implementation-planning
     #[test]
-    fn unbounded_junior_warning_is_advisory_and_configurable() -> Result {
+    fn implement_preview_has_no_unbounded_junior_warning() -> Result {
         let rig = TestRig::new()?;
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
         let input = json!({"op":"run", "template":"implement", "brief":"Fix it",
             "worktree":rig.project, "explain":true});
-        let preview = factory.graph_document(input.clone(), budget, &cancel)?;
-        assert!(preview["warnings"].as_array().unwrap().iter().any(|warning|
-            warning.as_str().unwrap().contains("unbounded_brief_junior_writer") && warning.as_str().unwrap().contains("--plan")));
+        let preview = factory.graph_document(input, budget, &cancel)?;
+        // The default direct-writer path starts a junior writer without a plan;
+        // no advisory contradicts that documented default.
+        assert!(
+            preview["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|warning| !warning.as_str().unwrap().contains("unbounded"))
+        );
         assert_eq!(preview["implement_plan"]["value"], false);
-        let document: GraphDocument = serde_json::from_value(preview["document"].clone())?;
-        let expanded = document.expanded(&factory.context.config.graph.limits)?;
-        assert!(implementation_warnings(&expanded.nodes, &input, false).is_empty());
-        let mut explicit = input;
-        explicit["set"] = json!({"plan":false});
-        let preview = factory.graph_document(explicit, budget, &cancel)?;
-        assert!(preview["warnings"].as_array().unwrap().is_empty());
         Ok(())
     }
 }

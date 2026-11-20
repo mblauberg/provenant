@@ -12,6 +12,7 @@
       "lanes.publish",
       "lanes.local_cargo",
       "lanes.cargo_target",
+      "lanes.cargo_seed_budget",
       "lanes.cargo_cache_max",
       "lanes.ci_scope",
       "lanes.verification",
@@ -271,8 +272,7 @@
   "host_implement_settings": {
     "path": "domains.fabric.implement",
     "settings": {
-      "plan": {"type": "bool", "default": "false", "effect": "Add a planner before implementation writers unless a template parameter overrides it."},
-      "warn_unbounded_junior": {"type": "bool", "default": "true", "effect": "Warn when a junior implementation writer has an unbounded brief."}
+      "plan": {"type": "bool", "default": "false", "effect": "Add a planner before implementation writers unless a template parameter overrides it."}
     }
   },
   "domain_wait_settings": {
@@ -480,6 +480,7 @@
       "policy.SEARCH_ENTRIES": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "An unfinished session search reports its exhausted configurable budget and host source rather than claiming the session is missing. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.SEARCH_DEPTH": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "An unfinished session search reports its exhausted configurable budget and host source rather than claiming the session is missing. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.WRITE_SCOPE": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Paths inside the writer worktree are advisory scope. Report paths outside the declared scope; only an explicit strict setting refuses settlement. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
+      "policy.LANE_TOOL_STATE_COMMITTED": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Writer commits that add or modify .local, .config or .cache paths at the repository root warn at settlement with the paths named; settlement proceeds unless an explicit strict setting refuses. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.WRITER_CENSUS": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Process census is observational; the exclusive writer lease and retained-import fence establish writer admission authority. The setting source is named in each warning."},
       "policy.WRITER_BRANCH_MOVED": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "The writer branch head moved between prepare and launch; the launch warns and relaunches against the new head. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.STEER_SESSION": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Steering input is recorded when the session is unavailable or differs from the expected one; the lane continues without resume. Generation and route-digest checks stay continuation-authority refusals. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
@@ -708,6 +709,15 @@
       "reader": "tools/front-door/crates/run/src/cargo_target.rs",
       "effect": "CARGO_TARGET_DIR for lanes: private (default; the worktree's own target in its lane cache, seeded warm by a copy-on-write clone of the project's host seed generation with dep-info aged so members rebuild from this worktree's sources), project (the writer worktree's own target/ beside its Cargo workspace) or an absolute path. provenant worktree seed-target prints and seeds the private target for a checkout outside a lane. The value and its source appear in the lane preamble and in provenant config show.",
       "trade_off": "private starts warm and costs little disk on APFS, where clones share blocks; where the filesystem cannot clone, the target starts unseeded and cold, with a warning. It is removed with the worktree. project shares artifacts with builds a person runs in the same checkout but starts cold. Never point several worktrees at one absolute path: Cargo decides member freshness by source mtimes, so one worktree reuses another branch's artifacts."
+    },
+    "lanes.cargo_seed_budget": {
+      "type": "duration",
+      "default": "5m",
+      "host_only": true,
+      "status": "wired",
+      "reader": "tools/front-door/crates/config/src/cargo_seed_budget.rs, tools/front-door/crates/run/src/cargo_seed.rs",
+      "effect": "Maximum wall time for each step of a private Cargo target seed: generation selection and stage cleanup, the clone, and dep-info aging each start with their own budget from this knob. The size a clone reserves is measured once when the host builds the generation, not by walking the seed before cloning. A fallback names the step that ran out; the effective value and its source (host or compiled default) appear in cargo-target-setup.json and the warning. Accept a duration such as 30s, 5m or 1h; 1h is the ceiling.",
+      "trade_off": "A higher budget lets a large seed finish on a loaded host but can hold a store lock and partial stage longer; a lower one falls back to a cold build sooner."
     },
     "lanes.cargo_cache_max": {
       "type": "size",

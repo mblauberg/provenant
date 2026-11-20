@@ -47,6 +47,7 @@ pub fn bare_spec(path: &str) -> LaunchSpec {
         cwd: std::path::PathBuf::from("/"),
         setup: Vec::new(),
         omitted_discovery: Vec::new(),
+        warnings: Vec::new(),
         user_skills: Default::default(),
         tool_requirements: Default::default(),
         git_wrapper: Default::default(),

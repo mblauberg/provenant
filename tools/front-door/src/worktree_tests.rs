@@ -217,7 +217,7 @@ pub fn main() -> std::process::ExitCode {
                 crate::dispatch(provenant_cli::parse(args), &Fixture)
             }))
         }
-        Some("--state-dir" | "internal") => {
+        Some("--state-dir" | "internal" | "admit") => {
             let code = crate::dispatch(provenant_cli::parse(args), &Fixture);
             // A fixture-only observation after the real command has rendered.
             if let Some(path) = std::env::var_os("FIXTURE_LAND_CWD_FILE") {
@@ -294,6 +294,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "gc_reports_transient_and_preserves_unobserved_project_array",
             "gc_pressure_collects_only_the_selected_primary_project",
             "gc_sweep_budget_stops_then_resumes",
+            "gc_preview_reports_import_pins_and_apply_removes_them",
             "gc_refuses_unbound_bare_projects",
             "gc_collects_bound_bare_worktrees",
             "provider_retention_classes_sweep_host_and_refuse_replaced_roots",
@@ -335,9 +336,11 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "pr_contribution_roundtrip",
             "pr_contribution_unbound_project",
             "pr_contribution_land_warns_when_binding_fails",
+            "land_binding_never_reads_or_warns_about_other_prs",
         ],
         |name| {
             let result = match name {
+                "land_binding_never_reads_or_warns_about_other_prs" => crate::pr_land_tests::land_binding_never_reads_or_warns_about_other_prs(),
                 "pr_contribution_land_warns_when_binding_fails" => crate::pr_land_tests::pr_contribution_land_warns_when_binding_fails(),
                 "pr_contribution_unbound_project" => crate::pr_land_tests::pr_contribution_unbound_project(),
                 "pr_contribution_roundtrip" => crate::pr_land_tests::pr_contribution_roundtrip(),
@@ -417,6 +420,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "gc_pressure_collects_only_the_selected_primary_project" => gc_pressure_collects_only_the_selected_primary_project(),
                 "gc_sweep_budget_stops_then_resumes" => gc_sweep_budget_stops_then_resumes(),
+                "gc_preview_reports_import_pins_and_apply_removes_them" => {
+                    gc_preview_reports_import_pins_and_apply_removes_them()
+                }
                 "gc_refuses_unbound_bare_projects" => gc_refuses_unbound_bare_projects(),
                 "gc_collects_bound_bare_worktrees" => gc_collects_bound_bare_worktrees(),
                 "gc_reports_transient_and_preserves_unobserved_project_array" => gc_reports_transient_and_preserves_unobserved_project_array(),

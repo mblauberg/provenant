@@ -516,6 +516,8 @@ struct GcData {
     )]
     shared_targets: provenant_run::build_dir_gc::SharedRetirement,
     graph_checkpoints_removed: usize,
+    /// Import-extra pins removed (apply) or that would be removed (preview).
+    import_pins: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     stale_graphs: Vec<crate::gc_support::StaleGraph>,
     #[serde(skip)]
@@ -1000,6 +1002,15 @@ fn gc_data_summary(data: &GcData) -> String {
         .sum();
     human.push_str(&format!("{trees} merged worktree(s), {outputs} output directory(s), {} attempt tmp directory(s), {} capture(s)\n",
         data.provider_state.attempt_tmp.len(), data.provider_state.attempt_logs.len()));
+    human.push_str(&format!(
+        "{} import pin(s) {}\n",
+        data.import_pins,
+        if data.report.dry_run {
+            "would be removed"
+        } else {
+            "removed"
+        }
+    ));
     let not_run = |class| data.classes_not_run.contains(&class);
     if not_run(provenant_config::RetentionKind::TargetSeeds) {
         human.push_str("target seed generations: not run in this pass\n");
@@ -1043,11 +1054,12 @@ fn gc_data_summary(data: &GcData) -> String {
             data.build_dirs.target_idle_setting, data.build_dirs.target_idle_source
         )
     };
+    let cargo_bytes_label = data.build_dirs.byte_method.as_str();
     if not_run(provenant_config::RetentionKind::BuildDirectories) {
         human.push_str("Cargo targets: not run in this pass\n");
     } else if data.build_dirs.measurement_skipped {
         human.push_str(&format!(
-            "Cargo target census partial: {} known allocated bytes / {} byte budget (setting {}; source: {}{idle}); resumes at {}\n",
+            "Cargo target census partial: {} known {cargo_bytes_label} / {} byte budget (setting {}; source: {}{idle}); resumes at {}\n",
             data.build_dirs.cache_bytes,
             data.build_dirs.budget_bytes,
             data.build_dirs.budget_setting,
@@ -1060,7 +1072,7 @@ fn gc_data_summary(data: &GcData) -> String {
         ));
     } else {
         human.push_str(&format!(
-        "{} Cargo target(s), {} allocated bytes {}; {} / {} allocated bytes remain (budget setting {}; source: {}{idle}), {} busy, {} recent\n",
+        "{} Cargo target(s), {} {cargo_bytes_label} {}; {} / {} {cargo_bytes_label} remain (budget setting {}; source: {}{idle}), {} busy, {} recent\n",
         data.build_dirs.removed.len(),
         data.build_dirs.bytes,
         if data.report.dry_run {
@@ -1076,9 +1088,15 @@ fn gc_data_summary(data: &GcData) -> String {
         data.build_dirs.recent.len(),
     ));
     }
+    if !not_run(provenant_config::RetentionKind::BuildDirectories)
+        && data.build_dirs.byte_method == provenant_run::build_dir_gc::ByteMethod::AllocatedFallback
+    {
+        human
+            .push_str("Cargo target sizes: private bytes unavailable; reporting allocated bytes\n");
+    }
     for removal in &data.build_dirs.removed {
         human.push_str(&format!(
-            "{} Cargo target {} ({}{}; {} allocated bytes{})\n",
+            "{} Cargo target {} ({}{}; {} {cargo_bytes_label}{})\n",
             if data.report.dry_run {
                 "would remove"
             } else {
@@ -1378,6 +1396,7 @@ enum GcOutput<'a> {
         provider_state_removed: usize,
         build_dirs_removed: usize,
         build_dir_bytes_reclaimed: u64,
+        build_dir_byte_method: &'a provenant_run::build_dir_gc::ByteMethod,
         build_dir_bytes: u64,
         build_dir_budget_bytes: u64,
         build_dir_budget_setting: &'a str,
@@ -1389,6 +1408,7 @@ enum GcOutput<'a> {
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
         classes_not_run: &'a [provenant_config::RetentionKind],
         graph_checkpoints_removed: usize,
+        import_pins: usize,
         discard_archives_reclaimed: usize,
         discard_archive_bytes: u64,
         discard_archives_busy: &'a [PathBuf],
@@ -1453,6 +1473,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         provider_state_removed: data.provider_state.removed.len(),
         build_dirs_removed: data.build_dirs.removed.len(),
         build_dir_bytes_reclaimed: data.build_dirs.bytes,
+        build_dir_byte_method: &data.build_dirs.byte_method,
         build_dir_bytes: data.build_dirs.cache_bytes,
         build_dir_budget_bytes: data.build_dirs.budget_bytes,
         build_dir_budget_setting: &data.build_dirs.budget_setting,
@@ -1463,6 +1484,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         build_dir_target_idle_source: &data.build_dirs.target_idle_source,
         classes_not_run: &data.classes_not_run,
         graph_checkpoints_removed: data.graph_checkpoints_removed,
+        import_pins: data.import_pins,
         discard_archives_reclaimed: if data.report.dry_run {
             data.discard_archives.would_remove.len()
         } else {
@@ -1503,6 +1525,8 @@ struct GcProject {
     state: Directory,
     lanes: Vec<worktrees::WorktreeInfo>,
     path: PathBuf,
+    /// Import-extra pins the sweep removed (apply) or would remove (preview).
+    import_pins: usize,
 }
 
 /// Open a checkout normally, or a bare common directory only through an
@@ -1579,9 +1603,45 @@ fn gc_project(
                     "GC requires a verified primary checkout or bound bare owner",
                 ));
             }
+            // Settlement clears these pins on every outcome. GC is the
+            // backstop for pins left by an earlier version or an attempt
+            // whose record has since gone. The preview counts them without
+            // touching the ref store; apply removes them.
+            let call = provenant_run::Request {
+                clock: context.clock,
+                cancel,
+            };
+            let store_context = provenant_run::ExecutionContext {
+                state_root: roots.state.clone(),
+                project_id: context.binding.project_id(),
+                actor_id: provenant_core::ActorId::from_bytes([0; 16]),
+                read_prompts: false,
+            };
+            let import_pins =
+                match provenant_run::RunStore::open_disk_read_only(&store_context, &call) {
+                    Ok(Some(store)) => match provenant_run::gc_import_pins(
+                        context.utility.git_program_path(),
+                        context.repo,
+                        &store,
+                        &call,
+                        read_only,
+                    ) {
+                        Ok(count) => count,
+                        Err(error) => {
+                            warn_import_pin_collection(project, &error);
+                            0
+                        }
+                    },
+                    Ok(None) => 0,
+                    Err(error) => {
+                        warn_import_pin_collection(project, &error);
+                        0
+                    }
+                };
             Ok(GcProject {
                 binding: context.binding.clone(),
                 path: project.to_owned(),
+                import_pins,
                 state: Directory::open_anchor(
                     &roots
                         .state
@@ -1597,6 +1657,18 @@ fn gc_project(
             })
         },
     )
+}
+
+/// An unreadable run store cannot prove which pins are settled, so the
+/// backstop keeps them all. Warn and let the rest of the sweep run: failing the
+/// project here would skip settled-lane collection and the path-based pass.
+fn warn_import_pin_collection(project: &Path, error: &(impl std::fmt::Display + ?Sized)) {
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "warning: import pin collection failed for {}: {error}",
+        project.display()
+    );
 }
 
 /// What `land` did to a merged branch's registered worktree.
@@ -2517,6 +2589,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .map_err(|_| Error::GcObservation("invalid alert threshold"))?
         .unwrap_or(0)
         .max(free_floor);
+    let import_pins = projects.iter().map(|project| project.import_pins).sum();
     let mut adapters = GcAdapters {
         command,
         roots: &roots,
@@ -2543,6 +2616,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         stopped_cursor: None,
         data: GcData {
             idle_seconds,
+            import_pins,
             sweep_budget_seconds,
             sweep_budget_source: sweep_budget_source.clone(),
             sweep_warning,
@@ -4349,6 +4423,7 @@ mod gc_preview_tests {
         data.build_dirs.budget_source = "host".into();
         data.build_dirs.target_idle_setting = "30d".into();
         data.build_dirs.target_idle_source = "compiled default".into();
+        data.build_dirs.byte_method = provenant_run::build_dir_gc::ByteMethod::AllocatedFallback;
         data.build_dirs.busy.push("/cache/b/target".into());
         data.build_dirs.recent.push("/cache/c/target".into());
         for (dry_run, expected, verb) in [
@@ -4392,6 +4467,49 @@ mod gc_preview_tests {
             "/repo/.worktrees/gone"
         );
     }
+    #[test]
+    fn gc_summary_names_the_cargo_target_byte_figure() {
+        let mut data = GcData::default();
+        data.report.dry_run = true;
+        data.build_dirs.bytes = 4096;
+        data.build_dirs.cache_bytes = 8192;
+        data.build_dirs.budget_bytes = 16384;
+        for (method, label, warns, json_name) in [
+            (
+                provenant_run::build_dir_gc::ByteMethod::AllocatedFallback,
+                "allocated bytes",
+                true,
+                "allocated_fallback",
+            ),
+            (
+                provenant_run::build_dir_gc::ByteMethod::Private,
+                "private bytes",
+                false,
+                "private",
+            ),
+            (
+                provenant_run::build_dir_gc::ByteMethod::Unmeasured,
+                "unmeasured bytes",
+                false,
+                "unmeasured",
+            ),
+        ] {
+            data.build_dirs.byte_method = method;
+            let summary = gc_data_summary(&data);
+            assert!(
+                summary.contains(&format!("4096 {label} reclaimable")),
+                "{summary}"
+            );
+            assert_eq!(
+                summary.contains("private bytes unavailable; reporting allocated bytes"),
+                warns,
+                "{summary}"
+            );
+            let json = serde_json::to_value(gc_result_data(&data, false)).unwrap_or_default();
+            assert_eq!(json["build_dir_byte_method"], json_name);
+        }
+    }
+
     #[test]
     fn gc_summary_reports_event_expiry_in_preview_and_applied_mode() {
         let mut data = GcData::default();

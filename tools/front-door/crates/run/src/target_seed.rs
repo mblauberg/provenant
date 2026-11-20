@@ -20,6 +20,39 @@ pub struct Manifest {
     pub cargo_profile: provenant_config::CargoBuildProfile,
     pub features: Vec<String>,
     pub flags: Vec<String>,
+    /// Allocated bytes of the built target, measured once at publication so a
+    /// clone can reserve cache budget without walking the whole seed first.
+    /// Older generations leave this unset; a clone then reserves nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocated_bytes: Option<u64>,
+}
+
+/// Allocated bytes of a seed target, measured at seed-build time. A clone of a
+/// multi-gigabyte target cannot afford a second walk of the whole tree before it
+/// starts, so the figure is recorded here and read from the manifest instead.
+#[cfg(unix)]
+pub fn allocated_tree_bytes(path: &Path) -> Option<u64> {
+    use std::{fs, os::unix::fs::MetadataExt};
+    const MAX_DEPTH: usize = 64;
+    fn walk(path: &Path, depth: usize) -> Option<u64> {
+        if depth > MAX_DEPTH {
+            return None;
+        }
+        let metadata = fs::symlink_metadata(path).ok()?;
+        let mut bytes = metadata.blocks().saturating_mul(512);
+        if metadata.file_type().is_dir() {
+            for entry in fs::read_dir(path).ok()? {
+                bytes = bytes.saturating_add(walk(&entry.ok()?.path(), depth + 1)?);
+            }
+        }
+        Some(bytes)
+    }
+    walk(path, 0)
+}
+
+#[cfg(not(unix))]
+pub fn allocated_tree_bytes(_path: &Path) -> Option<u64> {
+    None
 }
 
 /// Hash a verified repository handle's canonical common Git directory for

@@ -33,6 +33,11 @@ pub use gc::{
 pub use github_policy::{
     DEFAULT_GH_BUDGET, GH_INVOCATIONS_FILE, GithubPolicy, label_events_trigger_ci,
 };
+mod cargo_seed_budget;
+pub use cargo_seed_budget::{
+    DEFAULT as CARGO_SEED_BUDGET_DEFAULT, KNOB as CARGO_SEED_BUDGET_KNOB, SeedBudgetSetting,
+    is_valid_setting as is_valid_cargo_seed_budget, resolve as cargo_seed_budget,
+};
 mod harness;
 pub use harness::legacy_harness_selectors;
 mod hooks;

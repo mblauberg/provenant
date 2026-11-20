@@ -451,6 +451,53 @@ fn terminal_ignores_protected_changes_present_at_lane_start()
 }
 
 #[test]
+fn committed_tool_state_paths_warn_and_settle()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    crate::writer::TOOL_STATE_WARNINGS.with(|warnings| warnings.borrow_mut().clear());
+    assert!(!fixture.terminal(|| {
+        let path = fixture.writer.worktree.join(".local/state/gh/device-id");
+        std::fs::create_dir_all(path.parent().ok_or("tool-state parent")?)?;
+        std::fs::write(path, "device\n")?;
+        fixture.lane_git(&["add", ".local"])?;
+        fixture.commit(&fixture.writer.worktree, "Commit tool state")
+    })?);
+    let warnings = crate::writer::TOOL_STATE_WARNINGS.with(|warnings| warnings.borrow().clone());
+    assert!(
+        warnings
+            .iter()
+            .any(|line| line.contains("LANE_TOOL_STATE_COMMITTED")),
+        "expected a tool-state policy warning, got {warnings:?}"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|line| line.contains(".local/state/gh/device-id")),
+        "warning must name the committed path, got {warnings:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn ordinary_dot_paths_do_not_warn() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    crate::writer::TOOL_STATE_WARNINGS.with(|warnings| warnings.borrow_mut().clear());
+    assert!(!fixture.terminal(|| {
+        let github = fixture.writer.worktree.join(".github/x");
+        std::fs::create_dir_all(github.parent().ok_or(".github parent")?)?;
+        std::fs::write(github, "ci\n")?;
+        let config = fixture.writer.worktree.join("src/.config/settings");
+        std::fs::create_dir_all(config.parent().ok_or("src/.config parent")?)?;
+        std::fs::write(config, "settings\n")?;
+        fixture.lane_git(&["add", ".github", "src"])?;
+        fixture.commit(&fixture.writer.worktree, "Ordinary dot paths")
+    })?);
+    let warnings = crate::writer::TOOL_STATE_WARNINGS.with(|warnings| warnings.borrow().clone());
+    assert!(warnings.is_empty(), "unexpected warning: {warnings:?}");
+    Ok(())
+}
+
+#[test]
 fn terminal_retains_a_stopped_merge_in_private_git()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     stopped_merge_stays_private(false)

@@ -385,10 +385,14 @@ impl crate::LaunchSpec {
     /// lane keeps the user's own gh configuration and login, exactly as a CLI
     /// started by hand would; the wrapper only counts, advises and applies the
     /// project's advisory deny list before running the host-selected `gh`.
+    /// `gh_config` is the host's resolved gh configuration directory: it is
+    /// exported by the wrapper and pinned in the lane environment, so an
+    /// adapter's private `XDG_CONFIG_HOME` cannot hide the host login.
     pub fn configure_gh_shim(
         &mut self,
         scratch: &Path,
         gh: &Path,
+        gh_config: &Path,
         shim: &GhShim<'_>,
     ) -> Result<(), ProviderError> {
         let text = |path: &Path| -> Result<String, ProviderError> {
@@ -399,6 +403,7 @@ impl crate::LaunchSpec {
             Ok(value.to_owned())
         };
         let gh_path = text(gh)?;
+        let gh_config_text = text(gh_config)?;
         let counter = shell_quote(&text(&scratch.join(provenant_config::GH_INVOCATIONS_FILE))?);
         let bin = scratch.join("bin");
         let path_index = self
@@ -423,9 +428,18 @@ impl crate::LaunchSpec {
         );
         self.setup.push(SetupStep::WriteExecutable {
             path: wrapper,
-            bytes: gh_wrapper(&gh_path, None, &counter, shim).into_bytes(),
+            bytes: gh_wrapper(
+                &gh_path,
+                Some(&shell_quote(&gh_config_text)),
+                &counter,
+                shim,
+            )
+            .into_bytes(),
         });
         self.env[path_index].1 = next_path;
+        self.env.retain(|(key, _)| key != "GH_CONFIG_DIR");
+        self.env
+            .push(("GH_CONFIG_DIR".into(), gh_config.as_os_str().to_owned()));
         Ok(())
     }
 }
@@ -2395,6 +2409,92 @@ mod tests {
     adapter_git_test!(private_git_cursor, "cursor");
     adapter_git_test!(private_git_agy, "agy");
     adapter_git_test!(private_git_opencode, "opencode");
+
+    /// OpenCode re-points `XDG_CONFIG_HOME` at private state. An unsandboxed
+    /// lane must still resolve the host's gh configuration, through the lane
+    /// environment and through the shim, and the shim directory must lead
+    /// `PATH` ahead of every system bin directory.
+    #[test]
+    fn opencode_gh_shim_pins_the_host_config_and_leads_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{Access, Adapter, Prompt, opencode::OpenCode};
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let scratch = root.join("scratch");
+        let host_gh = root.join("host-xdg/gh");
+        fs::create_dir_all(&host_gh)?;
+        fs::write(host_gh.join("hosts.yml"), "github.com:\n  user: fixture\n")?;
+        // The fixture gh succeeds only when pointed at the host directory.
+        let gh = root.join("real-gh");
+        fs::write(
+            &gh,
+            "#!/bin/sh\n[ \"$GH_CONFIG_DIR\" = \"$EXPECTED_GH_CONFIG_DIR\" ] && [ -f \"$GH_CONFIG_DIR/hosts.yml\" ] || exit 1\nprintf 'authenticated\\n'\n",
+        )?;
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o700))?;
+
+        let plan = crate::tests::fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = Prompt::new("fixture".into());
+        let mut spec = OpenCode.prepare(crate::tests::fixture_input(
+            &route, &plan, &prompt, &root, None,
+        ))?;
+        let value = |spec: &crate::LaunchSpec, name: &str| {
+            spec.env
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        };
+        let private_xdg = value(&spec, "XDG_CONFIG_HOME").ok_or("private XDG_CONFIG_HOME")?;
+        assert_ne!(Path::new(&private_xdg), root.join("host-xdg"));
+        assert_eq!(value(&spec, "GH_CONFIG_DIR"), None);
+
+        spec.configure_gh_shim(&scratch, &gh, &host_gh, &Default::default())?;
+
+        // The adapter's private XDG_CONFIG_HOME is untouched; gh is pinned.
+        assert_eq!(value(&spec, "XDG_CONFIG_HOME"), Some(private_xdg.clone()));
+        assert_eq!(
+            value(&spec, "GH_CONFIG_DIR"),
+            Some(host_gh.as_os_str().to_owned())
+        );
+        let path = value(&spec, "PATH").ok_or("PATH")?;
+        let entries: Vec<_> = std::env::split_paths(&path).collect();
+        assert_eq!(entries.first(), Some(&scratch.join("bin")));
+        for system in ["/usr/bin", "/bin", "/opt/homebrew/bin", "/usr/local/bin"] {
+            if let Some(index) = entries.iter().position(|entry| entry == Path::new(system)) {
+                assert!(index > 0, "{system} precedes the shim directory");
+            }
+        }
+        // The wrapper carries the pin even if the caller's environment does not.
+        for step in &spec.setup {
+            match step {
+                SetupStep::CreateDir(path) if path.starts_with(&scratch) => {
+                    fs::create_dir_all(path)?
+                }
+                SetupStep::WriteExecutable { path, bytes } if path.starts_with(&scratch) => {
+                    fs::write(path, bytes)?;
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+                }
+                _ => {}
+            }
+        }
+        let shim = scratch.join("bin/gh");
+        assert!(fs::read_to_string(&shim)?.contains("export GH_CONFIG_DIR"));
+        let argv = [shim.into_os_string(), "auth".into(), "status".into()];
+        let environment = [
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("XDG_CONFIG_HOME".into(), private_xdg),
+            ("EXPECTED_GH_CONFIG_DIR".into(), host_gh.into_os_string()),
+        ];
+        let mut options = ExecOptions::new(&argv, &root, Duration::from_secs(5));
+        options.env = Some(&environment);
+        let outcome = SystemExecutor::new(1)?.execute(options)?;
+        assert_eq!(outcome.termination, Termination::Exit(0));
+        assert_eq!(outcome.stdout.bytes, b"authenticated\n");
+        Ok(())
+    }
 
     #[test]
     fn private_git_command_writer_is_unsupported() {

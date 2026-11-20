@@ -101,12 +101,21 @@ pub struct ResolvedHarnessTarget {
 pub const STATE_FORMAT_VERSION: u64 = 2;
 pub const INSTALL_RECEIPT_SCHEMA_VERSION: u64 = 2;
 
+/// Format of the records a live attempt's supervisor or settlement reads.
+/// Bump this in any release that changes those files, so install can warn when
+/// it would swap under attempts that were started on the previous format.
+pub const LIVE_RECORD_FORMAT: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstallReceipt {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     pub schema_version: u64,
     pub state_format_version: u64,
+    /// Live-attempt record format installed on this host. Older receipts omit
+    /// it, which install treats as a format change.
+    #[serde(default)]
+    pub live_record_format: Option<u32>,
     pub source_digest: SourceDigest,
     pub manifest_digest: FileDigest,
     pub asset_digest: SourceDigest,

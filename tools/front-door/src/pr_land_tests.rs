@@ -654,6 +654,70 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     Ok(())
 }
 
+/// Landing binds only the PR it lands: it never reads or warns about other PRs
+/// on the same branch.
+/// Spec: docs/specs/run-attribution.md#pr-contributions
+/// PR 7 is seeded as a closed open-binding so the removed
+/// stale-binding sweep would both read and close it; the gh-call log proves the
+/// land path never attempted that read at all.
+pub(crate) fn land_binding_never_reads_or_warns_about_other_prs() -> Result {
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let landing = landing()?;
+    let (_, context) = super::worktree_tests::writer_context(&landing.rig)?;
+    let store = super::worktree_tests::open_writer_store(&context)?;
+    let db = provenant_run::Contributions::open(store.writer_registry(), &call)?;
+
+    let other = provenant_run::PullRequest {
+        repository: "owner/repo".into(),
+        number: 7,
+    };
+    let head = provenant_core::GitOid::parse(&landing.head)?;
+    db.bind(context.project_id, "feat", &other, head, &call)?;
+    fs::write(landing.rig.project.join("state-7"), "CLOSED")?;
+    assert!(
+        db.open_bindings(context.project_id, "feat", &call)?
+            .contains(&other)
+    );
+
+    let calls_before = fs::read_to_string(landing.rig.project.join("gh-calls")).unwrap_or_default();
+    let landed = command(&landing.rig, &["land", NUMBER, "--json"])?;
+    assert_eq!(
+        code(&landed),
+        0,
+        "{}",
+        String::from_utf8_lossy(&landed.stderr.bytes)
+    );
+
+    let calls_after = fs::read_to_string(landing.rig.project.join("gh-calls"))?;
+    let read = &calls_after[calls_before.len()..];
+    assert!(
+        !read.lines().any(|line| line.contains("pulls/7")),
+        "land read another PR's end state: {read}"
+    );
+    let stderr = String::from_utf8_lossy(&landed.stderr.bytes);
+    assert!(
+        !stderr.contains("pr contributions 7 --bind"),
+        "land warned about another PR: {stderr}"
+    );
+
+    // The landed PR is bound; the other PR's binding is untouched and still open.
+    let landed_pr = provenant_run::PullRequest {
+        repository: "owner/repo".into(),
+        number: 1668,
+    };
+    assert!(db.is_bound(&landed_pr, &call)?);
+    assert!(
+        db.open_bindings(context.project_id, "feat", &call)?
+            .contains(&other)
+    );
+    Ok(())
+}
+
 pub(crate) fn pr_contribution_land_warns_when_binding_fails() -> Result {
     let clock = provenant_os::clock::SystemClock::new();
     let cancel = provenant_core::CancelToken::new();
