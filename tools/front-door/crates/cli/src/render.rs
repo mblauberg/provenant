@@ -6,6 +6,10 @@ use serde::Serialize;
 use std::io::{self, Write};
 use thiserror::Error;
 
+/// An error cause can carry a 2 KiB command-output tail, expanded by escaping.
+/// Human output shows all of it; compact output summarises it to one row.
+const ERROR_CAUSE_BYTES: usize = 4 * 1024;
+
 /// The compact view an owner supplies for the default human output: a headline
 /// of counts, then the rows that need action first, and the one typed next
 /// command. The generic truncator is only a fallback for owners without one.
@@ -289,10 +293,35 @@ pub fn render_within<T: Serialize>(
                         && !cause.is_empty()
                         && cause != error.message
                     {
-                        for line in safe_human_text(cause).lines() {
-                            text.push_str("  ");
-                            text.push_str(line);
-                            text.push('\n');
+                        let safe = provenant_records::diagnostic::safe_multiline_text(
+                            cause,
+                            ERROR_CAUSE_BYTES,
+                        );
+                        match mode {
+                            RenderMode::Human { .. } => {
+                                for line in safe.lines() {
+                                    text.push_str("  ");
+                                    text.push_str(line);
+                                    text.push('\n');
+                                }
+                            }
+                            RenderMode::Compact { .. } => {
+                                // Compact stays summarised: one bounded line
+                                // and a pointer to --full, never a tail dump.
+                                let first = safe
+                                    .lines()
+                                    .find(|line| !line.trim().is_empty())
+                                    .unwrap_or("");
+                                text.push_str("  ");
+                                text.push_str(&bounded_text(first, limits::FALLBACK_ROW_BYTES));
+                                if safe.lines().count() > 1
+                                    || first.len() > limits::FALLBACK_ROW_BYTES
+                                {
+                                    text.push_str(" (more with --full)");
+                                }
+                                text.push('\n');
+                            }
+                            RenderMode::Json => {}
                         }
                     }
                     text.push_str(&format!(
@@ -351,30 +380,6 @@ pub fn render_within<T: Serialize>(
         Err(error) => Err(RenderError::Write(error)),
     }
 }
-/// Characters that could hide or reorder text on a terminal: DEL, C1 controls
-/// and the Cf, Zl and Zp categories.
-fn is_unsafe(c: char) -> bool {
-    matches!(c,
-        '\u{7f}'..='\u{9f}' | '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}'
-        | '\u{70f}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
-        | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}'
-        | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
-}
-/// Human diagnostic text keeps its line breaks but never its terminal controls.
-/// Used for an error's extra cause, which may be captured command output.
-fn safe_human_text(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '\n' | '\t' => out.push(character),
-            character if character.is_control() || is_unsafe(character) => {
-                out.push_str(&character.escape_default().to_string());
-            }
-            character => out.push(character),
-        }
-    }
-    out
-}
 /// Quote text outside the conservative bare set `[A-Za-z0-9._:/@+%,-]`.
 fn quoted(text: &str) -> String {
     if !text.is_empty()
@@ -392,7 +397,9 @@ fn quoted(text: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() || is_unsafe(c) => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c if provenant_records::diagnostic::unsafe_display_character(c) => {
+                out.push_str(&format!("\\u{{{:x}}}", c as u32))
+            }
             c => out.push(c),
         }
     }
@@ -596,7 +603,7 @@ mod tests {
             code: "WORKTREE".into(),
             message: "target seed build: build.prepare[0] command failed (exit 1)".into(),
             cause: Some(cause.into()),
-            repair: None,
+            repair: Some("run `provenant worktree seed-build`".into()),
         });
         let human_mode = || RenderMode::Human {
             text: "",
@@ -609,6 +616,11 @@ mod tests {
         assert!(text.starts_with("provenant: WORKTREE: target seed build:"));
         assert!(text.contains("  npm ERR! Cannot find package 'zod'\n"), "{text}");
         assert!(text.contains("  next line of output\n"), "{text}");
+        // The cause sits between the message and the one typed next command.
+        let message_at = text.find("target seed build:").ok_or("message")?;
+        let cause_at = text.find("  npm ERR!").ok_or("cause")?;
+        let next_at = text.find("next:").ok_or("next")?;
+        assert!(message_at < cause_at && cause_at < next_at, "{text}");
 
         let mut json = Vec::new();
         render(&result, RenderMode::Json, &mut json)?;
@@ -623,6 +635,55 @@ mod tests {
         render(&result, human_mode(), &mut human)?;
         let text = String::from_utf8(human)?;
         assert_eq!(text.matches(&message).count(), 1, "{text}");
+        Ok(())
+    }
+
+    #[test]
+    // Spec: docs/specs/cli.md#results
+    fn compact_error_cause_is_one_bounded_row_and_human_keeps_every_line()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cause = format!("npm ERR! {}\nsecond line\nthird line", "z".repeat(300));
+        let mut result = CommandResult::new("worktree seed-build", Outcome::Error, ());
+        result.error = Some(provenant_records::CommandError {
+            diagnostic: None,
+            code: "WORKTREE".into(),
+            message: "target seed build: build.prepare[0] command failed".into(),
+            cause: Some(cause),
+            repair: None,
+        });
+        let mut compact = Vec::new();
+        render(
+            &result,
+            RenderMode::Compact {
+                text: "",
+                read_only: false,
+                summary: None,
+            },
+            &mut compact,
+        )?;
+        let compact = String::from_utf8(compact)?;
+        assert_eq!(
+            compact.lines().filter(|line| line.starts_with("  ")).count(),
+            1,
+            "{compact}"
+        );
+        assert!(compact.contains("--full"), "{compact}");
+        assert!(!compact.contains("second line"), "{compact}");
+        assert!(!compact.contains("third line"), "{compact}");
+        assert!(compact.lines().all(|line| line.len() <= limits::FALLBACK_ROW_BYTES + 24), "{compact}");
+
+        let mut human = Vec::new();
+        render(
+            &result,
+            RenderMode::Human {
+                text: "",
+                read_only: false,
+                summary: None,
+            },
+            &mut human,
+        )?;
+        let human = String::from_utf8(human)?;
+        assert!(human.contains("second line") && human.contains("third line"), "{human}");
         Ok(())
     }
     #[test]

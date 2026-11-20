@@ -112,21 +112,21 @@ pub(crate) fn local_worktree_message(error: &WorktreeError) -> String {
 }
 
 impl Error {
-    fn local_message(&self) -> String {
+    pub(crate) fn local_message(&self) -> String {
         match self {
             Self::Worktree(error) => local_worktree_message(error),
             _ => self.to_string(),
         }
     }
 
-    fn repair(&self) -> Option<&'static str> {
+    pub(crate) fn repair(&self) -> Option<&'static str> {
         match self {
             Self::Worktree(error) => error.repair(),
             _ => None,
         }
     }
 
-    fn outcome(&self) -> Outcome {
+    pub(crate) fn outcome(&self) -> Outcome {
         match self {
             Self::Root(roots::RootError::Checkout | roots::RootError::State(_))
             | Self::InvalidScope
@@ -162,7 +162,7 @@ impl Error {
         }
     }
 
-    fn cause(&self) -> Option<&str> {
+    pub(crate) fn cause(&self) -> Option<&str> {
         match self {
             Self::SeedBuild {
                 tail: Some(tail), ..
@@ -174,12 +174,14 @@ impl Error {
 
 /// Keep a failing `build.prepare` command's bounded output alongside its
 /// message. A seed-build operator otherwise sees only the command and exit
-/// status and has to reproduce the failure to learn why it happened.
-fn seed_build_failure(error: &(dyn std::error::Error + 'static)) -> Error {
+/// status and has to reproduce the failure to learn why it happened. The tail
+/// is masked here, before it becomes `error.cause`, so local `redaction` holds
+/// for both human and JSON output.
+pub(crate) fn seed_build_failure(error: &(dyn std::error::Error + 'static)) -> Error {
     Error::SeedBuild {
         message: error.to_string(),
         tail: crate::target_seed_build::prepare_failed_of(error)
-            .map(|prepare| prepare.tail.clone()),
+            .map(|prepare| crate::target_seed_build::redact_operator_text(&prepare.tail)),
     }
 }
 

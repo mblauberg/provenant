@@ -28,8 +28,9 @@ fn seed_build_stderr(line: impl std::fmt::Display) {
 
 /// A failing `build.prepare` command. It travels as the error of `refresh` or
 /// `build`, so a caller tells it from a generic failure by type. The public
-/// fields let the tick record the command and its bounded output tail without
-/// echoing either in an operator diagnostic.
+/// fields let the tick record the command and its bounded output tail; the
+/// manual `worktree seed-build` path shows that tail as a redacted cause, never
+/// as part of the refusal message.
 #[derive(Debug)]
 pub struct PrepareFailed {
     pub index: usize,
@@ -91,6 +92,17 @@ fn output_tail(stdout: &[u8], stderr: &[u8]) -> String {
     combined.extend_from_slice(stderr);
     let start = combined.len().saturating_sub(OUTPUT_TAIL_BYTES);
     String::from_utf8_lossy(&combined[start..]).into_owned()
+}
+
+/// Local text derived from captured command output follows the `redaction`
+/// policy (docs/specs/cli.md#results): under `redaction=full`, known values and
+/// credential shapes are masked before the text reaches an operator or a
+/// machine reader. Text that cannot be filtered is withheld, never passed on.
+pub(crate) fn redact_operator_text(text: &str) -> String {
+    match provenant_redact::known_shapes(text.as_bytes()) {
+        Ok(safe) => String::from_utf8_lossy(&safe).into_owned(),
+        Err(_) => "[REDACTED]".to_owned(),
+    }
 }
 
 /// Report the inherited compiler-selection keys a seed build removes from its
@@ -909,17 +921,19 @@ fn record_refresh_outcome(state: &Path, project_key: &str, outcome: &str, reason
     }
 }
 
-/// A short, bounded cause for a recorded refresh failure. Prepare failures name
-/// the command and its output tail; skips name their typed reason; everything
-/// else keeps the error text, which `record_refresh` caps at 2 KiB.
+/// A short, bounded cause for a recorded refresh failure, masked under the
+/// local `redaction` policy. Prepare failures name the command and its output
+/// tail; skips name their typed reason; everything else keeps the error text,
+/// which `record_refresh` caps at 2 KiB.
 fn refresh_failure_reason(error: &(dyn Error + 'static)) -> String {
-    if let Some(prepare) = prepare_failed_of(error) {
+    let reason = if let Some(prepare) = prepare_failed_of(error) {
         format!("{}: {}", prepare.argv.join(" "), prepare.tail)
     } else if let Some(skip) = skip_of(error) {
         format!("{}: {}", skip.reason.cause(), skip)
     } else {
         error.to_string()
-    }
+    };
+    redact_operator_text(&reason)
 }
 
 /// Rebuild this repository's seed when its verify base has no complete
@@ -2952,6 +2966,73 @@ mod tests {
             fs::read_dir(stage.join("target")).is_ok_and(|mut entries| entries.next().is_none()),
             "cargo never runs after a failed prepare command"
         );
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed, docs/specs/cli.md#results
+    #[test]
+    fn failing_prepare_cause_is_masked_in_json_under_full_redaction() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
+        let secret = "seed-build-credential-3391";
+        let _scope = provenant_redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (project, commit, _) = prepared_project(temp.path());
+        let script = temp.path().join("fail.sh");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"npm ERR! registry rejected {secret} (Cannot find package 'zod')\" >&2\necho 'install the missing dependency' >&2\nexit 7\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        write_prepare(&project, vec![vec![script.to_string_lossy().into_owned()]]);
+        let stage = temp.path().join("stage");
+        fs::create_dir(&stage).unwrap();
+        let identity = identity("prepare-key", &commit);
+        let error = build_into(
+            state.path(),
+            &stage,
+            &project,
+            Path::new("."),
+            &commit,
+            "prepare-key",
+            &identity.cargo_profile,
+        )
+        .unwrap_err();
+
+        // The recorded refresh reason carries the tail only after masking.
+        let reason = refresh_failure_reason(error.as_ref());
+        assert!(reason.contains("install the missing dependency"), "{reason}");
+        assert!(!reason.contains(secret), "{reason}");
+        assert!(reason.contains("[REDACTED]"), "{reason}");
+
+        // A manual `seed-build --json` renders the same masked tail as
+        // error.cause, after the message and before the one typed next.
+        let failure = crate::worktrees::seed_build_failure(error.as_ref());
+        let mut result = provenant_records::CommandResult::new(
+            "worktree seed-build",
+            failure.outcome(),
+            (),
+        );
+        result.error = Some(crate::command_error(
+            "WORKTREE",
+            &failure.local_message(),
+            failure.cause(),
+            failure.repair(),
+        ));
+        let mut json = Vec::new();
+        provenant_cli::render(&result, provenant_cli::RenderMode::Json, &mut json).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        let cause = value["error"]["cause"].as_str().expect("error.cause");
+        assert!(cause.contains("Cannot find package 'zod'"), "{cause}");
+        assert!(cause.contains("install the missing dependency"), "{cause}");
+        assert!(!cause.contains(secret), "{cause}");
+        assert!(cause.contains("[REDACTED]"), "{cause}");
+        let message = value["error"]["message"].as_str().expect("error.message");
+        assert!(message.contains("build.prepare[0]"), "{message}");
+        assert!(!message.contains(secret), "{message}");
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed
