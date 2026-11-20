@@ -65,7 +65,8 @@ pub(crate) fn run(command: provenant_cli::Ci, globals: &Globals) -> u8 {
 
 /// How a job ended. Cancellation is never reported as a real failure: a job
 /// cancelled by the chair, and an aggregate gate whose only bad inputs were
-/// cancelled, both settle as cancelled.
+/// cancelled, both settle as cancelled. A gate whose inputs cannot be shown to
+/// be the cause stays a real failure, marked uncertain.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum JobClass {
@@ -75,9 +76,14 @@ pub(crate) enum JobClass {
     /// Failed only because the jobs it gates were cancelled, not because any
     /// of its own inputs failed.
     CancelledDependencies,
+    /// The gate failed and its inputs could not be established, so a cancelled
+    /// sibling elsewhere in the run is not evidence that cancellation caused
+    /// it. It stays a real failure rather than being demoted.
+    Uncertain,
 }
 impl JobClass {
-    /// Both cancelled classes are cancellation, not a defect to act on.
+    /// Both cancelled classes are cancellation, not a defect to act on. An
+    /// uncertain gate is still a failure to act on.
     fn is_cancelled(self) -> bool {
         matches!(self, Self::Cancelled | Self::CancelledDependencies)
     }
@@ -453,12 +459,35 @@ struct ApiJob {
     conclusion: Option<String>,
     #[serde(default)]
     steps: Vec<ApiStep>,
+    /// A forge that publishes dependencies on the jobs endpoint lets us read
+    /// the gate's inputs without fetching the workflow. GitHub omits this
+    /// field, which is what sends the reader to the workflow file.
+    #[serde(default)]
+    needs: Option<Needs>,
 }
 
 #[derive(Deserialize)]
 struct ApiStep {
     name: String,
     conclusion: Option<String>,
+}
+
+/// GitHub spells a single dependency as a scalar and several as a sequence,
+/// both in the jobs metadata and in a workflow's `needs:` key.
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+enum Needs {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Needs {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(name) => vec![name],
+            Self::Many(names) => names,
+        }
+    }
 }
 
 /// Whether a job conclusion is a bad input to a gate. A skipped job is bad
@@ -475,62 +504,80 @@ fn bad_input(conclusion: Option<&str>) -> bool {
     )
 }
 
+/// The jobs the aggregate gate actually waits for. `complete` is false when a
+/// dependency could not be matched to an ended job, so conclusions from the
+/// rest of the run cannot establish why the gate failed.
+#[derive(Debug, Default)]
+struct GateInputs {
+    ids: Vec<u64>,
+    complete: bool,
+}
+
+impl GateInputs {
+    fn unknown() -> Self {
+        Self::default()
+    }
+}
+
 /// Classify every ended job in a run. `gh run view --log-failed` waits for the
 /// whole run; the jobs endpoint names each job's own conclusion as soon as that
-/// job ends. A gate whose only bad inputs were cancelled is a cancellation,
-/// never a real failure, so an aggregate `ci-status` cannot misreport FAILURE.
-fn classify_jobs(jobs: &[ApiJob]) -> BTreeMap<u64, JobClass> {
-    let mut conclusions: BTreeMap<String, Option<String>> = BTreeMap::new();
-    for job in jobs {
-        conclusions.insert(job.name.clone(), job.conclusion.clone());
-        conclusions.insert(job.id.to_string(), job.conclusion.clone());
-    }
+/// job ends. An aggregate gate is demoted only when its own dependencies show
+/// cancellations and no other cause.
+fn classify_jobs(jobs: &[ApiJob], inputs: &GateInputs) -> BTreeMap<u64, JobClass> {
     let mut classes = BTreeMap::new();
     for job in jobs {
         if job.status != "completed" {
             continue;
         }
-        let class = match job.conclusion.as_deref() {
-            Some("cancelled") => JobClass::Cancelled,
-            Some("skipped") if gate_only_cancelled(job, &conclusions) => {
-                JobClass::CancelledDependencies
+        let class = if job.name == AGGREGATE_GATE {
+            gate_class(job.conclusion.as_deref(), jobs, inputs)
+        } else {
+            match job.conclusion.as_deref() {
+                Some("cancelled") | Some("skipped") => Some(JobClass::Cancelled),
+                Some(conclusion) if bad_input(Some(conclusion)) => Some(JobClass::Failed),
+                // A succeeded (or neutral) job is not part of the failing digest.
+                _ => None,
             }
-            Some("skipped") => JobClass::Cancelled,
-            Some(conclusion) if bad_input(Some(conclusion)) => {
-                if gate_only_cancelled(job, &conclusions) {
-                    JobClass::CancelledDependencies
-                } else {
-                    JobClass::Failed
-                }
-            }
-            // A succeeded (or neutral) job is not part of the failing digest.
-            _ => continue,
         };
+        let Some(class) = class else { continue };
         classes.insert(job.id, class);
     }
     classes
 }
 
 /// The repository's required aggregate check. Its own conclusion is a failure
-/// that says nothing about its cause; the member jobs do.
+/// that says nothing about its cause; the jobs it waits for do.
 const AGGREGATE_GATE: &str = "ci-status";
 
-/// Whether the required aggregate gate failed only because every other ended
-/// job with a bad conclusion was cancelled or skipped. The jobs endpoint does
-/// not publish dependency lists, so the evidence is the run's own job names and
-/// conclusions: any real failure elsewhere keeps the gate a real failure, and
-/// a job that is not the aggregate gate is never demoted on this basis.
-fn gate_only_cancelled(job: &ApiJob, conclusions: &BTreeMap<String, Option<String>>) -> bool {
-    if job.name != AGGREGATE_GATE || !bad_input(job.conclusion.as_deref()) {
-        return false;
+/// Classify the aggregate gate from its dependencies alone. A direct
+/// cancellation needs no inference; every other bad conclusion needs complete
+/// dependency evidence before the gate may be called a cancellation.
+fn gate_class(conclusion: Option<&str>, jobs: &[ApiJob], inputs: &GateInputs) -> Option<JobClass> {
+    match conclusion {
+        Some("cancelled") => Some(JobClass::Cancelled),
+        Some(conclusion) if bad_input(Some(conclusion)) => {
+            if !inputs.complete {
+                Some(JobClass::Uncertain)
+            } else if gate_only_cancelled(jobs, inputs) {
+                Some(JobClass::CancelledDependencies)
+            } else {
+                Some(JobClass::Failed)
+            }
+        }
+        _ => None,
     }
-    let own_id = job.id.to_string();
+}
+
+/// Whether every bad conclusion among the gate's own inputs was a cancellation
+/// or skip, with at least one such input. Jobs elsewhere in the run are not
+/// evidence either way and are never consulted here.
+fn gate_only_cancelled(jobs: &[ApiJob], inputs: &GateInputs) -> bool {
     let mut saw_bad = false;
-    for (name, conclusion) in conclusions {
-        if name == &job.name || name == &own_id {
+    for job in jobs {
+        if !inputs.ids.contains(&job.id) {
             continue;
         }
-        let Some(conclusion) = conclusion.as_deref() else {
+        let Some(conclusion) = job.conclusion.as_deref() else {
             continue;
         };
         if !bad_input(Some(conclusion)) {
@@ -542,6 +589,241 @@ fn gate_only_cancelled(job: &ApiJob, conclusions: &BTreeMap<String, Option<Strin
         }
     }
     saw_bad
+}
+
+/// Dependency names published on the jobs endpoint, when the forge provides
+/// them. A dependency that names no ended job leaves the inputs incomplete.
+fn inputs_from_names(needs: &[String], jobs: &[ApiJob]) -> GateInputs {
+    let mut ids = Vec::new();
+    let mut complete = true;
+    for need in needs {
+        let matches: Vec<u64> = jobs
+            .iter()
+            .filter(|job| job.name == *need || job.id.to_string() == *need)
+            .map(|job| job.id)
+            .collect();
+        if matches.is_empty() {
+            complete = false;
+        }
+        ids.extend(matches);
+    }
+    GateInputs { ids, complete }
+}
+
+/// Read the gate's `needs` from its own job metadata, when the jobs endpoint
+/// publishes them.
+fn gate_inputs_from_jobs(jobs: &[ApiJob]) -> Option<GateInputs> {
+    let gate = jobs.iter().find(|job| job.name == AGGREGATE_GATE)?;
+    let names = gate.needs.clone()?.into_vec();
+    (!names.is_empty()).then(|| inputs_from_names(&names, jobs))
+}
+
+/// A dependency as declared in the workflow: its job key and, when set, the
+/// display name the jobs API reports. Matrix names are templates the runner
+/// expands with concrete values.
+struct WorkflowNeed {
+    key: String,
+    name: Option<String>,
+}
+
+/// The part of a workflow file the digest reads: job keys, display names and
+/// declared dependencies. Every other workflow key is ignored.
+#[derive(Deserialize)]
+struct Workflow {
+    jobs: BTreeMap<String, WorkflowJob>,
+}
+
+#[derive(Deserialize)]
+struct WorkflowJob {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    needs: Option<Needs>,
+}
+
+/// Bound the workflow read the same way the front door bounds other YAML.
+fn yaml_options() -> serde_saphyr::Options {
+    let mut budget = serde_saphyr::Budget::default();
+    budget.max_reader_input_bytes = Some(2 * 1024 * 1024);
+    budget.max_depth = 32;
+    budget.max_nodes = 100_000;
+    let mut options = serde_saphyr::Options::default();
+    options.budget = Some(budget);
+    options
+}
+
+/// Read the aggregate gate's dependencies from a workflow file. A workflow
+/// without the gate, or without a `needs:` declaration on it, yields no
+/// evidence rather than an empty dependency list that could be mistaken for
+/// one.
+fn parse_workflow_needs(text: &str) -> Result<Option<Vec<WorkflowNeed>>, String> {
+    let workflow: Workflow = serde_saphyr::from_str_with_options(text, yaml_options())
+        .map_err(|error| error.to_string())?;
+    let Some(gate) = workflow.jobs.get(AGGREGATE_GATE) else {
+        return Ok(None);
+    };
+    let Some(needs) = gate.needs.clone() else {
+        return Ok(None);
+    };
+    Ok(Some(
+        needs
+            .into_vec()
+            .into_iter()
+            .map(|key| WorkflowNeed {
+                name: workflow.jobs.get(&key).and_then(|job| job.name.clone()),
+                key,
+            })
+            .collect(),
+    ))
+}
+
+/// Map workflow dependencies to the ended jobs they produced. A matrix job's
+/// display name is a template, so its literal parts are matched around each
+/// `${{ ... }}` placeholder.
+fn inputs_from_workflow(needs: &[WorkflowNeed], jobs: &[ApiJob]) -> GateInputs {
+    let mut ids = Vec::new();
+    let mut complete = true;
+    for need in needs {
+        let matches: Vec<u64> = jobs
+            .iter()
+            .filter(|job| {
+                name_matches(&need.key, &job.name)
+                    || need
+                        .name
+                        .as_deref()
+                        .is_some_and(|pattern| name_matches(pattern, &job.name))
+            })
+            .map(|job| job.id)
+            .collect();
+        if matches.is_empty() {
+            complete = false;
+        }
+        ids.extend(matches);
+    }
+    GateInputs { ids, complete }
+}
+
+/// Match a job display name against a workflow name, expanding each
+/// `${{ ... }}` placeholder to one or more characters of the actual name.
+fn name_matches(pattern: &str, name: &str) -> bool {
+    let Some(first) = pattern.find("${{") else {
+        return pattern == name;
+    };
+    let (prefix, mut rest_pattern) = pattern.split_at(first);
+    if !name.starts_with(prefix) {
+        return false;
+    }
+    let mut rest_name = &name[prefix.len()..];
+    loop {
+        let Some(close) = rest_pattern.find("}}") else {
+            return false;
+        };
+        rest_pattern = &rest_pattern[close + 2..];
+        let Some(open) = rest_pattern.find("${{") else {
+            return rest_name.len() > rest_pattern.len() && rest_name.ends_with(rest_pattern);
+        };
+        let (literal, after) = rest_pattern.split_at(open);
+        let Some(at) = rest_name.find(literal) else {
+            return false;
+        };
+        if at == 0 {
+            return false;
+        }
+        rest_name = &rest_name[at + literal.len()..];
+        rest_pattern = after;
+    }
+}
+
+/// Read the gate's dependencies from the workflow file at the run's head SHA.
+/// Any unreadable metadata leaves the inputs unknown: the digest reports an
+/// uncertain gate rather than guessing from other jobs in the run.
+fn workflow_gate_inputs(
+    state: &Path,
+    project: &Path,
+    repository: &str,
+    run: u64,
+    jobs: &[ApiJob],
+    request: &provenant_config::ports::Request,
+) -> GateInputs {
+    let Ok(text) = workflow_at_head(state, project, repository, run, request) else {
+        return GateInputs::unknown();
+    };
+    let Ok(Some(needs)) = parse_workflow_needs(&text) else {
+        return GateInputs::unknown();
+    };
+    inputs_from_workflow(&needs, jobs)
+}
+
+/// Fetch the workflow file that produced a run, pinned to that run's head SHA.
+fn workflow_at_head(
+    state: &Path,
+    project: &Path,
+    repository: &str,
+    run: u64,
+    request: &provenant_config::ports::Request,
+) -> Result<String, String> {
+    let endpoint = format!("repos/{repository}/actions/runs/{run}");
+    let bytes = successful(
+        forge_execute(
+            state,
+            project,
+            &["gh", "api", &endpoint],
+            request,
+            false,
+            None,
+        )
+        .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let metadata: Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let head = metadata
+        .get("head_sha")
+        .and_then(Value::as_str)
+        .ok_or("run metadata named no head SHA")?;
+    let workflow_id = metadata
+        .get("workflow_id")
+        .and_then(Value::as_u64)
+        .ok_or("run metadata named no workflow id")?;
+
+    let endpoint = format!("repos/{repository}/actions/workflows/{workflow_id}");
+    let bytes = successful(
+        forge_execute(
+            state,
+            project,
+            &["gh", "api", &endpoint],
+            request,
+            false,
+            None,
+        )
+        .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let metadata: Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let path = metadata
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or("workflow metadata named no path")?;
+
+    let endpoint = format!("repos/{repository}/contents/{path}?ref={head}");
+    let bytes = successful(
+        forge_execute(
+            state,
+            project,
+            &[
+                "gh",
+                "api",
+                "-H",
+                "Accept: application/vnd.github.raw+json",
+                &endpoint,
+            ],
+            request,
+            false,
+            None,
+        )
+        .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Build the per-job digest for one run. Each ended job's log is fetched on its
@@ -564,7 +846,9 @@ fn run_digest(
             };
         }
     };
-    let classes = classify_jobs(&jobs);
+    let inputs = gate_inputs_from_jobs(&jobs)
+        .unwrap_or_else(|| workflow_gate_inputs(state, project, repository, run, &jobs, request));
+    let classes = classify_jobs(&jobs, &inputs);
     let mut errors = Vec::new();
     let mut failures = Vec::new();
     for job in &jobs {
@@ -581,7 +865,9 @@ fn run_digest(
                 )
             })
             .map(|step| step.name.clone());
-        let mut parsed = if class == JobClass::Failed {
+        // An uncertain gate is still a failure to act on, so keep its log
+        // evidence even though its cause could not be established.
+        let mut parsed = if !class.is_cancelled() {
             match job_log(state, project, repository, job.id, request) {
                 Ok(text) => parse_failed_log(&text),
                 Err(error) => {
@@ -1027,6 +1313,7 @@ fn class_label(class: JobClass) -> &'static str {
         JobClass::Failed => "failed",
         JobClass::Cancelled => "cancelled",
         JobClass::CancelledDependencies => "cancelled (dependencies only)",
+        JobClass::Uncertain => "failed (gate inputs unknown)",
     }
 }
 
@@ -1471,19 +1758,141 @@ mod tests {
     #[test]
     fn aggregate_gate_failed_only_by_cancelled_members_is_cancelled() {
         let jobs = parse_jobs(include_str!("ci/fixtures/run-cancelled-aggregate.json").as_bytes())
-            .expect("jobs");
-        let classes = classify_jobs(&jobs);
+            .expect("jobs fixture");
+        let needs = parse_workflow_needs(include_str!("ci/fixtures/workflow-ci.yml"))
+            .expect("workflow fixture")
+            .expect("gate needs");
+        let inputs = inputs_from_workflow(&needs, &jobs);
+        assert!(inputs.complete, "fixture resolves every gate input");
+        let classes = classify_jobs(&jobs, &inputs);
         let gate = jobs
             .iter()
-            .find(|job| job.name == "ci-status")
+            .find(|job| job.name == AGGREGATE_GATE)
             .expect("gate");
         assert_eq!(classes[&gate.id], JobClass::CancelledDependencies);
         assert!(classes[&gate.id].is_cancelled());
         let member = jobs
             .iter()
-            .find(|job| job.name == "Rust Linux tests (cache)")
+            .find(|job| job.name == "Rust front door (1/3)")
             .expect("member");
         assert_eq!(classes[&member.id], JobClass::Cancelled);
+        // The unrelated cancelled job is cancelled in its own right, but it is
+        // not one of the gate's inputs.
+        let unrelated = jobs
+            .iter()
+            .find(|job| job.name == "Docs drift")
+            .expect("unrelated job");
+        assert_eq!(classes[&unrelated.id], JobClass::Cancelled);
+    }
+
+    // Regression for F13: an unrelated cancellation plus a missing required
+    // member must never read as "the gate failed only because of cancellations".
+    #[test]
+    fn unrelated_cancelled_job_never_demotes_a_gate_with_a_missing_input() {
+        let mut jobs =
+            parse_jobs(include_str!("ci/fixtures/run-cancelled-aggregate.json").as_bytes())
+                .expect("jobs fixture");
+        jobs.retain(|job| job.name != "Rust front door (3/3)");
+        assert!(jobs.iter().any(|job| job.name == "Docs drift"));
+        let needs = parse_workflow_needs(include_str!("ci/fixtures/workflow-ci.yml"))
+            .expect("workflow fixture")
+            .expect("gate needs");
+        let inputs = inputs_from_workflow(&needs, &jobs);
+        assert!(!inputs.complete, "the missing matrix member is observable");
+        let classes = classify_jobs(&jobs, &inputs);
+        let gate = jobs
+            .iter()
+            .find(|job| job.name == AGGREGATE_GATE)
+            .expect("gate");
+        assert_eq!(classes[&gate.id], JobClass::Uncertain);
+        assert!(!classes[&gate.id].is_cancelled());
+    }
+
+    // Spec: docs/specs/cli.md#ci-observations
+    #[test]
+    fn only_the_gate_declared_members_decide_its_cancellation() {
+        let mut jobs =
+            parse_jobs(include_str!("ci/fixtures/run-cancelled-aggregate.json").as_bytes())
+                .expect("jobs fixture");
+        for job in &mut jobs {
+            if job.name == "Docs drift" {
+                job.conclusion = Some("failure".to_owned());
+            }
+        }
+        let needs = parse_workflow_needs(include_str!("ci/fixtures/workflow-ci.yml"))
+            .expect("workflow fixture")
+            .expect("gate needs");
+        let inputs = inputs_from_workflow(&needs, &jobs);
+        assert!(inputs.complete);
+        let classes = classify_jobs(&jobs, &inputs);
+        let gate = jobs
+            .iter()
+            .find(|job| job.name == AGGREGATE_GATE)
+            .expect("gate");
+        assert_eq!(classes[&gate.id], JobClass::CancelledDependencies);
+    }
+
+    // Spec: docs/specs/cli.md#ci-observations
+    #[test]
+    fn unknown_gate_inputs_keep_a_failed_gate_uncertain_but_failed() {
+        let jobs = parse_jobs(
+            br#"{"total_count":2,"jobs":[
+                {"id":11,"name":"Docs drift","status":"completed","conclusion":"cancelled","steps":[]},
+                {"id":12,"name":"ci-status","status":"completed","conclusion":"failure","steps":[]}
+            ]}"#,
+        )
+        .expect("jobs");
+        let classes = classify_jobs(&jobs, &GateInputs::unknown());
+        assert_eq!(classes[&12], JobClass::Uncertain);
+        assert!(!classes[&12].is_cancelled());
+        assert!(class_label(JobClass::Uncertain).contains("unknown"));
+    }
+
+    // Spec: docs/specs/cli.md#ci-observations
+    #[test]
+    fn gate_needs_published_on_the_jobs_endpoint_are_used() {
+        let jobs = parse_jobs(
+            br#"{"total_count":3,"jobs":[
+                {"id":21,"name":"build","status":"completed","conclusion":"cancelled","steps":[]},
+                {"id":22,"name":"Docs drift","status":"completed","conclusion":"cancelled","steps":[]},
+                {"id":23,"name":"ci-status","status":"completed","conclusion":"failure","steps":[],"needs":["build"]}
+            ]}"#,
+        )
+        .expect("jobs");
+        let inputs = gate_inputs_from_jobs(&jobs).expect("needs from jobs API");
+        assert!(inputs.complete);
+        let classes = classify_jobs(&jobs, &inputs);
+        assert_eq!(classes[&23], JobClass::CancelledDependencies);
+    }
+
+    // Spec: docs/specs/cli.md#ci-observations
+    #[test]
+    fn an_unresolved_jobs_api_need_leaves_the_gate_uncertain() {
+        let jobs = parse_jobs(
+            br#"{"total_count":3,"jobs":[
+                {"id":31,"name":"build","status":"completed","conclusion":"cancelled","steps":[]},
+                {"id":32,"name":"Docs drift","status":"completed","conclusion":"cancelled","steps":[]},
+                {"id":33,"name":"ci-status","status":"completed","conclusion":"failure","steps":[],"needs":["build","not-in-run"]}
+            ]}"#,
+        )
+        .expect("jobs");
+        let inputs = gate_inputs_from_jobs(&jobs).expect("needs from jobs API");
+        assert!(!inputs.complete);
+        let classes = classify_jobs(&jobs, &inputs);
+        assert_eq!(classes[&33], JobClass::Uncertain);
+    }
+
+    // Spec: docs/specs/cli.md#ci-observations
+    #[test]
+    fn matrix_display_name_templates_match_expanded_job_names() {
+        let partition = "Rust front door (${{ matrix.partition }}/3)";
+        assert!(name_matches(partition, "Rust front door (1/3)"));
+        assert!(!name_matches(partition, "Rust front door (1/2)"));
+        assert!(!name_matches(partition, "Rust front door (/3)"));
+        let group = "Rust macOS tests (${{ matrix.group }})";
+        assert!(name_matches(group, "Rust macOS tests (custody)"));
+        assert!(!name_matches(group, "Rust macOS tests ()"));
+        assert!(name_matches("Select CI suites", "Select CI suites"));
     }
 
     // Spec: docs/specs/cli.md#ci-observations
@@ -1497,7 +1906,11 @@ mod tests {
             ]}"#,
         )
         .expect("jobs");
-        let classes = classify_jobs(&jobs);
+        let inputs = GateInputs {
+            ids: vec![201, 202],
+            complete: true,
+        };
+        let classes = classify_jobs(&jobs, &inputs);
         assert_eq!(classes[&201], JobClass::Failed);
         assert_eq!(classes[&202], JobClass::Cancelled);
         assert_eq!(classes[&203], JobClass::Failed);
@@ -1514,7 +1927,7 @@ mod tests {
             ]}"#,
         )
         .expect("jobs");
-        let classes = classify_jobs(&jobs);
+        let classes = classify_jobs(&jobs, &GateInputs::unknown());
         assert_eq!(classes[&301], JobClass::Failed);
     }
 
