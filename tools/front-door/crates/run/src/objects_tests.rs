@@ -1988,6 +1988,80 @@ fn buffered_ref_retries_require_one_atomic_delete_transaction() {
 }
 
 #[test]
+// Spec: docs/specs/run.md#lane-git-and-import
+fn clear_import_refs_removes_every_attempt_pin_in_one_transaction() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let repo = fixture.worktree.repo();
+    let sibling = AttemptId::from_bytes([0x5a; 16]);
+    let oid = fixture.base.to_string();
+    let own: Vec<String> = (1..=3)
+        .map(|index| {
+            format!(
+                "refs/provenant/import-extra/{}/object-{index}",
+                fixture.import_attempt
+            )
+        })
+        .collect();
+    let foreign = format!("refs/provenant/import-extra/{sibling}/object");
+    for reference in own.iter().chain(std::iter::once(&foreign)) {
+        super::command(
+            &fixture.git,
+            repo.common_git_dir(),
+            &fixture.lane,
+            &super::args(&["update-ref", reference, &oid]),
+            None,
+        )?;
+    }
+    let marker = fixture.root.join("update-ref-attempts");
+    let wrapper = fixture.root.join("counting-git");
+    let shell_quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    // The executor places `--git-dir` and `-c` options before the subcommand,
+    // so count `update-ref` wherever it appears rather than assuming `$1`.
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = update-ref ]; then printf x >> {}; fi\ndone\nexec {} \"$@\"\n",
+            shell_quote(&marker),
+            shell_quote(&fixture.git),
+        ),
+    )?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+
+    super::clear_import_refs(&wrapper, repo, fixture.import_attempt)?;
+
+    assert_eq!(
+        fs::read(&marker)?.len(),
+        1,
+        "an attempt's pins must be deleted in one batched update-ref process"
+    );
+    for reference in &own {
+        assert!(
+            super::command(
+                &fixture.git,
+                repo.common_git_dir(),
+                &fixture.lane,
+                &super::args(&["for-each-ref", reference]),
+                None,
+            )?
+            .is_empty(),
+            "{reference} survived cleanup"
+        );
+    }
+    assert!(
+        !super::command(
+            &fixture.git,
+            repo.common_git_dir(),
+            &fixture.lane,
+            &super::args(&["for-each-ref", &foreign]),
+            None,
+        )?
+        .is_empty(),
+        "another attempt's pin was removed"
+    );
+    Ok(())
+}
+
+#[test]
 fn stopped_merge_retains_private_state_without_adoption_by_a_new_attempt() -> TestResult {
     let mut fixture = Fixture::new("sha1")?;
     fs::write(fixture.project.join("file"), "conflicting main change\n")?;
@@ -2087,12 +2161,7 @@ fn stopped_merge_retains_private_state_without_adoption_by_a_new_attempt() -> Te
     )?;
     super::sync_native_index(fixture.worktree.repo(), fixture.base);
     let import_attempt = provenant_core::AttemptId::from_bytes([0; 16]);
-    super::clear_import_refs(
-        &fixture.git,
-        fixture.worktree.repo(),
-        import_attempt,
-        &objects,
-    )?;
+    super::clear_import_refs(&fixture.git, fixture.worktree.repo(), import_attempt)?;
     assert!(
         super::command(
             &fixture.git,

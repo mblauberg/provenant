@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 const DAY_MICROS: i64 = 86_400_000_000;
@@ -783,6 +783,59 @@ impl RunStore {
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
+}
+
+fn import_pin_attempt(reference: &str) -> Option<AttemptId> {
+    let rest = reference.strip_prefix("refs/provenant/import-extra/")?;
+    AttemptId::parse(rest.split('/').next()?).ok()
+}
+
+fn import_pin_gc_eligible(store: &RunStore, id: AttemptId, call: &Request<'_>) -> Result<bool> {
+    let record = match store.record(id, call) {
+        Ok(record) => record,
+        // No attempt owns the ref: it outlived its attempt.
+        Err(RunError::NotFound) => return Ok(true),
+        Err(error) => return Err(error),
+    };
+    if !matches!(record.state, AttemptState::Terminal { .. }) {
+        return Ok(false);
+    }
+    // A refused import keeps its pins as recovery evidence: its cleanup effect
+    // never runs, so it must not be mistaken for a settled attempt here.
+    if let Ok(attempt) = store.attempt_dir(id, false)
+        && crate::holder::object_import_refused(&attempt, RunStore::scope(&record))?.is_some()
+    {
+        return Ok(false);
+    }
+    store.reconcile_is_settled(id, id, call)
+}
+
+/// GC backstop: remove the import-extra pins of every settled or missing
+/// attempt in one batched `update-ref --stdin` transaction. Live attempts and
+/// refused imports keep their pins until settlement releases them. A preview
+/// reports what it would remove without touching the ref store.
+pub fn gc_import_pins(
+    git: &Path,
+    repo: &provenant_confinement::repo::VerifiedRepo,
+    store: &RunStore,
+    call: &Request<'_>,
+    dry_run: bool,
+) -> Result<usize> {
+    let mut eligible = Vec::new();
+    for reference in crate::objects::all_import_extra_refs(git, repo)? {
+        call.check()?;
+        let Some(id) = import_pin_attempt(&reference) else {
+            continue;
+        };
+        // An unreadable attempt is not proof of settlement: keep its pins.
+        if let Ok(true) = import_pin_gc_eligible(store, id, call) {
+            eligible.push(reference);
+        }
+    }
+    if !dry_run {
+        crate::objects::delete_refs(git, repo, &eligible)?;
+    }
+    Ok(eligible.len())
 }
 
 /// Every custody check that protects an attempt's payload: the publication

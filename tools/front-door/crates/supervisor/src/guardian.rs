@@ -470,10 +470,6 @@ pub struct GuardianHooks<'a> {
 /// except when the attempt directory is provably removed: there is nowhere to
 /// publish the exit or settle, so only the writer reservation remains.
 pub trait Holder {
-    /// Host graph evidence: unknown or live nested work must prevent escapee stops.
-    fn has_live_children(&self, _context: &[u8]) -> Result<bool> {
-        Ok(false)
-    }
     fn admit(&self, context: &[u8], attempt: &Directory) -> Result<()>;
     /// Stop host-side submission services before descendant cleanup begins.
     /// Failure is bookkeeping evidence, never a provider stop reason.
@@ -896,12 +892,12 @@ struct Driver<'a> {
     registry: Option<&'a dyn ChildRegistry>,
     descendant_stop_allowed: bool,
     /// The registry permits an exact sandbox escapee stop this tick.
-    /// The host graph-child check is deferred until a control action needs it.
     /// Unproven registered owners stay protected. Independent of
-    /// `descendant_stop_allowed`.
+    /// `descendant_stop_allowed`. Live graph children are separate attempts
+    /// and never among this lane's candidates (#3568).
     escapee_stop_allowed: bool,
     /// The last stop pass had live candidates it was not allowed to signal:
-    /// withheld descendant or escapee permission, or a host graph refusal.
+    /// withheld descendant or escapee permission.
     stop_refused: bool,
 }
 /// Whether a writer's latest reported context has reached its context handoff
