@@ -1518,7 +1518,14 @@ mod tests {
         });
         store.create(&legacy, &call)?;
 
-        let legacy_record = store.record(legacy.attempt_id, &call)?;
+        let legacy_record = store.mark_starting(
+            &store.record(legacy.attempt_id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
         let legacy_scope = crate::RunStore::scope(&legacy_record);
         let slot = store
             .attempt_writer_slot(legacy.attempt_id, &call)?
@@ -1532,10 +1539,30 @@ mod tests {
             &clock,
         )?;
         drop(lease);
+        // Match the schema-1 record written before per-attempt holder locks.
+        use std::os::unix::fs::MetadataExt;
+        let evidence = slot.join(legacy.attempt_id.to_string());
+        let attempt = store
+            .attempt_dir(legacy.attempt_id, false)?
+            .current_path()?;
+        std::fs::write(evidence.join("guardian.lock"), [])?;
+        std::fs::write(attempt.join("custody.lock"), [])?;
+        let identity = |path: &std::path::Path| -> std::io::Result<serde_json::Value> {
+            let metadata = std::fs::metadata(path)?;
+            Ok(serde_json::json!({"device": metadata.dev(), "inode": metadata.ino()}))
+        };
+        let guardian = serde_json::json!({
+            "schema_version": 1,
+            "scope": legacy_scope,
+            "guardian_process": null,
+            "attempt": identity(&attempt)?,
+            "guardian": identity(&evidence.join("guardian.lock"))?,
+            "writer": identity(&slot.join("writer.lock"))?,
+            "custody": identity(&attempt.join("custody.lock"))?,
+        });
         std::fs::write(
-            slot.join(legacy.attempt_id.to_string())
-                .join("guardian-lock.json"),
-            br#"{"schema_version":1}"#,
+            evidence.join("guardian-lock.json"),
+            serde_json::to_vec(&guardian)?,
         )?;
 
         let listing = store.writer_fence_listing()?;
