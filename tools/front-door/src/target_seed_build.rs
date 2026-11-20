@@ -2946,8 +2946,10 @@ mod tests {
         assert_eq!(prepare.exit, Some(7));
         assert!(prepare.tail.len() <= OUTPUT_TAIL_BYTES);
         assert!(prepare.tail.contains("xxx"));
+        // The target directory exists before prepare (prepare shares the build
+        // environment that points at it), but cargo must not have written to it.
         assert!(
-            !stage.join("target").exists(),
+            fs::read_dir(stage.join("target")).is_ok_and(|mut entries| entries.next().is_none()),
             "cargo never runs after a failed prepare command"
         );
     }
