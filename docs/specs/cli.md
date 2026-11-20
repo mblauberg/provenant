@@ -161,6 +161,15 @@ default, expands with `--full`, and exposes typed records and native presence
 with `--json`. Pagination uses `--limit` and `--cursor`; `--session` selects the
 exact chair session for the session-start digest. Settled custody leaves the
 active view. The digest reads this view instead of extracting PRs from prose.
+`provenant status` and `provenant worktree list` also report a `stranded work`
+section: a registered or project worktree with uncommitted edits and no live
+holder, named by its branch and linked issue or PR when the branch carries one.
+Each row gives the changed file and line counts, the age of the newest edit and
+the `run implement --worktree` command that adopts the work. A clean worktree,
+one with a live lane and one whose holder cannot be determined are not called
+stranded. The section is advisory state only: it never refuses a command or
+signals a process. `status --json` carries `stranded_work`; `worktree list` keeps
+its worktree array in JSON and adds the section to human output.
 Graph status rows share the same keys across graph, node and attempt kinds.
 An attempt row carries `provenant_version` and `release_source_digest` read
 from that attempt's stored trace; both keys are absent when the observation is.

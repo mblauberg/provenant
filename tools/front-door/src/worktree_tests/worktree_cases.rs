@@ -1,5 +1,116 @@
 use super::*;
 
+/// Resolve the structured path emitted by `worktree create` without assuming
+/// how a branch name maps to a directory.
+fn created_worktree_path(value: &Value) -> Result<PathBuf> {
+    let wire = &value["data"]["path"];
+    let root = wire["root"].as_str().ok_or("worktree path root")?;
+    let relative = wire["relative"]["path"]
+        .as_str()
+        .ok_or("worktree relative path")?;
+    Ok(Path::new(root).join(relative))
+}
+
+pub(super) fn status_and_worktree_list_report_stranded_work() -> Result {
+    let rig = repository()?;
+    let created = ok(
+        &rig,
+        &["worktree", "create", "fix/3650-stranded-work", "--json"],
+    )?;
+    let path = created_worktree_path(&created)?;
+    ok(&rig, &["worktree", "create", "fix/3546-clean", "--json"])?;
+    let file = path.join("stranded.txt");
+    fs::write(&file, "one\ntwo\nthree\n")?;
+    let older = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(2 * 86_400))
+        .ok_or("age arithmetic")?;
+    fs::File::open(&file)?.set_modified(older)?;
+
+    let status = ok(&rig, &["status", "--json"])?;
+    let rows = status["data"]["stranded_work"]
+        .as_array()
+        .ok_or("status has no stranded_work array")?;
+    assert_eq!(rows.len(), 1, "{status}");
+    let row = &rows[0];
+    assert_eq!(row["branch"], "fix/3650-stranded-work");
+    assert_eq!(row["issue"], "#3650");
+    assert_eq!(row["files"], 1);
+    assert_eq!(row["lines"], 3);
+    assert_eq!(row["age"], "2d");
+    assert!(
+        row["path"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("3650-stranded-work")
+    );
+
+    let listing = ok(&rig, &["worktree", "list", "--json"])?;
+    assert_eq!(listing["data"].as_array().map(Vec::len), Some(3));
+
+    let human_status = command(&rig, &["status"])?;
+    let status_text = String::from_utf8(human_status.stdout.bytes)?;
+    assert!(status_text.contains("stranded work:"), "{status_text}");
+    assert!(status_text.contains("#3650"), "{status_text}");
+    assert!(
+        status_text.contains("1 file, 3 lines, 2d old"),
+        "{status_text}"
+    );
+    assert!(
+        status_text.contains("provenant run implement --worktree"),
+        "{status_text}"
+    );
+    assert!(!status_text.contains("3546-clean"), "{status_text}");
+
+    let human_list = command(&rig, &["worktree", "list"])?;
+    let list_text = String::from_utf8(human_list.stdout.bytes)?;
+    assert!(list_text.contains("stranded work:"), "{list_text}");
+    assert!(list_text.contains("#3650"), "{list_text}");
+    Ok(())
+}
+
+pub(super) fn status_omits_stranded_work_with_a_live_lane() -> Result {
+    let rig = repository()?;
+    let created = ok(
+        &rig,
+        &["worktree", "create", "fix/3650-stranded-work", "--json"],
+    )?;
+    let path = created_worktree_path(&created)?;
+    fs::write(path.join("stranded.txt"), "one\ntwo\nthree\n")?;
+    let (roots, _) = writer_context(&rig)?;
+    let cancel = provenant_core::CancelToken::new();
+    let clock = provenant_os::clock::SystemClock;
+    provenant_confinement::worktrees::with_context(
+        &roots,
+        &rig.home,
+        &rig.project,
+        &clock,
+        &cancel,
+        |context| {
+            // A held writer lease is a live lane. The survey must not call
+            // this work stranded while the lease exists.
+            let _guard =
+                provenant_confinement::worktrees::cache_writer_guard(context.project_state, &path)
+                    .map_err(|occupancy| {
+                        provenant_confinement::worktrees::WorktreeError::UnknownOccupancy {
+                            path: path.clone(),
+                            detail: format!("fixture writer lease unavailable: {occupancy:?}"),
+                        }
+                    })?;
+            let rows = crate::stranded_work::survey_in_context(
+                context,
+                &cancel,
+                crate::stranded_work::now_micros(&clock),
+            );
+            assert!(
+                rows.iter().all(|row| row.path != path),
+                "a held lane was reported as stranded: {rows:?}"
+            );
+            Ok(())
+        },
+    )?;
+    Ok(())
+}
+
 pub(super) fn naming_and_post_create_ports_are_advisory_and_evidenced() -> Result {
     let rig = repository()?;
     let (roots, _execution) = writer_context(&rig)?;
