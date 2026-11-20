@@ -211,6 +211,49 @@ fn unknown_opencode_error_settles_unclassified() {
 
 // Spec: docs/specs/routing.md#capacity-is-not-quota
 #[test]
+fn text_then_unclassified_error_with_exit_zero_is_not_success() {
+    let route = run::RouteRecord {
+        provider: Some("opencode".into()),
+        model: Some("opencode/anthropic/test".into()),
+        ..Default::default()
+    };
+    let stream = concat!(
+        "{\"type\":\"text\",\"sessionID\":\"ses_a\",\"part\":{\"text\":\"OK\"}}\n",
+        "{\"type\":\"error\",\"error\":{\"type\":\"unknown\",\"message\":\"x\"}}\n",
+    );
+    let decoded = Registry::default()
+        .decode(
+            &route,
+            stream.as_bytes(),
+            &clean_exit(),
+            Path::new("/nonexistent"),
+        )
+        .unwrap();
+    assert_eq!(decoded.outcome, run::Outcome::Unclassified);
+}
+
+// Spec: docs/specs/routing.md#capacity-is-not-quota
+#[test]
+fn text_without_error_and_exit_zero_succeeds() {
+    let route = run::RouteRecord {
+        provider: Some("opencode".into()),
+        model: Some("opencode/anthropic/test".into()),
+        ..Default::default()
+    };
+    let stream = "{\"type\":\"text\",\"sessionID\":\"ses_a\",\"part\":{\"text\":\"OK\"}}\n";
+    let decoded = Registry::default()
+        .decode(
+            &route,
+            stream.as_bytes(),
+            &clean_exit(),
+            Path::new("/nonexistent"),
+        )
+        .unwrap();
+    assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+}
+
+// Spec: docs/specs/routing.md#capacity-is-not-quota
+#[test]
 fn diagnosed_opencode_error_omits_private_provider_text() {
     let route = run::RouteRecord {
         provider: Some("opencode".into()),

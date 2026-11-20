@@ -196,6 +196,8 @@ Capacity (`model_unavailable`) and account allowance (`quota_limited`) are
 separate outcomes. A capacity cooldown is an advisory selection preference that
 explicit models ignore; only a quota-limited outcome cools an account. Retries
 spend the single lineage allowance in [retry owner](retry-owner.md).
+An unclassified provider error settles as `Unclassified`, including after text
+and exit 0; a clean exit without an error still settles as `Succeeded`.
 - Why: capacity and quota need different remedies without multiplying retries.
 
 ## Unknown never means ready
