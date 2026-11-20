@@ -4323,6 +4323,28 @@ fn opencode_free_pool_cools_second_model() -> Result {
     Ok(())
 }
 
+fn opencode_free_limit_records_provider_retry_after() -> Result {
+    let stdout = br#"{"type":"error","error":{"type":"provider.free-limit","status":429,"retryAfterMs":5624100}}"#;
+    let record = persisted_refusal(
+        "opencode",
+        "opencode/opencode/deepseek-v4.1-flash-free",
+        ("open-code-free", "keyless-free"),
+        stdout,
+    )?;
+    let refusal = &record.refusals[0];
+    assert_eq!(refusal.pool.as_deref(), Some("opencode-free"));
+    // Refusals have whole-second timestamps, so milliseconds round up.
+    assert_eq!(
+        refusal.resets_unix_seconds,
+        Some(refusal.observed_unix_seconds + 5625)
+    );
+    assert_eq!(
+        refusal.expires_unix_seconds()?,
+        refusal.observed_unix_seconds + 5625
+    );
+    Ok(())
+}
+
 fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
     use provenant_records::{
         ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
@@ -4399,12 +4421,12 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
     admit(&first, resets + 10)?;
     admit(&second, resets + 10)?;
 
-    // Missing, null, negative and huge values fall back or clamp.
+    // Missing, null and negative values fall back; long provider waits are retained.
     for (retry_ms, expected_offset) in [
         (None, None),
         (Some(serde_json::Value::Null), None),
         (Some(serde_json::json!(-5000)), None),
-        (Some(serde_json::json!(999_999_999)), Some(86_400)),
+        (Some(serde_json::json!(999_999_999)), Some(1_000_000)),
     ] {
         let mut err = serde_json::json!({
             "type": "provider.quota",
@@ -6405,6 +6427,10 @@ fn main() -> ExitCode {
             (
                 "opencode_free_pool_cools_second_model",
                 opencode_free_pool_cools_second_model,
+            ),
+            (
+                "opencode_free_limit_records_provider_retry_after",
+                opencode_free_limit_records_provider_retry_after,
             ),
             (
                 "opencode_free_reset_cools_pool_until_reset_and_restores",

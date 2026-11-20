@@ -2674,7 +2674,10 @@ fn quota_human_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> String
             "{} [{}]: {status}{}, age {age}",
             row.account.label,
             row.account.adapter,
-            reset.map_or_else(String::new, |label| format!(" {label}"))
+            reset.map_or_else(String::new, |label| format!(
+                " {label} (source: {})",
+                refusal_reset_source(&row.account.adapter)
+            ))
         ));
         if let Some(readiness) = &row.readiness {
             human.push_str(&format!(
@@ -2714,7 +2717,10 @@ fn quota_human_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> String
                 .and_then(|at| reset_label(at, report.generated_unix_seconds, &time_zone));
             human.push_str(&format!(
                 "; recorded refusal for {name}{pool}{}",
-                reset.map_or_else(String::new, |label| format!(" {label}"))
+                reset.map_or_else(String::new, |label| format!(
+                    " {label} (source: {})",
+                    refusal_reset_source(&row.account.adapter)
+                ))
             ));
         }
         if let Some(snapshot) = &row.snapshot {
@@ -2832,6 +2838,14 @@ fn reset_label(resets_at: &str, now: i64, time_zone: &jiff::tz::TimeZone) -> Opt
         "%a %H:%M"
     };
     Some(format!("until {}", reset.strftime(format)))
+}
+
+fn refusal_reset_source(adapter: &str) -> &'static str {
+    if adapter == "opencode" {
+        "provider retry-after"
+    } else {
+        "provider reset"
+    }
 }
 
 /// Avoid repeating the account-level free-pool expiry already printed beside its status.
@@ -2968,7 +2982,10 @@ fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crat
                     .and_then(|at| reset_label(at, report.generated_unix_seconds, &time_zone));
                 format!(
                     "recorded refusal for {name}{pool}{}",
-                    reset.map_or_else(String::new, |label| format!(" {label}"))
+                    reset.map_or_else(String::new, |label| format!(
+                        " {label} (source: {})",
+                        refusal_reset_source(&row.account.adapter)
+                    ))
                 )
             })
             .collect::<Vec<_>>();
@@ -2983,7 +3000,10 @@ fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crat
             row.account.adapter,
             state(row),
             pools,
-            reset.map_or_else(String::new, |label| format!(" {label}")),
+            reset.map_or_else(String::new, |label| format!(
+                " {label} (source: {})",
+                refusal_reset_source(&row.account.adapter)
+            )),
             refusals
         )
     }));
@@ -3942,7 +3962,7 @@ mod tests {
         let today = report("2026-11-02T00:00:00Z", Some("2026-11-02T00:11:00Z"));
         let human = quota_human_at(&today, zone.clone());
         assert!(
-            human.contains("zen [opencode]: EXHAUSTED until 10:11"),
+            human.contains("zen [opencode]: EXHAUSTED until 10:11 (source: provider retry-after)"),
             "{human}"
         );
         assert!(
@@ -3955,10 +3975,8 @@ mod tests {
         );
         let compact = quota_summary_at(&today, zone.clone());
         assert!(
-            compact
-                .lines
-                .iter()
-                .any(|line| line == "zen [opencode]: exhausted until 10:11")
+            compact.lines.iter().any(|line| line
+                == "zen [opencode]: exhausted until 10:11 (source: provider retry-after)")
         );
         assert!(
             compact
@@ -4002,12 +4020,12 @@ mod tests {
         let human = quota_human_at(&scoped, zone.clone());
         assert!(
             human
-                .contains("recorded refusal for opencode/beam-pro in pool opencode-go until 10:11"),
+                .contains("recorded refusal for opencode/beam-pro in pool opencode-go until 10:11 (source: provider retry-after)"),
             "{human}"
         );
         let compact = quota_summary_at(&scoped, zone.clone());
         assert!(compact.lines.iter().any(|line| {
-            line == "unknown [opencode]: available (recorded refusal for opencode/beam-pro in pool opencode-go until 10:11)"
+            line == "unknown [opencode]: available (recorded refusal for opencode/beam-pro in pool opencode-go until 10:11 (source: provider retry-after))"
         }));
         assert_eq!(
             serde_json::to_value(&scoped).unwrap()["accounts"][1]["refusals"][0]["resets_at"],
