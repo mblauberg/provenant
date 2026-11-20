@@ -19,7 +19,34 @@ use std::io::{self, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+/// Source digest of the binary that writes launch.json. The entry point knows
+/// the installed build and hands it in; the version is compiled into this
+/// crate. The digest stays unknown when no entry point supplied one, so a
+/// launch record never guesses which build wrote it.
+static BUILD_SOURCE_DIGEST: OnceLock<String> = OnceLock::new();
+
+/// Record the running binary's source digest before any guardian launches.
+pub fn set_build_source_digest(digest: String) {
+    let _ = BUILD_SOURCE_DIGEST.set(digest);
+}
+
+/// The build named in a launch record.
+#[derive(Debug, Serialize)]
+struct Build {
+    version: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_digest: Option<&'static str>,
+}
+
+fn launched_build() -> Build {
+    Build {
+        version: env!("CARGO_PKG_VERSION"),
+        source_digest: BUILD_SOURCE_DIGEST.get().map(String::as_str),
+    }
+}
 
 #[derive(Debug)]
 struct ReconcileHint {
@@ -728,6 +755,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     #[derive(Serialize)]
     struct Summary<'a> {
         schema_version: u64,
+        build: Build,
         scope: Scope,
         key: &'a provenant_records::WorkKey,
         resolved_route: &'a str,
@@ -742,6 +770,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     // Omit all argv values, stdin, environment values and the replayable plan.
     let summary = Summary {
         schema_version: 1,
+        build: launched_build(),
         scope: message.scope,
         key: &message.key,
         resolved_route: &message.resolved_route,

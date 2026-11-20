@@ -68,6 +68,9 @@ its census and sandbox probe only for an unresolved exit.
 
 A launch is named by its attempt's `WorkKey`: the guardian's launch summary
 records the key, and a stop request is identified by attempt and generation.
+The launch summary also records the launching build's version and source
+digest, so every launch names the binary that wrote it, even when an upgrade
+lands while the attempt is queued.
 A supervisor restart finds a live writer by the key through the attempt row,
 then reads that attempt's custody records.
 - Why: signalling a recycled PID or a sibling's group kills unrelated work, and

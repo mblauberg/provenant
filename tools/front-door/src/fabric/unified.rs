@@ -2505,6 +2505,7 @@ pub(crate) fn unified_graph_trace(
         if provenant_cli::fabric::in_lane() {
             let mut data = lane_graph_read(json!({"op":"trace", "id":id}))?;
             add_cache_share(&mut data);
+            add_build_identity(&mut data);
             return Ok(data);
         }
         let factory = read_factory(globals, workers).map_err(|error| {
@@ -2536,18 +2537,30 @@ pub(crate) fn unified_graph_trace(
             events.retain(|event| event["attempt"]["identity"] == reference.as_str());
         }
         add_cache_share(&mut data);
+        add_build_identity(&mut data);
         Ok(data)
     })();
     match result {
         Ok(data) => {
-            let human = data["events"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(Value::to_string)
-                .collect::<Vec<_>>()
-                .join("\n")
-                + "\n";
+            let mut human = String::new();
+            if let Some(version) = data["build"]["version"].as_str() {
+                human.push_str(&format!(
+                    "build {version} ({})\n",
+                    data["build"]["source_digest"]
+                        .as_str()
+                        .unwrap_or("unknown source digest")
+                ));
+            }
+            human.push_str(
+                &data["events"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            human.push('\n');
             let display_globals = provenant_cli::Globals {
                 json: globals.json,
                 full: true,
@@ -2566,6 +2579,18 @@ pub(crate) fn unified_graph_trace(
             )
         }
         Err(error) => command_fail("trace", error.as_ref(), globals),
+    }
+}
+
+/// The graph event stream carries attempt identities but no build identity.
+/// Name the binary producing this trace so the header and the structured
+/// output agree on which build an operator is reading.
+fn add_build_identity(data: &mut Value) {
+    if let Ok(identity) = crate::identity() {
+        data["build"] = json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "source_digest": identity.source_digest.to_string(),
+        });
     }
 }
 

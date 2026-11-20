@@ -62,6 +62,8 @@ fn row() -> LaneRow {
         provider_error: None,
         capabilities: None,
         payload: None,
+        provenant_version: None,
+        release_source_digest: None,
     }
 }
 
@@ -259,6 +261,62 @@ fn dead_and_unobservable_writer_projection_is_truthful_and_actionable()
     assert!(unknown.reason.as_deref().is_some_and(|reason| {
         reason.contains("cannot be verified") && reason.contains("provenant reconcile")
     }));
+    Ok(())
+}
+
+#[test]
+fn status_rows_surface_build_identity_from_the_stored_trace()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Spec: docs/specs/cli.md#status-selection
+    let project = ProjectId::from_bytes([9; 16]);
+    let target = crate::WorkKey::new(project, "build-identity", "writer", 1)?;
+    let base = json!({
+        "schema_version": 1,
+        "key": target,
+        "attempt_id": AttemptId::from_bytes([2; 16]),
+        "project_id": project,
+        "attempt_number": 1,
+        "revision": 1,
+        "generation": 1,
+        "requested_route": {"kind":"named", "name":"fixture"},
+        "authority_digest": Digest::from_bytes([3; 32]),
+        "queued_at": WallTime::from_micros(1)?,
+        "state": {"state":"running"},
+        "usage": {},
+        "trace": {},
+        "read_only_writable": [],
+        "protected_paths": [],
+        "prompt": {
+            "path":{"encoding":"utf8", "path":"prompt"},
+            "digest":CanonicalV1::file_digest(b"fixture"),
+            "bytes":7,
+            "complete":true,
+            "redacted":false
+        }
+    });
+    let digest = "7fc53dfe00000000000000000000000000000000000000000000000000000000";
+    let observed = "1970-01-01T00:00:00.000000Z";
+    let mut recorded = base.clone();
+    recorded["trace"] = json!({
+        "telemetry_context": {
+            "provenant_version": {"value": "2.4.1", "source": "compiled_package", "effective_at": observed, "scope": "provenant-run package"},
+            "release_source_digest": {"value": digest, "source": "release_manifest", "effective_at": observed, "scope": "installed release"}
+        }
+    });
+    let attempt: crate::run::AttemptRecord = serde_json::from_value(recorded)?;
+    let projected = LaneRow::project(&attempt, LaneProjectionFacts::default());
+    assert_eq!(projected.provenant_version.as_deref(), Some("2.4.1"));
+    assert_eq!(projected.release_source_digest.as_deref(), Some(digest));
+    let value = serde_json::to_value(&projected)?;
+    assert_eq!(value["provenant_version"], "2.4.1");
+    assert_eq!(value["release_source_digest"], digest);
+
+    // A record with neither observation omits both keys and does not error.
+    let old: crate::run::AttemptRecord = serde_json::from_value(base)?;
+    let projected = LaneRow::project(&old, LaneProjectionFacts::default());
+    let value = serde_json::to_value(&projected)?;
+    assert!(value.get("provenant_version").is_none());
+    assert!(value.get("release_source_digest").is_none());
     Ok(())
 }
 

@@ -282,6 +282,33 @@ fn scope() -> Scope {
         generation: 1,
     }
 }
+
+/// An additive `build` field in launch.json must not change custody recovery.
+fn reattach_accepts_launch_records_with_and_without_build(root: &Path) -> Result<()> {
+    let requester = provenant_core::ActorId::from_bytes([7; 16]);
+    for (name, summary) in [
+        (
+            "without-build",
+            serde_json::json!({"schema_version": 1, "scope": scope(), "requester": requester}),
+        ),
+        (
+            "with-build",
+            serde_json::json!({
+                "schema_version": 1,
+                "scope": scope(),
+                "requester": requester,
+                "build": {"version": "2.4.1", "source_digest": "3634"},
+            }),
+        ),
+    ] {
+        let attempt = root.join(format!("{name}-attempt"));
+        std::fs::create_dir(&attempt)?;
+        std::fs::write(attempt.join("launch.json"), serde_json::to_vec(&summary)?)?;
+        reattach(Directory::open_anchor(&attempt)?, scope())?;
+    }
+    Ok(())
+}
+
 fn writer_is_fenced_after_every_descriptor_closes(root: &Path) -> Result<()> {
     let path = root.join("writer");
     std::fs::create_dir(&path)?;
@@ -3269,6 +3296,10 @@ const CASES: &[Case] = &[
     (
         "held_stop_replaces_what_a_lane_left_but_reattach_keeps_a_later_generation",
         held_stop_replaces_what_a_lane_left_but_reattach_keeps_a_later_generation,
+    ),
+    (
+        "reattach_accepts_launch_records_with_and_without_build",
+        reattach_accepts_launch_records_with_and_without_build,
     ),
     (
         "descendant_journal_failure_is_reported",
