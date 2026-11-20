@@ -506,6 +506,8 @@ fn gate_verdict_rejects_spoofed_multiple_and_malformed_lines() {
         "VERDICT: PASSX".to_owned(),
         "VERDICT: passable".to_owned(),
         "VERDICT: PASS/FAIL".to_owned(),
+        // A declaration line past the capture's line bound is not recognised.
+        format!("VERDICT: PASS{}", " ".repeat(1024)),
         format!(
             "{}\nVERDICT: FAIL\n{}\nVERDICT: PASS",
             "x".repeat(5000),
@@ -539,7 +541,7 @@ fn gate_verdict_accepts_trailing_text_after_a_recognised_word() {
     // captured verdict is still canonicalised before the gate reads it.
     for text in [
         "VERDICT: PASS x".to_owned(),
-        format!("VERDICT: PASS{}", " ".repeat(1024)),
+        "verdict: pass".to_owned(),
         "Verdict: LGTM abc123".to_owned(),
         "VERDICT: approved 0be4e6c".to_owned(),
     ] {
@@ -569,7 +571,12 @@ fn gate_verdict_ignores_prose_that_only_resembles_a_verdict_line() {
         VerdictThreshold::All,
         &[Some("PASS"), Some("PASS"), Some("PASS")],
     );
-    owner.observations[0] = terminal_with_result(AttemptOutcome::Succeeded, "verdict: pass");
+    // A declaration is recognised case-insensitively, so prose here must not
+    // take the declaration shape at all.
+    owner.observations[0] = terminal_with_result(
+        AttemptOutcome::Succeeded,
+        "Overall the verdict leans towards a pass once F1 is fixed.",
+    );
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.checkpoint.nodes[3].state, NodeState::Failed);
     assert_eq!(
