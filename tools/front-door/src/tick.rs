@@ -3062,7 +3062,7 @@ mod tests {
         assert!(older.projects[0].cleared_environment.is_empty());
     }
 
-    /// Spec: docs/specs/state.md (every new persisted field is optional or defaulted)
+    /// Spec: docs/specs/state.md#typed-host-metadata-in-format-2 (every new persisted field is optional or defaulted)
     #[test]
     fn the_seed_result_records_typed_per_project_outcomes_and_reads_an_older_result() {
         use crate::target_seed_build::SkipReason;
