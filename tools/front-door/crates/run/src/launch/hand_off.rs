@@ -523,7 +523,15 @@ impl RunStore {
                 }
             }
         }
-        strip_hosted_credentials(&mut plan.environment);
+        strip_hosted_credentials(
+            &mut plan.environment,
+            plan.route
+                .lane_access
+                .as_ref()
+                .map_or(provenant_records::LaneAccess::Host, |receipt| {
+                    receipt.access
+                }),
+        );
         // Route records name models as `adapter/model`; prefix only a
         // provider-native one (which may itself contain `/`).
         let provider = plan.route.provider.as_deref().unwrap_or_default();
@@ -703,12 +711,16 @@ impl Drop for CancelWatch {
     }
 }
 
-/// Hosted-cloud and third-party credentials never reach a lane, sandboxed
-/// or not. Adapters already rebuild the environment from an allowlist; this
-/// holds the boundary if an allowlist ever grows. `GH_TOKEN` is the one
-/// credential the host hands a publishing lane on purpose.
-pub(crate) fn strip_hosted_credentials(environment: &mut Vec<(OsString, OsString)>) {
-    environment.retain(|(name, _)| !hosted_credential(name));
+/// Isolated lanes strip hosted-cloud and third-party credentials. Cross-host
+/// and ungranted-provider credential boundaries are enforced at that crossing.
+/// `GH_TOKEN` remains available to publishing lanes.
+pub(crate) fn strip_hosted_credentials(
+    environment: &mut Vec<(OsString, OsString)>,
+    access: provenant_records::LaneAccess,
+) {
+    if access.is_isolated() {
+        environment.retain(|(name, _)| !hosted_credential(name));
+    }
 }
 
 fn hosted_credential(name: &std::ffi::OsStr) -> bool {
@@ -793,7 +805,9 @@ mod tests {
             .map(|(name, _)| ((*name).into(), format!("value:{name}").into()))
             .collect();
         let original = environment.clone();
-        super::strip_hosted_credentials(&mut environment);
+        super::strip_hosted_credentials(&mut environment, provenant_records::LaneAccess::Host);
+        assert_eq!(environment, original);
+        super::strip_hosted_credentials(&mut environment, provenant_records::LaneAccess::Isolated);
         for (name, value) in original {
             let retained = environment.iter().find(|(key, _)| key == &name);
             if super::hosted_credential(&name) {

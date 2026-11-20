@@ -810,33 +810,48 @@ pub(crate) fn tool_search_path(
     Ok(path)
 }
 
-/// Native launches inherit the host environment in memory; provider selectors
-/// are applied by each adapter. Sandboxed launches use a minimal environment:
-/// the user's identity, filtered requester PATH followed by fixed tool-search
-/// fallbacks, and TMPDIR under the attempt's private tmp directory. Required
-/// private wrappers are prepended during finalisation. zsh ignores TMPDIR for the
-/// temporary files behind here-documents and here-strings and defaults
-/// TMPPREFIX to `/tmp/zsh`, which a lane cannot write, so TMPPREFIX points
-/// into the same directory. Repository-specific Git object configuration
-/// belongs to the private directory.
-/// Callers append provider keys.
+/// Host access inherits the host environment; adapters apply provider selectors.
+/// Isolated sandboxed launches reconstruct the prior minimal environment.
+/// Sandboxes use private temporary paths because host temporary directories may
+/// not be writable; zsh also needs TMPPREFIX for here-documents.
 pub(crate) fn base_env(
     input: &PrepareInput<'_>,
     scratch: &Path,
     path: impl AsRef<std::ffi::OsStr>,
 ) -> Result<Vec<(OsString, OsString)>, ProviderError> {
-    if !input.sandboxed() {
-        let mut env: Vec<_> = std::env::vars_os()
-            .filter(|(name, _)| name != provenant_core::consumer_env::SANDBOX && name != "HOME")
+    base_env_with_host(input, scratch, path, std::env::vars_os())
+}
+
+pub(crate) fn base_env_with_host(
+    input: &PrepareInput<'_>,
+    scratch: &Path,
+    path: impl AsRef<std::ffi::OsStr>,
+    host: impl Iterator<Item = (OsString, OsString)>,
+) -> Result<Vec<(OsString, OsString)>, ProviderError> {
+    if !input.isolated() {
+        let sandboxed = input.sandboxed();
+        let mut env: Vec<_> = host
+            .filter(|(name, _)| {
+                name != provenant_core::consumer_env::SANDBOX
+                    && name != "HOME"
+                    && !(sandboxed && (name == "TMPDIR" || name == "TMPPREFIX"))
+            })
             .collect();
         // Apply the requester's path before adapters add their own wrappers.
         if let Some(path) = (input.host_var)("PATH") {
             env.retain(|(name, _)| name != "PATH");
             env.push(("PATH".into(), path));
         }
-        // Establish the host's selected home before an adapter may isolate it.
         env.push(("HOME".into(), input.home.into()));
-        env.push((provenant_core::consumer_env::SANDBOX.into(), "off".into()));
+        env.push((
+            provenant_core::consumer_env::SANDBOX.into(),
+            if sandboxed { "on" } else { "off" }.into(),
+        ));
+        if sandboxed {
+            // The sandbox may deny writes to the inherited temporary directory.
+            env.push(("TMPDIR".into(), scratch.into()));
+            env.push(("TMPPREFIX".into(), scratch.join("zsh").into()));
+        }
         return Ok(env);
     }
     let fallbacks = path.as_ref();
