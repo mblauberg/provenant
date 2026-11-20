@@ -42,6 +42,24 @@ This repository keeps its source at `config/ports.json` and links the optional
 `scripts/verify-nextest` belong in that source (direct CI reads it without
 Provenant); the builtin verify tiers are neutral cargo commands.
 
+The `build` port carries the shared seed-build interface. `build.prepare` is an
+ordered list of argv arrays: each command runs with the checkout root as its
+working directory before a seed build, and a failing command fails that build
+(the runner is implemented by a later slice). `build.seed.stale_after` is the age
+after which a seed is considered stale, expressed in the host-gc duration syntax
+(0 or whole seconds, minutes, hours, days or weeks, e.g. `24h`, the default); a
+reader warns and falls back to `24h` on a bad value. Both keys layer like other
+port fields, so a layer can set only the one it changes. For example, to ensure
+generated files exist before seeding:
+
+```json
+{
+  "build": {
+    "prepare": [["node", "tools/ensure-generated.mjs"]]
+  }
+}
+```
+
 ## Provider model scope
 
 `[providers.cursor]` defaults to `models = ["auto", "composer-*", "grok-*"]`.

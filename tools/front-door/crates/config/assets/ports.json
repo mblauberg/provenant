@@ -110,5 +110,12 @@
     "backend": {
       "kind": "builtin"
     }
+  },
+  "build": {
+    "source": "builtin",
+    "prepare": [],
+    "seed": {
+      "stale_after": "24h"
+    }
   }
 }

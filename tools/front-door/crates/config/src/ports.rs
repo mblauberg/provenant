@@ -383,6 +383,67 @@ impl WorktreeLayoutPort {
     }
 }
 
+/// Seed-build staleness policy. A later slice consumes this through
+/// [`BuildSeed::stale_after_duration`], warning and falling back to the default
+/// when the value is malformed rather than refusing the port table.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildSeed {
+    #[serde(default = "default_seed_stale_after")]
+    pub stale_after: String,
+}
+
+fn default_seed_stale_after() -> String {
+    "24h".to_owned()
+}
+
+impl Default for BuildSeed {
+    fn default() -> Self {
+        Self {
+            stale_after: default_seed_stale_after(),
+        }
+    }
+}
+
+impl BuildSeed {
+    /// Parse `stale_after` with the host-gc duration parser so there is one
+    /// duration syntax. Errors are reported to a reader that warns and falls
+    /// back to 24h; this never panics.
+    pub fn stale_after_duration(&self) -> Result<Duration, String> {
+        crate::gc::parse_gc_idle_duration(&self.stale_after)
+            .map(Duration::from_secs)
+            .map_err(|error| error.to_owned())
+    }
+}
+
+/// The host seed build interface shared by later build slices. Only these two
+/// keys are declared now; a consumer repository may set them in a lower layer
+/// and have higher layers override them independently.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildPort {
+    pub source: PortSource,
+    #[serde(default)]
+    pub prepare: Vec<Vec<String>>,
+    #[serde(default)]
+    pub seed: BuildSeed,
+}
+
+impl PortEntry for BuildPort {
+    fn source(&self) -> PortSource {
+        self.source
+    }
+    fn set_source(&mut self, source: PortSource) {
+        self.source = source;
+    }
+    fn backend_kind(&self) -> PortBackendKind {
+        PortBackendKind::Builtin
+    }
+    fn valid(&self) -> bool {
+        self.prepare
+            .iter()
+            .all(|argv| argv.first().is_some_and(|program| !program.is_empty()))
+    }
+}
+
 trait PortEntry {
     fn source(&self) -> PortSource;
     fn set_source(&mut self, source: PortSource);
@@ -545,6 +606,7 @@ declare_ports! {
     release: Port,
     admission: Port,
     build_admission: Port,
+    build: BuildPort,
 }
 
 /// An error in one port-table layer always names its file and the key that
@@ -903,16 +965,19 @@ mod tests {
                 Some(&serde_json::to_value(source).unwrap()),
                 "{name} source"
             );
-            let expected_backend = match backend {
-                PortBackendKind::Builtin => "builtin",
-                PortBackendKind::Command => "command",
-                PortBackendKind::None => "none",
-            };
-            assert_eq!(
-                entry.get("backend").and_then(|value| value.get("kind")),
-                Some(&serde_json::json!(expected_backend)),
-                "{name} backend"
-            );
+            if name != "build" {
+                // build declares no backend; it is builtin by construction.
+                let expected_backend = match backend {
+                    PortBackendKind::Builtin => "builtin",
+                    PortBackendKind::Command => "command",
+                    PortBackendKind::None => "none",
+                };
+                assert_eq!(
+                    entry.get("backend").and_then(|value| value.get("kind")),
+                    Some(&serde_json::json!(expected_backend)),
+                    "{name} backend"
+                );
+            }
         }
         assert_eq!(serde_json::from_value::<PortTable>(value).unwrap(), table);
 
@@ -1318,7 +1383,10 @@ mod tests {
         for &name in PortTable::PORT_NAMES {
             for serialised_source in [None, Some(PortSource::Builtin)] {
                 let mut entry = builtin[name].clone();
-                entry["backend"] = serde_json::json!({"kind": "none"});
+                if name != "build" {
+                    // build has no backend field; its layer override is prepare.
+                    entry["backend"] = serde_json::json!({"kind": "none"});
+                }
                 let object = entry.as_object_mut().unwrap();
                 object.remove("source");
                 if let Some(source) = serialised_source {
@@ -1363,6 +1431,143 @@ mod tests {
                     assert_eq!(serde_json::to_value(&table).unwrap(), expected);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn build_port_defaults() {
+        let table = PortTable::builtin();
+        let build = &table.build;
+        assert_eq!(build.source, PortSource::Builtin);
+        assert!(build.prepare.is_empty());
+        assert_eq!(build.seed, BuildSeed::default());
+        assert_eq!(
+            build.seed.stale_after_duration().unwrap(),
+            Duration::from_secs(24 * 60 * 60)
+        );
+        let (_, source, backend, valid, reason) =
+            table.entries().find(|entry| entry.0 == "build").unwrap();
+        assert_eq!(source, PortSource::Builtin);
+        assert_eq!(backend, PortBackendKind::Builtin);
+        assert!(valid);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn build_prepare_layers_project_over_host() {
+        let temp = tempfile::tempdir().unwrap();
+        let host = temp.path().join("host");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&host).unwrap();
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        let host_prepare = vec![vec!["node".to_owned(), "host-prepare.mjs".to_owned()]];
+        let project_prepare = vec![vec!["node".to_owned(), "project-prepare.mjs".to_owned()]];
+
+        std::fs::write(
+            host.join("ports.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": PORTS_SCHEMA_VERSION,
+                "build": {"prepare": host_prepare},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // No project layer: the host value and its source survive, and the
+        // omitted seed inherits the compiled 24h default.
+        let table = PortTable::read_for(None, &host).unwrap();
+        assert_eq!(table.build.prepare, host_prepare);
+        assert_eq!(table.build.source, PortSource::Host);
+        assert_eq!(
+            table.build.seed.stale_after_duration().unwrap(),
+            Duration::from_secs(24 * 60 * 60)
+        );
+
+        // A project layer that sets build.prepare wins and reports its source.
+        std::fs::write(
+            project.join(PORTS_CONFIG),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": PORTS_SCHEMA_VERSION,
+                "build": {"prepare": project_prepare},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let table = PortTable::read_for(Some(project.as_path()), &host).unwrap();
+        assert_eq!(table.build.prepare, project_prepare);
+        assert_eq!(table.build.source, PortSource::Project);
+        // Arrays replace rather than concatenate across layers.
+        assert_eq!(table.build.prepare.len(), 1);
+
+        // A project layer that omits build keeps the host declaration.
+        std::fs::write(
+            project.join(PORTS_CONFIG),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": PORTS_SCHEMA_VERSION,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let table = PortTable::read_for(Some(project.as_path()), &host).unwrap();
+        assert_eq!(table.build.prepare, host_prepare);
+        assert_eq!(table.build.source, PortSource::Host);
+
+        // With no layer setting build at all, it stays builtin and empty.
+        let empty_host = temp.path().join("empty-host");
+        std::fs::create_dir_all(&empty_host).unwrap();
+        let table = PortTable::read_for(None, &empty_host).unwrap();
+        assert_eq!(table.build.source, PortSource::Builtin);
+        assert!(table.build.prepare.is_empty());
+    }
+
+    #[test]
+    fn invalid_prepare_argv_is_invalid_port() {
+        let mut table = PortTable::builtin();
+        table.build.prepare.push(Vec::new());
+        assert!(table.validate().is_err());
+        let (_, _, _, valid, reason) = table.entries().find(|entry| entry.0 == "build").unwrap();
+        assert!(!valid);
+        assert!(reason.is_some());
+
+        let mut table = PortTable::builtin();
+        table.build.prepare.push(vec![String::new()]);
+        assert!(table.validate().is_err());
+
+        // A declared program is accepted; arguments after it are free-form.
+        let mut table = PortTable::builtin();
+        table.build.prepare.push(vec![
+            "node".to_owned(),
+            "tools/ensure-generated.mjs".to_owned(),
+        ]);
+        assert!(table.validate().is_ok());
+    }
+
+    #[test]
+    fn stale_after_bad_value_is_reported_not_panicking() {
+        let bad = BuildSeed {
+            stale_after: "not-a-duration".to_owned(),
+        };
+        assert!(bad.stale_after_duration().is_err());
+
+        // A bad duration stays a well-typed port: readers warn and fall back
+        // to 24h rather than the table refusing to load.
+        let mut table = PortTable::builtin();
+        table.build.seed = bad;
+        assert!(table.validate().is_ok());
+
+        for (text, expected) in [
+            ("36h", Some(36 * 60 * 60)),
+            ("0", Some(0)),
+            ("999999999999999999999w", None),
+        ] {
+            let seed = BuildSeed {
+                stale_after: text.to_owned(),
+            };
+            assert_eq!(
+                seed.stale_after_duration().ok(),
+                expected.map(Duration::from_secs),
+                "{text}"
+            );
         }
     }
 }
