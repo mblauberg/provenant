@@ -315,6 +315,61 @@ fn doctor_reports_an_observed_bystander_in_a_free_worktree() -> Result<(), Box<d
 }
 
 #[test]
+fn doctor_names_dwellers_without_claiming_signal_authority() -> Result<(), Box<dyn Error>> {
+    struct Dwelling;
+    impl WorkerObserver for Dwelling {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, Occupancy::Observed { process: None }))
+                .collect()
+        }
+        fn observe_evidence_while(
+            &self,
+            roots: &[PathBuf],
+            _: bool,
+            keep_going: &dyn Fn() -> bool,
+        ) -> Option<WorkerEvidence> {
+            keep_going().then(|| WorkerEvidence {
+                states: self.observe_roots(roots),
+                held: roots
+                    .iter()
+                    .map(|root| {
+                        (
+                            root.clone(),
+                            vec![ObservedProcess::cwd(913, Some("zsh -c burn".into()))],
+                        )
+                    })
+                    .collect(),
+                ..WorkerEvidence::default()
+            })
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let path = fixture.root.join("dwelling");
+    fixture.run(&[
+        "worktree",
+        "add",
+        "-b",
+        "dwelling",
+        path.to_str().ok_or("path")?,
+    ])?;
+    let context = WorktreeContext {
+        workers: &Dwelling,
+        ..test.context()
+    };
+    let report = doctor(&context, &path, &CancelToken::new())?;
+    assert_eq!(report.held_processes.len(), 1);
+    let row = &report.held_processes[0];
+    assert_eq!(row.pid, 913);
+    assert_eq!(row.command.as_deref(), Some("zsh -c burn"));
+    assert!(row.report.contains("report only"), "{}", row.report);
+    Ok(())
+}
+
+#[test]
 fn a_read_only_probe_yields_busy_without_publishing_a_reservation() -> Result<(), Box<dyn Error>> {
     // Spec: docs/specs/supervisor.md#writer-reservation-and-settlement
     // Contract (Q4): an observation gate is tried once. A writer that meets a

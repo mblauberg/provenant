@@ -56,6 +56,10 @@ pub struct WorktreeDiagnosis {
     pub evidence: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<&'static str>,
+    /// Advisory dwellers of this checkout from the same bounded census that
+    /// decided occupancy. Report only; never a signal target.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_processes: Vec<HeldProcess>,
 }
 
 impl WorktreeDiagnosis {
@@ -136,6 +140,7 @@ pub fn doctor(
         scope: None,
         evidence: None,
         source: None,
+        held_processes: Vec::new(),
     };
     report.set_state(
         WorktreeDiagnosisState::Unregistered,
@@ -160,25 +165,43 @@ pub fn doctor(
         report.reason = "Git retains a registration for a missing checkout.".into();
         return Ok(report);
     }
-    let occupancy = match custody {
-        Occupancy::Available if entry.locked => {
-            Occupancy::custody_unknown(path.clone(), "Git marks the worktree locked")
-        }
+    let (occupancy, held) = match custody {
+        Occupancy::Available if entry.locked => (
+            Occupancy::custody_unknown(path.clone(), "Git marks the worktree locked"),
+            Vec::new(),
+        ),
         Occupancy::Available => {
-            let observed = context
-                .workers
-                .observe_roots(std::slice::from_ref(&path))
-                .remove(&path)
+            let started = context.clock.mono_now().as_micros();
+            let within_budget =
+                || context.clock.mono_now().as_micros().saturating_sub(started) < 2_000_000;
+            let evidence = context.workers.observe_evidence_while(
+                std::slice::from_ref(&path),
+                true,
+                &within_budget,
+            );
+            let observed = evidence
+                .as_ref()
+                .and_then(|evidence| evidence.states.get(&path).cloned())
                 .unwrap_or_else(|| {
                     Occupancy::census_unknown(
                         path.clone(),
                         context.workers.incomplete_census_detail(),
                     )
                 });
-            combine_occupancy(&path, Occupancy::Available, observed)
+            let held = evidence
+                .and_then(|evidence| evidence.held.get(&path).cloned())
+                .unwrap_or_default();
+            (
+                combine_occupancy(&path, Occupancy::Available, observed),
+                held,
+            )
         }
-        other => other,
+        other => (other, Vec::new()),
     };
+    report.held_processes = held
+        .iter()
+        .filter_map(|process| HeldProcess::new(&path, process))
+        .collect();
     if let Occupancy::Held = occupancy {
         report.set_state(
             WorktreeDiagnosisState::LiveWriter,

@@ -564,6 +564,19 @@ Landing and collection require `Free`; the census grants no signal authority.
   permissions cannot prove absence.
 - Owner: `crates/confinement/src/worktrees.rs`, `crates/os/src/sys/pid.rs`
 
+### Settled dwellers are reported, never signalled
+
+`gc` preview and apply and `hosts doctor` name every process that one bounded
+worktree census finds inside a terminal lane worktree or settled attempt
+directory, with its pid, command, and whether a cwd, executable image or open
+descriptor placed it there. The census runs once per pass under a time budget
+and excludes the caller's own session and verified ancestors. A path observation
+alone grants no signal authority: these paths only report, and never signal, a
+dweller; the lane's own tree is reaped separately under proven identity.
+- Why: an orphaned process must be visible to the operator without turning a
+  cwd or descriptor hint into permission to kill an unrelated process.
+- Owner: `crates/confinement/src/worktrees/census.rs`, `src/worktrees.rs`, `src/hosts.rs`
+
 ### Pruning and GC need proof
 
 Pruning proves subsumption or landing from declared retained-ref, tree-equivalent,

@@ -7,7 +7,7 @@ use provenant_os::{
     exec::{ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination},
     fs::{Directory, LockMode, Metadata, PublishMode},
 };
-use provenant_run::{AttemptState, ExecutionContext, LaneQuery, RunStore};
+use provenant_run::{AttemptReader, AttemptState, ExecutionContext, LaneQuery, RunStore};
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
@@ -292,6 +292,14 @@ impl LaneSnapshot {
         self.is_current() && self.states.get(path).is_none_or(|terminal| *terminal)
     }
 
+    /// Snapshot of terminal worktrees for advisory reports.
+    pub(crate) fn settled_paths(&self) -> Vec<(PathBuf, bool)> {
+        self.states
+            .iter()
+            .map(|(path, terminal)| (path.clone(), *terminal))
+            .collect()
+    }
+
     /// Reuse the lane scan only while the observed host store
     /// remains unchanged. A changed snapshot never becomes valid again.
     pub(crate) fn is_current(&self) -> bool {
@@ -362,6 +370,54 @@ fn worktree_created_at_micros(path: &Path) -> Option<i128> {
 
 fn terminal_after_worktree_creation(finished_at: i64, created_at: Option<i128>) -> bool {
     created_at.is_some_and(|created| i128::from(finished_at) > created)
+}
+
+/// Roots a host-wide report may inspect: terminal lane worktrees and settled
+/// attempt directories across every registered project. A failed observation
+/// contributes no roots rather than aborting the whole report.
+pub(crate) fn settled_roots(roots: &Roots, cancel: &CancelToken) -> Vec<std::path::PathBuf> {
+    let Ok(projects) = provenant_config::registered_projects(roots) else {
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    for project in projects {
+        let project_id = project.project_id();
+        if let Ok(snapshot) = lane_states(roots, project_id, cancel) {
+            for (path, terminal) in snapshot.settled_paths() {
+                if terminal {
+                    result.push(path);
+                }
+            }
+        }
+        let context = ExecutionContext {
+            state_root: roots.state.clone(),
+            project_id,
+            actor_id: ActorId::from_bytes([0; 16]),
+            read_prompts: false,
+        };
+        let clock = SystemClock;
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel,
+        };
+        let Ok(Some(store)) = RunStore::open_disk_read_only(&context, &call) else {
+            continue;
+        };
+        if let Ok(attempts) = store.attempts(&call) {
+            for attempt in attempts.flatten() {
+                result.push(
+                    roots
+                        .state
+                        .as_path()
+                        .join("attempts")
+                        .join(attempt.attempt_id.to_string()),
+                );
+            }
+        }
+    }
+    result.sort();
+    result.dedup();
+    result
 }
 
 /// Lane states under `roots`, which bind with the same

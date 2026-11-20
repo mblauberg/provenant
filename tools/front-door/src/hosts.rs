@@ -99,6 +99,10 @@ pub(crate) struct Report {
     managed_error: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
+    /// Advisory dwellers in settled worktrees and attempts from one bounded
+    /// census. Reported only; no signal is ever sent from this list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    held_processes: Vec<provenant_confinement::worktrees::HeldProcess>,
 }
 fn executable(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
@@ -333,6 +337,7 @@ fn legacy_agent_warning(home: &Path) -> Option<&'static str> {
 pub(crate) fn local(
     home: &Path,
     roots: &provenant_core::Roots,
+    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> Result<Report, Box<dyn std::error::Error>> {
     let state = roots.state.as_path();
     let mut identities = vec![("default (~/.claude)".to_owned(), home.join(".claude"))];
@@ -437,7 +442,20 @@ pub(crate) fn local(
                 &executor,
             )
         });
+    let held_processes = {
+        let cancel = CancelToken::new();
+        let roots = crate::gc_support::settled_roots(roots, &cancel);
+        if roots.is_empty() {
+            Vec::new()
+        } else {
+            let clock = SystemClock::new();
+            let started = clock.mono_now().as_micros();
+            let within_budget = || clock.mono_now().as_micros().saturating_sub(started) < 2_000_000;
+            provenant_confinement::worktrees::held_report(workers, &roots, &within_budget)
+        }
+    };
     Ok(Report {
+        held_processes,
         claude,
         login_accounts,
         unobserved_adapters,
@@ -581,6 +599,14 @@ fn valid_remote(report: &Report) -> bool {
             .warnings
             .iter()
             .all(|text| text.len() <= 1024 && !text.chars().any(char::is_control))
+        && report.held_processes.len() <= 128
+        && report.held_processes.iter().all(|row| {
+            row.command
+                .as_ref()
+                .is_none_or(|text| text.len() <= 1024 && !text.chars().any(char::is_control))
+                && row.report.len() <= 1024
+                && !row.report.chars().any(char::is_control)
+        })
 }
 fn discard_remote_repairs(report: &mut Report) {
     report.tick_agent.repair = None;
@@ -622,11 +648,16 @@ fn ignore_file_warnings(globals: &Globals, roots: &provenant_core::Roots) -> Vec
         installed.iter().copied(),
     )
 }
-fn inspect(globals: &Globals, host: Option<&str>) -> Result<Report, DoctorError> {
+fn inspect(
+    globals: &Globals,
+    host: Option<&str>,
+    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+) -> Result<Report, DoctorError> {
     let Some(name) = host else {
         let resolved = roots::resolve(globals, roots::Workspace::Home, roots::Product::Optional)
             .map_err(DoctorError::local)?;
-        let mut report = local(&resolved.home, &resolved.roots).map_err(DoctorError::local)?;
+        let mut report =
+            local(&resolved.home, &resolved.roots, workers).map_err(DoctorError::local)?;
         report
             .warnings
             .extend(ignore_file_warnings(globals, &resolved.roots));
@@ -664,13 +695,21 @@ fn inspect(globals: &Globals, host: Option<&str>) -> Result<Report, DoctorError>
     discard_remote_repairs(&mut report);
     Ok(report)
 }
-pub fn run(command: Hosts, globals: &Globals) -> u8 {
+pub fn run(
+    command: Hosts,
+    globals: &Globals,
+    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+) -> u8 {
     let Hosts::Doctor { host } = command;
-    match inspect(globals, host.as_deref()) {
+    match inspect(globals, host.as_deref(), workers) {
         Ok(report) => {
             let mut text = String::new();
             for warning in &report.warnings {
                 text.push_str(warning);
+                text.push('\n');
+            }
+            for process in &report.held_processes {
+                text.push_str(&process.advisory());
                 text.push('\n');
             }
             match &report.nextest {
@@ -1141,5 +1180,30 @@ mod tests {
         assert!(super::valid_remote(&report));
         report.login_accounts[0].repair = Some("bad\nrepair".into());
         assert!(!super::valid_remote(&report));
+    }
+
+    #[test]
+    fn held_processes_round_trip_as_report_only_rows() {
+        let mut report: super::Report =
+            serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped","login_accounts":[]}"#)
+                .unwrap();
+        let root = std::path::Path::new("/tmp/settled-lane");
+        report
+            .held_processes
+            .push(provenant_confinement::worktrees::HeldProcess {
+                root: provenant_records::StructuredPathWire::from_path(root).unwrap(),
+                pid: 77,
+                command: Some("zsh -c burn".into()),
+                evidence: provenant_confinement::worktrees::ProcessEvidenceKind::WorkingDirectory,
+                path: None,
+                report: String::new(),
+            });
+        let json = serde_json::to_string(&report).unwrap();
+        let decoded: super::Report = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.held_processes.len(), 1);
+        let line = decoded.held_processes[0].advisory();
+        assert!(line.contains("77"), "{line}");
+        assert!(line.contains("zsh -c burn"), "{line}");
+        assert!(line.contains("report only"), "{line}");
     }
 }

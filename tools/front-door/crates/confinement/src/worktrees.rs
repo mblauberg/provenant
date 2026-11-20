@@ -574,6 +574,57 @@ impl std::fmt::Display for ObservedProcess {
     }
 }
 
+/// The report-only projection of a process census observation. A cwd or open
+/// descriptor names a dweller; it never grants authority to signal it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldProcess {
+    /// The settled worktree or attempt directory the process is inside.
+    pub root: StructuredPathWire,
+    pub pid: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    pub evidence: ProcessEvidenceKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<StructuredPathWire>,
+    /// The single advisory line rendered by gc and doctor.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub report: String,
+}
+
+impl HeldProcess {
+    pub fn new(root: &Path, process: &ObservedProcess) -> Option<Self> {
+        let root_wire = StructuredPathWire::from_path(root).ok()?;
+        let mut row = Self {
+            root: root_wire,
+            pid: process.pid,
+            command: process.command.clone(),
+            evidence: process.kind,
+            path: process
+                .cwd
+                .as_deref()
+                .and_then(|path| StructuredPathWire::from_path(path).ok()),
+            report: String::new(),
+        };
+        row.report = row.advisory();
+        Some(row)
+    }
+
+    /// One advisory line for gc and doctor. It reports, and never promises a
+    /// signal: a cwd observation carries no signalling authority.
+    pub fn advisory(&self) -> String {
+        let command = self.command.as_deref().unwrap_or("unknown command");
+        let root = self
+            .root
+            .to_path_buf()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| "<path>".into());
+        format!(
+            "held process {} ({command}) in {root} by {} (report only; not signalled)",
+            self.pid, self.evidence
+        )
+    }
+}
+
 /// Dependencies at the actual OS and utility seams. The caller supplies the
 /// binding and its `state/worktrees/<ProjectId>` directory.
 pub struct WorktreeContext<'a> {

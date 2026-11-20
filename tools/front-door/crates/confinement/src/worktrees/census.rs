@@ -4,6 +4,28 @@ use super::*;
 pub(super) const UNREADABLE_NO_CANDIDATE_PATH: &str =
     "unreadable process has no path under candidate roots";
 
+/// Every process one census saw holding each root by cwd, executable image or
+/// open descriptor. Diagnostic only: a cwd observation never grants signal
+/// authority, so this is reported and never acted on.
+pub type HeldProcesses = BTreeMap<PathBuf, Vec<ObservedProcess>>;
+
+fn record_held(held: &mut HeldProcesses, root: &Path, process: &ObservedProcess) {
+    let list = held.entry(root.to_path_buf()).or_default();
+    if !list
+        .iter()
+        .any(|seen| seen.pid == process.pid && seen.kind == process.kind && seen.cwd == process.cwd)
+    {
+        list.push(process.clone());
+    }
+}
+
+fn finish_held(mut held: HeldProcesses) -> HeldProcesses {
+    for processes in held.values_mut() {
+        processes.sort_by_key(|process| (process.pid, process.kind as u8));
+    }
+    held
+}
+
 /// When set by the gc CLI's `--full`, each PID is listed in addition to the
 /// aggregate warning. Other callers keep the compact single-line warning.
 static UNREADABLE_DETAIL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -60,6 +82,8 @@ fn warn_unreadable_processes(boot: &str, pids: &BTreeSet<i64>) {
 pub struct WorkerEvidence {
     pub states: BTreeMap<PathBuf, Occupancy>,
     pub holders: BTreeMap<PathBuf, ObservedProcess>,
+    /// Every process the same census saw inside each root. Diagnostic only.
+    pub held: HeldProcesses,
     pub details: BTreeMap<PathBuf, String>,
     pub taints: BTreeMap<PathBuf, TaintCause>,
 }
@@ -370,6 +394,20 @@ impl WorkerObserver for CensusSession<'_> {
     fn observe_evidence(&self, roots: &[PathBuf], for_land: bool) -> WorkerEvidence {
         self.evidence(roots, for_land)
     }
+    fn observe_evidence_while(
+        &self,
+        roots: &[PathBuf],
+        for_land: bool,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerEvidence> {
+        let policy = self.inner.epoch_policy()?;
+        self.inner.observe_evidence_with_policy_while(
+            roots,
+            &policy.entries,
+            for_land || policy.exclude_ancestors,
+            keep_going,
+        )
+    }
     fn observe_roots_with_taints(&self, roots: &[PathBuf]) -> WorkerTaintObservations {
         let e = self.evidence(roots, false);
         (e.states, e.taints)
@@ -466,8 +504,58 @@ pub trait WorkerObserver: Send + Sync {
             taints: default_taints(&states, &|_| None),
             states,
             holders: BTreeMap::new(),
+            held: BTreeMap::new(),
             details,
         }
+    }
+
+    /// One bounded acquisition carrying both custody and every process seen
+    /// inside each root. Native observers do a single census; injected seams
+    /// may derive the named holder from one observation.
+    fn observe_evidence_while(
+        &self,
+        roots: &[PathBuf],
+        for_land: bool,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerEvidence> {
+        if !keep_going() {
+            return None;
+        }
+        let (mut states, details) = if for_land {
+            self.observe_roots_for_land_with_details(roots)
+        } else {
+            self.observe_roots_with_details(roots)
+        };
+        let mut held = BTreeMap::new();
+        for root in states.keys() {
+            if !keep_going() {
+                return None;
+            }
+            if let Some(process) = self.live_process(root) {
+                record_held(&mut held, root, &process);
+            }
+        }
+        attach_worker_evidence(&mut states, &BTreeMap::new(), &details);
+        let evidence = WorkerEvidence {
+            taints: default_taints(&states, &|_| None),
+            states,
+            holders: BTreeMap::new(),
+            held: finish_held(held),
+            details,
+        };
+        keep_going().then_some(evidence)
+    }
+
+    /// Bounded acquisition under the caller's host policy. The default ignores
+    /// host configuration, as injected observers own their refusal semantics.
+    fn observe_evidence_with_policy_while(
+        &self,
+        roots: &[PathBuf],
+        _entries: &[CensusIgnoreEntry],
+        for_land: bool,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerEvidence> {
+        self.observe_evidence_while(roots, for_land, keep_going)
     }
 
     /// Acquire with the same policy used to identify the session epoch.
@@ -527,6 +615,22 @@ pub trait WorkerObserver: Send + Sync {
 
     /// Composition supplies host configuration. Injected observers retain
     /// their own refusal semantics; the native observer uses these entries.
+    fn observe_evidence_with_policy(
+        &self,
+        roots: &[PathBuf],
+        entries: &[CensusIgnoreEntry],
+        for_land: bool,
+    ) -> WorkerEvidence {
+        let (states, details) = self.observe_roots_with_policy(roots, entries, for_land);
+        WorkerEvidence {
+            taints: default_taints(&states, &|_| None),
+            states,
+            holders: BTreeMap::new(),
+            held: BTreeMap::new(),
+            details,
+        }
+    }
+
     fn observe_roots_with_policy(
         &self,
         roots: &[PathBuf],
@@ -550,21 +654,6 @@ pub trait WorkerObserver: Send + Sync {
             self.observe_roots_for_land_with_taints(roots)
         } else {
             self.observe_roots_with_taints(roots)
-        }
-    }
-
-    fn observe_evidence_with_policy(
-        &self,
-        roots: &[PathBuf],
-        entries: &[CensusIgnoreEntry],
-        for_land: bool,
-    ) -> WorkerEvidence {
-        let (states, details) = self.observe_roots_with_policy(roots, entries, for_land);
-        WorkerEvidence {
-            taints: default_taints(&states, &|_| None),
-            states,
-            holders: BTreeMap::new(),
-            details,
         }
     }
 
@@ -742,6 +831,30 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
         self.inner
             .observe_evidence_with_policy(roots, entries, for_land)
     }
+    fn observe_evidence_while(
+        &self,
+        roots: &[PathBuf],
+        for_land: bool,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerEvidence> {
+        let policy = self.epoch_policy()?;
+        self.inner.observe_evidence_with_policy_while(
+            roots,
+            &policy.entries,
+            for_land || policy.exclude_ancestors,
+            keep_going,
+        )
+    }
+    fn observe_evidence_with_policy_while(
+        &self,
+        roots: &[PathBuf],
+        entries: &[CensusIgnoreEntry],
+        for_land: bool,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerEvidence> {
+        self.inner
+            .observe_evidence_with_policy_while(roots, entries, for_land, keep_going)
+    }
     fn observe_roots_with_policy(
         &self,
         roots: &[PathBuf],
@@ -804,6 +917,30 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
     fn incomplete_census_detail(&self) -> String {
         self.inner.incomplete_census_detail()
     }
+}
+
+/// Report every process one bounded census saw inside any of `roots`. The
+/// report is advisory: no caller of this function may signal a named PID from
+/// a cwd, executable or descriptor observation.
+pub fn held_report(
+    workers: &dyn WorkerObserver,
+    roots: &[PathBuf],
+    keep_going: &dyn Fn() -> bool,
+) -> Vec<super::HeldProcess> {
+    // `for_land` carries the ancestor-exclusion policy into the census: the
+    // caller's own session and verified ancestors are never stray dwellers.
+    let Some(evidence) = workers.observe_evidence_while(roots, true, keep_going) else {
+        return Vec::new();
+    };
+    evidence
+        .held
+        .iter()
+        .flat_map(|(root, processes)| {
+            processes
+                .iter()
+                .filter_map(|process| super::HeldProcess::new(root, process))
+        })
+        .collect()
 }
 
 /// The refusal for a root observed live: it names the process when the
@@ -877,6 +1014,27 @@ impl WorkerObserver for SystemWorkerObserver {
     }
     fn observe_evidence(&self, roots: &[PathBuf], for_land: bool) -> WorkerEvidence {
         system_worker_evidence(roots, for_land, &[])
+    }
+    fn observe_evidence_while(
+        &self,
+        roots: &[PathBuf],
+        for_land: bool,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerEvidence> {
+        self.observe_evidence_with_policy_while(roots, &[], for_land, keep_going)
+    }
+    fn observe_evidence_with_policy_while(
+        &self,
+        roots: &[PathBuf],
+        entries: &[CensusIgnoreEntry],
+        for_land: bool,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerEvidence> {
+        if !keep_going() {
+            return None;
+        }
+        let evidence = system_worker_evidence_while(roots, for_land, entries, Some(keep_going));
+        keep_going().then_some(evidence)
     }
     fn observe_roots_with_policy(
         &self,
@@ -1068,9 +1226,11 @@ fn system_worker_evidence_while(
                 .cloned()
                 .map(|root| (root, detail.clone()))
                 .collect(),
+            ..WorkerEvidence::default()
         };
     };
     let mut unreadable_warnings = BTreeSet::new();
+    let mut held = BTreeMap::new();
     let (states, holders, details, taints) = observe_worker_holders_while(
         roots,
         &SystemProcessObserver,
@@ -1084,12 +1244,14 @@ fn system_worker_evidence_while(
                 unreadable_warnings.insert(pid);
             }
         },
+        &mut held,
         keep_going,
     );
     warn_unreadable_processes(&current.identity.boot, &unreadable_warnings);
     WorkerEvidence {
         states,
         holders,
+        held: finish_held(held),
         details,
         taints,
     }
@@ -1228,6 +1390,7 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
     ancestors: bool,
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
 ) -> WorkerHolderAudit {
+    let mut held = BTreeMap::new();
     observe_worker_holders_while(
         roots,
         observer,
@@ -1235,10 +1398,15 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
         current,
         ancestors,
         unplaceable,
+        &mut held,
         None,
     )
 }
 
+/// Collect every process a single census places inside each root into `held`.
+/// The caller's own identity and verified ancestors are already excluded by
+/// the census; none of these observations grants signal authority.
+#[allow(clippy::too_many_arguments)] // The holder audit and held report share one bounded census.
 pub(super) fn observe_worker_holders_while(
     roots: &[PathBuf],
     observer: &dyn ProcessObserver,
@@ -1246,6 +1414,7 @@ pub(super) fn observe_worker_holders_while(
     current: &ProcessFact,
     ancestors: bool,
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
+    held: &mut HeldProcesses,
     keep_going: Option<&dyn Fn() -> bool>,
 ) -> WorkerHolderAudit {
     let within_budget = || keep_going.is_none_or(|check| check());
@@ -1330,12 +1499,14 @@ pub(super) fn observe_worker_holders_while(
                 under_candidate |= record_unreadable_path(
                     &mut states,
                     &mut holders,
+                    held,
                     &mut details,
                     &mut taints,
                     cwd_observer,
                     pid,
                     path.as_path(),
                     ProcessEvidenceKind::WorkingDirectory,
+                    pid != current.identity.pid,
                     unplaceable,
                 );
             }
@@ -1346,12 +1517,14 @@ pub(super) fn observe_worker_holders_while(
                 under_candidate |= record_unreadable_path(
                     &mut states,
                     &mut holders,
+                    held,
                     &mut details,
                     &mut taints,
                     cwd_observer,
                     pid,
                     &path,
                     ProcessEvidenceKind::OtherHeldPath,
+                    pid != current.identity.pid,
                     unplaceable,
                 );
             }
@@ -1570,6 +1743,9 @@ pub(super) fn observe_worker_holders_while(
                                 kind,
                                 cwd: Some(location.to_path_buf()),
                             });
+                        if fact.identity.session_id != current.identity.session_id {
+                            record_held(held, &root, holder);
+                        }
                         taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
                         details.insert(
                             root,
@@ -1690,6 +1866,9 @@ pub(super) fn observe_worker_holders_while(
                                 kind: ProcessEvidenceKind::WorkingDirectory,
                                 cwd: Some(canonical.clone()),
                             });
+                        if fact.identity.session_id != current.identity.session_id {
+                            record_held(held, &root, holder);
+                        }
                         taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
                         details.insert(root, format!("process {}: cwd inside root", holder.pid));
                     }
@@ -1817,16 +1996,18 @@ pub(super) enum NativeCwd {
 
 /// Place positive cwd/descriptor evidence from an EPERM process. Unreadable
 /// process metadata is scoped to roots that its known paths could occupy.
-#[allow(clippy::too_many_arguments)] // The census owns these four correlated evidence maps.
+#[allow(clippy::too_many_arguments)] // The census owns these five correlated evidence maps.
 fn record_unreadable_path(
     states: &mut BTreeMap<PathBuf, Occupancy>,
     holders: &mut BTreeMap<PathBuf, ObservedProcess>,
+    held: &mut HeldProcesses,
     details: &mut BTreeMap<PathBuf, String>,
     taints: &mut BTreeMap<PathBuf, TaintCause>,
     cwd_observer: &dyn CwdObserver,
     pid: i64,
     path: &Path,
     kind: ProcessEvidenceKind,
+    reportable: bool,
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
 ) -> bool {
     let Some(canonical) = canonical_cwd(path) else {
@@ -1894,6 +2075,9 @@ fn record_unreadable_path(
             format!("process {pid}: {} inside root", holder.kind),
         );
         taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
+        if reportable {
+            record_held(held, &root, &holder);
+        }
         holders.entry(root).or_insert(holder);
     }
     possible

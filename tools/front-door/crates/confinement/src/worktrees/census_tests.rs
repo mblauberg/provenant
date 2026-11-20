@@ -162,6 +162,15 @@ fn session_refusal_uses_decision_evidence_and_missing_root_is_unknown() -> Resul
                         cwd: Some(root.clone()),
                     },
                 )]),
+                held: BTreeMap::from([(
+                    root.clone(),
+                    vec![ObservedProcess {
+                        pid: 123,
+                        command: Some("first".into()),
+                        kind: ProcessEvidenceKind::WorkingDirectory,
+                        cwd: Some(root.clone()),
+                    }],
+                )]),
                 taints: BTreeMap::from([(
                     root.clone(),
                     TaintCause::LiveWriter(ObservedProcess {
@@ -2337,6 +2346,7 @@ mod writer_cohort {
                 }
                 observation.occupancy = vec![first, complete()];
                 // Exercise the same budget-bound path used by landing retries.
+                let mut held_processes = BTreeMap::new();
                 let (states, holders, _, _) = observe_worker_holders_while(
                     std::slice::from_ref(&root),
                     &processes,
@@ -2344,6 +2354,7 @@ mod writer_cohort {
                     &processes.current,
                     false,
                     &mut |_, _| {},
+                    &mut held_processes,
                     Some(&|| true),
                 );
                 assert_eq!(states[&root].is_observed(), held, "{gap:?}");
@@ -2525,6 +2536,7 @@ mod narrowing {
             platform_uids: BTreeMap::new(),
         };
         let mut audit = Vec::new();
+        let mut held_processes = BTreeMap::new();
         let (states, _, details, _) = observe_worker_holders_while(
             std::slice::from_ref(&root),
             &processes,
@@ -2532,6 +2544,7 @@ mod narrowing {
             &current,
             false,
             &mut |pid, condition| audit.push((pid, condition)),
+            &mut held_processes,
             None,
         );
         Ok((
@@ -3432,5 +3445,69 @@ fn bounded_session_keeps_policy_fence_and_positive_holders()
             assert!(states[&roots[0]].is_unknown());
         }
     }
+    Ok(())
+}
+
+#[test]
+fn held_report_uses_one_bounded_census_and_only_reports() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Dwellers(AtomicUsize);
+    impl WorkerObserver for Dwellers {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, Occupancy::Observed { process: None }))
+                .collect()
+        }
+        fn observe_evidence_while(
+            &self,
+            roots: &[PathBuf],
+            _: bool,
+            keep_going: &dyn Fn() -> bool,
+        ) -> Option<WorkerEvidence> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            if !keep_going() {
+                return None;
+            }
+            let mut held = HeldProcesses::new();
+            for root in roots {
+                held.insert(
+                    root.clone(),
+                    vec![
+                        ObservedProcess::cwd(101, Some("zsh -c burn".into())),
+                        ObservedProcess::executable(202, Some("/usr/bin/yes".into())),
+                    ],
+                );
+            }
+            Some(WorkerEvidence {
+                states: roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, Occupancy::Observed { process: None }))
+                    .collect(),
+                held,
+                ..WorkerEvidence::default()
+            })
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let workers = Dwellers(AtomicUsize::new(0));
+    let roots = vec![temp.path().join("lane")];
+    let report = held_report(&workers, &roots, &|| true);
+    assert_eq!(workers.0.load(Ordering::SeqCst), 1, "one census per pass");
+    assert_eq!(report.len(), 2);
+    assert!(
+        report
+            .iter()
+            .any(|row| row.pid == 101 && row.command.as_deref() == Some("zsh -c burn"))
+    );
+    assert!(report.iter().any(|row| row.pid == 202));
+    for row in &report {
+        let line = row.advisory();
+        assert!(line.contains("report only"), "{line}");
+        assert!(!line.contains("kill"), "{line}");
+    }
+    assert!(held_report(&workers, &roots, &|| false).is_empty());
     Ok(())
 }
