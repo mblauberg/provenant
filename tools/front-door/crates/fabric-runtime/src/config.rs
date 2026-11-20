@@ -963,6 +963,9 @@ fn defaults(_profile: Profile) -> &'static str {
 /// boundary: recovery could raise a cap, lift a budget or swap a binary. Labels,
 /// peers' addresses and lane tuning recover to defaults.
 pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::new("agent_label", "string"),
+    FieldMetadata::new("client_label", "string"),
+    FieldMetadata::new("host_native", "table"),
     FieldMetadata::int(
         "graph.decide_timeout_seconds",
         1,
@@ -988,6 +991,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("lanes.lane_port_blocks", 0, 1024),
     FieldMetadata::int("peers.{peer}.connect_timeout_seconds", 1, 30),
     FieldMetadata::new("commands.{name}.argv", "array"),
+    FieldMetadata::new("commands.{name}.runtimes", "array"),
     FieldMetadata::new("home_hosts.{host}", "string"),
 ];
 fn boundary(error: &SectionError) -> bool {

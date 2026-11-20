@@ -1155,6 +1155,8 @@ fn defaults(_: Profile) -> &'static str {
 /// Enforced model policy restrictions, including a retired schedule key in a
 /// restricting rule, are a boundary; other routing input recovers.
 pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::new("model_exclusions", "array"),
+    FieldMetadata::new("model_choices", "array"),
     FieldMetadata::new("pacing.monthly.enabled", "bool"),
     FieldMetadata::int("pacing.monthly.burst_percent", 0, 100),
     FieldMetadata::int("pacing.monthly.initial_launch_cost_basis_points", 1, 10_000),
