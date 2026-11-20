@@ -746,18 +746,27 @@ impl SeedProjectOutcome {
 struct SeedProjectRecord {
     project: String,
     project_key: String,
+    /// Compiler-selection keys the seed pass removed from its child environment.
+    /// Names only; absent for older results and for passes that cleared nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    cleared_environment: Vec<String>,
     #[serde(flatten)]
     outcome: SeedProjectOutcome,
 }
 
 impl SeedProjectRecord {
-    fn new(project: &SeedProject, outcome: SeedProjectOutcome) -> Self {
+    fn new(
+        project: &SeedProject,
+        outcome: SeedProjectOutcome,
+        cleared_environment: Vec<String>,
+    ) -> Self {
         Self {
             project: truncate_bytes(
                 project.root.display().to_string(),
                 MAX_SEED_PROJECT_PATH_BYTES,
             ),
             project_key: project.project_key.clone(),
+            cleared_environment,
             outcome,
         }
     }
@@ -892,10 +901,11 @@ struct SeedDiscoveryError {
 }
 
 impl SeedDiscoveryError {
-    fn into_record(self) -> SeedProjectRecord {
+    fn into_record(self, cleared_environment: &[String]) -> SeedProjectRecord {
         SeedProjectRecord {
             project: truncate_bytes(self.project, MAX_SEED_PROJECT_PATH_BYTES),
             project_key: self.project_key,
+            cleared_environment: cleared_environment.to_vec(),
             outcome: SeedProjectOutcome::Failed {
                 error: self.message,
             },
@@ -950,6 +960,7 @@ fn truncate_seed_error(message: String) -> String {
 fn refresh_projects(
     projects: &[SeedProject],
     host_state: &std::path::Path,
+    cleared_environment: &[String],
     refresh: impl Fn(
         &std::path::Path,
     ) -> Result<crate::target_seed_build::Refresh, Box<dyn std::error::Error>>,
@@ -975,7 +986,7 @@ fn refresh_projects(
                     },
                 },
             };
-            SeedProjectRecord::new(project, outcome)
+            SeedProjectRecord::new(project, outcome, cleared_environment.to_vec())
         })
         .collect()
 }
@@ -1019,6 +1030,11 @@ fn seed_pass_locked(
 ) -> Result<SeedOutcome, String> {
     let at = || clock.wall_now().map_err(|error| error.to_string());
     let retry_project_keys = request.project_keys();
+    // The tick worker's own environment is what a seed build clears, so every
+    // record this pass produces reports the same set of key names.
+    let cleared_environment = provenant_run::target_seed::seed_build_cleared_keys(
+        &std::env::vars_os().collect::<Vec<_>>(),
+    );
     if !enabled {
         write_seed_result(
             directory,
@@ -1042,12 +1058,17 @@ fn seed_pass_locked(
                     .errors
                     .retain(|error| retry_project_keys.contains(&error.project_key));
             }
-            let mut fresh = refresh_projects(&discovery.projects, host_state, refresh);
+            let mut fresh = refresh_projects(
+                &discovery.projects,
+                host_state,
+                &cleared_environment,
+                refresh,
+            );
             fresh.extend(
                 discovery
                     .errors
                     .into_iter()
-                    .map(SeedDiscoveryError::into_record),
+                    .map(|error| error.into_record(&cleared_environment)),
             );
             let error = (discovery.omitted_errors > 0).then(|| {
                 format!(
@@ -2324,6 +2345,7 @@ mod tests {
         let fat = |index: usize| SeedProjectRecord {
             project: format!("/repo/{index}"),
             project_key: format!("{index}"),
+            cleared_environment: Vec::new(),
             outcome: SeedProjectOutcome::Failed {
                 // Control characters escape to six bytes each in JSON.
                 error: "\u{1}".repeat(MAX_SEED_ERROR_BYTES),
@@ -2398,6 +2420,7 @@ mod tests {
                 vec![SeedProjectRecord {
                     project: "/private/sensitive/repo".into(),
                     project_key: "key".into(),
+                    cleared_environment: Vec::new(),
                     outcome: SeedProjectOutcome::Failed {
                         error: private.into(),
                     },
@@ -2818,6 +2841,7 @@ mod tests {
         let outcomes = refresh_projects(
             &SeedDiscovery::from_paths(vec![bare]).projects,
             &root,
+            &[],
             |_| panic!("no manifest, no refresh"),
         );
         assert_eq!(outcomes.len(), 1);
@@ -2908,11 +2932,58 @@ mod tests {
 
     /// Spec: docs/specs/state.md (every new persisted field is optional or defaulted)
     #[test]
+    fn seed_result_records_cleared_environment() {
+        let at = WallTime::from_micros(1_000_000).unwrap();
+        let result = SeedResult::finished(
+            at,
+            None,
+            vec![
+                SeedProjectRecord {
+                    project: "/repo/cleared".into(),
+                    project_key: "cleared".into(),
+                    cleared_environment: vec!["RUSTC_WRAPPER".into(), "RUSTUP_TOOLCHAIN".into()],
+                    outcome: SeedProjectOutcome::Built,
+                },
+                SeedProjectRecord {
+                    project: "/repo/plain".into(),
+                    project_key: "plain".into(),
+                    cleared_environment: Vec::new(),
+                    outcome: SeedProjectOutcome::Current,
+                },
+            ],
+        );
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            json["projects"][0]["cleared_environment"],
+            serde_json::json!(["RUSTC_WRAPPER", "RUSTUP_TOOLCHAIN"])
+        );
+        assert!(
+            json["projects"][1].get("cleared_environment").is_none(),
+            "an empty set is omitted rather than written as a host key"
+        );
+        let round_trip: SeedResult = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip.projects, result.projects);
+        assert_eq!(
+            round_trip.projects[0].cleared_environment,
+            ["RUSTC_WRAPPER", "RUSTUP_TOOLCHAIN"]
+        );
+
+        // A result written before the field existed still decodes with no keys.
+        let older: SeedResult = serde_json::from_slice(
+            br#"{"state":"complete","at":"2026-11-17T12:49:25.659684Z","projects":[{"project":"/repo/old","project_key":"old","state":"built"}]}"#,
+        )
+        .unwrap();
+        assert!(older.projects[0].cleared_environment.is_empty());
+    }
+
+    /// Spec: docs/specs/state.md (every new persisted field is optional or defaulted)
+    #[test]
     fn the_seed_result_records_typed_per_project_outcomes_and_reads_an_older_result() {
         use crate::target_seed_build::SkipReason;
         let record = |key: &str, outcome| SeedProjectRecord {
             project: format!("/repo/{key}"),
             project_key: key.into(),
+            cleared_environment: Vec::new(),
             outcome,
         };
         let result = SeedResult::finished(

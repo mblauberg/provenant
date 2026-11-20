@@ -163,6 +163,29 @@ pub fn unsupported_seed_build_environment(
     })
 }
 
+/// Names of inherited compiler-selection keys a seed build removes from its
+/// child environment. Only names are returned, never values; the result is
+/// sorted and deduplicated so the build's warning and the tick's seed record
+/// cannot disagree. `RUSTUP_AUTO_INSTALL=0` is the exception Provenant sets
+/// itself; a different inherited value is an override to remove. Profile keys
+/// (`CARGO_INCREMENTAL`, `CARGO_PROFILE_*`, `CARGO_TARGET_DIR`) are not listed:
+/// they are set by the caller's Cargo profile and are part of the seed identity.
+pub fn seed_build_cleared_keys(environment: &[(OsString, OsString)]) -> Vec<String> {
+    let mut keys: Vec<String> = environment
+        .iter()
+        .filter_map(|(key, value)| {
+            let name = key.to_str()?;
+            if name == "RUSTUP_AUTO_INSTALL" {
+                return (value != "0").then(|| name.to_owned());
+            }
+            unsupported_seed_build_environment_key(key).map(|_| name.to_owned())
+        })
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
 /// Apply the same bounded TOML policy to live Cargo config files and config
 /// blobs read from a pinned verify-base tree. Input bytes are never retained.
 pub fn cargo_config_seed_eligibility(bytes: &[u8]) -> Result<(), &'static str> {
@@ -231,9 +254,17 @@ pub fn lock_build(state: &Path) -> Result<LockGuard, Box<dyn std::error::Error>>
 
 pub fn rustc_metadata(worktree: &Path) -> io::Result<(String, String)> {
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
-    let mut env: Vec<_> = std::env::vars_os().collect();
-    let rustc = cargo_tool(&env, "rustc")?;
+    let inherited: Vec<_> = std::env::vars_os().collect();
+    let rustc = cargo_tool(&inherited, "rustc")?;
     let argv = [rustc.into_os_string(), "-vV".into()];
+    // A seed build is not a lane: wrappers and rustup overrides come from the
+    // launcher's shell, not this repository. Probe with the compiler the pinned
+    // verify base selects, not the one the caller happened to export.
+    let cleared = seed_build_cleared_keys(&inherited);
+    let mut env: Vec<_> = inherited
+        .into_iter()
+        .filter(|(key, _)| !cleared.iter().any(|name| OsStr::new(name) == key))
+        .collect();
     env.retain(|(key, _)| key != "RUSTUP_AUTO_INSTALL");
     env.push(("RUSTUP_AUTO_INSTALL".into(), "0".into()));
     let mut options = ExecOptions::new(&argv, worktree, std::time::Duration::from_secs(30));
@@ -587,6 +618,65 @@ mod lane_probe_tests {
             )]),
             None
         );
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn cleared_keys_helper_names_only_and_keeps_provenant_set_keys() {
+        let env = vec![
+            (
+                OsString::from("RUSTC_WRAPPER"),
+                OsString::from("/secret/wrap"),
+            ),
+            (
+                OsString::from("RUSTUP_TOOLCHAIN"),
+                OsString::from("nightly"),
+            ),
+            (
+                OsString::from("CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"),
+                OsString::from("secret-ld"),
+            ),
+            (OsString::from("RUSTFLAGS"), OsString::from("-C secretflag")),
+            // Provenant sets these itself; they are not inherited overrides.
+            (OsString::from("RUSTUP_AUTO_INSTALL"), OsString::from("0")),
+            (OsString::from("CARGO_INCREMENTAL"), OsString::from("0")),
+            (
+                OsString::from("CARGO_PROFILE_DEV_DEBUG"),
+                OsString::from("line-tables-only"),
+            ),
+            (
+                OsString::from("CARGO_TARGET_DIR"),
+                OsString::from("/secret/target"),
+            ),
+            // A repeated key must not be recorded twice.
+            (
+                OsString::from("RUSTC_WRAPPER"),
+                OsString::from("/secret/wrap2"),
+            ),
+        ];
+        assert_eq!(
+            seed_build_cleared_keys(&env),
+            vec![
+                "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
+                "RUSTC_WRAPPER",
+                "RUSTFLAGS",
+                "RUSTUP_TOOLCHAIN",
+            ]
+        );
+        let rendered = format!("{:?}", seed_build_cleared_keys(&env));
+        assert!(
+            !rendered.contains("secret"),
+            "names only, never values: {rendered}"
+        );
+
+        // A non-zero auto-install value is an inherited override and is named;
+        // the Provenant-set zero value never is.
+        let bad_auto_install = [(OsString::from("RUSTUP_AUTO_INSTALL"), OsString::from("1"))];
+        assert_eq!(
+            seed_build_cleared_keys(&bad_auto_install),
+            vec!["RUSTUP_AUTO_INSTALL"]
+        );
+        assert!(seed_build_cleared_keys(&[]).is_empty());
     }
 
     #[test]

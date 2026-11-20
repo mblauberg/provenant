@@ -107,9 +107,14 @@ seeds, so after a toolchain change no seed matches until one of them runs.
 Each repository keeps its own warm generations. `domains.fabric.lanes.cargo_seed.max_generations`
 limits history per repository; `max_bytes` limits the whole host and can evict a
 repository's only generation. Compiler, host platform and the effective lane
-profile must match. Unsupported compiler, target or build-flag overrides make
-shared seeding unavailable; native commands retain those settings and can build
-normally. The warning identifies the unsupported setting class without its value.
+profile must match. A lane with unsupported compiler, target or build-flag
+overrides cannot use a shared seed; the lane warns with the unsupported setting
+class without its value and builds cold, while native commands retain those
+settings. `seed-build` and tick are not lanes: they clear those inherited keys
+from their Cargo and rustc children (keeping `RUSTUP_AUTO_INSTALL=0` and the
+effective profile), warn once with the key names and never their values, and
+record the names in `seed-result.json`. A consumer repository that wraps cargo
+with such keys can therefore refresh its seed.
 The [run spec](../specs/run.md#cargo-target-seed) owns the lifecycle;
 [GC](gc.md) owns retention.
 

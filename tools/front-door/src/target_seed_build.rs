@@ -6,7 +6,7 @@ use provenant_run::target_seed::{self, Manifest};
 use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs, io,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -16,15 +16,26 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const PUBLICATION_WAIT_SECONDS: u64 = 10;
 
-fn ensure_host_seed_environment_eligible() -> Result<()> {
+/// Report the inherited compiler-selection keys a seed build removes from its
+/// child environment. A seed build is not a lane: wrappers and rustup overrides
+/// come from whoever launched it, so the build clears them rather than refusing.
+/// Lane use of a mismatched seed is still guarded by the eligibility check in
+/// `target_seed.rs`. At most one line is printed per process, whatever the
+/// number of projects a tick pass refreshes.
+#[allow(clippy::print_stderr)] // The warning is the operator-facing output of the refresh.
+fn ensure_host_seed_environment_eligible() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
     let environment = std::env::vars_os().collect::<Vec<_>>();
-    if let Some(setting) = target_seed::unsupported_seed_build_environment(&environment) {
-        return Err(io::Error::other(format!(
-            "shared Cargo target seed is unavailable while {setting} is set; native Cargo builds keep that setting"
-        ))
-        .into());
+    let cleared = target_seed::seed_build_cleared_keys(&environment);
+    if cleared.is_empty() {
+        return;
     }
-    Ok(())
+    WARNED.call_once(|| {
+        eprintln!(
+            "warning: seed-build cleared inherited compiler-selection environment: {}",
+            cleared.join(", ")
+        );
+    });
 }
 
 fn cargo_config_ineligibility(reason: &str) -> io::Error {
@@ -222,14 +233,52 @@ fn make_directories_writable(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn run(cwd: &Path, argv: &[OsString], overrides: &[(OsString, OsString)]) -> Result<Vec<u8>> {
-    let mut env: Vec<_> = std::env::vars_os()
+/// The environment a seed-build child process sees. Inherited compiler-selection
+/// keys are dropped, as are `GIT_*` keys and keys Provenant sets through
+/// `overrides`; overrides are then applied last so the safe values win.
+fn seed_build_child_environment(
+    inherited: &[(OsString, OsString)],
+    overrides: &[(OsString, OsString)],
+) -> Vec<(OsString, OsString)> {
+    let cleared = target_seed::seed_build_cleared_keys(inherited);
+    let mut env: Vec<_> = inherited
+        .iter()
         .filter(|(key, _)| {
             !key.to_string_lossy().starts_with("GIT_")
                 && !overrides.iter().any(|(name, _)| name == key)
+                && !cleared.iter().any(|name| OsStr::new(name) == key)
         })
+        .cloned()
         .collect();
     env.extend_from_slice(overrides);
+    env
+}
+
+/// The manifest flags that describe inherited build settings. A cleared key no
+/// longer applies to the child process, so it must not be recorded as if it did.
+fn seed_build_flags(environment: &[(OsString, OsString)]) -> Vec<String> {
+    let cleared = target_seed::seed_build_cleared_keys(environment);
+    [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_BUILD_RUSTFLAGS",
+        "CARGO_BUILD_TARGET",
+    ]
+    .into_iter()
+    .filter(|key| !cleared.iter().any(|name| name == key))
+    .filter_map(|key| {
+        let value = environment
+            .iter()
+            .find(|(name, _)| name.as_os_str() == OsStr::new(key))
+            .and_then(|(_, value)| value.to_str())?;
+        Some(format!("{key}={value}"))
+    })
+    .collect()
+}
+
+fn run(cwd: &Path, argv: &[OsString], overrides: &[(OsString, OsString)]) -> Result<Vec<u8>> {
+    let inherited = std::env::vars_os().collect::<Vec<_>>();
+    let env = seed_build_child_environment(&inherited, overrides);
     let mut options = ExecOptions::new(argv, cwd, Duration::from_secs(4 * 60 * 60));
     options.env = Some(&env);
     options.process_group = true;
@@ -717,7 +766,7 @@ fn cargo_build_profile(state: &Path) -> Result<CargoBuildProfile> {
 #[allow(dead_code)]
 pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
     refuse_in_lane()?;
-    ensure_host_seed_environment_eligible()?;
+    ensure_host_seed_environment_eligible();
     let (identity, workspace) = match refresh_identity(state, project)? {
         IdentityRefresh::NotCargo => return Ok(Refresh::NotCargo),
         IdentityRefresh::Busy => return Ok(Refresh::Busy),
@@ -836,7 +885,7 @@ fn refuse_in_lane() -> Result<()> {
 
 pub fn build(state: &Path, project: &Path) -> Result<String> {
     refuse_in_lane()?;
-    ensure_host_seed_environment_eligible()?;
+    ensure_host_seed_environment_eligible();
     let workspace = workspace_relative(state, project)?
         .ok_or_else(|| io::Error::other("project has no selected Cargo workspace"))?;
     let base = verify_base(state, project, &workspace)?;
@@ -880,16 +929,7 @@ fn build_into(
         "cargo build --locked --all-targets".to_owned(),
         "cargo test --locked --no-run".to_owned(),
     ];
-    flags.extend(
-        [
-            "RUSTFLAGS",
-            "CARGO_ENCODED_RUSTFLAGS",
-            "CARGO_BUILD_RUSTFLAGS",
-            "CARGO_BUILD_TARGET",
-        ]
-        .into_iter()
-        .filter_map(|key| std::env::var(key).ok().map(|v| format!("{key}={v}"))),
-    );
+    flags.extend(seed_build_flags(&environment));
     for args in [
         &["build", "--locked", "--all-targets"][..],
         &["test", "--locked", "--no-run"][..],
@@ -915,6 +955,8 @@ fn build_into(
         overrides.extend([
             ("CARGO_TARGET_DIR".into(), target.as_os_str().into()),
             ("CARGO_BUILD_BUILD_DIR".into(), target.as_os_str().into()),
+            // Provenant's safe value; an inherited non-zero value is cleared.
+            ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
         ]);
         run(&worktree, &argv, &overrides)?;
     }
@@ -1349,6 +1391,86 @@ mod tests {
             0
         );
     }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn seed_build_clears_inherited_compiler_selection_env() {
+        let profile = LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .expect("default Cargo profile is UTF-8");
+        let inherited: Vec<(OsString, OsString)> = [
+            ("RUSTC_WRAPPER", "/secret/wrap"),
+            ("RUSTUP_TOOLCHAIN", "nightly"),
+            ("RUSTFLAGS", "-C secretflag"),
+            ("RUSTUP_AUTO_INSTALL", "1"),
+            ("GIT_CONFIG_GLOBAL", "/secret/gitconfig"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+        .chain(
+            [
+                OsString::from("CARGO_INCREMENTAL"),
+                OsString::from("CARGO_PROFILE_DEV_DEBUG"),
+            ]
+            .into_iter()
+            .map(|key| (key, OsString::from("profile-value"))),
+        )
+        .collect();
+        let mut overrides = profile.environment().to_vec();
+        overrides.extend([
+            ("CARGO_TARGET_DIR".into(), OsString::from("/seed/target")),
+            ("RUSTUP_AUTO_INSTALL".into(), OsString::from("0")),
+        ]);
+
+        let child = seed_build_child_environment(&inherited, &overrides);
+        for key in [
+            "RUSTC_WRAPPER",
+            "RUSTUP_TOOLCHAIN",
+            "RUSTFLAGS",
+            "RUSTUP_AUTO_INSTALL",
+            "GIT_CONFIG_GLOBAL",
+        ] {
+            assert!(
+                !child.iter().any(|(name, _)| name == key),
+                "{key} must not reach the child"
+            );
+        }
+        // The inherited auto-install value is replaced by the safe one, and
+        // profile/target values Provenant sets survive exactly once.
+        assert_eq!(
+            child
+                .iter()
+                .filter(|(name, value)| name == "RUSTUP_AUTO_INSTALL" && value == "0")
+                .count(),
+            1
+        );
+        for key in [
+            "CARGO_INCREMENTAL",
+            "CARGO_PROFILE_DEV_DEBUG",
+            "CARGO_TARGET_DIR",
+        ] {
+            assert_eq!(
+                child.iter().filter(|(name, _)| name == key).count(),
+                1,
+                "{key} is set by Provenant and must be kept"
+            );
+        }
+        // The cleared environment leaves no unsupported override, so the build
+        // proceeds: the seed is no longer refused for the launcher's shell.
+        assert_eq!(
+            target_seed::unsupported_seed_build_environment(&child),
+            None
+        );
+
+        // Flags record only settings that still apply to the child.
+        let flags = seed_build_flags(&inherited);
+        assert!(
+            !flags.iter().any(|flag| flag.contains("RUSTFLAGS")),
+            "a cleared key must not be recorded: {flags:?}"
+        );
+        assert_eq!(flags, Vec::<String>::new());
+    }
+
     #[allow(dead_code)] // The harness-free target includes this module without its tests.
     fn identity(project_key: &str, commit: &str) -> GenerationIdentity {
         GenerationIdentity {
@@ -1411,13 +1533,8 @@ mod tests {
         argv: &[OsString],
         overrides: &[(OsString, OsString)],
     ) -> Result<String> {
-        let mut env: Vec<_> = std::env::vars_os()
-            .filter(|(key, _)| {
-                !key.to_string_lossy().starts_with("GIT_")
-                    && !overrides.iter().any(|(name, _)| name == key)
-            })
-            .collect();
-        env.extend_from_slice(overrides);
+        let inherited = std::env::vars_os().collect::<Vec<_>>();
+        let env = seed_build_child_environment(&inherited, overrides);
         let mut options = ExecOptions::new(argv, cwd, Duration::from_secs(4 * 60 * 60));
         options.env = Some(&env);
         options.process_group = true;
