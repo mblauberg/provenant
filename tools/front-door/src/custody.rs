@@ -822,6 +822,7 @@ pub fn settle_landing(
     project: Option<&Path>,
     state: &Path,
     record: &provenant_records::landing::LandingRecord,
+    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> Result<(), Error> {
     let Some(project) = project else {
         return Ok(());
@@ -910,7 +911,8 @@ pub fn settle_landing(
                     )?;
                 }
             }
-            if let Err(error) = crate::worktrees::retention_event(&resolved, &artefacts, &evidence)
+            if let Err(error) =
+                crate::worktrees::retention_event(&resolved, &artefacts, &evidence, workers)
             {
                 provenant_fabric_runtime::custody::warning(format!(
                     "merge retention will retry: {error}"

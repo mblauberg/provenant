@@ -70,7 +70,7 @@ fn doctor_reports_five_worktree_states_and_one_repair_without_mutation()
             context.utility_budget,
             &cancel,
         )?;
-        let report = doctor(&context, &path, &cancel)?;
+        let report = doctor(&context, &path, &|_| false, &cancel)?;
         let (expected, expected_repair) = match scenario {
             "dirty" => (
                 WorktreeDiagnosisState::Dirty,
@@ -164,7 +164,7 @@ fn doctor_unknown_preserves_census_and_custody_scope_and_evidence() -> Result<()
         "doctor-unknown",
         path.to_str().ok_or("path")?,
     ])?;
-    let census = doctor(&context, &path, &cancel)?;
+    let census = doctor(&context, &path, &|_| false, &cancel)?;
     assert_eq!(census.state, WorktreeDiagnosisState::Unknown);
     assert_eq!(census.repair_kind(), WorktreeRepairKind::RetryDiagnosis);
     assert_eq!(census.source, Some("census"));
@@ -196,6 +196,7 @@ fn doctor_unknown_preserves_census_and_custody_scope_and_evidence() -> Result<()
             ..test.context()
         },
         &path,
+        &|_| false,
         &cancel,
     )?;
     assert_eq!(census_held.state, WorktreeDiagnosisState::Unknown);
@@ -222,7 +223,7 @@ fn doctor_unknown_preserves_census_and_custody_scope_and_evidence() -> Result<()
         .private_git_dir()
         .join("provenant-owner.json");
     fs::write(&owner_path, "malformed owner record")?;
-    let malformed = doctor(&test.context(), &path, &cancel)?;
+    let malformed = doctor(&test.context(), &path, &|_| false, &cancel)?;
     assert_eq!(malformed.state, WorktreeDiagnosisState::Unknown);
     assert_eq!(malformed.repair_kind(), WorktreeRepairKind::RetryDiagnosis);
     assert_eq!(malformed.source, Some("custody"));
@@ -257,7 +258,7 @@ fn doctor_unknown_preserves_census_and_custody_scope_and_evidence() -> Result<()
     fs::write(retained.join("import-retained.json"), "retained")?;
     let reservation = fs::read(retained.join("reservation.json"))?;
     drop(lease);
-    let custody = doctor(&context, &path, &cancel)?;
+    let custody = doctor(&context, &path, &|_| false, &cancel)?;
     assert_eq!(custody.state, WorktreeDiagnosisState::Unknown);
     assert_eq!(custody.repair_kind(), WorktreeRepairKind::RetryDiagnosis);
     assert_eq!(custody.source, Some("custody"));
@@ -306,11 +307,66 @@ fn doctor_reports_an_observed_bystander_in_a_free_worktree() -> Result<(), Box<d
         "observed",
         path.to_str().ok_or("path")?,
     ])?;
-    let report = doctor(&context, &path, &CancelToken::new())?;
+    let report = doctor(&context, &path, &|_| false, &CancelToken::new())?;
     assert_eq!(report.state, WorktreeDiagnosisState::Observed);
     assert_eq!(report.repair_kind(), WorktreeRepairKind::RetryDiagnosis);
     assert_eq!(report.holder, None);
     assert!(!report.repair.is_empty());
+    Ok(())
+}
+
+#[test]
+fn doctor_names_dwellers_without_claiming_signal_authority() -> Result<(), Box<dyn Error>> {
+    struct Dwelling;
+    impl WorkerObserver for Dwelling {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, Occupancy::Observed { process: None }))
+                .collect()
+        }
+        fn observe_evidence_while(
+            &self,
+            roots: &[PathBuf],
+            _: bool,
+            keep_going: &dyn Fn() -> bool,
+        ) -> Option<WorkerEvidence> {
+            keep_going().then(|| WorkerEvidence {
+                states: self.observe_roots(roots),
+                held: roots
+                    .iter()
+                    .map(|root| {
+                        (
+                            root.clone(),
+                            vec![ObservedProcess::cwd(913, Some("zsh -c burn".into()))],
+                        )
+                    })
+                    .collect(),
+                ..WorkerEvidence::default()
+            })
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let path = fixture.root.join("dwelling");
+    fixture.run(&[
+        "worktree",
+        "add",
+        "-b",
+        "dwelling",
+        path.to_str().ok_or("path")?,
+    ])?;
+    let context = WorktreeContext {
+        workers: &Dwelling,
+        ..test.context()
+    };
+    let report = doctor(&context, &path, &|_| true, &CancelToken::new())?;
+    assert_eq!(report.held_processes.len(), 1);
+    let row = &report.held_processes[0];
+    assert_eq!(row.pid, 913);
+    assert_eq!(row.command.as_deref(), Some("zsh -c burn"));
+    assert!(row.report.contains("report only"), "{}", row.report);
     Ok(())
 }
 
@@ -505,7 +561,7 @@ fn recovery_wait_releases_the_observer_gate_while_a_writer_is_held() -> Result<(
     // The recovery has attempted the actual held writer lease and is paused
     // between retries. Doctor must still acquire its observation gate.
     waited.recv_timeout(Duration::from_secs(5))?;
-    let report = doctor(&context, &path, &CancelToken::new())?;
+    let report = doctor(&context, &path, &|_| false, &CancelToken::new())?;
     assert_eq!(report.state, WorktreeDiagnosisState::LiveWriter);
     assert_eq!(report.repair_kind(), WorktreeRepairKind::WaitForWriter);
     assert_eq!(report.holder, Some(scope.attempt));

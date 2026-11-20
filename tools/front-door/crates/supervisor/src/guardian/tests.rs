@@ -1322,6 +1322,43 @@ fn guardian_present_attempt_with_enoent_sync_still_settles() {
     );
 }
 
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn guardian_launch_record_names_its_build() {
+    const CHILD_ARGS: &str = "PROVENANT_TEST_GUARDIAN_BUILD_FDS";
+    const FIXTURE_DIGEST: &str = "3634000000000000000000000000000000000000000000000000000000000000";
+    if let Some(args) = child_descriptors(CHILD_ARGS) {
+        crate::set_build_source_digest(FIXTURE_DIGEST.to_owned());
+        let observer = crate::fixture::RecordedBootObserver;
+        let publisher = UnconfirmedThenDurable(std::cell::Cell::new(false));
+        let holder = SettlingHolder;
+        supervise(
+            &args,
+            GuardianHooks {
+                observer: Some(&observer),
+                exit_publisher: Some(&publisher),
+                holder: Some(&holder),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        return;
+    }
+    let (_root, mut guardian, _, attempt_path, _) = spawn_missing_attempt_guardian(
+        "guardian::tests::guardian_launch_record_names_its_build",
+        CHILD_ARGS,
+        vec![b"/usr/bin/true".to_vec()],
+    );
+    let status = wait_for_guardian(&mut guardian);
+    assert!(status.success(), "supervise fixture failed: {status}");
+    let launch: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(attempt_path.join("launch.json")).unwrap()).unwrap();
+    assert_eq!(launch["schema_version"], 1);
+    assert_eq!(launch["build"]["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(launch["build"]["source_digest"], FIXTURE_DIGEST);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn descriptor_identity_distinguishes_removal_replacement_and_rename() {

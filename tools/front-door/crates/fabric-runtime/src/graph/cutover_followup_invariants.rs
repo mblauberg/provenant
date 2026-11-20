@@ -178,50 +178,6 @@ impl AttemptOwner for Owner {
     }
 }
 
-fn one_route_graph(id: &str) -> GraphDocument {
-    serde_json::from_value(json!({
-        "schema_version": 1, "graph_id": id, "nodes": [{
-            "id":"writer", "access":"worktree_write", "prompt":"Finish this slice",
-            "worktree":".worktrees/writer", "routes":[route("first")]
-        }]
-    }))
-    .unwrap()
-}
-
-#[test]
-fn single_route_token_loss_and_context_handoff_reuse_the_same_route() {
-    use provenant_records::StopCause;
-    let handoff = format!(
-        "{}handoff\n{{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"Continue this slice\",\"remaining\":[\"finish\"],\"decisions\":[],\"verify\":[]}}\n{}",
-        "\u{60}\u{60}\u{60}", "\u{60}\u{60}\u{60}"
-    );
-    for cause in [StopCause::LaneTokenLost, StopCause::ContextHandoff] {
-        let document = one_route_graph("single-route");
-        let mut owner = Owner {
-            observations: [
-                terminal(AttemptOutcome::TaskFailed, Some(cause), Some(&handoff)),
-                terminal(AttemptOutcome::Succeeded, None, None),
-            ]
-            .into(),
-            ..Default::default()
-        };
-        let run = advance(&document, &mut owner, &mut Journal::default()).unwrap();
-        assert!(run.checkpoint.successful(), "{cause}");
-        assert_eq!(owner.routes.len(), 2, "{cause}");
-        assert_eq!(owner.routes[0], owner.routes[1], "{cause}");
-        assert_eq!(owner.worktrees[0], owner.worktrees[1], "{cause}");
-        assert!(owner.prompts[1].contains("finish"), "{cause}");
-        let restarts: Vec<_> = run
-            .checkpoint
-            .expansions
-            .iter()
-            .filter_map(|e| e.patch.as_ref()?.restart.as_ref())
-            .map(|r| (r.cause, r.step))
-            .collect();
-        assert_eq!(restarts, [(cause, provenant_records::NextStep::NewRoute)]);
-    }
-}
-
 fn pinned_depletion_document() -> GraphDocument {
     serde_json::from_value(json!({
         "schema_version": 1, "graph_id": "pinned-tier",

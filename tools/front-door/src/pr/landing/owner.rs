@@ -53,6 +53,8 @@ pub struct Owner<'a> {
     pub policy: &'a LandPolicy,
     pub gate: &'a GateDefinition,
     pub reviews: &'a dyn ReviewRecordSource,
+    /// The caller's process-observation seam, also used by retention.
+    pub workers: &'a dyn provenant_confinement::worktrees::WorkerObserver,
     pub review_scope: provenant_records::landing::ReviewScope,
     /// Shadow runs never publish and keep no landing record.
     pub shadow: bool,
@@ -1007,9 +1009,12 @@ impl LandingOwner for Owner<'_> {
         }
         if !self.shadow {
             write_record(self.state, &record)?;
-            if let Err(error) =
-                crate::custody::settle_landing(self.repo.project_path(), self.state, &record)
-            {
+            if let Err(error) = crate::custody::settle_landing(
+                self.repo.project_path(),
+                self.state,
+                &record,
+                self.workers,
+            ) {
                 record
                     .warnings
                     .push(format!("custody settlement pending: {error}"));
@@ -1131,6 +1136,7 @@ mod tests {
             policy: &world.policy,
             gate: &world.definition,
             reviews: &world.reviews,
+            workers: &provenant_confinement::worktrees::SystemWorkerObserver,
             review_scope: world.review_scope.clone(),
             shadow: false,
             last: None,
@@ -1256,6 +1262,7 @@ mod tests {
                 policy: &world.policy,
                 gate: &world.definition,
                 reviews: &world.reviews,
+                workers: &provenant_confinement::worktrees::SystemWorkerObserver,
                 review_scope: world.review_scope.clone(),
                 shadow: false,
                 last: None,

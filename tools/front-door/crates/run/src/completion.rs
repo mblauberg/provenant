@@ -16,7 +16,15 @@ use std::{
 };
 
 pub(crate) fn guidance() -> &'static str {
-    "Work until the brief is finished. Do not end your turn because a slice is done, a commit is a natural checkpoint or the work is large; start the next item. Ending your turn ends your work, so a report of what remains is not progress. End your final answer with exactly one fenced handoff block, with nothing after it. Use schema_version 2 and status done, blocked or stopped_early; include note, remaining[], decisions[] and verify[] (verification performed and results). When a criterion is wrong, add spec_concerns entries with criterion, claim, evidence, proposed_change and status (as_written, diverged or stopped); disclose any divergence. A write scope names the expected files, not a fence: when the fix needs another file, edit it minimally and list each such path in decisions; only a strict WRITE_SCOPE lane policy refuses those paths at settlement. Use blocked only for a real boundary such as credentials, another repository or shared Git history. Use done only when the brief is finished. Use blocked when you need an owner decision, lack a capability required by the brief, or need an external change you cannot make yourself. These cases must not use stopped_early. Use stopped_early only when you cannot carry on in this session, such as running out of context, and never to report work you could do now. The JSON is at most 12288 bytes; note and each array entry are 1..4096 bytes, each array at most 64 strings. Example:\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"what was done\",\"remaining\":[],\"decisions\":[],\"verify\":[\"check and result\"]}\n```"
+    static GUIDANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    GUIDANCE.get_or_init(|| {
+        [
+            "Work until the brief is finished. Do not end your turn because a slice is done, a commit is a natural checkpoint or the work is large; start the next item. Ending your turn ends your work, so a report of what remains is not progress. End your final answer with exactly one fenced handoff block, with nothing after it. Use schema_version 2 and status done, blocked or stopped_early; include note, remaining[], decisions[] and verify[] (verification performed and results). When a criterion is wrong, add spec_concerns entries with criterion, claim, evidence, proposed_change and status (as_written, diverged or stopped); disclose any divergence. A write scope names the expected files, not a fence: when the fix needs another file, edit it minimally and list each such path in decisions; only a strict WRITE_SCOPE lane policy refuses those paths at settlement.",
+            provenant_records::handoff::STATUS_GUIDANCE,
+            "The JSON is at most 12288 bytes; note and each array entry are 1..4096 bytes, each array at most 64 strings. Example:\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"what was done\",\"remaining\":[],\"decisions\":[],\"verify\":[\"check and result\"]}\n```"
+        ]
+        .join(" ")
+    })
 }
 
 impl RunStore {
@@ -58,6 +66,16 @@ impl RunStore {
                 "warning: attempt {}: {}",
                 record.attempt_id,
                 fallback.warning()
+            );
+        }
+        if let Ok(Some(handoff)) = &parsed.handoff
+            && let Some(warning) = handoff.blocked_on_warning()
+        {
+            // Accepted: the field is additive, so the handoff stands without it.
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: attempt {}: {warning}",
+                record.attempt_id
             );
         }
         if let Some(handoff) = read_snapshot(attempt)? {
@@ -473,6 +491,17 @@ mod tests {
     use crate::tests::{call, clock, context, exit, input, publication, seal_observation};
     use provenant_records::AbsolutePath;
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    /// Invariant: the preamble teaches the statuses from the text the routing
+    /// policy's guidance also uses, and no sentence contradicts it.
+    #[test]
+    fn guidance_teaches_the_statuses_from_the_shared_text() {
+        let text = guidance();
+        assert!(text.contains(provenant_records::handoff::STATUS_GUIDANCE));
+        assert!(text.contains("blocked_on"));
+        assert!(!text.contains("real boundary"));
+        assert_eq!(text.matches("Use blocked only").count(), 1, "{text}");
+    }
 
     #[test]
     fn guidance_treats_write_scope_as_advisory_outside_strict_policy() {

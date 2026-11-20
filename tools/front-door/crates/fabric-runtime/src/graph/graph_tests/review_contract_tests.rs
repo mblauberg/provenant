@@ -391,7 +391,6 @@ fn typed_contract_rejects_invalid_verdicts_even_without_a_pass_requirement() {
     for verdict in [
         "",
         "VERDICT: BANANA",
-        "VERDICT: APPROVE",
         "VERDICT: PASS\nVERDICT: PASS",
     ] {
         let mut node = review("review.tests", "review");
@@ -424,6 +423,30 @@ fn typed_contract_rejects_invalid_verdicts_even_without_a_pass_requirement() {
                 .checkpoint,
             run.checkpoint
         );
+    }
+}
+
+// Spec: docs/specs/run-settlement.md#review-verdict-wording
+#[test]
+fn normalised_review_verdict_settles_with_a_warning() {
+    for (line, expected) in [
+        ("VERDICT: approve abc123", "VERDICT: PASS"),
+        ("Verdict FAIL: reachable panic", "VERDICT: FAIL"),
+    ] {
+        let mut node = review("review.tests", "review");
+        node.required_verdict = None;
+        let mut owner = FakeOwner {
+            observations: [terminal_with_result(
+                AttemptOutcome::Succeeded, &answer(json!([]), line),
+            )].into(),
+            ..Default::default()
+        };
+        let run = advance(&graph(vec![node]), &mut owner, &mut MemoryJournal::default()).unwrap();
+        let progress = &run.checkpoint.nodes[0];
+        assert_eq!(progress.state, NodeState::Succeeded);
+        let outputs = progress.outputs.as_ref().unwrap();
+        assert_eq!(outputs.verdict.as_deref(), Some(expected));
+        assert!(outputs.warnings.iter().any(|warning| warning.contains("review_verdict_normalised") && warning.contains(line)));
     }
 }
 

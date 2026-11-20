@@ -1128,7 +1128,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Hosts { command: None } => fabric::hosts(globals, process.workers()),
         Command::Hosts {
             command: Some(command),
-        } => hosts::run(command, globals),
+        } => hosts::run(command, globals, process.workers()),
         Command::Accounts(provenant_cli::accounts::Accounts::Sync {
             dry_run,
             adopt,
@@ -1817,6 +1817,10 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     // Lets attempt context match an installed release without hashing the
     // executable on the launch path; an unparsable identity stays unknown.
     if let Ok(identity) = identity() {
+        // The guardian may be a different build from the CLI that created the
+        // attempt. Hand it this binary's source digest so its launch record
+        // names the build that actually launched the attempt.
+        provenant_supervisor::set_build_source_digest(identity.source_digest.to_string());
         provenant_run::set_build_identity(identity);
     }
     let (verb, globals) = match &parsed {

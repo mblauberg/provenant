@@ -57,6 +57,8 @@ pub struct WaitInfo {
     pub start_unix_seconds: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<LaneIdentity>,
     /// The masked, bounded argv of the command waiting for the slot. The
     /// admission shim records it before publication, so raw arguments never
     /// reach a reader or the state directory.
@@ -72,9 +74,72 @@ pub struct HeldInfo {
     pub start_unix_seconds: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<LaneIdentity>,
     /// The masked, bounded argv of the command holding the slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+}
+
+/// Host-owned attribution for a lane sharing admission slots with other projects.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LaneIdentity {
+    pub project: PathBuf,
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LaneRegistration {
+    attempt_id: provenant_core::AttemptId,
+    scratch: PathBuf,
+    lane: LaneIdentity,
+}
+
+/// Publish a host-wide index of a lane's lock-backed markers before confinement.
+/// The lane still writes only its scratch grant; no shared registry write grant
+/// is needed. Marker locks, rather than the registration's age, prove liveness.
+pub fn register_lane(
+    state: &Path,
+    class: &str,
+    scratch: &Path,
+    attempt_id: provenant_core::AttemptId,
+    lane: LaneIdentity,
+) -> std::result::Result<(), AdmissionError> {
+    validate_class_name(class)?;
+    let path = class_directory(state, class).join("lanes");
+    std::fs::create_dir_all(&path)?;
+    let record = LaneRegistration {
+        attempt_id,
+        scratch: scratch.to_path_buf(),
+        lane,
+    };
+    let bytes = serde_json::to_vec(&record).map_err(std::io::Error::other)?;
+    let dir = Directory::open_anchor(&path)?;
+    dir.atomic_write(
+        std::ffi::OsStr::new(&format!("{attempt_id}.json")),
+        ".lane-",
+        &bytes,
+        crate::fs::PublishMode::Replace,
+    )?;
+    Ok(())
+}
+
+fn registered_lanes(state: &Path, class: &str) -> Vec<LaneRegistration> {
+    let Ok(entries) = std::fs::read_dir(class_directory(state, class).join("lanes")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                return None;
+            }
+            std::fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        })
+        .collect()
 }
 
 fn now_unix_seconds() -> u64 {
@@ -113,6 +178,7 @@ pub fn mark_waiting_with_command(
         pid,
         start_unix_seconds: now_unix_seconds(),
         attempt_id: attempt_id.map(str::to_string),
+        lane: None,
         command,
     };
     let (lock, json_path, lock_path) =
@@ -151,6 +217,7 @@ pub fn mark_held_with_command(
         pid,
         start_unix_seconds: now_unix_seconds(),
         attempt_id: attempt_id.map(str::to_string),
+        lane: None,
         command,
     };
     let (lock, json_path, lock_path) =
@@ -248,6 +315,7 @@ pub fn mark_host_waiting_with_command(
         pid,
         start_unix_seconds: now_unix_seconds(),
         attempt_id: None,
+        lane: None,
         command,
     };
     let json_file = format!("{pid}.json");
@@ -299,6 +367,7 @@ pub fn mark_host_held_with_command(
         pid,
         start_unix_seconds: now_unix_seconds(),
         attempt_id: None,
+        lane: None,
         command,
     };
     let json_file = format!("{pid}.json");
@@ -329,11 +398,37 @@ pub fn mark_host_held_with_command(
 }
 
 pub fn host_holders(state: &Path, class: &str) -> Vec<HeldInfo> {
-    live_records(&class_directory(state, class).join("holders"))
+    let mut holders: Vec<HeldInfo> = live_records(&class_directory(state, class).join("holders"));
+    for registration in registered_lanes(state, class) {
+        holders.extend(
+            lane_holders(&registration.scratch)
+                .into_iter()
+                .filter(|info| info.class == class)
+                .map(|mut info| {
+                    info.attempt_id = Some(registration.attempt_id.to_string());
+                    info.lane = Some(registration.lane.clone());
+                    info
+                }),
+        );
+    }
+    holders
 }
 
 pub fn host_waiters(state: &Path, class: &str) -> Vec<WaitInfo> {
-    live_records(&class_directory(state, class).join("waiters"))
+    let mut waiters: Vec<WaitInfo> = live_records(&class_directory(state, class).join("waiters"));
+    for registration in registered_lanes(state, class) {
+        waiters.extend(
+            lane_waiters(&registration.scratch)
+                .into_iter()
+                .filter(|info| info.class == class)
+                .map(|mut info| {
+                    info.attempt_id = Some(registration.attempt_id.to_string());
+                    info.lane = Some(registration.lane.clone());
+                    info
+                }),
+        );
+    }
+    waiters
 }
 
 fn live_records<T: serde::de::DeserializeOwned>(dir_path: &Path) -> Vec<T> {
@@ -384,28 +479,18 @@ pub fn active_classes(state: &Path) -> Vec<String> {
     classes
 }
 
-pub fn standalone_holders(state: &Path) -> Vec<HeldInfo> {
-    let mut all = Vec::new();
-    for class in active_classes(state) {
-        for holder in host_holders(state, &class) {
-            if holder.attempt_id.is_none() {
-                all.push(holder);
-            }
-        }
-    }
-    all
+pub fn all_holders(state: &Path) -> Vec<HeldInfo> {
+    active_classes(state)
+        .iter()
+        .flat_map(|class| host_holders(state, class))
+        .collect()
 }
 
-pub fn standalone_waiters(state: &Path) -> Vec<WaitInfo> {
-    let mut all = Vec::new();
-    for class in active_classes(state) {
-        for waiter in host_waiters(state, &class) {
-            if waiter.attempt_id.is_none() {
-                all.push(waiter);
-            }
-        }
-    }
-    all
+pub fn all_waiters(state: &Path) -> Vec<WaitInfo> {
+    active_classes(state)
+        .iter()
+        .flat_map(|class| host_waiters(state, class))
+        .collect()
 }
 
 pub fn class_directory(state: &Path, class: &str) -> PathBuf {

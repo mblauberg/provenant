@@ -157,6 +157,18 @@ so the two outputs cannot disagree about the unit.
 ## Lane verification and build admission
 
 A writer preamble's verification paragraph is `lanes.verification` (`check`, `targeted` or `full`). Unset, the sourced default is targeted: build in the worktree's own warm target (`lanes.cargo_target`), run cargo check, clippy on touched crates and targeted tests, and leave the workspace suite to CI. A brief line `Verification scope: targeted` (or `check` or `full`) overrides the knob and the paragraph names source `brief`. When the knob and that line disagree, the paragraph follows the brief and the stop cause names both scopes. Lane Cargo commands share the `build` admission class, configured through `[admission.build].slots`; unset, its count is derived from cores and memory (source `default`), and a configured value names its host or project source. Set it to `0` to disable the cap. Lane Cargo commands, including aliases and nextest, use a PATH shim to acquire a slot. A command that finds every slot busy waits a bounded time, then warns and proceeds; status shows the wait. Direct paths bypass this cooperative throttle.
+
+Admission attribution has the same host scope as slot occupancy. Before confinement,
+`configure_build_slots` registers each lane under `<state>/admission/<class>/lanes/`,
+including its project, lane name and scratch marker location. The registry indexes
+live holder and waiter markers through their held locks, so stale registrations or
+markers left after a crash do not imply occupancy. `admission::host_holders` and
+`host_waiters` combine registered lane markers with standalone markers, independent
+of the querying project or its run store. Both ordinary status and lane wait reasons
+name the holding project and lane; JSON retains their attribution. Registry
+publication failures warn and allow the build to proceed. Lanes keep their existing
+scratch write grant and read-only slot access; registration does not grant writes
+to host state or other lanes' records.
 - Why: a chair brief must be able to widen what a lane verifies, and parallel lanes must share one host cap instead of each taking the machine.
 
 ## Every limit names the layer that set it
@@ -299,18 +311,42 @@ A restart preserves the worktree and archives prior attempts. Bounds may turn a
 restart into a chair decision. See [routing](routing.md) for route selection.
 - Why: one decision keeps stop handling consistent and protects writer custody.
 
-A writer's declared stop settles as `stopped_early`, or as `blocked` when its
-final handoff is blocked. The node's advance code records whether the stop left
+A writer's declared stop settles as `stopped_early`, or as a blocked cause when its
+final handoff is blocked: `blocked_environment` or `blocked_dependency` when its
+`blocked_on` says so, and `blocked` for an owner decision, a missing capability or
+no kind given. The node's advance code records whether the stop left
 committed work: `writer_declared_stop` when the writer's head moved past its
 source commit, and `stopped_no_work` otherwise, whether the worktree is clean or
-holds uncommitted edits. Both codes take the `stopped_early` row below unless
-the node overrides it: a new route, which restarts the writer in a fresh session
+holds uncommitted edits. For a `stopped_early` handoff both codes take the
+`stopped_early` row below unless the node overrides it: a new route, which restarts the writer in a fresh session
 on its retained worktree. A junior route escalates to senior; otherwise the
 restart uses a declared route not yet launched, and an alias route may resolve
-again. With no such route, or with the continuation budget spent, the writer
-pauses for the chair. A `blocked` stop always goes to the chair.
+again. A different route is always preferred when one exists.
+
+With no different route, a stop that can continue on its own route
+(`stopped_early`, `lane_token_lost` and `context_handoff`) takes the same route
+with a fresh session on the retained worktree and branch, briefed with the
+previous handoff. This fallback is bounded twice: by the graph-wide
+`limits.continuations`, whose value and source the restart and pause reasons
+name, and by progress, because after the first round each further round must add
+a commit or change the handoff's `remaining[]`. A round that does neither pauses
+for the chair, which keeps a usage-limit stop that a writer wrote up as
+`stopped_early` from looping. A node `on_stop` entry for the cause wins over
+the fallback, so `chair` or `new_route` still pauses or restarts as the node
+says. Any other stop with no route, or with the continuation budget spent,
+pauses for the chair.
+
+A `blocked` stop is pinned to the chair, and its pause says which kind of block
+it is: only `owner_decision` and `capability` read as an owner decision or a
+missing capability, and a handoff with no `blocked_on` reads as "blocked" and
+says the kind was not given. A `blocked_environment` stop retries once on the
+same route in a fresh session, then pauses for the chair worded as an
+environment problem; it is not pinned, so a node `on_stop` entry can send it to
+the chair at once. A `blocked_dependency` stop pauses for the chair as a wait,
+and is not pinned either.
 - Why: the chair must see whether a restart resumes committed work, without a
-  second stop rule that could treat the two differently.
+  second stop rule that could treat the two differently; a writer that stops
+  early on its only route should continue, not wait for a manual relaunch.
 - Owner: `crates/fabric-runtime/src/graph/transitions.rs`,
   `crates/fabric-runtime/src/graph/next_step.rs`
 
@@ -318,6 +354,8 @@ pauses for the chair. A `blocked` stop always goes to the chair.
 | --- | --- | --- | --- |
 | `stopped_early` | `new_route` | no | 0 |
 | `blocked` | `chair` | yes | 0 |
+| `blocked_environment` | `chair` | no | 1 |
+| `blocked_dependency` | `chair` | no | 0 |
 | `handoff_missing` | `chair` | no | 0 |
 | `handoff_malformed` | `chair` | no | 0 |
 | `empty_result` | `new_route` | no | 1 |

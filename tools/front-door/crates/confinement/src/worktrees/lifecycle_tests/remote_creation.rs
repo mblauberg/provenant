@@ -925,7 +925,7 @@ fn doctor_and_list_report_the_same_registered_worktrees() -> Result<(), Box<dyn 
     let context = test.context();
     let path = fixture._temp.path().join("inventory-1");
     assert_eq!(
-        doctor(&context, &path, &cancel())?.state,
+        doctor(&context, &path, &|_| false, &cancel())?.state,
         WorktreeDiagnosisState::Clean
     );
     let listed: std::collections::BTreeSet<_> = list(&context, &cancel())?

@@ -379,15 +379,22 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                         .and_then(|node| node.land.as_ref())
                         .map(|land| &land.branch))
             );
+            // A review result reports the subject it actually reviewed, not
+            // the checkout head the launch started from. ReviewSettlement is
+            // the only checkpoint evidence that pins that subject; other nodes
+            // keep their existing commit, land and writer-binding fallback.
             row["head"] = json!(
-                node.and_then(|node| node.outputs.as_ref())
-                    .and_then(|out| out.commit.as_ref())
+                node.and_then(|node| node.review_settlement.as_ref())
+                    .map(|settlement| settlement.head.to_string())
+                    .or_else(|| node
+                        .and_then(|node| node.outputs.as_ref())
+                        .and_then(|out| out.commit.clone()))
                     .or_else(|| node
                         .and_then(|node| node.land.as_ref())
-                        .map(|land| &land.head))
+                        .map(|land| land.head.clone()))
                     .or_else(|| node
                         .and_then(|node| node.writer_binding.as_ref())
-                        .map(|binding| &binding.head))
+                        .map(|binding| binding.head.clone()))
             );
             row["pr"] = node
                 .and_then(|node| node.land.as_ref())
@@ -961,11 +968,7 @@ pub(crate) fn enrich_status_rows_within(
     };
     let call = provenant_run::Request { clock, cancel };
     let store = provenant_run::RunStore::open_read_only(&execution, &call).map_err(run_error)?;
-    let lane_holders = store
-        .as_ref()
-        .and_then(|store| provenant_cli::run::active_lane_admission(store, &call).ok())
-        .map(|records| records.0)
-        .unwrap_or_default();
+    let lane_holders = provenant_os::admission::all_holders(context.roots.state.as_path());
     let local_prefix = format!("{}/", context.identity.host);
     let local_census = rows
         .iter()
@@ -2275,28 +2278,8 @@ pub(crate) fn graph_listing(
         }
         let mut finished = finish_listing(listing, settled_count, command.all || globals.full);
         if root.as_path().exists() {
-            finished.admission_holders =
-                provenant_os::admission::standalone_holders(root.as_path());
-            finished.admission_waiters =
-                provenant_os::admission::standalone_waiters(root.as_path());
-            let execution = provenant_run::ExecutionContext {
-                state_root: root.clone(),
-                project_id: project,
-                actor_id: factory.context.identity.inbox.actor,
-                read_prompts: false,
-            };
-            let call = provenant_run::Request {
-                clock: &factory.clock,
-                cancel: &cancel,
-            };
-            if let Some(store) =
-                provenant_run::RunStore::open_read_only(&execution, &call).map_err(run_error)?
-            {
-                let (holders, waiters) =
-                    provenant_cli::run::active_lane_admission(&store, &call).map_err(run_error)?;
-                finished.admission_holders.extend(holders);
-                finished.admission_waiters.extend(waiters);
-            }
+            finished.admission_holders = provenant_os::admission::all_holders(root.as_path());
+            finished.admission_waiters = provenant_os::admission::all_waiters(root.as_path());
         }
         Ok(finished)
     })();
@@ -2634,10 +2617,11 @@ fn listing_summary(
 }
 
 fn admission_waiter_description(waiter: &provenant_os::admission::WaitInfo) -> String {
-    match &waiter.attempt_id {
-        Some(attempt) => format!("attempt {} (pid {})", attempt, waiter.pid),
-        None => format!("pid {}", waiter.pid),
-    }
+    provenant_cli::run::admission_actor_description(
+        waiter.pid,
+        waiter.attempt_id.as_deref(),
+        waiter.lane.as_ref(),
+    )
 }
 
 fn age_text(micros: i64) -> String {
@@ -4047,6 +4031,7 @@ mod tests {
             pid: 42,
             start_unix_seconds: 0,
             attempt_id: Some("holder-attempt".into()),
+            lane: None,
             command: Some("cargo build --release".into()),
         };
         let description = provenant_cli::run::admission_holder_description(&holder);
@@ -4301,11 +4286,21 @@ mod tests {
     }
 
     #[test]
-    fn lane_status_names_another_lanes_admission_holder() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn lane_status_names_another_projects_admission_holder()
+    -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
-        let waiting_scratch = temp.path().join("waiting");
-        let holding_scratch = temp.path().join("holding");
+        let waiting_scratch = temp.path().join("project-b/waiting");
+        let holding_scratch = temp.path().join("project-a/holding");
+        provenant_os::admission::register_lane(
+            temp.path(),
+            "build",
+            &holding_scratch,
+            "22222222222222222222222222222222".parse()?,
+            provenant_os::admission::LaneIdentity {
+                project: temp.path().join("project-a"),
+                name: "builder-a".to_owned(),
+            },
+        )?;
         let _held = provenant_os::admission::mark_held(
             &holding_scratch,
             "build",
@@ -4339,7 +4334,6 @@ mod tests {
                 path: provenant_records::AbsolutePath::new(&waiting_scratch)?,
                 scope: provenant_records::run::PathScope::Subtree,
             });
-        let holders = provenant_os::admission::lane_holders(&holding_scratch);
         let row = provenant_cli::run::project_lane_with_admission(
             &attempt,
             &[],
@@ -4347,12 +4341,13 @@ mod tests {
             None,
             true,
             Err(()),
-            &holders,
+            &[],
         );
         let reason = row.waiting_for.ok_or("missing admission wait")?;
         assert!(
             reason.contains("build")
-                && reason.contains("holder-attempt")
+                && reason.contains("project-a")
+                && reason.contains("builder-a")
                 && reason.contains("slot 2"),
             "{reason}"
         );
@@ -4861,6 +4856,35 @@ mod tests {
             assert_eq!(reply.result.data["rows"][0]["head"], "abc123");
             assert!(reply.human.contains("head: abc123"));
         }
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-settlement.md#review-verdict-wording
+    #[test]
+    fn review_result_reports_the_reviewed_head_not_the_launch_base()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut value = serde_json::to_value(review_checkpoint("VERDICT: PASS", json!([])))?;
+        value["nodes"][0]["review_settlement"] = json!({
+            "attempt_id": "7".repeat(32),
+            "head": "b".repeat(40),
+            "base": "a".repeat(40),
+            "verdict": "approve",
+            "independent": true,
+        });
+        let checkpoint: GraphCheckpoint = serde_json::from_value(value)?;
+        let rows = status_rows(
+            &graph_snapshot(checkpoint),
+            &GraphTarget {
+                graph: "g".into(),
+                node: Some("parent".into()),
+                attempt: None,
+            },
+        );
+        let target = "g/parent".parse()?;
+        let reply = result_reply(&target, &rows);
+        let reviewed = "b".repeat(40);
+        assert_eq!(reply.result.data["rows"][0]["head"], reviewed.as_str());
+        assert!(reply.human.contains(&format!("head: {reviewed}")));
         Ok(())
     }
 

@@ -68,6 +68,9 @@ its census and sandbox probe only for an unresolved exit.
 
 A launch is named by its attempt's `WorkKey`: the guardian's launch summary
 records the key, and a stop request is identified by attempt and generation.
+The launch summary also records the launching build's version and source
+digest, so every launch names the binary that wrote it, even when an upgrade
+lands while the attempt is queued.
 A supervisor restart finds a live writer by the key through the attempt row,
 then reads that attempt's custody records.
 - Why: signalling a recycled PID or a sibling's group kills unrelated work, and
@@ -580,6 +583,33 @@ Landing and collection require `Free`; the census grants no signal authority.
 - Why: a retained cwd or descriptor survives permission changes, so current
   permissions cannot prove absence.
 - Owner: `crates/confinement/src/worktrees.rs`, `crates/os/src/sys/pid.rs`
+
+### Settled dwellers are reported, never signalled
+
+`gc` preview and apply, `hosts doctor` and `worktree doctor` name every process
+that one bounded worktree census finds inside a terminal lane worktree or a
+settled attempt directory, with its pid, command, and whether a cwd, executable
+image or open descriptor placed it there. Every dweller of a root is named, not
+only the first process that placed a path there. An attempt contributes roots
+only while its run is `Terminal` and its custody is released; one shared helper
+applies that filter to both gc and host doctor. All three commands use the same
+2,000,000 microsecond budget and exclude the caller's own session and verified
+ancestors, including processes the listing could not name. A path observation
+alone grants no signal authority: these paths only report, and never signal, a
+dweller; the lane's own tree is reaped separately under proven identity.
+
+`worktree doctor` keeps main's unbounded occupancy classification and adds the
+held rows beside it, only for terminal worktrees; a bounded census never
+changes live-writer or `census_unknown` classification. When a bounded census is
+cut short by its budget or cancellation, or its process listing or coverage is incomplete, the report warns
+`dweller census incomplete (budget/cancel); results may be missing` rather than
+reading as no dwellers, and never refuses the command. A locally produced
+report caps held rows at 128 and acknowledges any omitted rows with an
+`N more held processes not shown` line, so it always passes peer validation.
+- Why: an orphaned process must be visible to the operator without turning a
+  cwd or descriptor hint into permission to kill an unrelated process, and a
+  partial census or a large host must never look like a clean result.
+- Owner: `crates/confinement/src/worktrees/census.rs`, `crates/confinement/src/worktrees/doctor.rs`, `src/worktrees.rs`, `src/gc_support.rs`, `src/hosts.rs`
 
 ### Pruning and GC need proof
 

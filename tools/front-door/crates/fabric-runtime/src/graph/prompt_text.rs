@@ -278,11 +278,17 @@ mod tests {
         let summary = format!("finding summary {secret}");
         let comment = format!("repair extension {secret}");
         let mut input = crate::result_capture::ResultCapture::new(None);
-        input.push(format!("VERDICT: {secret}\nResult {secret}\n```findings\n{{\"schema_version\":1,\"findings\":[{{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"propagates\":\"upstream:F1\",\"summary\":\"{summary}\",\"status\":\"open\"}}],\"repair_items\":[{{\"id\":\"F1\",\"status\":\"fixed\",\"reason\":\"fixed it\",\"comment\":\"{comment}\"}}]}}\n```\n").as_bytes());
+        // #3536: only a recognised verdict word is accepted; trailing text is
+        // ignored but quoted verbatim in the normalisation warning. Keep the
+        // credential-shaped canary as that trailing text so the same normal
+        // form is still asserted across the verdict, findings and handoff.
+        input.push(format!("VERDICT: PASS {secret}\nResult {secret}\n```findings\n{{\"schema_version\":1,\"findings\":[{{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"propagates\":\"upstream:F1\",\"summary\":\"{summary}\",\"status\":\"open\"}}],\"repair_items\":[{{\"id\":\"F1\",\"status\":\"fixed\",\"reason\":\"fixed it\",\"comment\":\"{comment}\"}}]}}\n```\n").as_bytes());
         let mut input = input.finish();
-        assert_eq!(
-            input.verdict.as_deref(),
-            Some(format!("VERDICT: {secret}").as_str())
+        assert_eq!(input.verdict.as_deref(), Some("VERDICT: PASS"));
+        let warning = input.verdict_warning.clone().unwrap();
+        assert!(
+            warning.contains(secret) && warning.contains("VERDICT: PASS"),
+            "{warning}"
         );
         input.verdict_cause = Some(format!("untrusted verdict diagnostic {secret}"));
         let note = format!("captured handoff note {secret}");
@@ -320,7 +326,12 @@ mod tests {
                 .contains(secret)
         );
         assert_eq!(safe.result.as_ref().unwrap().digest, input.digest);
-        assert!(safe.verdict.as_deref().unwrap().contains(secret));
+        assert_eq!(safe.verdict.as_deref(), Some("VERDICT: PASS"));
+        assert!(
+            safe.warnings
+                .iter()
+                .any(|warning| warning.contains(secret) && warning.contains("VERDICT: PASS"))
+        );
         assert!(safe.result.as_ref().unwrap().excerpt.contains(secret));
         assert_eq!(safe.findings[0].id, "F1");
         assert_eq!(safe.findings[0].file, "src/lib.rs");
