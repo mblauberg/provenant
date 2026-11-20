@@ -265,10 +265,14 @@ where
         let (idle, _) = settings(project_key);
         for row in rows {
             let paths = SlotPaths::new(home, project_key, row.index);
-            let Ok(dir) = Directory::open_anchor(&paths.root) else {
+            // Collection is a destructive slot operation: hold the slot lock
+            // and its custody lease together, and refuse a slot whose live
+            // build child still holds that lease. The guard stays alive through
+            // the full reset and the record unlink below.
+            if super::slots::SlotCustody::acquire(&paths).is_err() {
                 continue;
-            };
-            let Ok(_guard) = dir.try_lock(OsStr::new("slot.lock"), LockMode::Exclusive) else {
+            }
+            let Ok(dir) = Directory::open_anchor(&paths.root) else {
                 continue;
             };
             // Re-read under the lock: status is deliberately an unlocked observation.
@@ -572,18 +576,27 @@ fn claim_maintenance_budget(
     })
 }
 
-fn release_maintenance_reservation(state: &Path, reservation: &MaintenanceReservation) {
+/// Remove an in-flight reservation. Only a job that never started gives its
+/// hour unit back; a completed job's unit stays consumed. The guard keeps a
+/// stale or refunded claim from decrementing twice.
+fn clear_maintenance_reservation(state: &Path, reservation: &MaintenanceReservation, refund: bool) {
     let owner = format!("{}:{}", reservation.pid, reservation.start_time);
     let _ = with_maintenance_state(state, |record| {
-        // A unit is consumed on claim, so returning the reservation must give
-        // the hour its unit back; otherwise a worker that cannot run drains
-        // the budget for everyone else. The guard keeps a stale or refunded
-        // claim from decrementing twice.
-        if record.reservations.remove(&owner).is_some() {
+        if record.reservations.remove(&owner).is_some() && refund {
             record.hour_budget_used.count = record.hour_budget_used.count.saturating_sub(1);
         }
         Ok(())
     });
+}
+
+/// The claimed job never launched, so the hour refunds the unused unit.
+fn cancel_maintenance_reservation(state: &Path, reservation: &MaintenanceReservation) {
+    clear_maintenance_reservation(state, reservation, true);
+}
+
+/// The claimed job launched and finished; its hour unit stays consumed.
+fn finish_maintenance_reservation(state: &Path, reservation: &MaintenanceReservation) {
+    clear_maintenance_reservation(state, reservation, false);
 }
 
 /// Run a read-only Git query with a clean environment.
@@ -766,7 +779,7 @@ pub fn maintain(state: &Path, home: &Path, project: &Path, now: SystemTime) -> M
         }
     };
     let Some(slot_guard) = probe_slot(state, limit) else {
-        release_maintenance_reservation(state, &reservation);
+        cancel_maintenance_reservation(state, &reservation);
         outcome.warning = Some("no idle build slot for maintenance".into());
         return outcome;
     };
@@ -786,13 +799,13 @@ pub fn maintain(state: &Path, home: &Path, project: &Path, now: SystemTime) -> M
                     .min(u128::from(u64::MAX)) as u64
         });
     let Some(git) = provenant_os::git::git_executable() else {
-        release_maintenance_reservation(state, &reservation);
+        cancel_maintenance_reservation(state, &reservation);
         outcome.warning = Some("Git executable unavailable for build maintenance".into());
         return outcome;
     };
     let base = ports.verify.base.clone();
     if base.trim().is_empty() {
-        release_maintenance_reservation(state, &reservation);
+        cancel_maintenance_reservation(state, &reservation);
         outcome.warning = Some("verify.base is unset; cannot pin the maintenance tree".into());
         return outcome;
     }
@@ -807,7 +820,7 @@ pub fn maintain(state: &Path, home: &Path, project: &Path, now: SystemTime) -> M
         ],
     )
     .filter(|commit| commit.bytes().all(|byte| byte.is_ascii_hexdigit())) else {
-        release_maintenance_reservation(state, &reservation);
+        cancel_maintenance_reservation(state, &reservation);
         outcome.warning = Some(format!("cannot resolve verify base {base} for maintenance"));
         return outcome;
     };
@@ -822,13 +835,13 @@ pub fn maintain(state: &Path, home: &Path, project: &Path, now: SystemTime) -> M
             std::fs::canonicalize(path).unwrap_or(project.to_path_buf())
         }
         None => {
-            release_maintenance_reservation(state, &reservation);
+            cancel_maintenance_reservation(state, &reservation);
             outcome.warning = Some("cannot locate the project's Git common directory".into());
             return outcome;
         }
     };
     let Some(checkout) = base_checkout(project, &git, &commit) else {
-        release_maintenance_reservation(state, &reservation);
+        cancel_maintenance_reservation(state, &reservation);
         outcome.warning = Some("cannot check out the resolved verify base for maintenance".into());
         return outcome;
     };
@@ -897,37 +910,6 @@ pub fn maintain(state: &Path, home: &Path, project: &Path, now: SystemTime) -> M
     let result = super::run_with_pinned_slot(job, &context, slot_guard);
     outcome.ran = true;
     outcome.canary = canary;
-    let canary_failed = match &result {
-        Ok(result) => {
-            result.outcome.infra.is_some()
-                || result
-                    .outcome
-                    .exit
-                    .is_none_or(|exit| exit.code != Some(0) || exit.signal.is_some())
-        }
-        Err(_) => true,
-    };
-    if canary && canary_failed {
-        // Reset only the slot this maintenance job actually held, and only
-        // while owning its slot lock. Another job may have taken the slot
-        // after our admission guard was released.
-        match Directory::open_anchor(&paths.root).ok().and_then(|dir| {
-            dir.try_lock(OsStr::new("slot.lock"), LockMode::Exclusive)
-                .ok()
-        }) {
-            Some(_guard) => {
-                if let Err(error) = full_reset(&paths) {
-                    outcome.warning =
-                        Some(format!("freshness_failure: full reset failed: {error}"));
-                }
-            }
-            None => {
-                outcome.warning = Some(
-                    "freshness_failure: could not lock the maintained slot for a reset".into(),
-                );
-            }
-        }
-    }
     match &result {
         Ok(result) => {
             outcome.exit_code = result.outcome.exit.map(|exit| exit.process_code());
@@ -939,17 +921,13 @@ pub fn maintain(state: &Path, home: &Path, project: &Path, now: SystemTime) -> M
             {
                 outcome.warning = Some(warning.clone());
             }
-            if canary
-                && outcome.exit_code.is_some_and(|code| code == 0)
-                && let Ok(Some(mut record)) = SlotRecord::read(&paths.record)
-            {
-                record.last_canary_unix_ms = Some(now_ms);
-                let _ = record.write(&paths.record);
-            }
         }
         Err(error) => outcome.warning = Some(error.to_string()),
     }
-    release_maintenance_reservation(state, &reservation);
+    // The job launched, so its hour unit stays consumed. A canary's slot reset
+    // and freshness stamp are applied by the slot executor itself, while it
+    // still holds the custody of the exact slot it ran in.
+    finish_maintenance_reservation(state, &reservation);
     if let Err(error) = with_maintenance_state(state, |record| {
         record.last_prewarm.insert(key.clone(), now_ms);
         Ok(())
@@ -995,11 +973,43 @@ mod tests {
             second.is_none(),
             "parallel workers cannot exceed the budget"
         );
-        release_maintenance_reservation(&state, &first);
+        cancel_maintenance_reservation(&state, &first);
         assert!(
             claim_maintenance_budget(&state, 7, 1, 7 * 3_600_000)
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn completed_maintenance_consumes_the_hourly_unit() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let now = 7 * 3_600_000;
+        let first = claim_maintenance_budget(&state, 7, 1, now)
+            .unwrap()
+            .expect("the first worker reserves the only unit");
+        // The job launched and finished: its unit stays spent for the hour.
+        finish_maintenance_reservation(&state, &first);
+        assert!(
+            claim_maintenance_budget(&state, 7, 1, now)
+                .unwrap()
+                .is_none(),
+            "a completed job must not refund its hourly unit"
+        );
+
+        // Only a claim whose job never started gives the unit back.
+        let other = tempfile::tempdir().unwrap();
+        let idle_state = other.path().join("state");
+        let never_started = claim_maintenance_budget(&idle_state, 7, 1, now)
+            .unwrap()
+            .expect("the first worker reserves the only unit");
+        cancel_maintenance_reservation(&idle_state, &never_started);
+        assert!(
+            claim_maintenance_budget(&idle_state, 7, 1, now)
+                .unwrap()
+                .is_some(),
+            "a job that never launched refunds its unit"
         );
     }
 
@@ -1075,6 +1085,66 @@ mod tests {
         assert_eq!(gc(&home, &state, 1, now).removed_slots, 0);
         assert!(paths.target.join("artifact").exists());
         drop(guard);
+        assert_eq!(gc(&home, &state, 1, now).removed_slots, 1);
+        assert!(!paths.target.exists());
+    }
+
+    #[test]
+    fn gc_requires_live_custody_of_the_slot() {
+        use provenant_os::fs::{Directory, LockMode};
+        use std::ffi::OsStr;
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let state = temp.path().join("state");
+        let paths = SlotPaths::new(&home, "project", 0);
+        std::fs::create_dir_all(&paths.target).unwrap();
+        std::fs::write(paths.target.join("artifact"), b"cached").unwrap();
+        SlotRecord {
+            schema: 1,
+            project_key: "project".into(),
+            index: 0,
+            created_unix_ms: 1,
+            ..SlotRecord::default()
+        }
+        .write(&paths.record)
+        .unwrap();
+        let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(900_000);
+        let dir = Directory::open_anchor(&paths.root).unwrap();
+
+        // After the owner crashes, the slot lock is free but a surviving child
+        // still holds the inherited custody lease. Collection must skip it.
+        let lease = dir
+            .try_lock(OsStr::new("intent.lock"), LockMode::Exclusive)
+            .unwrap();
+        assert_eq!(gc(&home, &state, 1, now).removed_slots, 0);
+        assert!(paths.target.join("artifact").exists());
+        drop(lease);
+
+        // A live running marker blocks collection even with a free lease: the
+        // liveness check runs under the slot lock, not just the lease probe.
+        let start = match SystemProcessObserver.observe(std::process::id() as i64) {
+            ProcessObservation::Present(fact) => fact.identity.native_start,
+            _ => 0,
+        };
+        std::fs::write(
+            &paths.job,
+            serde_json::json!({
+                "pid": std::process::id(),
+                "pgid": std::process::id() as i64,
+                "start_time": start,
+                "boot": "",
+                "session_id": 0,
+                "owner": "surviving-child",
+                "state": "running"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(gc(&home, &state, 1, now).removed_slots, 0);
+        assert!(paths.target.join("artifact").exists());
+
+        // With neither a lease nor a live child the slot may be collected.
+        std::fs::remove_file(&paths.job).unwrap();
         assert_eq!(gc(&home, &state, 1, now).removed_slots, 1);
         assert!(!paths.target.exists());
     }

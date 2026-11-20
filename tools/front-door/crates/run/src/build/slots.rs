@@ -454,6 +454,31 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
     })
 }
 
+/// The only slot-side effects a maintenance canary may apply. A canary that
+/// ran locally has no `Slot` placement, so it has no slot to reset or stamp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CanarySlotEffect {
+    None,
+    Stamp(u64),
+    Reset,
+}
+
+fn canary_slot_effect(
+    canary: bool,
+    placement: super::ExecPlace,
+    outcome: &JobOutcome,
+    now_ms: u64,
+) -> CanarySlotEffect {
+    if !canary || placement != super::ExecPlace::Slot {
+        return CanarySlotEffect::None;
+    }
+    if super::freshness_failed(outcome) {
+        CanarySlotEffect::Reset
+    } else {
+        CanarySlotEffect::Stamp(now_ms)
+    }
+}
+
 /// Execute an already staged job after the caller has run its optional prelude.
 pub fn execute_staged(
     job: &Job,
@@ -624,7 +649,16 @@ pub fn execute_staged(
         finished_unix_ms: outcome.finished_unix_ms,
     });
     let finished = outcome.finished_unix_ms;
-    let post_reset = super::hygiene::after_job(&mut staged.record, &outcome, finished);
+    let mut post_reset = super::hygiene::after_job(&mut staged.record, &outcome, finished);
+    // Judge the canary here, while this function still holds the exact slot's
+    // lock and custody lease. A local fallback never reaches this point, so no
+    // slot the canary did not exercise is ever reset or stamped fresh.
+    let canary = matches!(owned_job.kind, super::JobKind::Maintenance { canary: true });
+    match canary_slot_effect(canary, super::ExecPlace::Slot, &outcome, finished) {
+        CanarySlotEffect::None => {}
+        CanarySlotEffect::Reset => post_reset = super::Reset::Full,
+        CanarySlotEffect::Stamp(at) => staged.record.last_canary_unix_ms = Some(at),
+    }
     if post_reset != super::Reset::None {
         outcome.reset = post_reset;
     }
@@ -918,6 +952,48 @@ fn acquire_intent_lease(root: &Path) -> Result<LockGuard, String> {
     directory
         .try_lock(name, LockMode::Exclusive)
         .map_err(|error| error.to_string())
+}
+
+/// Whether a running job marker still names a live build leader. Called while
+/// holding the slot's custody lease, so a leader that died but left descendants
+/// still fails the lease check rather than reaching this probe.
+fn live_build_child(path: &Path) -> bool {
+    let Ok(bytes) = fs::read(path) else {
+        return false;
+    };
+    let Ok(marker) = serde_json::from_slice::<JobMarker>(&bytes) else {
+        return false;
+    };
+    if marker.state != JobMarkerState::Running || marker.owner.is_empty() {
+        return false;
+    }
+    matches!(
+        SystemProcessObserver.observe(i64::from(marker.pid)),
+        ProcessObservation::Present(fact)
+            if !fact.zombie && fact.identity.native_start == marker.start_time
+    )
+}
+
+/// Exclusive custody of one slot's payload for a destructive operation.
+///
+/// Holding this means the slot lock is ours and no live build child holds the
+/// inherited custody lease or a running marker. Staging, reset and collection
+/// all use the same lock pair, so a slot cannot be reset or reused underneath a
+/// process that can still write to it.
+pub(super) struct SlotCustody {
+    _slot_lock: LockGuard,
+    _lease: LockGuard,
+}
+
+impl SlotCustody {
+    pub(super) fn acquire(paths: &SlotPaths) -> Result<Self, String> {
+        let _slot_lock = slot_lock(&paths.lock).map_err(|error| error.to_string())?;
+        let _lease = acquire_intent_lease(&paths.root)?;
+        if live_build_child(&paths.job) {
+            return Err("slot still has a live build child".into());
+        }
+        Ok(Self { _slot_lock, _lease })
+    }
 }
 
 fn slot_lock(path: &Path) -> std::io::Result<provenant_os::fs::LockGuard> {
@@ -1441,6 +1517,36 @@ mod tests {
         };
         record.write(&path).unwrap();
         assert_eq!(SlotRecord::read(&path).unwrap(), Some(record));
+    }
+
+    #[test]
+    fn canary_effect_only_touches_the_slot_it_ran_in() {
+        use super::super::{ExitStatus, report};
+        let mut clean = report::test_row();
+        clean.exit = Some(ExitStatus::code(0));
+        let mut failed = report::test_row();
+        failed.exit = Some(ExitStatus::code(1));
+
+        // The only slot-side effects a canary may apply are decided here,
+        // while the staged slot's lock and custody lease are held. A canary
+        // that ran locally has no slot placement and must leave every slot alone.
+        assert_eq!(
+            canary_slot_effect(true, ExecPlace::Slot, &failed, 42),
+            CanarySlotEffect::Reset
+        );
+        assert_eq!(
+            canary_slot_effect(true, ExecPlace::Slot, &clean, 42),
+            CanarySlotEffect::Stamp(42)
+        );
+        assert_eq!(
+            canary_slot_effect(true, ExecPlace::Local, &clean, 42),
+            CanarySlotEffect::None,
+            "a local fallback must not stamp a slot the canary never exercised"
+        );
+        assert_eq!(
+            canary_slot_effect(false, ExecPlace::Slot, &clean, 42),
+            CanarySlotEffect::None
+        );
     }
 
     fn real_git() -> Command {
