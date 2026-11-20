@@ -56,12 +56,27 @@ pub enum PidError {
 pub enum ProcessSignal {
     Stop,
     Continue,
+    Terminate,
+    Kill,
 }
 
 /// Signal one positive PID, never a process group. Returns false if the PID no
 /// longer exists; permissions and other syscall failures remain errors.
 pub fn signal_process(pid: i64, signal: ProcessSignal) -> Result<bool, PidError> {
     signal_process_with(pid, signal, crate::sys::pid::signal_process)
+}
+
+/// Signal a process group after the caller validates its recorded leader identity.
+pub fn signal_process_group(pgid: i64, signal: ProcessSignal) -> Result<bool, PidError> {
+    if pgid <= 0 {
+        return Err(PidError::Refused { pid: pgid });
+    }
+    let pgid = i32::try_from(pgid).map_err(|_| PidError::NumberOutOfRange { pid: pgid })?;
+    match crate::sys::pid::signal_process_group(pgid, signal) {
+        Ok(()) => Ok(true),
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(false),
+        Err(source) => Err(PidError::Io { pid: pgid, source }),
+    }
 }
 
 fn signal_process_with(
