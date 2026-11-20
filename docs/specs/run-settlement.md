@@ -190,9 +190,10 @@ writes canonical arrays, lowercase status and concern objects.
 
 A `blocked` handoff may add `blocked_on` with `owner_decision`, `capability`,
 `environment` or `dependency` to say what blocked the writer. The field is
-additive: it rides in the handoff's forward fields, `schema_version` stays 2, and
-it is never required. An unrecognised value, or a value given with another
-status, is kept, ignored and warned about; it never refuses the handoff. Casing
+additive: `schema_version` stays 2 and it is never required. A text value that
+names no kind, or any value given with another status, is kept, ignored and
+warned about; it never refuses the handoff. A value that is not text is
+malformed, as for every declared field. Casing
 and surrounding whitespace do not matter. The sealed stop takes its cause from
 it (`blocked_environment`, `blocked_dependency`, otherwise `blocked`); see
 [run](run.md#what-follows-a-stop). The status guidance in the writer preamble

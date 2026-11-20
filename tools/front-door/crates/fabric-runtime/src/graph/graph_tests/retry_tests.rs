@@ -2096,15 +2096,19 @@ fn no_work_continuation_recovers_after_checkpoint_failure_before_launch() {
 
 #[test]
 fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
-    // One exact route: the restart has nowhere else to go, so the stop is
-    // saved with a chair pause. The chair then resumes, leaving an unfenced
-    // stop that owes a restart, the state an earlier host saved alone.
+    // The continuation budget is spent, so the stop is saved with a chair
+    // pause. The chair then resumes, leaving an unfenced stop that owes a
+    // restart, the state an earlier host saved alone.
     let mut work = node("work", route("first"));
     work.access = AccessMode::WorktreeWrite;
     work.worktree = Some(".worktrees/work".into());
     let document = graph(vec![work]);
     let mut owner = FakeOwner {
         observations: [no_work_stop(Some(&"a".repeat(40)))].into(),
+        ..Default::default()
+    };
+    let spent = crate::config::GraphLimits {
+        continuations: 0,
         ..Default::default()
     };
     use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
@@ -2134,7 +2138,15 @@ fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
         .unwrap();
     let mut journal = saved;
     assert_eq!(
-        advance(&document, &mut owner, &mut journal).unwrap().status,
+        advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &spent,
+            &Default::default()
+        )
+        .unwrap()
+        .status,
         GraphStatus::Paused
     );
     assert_eq!(owner.calls.len(), 1);
@@ -2420,27 +2432,33 @@ fn no_work_restart_preserves_raw_handoff_and_the_stop() {
     assert_eq!(saved, run.checkpoint);
 }
 
+/// Invariant: a writer with no other route continues once on its own route,
+/// and returns to the chair when the next round shows no progress.
 #[test]
-fn stopped_writer_without_another_route_returns_to_the_chair() {
+fn stopped_writer_without_another_route_continues_once_then_returns_to_the_chair() {
     let mut work = node("work", route("first"));
     work.access = AccessMode::WorktreeWrite;
     work.worktree = Some(".worktrees/work".into());
     let document = graph(vec![work]);
     let mut owner = FakeOwner {
-        observations: [no_work_stop(Some(&"a".repeat(40)))].into(),
+        observations: [
+            no_work_stop(Some(&"a".repeat(40))),
+            no_work_stop(Some(&"a".repeat(40))),
+        ]
+        .into(),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(owner.calls.len(), 1);
-    assert!(run.checkpoint.expansions.is_empty());
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(run.checkpoint.expansions.len(), 1);
     assert!(!next_step::pending(&run.checkpoint));
     assert_eq!(
         advance(&document, &mut owner, &mut journal).unwrap().status,
         GraphStatus::Paused
     );
-    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(owner.calls.len(), 2);
 }
 
 #[test]

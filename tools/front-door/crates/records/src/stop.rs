@@ -266,8 +266,8 @@ pub const STOP_TABLE: &[StopRule] = {
     &[
         rule(StoppedEarly, NEW, crate::run::CauseSource::Provider),
         pinned(Blocked, crate::run::CauseSource::Owner),
-        once(BlockedEnvironment, CHAIR, crate::run::CauseSource::Host),
-        rule(BlockedDependency, CHAIR, crate::run::CauseSource::Host),
+        once(BlockedEnvironment, CHAIR, crate::run::CauseSource::Provider),
+        rule(BlockedDependency, CHAIR, crate::run::CauseSource::Provider),
         rule(HandoffMissing, CHAIR, crate::run::CauseSource::Provider),
         once(EmptyResult, NEW, crate::run::CauseSource::Provider),
         rule(Uncommitted, CHAIR, crate::run::CauseSource::Provider),

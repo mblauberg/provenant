@@ -26,6 +26,7 @@ fn worst_handoff() -> provenant_records::handoff::Handoff {
         verify: Vec::new(),
         spec_concerns: Vec::new(),
         write_scope: None,
+        blocked_on: None,
         extra: Default::default(),
     }
 }

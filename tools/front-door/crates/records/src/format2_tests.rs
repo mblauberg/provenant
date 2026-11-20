@@ -414,6 +414,7 @@ fn handoff(status: HandoffStatus, note: &str) -> Handoff {
         verify: vec![],
         spec_concerns: vec![],
         write_scope: None,
+        blocked_on: None,
         extra: Default::default(),
     }
 }
@@ -456,16 +457,14 @@ fn a_blocked_handoff_seals_the_cause_its_blocked_on_names() {
     ] {
         let mut blocked = handoff(HandoffStatus::Blocked, "The shared lock.");
         if let Some(kind) = kind {
-            blocked.extra.insert("blocked_on".into(), json!(kind));
+            blocked.blocked_on = Some(serde_json::from_value(json!(kind)).unwrap());
         }
         let stop = Stop::declared(blocked.clone()).unwrap().unwrap();
         assert_eq!(stop.cause(), cause, "{kind:?}");
         assert!(Stop::new(cause, Some(blocked)).is_ok(), "{kind:?}");
     }
     let mut stopped = handoff(HandoffStatus::StoppedEarly, "Out of room.");
-    stopped
-        .extra
-        .insert("blocked_on".into(), json!("environment"));
+    stopped.blocked_on = Some(serde_json::from_value(json!("environment")).unwrap());
     let stop = Stop::declared(stopped.clone()).unwrap().unwrap();
     assert_eq!(stop.cause(), StopCause::StoppedEarly);
     assert!(Stop::new(StopCause::BlockedEnvironment, Some(stopped)).is_err());
@@ -684,6 +683,7 @@ fn handoff_write_scope_report_round_trips_full_and_compact_shapes() {
             verify: Vec::new(),
             spec_concerns: Vec::new(),
             write_scope: Some(report),
+            blocked_on: None,
             extra: Default::default(),
         };
         let wire = serde_json::to_value(&handoff).unwrap();

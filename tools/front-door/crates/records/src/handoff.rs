@@ -80,9 +80,7 @@ impl<'de> Deserialize<'de> for HandoffStatus {
 }
 
 /// What blocked a writer that declared `status: blocked`. The handoff names
-/// it in the optional `blocked_on` field. The field is additive: it lives in
-/// the handoff's extension fields, so an unknown value is kept and warned
-/// about, never refused.
+/// it in the optional `blocked_on` field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockedOn {
@@ -121,8 +119,30 @@ impl BlockedOn {
     }
 }
 
-/// The handoff extension field that names what blocked the writer.
-pub const BLOCKED_ON: &str = "blocked_on";
+/// The handoff's `blocked_on` as written. The field is additive, so a text
+/// value that names no known kind is kept as written and warned about, never
+/// refused; only a value that is not text is malformed, as for every field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockedOnField {
+    Kind(BlockedOn),
+    Unrecognised(String),
+}
+
+impl Serialize for BlockedOnField {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Kind(kind) => serializer.serialize_str(kind.as_str()),
+            Self::Unrecognised(text) => serializer.serialize_str(text),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BlockedOnField {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        Ok(BlockedOn::parse(&text).map_or(Self::Unrecognised(text), Self::Kind))
+    }
+}
 
 /// The one statement of what each handoff status means, for every prompt that
 /// teaches it: the lane preamble and the routing policy's guidance both use it.
@@ -355,6 +375,8 @@ handoff_fields! {
     spec_concerns: Vec<SpecConcern> => |v: &Vec<SpecConcern>| concerns_valid(v);
     #[serde(default, skip_serializing_if = "Option::is_none")]
     write_scope: Option<WriteScopeReport> => |_: &Option<WriteScopeReport>| true;
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blocked_on: Option<BlockedOnField> => |_: &Option<BlockedOnField>| true;
 }
 
 impl Handoff {
@@ -534,29 +556,29 @@ impl Handoff {
     /// handoff. `None` when the field is absent, unrecognised, or given with
     /// another status, where it is ignored.
     pub fn blocked_on(&self) -> Option<BlockedOn> {
-        if self.status != HandoffStatus::Blocked {
-            return None;
+        match &self.blocked_on {
+            Some(BlockedOnField::Kind(kind)) if self.status == HandoffStatus::Blocked => {
+                Some(*kind)
+            }
+            _ => None,
         }
-        BlockedOn::parse(self.extra.get(BLOCKED_ON)?.as_str()?)
     }
 
     /// The warning for a `blocked_on` that is ignored: an unrecognised value,
     /// or a value given with a status other than `blocked`. The handoff is
     /// accepted either way and keeps the field.
     pub fn blocked_on_warning(&self) -> Option<String> {
-        let value = self.extra.get(BLOCKED_ON)?;
+        let field = self.blocked_on.as_ref()?;
         if self.status != HandoffStatus::Blocked {
-            return Some(format!(
-                "handoff {BLOCKED_ON} is only used with status blocked; ignoring it"
-            ));
+            return Some("handoff blocked_on is only used with status blocked; ignoring it".into());
         }
-        let known = value.as_str().and_then(BlockedOn::parse).is_some();
-        (!known).then(|| {
-            format!(
-                "handoff {BLOCKED_ON} {value} is not one of {}; ignoring it",
+        match field {
+            BlockedOnField::Kind(_) => None,
+            BlockedOnField::Unrecognised(text) => Some(format!(
+                "handoff blocked_on \"{text}\" is not one of {}; ignoring it",
                 BlockedOn::ALL.map(BlockedOn::as_str).join(", ")
-            )
-        })
+            )),
+        }
     }
 
     pub fn fenced(&self) -> String {
@@ -1156,6 +1178,7 @@ mod tests {
                 out_of_scope_count: 1,
                 paths_omitted_from_handoff: true,
             });
+            handoff.blocked_on = Some(BlockedOnField::Kind(BlockedOn::Environment));
             handoff
                 .extra
                 .insert("future".into(), serde_json::json!({"any": [true, null]}));
@@ -1230,22 +1253,27 @@ mod tests {
             let handoff = Handoff::from_result(&text).unwrap().unwrap();
             assert_eq!(handoff.blocked_on(), Some(kind));
             assert_eq!(handoff.blocked_on_warning(), None);
-            assert_eq!(handoff.extra[BLOCKED_ON], serde_json::json!(kind.as_str()));
+            assert_eq!(handoff.blocked_on, Some(BlockedOnField::Kind(kind)));
+            assert!(handoff.extra.is_empty());
             assert_eq!(Handoff::from_result(&handoff.fenced()), Ok(Some(handoff)));
         }
         // Casing and whitespace are tolerated, as for the status.
         let spaced = handoff_with("blocked", serde_json::json!(" Environment "));
         let handoff = Handoff::from_result(&spaced).unwrap().unwrap();
         assert_eq!(handoff.blocked_on(), Some(BlockedOn::Environment));
-        // An unknown value, or a non-text one, is kept and warned about.
-        for unknown in [serde_json::json!("weather"), serde_json::json!(7)] {
-            let handoff = Handoff::from_result(&handoff_with("blocked", unknown.clone()))
-                .unwrap()
-                .unwrap();
-            assert_eq!(handoff.blocked_on(), None);
-            assert_eq!(handoff.extra[BLOCKED_ON], unknown);
-            assert!(handoff.blocked_on_warning().unwrap().contains("ignoring"));
-        }
+        // An unknown value is kept as written and warned about, never refused.
+        let handoff = Handoff::from_result(&handoff_with("blocked", serde_json::json!("weather")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(handoff.blocked_on(), None);
+        assert_eq!(
+            handoff.blocked_on,
+            Some(BlockedOnField::Unrecognised("weather".into()))
+        );
+        assert!(handoff.blocked_on_warning().unwrap().contains("weather"));
+        assert_eq!(Handoff::from_result(&handoff.fenced()), Ok(Some(handoff)));
+        // A value that is not text is malformed, as for every declared field.
+        assert!(Handoff::from_result(&handoff_with("blocked", serde_json::json!(7))).is_err());
         // With any other status it is ignored, with a warning.
         for status in ["done", "stopped_early"] {
             let handoff =

@@ -3581,6 +3581,7 @@ fn stopped_handoff(
                 verify: Vec::new(),
                 spec_concerns: Vec::new(),
                 write_scope: None,
+                blocked_on: None,
                 extra: Default::default(),
             });
             handoff.status = HandoffStatus::StoppedEarly;

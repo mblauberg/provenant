@@ -496,7 +496,7 @@ mod tests {
         assert!(text.contains(provenant_records::handoff::STATUS_GUIDANCE));
         assert!(text.contains("blocked_on"));
         assert!(!text.contains("real boundary"));
-        assert_eq!(text.matches("Use blocked").count(), 1, "{text}");
+        assert_eq!(text.matches("Use blocked only").count(), 1, "{text}");
     }
 
     #[test]
