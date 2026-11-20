@@ -348,6 +348,8 @@ pub struct ProviderProfileSpec {
     pub runtime_reads: Vec<PathGrant>,
     /// Exact attempt-bound host Fabric mutation endpoint.
     pub fabric_socket: Option<PathGrant>,
+    /// Exact host SSH agent endpoint for a host-access lane.
+    pub ssh_agent_socket: Option<PathGrant>,
     /// State files the lane's nested Provenant commands read. Mutations use the socket.
     pub fabric_state_reads: Vec<PathGrant>,
     /// Literal directory discovery; never the contents of provider config.

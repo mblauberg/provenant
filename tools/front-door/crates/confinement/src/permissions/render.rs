@@ -998,6 +998,19 @@ fn render_profile_with_policy(
             sbpl_path(&socket.path)?
         ));
     }
+    if let Some(socket) = &profile.spec.ssh_agent_socket {
+        push_rule(
+            &mut source,
+            "allow",
+            "file-read*",
+            &socket.path,
+            PathScope::Exact,
+        )?;
+        source.push_str(&format!(
+            "(allow network-outbound (remote unix-socket (path-literal \"{}\")))\n",
+            sbpl_path(&socket.path)?
+        ));
+    }
     let mut omitted_endpoints = 0;
     for endpoint in &profile.spec.provider_api {
         if super::validation::validate_endpoint(endpoint).is_ok() {
@@ -1438,6 +1451,7 @@ fn push_boundaries(
             .iter()
             .filter(|grant| lane_exceptions.is_empty() || grant.scope == PathScope::Exact)
             .chain(&lane_exceptions)
+            .chain(profile.spec.ssh_agent_socket.iter())
             .cloned()
             .collect();
         let runtime_exceptions: Vec<_> = runtime
@@ -1494,7 +1508,9 @@ fn push_boundaries(
                 &lane_exceptions,
             )?;
         }
-        push_socket_denial(source, root, &lane_exceptions)?;
+        let mut socket_exceptions = lane_exceptions.clone();
+        socket_exceptions.extend(profile.spec.ssh_agent_socket.iter().cloned());
+        push_socket_denial(source, root, &socket_exceptions)?;
         push_ancestor_guards(source, root, &mut ancestors)?;
     }
     // Only the typed native keychain mechanism can read the exact login

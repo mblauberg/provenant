@@ -1050,6 +1050,21 @@ pub(super) fn host_provider_var(registry: &Registry<'_>, name: &str) -> Option<s
     std::env::var_os(name)
 }
 
+/// Select the captured host agent only for host-access lane launches.
+pub(super) fn lane_provider_var(
+    registry: &Registry<'_>,
+    name: &str,
+    access: provenant_records::LaneAccess,
+) -> Option<std::ffi::OsString> {
+    if name == "SSH_AUTH_SOCK" && !access.is_isolated() {
+        return registry.host.map_or_else(
+            || std::env::var_os(name),
+            |host| host.provider_path_environment.get(name).cloned(),
+        );
+    }
+    host_provider_var(registry, name)
+}
+
 /// Host token delivery must respect the same typed GitHub exception as file
 /// access; acquiring a token outside the lane cannot bypass an explicit denial.
 pub(super) fn github_auth_permitted(

@@ -325,6 +325,11 @@ fn validate_profile_spec_inner(
             return Err(PermissionError::InvalidPath(socket.path.clone()));
         }
     }
+    if let Some(socket) = &spec.ssh_agent_socket
+        && (!socket.path.is_absolute() || socket.scope != PathScope::Exact)
+    {
+        return Err(PermissionError::InvalidPath(socket.path.clone()));
+    }
     for grant in &spec.runtime_reads {
         validate_read_exec_grant(grant, credentials).map_err(|error| {
             if home.is_some() {

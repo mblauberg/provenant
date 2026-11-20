@@ -282,7 +282,7 @@ pub(super) fn prepare_command(
                 } else if key == "PATH" {
                     Some(lane_path.path().to_os_string())
                 } else {
-                    host_provider_var(registry, key)
+                    lane_provider_var(registry, key, lane_access.access)
                 }
             },
             skill_stage_max_bytes: config.domains.lanes.skill_stage_max_bytes,

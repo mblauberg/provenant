@@ -451,6 +451,11 @@ A capture failure leaves the previous binding and checkpoint intact; a
 deliberately empty PATH remains a valid captured value. Remote peers record their
 own PATH at ingress because origin directories may not exist there.
 
+`HostLaunchContext::provider_path_environment` captures the host SSH agent
+selector across guardian custody. Host-access preparation grants the resolved
+exact socket under a sandbox; isolated preparation retains the credential
+boundary.
+
 Provider preparation may select an account-specific home or redirect state and
 cache paths in either confinement mode; account selectors choose the registered
 account and its required credentials. Credential values stay in the live launch,

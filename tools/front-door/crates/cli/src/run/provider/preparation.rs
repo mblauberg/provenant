@@ -4435,7 +4435,7 @@ pub(super) fn prepare_candidates_inner(
                     } else if key == provenant_core::consumer_env::LANE_CARGO_LINT_TARGET {
                         Some(cargo_target_lint.as_os_str().to_os_string())
                     } else {
-                        host_provider_var(registry, key)
+                        lane_provider_var(registry, key, lane_access.access)
                     }
                 },
                 skill_stage_max_bytes: config.domains.lanes.skill_stage_max_bytes,
