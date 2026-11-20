@@ -254,10 +254,10 @@ fn prepare(
         }
     };
     let native_state = match &session_state {
-        crate::SessionStateLocation::Native { root } if input.sandboxed() => {
-            setup.push(SetupStep::CreateDir(root.clone()));
-            vec![subtree(root)]
-        }
+        // A host lane's provider home is user-owned: grant writes to the native
+        // root, but never create it with run-owned setup. Native provider state
+        // is not Provenant's to create or rewrite.
+        crate::SessionStateLocation::Native { root } if input.sandboxed() => vec![subtree(root)],
         _ => Vec::new(),
     };
     if let Some(selected_home) = selected_home {

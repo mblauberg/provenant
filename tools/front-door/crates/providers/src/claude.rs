@@ -1044,8 +1044,9 @@ fn prepare(
             target: user_skills.clone(),
         });
     }
+    // A host lane's native config directory is user-owned: grant session-state
+    // writes there, but leave its creation to the user's own provider setup.
     let native_state = if input.sandboxed() && !input.isolated() {
-        setup.push(SetupStep::CreateDir(config.clone()));
         vec![subtree(&config)]
     } else {
         Vec::new()

@@ -42,6 +42,10 @@ pub struct HostDeliveryContext {
     lane_sandboxed: Option<bool>,
     #[serde(default)]
     trusted_worktree: Option<PathBuf>,
+    /// The primary checkout a host lane's worktree was linked from. Its Git
+    /// configuration is host-owned, not another lane's writable area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_project: Option<PathBuf>,
     #[serde(default)]
     policy: provenant_records::policy::Policy,
     tools: Option<HostTools>,
@@ -326,6 +330,7 @@ impl Clone for HostDeliveryContext {
             lane_access: self.lane_access.clone(),
             lane_sandboxed: self.lane_sandboxed,
             trusted_worktree: self.trusted_worktree.clone(),
+            host_project: self.host_project.clone(),
             policy: self.policy.clone(),
             tools: self.tools.clone(),
             bound: self.bound.clone(),
@@ -345,6 +350,7 @@ impl PartialEq for HostDeliveryContext {
             && self.lane_access == other.lane_access
             && self.lane_sandboxed == other.lane_sandboxed
             && self.trusted_worktree == other.trusted_worktree
+            && self.host_project == other.host_project
             && self.policy == other.policy
             && self.tools == other.tools
             && self.bound == other.bound
@@ -1093,6 +1099,7 @@ impl HostDeliveryContext {
             lane_access: None,
             lane_sandboxed: None,
             trusted_worktree: None,
+            host_project: None,
             policy: Default::default(),
             bound: None,
             stop_publish_bound: None,
@@ -1225,6 +1232,7 @@ impl HostDeliveryContext {
         };
         self.tools = Some(HostTools { git, gh });
         let common_git_dir = self.trusted_common_git_dir(writer, stage)?;
+        self.set_host_project(&common_git_dir);
         self.refuse_protected_target(writer, &request.branch, stage)?;
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) && request.remote.is_empty() {
             let branch = self.command(
@@ -1391,11 +1399,12 @@ impl HostDeliveryContext {
         if !remotes.lines().any(|line| line == "origin") {
             return Ok(());
         }
-        host.validate_transport_helpers(writer)?;
         // A refresh completed since this request began also satisfies it,
         // including one which started during transport validation. The fetch
         // lock is independent of the short upstream-config lock.
         let common = host.common_git_dir(&writer.project, Stage::Prepare)?;
+        host.set_host_project(&common);
+        host.validate_transport_helpers(writer)?;
         let common = Directory::open_anchor(&common)?;
         let cancel = provenant_core::CancelToken::new();
         coalesced_origin_refresh(
@@ -1703,10 +1712,11 @@ impl HostDeliveryContext {
         Ok(())
     }
     fn host_environment(&mut self, writer: &WriterRequest) -> Result<()> {
-        // A graph delivery runs in the project checkout itself, which is not a
-        // lane.
-        self.trusted_worktree = (!self.isolated() && self.lane_sandboxed == Some(false))
-            .then(|| writer.worktree.clone());
+        // A host lane reads the host's own Git configuration and uses ordinary
+        // transport. Its worktree and the primary checkout it was linked from
+        // are its own, not another lane's writable area, whether or not the
+        // lane is sandboxed; sandboxing still confines the lane's writes.
+        self.trusted_worktree = (!self.isolated()).then(|| writer.worktree.clone());
         let host_state = self.host_state().ok_or_else(|| {
             prepare_error(DeliveryPrepareStep::LaneRoots, "host state root unknown")
         })?;
@@ -2154,13 +2164,16 @@ impl HostDeliveryContext {
             }));
         }
         let mut roots = transport::LaneRoots::new(protected);
+        // A host lane reads the host's own Git configuration. Its own worktree
+        // (also the Git process's base) and the primary checkout it was linked
+        // from are host-owned; other lanes' worktrees stay protected above.
         if let Some(worktree) = &self.trusted_worktree {
-            // An unsandboxed host lane uses the host's own Git configuration:
-            // its worktree and the primary checkout it was linked from are
-            // trusted, while other lanes' worktrees stay protected.
             roots = roots
                 .except_owned_worktree(worktree)
                 .except_owned_worktree(base);
+            if let Some(project) = &self.host_project {
+                roots = roots.except_owned_worktree(project);
+            }
         }
         transport::check_environment(environment, base, &roots).map_err(refuse)?;
         let listing = self.command_with_input(cwd, "git", &transport::LISTING_ARGS, stage, b"")?;
@@ -2221,6 +2234,15 @@ impl HostDeliveryContext {
     }
     fn trusted_common_git_dir(&self, writer: &WriterRequest, stage: Stage) -> Result<PathBuf> {
         self.discover_common_git_dir(&writer.project, stage)
+    }
+
+    /// A host lane reads the primary checkout's Git configuration; that
+    /// checkout is host-owned, unlike another lane's worktree. Its location is
+    /// the parent of the shared `.git` directory, not the writer's cwd.
+    fn set_host_project(&mut self, common_git_dir: &Path) {
+        if !self.isolated() && common_git_dir.file_name() == Some(std::ffi::OsStr::new(".git")) {
+            self.host_project = common_git_dir.parent().map(Path::to_path_buf);
+        }
     }
 
     pub(super) fn common_git_dir(&self, project: &Path, stage: Stage) -> Result<PathBuf> {

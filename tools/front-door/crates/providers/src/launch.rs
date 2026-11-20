@@ -1363,7 +1363,7 @@ fn lane_instructions(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<
     Ok(())
 }
 
-/// Render Provenant's declared hooks into the isolated harness configuration.
+/// Render Provenant's declared hooks into the lane-owned harness configuration.
 /// Native Claude uses its explicit settings file in scratch. OpenCode under
 /// host access and other native harnesses keep their install-managed host
 /// configuration untouched.
@@ -1412,7 +1412,7 @@ fn lane_hooks(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<bool, P
     }
 
     let config_home =
-        if input.sandboxed() || protocol == provenant_records::HookProtocol::OpenCodePlugin {
+        if input.isolated() || protocol == provenant_records::HookProtocol::OpenCodePlugin {
             let (home_variable, suffix) = install.lane_home;
             let Some(home) = spec
                 .env

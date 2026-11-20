@@ -184,6 +184,49 @@ fn transport_protects_sandboxed_lane_configuration()
 }
 
 #[test]
+fn host_transport_trusts_its_own_checkout_but_not_another_lanes_worktree()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let host = |sandboxed: bool, fixture: &PrepareFixture| {
+        HostDeliveryContext::new(fixture.environment.clone())
+            .with_lane_access(
+                Some(provenant_records::LaneAccessReceipt {
+                    access: provenant_records::LaneAccess::Host,
+                    source: provenant_records::LaneAccessSource::Launch,
+                    key: "lanes.access".into(),
+                    extra: Default::default(),
+                }),
+                Some(sandboxed),
+            )
+            .with_host_state(&fixture.root.join("state"))
+            .prepare(&fixture.writer, &fixture.request)
+    };
+    // A host lane reads the primary checkout's Git configuration even when
+    // sandboxed: that checkout and its own worktree are not lane-writable.
+    let fixture = PrepareFixture::new()?;
+    assert!(host(true, &fixture).is_ok());
+
+    // Another lane's worktree stays protected under the same host access.
+    let fixture = PrepareFixture::new()?;
+    let other = fixture.root.join("other-lane");
+    fixture.git(&[
+        "worktree",
+        "add",
+        "-qb",
+        "other-lane",
+        other.to_str().ok_or("other worktree")?,
+    ])?;
+    let helper = other.join("ssh-wrapper");
+    fixture.executable(&helper, "#!/bin/sh\nexit 0\n")?;
+    fixture.git(&[
+        "config",
+        "core.sshCommand",
+        helper.to_str().ok_or("helper")?,
+    ])?;
+    assert!(host(true, &fixture).is_err());
+    Ok(())
+}
+
+#[test]
 fn credential_url_is_not_passed_in_git_arguments()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;

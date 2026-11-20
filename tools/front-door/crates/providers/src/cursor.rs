@@ -283,16 +283,15 @@ fn prepare(
             root: input.home.to_owned(),
         }
     };
+    // Native configuration is user-owned: grant writes to it under host
+    // access, but never create it through the lane's run-owned setup.
     let native_state = if input.sandboxed() && !input.isolated() {
         [
             input.home.join(".cursor"),
             input.home.join(".config/cursor"),
         ]
         .into_iter()
-        .map(|path| {
-            setup.push(SetupStep::CreateDir(path.clone()));
-            subtree(path)
-        })
+        .map(subtree)
         .collect()
     } else {
         Vec::new()

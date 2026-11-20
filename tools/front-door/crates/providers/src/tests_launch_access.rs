@@ -1131,6 +1131,22 @@ fn sandboxed_host_access_uses_native_homes_and_authentication() -> Result<(), Pr
         assert!(!spec.env.iter().any(|(key, value)| key == "GIT_CONFIG_GLOBAL" && value == "/dev/null"));
         let state_root = if id == "agy" { Path::new("/fixture/home/.gemini") } else if id == "cursor" { Path::new("/fixture/home/.cursor") } else { expected };
         assert!(spec.profile.spec.state_writes.iter().any(|grant| grant.path == state_root));
+        // A host lane reads its native provider home, but run-owned setup may
+        // not create or rewrite it: those paths are refused before launch.
+        let native_home = Path::new("/fixture/home");
+        for step in &spec.setup {
+            let path = match step {
+                SetupStep::CreateDir(path)
+                | SetupStep::WriteFile { path, .. }
+                | SetupStep::WriteExecutable { path, .. }
+                | SetupStep::CreateLock(path) => path,
+                SetupStep::Symlink { link, .. } => link,
+            };
+            assert!(
+                !path.starts_with(native_home),
+                "{id}: host setup must not write the native home: {step:?}"
+            );
+        }
         assert!(!spec.env.iter().any(|(key, value)| (key == "HOME" || key == "CODEX_HOME" || key == "CLAUDE_CONFIG_DIR") && Path::new(value).starts_with("/fixture/state")));
         if id == "claude" {
             assert!(!spec.argv.iter().any(|arg| arg == "--strict-mcp-config" || arg == "--setting-sources"));

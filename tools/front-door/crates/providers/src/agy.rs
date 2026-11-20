@@ -550,10 +550,10 @@ fn prepare(
             target: user_skills.clone(),
         });
     }
+    // A host lane's native Gemini home is user-owned: grant session-state
+    // writes there, but never create it with run-owned setup.
     let native_state = if input.sandboxed() && !input.isolated() {
-        let state = home.join(".gemini");
-        setup.push(SetupStep::CreateDir(state.clone()));
-        vec![subtree(state)]
+        vec![subtree(home.join(".gemini"))]
     } else {
         Vec::new()
     };
