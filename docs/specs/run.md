@@ -316,16 +316,29 @@ After each job, only an infrastructure failure inside 24 hours advances the
 reset ladder: first light, second full, third quarantine. Cancellation and
 clock rollbacks do not count. A clock rollback performs a full reset before
 reuse with infra kind `clock` and no ladder step. A light reset checks out HEAD
-and cleans `-ffdx`; a full reset removes the slot's `target` and `repo` and the
-caller re-clones. A slot Git-sync failure before the first step is retried once
-after the reset; once output has streamed there is no retry. `hygiene::gc`
-removes slots idle past `build.slot_idle` or at indices at or above N, skips
-locked slots, expires store pins older than `build.snapshot_retention` and runs
-`git gc --prune=1.hour.ago` under the store lock. It is not yet called by tick.
-Prewarm, canary and `build maintain` are declared in configuration, but the
-handler and hygiene entry point are stubs and tick does not spawn them; no
-canary verdict is produced. The churn callback in `build report` is also a
-stub, so churn stays unknown and cannot pass.
+and cleans `-ffdx`; a full reset removes the slot's `target`, `repo` and `tmp`
+and the caller re-clones. A slot Git-sync failure before the first step is
+retried once after the reset; once output has streamed there is no retry.
+`hygiene::gc` (through `gc_projects`) removes slots idle past each project's
+`build.slot_idle` or at indices at or above N, skips locked slots, expires store
+pins older than `build.snapshot_retention` and runs `git gc --prune=1.hour.ago`
+under the store lock. It also rotates `jobs.jsonl` above 64 MiB into
+`jobs-<yyyymmdd>.jsonl` and drops rotations older than 30 days. Tick calls it
+after a completed collection, beside the seed pass, resolving idle and
+retention per registered project.
+
+`build maintain` runs one best-effort prewarm of
+`cargo check --workspace --all-targets --locked` on the verify base in an idle
+slot at Prewarm priority, after a non-blocking admission probe. It is skipped
+with a warning when the project had no job in 24 hours, the sampled build load
+is at or above `verify.load_per_cpu × cpus`, the hourly `build.prewarm_budget`
+is spent, or no slot is idle. A slot whose `last_canary` is older than
+`build.canary_every` runs a canary instead; a canary that exits non-zero on the
+CI-green base gets a full reset and a `freshness_failure` warning on its ledger
+row. A successful canary stamps `last_canary` in `slot.json`. Tick spawns one
+detached `provenant build maintain --project P` per recently used registered
+project after the collection; a scheduling failure warns and never fails the
+tick.
 
 ### Ledger and report
 
@@ -340,10 +353,18 @@ counts them missing. `build report` computes wait p50/p95 by priority
 (nearest-rank), peak concurrent admitted jobs from the overlap of slot rows
 (start/finish, bounded by N), peak RSS against physical memory, local
 exceptions by reason and their fraction, churn, and freshness and recovery
-failures. It prints one PASS, FAIL or NOT YET line per D1 criterion with
-thresholds from `build.soak.*`, with fewer than `min_runs` lane rows or less
-than `min_days` of span giving NOT YET. A gap of jobs that neither ran nor
-reported is not observable from rows, and the report says so.
+failures. Churn compares each slot row's rebuilt packages with the affected set
+from `provenant_select` between its previous and current snapshot, evaluated in
+a temporary detached worktree of the build store and cached at
+`<state>/build/report-cache/<prev>-<snap>.json`, plus the always-rebuild set:
+the configured root package, packages whose build script has no `rerun-if`
+directive, and Cargo's `build-script-build` fingerprint unit. A full selection
+expects every workspace member. An uncached or failed selection leaves the row
+unknown, and unknown rows cannot pass. It prints one PASS, FAIL or NOT YET line
+per D1 criterion with thresholds from `build.soak.*`, with fewer than
+`min_runs` lane rows or less than `min_days` of span giving NOT YET. A gap of
+jobs that neither ran nor reported is not observable from rows, and the report
+says so.
 
 ### Callers
 

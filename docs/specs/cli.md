@@ -38,10 +38,13 @@ The build command surface is `provenant build status [--json]`,
 `--full` flags use the shared global options. `status` reports each slot's
 project, index, health and allocated bytes, and the store size. `report`
 aggregates the outcome ledger within `--since` and prints one verdict per soak
-criterion; churn selection is currently unavailable, so a row that needs it
-cannot pass. `reset` clears quarantine and resets one `--slot` or every slot
-of the project; `--full` recreates the checkout and target cache. `maintain`
-is declared in the grammar, but its handler returns `BUILD_NOT_IMPLEMENTED`.
+criterion; churn uses the configured affected-package selector against a
+temporary checkout of the build store, cached per snapshot pair, plus the
+always-rebuild set, and a row whose selection cannot be computed stays unknown.
+`reset` clears quarantine and resets one `--slot` or every slot of the
+project; `--full` recreates the checkout and target cache. `maintain` runs one
+prewarm or canary on the verify base when recency, load and the hourly budget
+allow; when it is skipped it reports why as a warning rather than failing.
 
 `provenant verify [TIER] [--commit REV] [--affected]` runs one tier through the
 build strategy. `--commit` pins the revision to verify, and `--affected` applies
