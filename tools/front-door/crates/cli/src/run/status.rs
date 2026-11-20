@@ -127,55 +127,6 @@ pub fn project_lane(
     )
 }
 
-/// Collect live admission markers only from active lanes' scratch grants.
-pub fn active_lane_admission(
-    store: &run::RunStore,
-    call: &run::Request<'_>,
-) -> run::Result<(
-    Vec<provenant_os::admission::HeldInfo>,
-    Vec<provenant_os::admission::WaitInfo>,
-)> {
-    let mut query = lane_query(false, 100, 0);
-    let mut holders = Vec::new();
-    let mut waiters = Vec::new();
-    loop {
-        let page = store.lanes(&query, call)?;
-        for lane in page.lanes {
-            if !matches!(lane.state, run::AttemptState::Running { .. }) {
-                continue;
-            }
-            for grant in &lane.write_grants {
-                if grant.source == provenant_records::run::WriteSource::Scratch
-                    && let Ok(path) = grant.path.to_path_buf()
-                {
-                    let attempt = lane.attempt_id.to_string();
-                    holders.extend(
-                        provenant_os::admission::lane_holders(&path)
-                            .into_iter()
-                            .map(|mut info| {
-                                info.attempt_id = Some(attempt.clone());
-                                info
-                            }),
-                    );
-                    waiters.extend(
-                        provenant_os::admission::lane_waiters(&path)
-                            .into_iter()
-                            .map(|mut info| {
-                                info.attempt_id = Some(attempt.clone());
-                                info
-                            }),
-                    );
-                }
-            }
-        }
-        match page.next {
-            Some(next) => query.after = next,
-            None => break,
-        }
-    }
-    Ok((holders, waiters))
-}
-
 /// Project a status row using one bounded process census shared by the caller.
 /// `Err(())` records that census was unavailable, so each live attempt stays
 /// explicitly unknown instead of triggering one fresh host scan per row,
@@ -271,9 +222,27 @@ impl HostView {
 }
 
 pub fn admission_holder_description(h: &provenant_os::admission::HeldInfo) -> String {
-    match &h.attempt_id {
-        Some(attempt) => format!("slot {}: attempt {} (pid {})", h.slot, attempt, h.pid),
-        None => format!("slot {}: pid {}", h.slot, h.pid),
+    format!(
+        "slot {}: {}",
+        h.slot,
+        admission_actor_description(h.pid, h.attempt_id.as_deref(), h.lane.as_ref())
+    )
+}
+
+pub fn admission_actor_description(
+    pid: i64,
+    attempt: Option<&str>,
+    lane: Option<&provenant_os::admission::LaneIdentity>,
+) -> String {
+    match (lane, attempt) {
+        (Some(lane), _) => format!(
+            "project {} lane {} (pid {})",
+            lane.project.display(),
+            lane.name,
+            pid
+        ),
+        (None, Some(attempt)) => format!("attempt {attempt} (pid {pid})"),
+        (None, None) => format!("pid {pid}"),
     }
 }
 
@@ -340,12 +309,14 @@ fn project_lane_inner(
             );
             let elapsed = now_sec.saturating_sub(wait_info.start_unix_seconds);
             let mut holders = provenant_os::admission::host_holders(root, &wait_info.class);
-            holders.extend(
-                lane_holders
+            for holder in lane_holders.iter().filter(|h| h.class == wait_info.class) {
+                if !holders
                     .iter()
-                    .filter(|h| h.class == wait_info.class)
-                    .cloned(),
-            );
+                    .any(|known| known.pid == holder.pid && known.slot == holder.slot)
+                {
+                    holders.push(holder.clone());
+                }
+            }
             if holders.is_empty() {
                 format!("waiting for a host {} slot ({}s)", wait_info.class, elapsed)
             } else {

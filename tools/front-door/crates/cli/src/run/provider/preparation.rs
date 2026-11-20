@@ -4521,6 +4521,11 @@ pub(super) fn prepare_candidates_inner(
             roots.state.as_path(),
             &task.profile.knobs,
             &launch_policy,
+            task.context
+                .as_ref()
+                .and_then(|context| context.node_id.as_deref())
+                .or(task.title.as_deref())
+                .unwrap_or("lane"),
         )?;
         if let Some(policy) = plan.policy_mut() {
             for root in std::iter::once(process_tree_read).chain(coordination_reads) {

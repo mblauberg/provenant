@@ -712,11 +712,7 @@ pub(crate) fn enrich_status_rows_within(
     };
     let call = provenant_run::Request { clock, cancel };
     let store = provenant_run::RunStore::open_read_only(&execution, &call).map_err(run_error)?;
-    let lane_holders = store
-        .as_ref()
-        .and_then(|store| provenant_cli::run::active_lane_admission(store, &call).ok())
-        .map(|records| records.0)
-        .unwrap_or_default();
+    let lane_holders = provenant_os::admission::all_holders(context.roots.state.as_path());
     let local_prefix = format!("{}/", context.identity.host);
     let local_census = rows
         .iter()
@@ -1987,28 +1983,8 @@ pub(crate) fn graph_listing(
         }
         let mut finished = finish_listing(listing, settled_count, command.all || globals.full);
         if root.as_path().exists() {
-            finished.admission_holders =
-                provenant_os::admission::standalone_holders(root.as_path());
-            finished.admission_waiters =
-                provenant_os::admission::standalone_waiters(root.as_path());
-            let execution = provenant_run::ExecutionContext {
-                state_root: root.clone(),
-                project_id: project,
-                actor_id: factory.context.identity.inbox.actor,
-                read_prompts: false,
-            };
-            let call = provenant_run::Request {
-                clock: &factory.clock,
-                cancel: &cancel,
-            };
-            if let Some(store) =
-                provenant_run::RunStore::open_read_only(&execution, &call).map_err(run_error)?
-            {
-                let (holders, waiters) =
-                    provenant_cli::run::active_lane_admission(&store, &call).map_err(run_error)?;
-                finished.admission_holders.extend(holders);
-                finished.admission_waiters.extend(waiters);
-            }
+            finished.admission_holders = provenant_os::admission::all_holders(root.as_path());
+            finished.admission_waiters = provenant_os::admission::all_waiters(root.as_path());
         }
         Ok(finished)
     })();
@@ -2167,10 +2143,11 @@ pub(crate) fn graph_listing(
 }
 
 fn admission_waiter_description(waiter: &provenant_os::admission::WaitInfo) -> String {
-    match &waiter.attempt_id {
-        Some(attempt) => format!("attempt {} (pid {})", attempt, waiter.pid),
-        None => format!("pid {}", waiter.pid),
-    }
+    provenant_cli::run::admission_actor_description(
+        waiter.pid,
+        waiter.attempt_id.as_deref(),
+        waiter.lane.as_ref(),
+    )
 }
 
 fn age_text(micros: i64) -> String {
@@ -3582,11 +3559,21 @@ mod tests {
     }
 
     #[test]
-    fn lane_status_names_another_lanes_admission_holder() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn lane_status_names_another_projects_admission_holder()
+    -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
-        let waiting_scratch = temp.path().join("waiting");
-        let holding_scratch = temp.path().join("holding");
+        let waiting_scratch = temp.path().join("project-b/waiting");
+        let holding_scratch = temp.path().join("project-a/holding");
+        provenant_os::admission::register_lane(
+            temp.path(),
+            "build",
+            &holding_scratch,
+            "22222222222222222222222222222222".parse()?,
+            provenant_os::admission::LaneIdentity {
+                project: temp.path().join("project-a"),
+                name: "builder-a".to_owned(),
+            },
+        )?;
         let _held = provenant_os::admission::mark_held(
             &holding_scratch,
             "build",
@@ -3620,7 +3607,6 @@ mod tests {
                 path: provenant_records::AbsolutePath::new(&waiting_scratch)?,
                 scope: provenant_records::run::PathScope::Subtree,
             });
-        let holders = provenant_os::admission::lane_holders(&holding_scratch);
         let row = provenant_cli::run::project_lane_with_admission(
             &attempt,
             &[],
@@ -3628,12 +3614,13 @@ mod tests {
             None,
             true,
             Err(()),
-            &holders,
+            &[],
         );
         let reason = row.waiting_for.ok_or("missing admission wait")?;
         assert!(
             reason.contains("build")
-                && reason.contains("holder-attempt")
+                && reason.contains("project-a")
+                && reason.contains("builder-a")
                 && reason.contains("slot 2"),
             "{reason}"
         );

@@ -116,6 +116,19 @@ unavailable push leaves the committed head and unpushed count visible.
 ## Lane verification and build admission
 
 A writer preamble's verification paragraph is `lanes.verification` (`check`, `targeted` or `full`). Unset, the sourced default is targeted: use a shared warm target, run cargo check, clippy on touched crates and targeted tests, and leave the workspace suite to CI. A brief line `Verification scope: targeted` (or `check` or `full`) overrides the knob and the paragraph names source `brief`. When the knob and that line disagree, the paragraph follows the brief and the stop cause names both scopes. Lane Cargo commands share the `build` admission class, configured through `[admission.build].slots`; unset, its count is derived from cores and memory (source `default`), and a configured value names its host or project source. Set it to `0` to disable the cap. Lane Cargo commands, including aliases and nextest, use a PATH shim to acquire a slot. A command that finds every slot busy waits a bounded time, then warns and proceeds; status shows the wait. Direct paths bypass this cooperative throttle.
+
+Admission attribution has the same host scope as slot occupancy. Before confinement,
+`configure_build_slots` registers each lane under `<state>/admission/<class>/lanes/`,
+including its project, lane name and scratch marker location. The registry indexes
+live holder and waiter markers through their held locks, so stale registrations or
+markers left after a crash do not imply occupancy. `admission::host_holders` and
+`host_waiters` combine registered lane markers with standalone markers, independent
+of the querying project or its run store. Both ordinary status and lane wait reasons
+name the holding project and lane; JSON retains their attribution. Registry
+publication failures warn and allow the build to proceed. Lanes keep their existing
+scratch write grant and read-only slot access; registration does not grant writes
+to host state or other lanes' records.
+
 - Why: a chair brief must be able to widen what a lane verifies, and parallel lanes must share one host cap instead of each taking the machine.
 
 ## Every limit names the layer that set it

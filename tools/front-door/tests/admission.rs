@@ -951,3 +951,114 @@ fn ordinary_status_shows_standalone_admission_holders_and_waiters() -> Result {
     assert!(finish(&mut waiting_child, Duration::from_secs(10))?);
     Ok(())
 }
+
+// Spec: docs/specs/run.md#lane-verification-and-build-admission
+#[test]
+fn status_attributes_admission_across_projects_sharing_state() -> Result {
+    use provenant_os::admission::{LaneIdentity, mark_held, mark_waiting, register_lane};
+    let rig = Rig::new()?;
+    rig.provision(1)?;
+    let projects = tempfile::tempdir()?;
+    let project_a = projects.path().join("project-a");
+    let project_b = projects.path().join("project-b");
+    for project in [&project_a, &project_b] {
+        fs::create_dir(project)?;
+        assert!(
+            provenant_os::fixture::git_command()
+                .args(["init", "-q"])
+                .current_dir(project)
+                .status()?
+                .success()
+        );
+    }
+    let holding_scratch = project_a.join("scratch");
+    let waiting_scratch = project_b.join("scratch");
+    let holder_id = "11111111111111111111111111111111".parse()?;
+    let waiter_id = "22222222222222222222222222222222".parse()?;
+    for (project, scratch, attempt, name) in [
+        (&project_a, &holding_scratch, holder_id, "builder-a"),
+        (&project_b, &waiting_scratch, waiter_id, "builder-b"),
+    ] {
+        register_lane(
+            &rig.state,
+            "build",
+            scratch,
+            attempt,
+            LaneIdentity {
+                project: project.clone(),
+                name: name.to_owned(),
+            },
+        )?;
+    }
+    let slots = AdmissionSlots::open(&rig.state, "build")?;
+    let slot = slots.try_acquire(1)?.ok_or("missing host slot")?;
+    let held = mark_held(
+        &holding_scratch,
+        "build",
+        slot.index(),
+        42,
+        Some(&holder_id.to_string()),
+    )?;
+    assert!(slots.try_acquire(1)?.is_none());
+    let waiting = mark_waiting(&waiting_scratch, "build", 43, Some(&waiter_id.to_string()))?;
+
+    for project in [&project_a, &project_b] {
+        for json in [false, true] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
+            command
+                .arg("--state-dir")
+                .arg(&rig.state)
+                .arg("--project")
+                .arg(project)
+                .arg("status")
+                .env("PROVENANT_ROOT", env!("CARGO_MANIFEST_DIR"))
+                .env_remove(provenant_core::consumer_env::PARENT_ATTEMPT_ID)
+                .env_remove(provenant_core::RUN_STATE_DIRECTORY_ENV)
+                .env_remove(provenant_core::consumer_env::LANE_DEPTH);
+            if json {
+                command.arg("--json");
+            }
+            let output = command.output()?;
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if json {
+                let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                let admission = &value["data"]["admission"];
+                let holders = admission["holders"].as_array().ok_or("missing holders")?;
+                let waiters = admission["waiters"].as_array().ok_or("missing waiters")?;
+                assert_eq!(holders.len(), 1);
+                assert_eq!(waiters.len(), 1);
+                assert_eq!(holders[0]["attempt_id"], holder_id.to_string());
+                assert_eq!(holders[0]["lane"]["project"], project_a.to_str().unwrap());
+                assert_eq!(holders[0]["lane"]["name"], "builder-a");
+                assert_eq!(waiters[0]["attempt_id"], waiter_id.to_string());
+                assert_eq!(waiters[0]["lane"]["project"], project_b.to_str().unwrap());
+                assert_eq!(waiters[0]["lane"]["name"], "builder-b");
+            } else {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let waiter = text
+                    .lines()
+                    .find(|line| line.contains("build waiter:"))
+                    .ok_or("missing waiter line")?;
+                assert!(
+                    waiter.contains("project-a")
+                        && waiter.contains("builder-a")
+                        && waiter.contains("project-b")
+                        && waiter.contains("builder-b"),
+                    "{waiter}"
+                );
+            }
+        }
+    }
+    drop(waiting);
+    drop(held);
+    drop(slot);
+    // Persistent registrations alone never imply occupancy.
+    assert!(provenant_os::admission::all_holders(&rig.state).is_empty());
+    assert!(provenant_os::admission::all_waiters(&rig.state).is_empty());
+    assert!(slots.try_acquire(1)?.is_some());
+    Ok(())
+}

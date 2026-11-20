@@ -329,6 +329,11 @@ pub(super) fn prepare_command(
         roots.state.as_path(),
         &task.profile.knobs,
         &launch_policy,
+        task.context
+            .as_ref()
+            .and_then(|context| context.node_id.as_deref())
+            .or(task.title.as_deref())
+            .unwrap_or("lane"),
     )?;
     if let Some(policy) = plan.policy_mut() {
         for root in std::iter::once(process_tree_read).chain(coordination_reads) {
@@ -549,6 +554,7 @@ pub(super) fn configure_build_slots(
     state: &Path,
     knobs: &std::collections::BTreeMap<String, serde_json::Value>,
     policy: &provenant_records::policy::Policy,
+    lane_name: &str,
 ) -> Result<Vec<PathGrant>, String> {
     let table = provenant_config::PortTable::read_for(Some(project), state)
         .map_err(|error| format!("cannot resolve build admission port: {error}"))?;
@@ -645,8 +651,36 @@ pub(super) fn configure_build_slots(
                 cargo_nextest: cargo_nextest.as_deref(),
                 local_cargo: local_cargo(knobs),
             };
-            match spec.borrow_mut().configure_build_slots(scratch, &gate) {
+            let setup = spec.borrow_mut().configure_build_slots(scratch, &gate);
+            match setup {
                 Ok(provenant_providers::BuildSlotSetupOutcome::Configured) => {
+                    // Register on the host before confinement. The shim only
+                    // writes its existing scratch grant, never another lane's state.
+                    if let Some(attempt) = spec
+                        .borrow()
+                        .env
+                        .iter()
+                        .find(|(key, _)| key == provenant_core::consumer_env::PARENT_ATTEMPT_ID)
+                        .and_then(|(_, value)| value.to_str())
+                        .and_then(|value| value.parse::<provenant_core::AttemptId>().ok())
+                    {
+                        for class in all_classes.keys() {
+                            if let Err(error) = provenant_os::admission::register_lane(
+                                state,
+                                class,
+                                scratch,
+                                attempt,
+                                provenant_os::admission::LaneIdentity {
+                                    project: project.to_path_buf(),
+                                    name: lane_name.to_owned(),
+                                },
+                            ) {
+                                eprintln!(
+                                    "provenant: host admission attribution unavailable for {class}: {error}; proceeding without it"
+                                );
+                            }
+                        }
+                    }
                     let mut grants = Vec::new();
                     let admission_root = state.join("admission");
                     grants.push(PathGrant {
