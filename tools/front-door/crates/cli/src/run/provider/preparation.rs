@@ -4230,7 +4230,10 @@ pub(super) fn prepare_candidates_inner(
         let mut provider_route = adapter_route(&route);
         let model_id =
             provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?;
-        let launch_model = catalogue.launch_model(&model_id, route.effort.as_deref());
+        // Resolve a family alias once at selection: the provider reports the
+        // exact model, which launch and identity comparison must both use.
+        let exact_model = resolved_launch_model(&catalogue, &model_id);
+        let launch_model = catalogue.launch_model(&exact_model, route.effort.as_deref());
         let provider_model = (launch_model != route.model).then_some(launch_model);
         let project_id_str = project_id.to_string();
         let project_key = format!("domains.lanes.projects.{project_id_str}.user_skills");
@@ -4809,8 +4812,9 @@ pub(super) fn prepare_candidates_inner(
         // Check the effective catalogue already loaded for this launch (bundled
         // plus discovered models), the same lookup and revision `route list`
         // uses. An eligibility left over from a different revision must not
-        // make a discovered exact model look uncatalogued at launch.
-        if catalogue.model(&model_id).is_none() {
+        // make a discovered exact model look uncatalogued at launch. A family
+        // alias such as `claude/sonnet` resolves to an exact model here too.
+        if catalogue.resolve_family_alias(&model_id).is_none() {
             let warning = format!(
                 "model {}/{} is not in the catalogue; the provider will check it",
                 route.adapter, route.model
@@ -4873,6 +4877,10 @@ pub(super) fn prepare_candidates_inner(
             resume.is_some(),
             current_candidate > 0,
         );
+        // The launch uses the exact model; record it so identity comparison
+        // cannot judge it different from the model the provider reports. The
+        // requested alias stays on the attempt's requested route.
+        apply_resolved_model(&mut provider, &exact_model);
         provider.account_source = Some(if resume.is_some() {
             provenant_records::run::AccountSource::Continuation
         } else if task.account.is_some() {
@@ -4927,6 +4935,9 @@ pub(super) fn prepare_candidates_inner(
                 plan.codex_policy() == provenant_confinement::CodexPolicy::Clean,
             ));
         }
+        provider
+            .launch_warnings
+            .extend(spec.warnings.iter().cloned());
         provider.applied_access = Some(serde_json::from_value(
             spec.applied_access()
                 .receipt(&home, spec.credential_roots()),
@@ -5171,6 +5182,30 @@ fn origin_receipt(
         .unwrap_or_default()
 }
 
+/// Resolve a family alias once for launch. A provider reports its exact model,
+/// so launch, receipts and identity comparison must all speak in exact models;
+/// the requested alias stays on the attempt's requested route.
+/// Spec: docs/specs/routing.md#provider-model-discovery
+fn resolved_launch_model(
+    catalogue: &provenant_routing::Catalogue,
+    requested: &provenant_routing::ModelId,
+) -> provenant_routing::ModelId {
+    catalogue
+        .resolve_family_alias(requested)
+        .cloned()
+        .unwrap_or_else(|| requested.clone())
+}
+
+/// Carry the exact model into the launch receipt, so identity comparison sees
+/// the model the provider reports.
+/// Spec: docs/specs/routing.md#provider-model-discovery
+fn apply_resolved_model(
+    record: &mut provenant_records::run::RouteRecord,
+    exact: &provenant_routing::ModelId,
+) {
+    record.model = Some(format!("{}/{}", exact.adapter(), exact.model()));
+}
+
 /// Preserve the resolver's decision at the launch boundary.
 fn launch_route_record(
     route: &ResolvedRoute,
@@ -5342,6 +5377,29 @@ mod receipt_tests {
         );
         assert!(wire.get("prompt").is_none());
         assert!(wire.get("credential").is_none());
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#provider-model-discovery
+    #[test]
+    fn family_alias_launch_uses_the_exact_model() -> Result<(), Box<dyn std::error::Error>> {
+        let catalogue = Catalogue::bundled()?;
+        let alias = provenant_routing::ModelId::parse("claude/sonnet")?;
+        let exact = resolved_launch_model(&catalogue, &alias);
+        assert_eq!(exact.as_str(), "claude/claude-sonnet-5-5");
+
+        // Launch and the observed identity both speak in exact models, so the
+        // model reported by the provider matches the applied route.
+        assert_eq!(catalogue.launch_model(&exact, None), "claude-sonnet-5-5");
+        let mut applied = run::RouteRecord {
+            model: Some(alias.as_str().to_owned()),
+            ..Default::default()
+        };
+        apply_resolved_model(&mut applied, &exact);
+        assert_eq!(applied.model.as_deref(), Some("claude/claude-sonnet-5-5"));
+
+        // An already-exact model resolves to itself.
+        assert_eq!(resolved_launch_model(&catalogue, &exact), exact);
         Ok(())
     }
 }

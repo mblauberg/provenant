@@ -987,6 +987,62 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     Ok(())
 }
 
+// Spec: docs/specs/run-settlement.md#identity-mismatch-keeps-writer-work
+#[test]
+fn review_required_identity_mismatch_keeps_the_writers_head() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let mut input = input();
+    input.request.task.writer = Some(WriterRequest {
+        extra: Default::default(),
+        custody_project: Some(crate::tests::writer_project()),
+        project: temp.path().to_path_buf(),
+        worktree: temp.path().join("lane"),
+    });
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let id = input.attempt_id;
+    let head = provenant_core::GitOid::parse(&"b".repeat(40))?;
+    let attempt = store.attempt_dir(id, false)?;
+    artifacts::seal(
+        &attempt,
+        "writer-terminal.json",
+        &db::bytes(&writer::WriterTerminal {
+            schema_version: 1,
+            head,
+            stop_work: None,
+        })?,
+        RECORD_LIMIT,
+    )?;
+    let mut publication = publication();
+    publication.outcome = Outcome::ReviewRequired;
+    publication.terminal_cause = Some(TerminalCause::IdentityMismatch);
+    publication.observed_route = Some(RouteRecord {
+        model: Some("other/model".into()),
+        ..route()
+    });
+    publication.reason = Some(
+        "warning: observed provider identity (model other/model) differs from the requested route (model fixture/model); kept commit for review"
+            .into(),
+    );
+    let record = store.publish_terminal(id, 1, &publication, &exit(), &call)?;
+    assert_eq!(record.head, Some(head));
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::ReviewRequired,
+            terminal_cause: Some(TerminalCause::IdentityMismatch),
+            ..
+        }
+    ));
+    assert_eq!(store.record(id, &call)?, record);
+    Ok(())
+}
+
 #[test]
 fn record_read_is_one_snapshot_across_a_concurrent_terminal_publication() -> TestResult {
     let (new_clock, new_call, new_input) = (clock, call, input);

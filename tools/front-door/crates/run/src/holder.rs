@@ -188,6 +188,93 @@ fn apply_provider_identity(
     }
 }
 
+/// A writer's committed head, when settlement can prove the head moved from
+/// the pinned base. Absent or unchanged evidence is not a commit.
+fn writer_committed_head(
+    attempt: &Directory,
+    settlement: Option<&crate::settlement::Driver<'_>>,
+) -> Result<Option<provenant_core::GitOid>> {
+    let sealed = match read_sealed(attempt, "writer-terminal.json", RECORD_LIMIT)? {
+        Some(raw) => Some(crate::db::decode::<crate::writer::WriterTerminal>(&raw)?.head),
+        None => None,
+    };
+    let head = sealed.or_else(|| settlement.and_then(crate::settlement::Driver::head));
+    let base = settlement.and_then(crate::settlement::Driver::base);
+    Ok(head.filter(|head| base.is_none_or(|base| base != *head)))
+}
+
+/// The identities a mismatch warning names, in the route's own terms.
+fn route_identity_label(route: Option<&RouteRecord>) -> String {
+    let Some(route) = route else {
+        return "no identity observed".into();
+    };
+    let mut labels = Vec::new();
+    if let Some(provider) = route.provider.as_deref() {
+        labels.push(format!("provider {provider}"));
+    }
+    if let Some(model) = route.model.as_deref() {
+        labels.push(format!("model {model}"));
+    }
+    if let Some(effort) = route.effort.as_deref() {
+        labels.push(format!("effort {effort}"));
+    }
+    if let Some(account) = route.account_key.as_deref() {
+        labels.push(format!("account {account}"));
+    }
+    if labels.is_empty() {
+        "no identity recorded".into()
+    } else {
+        labels.join(", ")
+    }
+}
+
+/// Apply a contradicted provider identity to settlement. A writer whose head
+/// moved keeps its commit for review, with a warning naming both identities;
+/// it never fails and never discards the work. Every other lane keeps the
+/// fatal mismatch decision.
+fn apply_route_identity(
+    decoded: &mut Decoded,
+    resolved: Option<&RouteRecord>,
+    applied: Option<&RouteRecord>,
+    observed: Option<&RouteRecord>,
+    committed_head: Option<provenant_core::GitOid>,
+) {
+    match crate::reader::route_identity(resolved, applied, observed) {
+        crate::reader::RouteIdentity::Observed => {}
+        crate::reader::RouteIdentity::Unobserved => {
+            decoded
+                .partial_signals
+                .push(PartialSignal::IdentityUnobserved);
+        }
+        crate::reader::RouteIdentity::Mismatch => match committed_head {
+            Some(head) => {
+                let warning = format!(
+                    "warning: observed provider identity ({}) differs from the requested route ({}); kept commit {head} for review",
+                    route_identity_label(observed),
+                    route_identity_label(applied),
+                );
+                decoded.outcome = Outcome::ReviewRequired;
+                decoded.terminal_cause = Some(TerminalCause::IdentityMismatch);
+                decoded.reason = Some(match decoded.reason.take() {
+                    Some(reason) => format!("{reason}; {warning}"),
+                    None => warning,
+                });
+                if decoded.result.is_empty() {
+                    decoded.result = EMPTY_WRITER_RESULT.into();
+                }
+                // A preserved commit is a review record, not a success: its
+                // sealed result must be complete even when the capture was not.
+                decoded.complete = true;
+            }
+            None => {
+                decoded.outcome = Outcome::Failed;
+                decoded.terminal_cause = Some(TerminalCause::IdentityMismatch);
+                decoded.reason = Some(TerminalCause::IdentityMismatch.detail().into());
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod identity_policy_tests {
     use super::*;
@@ -238,6 +325,170 @@ mod identity_policy_tests {
                 );
             }
         }
+    }
+
+    // Spec: docs/specs/run-settlement.md#identity-mismatch-keeps-writer-work
+    #[test]
+    fn identity_mismatch_keeps_a_writers_commit_for_review()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let requested = crate::tests::route();
+        let observed = RouteRecord {
+            model: Some("fixture/other".into()),
+            ..requested.clone()
+        };
+        let head = provenant_core::GitOid::parse(&"b".repeat(40))?;
+        for (committed, expected) in [
+            (Some(head), Outcome::ReviewRequired),
+            (None, Outcome::Failed),
+        ] {
+            let mut decoded = Decoded {
+                terminal_cause: None,
+                outcome: Outcome::Succeeded,
+                result: "committed work".into(),
+                complete: true,
+                observed_route: Some(observed.clone()),
+                usage: UsageRecord::default(),
+                session: None,
+                reason: None,
+                partial_signals: vec![],
+                turns: vec![],
+            };
+            apply_route_identity(
+                &mut decoded,
+                Some(&requested),
+                Some(&requested),
+                Some(&observed),
+                committed,
+            );
+            assert_eq!(decoded.outcome, expected);
+            assert_eq!(
+                decoded.terminal_cause,
+                Some(TerminalCause::IdentityMismatch)
+            );
+            let reason = decoded.reason.as_deref().ok_or("mismatch reason")?;
+            if committed.is_some() {
+                assert!(reason.contains("fixture/model"), "{reason}");
+                assert!(reason.contains("fixture/other"), "{reason}");
+                assert!(reason.contains(&head.to_string()), "{reason}");
+                assert!(decoded.complete);
+            } else {
+                // No verified moved head: the fatal decision and its fixed
+                // detail are unchanged.
+                assert_eq!(reason, TerminalCause::IdentityMismatch.detail());
+            }
+        }
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-settlement.md#identity-mismatch-keeps-writer-work
+    #[test]
+    fn first_settlement_keeps_a_writers_commit_under_a_mismatched_identity()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+
+        let fixture = PrepareFixture::new()?;
+        let execution = registered_landed_writer_fixture(&fixture)?;
+        let (clock, cancel) = (crate::tests::clock(), CancelToken::new());
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&execution, &call)?;
+        let mut run = crate::tests::input();
+        run.request.task.writer = Some(fixture.writer.clone());
+        store.create(&run, &call)?;
+        let id = run.attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let scope = RunStore::scope(&record);
+        let attempt = store.attempt_dir(id, false)?;
+        let mut launch = crate::prepare_writer(
+            &fixture.writer,
+            execution.state_root.as_path(),
+            execution.project_id,
+        )?;
+        launch.snapshot(
+            execution.state_root.as_path(),
+            &attempt,
+            scope,
+            &Policy::default(),
+        )?;
+        let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+        std::fs::create_dir_all(&candidate)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        crate::objects::prepare_bound(
+            &git,
+            launch.worktree.repo(),
+            &attempt,
+            &candidate,
+            launch.branch.as_str(),
+            launch.base,
+        )?;
+        let pin = crate::objects::import_pin(scope.attempt, launch.base);
+        fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
+        // The writer committed before it exited, so its head moved past base.
+        // This is the evidence terminal settlement pins and seals below.
+        fixture.commit(&fixture.writer.worktree, "committed work")?;
+        let head =
+            crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?;
+        assert_ne!(head, launch.base, "fixture must produce a moved head");
+        // The bound private source is a snapshot taken before the commit, so
+        // advance its branch ref to the committed head that settlement pins.
+        std::fs::write(
+            candidate.join("git-common").join(launch.branch.as_str()),
+            format!("{head}\n"),
+        )?;
+        let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+        let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+            directory.try_clone()?,
+            scope,
+            binding,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        drop(provenant_supervisor::fixture::bind_writer_attempt(
+            lease, &attempt,
+        )?);
+        crate::artifacts::seal(
+            &attempt,
+            "launch.json",
+            &crate::db::bytes(&serde_json::json!({
+                "schema_version": 1,
+                "scope": scope,
+                "requester": execution.actor_id,
+            }))?,
+            RECORD_LIMIT,
+        )?;
+        let mut observed = crate::tests::exit();
+        observed.scope = scope;
+        crate::dispatch_tests::seal_exit(&store, &observed)?;
+        let mismatched = RouteRecord {
+            model: Some("fixture/other".into()),
+            ..crate::tests::route()
+        };
+        let fake = crate::dispatch_tests::Fake::with_observed(Some(mismatched), None);
+        let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
+        let AttemptState::Terminal {
+            outcome,
+            terminal_cause,
+            reason,
+            ..
+        } = &finished.state
+        else {
+            return Err("first settlement must be terminal".into());
+        };
+        assert_eq!(*outcome, Outcome::ReviewRequired, "reason: {reason:?}");
+        assert_eq!(*terminal_cause, Some(TerminalCause::IdentityMismatch));
+        let reason = reason.as_deref().ok_or("mismatch reason")?;
+        assert!(reason.contains("fixture/model"), "{reason}");
+        assert!(reason.contains("fixture/other"), "{reason}");
+        assert!(reason.contains(&head.to_string()), "{reason}");
+        Ok(())
     }
 }
 
@@ -3144,28 +3395,28 @@ impl RunStore {
                 decoded.reason = Some("provider result is empty or incomplete".into());
             }
         }
+        // A writer's head is pinned and sealed by terminal settlement above.
+        // Read it only after that call so the first settlement decides identity
+        // from the head that was actually committed, not from absent
+        // pre-terminal evidence; a mismatch then preserves the work for review.
+        let committed_head = if task.writer.is_some() {
+            writer_committed_head(attempt, settlement.as_ref())?
+        } else {
+            None
+        };
         if matches!(
             decoded.outcome,
             Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
         ) || completed_budget_handoff
         {
-            match crate::reader::route_identity(
+            let observed_route = decoded.observed_route.clone();
+            apply_route_identity(
+                &mut decoded,
                 record.resolved_route.as_ref(),
                 record.applied_route.as_ref(),
-                decoded.observed_route.as_ref(),
-            ) {
-                crate::reader::RouteIdentity::Observed => {}
-                crate::reader::RouteIdentity::Unobserved => {
-                    decoded
-                        .partial_signals
-                        .push(PartialSignal::IdentityUnobserved);
-                }
-                crate::reader::RouteIdentity::Mismatch => {
-                    decoded.outcome = Outcome::Failed;
-                    decoded.terminal_cause = Some(TerminalCause::IdentityMismatch);
-                    decoded.reason = Some(TerminalCause::IdentityMismatch.detail().into());
-                }
-            }
+                observed_route.as_ref(),
+                committed_head,
+            );
         }
         let mut terminal_note = if exit.never_spawned && !cancelled {
             exit.launch_refusal.map(|fact| {

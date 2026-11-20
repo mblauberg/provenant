@@ -55,9 +55,14 @@ every release directory a running process still uses, so a live supervisor
 and its provider keep their own binary. Two things cross the swap: later
 re-executions through the link (settlement resume, tick, the peer agent) run
 the new release against the live attempt's records, and install restarts the
-peer and tick agents. Drain first only when the release notes name a state or
-record format change, or for a multi-host upgrade that would leave peers on
-mixed versions for longer.
+peer and tick agents. When the candidate's live-attempt record format differs
+from the installed one, install warns on stderr and names every live attempt
+under the installed state root, in any project and whatever the current
+directory; if those attempts cannot be inspected, it warns that it could not
+inspect them instead of staying silent. Drain them first or expect them to
+settle under the new release. Install never refuses on this warning. Drain as
+well for a multi-host upgrade that would
+leave peers on mixed versions for longer.
 
 If installation fails after stopping agents, the output names the stopped
 agents and those that may still be running, prints the quoted state directory

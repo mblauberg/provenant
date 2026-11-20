@@ -287,6 +287,12 @@ impl DiskReport {
         }
     }
 
+    /// Whether every observation reported an APFS private size, rather than
+    /// falling back to allocated blocks.
+    pub fn uses_private_size(&self) -> bool {
+        self.method == "apfs_private_size"
+    }
+
     /// Whether the report's shared traversal budget has been consumed.
     pub fn traversal_exhausted(&self) -> bool {
         self.walk_budget.exhausted()
