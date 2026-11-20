@@ -8,8 +8,9 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Read, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
+    time::Instant,
 };
 use support::{Result, TestRig, code};
 
@@ -47,6 +48,107 @@ printf 'shell stderr ghp_abcdefghijklmnopqrstuvwxyz0123456789\n' >&2
     );
     io::stderr().write_all(&output.stderr)?;
     Ok(String::from_utf8(output.stdout)?)
+}
+
+fn await_fixture_marker(path: &Path) -> Result {
+    let deadline = Instant::now() + std::time::Duration::from_secs(20);
+    while !path.is_file() {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for shared-worktree fixture marker {}",
+                path.display()
+            )
+            .into());
+        }
+        std::thread::park_timeout(std::time::Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+fn fixture_git(args: &[&str]) -> Result {
+    let git = std::env::var_os("PROVENANT_GIT").ok_or("PROVENANT_GIT")?;
+    let output = provenant_os::fixture::git_command_at(git)
+        .args(args)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "fixture git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Keep both provider processes live through each other's pathspec commits.
+/// The second file is staged before the first pathspec commit, so a broad
+/// commit would consume the other lane's staged work.
+fn shared_worktree_writer_fixture(prompt: &str) -> Result<Option<String>> {
+    let (name, own_file, other_name) = if prompt.contains("fixture shared worktree writer first") {
+        ("first", "first-owned.txt", "second")
+    } else if prompt.contains("fixture shared worktree writer second") {
+        ("second", "second-owned.txt", "first")
+    } else {
+        return Ok(None);
+    };
+    let barrier = prompt
+        .lines()
+        .find_map(|line| line.strip_prefix("SHARED_WORKTREE_BARRIER: "))
+        .map(PathBuf::from)
+        .ok_or("shared-worktree barrier path")?;
+    fs::create_dir_all(&barrier)?;
+    fs::write(own_file, format!("{name} lane change\n"))?;
+    fs::write(barrier.join(format!("{name}-ready")), b"ready")?;
+    await_fixture_marker(&barrier.join(format!("{other_name}-ready")))?;
+
+    if name == "first" {
+        fixture_git(&["add", "--", own_file])?;
+        fs::write(barrier.join("first-staged"), b"staged")?;
+        await_fixture_marker(&barrier.join("second-staged"))?;
+        fixture_git(&[
+            "commit",
+            "-m",
+            "fixture first shared commit",
+            "--",
+            own_file,
+        ])?;
+        fs::write(barrier.join("first-committed"), b"committed")?;
+        await_fixture_marker(&barrier.join("second-committed"))?;
+    } else {
+        await_fixture_marker(&barrier.join("first-staged"))?;
+        fixture_git(&["add", "--", own_file])?;
+        fs::write(barrier.join("second-staged"), b"staged")?;
+        await_fixture_marker(&barrier.join("first-committed"))?;
+        fixture_git(&[
+            "commit",
+            "-m",
+            "fixture second shared commit",
+            "--",
+            own_file,
+        ])?;
+        fs::write(barrier.join("second-committed"), b"committed")?;
+    }
+    Ok(Some(format!("{name} shared-worktree commit completed")))
+}
+
+fn distinct_branch_writer_fixture(prompt: &str) -> Result<Option<String>> {
+    let Some(index) = prompt
+        .lines()
+        .find_map(|line| line.strip_prefix("DISTINCT_BRANCH_WRITER: "))
+        .map(str::to_owned)
+    else {
+        return Ok(None);
+    };
+    let barrier = prompt
+        .lines()
+        .find_map(|line| line.strip_prefix("SHARED_WORKTREE_BARRIER: "))
+        .map(PathBuf::from)
+        .ok_or("distinct-branch barrier path")?;
+    fs::create_dir_all(&barrier)?;
+    fs::write(barrier.join(format!("{index}-ready")), b"ready")?;
+    await_fixture_marker(&barrier.join("release"))?;
+    Ok(Some(format!("distinct branch {index} stayed live")))
 }
 
 const HANDOFF_SECRET: &str = "sk-abcdefghijklmnopqrstuvwx";
@@ -690,6 +792,10 @@ fn fixture() -> Result {
     }
     let answer = if prompt.contains("Reply with exactly one word: OK.") {
         "OK".to_owned()
+    } else if let Some(answer) = distinct_branch_writer_fixture(&prompt)? {
+        format!("{answer}{DONE_FENCE}")
+    } else if let Some(answer) = shared_worktree_writer_fixture(&prompt)? {
+        format!("{answer}{DONE_FENCE}")
     } else if prompt.contains("fixture writer shell") {
         format!("{}{DONE_FENCE}", writer_shell_probe()?)
     } else if prompt.contains("fixture council findings") {
@@ -2150,6 +2256,7 @@ fn simultaneous_first_launches_pass_cutover_guard() -> Result {
                 .spawn()?,
         );
     }
+    let mut attempts = Vec::new();
     for child in children {
         let output = child.wait_with_output()?;
         let text = format!(
@@ -2163,8 +2270,30 @@ fn simultaneous_first_launches_pass_cutover_guard() -> Result {
         let graph = result["data"]["checkpoint"]["graph_id"]
             .as_str()
             .ok_or_else(|| format!("launch named no graph: {result}"))?;
-        let settled = rig.command(&["wait", graph, "--timeout", "30s", "--json"])?;
-        assert_eq!(code(&settled), 0, "{graph}: {settled:?}");
+        let node = result["data"]["checkpoint"]["nodes"][0]["id"]
+            .as_str()
+            .ok_or_else(|| format!("launch named no node: {result}"))?;
+        attempts.push((graph.to_owned(), node.to_owned()));
+    }
+
+    // `wait` observes attempt settlement but does not run graph advancement.
+    // Once each provider attempt is terminal, one explicit host tick drives
+    // the normal graph settlement owner for every concurrently launched run.
+    for (graph, node) in &attempts {
+        let target = format!("{graph}/{node}#1");
+        let waited = rig.command(&["wait", &target, "--timeout", "30s", "--json"])?;
+        assert_eq!(code(&waited), 0, "{target}: {waited:?}");
+    }
+    let tick = rig.command(&["tick", "--json"])?;
+    assert_eq!(code(&tick), 0, "graph settlement tick: {tick:?}");
+
+    for (graph, _) in &attempts {
+        let checkpoint = rig.checkpoint(graph)?;
+        let node = checkpoint["nodes"]
+            .as_array()
+            .and_then(|nodes| nodes.first())
+            .ok_or_else(|| format!("{graph}: graph node missing after tick: {checkpoint}"))?;
+        assert_eq!(node["state"], "succeeded", "{graph}: {checkpoint}");
     }
     Ok(())
 }
@@ -2181,6 +2310,226 @@ fn writer_registry_fixture() -> Result<TestRig> {
         .output()?;
     assert!(seeded.status.success(), "{seeded:?}");
     Ok(rig)
+}
+
+fn writer_fixture_diagnostics(rig: &TestRig) -> String {
+    let mut notes = String::new();
+    if let Ok(entries) = fs::read_dir(
+        rig.project
+            .join(".worktrees/shared-writer/.fixture-shared-barrier"),
+    ) {
+        notes.push_str(&format!(
+            "markers: {:?}\n",
+            entries
+                .take(8)
+                .flatten()
+                .map(|entry| entry.file_name())
+                .collect::<Vec<_>>()
+        ));
+    }
+    if let Ok(entries) = fs::read_dir(rig.state.join("attempts")) {
+        for entry in entries.take(8).flatten() {
+            for name in [
+                "terminal-pending.json",
+                "terminal-effects.json",
+                "result.md",
+                "stderr.log",
+            ] {
+                if let Ok(bytes) = fs::read(entry.path().join(name)) {
+                    let summary = if name == "terminal-pending.json" {
+                        serde_json::from_slice::<Value>(&bytes).ok().map(|value| {
+                            json!({
+                                "state":value["state"], "outcome":value["outcome"],
+                                "reason":value["reason"], "terminal_cause":value["terminal_cause"]
+                            })
+                            .to_string()
+                        })
+                    } else {
+                        None
+                    };
+                    let text =
+                        summary.unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
+                    notes.push_str(&format!(
+                        "{} {name}: {}\n",
+                        entry.file_name().to_string_lossy(),
+                        text.chars().take(4096).collect::<String>()
+                    ));
+                }
+            }
+        }
+    }
+    notes
+}
+
+// Spec: docs/specs/run-launch.md#admission-and-custody
+/// Two related graph lanes hold one checkout at once, then commit separate
+/// paths from private Git views. One history publishes; the divergent sibling
+/// is refused and retained, never replacing the winner.
+fn shared_worktree_writers_commit_disjoint_paths() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = writer_registry_fixture()?;
+    let _cleanup = rig.process_cleanup();
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[knobs]\n'lanes.max_concurrency'=2\n'lanes.sandbox'='on'"
+    )?;
+
+    let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
+    fs::write(rig.project.join("first-owned.txt"), "base first\n")?;
+    fs::write(rig.project.join("second-owned.txt"), "base second\n")?;
+    fs::write(rig.project.join(".gitignore"), ".fixture-shared-barrier/\n")?;
+    let base = rig.execute(
+        &git,
+        &[
+            "add",
+            "--",
+            "first-owned.txt",
+            "second-owned.txt",
+            ".gitignore",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&base), 0, "{base:?}");
+    let base = rig.execute(&git, &["commit", "-qm", "shared writer base"], None)?;
+    assert_eq!(code(&base), 0, "{base:?}");
+    let base_tip = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
+    assert_eq!(code(&base_tip), 0, "{base_tip:?}");
+    let base_tip = String::from_utf8(base_tip.stdout.bytes)?.trim().to_owned();
+
+    let worktree = rig.project.join(".worktrees/shared-writer");
+    let added = rig.execute(
+        &git,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "shared-writer",
+            worktree.to_str().ok_or("worktree path")?,
+        ],
+        None,
+    )?;
+    assert_eq!(code(&added), 0, "{added:?}");
+    let barrier = worktree.join(".fixture-shared-barrier");
+    fs::create_dir_all(&barrier)?;
+
+    let document = rig.root.join("shared-worktree-writers.json");
+    let barrier_text = barrier.to_str().ok_or("barrier path")?;
+    fs::write(
+        &document,
+        serde_json::to_vec(&json!({
+            "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "graph_id": "shared-worktree-writers",
+            "nodes": [
+                {
+                    "id": "first",
+                    "prompt": format!("fixture shared worktree writer first\nSHARED_WORKTREE_BARRIER: {barrier_text}"),
+                    "access": "worktree_write",
+                    "worktree": worktree,
+                    "write_scope": ["first-owned.txt"],
+                    "route": {"adapter": "codex", "model": "gpt-6-luna", "effort": "low"}
+                },
+                {
+                    "id": "second",
+                    "prompt": format!("fixture shared worktree writer second\nSHARED_WORKTREE_BARRIER: {barrier_text}"),
+                    "access": "worktree_write",
+                    "worktree": worktree,
+                    "write_scope": ["second-owned.txt"],
+                    "route": {"adapter": "codex", "model": "gpt-6-luna", "effort": "low"}
+                }
+            ]
+        }))?,
+    )?;
+
+    let settled = rig
+        .run_and_wait(
+            &["--file", document.to_str().ok_or("graph document")?],
+            "40s",
+        )
+        .map_err(|error| format!("{error}; {}", writer_fixture_diagnostics(&rig)))?;
+    let checkpoint = &settled.checkpoint;
+    let nodes = checkpoint["nodes"].as_array().ok_or("graph nodes")?;
+    assert_eq!(nodes.len(), 2, "{checkpoint}");
+    for node in nodes {
+        assert!(node["attempts"][0]["attempt_ref"].is_string(), "{node}");
+    }
+    for marker in [
+        "first-ready",
+        "second-ready",
+        "first-staged",
+        "second-staged",
+        "first-committed",
+        "second-committed",
+    ] {
+        assert!(
+            barrier.join(marker).is_file(),
+            "provider did not reach {marker}: {}",
+            writer_fixture_diagnostics(&rig)
+        );
+    }
+
+    // Both lanes ran concurrently from the same tip. Publication is a
+    // compare-and-swap of the host branch: one lane's history lands, the other
+    // diverges, is refused, and keeps its commits in its private Git. Neither
+    // replaces the other, and there is no automatic rebase.
+    let succeeded = nodes
+        .iter()
+        .filter(|node| node["state"] == "succeeded")
+        .count();
+    assert_eq!(
+        succeeded,
+        1,
+        "{checkpoint}; {}",
+        writer_fixture_diagnostics(&rig)
+    );
+    let mut retained = 0;
+    for entry in fs::read_dir(rig.state.join("attempts"))?.flatten() {
+        let Ok(bytes) = fs::read(entry.path().join("terminal-pending.json")) else {
+            continue;
+        };
+        let record: Value = serde_json::from_slice(&bytes)?;
+        if record["state"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("retained in the attempt's private Git"))
+        {
+            retained += 1;
+        }
+    }
+    assert_eq!(retained, 1, "{}", writer_fixture_diagnostics(&rig));
+
+    let worktree_arg = worktree.to_str().ok_or("worktree path")?;
+    let show = |revision: &str| -> Result<String> {
+        let output = rig.execute(
+            &git,
+            &[
+                "-C",
+                worktree_arg,
+                "show",
+                "--pretty=format:",
+                "--name-only",
+                revision,
+            ],
+            None,
+        )?;
+        assert_eq!(code(&output), 0, "{output:?}");
+        Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
+    };
+    let winner = show("HEAD")?;
+    assert!(
+        ["first-owned.txt", "second-owned.txt"].contains(&winner.as_str()),
+        "the published commit holds exactly one lane's path: {winner}"
+    );
+    let parent = rig.execute(&git, &["-C", worktree_arg, "rev-parse", "HEAD^"], None)?;
+    assert_eq!(code(&parent), 0, "{parent:?}");
+    assert_eq!(
+        String::from_utf8(parent.stdout.bytes)?.trim(),
+        base_tip,
+        "the published commit sits directly on the shared base"
+    );
+    Ok(())
 }
 
 // Spec: docs/specs/run.md#writer-pin-and-re-pin
@@ -2243,16 +2592,18 @@ fn continue_in_place_launches_direct_writer_graph() -> Result {
 fn wip_commit_launches_direct_writer_graph() -> Result {
     dirty_writer_mode_launches_direct_graph("wip_commit")
 }
-
-/// Admission starts or durably schedules a retry under repository contention.
-fn simultaneous_writer_launches_are_admitted_or_scheduled_for_retry() -> Result {
-    // Two simultaneous callers exercise admission under contention. Repeating
-    // twelve launches in two rounds only stressed the host; the held-lock test
-    // below deterministically pins the durable retry branch.
+/// Distinct branch launches start directly without repository-wide waiting.
+fn distinct_branch_writer_launches_start_without_shared_waits() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
     let rig = writer_registry_fixture()?;
     let _cleanup = rig.process_cleanup();
     let binary = option_env!("CARGO_BIN_EXE_provenant").ok_or("binary")?;
     let barrier = std::sync::Barrier::new(2);
+    let live = rig.root.join("distinct-branch-live");
+    fs::create_dir_all(&live)?;
+    let live_path = live.to_str().ok_or("live barrier path")?;
     std::thread::scope(|scope| -> Result {
         let mut launches = Vec::new();
         for index in 0..2 {
@@ -2260,6 +2611,9 @@ fn simultaneous_writer_launches_are_admitted_or_scheduled_for_retry() -> Result 
             let rig = &rig;
             launches.push(scope.spawn(move || {
                 barrier.wait();
+                let prompt = format!(
+                    "fixture distinct branch writer\nSHARED_WORKTREE_BARRIER: {live_path}\nDISTINCT_BRANCH_WRITER: {index}"
+                );
                 std::process::Command::new(binary)
                     .current_dir(&rig.project)
                     .env_clear()
@@ -2269,7 +2623,7 @@ fn simultaneous_writer_launches_are_admitted_or_scheduled_for_retry() -> Result 
                     .args([
                         "run",
                         "task",
-                        "fixture writer",
+                        &prompt,
                         "--route",
                         "junior",
                         "--mode",
@@ -2283,237 +2637,45 @@ fn simultaneous_writer_launches_are_admitted_or_scheduled_for_retry() -> Result 
                     .output()
             }));
         }
+        let mut graph_ids = Vec::new();
         for launch in launches {
             let output = launch.join().map_err(|_| "launch thread panicked")??;
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             let response: Value = serde_json::from_slice(&output.stdout)?;
             let node = &response["data"]["checkpoint"]["nodes"][0];
-            let accepted = node["attempts"][0]["attempt_ref"].is_string();
-            let retry = node["state"] == "running"
-                && node["launch_retry"]["wake_at"].as_str().is_some()
-                && response["status"] == "waiting"
-                && response["data"]["waits"].as_array().is_some_and(|waits| {
-                    waits
-                        .iter()
-                        .any(|wait| wait["node"] == node["id"] && wait["wait"] == "launch_retry")
-                });
             assert!(
-                accepted || retry,
-                "{response}; {}",
+                node["attempts"][0]["attempt_ref"].is_string(),
+                "distinct branch launch must start without a shared-repository retry: {response}; {}",
                 String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(node["launch_retry"], Value::Null, "{response}");
+            graph_ids.push(
+                response["data"]["checkpoint"]["graph_id"]
+                    .as_str()
+                    .ok_or("graph id")?
+                    .to_owned(),
+            );
+        }
+        for index in 0..2 {
+            await_fixture_marker(&live.join(format!("{index}-ready")))?;
+        }
+        // Every provider now holds its distinct worktree lease at once.
+        fs::write(live.join("release"), b"release")?;
+        for graph in graph_ids {
+            let waited = rig.command(&["wait", &graph, "--timeout", "30s", "--json"])?;
+            assert_eq!(
+                code(&waited),
+                0,
+                "{graph}: {}",
+                writer_fixture_diagnostics(&rig)
             );
         }
         Ok(())
     })?;
-    Ok(())
-}
-
-/// A held registry preserves a typed, durable retry without creating a writer.
-fn writer_registry_contention_is_durable_without_creating_a_writer() -> Result {
-    use provenant_core::{Clock, RootInputs, WaitBudget};
-    use provenant_os::{
-        clock::SystemClock,
-        fs::{Directory, LockMode, SystemPathResolver},
-    };
-    let rig = writer_registry_fixture()?;
-    writeln!(
-        OpenOptions::new()
-            .append(true)
-            .open(rig.state.join("config.toml"))?,
-        "\n[domains.fabric.graph]\nlaunch_wait_seconds=2\nwriter_provision_seconds=2"
-    )?;
-    let _cleanup = rig.process_cleanup();
-    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
-    inputs.state_dir = Some(rig.state.clone());
-    let roots = inputs.resolve(&SystemPathResolver)?;
-    let binding = provenant_config::bind_project(
-        &roots,
-        provenant_config::ProjectLocation::new(fs::canonicalize(rig.project.join(".git"))?)?,
-    )?;
-    let registry = rig
-        .state
-        .join("worktrees")
-        .join(binding.project_id().to_string());
-    fs::create_dir_all(&registry)?;
-    fs::set_permissions(&registry, fs::Permissions::from_mode(0o700))?;
-    let directory = Directory::open_anchor(&rig.project.join(".git"))?;
-    let clock = SystemClock;
-    let _held = directory.lock(
-        std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
-        LockMode::Exclusive,
-        WaitBudget::nonblocking(clock.mono_now()),
-        &provenant_core::CancelToken::new(),
-        &clock,
-    )?;
-    let output = rig.command(&[
-        "run",
-        "task",
-        "fixture writer",
-        "--route",
-        "junior",
-        "--mode",
-        "worktree-write",
-        "--branch",
-        "blocked-writer",
-        "--base",
-        "HEAD",
-        "--json",
-    ])?;
-    let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    let node = &response["data"]["checkpoint"]["nodes"][0];
-    assert_eq!(node["advance_owner_code"], "writer_lock_busy", "{response}");
-    assert!(
-        node["attempts"].as_array().is_some_and(Vec::is_empty),
-        "{response}"
-    );
-    let retry = node
-        .get("launch_retry")
-        .filter(|value| value.is_object())
-        .or_else(|| {
-            node.get("last_launch_retry")
-                .filter(|value| value.is_object())
-        })
-        .ok_or("durable writer retry")?;
-    assert!(
-        retry["failures"]
-            .as_u64()
-            .is_some_and(|failures| failures > 0)
-    );
-    assert!(retry["wake_at"].is_string() || node["advance_error_code"] == "launch_retry_exhausted");
-    assert!(!rig.project.join(".worktrees/blocked-writer").exists());
-    let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
-    let branch = rig.execute(
-        &git,
-        &["show-ref", "--verify", "refs/heads/blocked-writer"],
-        None,
-    )?;
-    assert_ne!(code(&branch), 0, "{branch:?}");
-    let graph = response["data"]["checkpoint"]["graph_id"]
-        .as_str()
-        .ok_or("graph id")?;
-    // Reading contention must not reacquire the held registry.
-    let output = rig.command(&["status", graph, "--json"])?;
-    assert_eq!(code(&output), 0, "{output:?}");
-    let reading: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert!(
-        reading["data"]["rows"].as_array().is_some_and(|rows| rows
-            .iter()
-            .any(|row| row["kind"] == "node" && row["cause_code"] == "writer_lock_busy")),
-        "{reading}"
-    );
-    Ok(())
-}
-
-/// Expanded writers preserve contention as a durable retry without waiting.
-fn expanded_writer_registry_contention_remains_retryable() -> Result {
-    use provenant_core::{Clock, RootInputs, WaitBudget};
-    use provenant_os::{
-        clock::SystemClock,
-        fs::{Directory, LockMode, SystemPathResolver},
-    };
-    if !graph_fixture_available()? {
-        return Ok(());
-    }
-    let rig = writer_registry_fixture()?;
-    writeln!(
-        OpenOptions::new()
-            .append(true)
-            .open(rig.state.join("config.toml"))?,
-        "\n[domains.fabric.graph]\nlaunch_wait_seconds=2\nwriter_provision_seconds=2"
-    )?;
-    let _cleanup = rig.process_cleanup();
-    let key =
-        provenant_providers::identity::codex_account(br#"{"tokens":{"account_id":"fixture-one"}}"#)
-            .ok_or("account")?;
-    support::register_account(&rig, "codex", "fixture", &key, &rig.root.join("codex"))?;
-    let document = rig.root.join("expanded.json");
-    fs::write(
-        &document,
-        serde_json::to_vec(
-            &json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"expanded-lock","nodes":[{"id":"slow","prompt":"fixture slow registry","access":"read_only","route":{"adapter":"codex","model":"gpt-6-luna"}}]}),
-        )?,
-    )?;
-    let doc = document.to_str().ok_or("document")?;
-    let initial = rig.command(&["run", "--file", doc, "--json"])?;
-    let initial: Value = serde_json::from_slice(&initial.stdout.bytes)?;
-    assert_eq!(initial["data"]["status"], "pending", "{initial}");
-    let git = provenant_os::git::resolve_git_executable(None).ok_or("git")?;
-    let head = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
-    assert_eq!(code(&head), 0, "{head:?}");
-    let source = std::str::from_utf8(&head.stdout.bytes)?.trim();
-    let patch = rig.root.join("patch.json");
-    fs::write(
-        &patch,
-        serde_json::to_vec(
-            &json!({"schema_version":1,"nodes":[{"id":"writer","prompt":"write code","access":"worktree_write","write_scope":["."],"source":{"type":"commit","commit":source},"route":{"adapter":"codex","model":"gpt-6-luna"}}]}),
-        )?,
-    )?;
-    let edited = rig.command(&[
-        "edit",
-        "expanded-lock",
-        "--file",
-        patch.to_str().ok_or("patch")?,
-        "--json",
-    ])?;
-    assert_eq!(code(&edited), 0, "{edited:?}");
-    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
-    inputs.state_dir = Some(rig.state.clone());
-    let roots = inputs.resolve(&SystemPathResolver)?;
-    let binding = provenant_config::bind_project(
-        &roots,
-        provenant_config::ProjectLocation::new(fs::canonicalize(rig.project.join(".git"))?)?,
-    )?;
-    let registry = rig
-        .state
-        .join("worktrees")
-        .join(binding.project_id().to_string());
-    fs::create_dir_all(&registry)?;
-    fs::set_permissions(&registry, fs::Permissions::from_mode(0o700))?;
-    let directory = Directory::open_anchor(&rig.project.join(".git"))?;
-    let clock = SystemClock;
-    let _held = directory.lock(
-        std::ffi::OsStr::new(provenant_confinement::worktrees::REPOSITORY_LOCK),
-        LockMode::Exclusive,
-        WaitBudget::nonblocking(clock.mono_now()),
-        &provenant_core::CancelToken::new(),
-        &clock,
-    )?;
-    // An edit only records the patch; the scheduler tick launches the added
-    // writer. With Git's repository lock held, it records retryable writer
-    // contention without creating an attempt.
-    let tick = rig.command(&["tick", "--json"])?;
-    assert_eq!(code(&tick), 0, "{tick:?}");
-    let checkpoint = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
-        &roots.state,
-        binding.project_id(),
-        "expanded-lock",
-    )?
-    .ok_or("checkpoint")?;
-    let writer = checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == "writer")
-        .ok_or("writer")?;
-    assert!(writer.attempts.is_empty());
-    assert_eq!(
-        writer.advance_owner_code.as_deref(),
-        Some("writer_lock_busy")
-    );
-    let retry = writer
-        .launch_retry
-        .as_ref()
-        .or(writer.last_launch_retry.as_ref())
-        .ok_or("durable expanded writer retry")?;
-    assert!(retry.failures > 0 && retry.deadline.is_some());
-    assert!(
-        retry.wake_at.is_some()
-            || writer.advance_error_code.as_deref() == Some("launch_retry_exhausted")
-    );
-    assert!(
-        provenant_fabric_runtime::graph::relay::pending_provisioning(&checkpoint)
-            .iter()
-            .any(|(node, _, _)| node == "writer"),
-        "{checkpoint:?}"
-    );
     Ok(())
 }
 
@@ -3883,7 +4045,7 @@ fn composite_graph_output_uses_declared_roots_and_exports() -> Result {
     assert_eq!(digest["state"], "succeeded");
     assert_eq!(digest["findings_count"], 1);
     assert_eq!(digest["findings_available"], true);
-    let human_status = rig.command(&["status", "composite-output/panel"])?;
+    let human_status = rig.command(&["status", "composite-output/panel", "--full"])?;
     let human_status = String::from_utf8_lossy(&human_status.stdout.bytes);
     assert!(
         human_status.contains("verdict=VERDICT: FAIL"),
@@ -4885,7 +5047,7 @@ fn detached_graph_retry_reports_discarded_exclusion() -> Result {
         checkpoint["nodes"][0]["attempts"][0]["launched"], true,
         "{checkpoint}"
     );
-    let status = rig.command(&["status", "stale-exclusion"])?;
+    let status = rig.command(&["status", "stale-exclusion", "--full"])?;
     assert_eq!(code(&status), 0, "{status:?}");
     let text = String::from_utf8_lossy(&status.stdout.bytes);
     assert!(
@@ -4973,10 +5135,6 @@ fn light_graph_delivers_and_applies_preset_per_node() -> Result {
             assert_ne!(
                 record.profile.knobs.get("lanes.receipts"),
                 Some(&json!("none"))
-            );
-            assert_ne!(
-                record.profile.knobs.get("lanes.supervision"),
-                Some(&json!("minimal"))
             );
         }
     }
@@ -6069,20 +6227,16 @@ fn main() -> ExitCode {
                 provider_checks_preserve_routes_and_settlement_causes,
             ),
             (
-                "expanded_writer_registry_contention_remains_retryable",
-                expanded_writer_registry_contention_remains_retryable,
-            ),
-            (
                 "pending_graph_reports_pre_attempt_writer_failure",
                 pending_graph_reports_pre_attempt_writer_failure,
             ),
             (
-                "writer_registry_contention_is_durable_without_creating_a_writer",
-                writer_registry_contention_is_durable_without_creating_a_writer,
+                "distinct_branch_writer_launches_start_without_shared_waits",
+                distinct_branch_writer_launches_start_without_shared_waits,
             ),
             (
-                "simultaneous_writer_launches_are_admitted_or_scheduled_for_retry",
-                simultaneous_writer_launches_are_admitted_or_scheduled_for_retry,
+                "shared_worktree_writers_commit_disjoint_paths",
+                shared_worktree_writers_commit_disjoint_paths,
             ),
             (
                 "simultaneous_first_launches_pass_cutover_guard",

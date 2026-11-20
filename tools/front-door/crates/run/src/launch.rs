@@ -80,22 +80,6 @@ pub fn capture_plan(task: &TaskRequest, limits: &provenant_records::LaneLimits) 
             CapturePlan::default().stdout
         },
         wall_ms: enforced(&limits.deadline_seconds).saturating_mul(1000),
-        // Minimal supervision (the `light` preset) marks silence at the
-        // longest interval the registry allows; it still never kills for it.
-        silence_ms: if task
-            .profile
-            .knobs
-            .get("lanes.supervision")
-            .and_then(serde_json::Value::as_str)
-            == Some("minimal")
-        {
-            3_600_000
-        } else {
-            task.profile
-                .knob_u64("lanes.silence_seconds")
-                .unwrap_or(1800)
-                .saturating_mul(1000)
-        },
         token_budget: enforced(&limits.token_budget),
         budget_action: limits.budget_policy.clone().unwrap_or_default().action,
         // Writers only: a fresh attempt continues a writer's retained
@@ -1060,16 +1044,22 @@ impl RunStore {
         for id in ids {
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
             if matches!(self.record(id, call)?.state, AttemptState::Queued { .. }) {
-                self.withdraw(
+                self.withdraw_with_preparation_failure(
                     id,
-                    AttemptState::Queued {
-                        extra: Default::default(),
+                    crate::store::Withdrawal {
+                        expected: AttemptState::Queued {
+                            extra: Default::default(),
+                        },
+                        outcome: Outcome::Rejected,
+                        reason,
+                        finished_at: call
+                            .clock
+                            .wall_now()
+                            .map_err(|_| RunError::Validation("wall clock"))?,
+                        failure: None,
+                        terminal_cause: None,
+                        terminal_note: None,
                     },
-                    Outcome::Rejected,
-                    reason,
-                    call.clock
-                        .wall_now()
-                        .map_err(|_| RunError::Validation("wall clock"))?,
                     call,
                 )?;
             }
@@ -2631,6 +2621,65 @@ fn lane_port_plan(
     }))
 }
 
+/// The lane's process-tree sampling cadence, resolved here because the
+/// guardian starts with an empty environment and cannot read config. An
+/// explicit `domains.run.resource_sample_interval_ms` wins. At 0 (the
+/// default) an admission class with `memory_per_slot` needs a sample, so the
+/// lane is sampled at the default cadence; otherwise no sampler runs.
+/// `provenant config show --full` shows both settings and their sources.
+fn process_tree_interval(
+    state: &std::path::Path,
+    project: &std::path::Path,
+    policy: &provenant_records::policy::Policy,
+) -> Option<std::time::Duration> {
+    let configured = match provenant_confinement::run_config::RunConfig::read(state) {
+        Ok(config) => config.resource_sample_interval_ms,
+        Err(error) => {
+            if let provenant_records::policy::Effect::Warn(message) = policy.check(
+                "LAUNCH_PROCESS_TREE_INTERVAL_OR_WARN_NONE",
+                provenant_records::policy::Facts::violation(format!(
+                    "domains.run settings unavailable ({error}); no process-tree sampling"
+                )),
+            ) {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            }
+            return None;
+        }
+    };
+    if configured > 0 {
+        return Some(std::time::Duration::from_millis(configured));
+    }
+    provenant_config::ResolvedAdmissionClass::resolve_all(state, Some(project))
+        .into_values()
+        .any(|class| class.memory_per_slot_bytes.is_some())
+        .then_some(provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL)
+}
+
+/// How long the guardian may retain custody of an unresolved exit, resolved
+/// here for the same reason as the sampling cadence. Unreadable run settings
+/// warn and keep the shipped limit; `provenant config show --full` shows
+/// `domains.run.retained_custody_seconds` and its source.
+fn retained_custody_ms(state: &std::path::Path, policy: &provenant_records::policy::Policy) -> u64 {
+    let seconds = match provenant_confinement::run_config::RunConfig::read(state) {
+        Ok(config) => config.retained_custody_seconds,
+        Err(error) => {
+            let seconds = provenant_supervisor::custody::DEFAULT_RETAINED_CUSTODY_SECONDS;
+            if let provenant_records::policy::Effect::Warn(message) = policy.check(
+                "LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT",
+                provenant_records::policy::Facts::violation(format!(
+                    "domains.run settings unavailable ({error}); retained custody keeps the shipped {seconds} s limit"
+                )),
+            ) {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+            }
+            seconds
+        }
+    };
+    seconds.saturating_mul(1_000)
+}
+
 fn lane_port_plan_or_warn(
     state: &std::path::Path,
     policy: &provenant_records::policy::Policy,
@@ -2964,9 +3013,12 @@ mod policy_reporting_tests {
                 .unwrap(),
                 cargo_target_seed: false,
                 state_root: "/fixture/state".into(),
+                roots: None,
                 sandbox: inherited_sandbox,
                 backend: None,
                 cargo_target: Default::default(),
+                cargo_cache_budget: None,
+                cargo_target_protection: Default::default(),
             }),
         };
         prepared.bind_sandbox_backend(&cancel, &Default::default())?;

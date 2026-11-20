@@ -24,15 +24,20 @@ fn live_or_full(
 
 impl Driver<'_> {
     /// Descriptor observations explain contention, but never grant signal or
-    /// settlement authority. Share one deadline across the entire scan.
+    /// settlement authority. Share one deadline across the entire scan. The
+    /// scan runs once per guardian: retained custody reaches a cleanup
+    /// deadline every escalation, and the holders rarely change between them.
     #[allow(clippy::disallowed_methods)]
     fn warn_cleanup_holders(
-        &self,
+        &mut self,
         census: Option<&crate::census::Census>,
         warnings: &mut Vec<String>,
         omitted: &mut u64,
     ) {
         use provenant_os::pid::{CwdObserver, SystemCwdObserver};
+        if std::mem::replace(&mut self.cleanup_holders_warned, true) {
+            return;
+        }
         let deadline = Instant::now() + Duration::from_millis(100);
         let resource = self
             .lock_dir
@@ -105,11 +110,6 @@ impl Driver<'_> {
                 ),
             );
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    pub(super) fn holder_reports_no_live_children(&self) -> bool {
-        host_allows_escapee_stop(self.holder, &self.holder_context)
     }
 
     pub(super) fn persist_tracking(&mut self, warnings: &mut Vec<String>, omitted: &mut u64) {
@@ -226,7 +226,6 @@ impl Driver<'_> {
     ) {
         let began = Instant::now();
         let grace = Duration::from_millis(plan.descendant_grace_ms);
-        let group = child.id();
         let mut escalation = false;
         loop {
             // A group signal cannot exclude members, so never send one while a
@@ -237,32 +236,12 @@ impl Driver<'_> {
             if census.is_none() && reason != machine::StopReason::ExplicitCancellation {
                 return;
             }
-            if let Some(census) = census {
-                let members = || {
-                    census.facts().filter(|fact| {
-                        fact.identity.group_id == group && fact.identity.pid != group
-                    })
-                };
-                let shielded = members().any(|fact| {
-                    self.protected.contains(&fact.identity)
-                        || self
-                            .spared
-                            .spared_identities()
-                            .any(|spared| *spared == fact.identity)
-                });
-                if shielded || (census.is_complete() && members().all(|fact| fact.zombie)) {
-                    return;
-                }
-                let signal = if escalation {
-                    libc::SIGKILL
-                } else {
-                    libc::SIGTERM
-                };
-                let outcome = stop_delivery_outcome(child.stop_group(escalation));
-                self.record_delivery(self.reservation.provider.clone(), reason, signal, outcome);
-                if outcome != DeliveryOutcome::Delivered && !escalation {
-                    push_warning(warnings, omitted, "group signal not delivered");
-                }
+            if let Some(census) = census
+                && self
+                    .signal_group(child, &census, reason, escalation, warnings, omitted)
+                    .is_none()
+            {
+                return;
             }
             if escalation && began.elapsed() >= grace.saturating_mul(2) {
                 return;
@@ -271,17 +250,7 @@ impl Driver<'_> {
                 escalation = true;
                 continue;
             }
-            let _ = self.reactor.wait(&[], Duration::from_millis(20));
-        }
-    }
-
-    pub(super) fn provider_cpu_micros(&self) -> Option<u64> {
-        let expected = self.reservation.provider.as_ref()?;
-        match self.observer.observe(expected.pid) {
-            ProcessObservation::Present(fact) if fact.identity == *expected => fact.cpu_micros,
-            ProcessObservation::Present(_)
-            | ProcessObservation::Absent
-            | ProcessObservation::Unknown(_) => None,
+            self.reactor.pause(Duration::from_millis(20));
         }
     }
 
@@ -432,14 +401,6 @@ impl Driver<'_> {
                     self.history_complete = false;
                 }
             }
-            if fact
-                .command
-                .as_ref()
-                .is_some_and(|name| self.protected_commands.contains(name))
-                && (self.tracked.contains(&fact.identity) || fact.identity.group_id == child.id())
-            {
-                self.protected.insert(fact.identity.clone());
-            }
         }
         self.tracked
             .retain(|identity| identity_still_possible(&census, identity));
@@ -589,9 +550,7 @@ impl Driver<'_> {
         {
             return false;
         }
-        let mut spared: std::collections::BTreeSet<_> =
-            self.spared.spared_identities().cloned().collect();
-        spared.extend(self.protected.iter().cloned());
+        let spared = self.cleanup_spared();
         self.marked_escapees(census, child.id(), &spared).is_empty()
     }
 
@@ -636,137 +595,498 @@ impl Driver<'_> {
                     self.warn_cleanup_holders(None, warnings, omitted);
                     return Ok(false);
                 }
-                let _ = self.reactor.wait(&[], Duration::from_millis(20));
+                self.reactor.pause(Duration::from_millis(20));
                 continue;
             };
             census_warning_active = false;
-            let mut spared: std::collections::BTreeSet<_> =
-                self.spared.spared_identities().cloned().collect();
-            spared.extend(self.protected.iter().cloned());
-            // A descendant that detached before the census saw it stays in the
-            // attempt's sandbox; it is tracked here and ended below.
-            #[cfg(target_os = "macos")]
-            let marked = self.marked_escapees(&census, child.id(), &spared);
-            // Reaping sends no signal, so an adopted zombie is reaped even when
-            // descendant stops are not allowed; otherwise a fenced guardian
-            // would pin it indefinitely.
-            let reaped = child.reap_adopted(&census, &spared)?;
-            #[cfg(target_os = "macos")]
-            let mut reaped = reaped;
-            #[cfg(target_os = "macos")]
-            if !self.descendant_stop_allowed {
-                reaped.unresolved = !self
-                    .tracked
-                    .iter()
-                    .all(|identity| reaped.reaped.contains(identity));
-            }
-            for identity in reaped.reaped {
-                self.tracked.remove(&identity);
-                if self.reaped.len() < 16 {
-                    self.reaped.push(identity);
-                } else {
-                    self.omitted_reaped = self.omitted_reaped.saturating_add(1);
-                }
-            }
-            #[cfg(target_os = "macos")]
-            let outstanding =
-                self.tracked
-                    .iter()
-                    .any(|identity| match census.process(identity.pid) {
-                        crate::census::ProcessLookup::Absent => false,
-                        crate::census::ProcessLookup::Present(fact) => {
-                            fact.identity == *identity && !fact.zombie
-                        }
-                        crate::census::ProcessLookup::Unknown => true,
-                    });
-            #[cfg(target_os = "macos")]
-            let census_clear = census.is_complete() && !reaped.unresolved && !outstanding;
-            #[cfg(target_os = "macos")]
-            let complete = census_clear && self.darwin_quiescent(child, &census)?;
-            #[cfg(not(target_os = "macos"))]
-            let complete = false;
+            let spared = self.cleanup_spared();
+            let (complete, marked) = self.observe_settlement(child, &census, &spared)?;
             if complete {
                 let _ = child.cleanup(true)?;
                 self.persist_tracking(warnings, omitted);
                 return Ok(true);
             }
-            // Root exit does not authorise an arbitrary PID. Descendants need
-            // retained provider-ancestry proof or an attempt-sandbox mark.
             let escalation = began.elapsed() >= Duration::from_millis(plan.descendant_grace_ms);
-            let delivery_reason = machine::StopReason::PostTerminalCleanup;
-            let signal = if escalation {
-                libc::SIGKILL
-            } else {
-                libc::SIGTERM
-            };
-            let outcome = stop_delivery_outcome(child.stop(escalation));
-            // ESRCH means the provider is already gone (or already signalled),
-            // which later ticks would only repeat; it is not a failed delivery.
-            if outcome != DeliveryOutcome::Failed(DeliveryFailure::NoSuchProcess) {
-                self.record_delivery(
-                    self.reservation.provider.clone(),
-                    delivery_reason,
-                    signal,
-                    outcome,
-                );
-                if outcome != DeliveryOutcome::Delivered {
-                    push_warning(warnings, omitted, "post-terminal provider signal failed");
-                }
-            }
-            #[cfg(target_os = "macos")]
-            if self.holder_reports_no_live_children() {
-                let mut targets = std::collections::BTreeSet::new();
-                // Native descendants require a requested provider stop, not
-                // merely its ordinary exit. Without a native child registry,
-                // an actual host holder must affirm that no graph child remains;
-                // an absent holder is not that proof.
-                let requested_stop = match reason {
-                    machine::StopReason::PostTerminalCleanup => false,
-                    machine::StopReason::ExplicitCancellation
-                    | machine::StopReason::Steered
-                    | machine::StopReason::WallDeadline
-                    | machine::StopReason::ProtocolRejected
-                    | machine::StopReason::SupervisorSignal
-                    | machine::StopReason::TokenBudget
-                    | machine::StopReason::ContextHandoff => true,
-                };
-                if requested_stop
-                    && (self.descendant_stop_allowed
-                        || (self.registry.is_none() && self.holder.is_some()))
-                {
-                    targets.extend(child.owned_cleanup_targets(&census, &spared));
-                }
-                if self.escapee_stop_allowed {
-                    targets.extend(marked);
-                }
-                let targets: Vec<_> = targets.into_iter().collect();
-                for delivery in child.stop_owned_targets(escalation, &targets) {
-                    self.record_delivery(
-                        Some(delivery.identity),
-                        delivery_reason,
-                        signal,
-                        delivery.outcome,
-                    );
-                }
-            }
+            self.stop_pass(
+                child, &census, &spared, marked, escalation, warnings, omitted,
+            );
             self.persist_tracking(warnings, omitted);
             if Instant::now() >= deadline {
                 self.warn_cleanup_holders(Some(&census), warnings, omitted);
                 return Ok(false);
             }
-            let _ = self.reactor.wait(
-                &[],
-                Duration::from_millis(plan.descendant_grace_ms.clamp(1, 20)),
+            self.reactor
+                .pause(Duration::from_millis(plan.descendant_grace_ms.clamp(1, 20)));
+        }
+    }
+
+    /// The group signal for one census: `None` when a spared or protected
+    /// owner shares the group (a group signal cannot exclude it) or no live
+    /// member remains; otherwise the live members signalled, if delivered.
+    fn signal_group(
+        &mut self,
+        child: &mut crate::process_os::provider::ProviderGroup,
+        census: &crate::census::Census,
+        reason: machine::StopReason,
+        escalation: bool,
+        warnings: &mut Vec<String>,
+        omitted: &mut u64,
+    ) -> Option<Vec<ProcessIdentity>> {
+        let group = child.id();
+        let members = || {
+            census
+                .facts()
+                .filter(move |fact| fact.identity.group_id == group && fact.identity.pid != group)
+        };
+        let shielded = members().any(|fact| {
+            self.protected.contains(&fact.identity)
+                || self
+                    .spared
+                    .spared_identities()
+                    .any(|spared| *spared == fact.identity)
+        });
+        if shielded || (census.is_complete() && members().all(|fact| fact.zombie)) {
+            return None;
+        }
+        let signal = if escalation {
+            libc::SIGKILL
+        } else {
+            libc::SIGTERM
+        };
+        let outcome = stop_delivery_outcome(child.stop_group(escalation));
+        self.record_delivery(self.reservation.provider.clone(), reason, signal, outcome);
+        if outcome != DeliveryOutcome::Delivered {
+            if !escalation {
+                push_warning(warnings, omitted, "group signal not delivered");
+            }
+            return Some(Vec::new());
+        }
+        Some(
+            members()
+                .filter(|fact| !fact.zombie)
+                .map(|fact| fact.identity.clone())
+                .collect(),
+        )
+    }
+
+    /// One signalling pass over one census: the provider, then (on macOS)
+    /// recorded descendants and sandbox-marked escapees the host allows.
+    /// Returns the live identities that were signalled.
+    #[allow(clippy::too_many_arguments)]
+    fn stop_pass(
+        &mut self,
+        child: &mut crate::process_os::provider::ProviderGroup,
+        census: &crate::census::Census,
+        spared: &std::collections::BTreeSet<ProcessIdentity>,
+        marked: Vec<ProcessIdentity>,
+        escalation: bool,
+        warnings: &mut Vec<String>,
+        omitted: &mut u64,
+    ) -> Vec<ProcessIdentity> {
+        let mut signalled = Vec::new();
+        // Root exit does not authorise an arbitrary PID. Descendants need
+        // retained provider-ancestry proof or an attempt-sandbox mark.
+        let delivery_reason = machine::StopReason::PostTerminalCleanup;
+        let signal = if escalation {
+            libc::SIGKILL
+        } else {
+            libc::SIGTERM
+        };
+        let outcome = stop_delivery_outcome(child.stop(escalation));
+        // ESRCH means the provider is already gone (or already signalled),
+        // which later ticks would only repeat; it is not a failed delivery.
+        if outcome != DeliveryOutcome::Failed(DeliveryFailure::NoSuchProcess) {
+            self.record_delivery(
+                self.reservation.provider.clone(),
+                delivery_reason,
+                signal,
+                outcome,
             );
+            if outcome != DeliveryOutcome::Delivered {
+                push_warning(warnings, omitted, "post-terminal provider signal failed");
+            }
+        }
+        if outcome == DeliveryOutcome::Delivered
+            && let Some(provider) = self.reservation.provider.as_ref()
+            && matches!(
+                census.process(provider.pid),
+                crate::census::ProcessLookup::Present(fact)
+                    if fact.identity == *provider && !fact.zombie
+            )
+        {
+            signalled.push(provider.clone());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut candidates = std::collections::BTreeSet::new();
+            // The lane's own tree ends with it, whatever ended the provider
+            // (#3545). Only recorded descendants with retained provider
+            // ancestry and sandbox-marked escapees are candidates, and each
+            // signal re-observes the exact identity. A live graph child is a
+            // separate attempt: it is never a provider descendant here and
+            // never carries this lane's sandbox mark, so it cannot be a
+            // candidate. Its own tree is its guardian's to end (#3568).
+            let owned = child.owned_cleanup_targets(census, spared);
+            let descendants_allowed =
+                self.descendant_stop_allowed || (self.registry.is_none() && self.holder.is_some());
+            // A live candidate this pass may not signal can settle only by its
+            // own exit. Only actual candidates count: a withheld permission
+            // with nothing to stop refuses nothing.
+            let refused = (!descendants_allowed && !owned.is_empty())
+                || (!self.escapee_stop_allowed && !marked.is_empty());
+            if descendants_allowed {
+                candidates.extend(owned);
+            }
+            if self.escapee_stop_allowed {
+                candidates.extend(marked);
+            }
+            let targets = authorised_cleanup_targets(candidates);
+            self.stop_refused = refused;
+            for delivery in child.stop_owned_targets(escalation, &targets) {
+                if delivery.outcome == DeliveryOutcome::Delivered {
+                    self.stopped_descendants.insert(delivery.identity.clone());
+                    signalled.push(delivery.identity.clone());
+                }
+                self.record_delivery(
+                    Some(delivery.identity),
+                    delivery_reason,
+                    signal,
+                    delivery.outcome,
+                );
+            }
+            self.note_stopped_descendants(warnings, omitted);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            drop(marked);
+            let _ = spared;
+        }
+        signalled
+    }
+
+    /// Retained custody's repeated stop. Unlike `cleanup`, it never polls:
+    /// one census, then TERM and a wait on exit watches for exactly the
+    /// signalled processes, then KILL and another, then one last census. With
+    /// nothing to signal it returns after the first census.
+    pub(super) fn retained_stop(
+        &mut self,
+        child: &mut crate::process_os::provider::ProviderGroup,
+        plan: CapturePlan,
+        stop_reason: Option<machine::StopReason>,
+        warnings: &mut Vec<String>,
+        omitted: &mut u64,
+    ) -> Result<bool> {
+        let reason = if stop_reason == Some(machine::StopReason::ExplicitCancellation)
+            || self.read_cancel(warnings, omitted)
+                == Some(machine::StopReason::ExplicitCancellation)
+        {
+            machine::StopReason::ExplicitCancellation
+        } else {
+            stop_reason.unwrap_or(machine::StopReason::PostTerminalCleanup)
+        };
+        #[cfg(target_os = "macos")]
+        {
+            let _ = child.cleanup(true)?;
+        }
+        retained_stop_flow(&mut DriverPasses {
+            driver: self,
+            child,
+            reason,
+            grace: Duration::from_millis(plan.descendant_grace_ms.max(1)),
+            warnings,
+            omitted,
+            last: None,
+        })
+    }
+
+    /// Block on exit watches until every identity is gone or `grace` ends.
+    /// Each wake checks only these identities, never a host census. The
+    /// reactor keeps every edge it drains for the retained loop, including
+    /// process events: one may be the exit of an identity outside
+    /// `identities` that blocks settlement. A supervisor signal ends the wait.
+    #[allow(clippy::disallowed_methods)]
+    fn await_exits(&mut self, identities: &[ProcessIdentity], grace: Duration) {
+        let pids = identities.iter().map(|identity| identity.pid).collect();
+        let mut watched =
+            matches!(self.reactor.watch_processes(&pids), Ok(watches) if watches.failures == 0);
+        let deadline = Instant::now() + grace;
+        loop {
+            if !identities.iter().any(|identity| self.still_alive(identity)) {
+                return;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            // Without a watch on every identity, recheck at the walk rate.
+            let wait = if watched {
+                remaining
+            } else {
+                remaining.min(Duration::from_millis(CENSUS_INTERVAL_MS))
+            };
+            match self.reactor.wait(&[], wait) {
+                Ok(_) => {
+                    watched &= !self.reactor.pending().process_overflow;
+                    if self.reactor.signalled() {
+                        return;
+                    }
+                }
+                Err(_) => {
+                    provenant_os::sys::wait_pause(remaining);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn still_alive(&self, identity: &ProcessIdentity) -> bool {
+        match self.observer.observe(identity.pid) {
+            crate::census::ProcessObservation::Present(fact) => {
+                fact.identity == *identity && !fact.zombie
+            }
+            crate::census::ProcessObservation::Absent => false,
+            crate::census::ProcessObservation::Unknown(_) => true,
+        }
+    }
+
+    /// One summary warning, refreshed in place, for every descendant this
+    /// guardian signalled; per-process warnings would crowd out the rest.
+    #[cfg(target_os = "macos")]
+    fn note_stopped_descendants(&self, warnings: &mut Vec<String>, omitted: &mut u64) {
+        if self.stopped_descendants.is_empty() {
+            return;
+        }
+        let label = format!(
+            "killed {} surviving descendants",
+            self.stopped_descendants.len()
+        );
+        match warnings.iter_mut().find(|warning| {
+            warning.starts_with("killed ") && warning.ends_with(" surviving descendants")
+        }) {
+            Some(warning) => *warning = label,
+            None => push_warning(warnings, omitted, &label),
+        }
+    }
+
+    /// Spared and protected owners: never signalled, never reaped as ours.
+    fn cleanup_spared(&self) -> std::collections::BTreeSet<ProcessIdentity> {
+        let mut spared: std::collections::BTreeSet<_> =
+            self.spared.spared_identities().cloned().collect();
+        spared.extend(self.protected.iter().cloned());
+        spared
+    }
+
+    /// One signal-free settlement observation over a complete-or-not census:
+    /// track sandboxed escapees, reap adopted zombies and prove quiescence.
+    /// Returns whether the group settled and the escapees marked this pass.
+    fn observe_settlement(
+        &mut self,
+        child: &mut crate::process_os::provider::ProviderGroup,
+        census: &crate::census::Census,
+        spared: &std::collections::BTreeSet<ProcessIdentity>,
+    ) -> Result<(bool, Vec<ProcessIdentity>)> {
+        // A descendant that detached before the census saw it stays in the
+        // attempt's sandbox; it is tracked here and ended by the caller.
+        #[cfg(target_os = "macos")]
+        let marked = self.marked_escapees(census, child.id(), spared);
+        #[cfg(not(target_os = "macos"))]
+        let marked = Vec::new();
+        // Reaping sends no signal, so an adopted zombie is reaped even when
+        // descendant stops are not allowed; otherwise a fenced guardian
+        // would pin it indefinitely.
+        let reaped = child.reap_adopted(census, spared)?;
+        #[cfg(target_os = "macos")]
+        let mut reaped = reaped;
+        #[cfg(target_os = "macos")]
+        if !self.descendant_stop_allowed {
+            reaped.unresolved = !self
+                .tracked
+                .iter()
+                .all(|identity| reaped.reaped.contains(identity));
+        }
+        for identity in reaped.reaped {
+            self.tracked.remove(&identity);
+            if self.reaped.len() < 16 {
+                self.reaped.push(identity);
+            } else {
+                self.omitted_reaped = self.omitted_reaped.saturating_add(1);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        let outstanding = self
+            .tracked
+            .iter()
+            .any(|identity| match census.process(identity.pid) {
+                crate::census::ProcessLookup::Absent => false,
+                crate::census::ProcessLookup::Present(fact) => {
+                    fact.identity == *identity && !fact.zombie
+                }
+                crate::census::ProcessLookup::Unknown => true,
+            });
+        #[cfg(target_os = "macos")]
+        let complete = census.is_complete()
+            && !reaped.unresolved
+            && !outstanding
+            && self.darwin_quiescent(child, census)?;
+        #[cfg(not(target_os = "macos"))]
+        let complete = false;
+        Ok((complete, marked))
+    }
+
+    /// Retained custody's check between stop passes: one full census and the
+    /// same settlement proof as cleanup. It sends no signal and never reads
+    /// host graph evidence, so an idle retained guardian costs one census.
+    pub(super) fn settle_without_signals(
+        &mut self,
+        child: &mut crate::process_os::provider::ProviderGroup,
+        warnings: &mut Vec<String>,
+        omitted: &mut u64,
+    ) -> Result<bool> {
+        let Some(census) = self.refresh_census(child) else {
+            return Ok(false);
+        };
+        let spared = self.cleanup_spared();
+        let (complete, _) = self.observe_settlement(child, &census, &spared)?;
+        if complete {
+            let _ = child.cleanup(true)?;
+        }
+        self.persist_tracking(warnings, omitted);
+        Ok(complete)
+    }
+
+    /// Exit and fork filters for every identity that can still block
+    /// settlement. Returns whether all of them are watched (dead identities
+    /// need no filter) and whether one was found gone at registration, an
+    /// exit no event will report.
+    pub(super) fn watch_retained_processes(&mut self) -> (bool, bool) {
+        let pids: std::collections::BTreeSet<i64> = self
+            .tracked
+            .iter()
+            .chain(self.history.iter())
+            .chain(self.protected.iter())
+            .chain(self.spared.spared_identities())
+            .map(|identity| identity.pid)
+            .collect();
+        match self.reactor.watch_processes(&pids) {
+            Ok(watches) => (watches.failures == 0, watches.gone),
+            Err(_) => (false, false),
         }
     }
 }
 
-/// Unknown host graph state refuses escapee signals. This is intentionally
-/// separate from census: an ordinary history walk must not reopen graph state.
+/// What one retained stop look saw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Look {
+    Unavailable,
+    Settled,
+    Pending,
+}
+
+/// The steps of retained custody's repeated stop. Each look is one census.
+pub(super) trait RetainedStopPasses {
+    fn look(&mut self) -> Result<Look>;
+    /// Signal what the last pending look authorised; the live identities signalled.
+    fn signal(&mut self, escalation: bool) -> Vec<ProcessIdentity>;
+    /// Block until every identity is gone or the grace ends.
+    fn await_exits(&mut self, identities: &[ProcessIdentity]);
+}
+
+/// TERM, wait, KILL, wait, look: at most three censuses per stop, one when
+/// nothing may be signalled. The 20 ms cleanup poll ran about 130 (#3560).
+pub(super) fn retained_stop_flow(passes: &mut dyn RetainedStopPasses) -> Result<bool> {
+    for escalation in [false, true] {
+        match passes.look()? {
+            Look::Unavailable => return Ok(false),
+            Look::Settled => return Ok(true),
+            Look::Pending => {}
+        }
+        let signalled = passes.signal(escalation);
+        if signalled.is_empty() {
+            return Ok(false);
+        }
+        passes.await_exits(&signalled);
+    }
+    Ok(passes.look()? == Look::Settled)
+}
+
+struct DriverPasses<'p, 'a> {
+    driver: &'p mut Driver<'a>,
+    child: &'p mut crate::process_os::provider::ProviderGroup,
+    reason: machine::StopReason,
+    grace: Duration,
+    warnings: &'p mut Vec<String>,
+    omitted: &'p mut u64,
+    last: Option<(
+        crate::census::Census,
+        Vec<ProcessIdentity>,
+        std::collections::BTreeSet<ProcessIdentity>,
+    )>,
+}
+
+impl RetainedStopPasses for DriverPasses<'_, '_> {
+    fn look(&mut self) -> Result<Look> {
+        let Some(census) = self.driver.refresh_census(self.child) else {
+            return Ok(Look::Unavailable);
+        };
+        let spared = self.driver.cleanup_spared();
+        let (complete, marked) = self
+            .driver
+            .observe_settlement(self.child, &census, &spared)?;
+        if complete {
+            let _ = self.child.cleanup(true)?;
+            self.driver.persist_tracking(self.warnings, self.omitted);
+            return Ok(Look::Settled);
+        }
+        self.last = Some((census, marked, spared));
+        Ok(Look::Pending)
+    }
+
+    fn signal(&mut self, escalation: bool) -> Vec<ProcessIdentity> {
+        let Some((census, marked, spared)) = self.last.take() else {
+            return Vec::new();
+        };
+        let mut signalled = self
+            .driver
+            .signal_group(
+                self.child,
+                &census,
+                self.reason,
+                escalation,
+                self.warnings,
+                self.omitted,
+            )
+            .unwrap_or_default();
+        for identity in self.driver.stop_pass(
+            self.child,
+            &census,
+            &spared,
+            marked,
+            escalation,
+            self.warnings,
+            self.omitted,
+        ) {
+            if !signalled.contains(&identity) {
+                signalled.push(identity);
+            }
+        }
+        self.driver.persist_tracking(self.warnings, self.omitted);
+        signalled
+    }
+
+    fn await_exits(&mut self, identities: &[ProcessIdentity]) {
+        self.driver.await_exits(identities, self.grace);
+    }
+}
+
+/// Targets the lane may signal at settlement. A live graph child spares only
+/// its own process tree: it is a separate attempt, never a recorded descendant
+/// of this lane's provider and never carrying this lane's sandbox mark, so it
+/// is not among `candidates` and cannot withhold a signal from them (#3568).
 #[cfg(any(target_os = "macos", test))]
-pub(super) fn host_allows_escapee_stop(holder: Option<&dyn Holder>, context: &[u8]) -> bool {
-    holder.is_none_or(|holder| matches!(holder.has_live_children(context), Ok(false)))
+pub(super) fn authorised_cleanup_targets(
+    candidates: std::collections::BTreeSet<ProcessIdentity>,
+) -> Vec<ProcessIdentity> {
+    candidates.into_iter().collect()
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -866,44 +1186,30 @@ mod live_census_tests {
     use crate::census::{Census, CensusError, ObservationIssue, ProcessObservation};
     use std::cell::Cell;
 
-    struct GraphHolder {
-        live: Option<bool>,
-        reads: Cell<usize>,
-    }
-    impl Holder for GraphHolder {
-        fn admit(&self, _: &[u8], _: &Directory) -> Result<()> {
-            Ok(())
-        }
-        fn terminal(
-            &self,
-            _: &[u8],
-            _: &Directory,
-            _: &ExitObservation,
-            _: &crate::custody::Recovery,
-        ) -> Result<()> {
-            Ok(())
-        }
-        fn has_live_children(&self, context: &[u8]) -> Result<bool> {
-            assert_eq!(context, b"attempt");
-            self.reads.set(self.reads.get() + 1);
-            self.live.ok_or(CustodyError::InvalidRecord)
-        }
-    }
-
     #[test]
-    fn escapee_signal_requires_current_clear_host_graph_evidence() {
-        assert!(host_allows_escapee_stop(None, b"attempt"));
-        for live in [Some(false), Some(true), None] {
-            let holder = GraphHolder {
-                live,
-                reads: Cell::new(0),
-            };
-            assert_eq!(
-                host_allows_escapee_stop(Some(&holder), b"attempt"),
-                live == Some(false)
-            );
-            assert_eq!(holder.reads.get(), 1);
-        }
+    fn lane_cleanup_candidates_need_no_host_graph_evidence() {
+        let first = ProcessIdentity {
+            boot: "boot".into(),
+            pid: 20,
+            native_start: 2,
+            group_id: 20,
+            session_id: 20,
+        };
+        let second = ProcessIdentity {
+            boot: "boot".into(),
+            pid: 21,
+            native_start: 3,
+            group_id: 20,
+            session_id: 20,
+        };
+        // Live graph children live in other attempts, so they are never in
+        // this set; every lane-owned candidate is authorised (#3568).
+        let targets = authorised_cleanup_targets(std::collections::BTreeSet::from([
+            second.clone(),
+            first.clone(),
+        ]));
+        assert_eq!(targets, vec![first, second]);
+        assert!(authorised_cleanup_targets(Default::default()).is_empty());
     }
 
     struct Observer {

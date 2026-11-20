@@ -6,7 +6,8 @@ pub mod graph_relay;
 /// Shared identity/config setup for CLI leaves and the binary's fabric edges.
 pub use context::{
     Context, PeerFailure, acquire_custody, chair_process, checkout_branch, checkout_subject,
-    current_chair, current_session, facade_outcome, in_lane, inspect_checkout_subject, publish,
+    current_chair, current_session, facade_outcome, in_lane, inspect_checkout_subject,
+    provisioned_checkout_subject, publish,
 };
 
 /// Trusted project and actor identity for sibling leaves such as workflow.

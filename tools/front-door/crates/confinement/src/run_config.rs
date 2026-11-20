@@ -35,6 +35,7 @@ continuation_copy_depth = 32
 source_view_seconds = 300
 source_view_entries = 100000
 source_view_bytes = 536870912
+retained_custody_seconds = 3600
 sandboxed_routes = []
 sandbox_cache_reads = []
 
@@ -113,9 +114,15 @@ pub struct RunConfig {
     /// Maximum total file bytes in one pinned source view.
     #[serde(default = "default_source_view_bytes")]
     pub source_view_bytes: u64,
-    /// Interval between advisory CPU and process-tree observations (default 5s).
-    #[serde(default = "default_resource_sample_interval_ms")]
+    /// Interval between lane process-tree samples. 0 (default) is off: no
+    /// sampler runs and lanes get no `PROVENANT_PROCESS_TREE`.
+    #[serde(default)]
     pub resource_sample_interval_ms: u64,
+    /// How long a guardian retains custody of a lane whose processes outlived
+    /// cleanup before it records why and exits, leaving the unresolved exit
+    /// to `provenant reconcile`.
+    #[serde(default = "default_retained_custody_seconds")]
+    pub retained_custody_seconds: u64,
     /// Route prefixes (`adapter/model`) whose lanes run sandboxed under default
     /// configuration. Empty by default; users can add routes (e.g. OpenCode Zen tier
     /// `opencode/opencode/`). An explicit `lanes.sandbox = "off"` / `--no-sandbox`
@@ -300,8 +307,8 @@ fn default_source_view_entries() -> u32 {
 fn default_source_view_bytes() -> u64 {
     512 << 20
 }
-fn default_resource_sample_interval_ms() -> u64 {
-    provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL_MS
+fn default_retained_custody_seconds() -> u64 {
+    provenant_supervisor::custody::DEFAULT_RETAINED_CUSTODY_SECONDS
 }
 fn default_true() -> bool {
     true
@@ -366,7 +373,8 @@ impl Default for RunConfig {
             source_view_seconds: default_source_view_seconds(),
             source_view_entries: default_source_view_entries(),
             source_view_bytes: default_source_view_bytes(),
-            resource_sample_interval_ms: default_resource_sample_interval_ms(),
+            resource_sample_interval_ms: 0,
+            retained_custody_seconds: default_retained_custody_seconds(),
             sandboxed_routes: default_sandboxed_routes(),
             sandbox_cache_reads: Vec::new(),
             projects: BTreeMap::new(),
@@ -750,6 +758,15 @@ impl DomainConfig for RunConfig {
                 });
             }
         }
+        if !(1..=provenant_supervisor::custody::MAX_RETAINED_CUSTODY_SECONDS)
+            .contains(&self.retained_custody_seconds)
+        {
+            errors.push(SectionError {
+                detail: None,
+                field: "retained_custody_seconds".into(),
+                code: "range",
+            });
+        }
         valid_patterns("review_exempt", &self.review_exempt, &mut errors);
         valid_writer_writes("writer_writes", &self.writer_writes, &mut errors);
         valid_writer_writes(
@@ -848,7 +865,12 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("source_view_seconds", "int"),
     FieldMetadata::new("source_view_entries", "int"),
     FieldMetadata::new("source_view_bytes", "int"),
-    FieldMetadata::int("resource_sample_interval_ms", 1, 60000),
+    FieldMetadata::int("resource_sample_interval_ms", 0, 60000),
+    FieldMetadata::int(
+        "retained_custody_seconds",
+        1,
+        provenant_supervisor::custody::MAX_RETAINED_CUSTODY_SECONDS as i64,
+    ),
     FieldMetadata::new("push_conflict_markers", "bool"),
     FieldMetadata::new("admission_seconds", "integer"),
     FieldMetadata::new("writer_writes", "array"),
@@ -971,6 +993,42 @@ mod tests {
                 .iter()
                 .any(|error| error.field == "grant_limit")
         );
+        Ok(())
+    }
+    /// The guardian refuses a plan whose retention limit is out of range, so
+    /// the run settings refuse it first: an unreadable setting warns and the
+    /// launcher keeps the shipped limit, and the lane still starts.
+    #[test]
+    fn retained_custody_seconds_is_range_checked_where_the_launcher_reads_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let max = provenant_supervisor::custody::MAX_RETAINED_CUSTODY_SECONDS;
+        let defaults: RunConfig = toml_edit::de::from_str("")?;
+        assert_eq!(
+            defaults.retained_custody_seconds,
+            provenant_supervisor::custody::DEFAULT_RETAINED_CUSTODY_SECONDS
+        );
+        for valid in [1, max] {
+            let config: RunConfig =
+                toml_edit::de::from_str(&format!("retained_custody_seconds = {valid}"))?;
+            assert!(config.validate().is_empty(), "{valid}");
+        }
+        for invalid in [0, max + 1, 700_000] {
+            let config: RunConfig =
+                toml_edit::de::from_str(&format!("retained_custody_seconds = {invalid}"))?;
+            assert!(
+                config
+                    .validate()
+                    .iter()
+                    .any(|error| error.field == "retained_custody_seconds"),
+                "{invalid}"
+            );
+            let state = tempfile::tempdir()?;
+            std::fs::write(
+                state.path().join("config.toml"),
+                format!("schema_version=1\n[domains.run]\nretained_custody_seconds={invalid}\n"),
+            )?;
+            assert!(RunConfig::read(state.path()).is_err(), "{invalid}");
+        }
         Ok(())
     }
     fn lane_input(route: &str) -> SandboxInputs<'_> {

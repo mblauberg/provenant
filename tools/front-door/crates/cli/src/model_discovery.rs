@@ -298,18 +298,11 @@ mod tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "test process existence without signalling it"
-    )]
     fn assert_gone(marker: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let pids = std::fs::read_to_string(marker)?;
         for pid in pids.split_whitespace() {
-            let status = std::process::Command::new("/bin/kill")
-                .args(["-0", pid])
-                .stderr(std::process::Stdio::null())
-                .status()?;
-            assert!(!status.success(), "process {pid} survived refresh");
+            provenant_test_support::assert_process_gone(pid)
+                .map_err(|error| format!("survived refresh: {error}"))?;
         }
         Ok(())
     }

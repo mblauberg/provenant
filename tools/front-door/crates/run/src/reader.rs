@@ -20,16 +20,6 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-const PROCESS_OBSERVATION_MAX_AGE_MICROS: i64 = 5_000_000;
-const PROCESS_OBSERVATION_MAX_FUTURE_SKEW_MICROS: i64 = 1_000_000;
-
-pub(super) fn process_observation_fresh(observed: WallTime, now: WallTime) -> bool {
-    observed.as_micros().saturating_sub(now.as_micros())
-        <= PROCESS_OBSERVATION_MAX_FUTURE_SKEW_MICROS
-        && now.as_micros().saturating_sub(observed.as_micros())
-            <= PROCESS_OBSERVATION_MAX_AGE_MICROS
-}
-
 pub trait AttemptReader {
     fn attempt(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptFact>;
     /// Every settled attempt of the project, oldest first.
@@ -976,13 +966,7 @@ impl RunStore {
                 #[serde(default)]
                 last_output_at: Option<WallTime>,
                 #[serde(default)]
-                observed_at: Option<WallTime>,
-                #[serde(default)]
                 priority: Option<i32>,
-                #[serde(default)]
-                silent: bool,
-                #[serde(default)]
-                silent_for_ms: Option<u64>,
             }
             let parsed = serde_json::from_slice::<ProcessCheckpoint>(&bytes);
             let scoped = parsed.as_ref().is_ok_and(|observation| {
@@ -1007,16 +991,6 @@ impl RunStore {
                 record.process_observation_valid.0 = true;
                 record.last_output_at = observation.last_output_at;
                 record.priority = observation.priority;
-                let fresh = observation
-                    .observed_at
-                    .zip(call.clock.wall_now().ok())
-                    .is_some_and(|(observed, now)| process_observation_fresh(observed, now));
-                if observation.silent
-                    && fresh
-                    && matches!(record.state, AttemptState::Running { .. })
-                {
-                    record.provider_silent_for_ms.0 = observation.silent_for_ms;
-                }
             }
         }
         Ok(record)

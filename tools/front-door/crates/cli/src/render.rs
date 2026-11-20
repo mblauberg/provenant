@@ -215,17 +215,7 @@ pub enum RenderError {
     Write(#[source] io::Error),
 }
 pub fn exit_status(outcome: &Outcome) -> u8 {
-    match outcome {
-        Outcome::Ok => 0,
-        Outcome::Failed | Outcome::Refused => 1,
-        Outcome::Invalid => 2,
-        Outcome::Error => 3,
-        Outcome::Unavailable => 4,
-        Outcome::Pending => 5,
-        Outcome::Waiting => 0,
-        Outcome::Timeout => 124,
-        Outcome::Cancelled => 130,
-    }
+    outcome.exit_code()
 }
 /// At most cap bytes are retained even if an owner's Serialize floods output.
 struct Buffer {
@@ -575,6 +565,15 @@ mod tests {
         let rows = "item\n".repeat(limits::FALLBACK_LINES + 1);
         let compact = fallback_text("status", &rows);
         assert!(compact.contains("1 lines omitted"), "{compact}");
+    }
+    #[test]
+    fn generic_line_cap_footer_explains_how_to_see_the_rest() {
+        let text = (0..50).map(|i| format!("line {i}\n")).collect::<String>();
+        let res = compact_text("custom-command", &text, None);
+        assert!(res.contains(&format!(
+            "{} lines omitted; use --full for all detail",
+            50 - limits::FALLBACK_LINES
+        )));
     }
     #[test]
     fn terse_is_one_line_per_record() {

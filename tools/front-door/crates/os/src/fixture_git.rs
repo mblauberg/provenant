@@ -11,6 +11,8 @@ use std::{
 /// Whether an inherited variable is a Git setting that a fixture must not see.
 fn inherited_git_setting(key: &OsStr) -> bool {
     key.to_string_lossy().starts_with("GIT_")
+        || key == provenant_core::consumer_env::GIT
+        || key == provenant_core::consumer_env::WORKTREE_GITDIR
 }
 
 /// Remove all inherited Git settings before a fixture adds its own settings.
@@ -83,7 +85,7 @@ pub fn fixture_git_settings() -> [(OsString, OsString); 12] {
 /// Pass it as `ExecOptions::env`; an unset `env` inherits the lane's Git binding.
 pub fn git_env() -> Vec<(OsString, OsString)> {
     let mut env: Vec<_> = std::env::vars_os()
-        .filter(|(key, _)| !inherited_git_setting(key) && key != provenant_core::consumer_env::GIT)
+        .filter(|(key, _)| !inherited_git_setting(key))
         .collect();
     // Children that find `git` on PATH, such as cargo's Git CLI, must reach native Git, not a lane wrapper.
     if let Some(dir) =
@@ -99,6 +101,32 @@ pub fn git_env() -> Vec<(OsString, OsString)> {
     }
     env.extend(fixture_git_settings());
     env
+}
+
+/// Re-execute a fixture test with native Git and without inherited lane Git
+/// state. Use this when the code under test reads its own process environment.
+#[allow(clippy::disallowed_methods)]
+pub fn reexec_with_clean_git(test: &str) -> io::Result<bool> {
+    const CHILD: &str = "PROVENANT_CLEAN_GIT_FIXTURE_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        return Ok(false);
+    }
+    let output = Command::new(std::env::current_exe()?)
+        .args(["--exact", test])
+        .env_clear()
+        .envs(git_env())
+        .env(CHILD, "1")
+        .output()?;
+    if !output.status.success()
+        || !String::from_utf8_lossy(&output.stdout).contains("running 1 test")
+    {
+        return Err(io::Error::other(format!(
+            "fixture child failed or did not run: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(true)
 }
 
 /// One executor for every fixture Git command, built once per process. Its capacity
@@ -251,6 +279,17 @@ mod tests {
         }
 
         if let Some(root) = std::env::var_os("PROVENANT_FIXTURE_EXECUTOR_CHILD") {
+            let env = git_env();
+            assert!(
+                !env.iter()
+                    .any(|(key, _)| key == "PROVENANT_GIT" || key == "PROVENANT_WORKTREE_GITDIR")
+            );
+            let command = git_command();
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(key, value)| key == "PROVENANT_WORKTREE_GITDIR" && value.is_none())
+            );
             let fixture = Path::new(&root).join("fixture");
             fs::create_dir(&fixture)?;
             run_git(&fixture, &["init", "-q"])?;
@@ -290,6 +329,8 @@ mod tests {
             .args(["--exact", test_path.as_str()])
             .env("PROVENANT_FIXTURE_EXECUTOR_CHILD", temp.path())
             .env("PATH", &shim)
+            .env("PROVENANT_GIT", shim.join("git"))
+            .env("PROVENANT_WORKTREE_GITDIR", lane.join(".git"))
             .env("GIT_DIR", lane.join(".git"))
             .env("GIT_WORK_TREE", &lane)
             .env("GIT_COMMON_DIR", lane.join(".git"))

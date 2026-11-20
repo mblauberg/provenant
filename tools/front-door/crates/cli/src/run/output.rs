@@ -1,5 +1,18 @@
 use super::*;
 
+/// The budget's unit and counted usage, projected from the same limit and
+/// usage record that `status` uses, so `result` and `status` cannot disagree.
+fn budget_usage(record: &run::AttemptRecord) -> Option<Value> {
+    let usage = record.limits.as_ref()?.budget_usage(
+        &record.usage,
+        record
+            .applied_route
+            .as_ref()
+            .and_then(|route| route.provider.as_deref()),
+    )?;
+    serde_json::to_value(usage).ok()
+}
+
 /// Render a host-owned read through the same CLI projection.
 pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Reply {
     let receipt_tail = matches!(command.part, Part::Receipt)
@@ -542,6 +555,9 @@ fn output_read_part(
         if let Some(stop_work) = &record.stop_work {
             data["stop_work"] = json!(stop_work);
         }
+        if let Some(usage) = budget_usage(&record) {
+            data["budget_usage"] = usage;
+        }
         return Ok((data, format!("{reason}\n")));
     }
     let evicted = status::artifact(
@@ -610,6 +626,9 @@ fn output_read_part(
             "digest": chunk.digest,
             "bytes": provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(chunk.bytes),
     });
+    if let Some(usage) = budget_usage(&record) {
+        data["budget_usage"] = usage;
+    }
     if evicted {
         // Retention removed the bulk payload; the record, result and capture
         // tails remain.
@@ -792,6 +811,12 @@ fn warning_level_stderr_line(line: &str) -> bool {
     };
     let level = first.trim_matches(['[', ']', ':']).to_ascii_lowercase();
     if matches!(level.as_str(), "warn" | "warning") {
+        return true;
+    }
+    // A deprecated key in the inherited provider config is advice. Codex
+    // prints it on stderr without a level prefix; it is shown once as a
+    // launch warning, never promoted to the attempt's error headline.
+    if provenant_providers::codex::config_deprecation_notice(line) {
         return true;
     }
     let bytes = first.as_bytes();

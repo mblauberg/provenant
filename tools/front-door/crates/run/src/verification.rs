@@ -7,7 +7,7 @@ pub const KNOB: &str = "lanes.verification";
 
 /// The default verification paragraph. A launch that does not override it
 /// includes this text unchanged.
-pub const CHECK_PARAGRAPH: &str = "Verification: CI runs the full tests and lints. When a shared warm CARGO_TARGET_DIR is available, run `cargo check`, clippy on touched crates and the tests that cover your change; otherwise do not build cold: leave it to CI and say so. Report what you ran (source: default; lanes.verification).\n";
+pub const CHECK_PARAGRAPH: &str = "Verification: CI runs the full tests and lints. Build in the CARGO_TARGET_DIR the lane sets, this worktree's own target seeded warm. When it is warm, run `cargo check`, clippy on touched crates and the tests that cover your change; otherwise do not build cold: leave it to CI and say so. Report what you ran (source: default; lanes.verification).\n";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VerificationScope {
@@ -98,13 +98,13 @@ impl VerificationResolution {
         }
         let body = match scope.value {
             VerificationScope::Check => {
-                "Verification: use a shared warm CARGO_TARGET_DIR; if unavailable, report it and do not build cold. Run cargo check on the touched crates, then commit and push."
+                "Verification: build in the CARGO_TARGET_DIR the lane sets, this worktree's own target seeded warm; if it is cold, say so and leave the build to CI. Run cargo check on the touched crates, then commit and push."
             }
             VerificationScope::Targeted => {
-                "Verification: use a shared warm CARGO_TARGET_DIR; if unavailable, report it and do not build cold. Run cargo check, clippy on touched crates and targeted tests for changed code, then commit and push. Leave the whole workspace suite to CI."
+                "Verification: build in the CARGO_TARGET_DIR the lane sets, this worktree's own target seeded warm; if it is cold, say so and leave the build to CI. Run cargo check, clippy on touched crates and targeted tests for changed code, then commit and push. Leave the whole workspace suite to CI."
             }
             VerificationScope::Full => {
-                "Verification: use a shared warm CARGO_TARGET_DIR; if unavailable, report it and do not build cold. Run the local checks the repository documents for this change, including its tests; leave the whole workspace suite to CI, then commit and push."
+                "Verification: build in the CARGO_TARGET_DIR the lane sets, this worktree's own target seeded warm; if it is cold, say so and leave the build to CI. Run the local checks the repository documents for this change, including its tests; leave the whole workspace suite to CI, then commit and push."
             }
         };
         format!("{body} (source: {}; {KNOB}).\n", scope.source)

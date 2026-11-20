@@ -164,6 +164,8 @@ fn cancel_and_reconcile_report_leftover_paths_and_reasons_without_terminal_contr
             error: "writer fence listing failed".into(),
         },
     };
+    assert!(!reconcile_blocks(&state));
+    assert!(reconcile_summary(&state).contains("warning:"));
     assert!(reconcile_summary(&state).contains("writer fence listing failed"));
 
     let data =

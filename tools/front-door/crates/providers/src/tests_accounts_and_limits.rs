@@ -403,7 +403,8 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
         launch
             .env
             .iter()
-            .all(|(key, _)| key != "GIT_CONFIG_NOSYSTEM")
+            .all(|(key, _)| key != "GIT_CONFIG_NOSYSTEM"),
+        "the lane does not force system Git configuration off"
     );
     for path in [
         "/fixture/home/.cargo/bin",
@@ -794,6 +795,8 @@ fn lanes_read_git_global_ignore_and_attributes_only_when_present()
     std::fs::write(git.join("ignore"), "")?;
     std::fs::write(git.join("attributes"), "")?;
     std::fs::write(git.join("config"), "")?;
+    // A writer includes the host global config and is granted an exact read
+    // on it; a read-only lane has no private config and never reads the file.
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
         let mut paths = granted(access)?;
         paths.sort();

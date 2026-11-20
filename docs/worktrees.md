@@ -30,5 +30,11 @@ collection and retention, see [GC](runbooks/gc.md); for uncertain custody, use
 [lane recovery](runbooks/lane-lifecycle.md#recovery). Never delete a lock or
 reservation to bypass custody.
 
+Creation takes exclusive custody of its destination before checking the path,
+Git registration or branch, and repeats those checks under custody. If `git
+worktree add` fails after state appears, that state is retained unless its
+identity can be attributed to the failed invocation; an earlier absence check
+alone does not authorise recursive cleanup.
+
 The [supervisor spec](specs/supervisor.md#worktrees) owns worktree custody and
 shared Git metadata.

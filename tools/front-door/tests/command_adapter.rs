@@ -767,16 +767,8 @@ fn command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt() -> 
         .find_map(|line| line.strip_prefix("| child="))
         .ok_or("detached child pid")?
         .parse()?;
-    let alive = rig.execute(
-        std::path::Path::new("/bin/kill"),
-        &["-0", &child.to_string()],
-        None,
-    )?;
-    assert_ne!(
-        code(&alive),
-        0,
-        "detached child {child} survived settlement"
-    );
+    provenant_test_support::assert_process_gone(&child.to_string())
+        .map_err(|error| format!("detached child survived settlement: {error}"))?;
     Ok(())
 }
 
@@ -946,7 +938,10 @@ printf 'private-output\n'
         "security/linux|security/linux\n"
     );
 
-    let inventory = provenant_config::port_command_receipts(&rig.state)?;
+    let inventory = provenant_config::port_command_receipts(
+        &rig.state,
+        &provenant_core::SweepControl::default(),
+    )?;
     assert!(inventory.complete, "{:?}", inventory.issues);
     let receipt = &inventory
         .entries
@@ -1011,7 +1006,10 @@ printf 'executed\n' > verify-call.txt
     assert_eq!(result["data"]["backend"], "none");
     assert_eq!(result["error"]["code"], "VERIFY_UNAVAILABLE");
     assert!(!marker.exists());
-    let inventory = provenant_config::port_command_receipts(&rig.state)?;
+    let inventory = provenant_config::port_command_receipts(
+        &rig.state,
+        &provenant_core::SweepControl::default(),
+    )?;
     assert!(inventory.complete, "{:?}", inventory.issues);
     assert!(
         inventory

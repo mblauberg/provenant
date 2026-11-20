@@ -34,30 +34,34 @@ SKILL.md.
   (`IN_LANE`). Use `tracker` for work tracked in GitHub issues.
 - **Repository docs.** A repository's AGENTS.md, CONTRIBUTING and runbooks own
   its verify, commit and release steps; skills defer to them.
-- **Boundaries.** The real boundaries are credentials, Git isolation, data
-  integrity and authority. They and user gates change only with the user's
-  authority; host access alone grants none. Elsewhere prefer overridable
-  defaults and warn rather than refuse.
+- **Boundaries.** The real boundaries are three outcomes: credentials and
+  secrets never reach a lane, provider or output not granted them; no lane
+  moves, rewrites or deletes another lane's refs, commits or uncommitted files,
+  and nothing destroys uncommitted work; and user gates, merge, release and
+  ruleset changes need the user's authority. They change only with that
+  authority; host access alone grants none. Everything else is a mechanism or
+  overridable default that warns and proceeds, with its source shown.
 - **Evidence.** A doc, ADR, memory or existing behaviour records a past
   decision, not proof it still holds. When work rests on one or the tree
   contradicts it, check whether its reason still holds; if not, change it in the
   same pull request, or report it if out of scope. A stale rule misleads every
   later agent; an unknown reason or an inconvenience is not a lapse.
 - **Git.** Implementation branches, linked worktrees, and commits, pushes and
-  pull requests from those branches are pre-authorised, with one writer per
-  worktree. Merge through the repository's own workflow; an authorised merge
-  prunes its own worktree and merged refs. A writer may rebase, rewrite and
-  force-push with lease its own unmerged branches. The chair removes other
+  pull requests from those branches are pre-authorised. A worktree's owning
+  lane decides who else writes in it. Merge through the repository's own
+  workflow; an authorised merge prunes its own worktree and merged refs. A writer
+  may rebase, rewrite and force-push with lease its own unmerged branches. The chair removes other
   branches and worktrees, unmerged ones included, once their work has landed or
   been superseded or abandoned; record each removed tip and never remove one a
   live writer holds or one with uncommitted edits. Rewriting, deleting or pushing to a shared branch
   needs the user's authority. CI and test-speed fixes, and changes that restore
   a red default branch, merge on green without review; weakening a check or changing a real boundary
   does not qualify.
-- **Checks.** Locally, run only fast targeted checks: lint, types and
-  touched tests. Full suites run in CI, which gates the merge. Review follows
-  risk (`code-review`): a small change needs none; when review runs, the author
-  is never its reviewer and lens coverage comes before provider family.
+- **Checks.** Locally, run lint and types on the shared build cache, plus
+  touched tests only when that cache is warm, and never start a cold build; CI
+  runs the tests and gates the merge. Review follows risk (`code-review`): a
+  small change needs none; when review runs, the author is never its reviewer
+  and lens coverage comes before provider family.
 - **Waiting.** Never poll with `sleep` or repeated reads. Block on `provenant wait`
   (`--pr NUMBER` for a pull request) in the background and carry on.
 - **Memory.** Durable knowledge goes in project docs, cross-project preferences
@@ -70,5 +74,5 @@ SKILL.md.
 Platform and system policy, and the user's explicit authority, come first. The
 Git rule is durable authorisation for the actions it names. Project
 instructions may strengthen these rules or set their own review and acceptance
-gates, but never broaden authority, weaken safety or redefine cross-project
+gates, but never broaden authority, weaken a real boundary or redefine cross-project
 preferences.

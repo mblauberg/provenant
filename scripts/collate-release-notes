@@ -4,9 +4,12 @@
 #   collate-release-notes --check   validate the fragments only
 #   collate-release-notes vX.Y.Z    write docs/release-notes/vX.Y.Z.md and
 #                                   delete the fragments, keeping _intro.md
-# Each fragment is <topic>.md whose first line is one of the section headings
-# below, followed by its bullets, with no later ## heading. An optional second
-# nonblank line, "### <Area>", names one of the areas below. The collated notes render
+# Each fragment is <topic>.md holding one section: line 1 is one of the section
+# headings below, followed by its bullets. Two sections need two fragments. An
+# optional second nonblank line, "### <Area>", names one of the areas below.
+# --check fails, naming file:line, on content collation would drop or misfile (a
+# later "## " heading, or content before the first heading) and warns, listing
+# the choices, on an unknown section or area. The collated notes render
 # "### Area" sub-headings only in a section with more than 12 entries; smaller
 # sections list their entries flat, in area order. Untagged entries come last.
 # Links in fragments are relative to next.d/;
@@ -28,44 +31,87 @@ Chair, inbox and console
 Fabric
 Telemetry and providers'
 
-normalise() {
-  printf '%s\n' "$1" | awk '{$1=$1; print tolower($0)}'
+# The one reading of a fragment, shared by --check and collation so they cannot
+# disagree. Prints tab-separated records for fragment $1:
+#   section<TAB>## Heading   the canonical section (Additions when unknown)
+#   area<TAB>Area            the canonical area (empty when untagged or unknown)
+#   body<TAB>N               the first line number of the bullets
+#   warn<TAB>N<TAB>message   collation recovers (unknown section or area)
+#   error<TAB>N<TAB>message  collation would drop or misfile content
+# Only the first nonblank line may be a "## " heading, and an optional "### "
+# area line may follow it. Everything from the body line on is collated as is.
+parse() {
+  SECTIONS=$sections AREAS=$areas awk '
+    function norm(s) {
+      sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); gsub(/[ \t]+/, " ", s)
+      return tolower(s)
+    }
+    function warn(n, m) { printf "warn\t%d\t%s\n", n, m }
+    function err(n, m) { printf "error\t%d\t%s\n", n, m }
+    BEGIN {
+      n = split(ENVIRON["SECTIONS"], s, "\n")
+      for (i = 1; i <= n; i++) {
+        name = substr(s[i], 4)
+        sec[norm(name)] = s[i]
+        snames = snames (i > 1 ? ", " : "") name
+      }
+      n = split(ENVIRON["AREAS"], a, "\n")
+      for (i = 1; i <= n; i++) {
+        area[norm(a[i])] = a[i]
+        anames = anames (i > 1 ? ", " : "") a[i]
+      }
+      section = "## Additions"; cur = ""; body = 1; seen = 0; want_area = 0
+    }
+    { sub(/\r$/, "") }
+    NF == 0 { next }
+    !seen {
+      seen = 1
+      if ($0 ~ /^## /) {
+        key = norm(substr($0, 4))
+        if (key in sec) section = sec[key]
+        else warn(NR, "unknown section \"" substr($0, 4) "\"; filed under Additions; choose one of: " snames)
+        body = NR + 1; want_area = 1
+      } else {
+        err(NR, "content before the first section heading; line 1 must be a \"## \" heading, one of: " snames)
+      }
+      next
+    }
+    /^## / {
+      err(NR, "later section heading \"" $0 "\" would be dropped; one section per fragment; use two fragments for two sections")
+      next
+    }
+    want_area {
+      want_area = 0
+      if ($0 ~ /^### /) {
+        key = norm(substr($0, 5))
+        if (key in area) cur = area[key]
+        else warn(NR, "unknown area \"" substr($0, 5) "\"; left untagged; choose one of: " anames)
+        body = NR + 1
+      }
+    }
+    END {
+      if (!seen) err(1, "fragment is empty")
+      printf "section\t%s\narea\t%s\nbody\t%d\n", section, cur, body
+    }
+  ' "$1"
 }
 
-section_of() {
-  first=$(sed -n 1p "$1")
-  case "$first" in '## '*) value=${first#\#\# } ;; *) value= ;; esac
-  case "$(normalise "$value")" in
-    'breaking changes') printf '%s\n' '## Breaking changes' ;;
-    'behaviour changes') printf '%s\n' '## Behaviour changes' ;;
-    additions) printf '%s\n' '## Additions' ;;
-    fixes) printf '%s\n' '## Fixes' ;;
-    *) printf '%s\n' '## Additions' ;;
-  esac
+field() {
+  parse "$1" | awk -F '\t' -v key="$2" '$1 == key { print $2; exit }'
 }
 
-# The first nonblank line after the section heading, where an area may sit.
-area_line() {
-  awk 'NR > 1 && NF { print; exit }' "$1"
-}
+section_of() { field "$1" section; }
+area_of() { field "$1" area; }
 
-area_of() {
-  second=$(area_line "$1")
-  case "$second" in
-    '### '*) value=${second#\#\#\# } ;;
-    *) return ;;
-  esac
-  case "$(normalise "$value")" in
-    'cli and install') printf '%s\n' 'CLI and install' ;;
-    'lanes and settlement') printf '%s\n' 'Lanes and settlement' ;;
-    'git and safety') printf '%s\n' 'Git and safety' ;;
-    'accounts, quota and routing') printf '%s\n' 'Accounts, quota and routing' ;;
-    'pipelines and graphs') printf '%s\n' 'Pipelines and graphs' ;;
-    'chair, inbox and console') printf '%s\n' 'Chair, inbox and console' ;;
-    'fabric') printf '%s\n' 'Fabric' ;;
-    'telemetry and providers') printf '%s\n' 'Telemetry and providers' ;;
-    *) ;;
-  esac
+# Print the bullets of fragment $1: everything after its heading and area line,
+# without the blank lines around them.
+body_of() {
+  start=$(field "$1" body)
+  awk -v start="$start" 'NR >= start {
+    if ($0 == "") { held = held "\n"; next }
+    if (started) printf "%s", held
+    held = ""; started = 1; print
+  }' "$1"
 }
 
 check() {
@@ -81,27 +127,11 @@ check() {
   for f in "$dir"/*.md; do
     [ -e "$f" ] || continue
     [ "$f" = "$dir/_intro.md" ] && continue
-    if ! awk 'NF { found = 1 } END { exit !found }' "$f"; then
-      echo "collate-release-notes: $f: fragment is empty" >&2
-      status=1
-      continue
-    fi
-    first=$(sed -n 1p "$f")
-    if [ "$(section_of "$f")" = '## Additions' ] && [ "$(normalise "${first#\#\# }")" != additions ]; then
-      echo "collate-release-notes: $f: unknown section; using Additions" >&2
-    elif ! printf '%s\n' "$sections" | grep -qxF -- "$(section_of "$f")"; then
-      echo "collate-release-notes: $f: malformed section heading; using Additions" >&2
-    fi
-    second=$(area_line "$f")
-    case "$second" in '### '*)
-      if [ -z "$(area_of "$f")" ]; then
-        echo "collate-release-notes: $f: unknown area; leaving untagged" >&2
-      fi
-    esac
-    if awk 'NR > 1 && /^## / { found = 1 } END { exit !found }' "$f"; then
-      echo "collate-release-notes: $f: section headings are only allowed on line 1" >&2
-      echo "collate-release-notes: $f: later section heading ignored" >&2
-    fi
+    parse "$f" | awk -F '\t' -v f="$f" '
+      $1 == "warn" { printf "collate-release-notes: %s:%s: warning: %s\n", f, $2, $3 }
+      $1 == "error" { printf "collate-release-notes: %s:%s: %s\n", f, $2, $3; bad = 1 }
+      END { exit bad }
+    ' >&2 || status=1
   done
   return $status
 }
@@ -124,11 +154,7 @@ section_part() {
     [ "$f" = "$dir/_intro.md" ] && continue
     [ "$(section_of "$f")" = "$1" ] || continue
     [ "$(area_of "$f")" = "$2" ] || continue
-    skip=$(awk 'NR > 1 && NF { if (/^### /) print NR; exit }' "$f")
-    skip=${skip:-0}
-    # Drop the heading, the area line, any later section heading (ignored, as
-    # --check warns) and any blank lines around the bullets.
-    awk -v skip="$skip" 'NR > 1 && NR != skip && !/^## / { if ($0 == "") { held = held "\n"; next } if (started) printf "%s", held; held = ""; started = 1; print }' "$f"
+    body_of "$f"
   done
 }
 

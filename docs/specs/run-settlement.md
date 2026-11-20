@@ -10,7 +10,12 @@ Paths are relative to `tools/front-door/`.
 A settlement driver holds an exclusive lease. Journal locks do not span external
 commands, and terminal effects have separate exclusion. Import precedes
 writer branch publication, the terminal record is committed before custody release, and
-import refusal retains private Git for recovery.
+import refusal retains private Git for recovery. Private staged indexes also
+survive terminal cleanup and remain a worktree-removal fence until reconciled.
+Staging and stopped merges stay in attempt-private Git, with the worktree files
+left intact. Native index convergence uses only committed trees and preserves
+conflicting native staging or operations. Each attempt publishes only its private ref; a sibling-divergent host tip
+refuses publication while retaining both commits for recovery.
 - Why: recovery must resume durable effects without racing another driver or losing work.
 
 The guardian transfers its existing writer exclusion to recovery; import and
@@ -24,6 +29,48 @@ minutes is flagged as stalled in the existing status reason, including failures
 before a driver is claimed.
 - Why: a retained writer must not contend with itself or spend CPU retrying an
   unchanged failure indefinitely.
+
+The detached settlement worker waits for an exited attempt's writer lock,
+when it takes recovery custody, within the store's lock budget (the SQLite busy
+timeout, 30 s by default) and wakes as soon as the lock is released. Contention that outlives the wait is `WriterExclusionBusy`,
+reported as `waiting for writer lock <path>, held by <holder>`, where the
+holder names each attempt reserved in the slot with its guardian's liveness
+and, once that guardian has exited, its settlement owner's. The holder list
+labels the waiting attempt's own reservation. Contention sets a retry
+deadline but never spends the failure budget, never seals cleanup or import
+as failed and never exhausts a resumed worker. A holder may still release the
+lock while its guardian is live or unobservable, or while another attempt's
+settlement owner (its driver lock or a live recorded owner) is live or
+unreadable; a holder no reservation identifies is treated the same way. Then
+the wait continues and ages into the stalled reason. Once the wait has lasted
+three minutes with no holder that may release it, nothing will: settlement is
+recorded blocked, and the reason names `provenant
+reconcile <lane>` and `provenant reconcile --abandon <lane> --reason <text>`.
+An explicit reconcile clears the block and restarts the wait.
+
+Only that acquisition waits. Every other path, including cleanup inside the
+worker and request paths (queued withdrawal, terminal replay and publication,
+loss), tries the lock once: when it is busy it leaves the cleanup effect
+pending without counting a failure and retains the attempt, and the
+settlement worker retries the cleanup of every terminal writer, launched or
+not, whose cleanup receipt is not done; retention keeps its scratch until then.
+A refused Git import ends automatic cleanup instead: its pins and scratch are
+recovery evidence, never cleanup debt. Probes of a live attempt also take the lock once.
+- Why: another settler or a releasing guardian holding the lock is progress,
+  not failure; counting it blocked settlement and left steered nodes running
+  with no successor (#3572). A request must not stall on another holder, and a
+  lock no live process will release must reach an operator rather than wait
+  forever. Recovery in the same process may hold the lock through another file
+  description, so a wait anywhere but the worker's own acquisition stalls for
+  the whole budget.
+
+Every recorded blocking reason is stamped with the wall time it was recorded
+and the process ID of the worker or reconcile that recorded it. Reconcile and
+settling reports show it as past evidence, `recorded <N>s ago by process
+<pid>: <reason>` (`recorded earlier` for an unstamped legacy reason), never as
+an observation of the current request.
+- Why: a reason recorded by an earlier worker read as a current failure and
+  misled recovery.
 
 Publication accepts a lane tip that descends from the launch base, the origin
 default branch, the ref the lane launched against, or any remote-tracking
@@ -88,7 +135,13 @@ field using its serde path (for example `verify[0]`) and preserves the decoder
 error. Status and output show that diagnostic rather than claiming no handoff.
 Custody facts such as lost, unsettled or cancelled retain priority; the malformed
 handoff evidence still survives in their sealed stop.
-- Why: unfinished work must not appear complete or lose its handoff.
+A missing writer handoff keeps the census of uncommitted paths and the pinned
+head in the terminal reason and the sealed writer terminal. An empty final
+message is carried by the `empty_result` terminal cause and appended to that
+reason, never substituted for it, so the chair keeps the path list and the graph
+stays continuable.
+- Why: unfinished work must not appear complete or lose its handoff, and the
+  empty-message diagnostic must not hide the edits the writer left behind.
 
 A final answer's handoff is its closed `handoff` fence, which always wins.
 Without one, a `json` fence that ends the answer (only whitespace after it) and
@@ -156,13 +209,59 @@ A missing required writer handoff seals `handoff_missing` and goes to the chair;
 - Why: all readers need the same cause for the next decision; host stops must
   preserve valid handoffs and never count as negative provider-quality evidence.
 
+## Stray lane work
+
+A writer's work is the commits on its bound branch. Launch records the primary
+checkout's branch and every local and remote-tracking ref tip (`refs/heads/*`,
+`refs/remotes/*`). At settlement, once the writer's terminal check passes, the
+host flags stray work only when either holds:
+- (a) the primary checkout now sits on a branch that did not exist at launch;
+- (b) commits are reachable from the primary's HEAD or from a new or advanced
+  local branch that are reachable from none of the launch tips, the current tips
+  of the remote-tracking refs that existed at launch, or the HEAD of any linked
+  worktree other than the primary (which covers the bound branch and other
+  lanes' branches). One `git rev-list --stdin` call decides this.
+
+Stray work does not succeed. The attempt settles `review_required` with the
+`stray_work` partial signal and settlement reason, whose graph outcome is
+failed so dependants stay held, whatever the bound branch holds. The reason names
+the stray branch or the commits, the branches they are on, the primary checkout
+and the bound worktree.
+
+Nothing else is reported: a primary checkout that merely moved is not a finding.
+No recorded position (a bare repository, or a record that could not be written)
+or a comparison that cannot run is no finding, and an unreadable comparison
+warns while the lane still settles. Only host Git facts decide this; the handoff
+is the lane's prose, so branch or head names in it are never parsed. A lane with
+uncommitted edits in its bound worktree keeps its `uncommitted` outcome, which
+already needs the chair.
+- Why: settlement said `succeeded` for a lane whose work sat on a stray branch
+  in the primary checkout while its bound worktree stayed at base (#3611). A
+  whole-HEAD comparison blamed lanes for a pull the owner ran during the attempt,
+  and missed a lane that committed in the primary and switched back. Fetched
+  remote-tracking tips and other worktrees' heads account for those ordinary
+  moves, while an owner commit or branch made in the primary checkout during an
+  attempt is still flagged, because Git cannot tell it from a lane's. The check
+  asks for review; it never refuses or stops a lane.
+- Owner: `crates/run/src/writer.rs`, `crates/run/src/holder.rs`
+
 ## Guardian loss proof
 
 `Recovery::after_guardian_loss` offers a separate same-boot recovery capability.
 It requires the original guardian lock and attempt custody lock to be free,
 holds both alongside the original writer lease, and takes a fresh complete
-process census under those locks. Recorded roots, descendants and their
-sessions or groups must have no surviving member. The trusted host must also
+process census under those locks. A tree whose recorded descendants omitted
+identities is never proven gone, because no census can check their sessions or
+groups. Nor is a spawned tree whose guardian never completed a census of it,
+unless the attempt's sandbox mark was in effect: a daemon that double-forks and
+calls setsid after the guardian's last complete census is recorded nowhere and
+matches no pid, session or group, and only the inherited mark finds it. The
+guardian clears the incomplete flag at its first full census, which a running
+guardian takes at least every 5 s, so a guardian lost mid-run normally has a
+complete record; an unsandboxed lane lost before that is refused, and
+`reconcile --abandon` is the explicit escape. Recorded roots, descendants,
+identities an unresolved exit named, and their sessions or groups must have no
+surviving member, and no live process may carry the attempt's sandbox mark. The trusted host must also
 prove worktree non-occupancy under exclusion; unknown or occupied is not free.
 For a read-only attempt there is no worktree to occupy.
 
@@ -186,6 +285,13 @@ The capability itself neither commits a Run outcome nor changes read-only
 presence classification. The Run settlement driver owns its consumption and
 the separate EOF outcome and quiescent import/release transactions. Manual
 `reconcile --abandon` remains the explicit escape when proof is unavailable.
+Abandonment of custody that is not observed absent, such as a dead guardian
+that left its cleanup unresolved, first tries the same guardian-loss proof
+from a fresh census. A proof makes custody quiescent and abandonment proceeds;
+otherwise it refuses and names the blocker, including any live or
+unidentifiable PID or omitted descendants. The census-free absence
+classification is unchanged: an unresolved cleanup without that proof stays
+unknown, because an escaped process is excluded only by the proof.
 
 ## Continuation
 

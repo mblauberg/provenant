@@ -1139,6 +1139,7 @@ fn constraints(path: &str) -> Vec<String> {
         ],
         "provenant wait" => &[
             "every target resolves before the wait starts; no target waits for this project's running graphs",
+            "`--pr --until complete` defaults to domains.wait.pr_complete_timeout_seconds (60 minutes); an explicit --timeout still wins",
             "exit 0 success, 1 settled without success, 2 invalid or not found, 5 needs input, 124 timeout, 130 cancelled",
             WAIT_JSON_CONTRACT,
         ],
@@ -1167,6 +1168,18 @@ mod tests {
         }
         assert!(help.contains("keep that session"), "{help}");
         assert!(help.contains("restart fresh"), "{help}");
+    }
+
+    #[test]
+    fn wait_help_names_the_complete_wait_timeout_knob() {
+        let mut model = command_model();
+        let wait = model.find_subcommand_mut("wait").expect("wait grammar");
+        let help = wait.render_long_help().to_string();
+        assert!(
+            help.contains("domains.wait.pr_complete_timeout_seconds"),
+            "{help}"
+        );
+        assert!(help.contains("60-minute"), "{help}");
     }
 
     #[test]
@@ -1762,6 +1775,11 @@ mod tests {
             invalid(&["run", "task", flag, "example"]);
         }
         valid(&["templates"]);
+        valid(&["upgrade", "--verify", "--dry-run"]);
+        valid(&[
+            "upgrade", "--verify", "--host", "peer-a", "--route", "junior",
+        ]);
+        invalid(&["upgrade", "--dry-run"]);
         valid(&[
             "templates",
             "show",
@@ -2146,13 +2164,34 @@ mod tests {
         assert!(matches!(
             valid(&["ci", "failures", "pr", "12", "--json"]).command,
             Command::Ci(Ci::Failures {
-                target: ci::FailureTarget::Pr { number: 12 }
-            })
+                target: Some(ci::FailureTarget::Pr { numbers }),
+                ..
+            }) if numbers == [12]
+        ));
+        assert!(matches!(
+            valid(&["ci", "failures", "pr", "12", "34", "--json"]).command,
+            Command::Ci(Ci::Failures {
+                target: Some(ci::FailureTarget::Pr { numbers }),
+                ..
+            }) if numbers == [12, 34]
+        ));
+        assert!(matches!(
+            valid(&["ci", "failures", "--pr", "12", "--json"]).command,
+            Command::Ci(Ci::Failures { pr, .. }) if pr == [12]
+        ));
+        assert!(matches!(
+            valid(&["ci", "failures", "--pr", "12", "--pr", "34", "--json"]).command,
+            Command::Ci(Ci::Failures { pr, .. }) if pr == [12, 34]
+        ));
+        assert!(matches!(
+            valid(&["ci", "failures", "--pr", "12", "34", "--json"]).command,
+            Command::Ci(Ci::Failures { pr, .. }) if pr == [12, 34]
         ));
         assert!(matches!(
             valid(&["ci", "failures", "run", "98765", "--json"]).command,
             Command::Ci(Ci::Failures {
-                target: ci::FailureTarget::Run { run: 98765 }
+                target: Some(ci::FailureTarget::Run { run: 98765 }),
+                ..
             })
         ));
     }
@@ -2735,9 +2774,36 @@ mod tests {
         words.push("overflow.md");
         invalid(&words);
         valid(&["internal", "supervise"]);
-        valid(&["internal", "supervise", "3", "4", "5", "6", "7"]);
+        // Seven capabilities, plus the optional native profile descriptor.
+        valid(&["internal", "supervise", "3", "4", "5", "6", "7", "8", "9"]);
+        valid(&[
+            "internal",
+            "supervise",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "10",
+        ]);
         invalid(&["internal", "supervise", "3"]);
-        invalid(&["internal", "supervise", "2", "4", "5", "6", "7"]);
+        invalid(&["internal", "supervise", "3", "4", "5", "6", "7", "8"]);
+        invalid(&[
+            "internal",
+            "supervise",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "10",
+            "11",
+        ]);
+        invalid(&["internal", "supervise", "2", "4", "5", "6", "7", "8", "9"]);
     }
     #[test]
     fn wait_and_output_bounds() {
@@ -2753,6 +2819,9 @@ mod tests {
             "--any",
         ]);
         valid(&["wait", "--pr", "2721", "--follow", "--timeout", "2m"]);
+        valid(&["wait", "--pr", "2721", "--until", "complete"]);
+        invalid(&["wait", "--until", "complete"]);
+        invalid(&["wait", "--pr", "2721", "--until", "unknown"]);
         let sha = "a".repeat(40);
         let Command::Wait(wait) = valid(&["wait", "--pr", "2721", "--head", &sha]).command else {
             panic!("wait command")
@@ -2990,6 +3059,15 @@ mod tests {
             panic!("worktree doctor");
         };
         assert_eq!(path, std::path::PathBuf::from("../lane with spaces"));
+    }
+    #[test]
+    fn worktree_seed_target_requires_a_path() {
+        invalid(&["worktree", "seed-target"]);
+        let invocation = valid(&["worktree", "seed-target", ".worktrees/lane"]);
+        let Command::Worktree(Worktree::SeedTarget { path }) = invocation.command else {
+            panic!("worktree seed-target");
+        };
+        assert_eq!(path, std::path::PathBuf::from(".worktrees/lane"));
     }
     #[test]
     fn collection_caps_are_not_per_occurrence_caps() {
@@ -3239,6 +3317,50 @@ mod tests {
             panic!("byte path")
         };
         assert_eq!(inv.globals.state_dir.map(|v| v.into_os_string()), Some(raw));
+    }
+
+    #[test]
+    fn did_you_mean_suggestions_for_unknown_subcommand_and_flag() {
+        // Unknown subcommand: suggests closest valid subcommand (e.g. lan -> provenant land)
+        let ParseOutcome::Invalid { error, .. } = parsed(&["lan"]) else {
+            panic!("expected invalid outcome for unknown subcommand");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("did you mean `provenant land`?"),
+            "expected suggestion for unknown subcommand, got: {message}"
+        );
+
+        // Unknown subcommand in a group: suggests full command path (e.g. pr syn -> provenant pr sync)
+        let ParseOutcome::Invalid { error, .. } = parsed(&["pr", "syn"]) else {
+            panic!("expected invalid outcome for nested unknown subcommand");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("did you mean `provenant pr sync`?"),
+            "expected suggestion for nested unknown subcommand, got: {message}"
+        );
+
+        // Unknown flag: suggests closest valid flag on the selected command (e.g. --jso -> --json)
+        let ParseOutcome::Invalid { error, .. } = parsed(&["pr", "status", "--jso", "123"]) else {
+            panic!("expected invalid outcome for unknown flag");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("did you mean `--json`?"),
+            "expected suggestion for unknown flag, got: {message}"
+        );
+
+        // Words with edit distance > 2 receive no suggestion
+        let ParseOutcome::Invalid { error, .. } = parsed(&["pr", "completelyunknownsubcommand"])
+        else {
+            panic!("expected invalid outcome");
+        };
+        let message = error.to_string();
+        assert!(
+            !message.contains("did you mean"),
+            "expected no suggestion for distant word, got: {message}"
+        );
     }
 }
 

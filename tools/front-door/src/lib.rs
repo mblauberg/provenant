@@ -27,6 +27,7 @@ mod checkpoint_retention;
 mod event_delivery;
 mod events;
 mod gc_support;
+mod gc_sweep;
 mod handoff;
 mod hook_state;
 mod hook_worktree;
@@ -45,6 +46,7 @@ mod provider_retention;
 mod release_smoke;
 mod retention_owner;
 mod roots;
+mod scratch_dir;
 mod scratch_owner;
 mod settlement;
 mod staging_gc;
@@ -138,7 +140,7 @@ fn emit<T: Serialize>(
     emit_summarised(result, globals, human, read_only, None)
 }
 /// `emit` for an owner that supplies its own compact view.
-fn emit_summarised<T: Serialize>(
+pub(crate) fn emit_summarised<T: Serialize>(
     result: &CommandResult<T>,
     globals: &provenant_cli::Globals,
     human: &str,
@@ -198,6 +200,7 @@ fn land_explanation(
         ("gate.commands", "commands"),
         ("approval_sources", "approval"),
         ("approval_tier", "approval tier"),
+        ("approval_carry", "approval carry"),
         ("local_gate.mode", "local gate"),
         ("integration", "integration"),
         ("publish", "publication"),
@@ -1010,56 +1013,22 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
             .with_graph_read(move |context, input, cancel, within| {
                 fabric::read_lane_graph(context, input, cancel, within, workers)
             });
-        let disk = disk_guard::LaneDisk::default();
-        let (resource_sample_interval, resource_sample_interval_source) =
-            match roots::resolve(globals, Workspace::Project, Product::Optional) {
-                Ok(resolved) => match provenant_cli::config_reads::read_for(&resolved.roots, "internal") {
-                    Ok(config) => {
-                        let millis = config.domains.run.resource_sample_interval_ms;
-                        let source = config
-                            .origins
-                            .get("domains.run.resource_sample_interval_ms")
-                            .map(|origin| format!("{origin:?}"))
-                            .unwrap_or_else(|| "compiled default (origin unavailable)".into());
-                        if (1..=60_000).contains(&millis) {
-                            (Some(std::time::Duration::from_millis(millis)), source)
-                        } else {
-                            let _ = writeln!(io::stderr().lock(),
-                                "warning: domains.run.resource_sample_interval_ms is outside 1..=60000; using compiled {}ms default", provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL_MS);
-                            (None, "compiled default (invalid configured value)".into())
-                        }
-                    }
-                    Err(error) => {
-                        let _ = writeln!(io::stderr().lock(),
-                            "warning: domains.run resource sampling configuration unavailable; using compiled {}ms default: {error}", provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL_MS);
-                        (None, "compiled default (configuration unavailable)".into())
-                    }
-                },
-                Err(error) => {
-                    let _ = writeln!(io::stderr().lock(),
-                        "warning: resource sampling configuration roots unavailable; using compiled {}ms default: {error}", provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL_MS);
-                    (None, "compiled default (roots unavailable)".into())
-                }
+        let bind_publication =
+            |environment: &[(Vec<u8>, Vec<u8>)],
+             secret: Option<&provenant_os::exec::SecretInput>,
+             inherited: &provenant_os::exec::SecretValues| {
+                let mut values = provenant_redact::launch_values(
+                    environment,
+                    secret.map(|value| value.bytes.as_slice()),
+                )
+                .map_err(|_| provenant_os::exec::FilterError)?;
+                values.extend(inherited.0.iter().cloned());
+                let scope = provenant_redact::publication_scope(values)
+                    .map_err(|_| provenant_os::exec::FilterError)?;
+                Ok(Box::new(scope) as Box<dyn std::any::Any>)
             };
-        let effective_interval = resource_sample_interval
-            .unwrap_or(provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL);
-        let _ = writeln!(io::stderr().lock(),
-            "resource sampling interval: {}ms (source: {})",
-            effective_interval.as_millis(), resource_sample_interval_source);
-        let bind_publication = |environment: &[(Vec<u8>, Vec<u8>)],
-                                secret: Option<&provenant_os::exec::SecretInput>,
-                                inherited: &provenant_os::exec::SecretValues| {
-            let mut values = provenant_redact::launch_values(environment, secret.map(|value| value.bytes.as_slice()))
-                .map_err(|_| provenant_os::exec::FilterError)?;
-            values.extend(inherited.0.iter().cloned());
-            let scope = provenant_redact::publication_scope(values)
-                .map_err(|_| provenant_os::exec::FilterError)?;
-            Ok(Box::new(scope) as Box<dyn std::any::Any>)
-        };
         let hooks = provenant_supervisor::GuardianHooks {
             publication_scope: Some(&bind_publication),
-            disk: Some(&disk),
-            resource_sample_interval,
             holder: Some(&holder),
             stdout_decoder: Some(holder.stdout_decoder()),
             stderr_decoder: Some(holder.stderr_decoder()),
@@ -1076,13 +1045,16 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
                     globals,
                 ),
             },
-            Err(error) => fail(
-                "internal supervise",
-                Outcome::Error,
-                "SUPERVISOR",
-                &error.to_string(),
-                globals,
-            ),
+            Err(error) => {
+                let (status, code) = error.outcome();
+                fail(
+                    "internal supervise",
+                    status,
+                    code,
+                    &error.to_string(),
+                    globals,
+                )
+            }
         }
     })
 }

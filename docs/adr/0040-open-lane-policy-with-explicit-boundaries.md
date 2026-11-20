@@ -8,7 +8,7 @@ A personal harness should let an agent work with ordinary host access while prot
 
 ## Decision
 
-Ordinary filesystem, process and network access is ambient unless a mandatory boundary, an explicit lane request, an adapter offline requirement or optional host policy restricts it. Credentials, private state, source writes and shared Git remain subject to their applicable boundaries ([ADR 0035](0035-four-hard-boundaries-and-flexible-everything-else.md)). Exceptions for selected authentication, GitHub access, attempt-private state, installation assets and source access are explicit and bounded.
+Ordinary filesystem, process and network access is ambient unless a mandatory boundary, an explicit lane request, an adapter offline requirement or optional host policy restricts it. Credentials, private state, source writes and shared Git remain subject to their applicable boundaries ([ADR 0035](0035-three-hard-boundaries-and-flexible-everything-else.md)). Exceptions for selected authentication, GitHub access, attempt-private state, installation assets and source access are explicit and bounded.
 
 ## Sandbox mode
 

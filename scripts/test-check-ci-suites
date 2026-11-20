@@ -13,24 +13,40 @@ loader = importlib.machinery.SourceFileLoader('checker', str(Path(__file__).with
 spec = importlib.util.spec_from_loader(loader.name, loader)
 checker = importlib.util.module_from_spec(spec)
 loader.exec_module(checker)
-config = {'jobs': {'always': ['scope'], 'ungated': ['health']}, 'suite': [{'name': 'rust', 'jobs': ['test']} ]}
+config = {'jobs': {'always': ['scope'], 'ungated': ['health']}, 'suite': [
+    {'name': 'rust', 'tier': 'pr', 'jobs': ['test']},
+    {'name': 'native', 'tier': 'main', 'jobs': ['native-test'],
+     'pr_paths': ['crates/*/Cargo.toml', 'crates/a/**', 'crates/b/src/narrow.rs']},
+]}
+packages = {'a': 'crates/a', 'b': 'crates/b', 'c': 'crates/c'}
 workflow = yaml.safe_load('''
 jobs:
   scope: {}
   test:
     if: "${{ fromJSON(needs.scope.outputs.suites).rust == 'run' }}"
+    steps:
+      - run: nextest -E 'package(=c)'
+  native-test:
+    if: "${{ fromJSON(needs.scope.outputs.suites).native == 'run' }}"
+    steps:
+      - run: nextest -E 'package(=a) | (package(=b) & test(narrow))'
   ci-status:
-    needs: [scope, test]
+    needs: [scope, test, native-test]
   health: {}
 ''')
 # Spec: docs/specs/ci.md#suites-are-declared-once
-assert not checker.check(config, workflow)
-for mutation in ('missing', 'needs', 'unmapped', 'binding', 'always'):
+# A pull-request suite may name any package; a main-tier one names packages
+# its pr_paths reach, whole or by a narrow file.
+assert not checker.check(config, workflow, packages)
+for mutation in ('missing', 'needs', 'unmapped', 'binding', 'always', 'unwatched', 'unknown'):
     w = yaml.safe_load(yaml.safe_dump(workflow))
     if mutation == 'missing': del w['jobs']['test']
     if mutation == 'needs': w['jobs']['ci-status']['needs'].remove('test')
     if mutation == 'unmapped': w['jobs']['extra'] = {}; w['jobs']['ci-status']['needs'].append('extra')
     if mutation == 'binding': w['jobs']['test']['if'] = 'true'
     if mutation == 'always': w['jobs']['scope']['if'] = 'needs.scope.outputs.suites.rust'
-    assert checker.check(config, w), mutation
+    # Only the shared crates/*/Cargo.toml glob reaches c: its tests would be deferred.
+    if mutation == 'unwatched': w['jobs']['native-test']['steps'].append({'run': "nextest -E 'package(=c)'"})
+    if mutation == 'unknown': w['jobs']['native-test']['steps'].append({'run': "nextest -E 'package(=zz)'"})
+    assert checker.check(config, w, packages), mutation
 print('CI suite manifest fixtures passed.')

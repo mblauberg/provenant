@@ -21,6 +21,24 @@ macro_rules! lane_row {
     }
 }
 
+fn token_budget_usage_schema() -> Value {
+    object(
+        &[
+            ("unit", string()),
+            ("unit_detail", string()),
+            ("limit", unsigned()),
+            (
+                "source",
+                choices(&["default", "host", "project", "template", "tier", "launch"]),
+            ),
+            ("counted", nullable(unsigned())),
+            ("reported_input", nullable(unsigned())),
+            ("basis", choices(&["attempt", "session"])),
+        ],
+        &[("notice", nullable(string()))],
+    )
+}
+
 fn settlement_reason_schema() -> Value {
     let mut schema = choices(&[]);
     schema["enum"] = json!(crate::run::SettlementReason::ALL);
@@ -102,6 +120,7 @@ lane_row! {
         title: String => string();
         requested_priority: i64 => integer();
         limits: Value => any();
+        budget_usage: crate::TokenBudgetUsage => nullable(token_budget_usage_schema());
         provider_seconds: f64 => nullable(number());
         handoff: Value => any();
         provider_error: String => string();
@@ -157,7 +176,13 @@ impl LaneRow {
                     .ok()
                     .and_then(|value| value.as_str().map(str::to_owned))
                     .unwrap_or_default(),
+                // A refusal that recorded no cause is reported as unrecorded, never
+                // as an access-policy refusal the host did not observe.
                 terminal_cause
+                    .or_else(|| {
+                        (*outcome == crate::run::Outcome::Rejected)
+                            .then_some(crate::run::TerminalCause::Unrecorded)
+                    })
                     .map(|cause| cause.diagnostic(detail))
                     .or_else(|| {
                         (reason.is_some() || *outcome != crate::run::Outcome::Succeeded)
@@ -321,6 +346,9 @@ impl LaneRow {
                 SettlementReason::UncommittedWork => {
                     Some("the writer has uncommitted changes; preserve or commit the edits")
                 }
+                SettlementReason::StrayWork => Some(
+                    "the primary checkout moved and the bound branch gained no commits; the work may be in the primary checkout",
+                ),
                 _ => None,
             };
             if let Some(detail) = detail {
@@ -540,6 +568,14 @@ impl LaneRow {
                 .map(i64::from),
             provider_seconds: facts.provider_seconds,
             limits: lane.limits.as_ref().map(|limits| json!(limits)),
+            budget_usage: lane.limits.as_ref().and_then(|limits| {
+                limits.budget_usage(
+                    &lane.usage,
+                    lane.applied_route
+                        .as_ref()
+                        .and_then(|route| route.provider.as_deref()),
+                )
+            }),
             handoff: lane.state.stop().map(|stop| json!(stop.handoff_result())),
             provider_error: None,
             capabilities: None,
@@ -652,6 +688,7 @@ impl crate::run::TerminalCause {
         Self::Blocked,
         Self::LaneTokenLost,
         Self::Steered,
+        Self::Unrecorded,
     ];
 }
 
@@ -695,7 +732,8 @@ mod terminal_cause_tests {
             | TerminalCause::ContextHandoff
             | TerminalCause::Blocked
             | TerminalCause::LaneTokenLost
-            | TerminalCause::Steered => {}
+            | TerminalCause::Steered
+            | TerminalCause::Unrecorded => {}
         }
     }
 
@@ -737,5 +775,27 @@ mod terminal_cause_tests {
             assert!(!label.contains("secret"));
         }
         assert!(TerminalCause::FreePoolQuota.detail().contains("paid route"));
+    }
+
+    #[test]
+    fn a_rejection_without_a_recorded_cause_is_unrecorded() {
+        let state = AttemptState::Terminal {
+            extra: Default::default(),
+            terminal_cause: None,
+            terminal_note: None,
+            stop: None,
+            outcome: Outcome::Rejected,
+            exit_code: None,
+            finished_at: provenant_core::WallTime::from_micros(1).unwrap(),
+            reason: None,
+        };
+        let (_, reason) = LaneRow::state_and_reason(&state);
+        assert_eq!(reason.as_deref(), Some(TerminalCause::Unrecorded.detail()));
+        assert_ne!(
+            reason.as_deref(),
+            Some(TerminalCause::AccessPolicyRefused.detail())
+        );
+        let (_, label) = LaneRow::state_and_label(&state);
+        assert_eq!(label.as_deref(), Some(TerminalCause::Unrecorded.reason()));
     }
 }

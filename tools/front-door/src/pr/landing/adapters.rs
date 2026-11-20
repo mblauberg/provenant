@@ -189,6 +189,7 @@ pub struct GhForge {
     poll_interval_override: Option<Duration>,
     budget: Duration,
     deadline: Option<std::time::Instant>,
+    reviews: std::collections::BTreeMap<u64, Vec<serde_json::Value>>,
 }
 impl GhForge {
     pub fn new(project: &Path, state: &Path) -> Self {
@@ -200,7 +201,17 @@ impl GhForge {
             poll_interval_override: None,
             budget: Duration::from_secs(120),
             deadline: None,
+            reviews: Default::default(),
         }
+    }
+    fn pull_reviews(&mut self, number: u64) -> Result<&[serde_json::Value], LandingError> {
+        if !self.reviews.contains_key(&number) {
+            let reviews = self.pages(&format!(
+                "repos/{{owner}}/{{repo}}/pulls/{number}/reviews?per_page=100"
+            ))?;
+            self.reviews.insert(number, reviews);
+        }
+        Ok(self.reviews.get(&number).map(Vec::as_slice).unwrap_or(&[]))
     }
     #[allow(clippy::disallowed_methods)]
     fn reader(&self) -> wait::Reader<'_> {
@@ -672,13 +683,11 @@ impl Forge for GhForge {
         Ok(self.pull_request(number)?.head)
     }
     fn approvals(&mut self, number: u64, head: &str) -> Result<Vec<Approval>, LandingError> {
-        let reviews = self.pages(&format!(
-            "repos/{{owner}}/{{repo}}/pulls/{number}/reviews?per_page=100"
-        ))?;
+        let reviews = self.pull_reviews(number)?;
         // The latest decisive review of each reviewer stands; comments and
         // pending reviews neither grant nor withdraw approval.
         let mut latest: std::collections::BTreeMap<String, Option<Approval>> = Default::default();
-        for review in &reviews {
+        for review in reviews {
             let Some(reviewer) = review["user"]["login"].as_str() else {
                 continue;
             };
@@ -697,6 +706,29 @@ impl Forge for GhForge {
             );
         }
         Ok(latest.into_values().flatten().collect())
+    }
+    fn approved_commits(&mut self, number: u64) -> Result<Vec<String>, LandingError> {
+        let reviews = self.pull_reviews(number)?;
+        let mut latest: std::collections::BTreeMap<String, Option<String>> = Default::default();
+        for review in reviews {
+            let Some(reviewer) = review["user"]["login"].as_str() else {
+                continue;
+            };
+            let approved = match review["state"].as_str() {
+                Some("APPROVED") => true,
+                Some("CHANGES_REQUESTED" | "DISMISSED") => false,
+                _ => continue,
+            };
+            let commit_id = review["commit_id"].as_str().map(str::to_owned);
+            latest.insert(reviewer.to_owned(), if approved { commit_id } else { None });
+        }
+        let mut commits = Vec::new();
+        for commit in latest.into_values().flatten() {
+            if !commits.contains(&commit) {
+                commits.push(commit);
+            }
+        }
+        Ok(commits)
     }
     fn observation_interval(&self) -> Option<Duration> {
         self.poll_interval()
@@ -1381,6 +1413,14 @@ impl Repo for GitRepo<'_> {
             .commit_tree(&self.project, commit)
             .map_err(failed)?
             .to_string())
+    }
+    fn parents(&mut self, commit: &str) -> Result<Vec<String>, LandingError> {
+        super::super::git::parents(&self.project, commit)
+            .map_err(|error| LandingError::Failed(error.to_string()))
+    }
+    fn diff_content(&mut self, from: &str, to: &str) -> Result<String, LandingError> {
+        super::super::git::diff_content(&self.project, from, to)
+            .map_err(|error| LandingError::Failed(error.to_string()))
     }
 }
 

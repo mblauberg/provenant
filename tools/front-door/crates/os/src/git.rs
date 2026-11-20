@@ -9,6 +9,61 @@ use std::{
     time::Duration,
 };
 
+/// Read one attempt-private branch without parsing its mutable Git config or
+/// following symbolic references or filesystem links. Loose and packed refs
+/// share this bounded decoder across settlement and removal.
+pub fn private_branch_tip(
+    refs: &crate::fs::Directory,
+    branch: &str,
+) -> io::Result<provenant_core::GitOid> {
+    let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid private Git reference");
+    if !branch.starts_with("refs/heads/")
+        || branch.len() > 1024
+        || branch
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(invalid());
+    }
+    let head = refs
+        .read_stable(OsStr::new("HEAD"), 1024)
+        .map_err(io::Error::other)?;
+    if std::str::from_utf8(&head).map(str::trim).ok() != Some(format!("ref: {branch}").as_str()) {
+        return Err(invalid());
+    }
+    let (parent, leaf) = branch.rsplit_once('/').ok_or_else(invalid)?;
+    let read_loose = || -> crate::fs::Result<Vec<u8>> {
+        let mut directory = refs.try_clone()?;
+        for component in parent.split('/') {
+            directory = directory.open_verified_directory(OsStr::new(component))?;
+        }
+        directory.read_stable(OsStr::new(leaf), 128)
+    };
+    let bytes = match read_loose() {
+        Ok(bytes) => bytes,
+        Err(error) if error.is_not_found() => {
+            let packed = refs
+                .read_stable(OsStr::new("packed-refs"), 1024 * 1024)
+                .map_err(io::Error::other)?;
+            let mut found = None;
+            for line in packed.split(|byte| *byte == b'\n') {
+                if let Some(index) = line.iter().position(|byte| *byte == b' ')
+                    && &line[index + 1..] == branch.as_bytes()
+                {
+                    if found.is_some() {
+                        return Err(invalid());
+                    }
+                    found = Some(line[..index].to_vec());
+                }
+            }
+            found.ok_or_else(invalid)?
+        }
+        Err(error) => return Err(io::Error::other(error)),
+    };
+    provenant_core::GitOid::parse(std::str::from_utf8(&bytes).map_err(|_| invalid())?.trim())
+        .map_err(|_| invalid())
+}
+
 /// Maximum output for a scalar repository fact such as a resolved Git path.
 pub const REPO_FACT_SCALAR_LIMIT: usize = 64 * 1024;
 

@@ -26,6 +26,7 @@ enum Source {
         /// The head this wait is pinned to. Until GitHub reports it, no
         /// verdict is taken from the pull request's current head.
         watch_head: Option<String>,
+        complete: bool,
     },
 }
 impl Source {
@@ -40,7 +41,7 @@ impl Source {
 /// Where one target stands for a waiter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum Settle {
+pub(crate) enum Settle {
     Pending,
     NeedsInput,
     Succeeded,
@@ -176,10 +177,10 @@ fn pr_timeout_details(sources: &[Source], latest: &[Option<Reading>]) -> Vec<Str
         .iter()
         .zip(latest)
         .filter_map(|(source, reading)| match (source, reading) {
-            (Source::Pr { .. }, Some(reading)) => {
+            (Source::Pr { complete, .. }, Some(reading)) => {
                 serde_json::from_value::<crate::pr::status::Line>(reading.data.clone())
                     .ok()
-                    .filter(|line| line.verdict().is_none())
+                    .filter(|line| line.wait_verdict(*complete).is_none())
                     .map(|line| {
                         let next = if line.checks_unreported() {
                             format!(
@@ -198,10 +199,10 @@ fn pr_timeout_details(sources: &[Source], latest: &[Option<Reading>]) -> Vec<Str
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Reading {
-    settle: Settle,
+pub(crate) struct Reading {
+    pub(crate) settle: Settle,
     /// `TARGET STATE [cause]`, bounded; equal lines are one observation.
-    line: String,
+    pub(crate) line: String,
     data: Value,
 }
 impl Reading {
@@ -216,6 +217,70 @@ impl Reading {
                 provenant_cli::limits::SUMMARY_ROW_BYTES,
             ),
             data: Value::Null,
+        }
+    }
+}
+
+/// Holds a settling PR reading pending, for a bounded period, while Actions has
+/// reported no run for its head. A push's checks start after the push, so the
+/// first reading of a new head can look settled before its workflows exist.
+struct ActionsGrace {
+    limit: Duration,
+    /// The head last read and when it was first read.
+    head: Option<(String, Instant)>,
+    /// When the last reading was held, the moment the hold ends. The waiter
+    /// must read again then: no event or timer of its own would wake it.
+    held_until: Option<Instant>,
+}
+impl ActionsGrace {
+    fn new(limit: Duration) -> Self {
+        Self {
+            limit,
+            head: None,
+            held_until: None,
+        }
+    }
+
+    /// How long until the hold on the last reading ends; `None` when the last
+    /// reading was not held.
+    fn due_in(&self) -> Option<Duration> {
+        self.held_until
+            .map(|end| end.saturating_duration_since(Instant::now()))
+    }
+
+    /// Whether a held reading's grace period has ended and it needs a fresh read.
+    fn is_due(&self) -> bool {
+        self.due_in().is_some_and(|left| left.is_zero())
+    }
+
+    fn apply(&mut self, reading: Reading, label: &str, complete: bool) -> Reading {
+        self.held_until = None;
+        let Ok(mut line) = serde_json::from_value::<crate::pr::status::Line>(reading.data.clone())
+        else {
+            return reading;
+        };
+        let first_read = match &self.head {
+            Some((head, at)) if *head == line.head => *at,
+            _ => {
+                let now = Instant::now();
+                self.head = Some((line.head.clone(), now));
+                now
+            }
+        };
+        if first_read.elapsed() >= self.limit || !line.awaits_actions(complete) {
+            return reading;
+        }
+        line.hold_for_actions();
+        self.held_until = Some(first_read + self.limit);
+        Reading {
+            settle: Settle::Pending,
+            line: format!(
+                "{label} {}{} head={}",
+                line.class(),
+                line.cause_suffix(),
+                watched_head(&line)
+            ),
+            data: json!(line),
         }
     }
 }
@@ -369,6 +434,7 @@ fn read(
             number,
             repository,
             watch_head,
+            complete,
         } => match repository {
             Ok(repository) => match crate::pr::status::wait_line_observed(
                 edge.cwd,
@@ -381,7 +447,7 @@ fn read(
                 Ok(line) => {
                     let line = gate_line(line, watch_head.as_deref());
                     Reading {
-                        settle: match line.verdict() {
+                        settle: match line.wait_verdict(*complete) {
                             Some(true) => Settle::Succeeded,
                             Some(false) => Settle::Unsuccessful,
                             None => Settle::Pending,
@@ -402,23 +468,68 @@ fn read(
     }
 }
 
-fn reading_pr_event(number: u64, watch_head: Option<&str>, detail: Value) -> Reading {
+pub(crate) fn reading_pr_event(
+    number: u64,
+    watch_head: Option<&str>,
+    complete: bool,
+    detail: Value,
+) -> Reading {
     let label = format!("#{number}");
-    match serde_json::from_value::<crate::pr::status::Line>(detail["status"].clone()) {
+    let status = &detail["status"];
+    let malformed: Vec<_> = [
+        "draft",
+        "checks_passed",
+        "checks_total",
+        "checks_failed",
+        "checks_pending",
+        "failing_checks",
+        "pending_checks",
+        "merge",
+        "review",
+        "error",
+    ]
+    .into_iter()
+    .filter(|field| {
+        status.get(*field).is_some_and(|value| match *field {
+            "draft" => !value.is_boolean(),
+            "checks_passed" | "checks_total" | "checks_failed" | "checks_pending" => {
+                !value.is_null()
+                    && value
+                        .as_u64()
+                        .and_then(|n| usize::try_from(n).ok())
+                        .is_none()
+            }
+            "failing_checks" | "pending_checks" => !value
+                .as_array()
+                .is_some_and(|items| items.iter().all(Value::is_string)),
+            "error" => !value.is_null() && !value.is_string(),
+            _ => !value.is_string(),
+        })
+    })
+    .collect();
+    match serde_json::from_value::<crate::pr::status::Line>(status.clone()) {
         Ok(line) => {
             let line = gate_line(line, watch_head);
+            let summary = format!(
+                "{label} {}{} head={}",
+                line.class(),
+                line.cause_suffix(),
+                watched_head(&line)
+            );
             Reading {
-                settle: match line.verdict() {
+                settle: match line.wait_verdict(complete) {
                     Some(true) => Settle::Succeeded,
                     Some(false) => Settle::Unsuccessful,
                     None => Settle::Pending,
                 },
-                line: format!(
-                    "{label} {}{} head={}",
-                    line.class(),
-                    line.cause_suffix(),
-                    watched_head(&line)
-                ),
+                line: if malformed.is_empty() {
+                    summary
+                } else {
+                    format!(
+                        "{summary} warning: invalid display fields {}",
+                        malformed.join(",")
+                    )
+                },
                 data: json!(line),
             }
         }
@@ -1119,7 +1230,16 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         assets: &resolved.assets,
         cwd: &resolved.project,
     };
-    let deadline = Instant::now() + Duration::from_secs(settings.timeout(command.timeout, &origin));
+    // A `--pr --until complete` wait must outlast a normal CI run, so it uses
+    // its own configured default budget. An explicit --timeout still wins and
+    // every budget shares the same maximum.
+    let complete = matches!(command.until, Some(provenant_cli::PrWaitUntil::Complete));
+    let budget = if complete {
+        settings.complete_timeout(command.timeout, &origin)
+    } else {
+        settings.timeout(command.timeout, &origin)
+    };
+    let deadline = Instant::now() + Duration::from_secs(budget);
     let stop = Stop::default();
     let cadence = origin.local_cadence(&settings);
     let interval = cadence.interval;
@@ -1288,6 +1408,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     prs.sort_unstable();
     prs.dedup();
     let pr_read_timeout = Duration::from_secs(settings.pr_read_timeout_seconds);
+    let actions_grace = Duration::from_secs(settings.actions_grace_seconds);
     if sources.len() + prs.len() > settings.max_targets as usize {
         return crate::fail(
             "wait",
@@ -1326,6 +1447,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 number,
                 repository: repository.clone(),
                 watch_head,
+                complete,
             }
         }));
     }
@@ -1637,9 +1759,13 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             let interval = Duration::from_secs(60);
             scope.spawn(move || {
                 let mut session = None;
-                let watch_head = match source {
-                    Source::Pr { watch_head, .. } => watch_head.as_deref(),
-                    _ => None,
+                let (watch_head, complete) = match source {
+                    Source::Pr {
+                        watch_head,
+                        complete,
+                        ..
+                    } => (watch_head.as_deref(), *complete),
+                    _ => (None, false),
                 };
                 // Each subscription owns its replay cursor. No target can
                 // consume another target's events from a shared cursor.
@@ -1668,13 +1794,18 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         None
                     }
                 };
-                let initial = read(
-                    source,
-                    edge,
-                    &mut session,
-                    deadline,
-                    pr_read_timeout,
-                    &stop.cancel,
+                let mut grace = ActionsGrace::new(actions_grace);
+                let initial = grace.apply(
+                    read(
+                        source,
+                        edge,
+                        &mut session,
+                        deadline,
+                        pr_read_timeout,
+                        &stop.cancel,
+                    ),
+                    &source.label(),
+                    complete,
                 );
                 let done = initial.done();
                 if sender
@@ -1707,13 +1838,29 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             *number,
                             Duration::from_secs(60)
                                 .saturating_sub(last_reconcile.elapsed())
-                                .min(deadline.saturating_duration_since(Instant::now())),
+                                .min(deadline.saturating_duration_since(Instant::now()))
+                                .min(grace.due_in().unwrap_or(Duration::MAX)),
                             &stop.cancel,
                         ) {
                             Ok(Some(detail)) => {
                                 last_reconcile = Instant::now();
                                 if detail["status"].is_object() {
-                                    reading_pr_event(*number, watch_head, detail)
+                                    let event =
+                                        reading_pr_event(*number, watch_head, complete, detail);
+                                    if complete || event.settle == Settle::Succeeded {
+                                        // Journal records are bounded and omit Actions runs.
+                                        // Reconcile through the observer before settling.
+                                        read(
+                                            source,
+                                            edge,
+                                            &mut session,
+                                            deadline,
+                                            pr_read_timeout,
+                                            &stop.cancel,
+                                        )
+                                    } else {
+                                        event
+                                    }
                                 } else {
                                     // Webhook records carry identifiers only;
                                     // fetch the authoritative PR status now.
@@ -1727,11 +1874,18 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                                     )
                                 }
                             }
-                            Ok(None) if last_reconcile.elapsed() >= Duration::from_secs(60) => {
+                            Ok(None)
+                                if last_reconcile.elapsed() >= Duration::from_secs(60)
+                                    || grace.is_due() =>
+                            {
                                 last_reconcile = Instant::now();
-                                if journal
-                                    .source_current(repository, *number, None)
-                                    .unwrap_or(false)
+                                // A held reading whose grace period ended needs a
+                                // fresh read even when the journal is current:
+                                // nothing else would settle it.
+                                if !grace.is_due()
+                                    && journal
+                                        .source_current(repository, *number, None)
+                                        .unwrap_or(false)
                                 {
                                     continue;
                                 }
@@ -1757,7 +1911,8 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             if !stop.pause(
                                 interval
                                     .saturating_sub(last_reconcile.elapsed())
-                                    .min(deadline.saturating_duration_since(Instant::now())),
+                                    .min(deadline.saturating_duration_since(Instant::now()))
+                                    .min(grace.due_in().unwrap_or(Duration::MAX)),
                             ) {
                                 break;
                             }
@@ -1772,6 +1927,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                             )
                         }
                     };
+                    let reading = grace.apply(reading, &source.label(), complete);
                     let finished = reading.done();
                     if sender
                         .send(Update {
@@ -1826,6 +1982,15 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             );
             human.push_str(&line);
             human.push('\n');
+            if let (Source::Pr { complete: true, .. }, Some(reading)) = (source, reading)
+                && let Ok(status) =
+                    serde_json::from_value::<crate::pr::status::Line>(reading.data.clone())
+            {
+                for failure in status.failure_lines() {
+                    human.push_str(&failure);
+                    human.push('\n');
+                }
+            }
             if let Some(reading) = reading {
                 for digest in reading.data["digests"].as_array().into_iter().flatten() {
                     if let Some(line) = digest["line"].as_str() {
@@ -1877,7 +2042,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     human.push_str(&final_line(&sources, &latest, done, &superseding));
     // Compact output keeps an owner summary, not a head-only truncation, so
     // the settle states and the next command stay on its last line.
-    let summary = provenant_cli::Summary::new(
+    let mut summary = provenant_cli::Summary::new(
         mode_heading(mode).trim_end().to_owned(),
         rows.iter()
             .map(|row| row["line"].as_str().unwrap_or("").to_owned())
@@ -1888,6 +2053,15 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             next_command(&sources, &latest, &superseding)
         )),
     );
+    // Completion reports must retain every failing check and its link in compact output.
+    for (source, reading) in sources.iter().zip(&latest) {
+        if let (Source::Pr { complete: true, .. }, Some(reading)) = (source, reading)
+            && let Ok(status) =
+                serde_json::from_value::<crate::pr::status::Line>(reading.data.clone())
+        {
+            summary.lines.extend(status.failure_lines());
+        }
+    }
     crate::emit_summarised(
         &provenant_records::CommandResult::new(
             "wait",
@@ -1916,6 +2090,61 @@ fn write_line(line: &str) -> std::io::Result<()> {
 #[cfg(test)]
 #[allow(dead_code)] // Also included by the worktree driver without libtest.
 mod tests {
+    #[test]
+    fn pr_journal_display_fields_degrade_without_unavailable() {
+        for value in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!([])),
+        ] {
+            let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc",
+                "checks_total":1,"checks_failed":0,"checks_pending":0,"review":"APPROVED"});
+            if let Some(value) = value {
+                status["failing_checks"] = value;
+            }
+            let reading =
+                super::reading_pr_event(7, None, false, serde_json::json!({"status":status}));
+            assert_eq!(reading.settle, super::Settle::Succeeded);
+            assert!(!reading.line.contains("unavailable"));
+        }
+        for field in [
+            "draft",
+            "checks_passed",
+            "checks_total",
+            "failing_checks",
+            "pending_checks",
+            "merge",
+        ] {
+            let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc"});
+            status[field] = serde_json::json!({"invalid":true});
+            let reading =
+                super::reading_pr_event(7, None, false, serde_json::json!({"status":status}));
+            assert!(!reading.line.contains("unavailable"), "{field}");
+            assert!(reading.line.contains("warning"), "{field}");
+            assert_eq!(reading.settle, super::Settle::Pending, "{field}");
+        }
+        // These fields affect the verdict. Malformed values fail closed as an
+        // unavailable, still-pending observation instead of defaulting to a
+        // successful or terminal classification.
+        for field in ["checks_failed", "checks_pending", "review", "error"] {
+            let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc"});
+            status[field] = serde_json::json!({"invalid":true});
+            let reading =
+                super::reading_pr_event(7, None, false, serde_json::json!({"status":status}));
+            assert_eq!(reading.settle, super::Settle::Pending, "{field}");
+            assert!(reading.line.contains("unavailable"), "{field}");
+        }
+        for field in ["number", "state", "head"] {
+            let mut status = serde_json::json!({"number":7,"state":"OPEN","head":"abc"});
+            status.as_object_mut().unwrap().remove(field);
+            assert!(
+                super::reading_pr_event(7, None, false, serde_json::json!({"status":status}))
+                    .line
+                    .contains("unavailable")
+            );
+        }
+    }
+
     use super::*;
     #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
     use provenant_core::Clock as _;
@@ -2153,6 +2382,7 @@ mod tests {
             number: 7,
             repository: Ok("owner/repo".into()),
             watch_head: None,
+            complete: false,
         };
         for (with_pull, expected) in [(false, Outcome::Ok), (true, Outcome::Timeout)] {
             let mut sources = vec![Source::Graph("fix".parse().expect("target"))];
@@ -2531,6 +2761,115 @@ mod tests {
     }
 
     #[test]
+    fn pr_journal_obeys_the_selected_completion_policy() {
+        let status = json!({
+            "number": 7, "state": "OPEN", "head": "head", "draft": false,
+            "merge": "clean", "review": "unknown", "error": null,
+            "checks_passed": 0, "checks_total": 2,
+            "checks_failed": 1, "checks_pending": 1
+        });
+        let event = json!({"status": status});
+        assert_eq!(
+            reading_pr_event(7, None, false, event.clone()).settle,
+            Settle::Unsuccessful
+        );
+        assert_eq!(
+            reading_pr_event(7, None, true, event).settle,
+            Settle::Pending
+        );
+    }
+
+    fn settled_pr_reading(head: &str, passed: bool, workflows: Option<bool>) -> Reading {
+        let mut data = json!({
+            "number": 7, "state": "OPEN", "head": head, "draft": false,
+            "merge": "clean", "review": "unknown", "error": null,
+            "checks_passed": u32::from(passed), "checks_total": 1,
+            "checks_failed": u32::from(!passed), "checks_pending": 0
+        });
+        if let Some(active) = workflows {
+            data["active_workflows"] = json!(active);
+        }
+        Reading {
+            settle: if passed {
+                Settle::Succeeded
+            } else {
+                Settle::Unsuccessful
+            },
+            line: "#7 settled".into(),
+            data,
+        }
+    }
+
+    #[test]
+    fn a_new_head_stays_pending_until_actions_runs_exist_or_the_grace_ends() {
+        let mut grace = ActionsGrace::new(Duration::from_secs(3600));
+        let held = grace.apply(settled_pr_reading("a", true, None), "#7", false);
+        assert_eq!(held.settle, Settle::Pending);
+        assert!(held.line.starts_with("#7 pending"), "{}", held.line);
+        assert!(held.line.contains("head=a"), "{}", held.line);
+
+        // Runs for the head end the hold.
+        for active in [true, false] {
+            let seen = grace.apply(settled_pr_reading("a", true, Some(active)), "#7", false);
+            assert_eq!(seen.settle, Settle::Succeeded);
+        }
+
+        // A default wait still settles on a failure at once; a complete one holds.
+        let failed = settled_pr_reading("a", false, None);
+        assert_eq!(
+            grace.apply(failed.clone(), "#7", false).settle,
+            Settle::Unsuccessful
+        );
+        assert_eq!(grace.apply(failed, "#7", true).settle, Settle::Pending);
+
+        // An unreadable reading carries no line to hold.
+        let unreadable = Reading::unavailable("#7", "boom");
+        assert_eq!(grace.apply(unreadable.clone(), "#7", true), unreadable);
+    }
+
+    #[test]
+    fn the_grace_period_is_bounded_and_restarts_for_a_new_head() {
+        let mut ended = ActionsGrace::new(Duration::ZERO);
+        assert_eq!(
+            ended
+                .apply(settled_pr_reading("a", true, None), "#7", false)
+                .settle,
+            Settle::Succeeded,
+            "a zero grace period never holds"
+        );
+
+        let mut grace = ActionsGrace::new(Duration::from_secs(3600));
+        assert_eq!(
+            grace
+                .apply(settled_pr_reading("a", true, None), "#7", false)
+                .settle,
+            Settle::Pending
+        );
+        assert!(!grace.is_due());
+        let left = grace.due_in().expect("a held reading has a deadline");
+        assert!(left > Duration::from_secs(3000), "{left:?}");
+        // Age the head: the period has run out, so the reading settles.
+        let (_, first_read) = grace.head.as_mut().unwrap();
+        *first_read = Instant::now()
+            .checked_sub(Duration::from_secs(7200))
+            .expect("monotonic clock far enough from its origin");
+        assert_eq!(
+            grace
+                .apply(settled_pr_reading("a", true, None), "#7", false)
+                .settle,
+            Settle::Succeeded
+        );
+        assert_eq!(grace.due_in(), None, "a settled reading is not held");
+        // A later push is a new head with its own period.
+        assert_eq!(
+            grace
+                .apply(settled_pr_reading("b", true, None), "#7", false)
+                .settle,
+            Settle::Pending
+        );
+    }
+
+    #[test]
     fn a_pinned_wait_ignores_the_verdict_of_another_head() {
         let line: crate::pr::status::Line = serde_json::from_value(json!({
             "number": 7, "state": "OPEN", "head": "stale", "draft": false,
@@ -2552,6 +2891,7 @@ mod tests {
             number: 7,
             repository: Ok("owner/repo".into()),
             watch_head: None,
+            complete: false,
         }];
         let pending = Reading {
             settle: Settle::Pending,
@@ -2585,5 +2925,36 @@ mod tests {
             details[0].contains(crate::pr::status::NO_CHECKS_NEXT),
             "{details:?}"
         );
+    }
+
+    #[test]
+    fn a_timed_out_complete_wait_keeps_its_last_known_line() {
+        // A failure with checks still running settles a default wait but keeps a
+        // complete wait pending, so only the complete wait has a last known line.
+        let reading = Reading {
+            settle: Settle::Pending,
+            line: "#7 failing".into(),
+            data: json!({
+                "number": 7, "state": "OPEN", "head": "abc", "draft": false,
+                "merge": "clean", "review": "unknown", "error": null,
+                "checks_passed": 0, "checks_total": 2,
+                "checks_failed": 1, "checks_pending": 1,
+                "failing_checks": ["lint"], "pending_checks": ["build"]
+            }),
+        };
+        let source = |complete| {
+            vec![Source::Pr {
+                number: 7,
+                repository: Ok("owner/repo".into()),
+                watch_head: None,
+                complete,
+            }]
+        };
+        let complete = pr_timeout_details(&source(true), &[Some(reading.clone())]);
+        assert_eq!(complete.len(), 1, "{complete:?}");
+        assert!(complete[0].contains("fail=1"), "{complete:?}");
+        assert!(complete[0].contains("pending=1"), "{complete:?}");
+        assert!(complete[0].contains("pending_names=build"), "{complete:?}");
+        assert!(pr_timeout_details(&source(false), &[Some(reading)]).is_empty());
     }
 }

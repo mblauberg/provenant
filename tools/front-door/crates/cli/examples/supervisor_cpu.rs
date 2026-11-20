@@ -49,27 +49,6 @@ impl Holder for InertHolder {
     }
 }
 
-/// Admission is synthetic; census uses the real composition edge. Run's store
-/// and provider credentials are not needed to measure this callback.
-struct CensusHolder<'a>(provenant_cli::run::HostHolder<'a>);
-impl Holder for CensusHolder<'_> {
-    fn has_live_children(&self, raw: &[u8]) -> provenant_supervisor::custody::Result<bool> {
-        self.0.has_live_children(raw)
-    }
-    fn admit(&self, _: &[u8], _: &Directory) -> provenant_supervisor::custody::Result<()> {
-        Ok(())
-    }
-    fn terminal(
-        &self,
-        raw: &[u8],
-        attempt: &Directory,
-        exit: &ExitObservation,
-        recovery: &Recovery,
-    ) -> provenant_supervisor::custody::Result<()> {
-        InertHolder.terminal(raw, attempt, exit, recovery)
-    }
-}
-
 fn budget(clock: &SystemClock) -> Result<WaitBudget> {
     Ok(WaitBudget::cli(clock.mono_now(), 5)?)
 }
@@ -159,6 +138,7 @@ fn capture(root: &Path, churn: bool) -> Result {
         &clock,
     )?;
     let command = ProviderCommand {
+        resource_sample_interval: None,
         publication_values: Default::default(),
         policy: Default::default(),
         profile_file: None,
@@ -168,7 +148,6 @@ fn capture(root: &Path, churn: bool) -> Result {
         resolved_route: "fixture/cpu".into(),
         permission_plan_digest: Digest::from_bytes([0; 32]),
         key: provenant_supervisor::custody::fixture_key(4),
-        protected_commands: vec![],
         config_environment: fixture::config_environment(),
         argv: fixture::argv_with_args(
             if churn { "cpu-churn" } else { "wait-on-socket" },
@@ -236,7 +215,7 @@ fn main() -> Result {
     if args.first().is_some_and(|arg| arg == "internal")
         && args.get(1).is_some_and(|arg| arg == "supervise")
     {
-        let holder = CensusHolder(provenant_cli::run::HostHolder::new(&InertHolder));
+        let holder = InertHolder;
         provenant_supervisor::supervise(
             &args[2..],
             GuardianHooks {

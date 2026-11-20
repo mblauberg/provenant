@@ -316,12 +316,51 @@ impl From<&provenant_config::ResolvedAdmissionClass> for BuildCap {
     }
 }
 
+/// Where a writer lane works: its bound worktree, branch and base, and the
+/// primary checkout it must leave alone. Harnesses such as opencode name the
+/// primary checkout as the workspace root of a linked worktree, and an absolute
+/// path there outranks a brief that only says "your worktree" (#3611).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaneLocation {
+    pub worktree: std::path::PathBuf,
+    pub branch: String,
+    pub base: String,
+    pub primary_checkout: Option<std::path::PathBuf>,
+}
+
+impl LaneLocation {
+    /// The paragraph every writer lane is told, whatever its adapter.
+    pub fn preamble(&self) -> String {
+        let branch = self
+            .branch
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&self.branch);
+        let primary = self
+            .primary_checkout
+            .as_ref()
+            .map(|path| {
+                format!(
+                    " The primary checkout {} is not your working copy: never run commands, edit files, create branches or commit there, even when your environment or workspace banner names it as the working directory, workspace root or project root.",
+                    path.display()
+                )
+            })
+            .unwrap_or_default();
+        format!(
+            "Lane location: your working copy is the bound worktree {worktree} on branch {branch}, started from base {base}. Set the working directory of every shell command to {worktree}, edit files only under it, and commit on {branch}.{primary} An absolute path elsewhere in your context does not override this.\n",
+            worktree = self.worktree.display(),
+            base = self.base,
+        )
+    }
+}
+
 /// Optional preamble overrides. Default uses the targeted verification paragraph.
 #[derive(Clone, Debug, Default)]
 pub struct PreambleExtras {
+    pub location: Option<LaneLocation>,
     pub verification: Option<crate::VerificationResolution>,
     pub build_cap: Option<BuildCap>,
     pub cargo_target: Option<crate::ResolvedCargoTarget>,
+    pub cargo_cache_budget: Option<provenant_config::CargoCacheBudget>,
 }
 
 fn slot_guidance(cap: Option<BuildCap>) -> String {
@@ -356,6 +395,10 @@ pub fn lane_preamble(
     )
 }
 
+/// Which pull request command a lane runs: its own attempt is still running,
+/// so `provenant pr open` (settled attempts only) refuses it.
+const PULL_REQUEST_GUIDANCE: &str = "Pull request: open it from inside the lane with `gh pr create --body-file FILE` against a filled copy of the pull request template; `provenant pr open` is for after settlement, not for a running lane.\n";
+
 pub fn lane_preamble_with(
     model_guidance: &str,
     limits: &provenant_records::LaneLimits,
@@ -386,8 +429,25 @@ pub fn lane_preamble_with(
                 .as_ref()
                 .map(crate::ResolvedCargoTarget::preamble)
                 .unwrap_or_else(|| crate::ResolvedCargoTarget::default().preamble());
+            let cargo_cache_budget = extras
+                .cargo_cache_budget
+                .as_ref()
+                .map(|budget| {
+                    format!(
+                        "Cargo cache budget: {} bytes (setting {}; source: {}; lanes.cargo_cache_max).\n",
+                        budget.bytes,
+                        budget.setting,
+                        budget.source.as_str(),
+                    )
+                })
+                .unwrap_or_default();
+            let location = extras
+                .location
+                .as_ref()
+                .map(LaneLocation::preamble)
+                .unwrap_or_default();
             format!(
-                "{verification}{cargo_target}{}{}{budget}",
+                "{location}{verification}{cargo_target}{cargo_cache_budget}In a shared worktree, commit only your own paths with `git commit -- <paths>`; coordinate overlapping edits with the owning lane.\n{}{}{budget}{PULL_REQUEST_GUIDANCE}",
                 slot_guidance(extras.build_cap),
                 scope.preamble()
             )
@@ -436,6 +496,7 @@ mod tests {
         assert!(writer.contains("source: default"));
         assert!(writer.contains("Build slots:"));
         assert!(writer.contains("CI scope:"));
+        assert!(writer.contains("git commit -- <paths>"));
         assert!(writer.contains("Cargo target:"));
         assert!(writer.contains(&format!("Progress handoff JSON: {}", handoff.display())));
         let reader = lane_preamble("Model policy.", &Default::default(), None, Some(handoff));
@@ -447,6 +508,43 @@ mod tests {
             !lane_preamble("Model policy.", &Default::default(), None, None)
                 .contains("handoff.json")
         );
+    }
+
+    /// Harnesses such as opencode name the primary checkout as the workspace
+    /// root of a linked worktree. The brief must carry absolute paths so it
+    /// outranks that banner (#3611), for every adapter alike.
+    #[test]
+    fn writer_preamble_names_the_bound_worktree_branch_base_and_primary_checkout() {
+        let location = LaneLocation {
+            worktree: "/repo/.worktrees/fix-1".into(),
+            branch: "refs/heads/fix/1".into(),
+            base: "a".repeat(40),
+            primary_checkout: Some("/repo".into()),
+        };
+        let extras = PreambleExtras {
+            location: Some(location.clone()),
+            ..Default::default()
+        };
+        let writer = lane_preamble_with(
+            "Model policy.",
+            &Default::default(),
+            Some(crate::ResolvedCiScope::resolve(&Default::default())),
+            None,
+            &extras,
+        );
+        assert!(writer.contains("Lane location:"));
+        assert!(writer.contains("/repo/.worktrees/fix-1"));
+        assert!(writer.contains("branch fix/1"));
+        assert!(writer.contains(&"a".repeat(40)));
+        assert!(writer.contains("The primary checkout /repo is not your working copy"));
+        let reader = lane_preamble_with("Model policy.", &Default::default(), None, None, &extras);
+        assert!(!reader.contains("Lane location:"));
+        let bare = LaneLocation {
+            primary_checkout: None,
+            ..location
+        };
+        assert!(!bare.preamble().contains("primary checkout"));
+        assert!(bare.preamble().contains("/repo/.worktrees/fix-1"));
     }
 
     #[test]

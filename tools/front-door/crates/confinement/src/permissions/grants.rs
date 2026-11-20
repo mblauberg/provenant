@@ -53,10 +53,109 @@ pub fn worktree_cargo_cache_path(
     Ok(home.join("Library/Caches/provenant-lane-cargo").join(name))
 }
 
-/// Prepare only derived writer directories outside the child sandbox. This
-/// creates the lane cache and other derived directories. Call while holding writer custody,
-/// before collecting `required_anchors`. Shared config and packed refs remain
-/// immutable; tracking refs remain host-owned.
+/// Derive the persistent shared Git state container for this verified
+/// worktree incarnation and selected branch. The digest binds both Git
+/// directory identities and the custody subject, so path reuse cannot inherit
+/// refs from a removed checkout.
+pub fn worktree_git_state_path(
+    home: &Path,
+    worktree: &VerifiedWorktree,
+    selected_ref: &GitRefName,
+) -> Result<PathBuf, PermissionError> {
+    validate_absolute(home)?;
+    worktree.repo().revalidate()?;
+    let subject = crate::worktrees::worktree_subject(worktree.repo())
+        .map_err(|_| PermissionError::GitWriteAuthorityMissing)?;
+    let mut digest = Sha256::new();
+    digest.update(b"provenant-worktree-git-state-v1\0");
+    for value in [
+        subject.kind.as_str().as_bytes(),
+        subject.id.as_bytes(),
+        selected_ref.as_str().as_bytes(),
+    ] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value);
+    }
+    for identity in [
+        worktree.identity(),
+        worktree.repo().private_identity(),
+        worktree.repo().common_identity(),
+    ] {
+        digest.update(identity.device.to_be_bytes());
+        digest.update(identity.inode.to_be_bytes());
+    }
+    let name = provenant_core::hex(&digest.finalize());
+    Ok(home
+        .join("Library/Application Support/provenant/worktree-git")
+        .join(name))
+}
+
+/// Host-derived grant for the persistent shared Git state container.
+pub fn worktree_git_state(
+    home: &Path,
+    worktree: &VerifiedWorktree,
+    selected_ref: &GitRefName,
+    credentials: &provenant_core::CredentialRoots,
+) -> Result<PathGrant, PermissionError> {
+    let grant = PathGrant {
+        path: worktree_git_state_path(home, worktree, selected_ref)?,
+        scope: PathScope::Subtree,
+    };
+    validate_noncredential_grant(&grant, credentials)?;
+    validate_noncredential_grant(&worktree_git_state_namespace(&grant)?, credentials)?;
+    Ok(grant)
+}
+
+/// Only the shared ref/object children are writable. The container itself
+/// holds host-owned configuration, initialisation locks and ownership proof.
+pub(super) fn worktree_git_state_writes(container: &PathGrant) -> [PathGrant; 2] {
+    ["git-common", "git-objects"].map(|name| PathGrant {
+        path: container.path.join(name),
+        scope: PathScope::Subtree,
+    })
+}
+
+/// The shared storage namespace contains every worktree's Git state. A writer
+/// may mutate only its own two data children beneath this protected root.
+pub(super) fn worktree_git_state_namespace(
+    container: &PathGrant,
+) -> Result<PathGrant, PermissionError> {
+    Ok(PathGrant {
+        path: container
+            .path
+            .parent()
+            .ok_or(PermissionError::GitWriteAuthorityMissing)?
+            .to_owned(),
+        scope: PathScope::Subtree,
+    })
+}
+
+/// Host-maintained Git files stay immutable within the writable data children.
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+pub(super) fn worktree_git_state_host_files(container: &PathGrant) -> [PathGrant; 10] {
+    [
+        container.path.join("git-common/config"),
+        container.path.join("git-common/config.lock"),
+        container.path.join("git-common/config.worktree"),
+        container.path.join("git-common/config.worktree.lock"),
+        container.path.join("git-common/commondir"),
+        container.path.join("git-common/commondir.lock"),
+        container.path.join("git-common/gitdir"),
+        container.path.join("git-common/gitdir.lock"),
+        container.path.join("git-objects/info/alternates"),
+        container.path.join("git-objects/info/http-alternates"),
+    ]
+    .map(|path| PathGrant {
+        path,
+        scope: PathScope::Exact,
+    })
+}
+
+/// Prepare only host-derived writer directories outside the child sandbox. This
+/// creates the lane cache and shared Git-state container and data directories.
+/// Call while holding writer custody, before collecting `required_anchors`.
+/// The container and Git configuration remain host-owned; shared refs and
+/// objects are writable through the two narrowly scoped children.
 pub fn prepare_writer_directories(
     worktree: &VerifiedWorktree,
     selected_ref: &GitRefName,
@@ -66,11 +165,12 @@ pub fn prepare_writer_directories(
 ) -> Result<(), PermissionError> {
     worktree.repo().revalidate()?;
     let grants = WorktreeWriteGrants::derive(worktree, selected_ref);
-    if grants.digest(&authority.cargo_cache) != authority.git_grants_digest {
+    if grants.digest(&authority.cargo_cache, &authority.git_state) != authority.git_grants_digest {
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
     grants.validate(credentials)?;
     validate_writer_cache(authority, worktree, home, credentials)?;
+    validate_writer_git_state(authority, worktree, selected_ref, home, credentials)?;
     let paths: BTreeSet<_> = grants
         .iter()
         .chain([&authority.cargo_cache])
@@ -80,51 +180,78 @@ pub fn prepare_writer_directories(
         })
         .collect();
     for path in paths {
-        let mut directory =
-            Directory::open_anchor(Path::new("/")).map_err(PermissionError::Filesystem)?;
-        let mut traversed = PathBuf::from("/");
-        for component in path.components() {
-            let Component::Normal(name) = component else {
-                continue;
-            };
-            directory = match directory.open_directory(name) {
-                Ok(child) => child,
-                Err(error) if error.is_not_found() => {
-                    match directory.mkdir(name, 0o700) {
-                        Ok(()) => {}
-                        Err(error) if error.is_exists() => {}
-                        Err(error) => return Err(PermissionError::Filesystem(error)),
-                    }
-                    directory
-                        .open_directory(name)
-                        .map_err(PermissionError::Filesystem)?
+        create_derived_directory(path, &authority.cargo_cache.path, worktree)?;
+    }
+    prepare_git_state_directories(&authority.git_state)?;
+    Ok(())
+}
+
+/// Create `path` one verified component at a time, never following links. On
+/// the way, the lane cache and its parent must be private to this user, and the
+/// cache gets the owner marker GC reads to tie it to `worktree`.
+fn create_derived_directory(
+    path: &Path,
+    cache: &Path,
+    worktree: &VerifiedWorktree,
+) -> Result<(), PermissionError> {
+    let mut directory =
+        Directory::open_anchor(Path::new("/")).map_err(PermissionError::Filesystem)?;
+    let mut traversed = PathBuf::from("/");
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        directory = match directory.open_directory(name) {
+            Ok(child) => child,
+            Err(error) if error.is_not_found() => {
+                match directory.mkdir(name, 0o700) {
+                    Ok(()) => {}
+                    Err(error) if error.is_exists() => {}
+                    Err(error) => return Err(PermissionError::Filesystem(error)),
                 }
-                Err(error) => return Err(PermissionError::Filesystem(error)),
-            };
-            traversed.push(name);
-            if traversed == authority.cargo_cache.path
-                || Some(traversed.as_path()) == authority.cargo_cache.path.parent()
-            {
-                verify_cache_metadata(&directory.metadata().map_err(PermissionError::Filesystem)?)?;
-            }
-            if traversed == authority.cargo_cache.path {
-                let identity = worktree.identity();
-                let marker = encode_cache_owner(&CacheOwner {
-                    path: worktree.path().to_path_buf(),
-                    identity: (identity.device, identity.inode),
-                });
                 directory
-                    .atomic_write(
-                        OsStr::new(CARGO_CACHE_OWNER),
-                        ".provenant-owner-",
-                        &marker,
-                        PublishMode::Replace,
-                    )
-                    .map_err(PermissionError::Filesystem)?;
+                    .open_directory(name)
+                    .map_err(PermissionError::Filesystem)?
             }
+            Err(error) => return Err(PermissionError::Filesystem(error)),
+        };
+        traversed.push(name);
+        if traversed == cache || Some(traversed.as_path()) == cache.parent() {
+            verify_cache_metadata(&directory.metadata().map_err(PermissionError::Filesystem)?)?;
+        }
+        if traversed == cache {
+            let identity = worktree.identity();
+            let marker = encode_cache_owner(&CacheOwner {
+                path: worktree.path().to_path_buf(),
+                identity: (identity.device, identity.inode),
+            });
+            directory
+                .atomic_write(
+                    OsStr::new(CARGO_CACHE_OWNER),
+                    ".provenant-owner-",
+                    &marker,
+                    PublishMode::Replace,
+                )
+                .map_err(PermissionError::Filesystem)?;
+            // One tag covers every target under the cache, including a seed
+            // clone or `target-lint` that Cargo did not create.
+            crate::cache::tag_cache_directory(&directory).map_err(PermissionError::Filesystem)?;
         }
     }
     Ok(())
+}
+
+/// Create a worktree's lane cache with its owner marker for a host command
+/// outside any lane, such as `provenant worktree seed-target`. The writer path
+/// uses [`prepare_writer_directories`]; both derive the same directory.
+pub fn prepare_worktree_cargo_cache(
+    home: &Path,
+    worktree: &VerifiedWorktree,
+    credentials: &provenant_core::CredentialRoots,
+) -> Result<PathBuf, PermissionError> {
+    let grant = worktree_cargo_cache(home, worktree, credentials)?;
+    create_derived_directory(&grant.path, &grant.path, worktree)?;
+    Ok(grant.path)
 }
 
 pub(super) fn validate_writer_cache(
@@ -139,8 +266,64 @@ pub(super) fn validate_writer_cache(
     Ok(())
 }
 
-/// Host Git boundaries bound into writer authority. All remain read-only;
-/// the lane owns its complete Git directory under attempt scratch.
+pub(super) fn validate_writer_git_state(
+    authority: &WorktreeWriteAuthority,
+    worktree: &VerifiedWorktree,
+    selected_ref: &GitRefName,
+    home: &Path,
+    credentials: &provenant_core::CredentialRoots,
+) -> Result<(), PermissionError> {
+    let expected = worktree_git_state(home, worktree, selected_ref, credentials)?;
+    if authority.git_state != expected {
+        return Err(PermissionError::GitWriteAuthorityMissing);
+    }
+    Ok(())
+}
+
+fn prepare_git_state_directories(container: &PathGrant) -> Result<(), PermissionError> {
+    let namespace = worktree_git_state_namespace(container)?;
+    let writes = worktree_git_state_writes(container);
+    let private_paths = [
+        namespace.path.as_path(),
+        container.path.as_path(),
+        writes[0].path.as_path(),
+        writes[1].path.as_path(),
+    ];
+    for path in private_paths {
+        let mut directory =
+            Directory::open_anchor(Path::new("/")).map_err(PermissionError::Filesystem)?;
+        let mut traversed = PathBuf::from("/");
+        for component in path.components() {
+            let Component::Normal(name) = component else {
+                continue;
+            };
+            directory = match directory.open_directory(name) {
+                Ok(child) => child,
+                Err(error) if error.is_not_found() => {
+                    match directory.mkdir(name, 0o700) {
+                        Ok(()) => directory.sync().map_err(PermissionError::Filesystem)?,
+                        Err(error) if error.is_exists() => {}
+                        Err(error) => return Err(PermissionError::Filesystem(error)),
+                    }
+                    directory
+                        .open_directory(name)
+                        .map_err(PermissionError::Filesystem)?
+                }
+                Err(error) => return Err(PermissionError::Filesystem(error)),
+            };
+            traversed.push(name);
+            if private_paths.contains(&traversed.as_path()) {
+                verify_cache_metadata(&directory.metadata().map_err(PermissionError::Filesystem)?)?;
+            }
+        }
+        directory.sync().map_err(PermissionError::Filesystem)?;
+    }
+    Ok(())
+}
+
+/// Host repository Git boundaries bound into writer authority. They remain
+/// read-only; shared mutable refs and objects live in the separate derived
+/// Git-state grant, while provider configuration remains attempt-private.
 pub(crate) struct WorktreeWriteGrants {
     pub(super) worktree: PathGrant,
     pub(super) private_git_dir: PathGrant,
@@ -176,12 +359,12 @@ impl WorktreeWriteGrants {
         [&self.worktree, &self.private_git_dir, &self.common_git_dir].into_iter()
     }
 
-    pub(super) fn digest(&self, cache: &PathGrant) -> [u8; 32] {
+    pub(super) fn digest(&self, cache: &PathGrant, git_state: &PathGrant) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"provenant-worktree-git-grants-v13\0");
+        digest.update(b"provenant-worktree-git-grants-v14\0");
         digest.update((self.branch.len() as u64).to_be_bytes());
         digest.update(self.branch.as_bytes());
-        for grant in self.iter().chain([cache]) {
+        for grant in self.iter().chain([cache, git_state]) {
             let bytes = grant.path.as_os_str().as_encoded_bytes();
             digest.update((bytes.len() as u64).to_be_bytes());
             digest.update(bytes);
@@ -208,20 +391,40 @@ impl WorktreeWriteGrants {
 pub(super) fn push_worktree_rule(
     source: &mut String,
     grants: &WorktreeWriteGrants,
+    git_state: &PathGrant,
 ) -> Result<(), PermissionError> {
     let worktree = sbpl_path(&grants.worktree.path)?;
     let git_dir = sbpl_path(&grants.private_git_dir.path)?;
     let common_dir = sbpl_path(&grants.common_git_dir.path)?;
+    let git_state_path = &git_state.path;
+    let git_common_path = git_state_path.join("git-common");
+    let git_objects_path = git_state_path.join("git-objects");
+    let git_common = sbpl_path(&git_common_path)?;
+    let git_objects = sbpl_path(&git_objects_path)?;
     source.push_str(&format!(
         "(allow file-read* (subpath \"{git_dir}\") (subpath \"{common_dir}\"))\n"
     ));
     source.push_str(&format!(
         "(allow file-write* (require-all (subpath \"{worktree}\") (require-not (subpath \"{git_dir}\")) (require-not (subpath \"{common_dir}\"))))\n"
     ));
-    // Shared metadata stays immutable even when another write root overlaps it.
-    // Git writes its index, refs and operation state entirely under scratch.
+    // The host-owned repository Git directories remain read-only.
     for grant in [&grants.common_git_dir, &grants.private_git_dir] {
         push_rule(source, "deny", "file-write*", &grant.path, grant.scope)?;
+    }
+    // The container holds host-owned config, init locks and ownership proof.
+    // Read exceptions are restricted to this writer's two data children; the
+    // namespace-wide boundary is applied for every profile in push_boundaries.
+    source.push_str(&format!(
+        "(allow file-read* (subpath \"{git_common}\") (subpath \"{git_objects}\"))\n"
+    ));
+    for grant in worktree_git_state_host_files(git_state) {
+        push_rule(source, "deny", "file-write*", &grant.path, grant.scope)?;
+    }
+    for path in [&git_common_path, &git_objects_path] {
+        source.push_str(&format!(
+            "(deny file-write-create (require-all (vnode-type SYMLINK) (subpath \"{}\")))\n",
+            sbpl_path(path)?
+        ));
     }
     Ok(())
 }

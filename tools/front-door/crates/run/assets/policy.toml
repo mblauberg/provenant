@@ -211,6 +211,22 @@ knob = "policy.LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE"
 justification = "Unreadable or unrepresentable lane-port settings warn and leave the lane without an allocated port block."
 
 [[rule]]
+code = "LAUNCH_PROCESS_TREE_INTERVAL_OR_WARN_NONE"
+site = "run/src/launch.rs#process_tree_interval"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_PROCESS_TREE_INTERVAL_OR_WARN_NONE"
+justification = "Unreadable run settings warn and launch the lane without a process-tree sampler; admission then skips its memory limit with a warning."
+
+[[rule]]
+code = "LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT"
+site = "run/src/launch.rs#retained_custody_ms"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT"
+justification = "Unreadable run settings warn and launch the lane with the shipped retained-custody limit."
+
+[[rule]]
 code = "PORT_BLOCKS"
 site = "supervisor/src/guardian.rs#Driver::run"
 boundary = "none"
@@ -929,15 +945,6 @@ refusable = true
 knob = "policy.DISK_FLOOR"
 threshold = "gc.critical_free"
 justification = "Measured free space below gc.critical_free warns with the figures, their sources and the remedy; submission, admission and new builds share this one decision. Refuse holds new work until space is reclaimed; a record that cannot be written still fails as data integrity."
-
-[[rule]]
-code = "GUARDIAN_DISK"
-site = "src/disk_guard.rs#LaneDisk::below_floor"
-boundary = "none"
-strength = "warn"
-knob = "policy.GUARDIAN_DISK"
-threshold = "gc.free_floor"
-justification = "The guardian observes free space during a running lane and only warns; running builds continue."
 
 [[rule]]
 code = "ADMISSION_PRESSURE"

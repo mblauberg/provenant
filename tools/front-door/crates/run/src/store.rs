@@ -987,7 +987,7 @@ impl RunStore {
                 limits: None,
                 schema_version: 2, attempt_id, project_id: context.project_id, attempt_number: u64::from(key.attempt()), revision: 1, generation: 0,
                 delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, steering: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, stop_work: None, verified_owner: Some(context.actor_id), session: None,
-                queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_silent_for_ms: provenant_records::run::Transient(None), process_observation_valid: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
+                queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, process_observation_valid: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
                 terminal_evidence: None, settlement_reason: None, cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
                 prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: input.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
                 trace: provenant_records::Trace {extra: Default::default(),
@@ -1204,6 +1204,10 @@ impl RunStore {
             terminal_cause,
             terminal_note,
         } = withdrawal;
+        // A refusal whose producer named no cause is recorded as unrecorded,
+        // never as a cause the host did not observe.
+        let terminal_cause = terminal_cause
+            .or_else(|| (outcome == Outcome::Rejected).then_some(TerminalCause::Unrecorded));
         if failure.is_some()
             && !matches!(
                 expected,
@@ -1473,6 +1477,9 @@ impl RunStore {
         self.record(expected.attempt_id, call)
     }
 
+    /// Post-commit cleanup. It tries another holder's writer lock once: a
+    /// busy lock leaves the cleanup effect pending and the attempt retained
+    /// for the settlement worker, and never counts as a failure.
     pub(crate) fn settle_cleanup(
         &self,
         record: &AttemptRecord,
@@ -1512,7 +1519,14 @@ impl RunStore {
             .request(record.attempt_id, call)
             .is_ok_and(|request| request.task.writer.is_some())
         {
-            let _ = self.retry_git_cleanup_with_custody(record, recovery, call);
+            // Other failures are recorded on the cleanup effect itself.
+            if self
+                .retry_git_cleanup_with_custody(record, recovery, call)
+                .is_err_and(|error| error.is_writer_contention())
+            {
+                let _ = self.set_temporary_retained(record.attempt_id, true, call);
+                return;
+            }
         }
         // Reuse verified same-scope custody, including a read-only guardian's
         // attempt lock. A second open would contend with our own description.
@@ -1557,6 +1571,7 @@ impl RunStore {
             record,
             false,
             &mut ProviderStateGc::default(),
+            &|| true,
         );
         let _ = self.set_temporary_retained(record.attempt_id, true, call);
     }
@@ -2014,40 +2029,35 @@ impl RunStore {
                     .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?,
                 _ => false,
             };
-            // Refuse while another holder owns the writer lock.
+            // Try another holder's writer lock once; contention defers.
             let _lock = match &slot {
-                Some(slot) if !held => {
-                    let observation = provenant_supervisor::custody::writer_admission_guard(slot)
-                        .map_err(|error| {
-                        RunError::Io(std::io::Error::other(error.to_string()))
-                    })?;
-                    let writer = slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
-                    drop(observation);
-                    Some(writer)
-                }
+                Some(slot) if !held => Some(
+                    provenant_supervisor::custody::lock_writer_exclusion(
+                        slot,
+                        provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                        call.cancel,
+                        call.clock,
+                    )
+                    .map_err(|error| {
+                        crate::controls::writer_exclusion_error(
+                            self,
+                            slot,
+                            Self::scope(record),
+                            error,
+                            call,
+                        )
+                    })?,
+                ),
                 _ => None,
             };
             let attempt = self.attempt_dir(record.attempt_id, false)?;
             let head = crate::settlement::pinned_head(&attempt, Self::scope(record))?;
             let mut remove_import_pin = slot.is_some();
-            if let Some(slot) = &slot {
-                let own = slot.metadata()?;
+            if slot.is_some() {
                 match self.writer_fence_listing() {
                     Ok(listing) => {
                         if !listing.issues.is_empty() {
                             remove_import_pin = false;
-                        }
-                        for fence in listing.reservations {
-                            if fence.scope == Self::scope(record) {
-                                continue;
-                            }
-                            if let Some(path) = fence.custody_directory() {
-                                let other =
-                                    provenant_os::fs::Directory::open_anchor(path)?.metadata()?;
-                                if own.device == other.device && own.inode == other.inode {
-                                    remove_import_pin = false;
-                                }
-                            }
                         }
                     }
                     Err(_) => remove_import_pin = false,
@@ -2064,6 +2074,10 @@ impl RunStore {
         })();
         let disposition = match cleanup {
             Ok(()) => EffectDisposition::Done,
+            // Contention past the wait is returned unrecorded: it names the
+            // holder and settlement retries, so a busy holder never seals the
+            // cleanup as failed.
+            Err(error) if error.is_writer_contention() => return Err(error),
             Err(error) => EffectDisposition::Failed {
                 reason: error.to_string().chars().take(1024).collect(),
                 retryable: false,

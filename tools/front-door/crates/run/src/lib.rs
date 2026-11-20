@@ -6,8 +6,8 @@ mod board;
 mod completion;
 pub use board::{BoardLane, BoardPage};
 pub use completion::{
-    BuildCap, PreambleExtras, handoff_progress_guidance, lane_preamble, lane_preamble_with,
-    sanitise_handoff, sanitise_handoff_result,
+    BuildCap, LaneLocation, PreambleExtras, handoff_progress_guidance, lane_preamble,
+    lane_preamble_with, sanitise_handoff, sanitise_handoff_result,
 };
 mod verification;
 pub use verification::{VerificationResolution, conflict_cause};
@@ -53,6 +53,7 @@ pub use service::{DispatchRequest, DispatchTask, ErrorKind, RefusalContext, Serv
 pub use transcript::locate as locate_transcript;
 pub mod build_dir_gc;
 mod cargo_seed;
+pub use cargo_seed::{WorktreeSeed, seed_worktree_target};
 pub mod target_seed;
 pub mod target_seed_gc;
 mod writer;
@@ -91,8 +92,8 @@ pub use plan::{
 };
 pub use retention::{
     AttemptLogRemoval, AttemptTmpRemoval, PayloadEviction, PayloadReport, ProviderStateGc,
-    ProviderStateIssue, ScratchOwner, ScratchOwnerResolver, ScratchPolicy, TOMBSTONE,
-    payload_totals,
+    ProviderStateIssue, RetentionScan, ScratchOwner, ScratchOwnerResolver, ScratchPolicy,
+    TOMBSTONE, gc_import_pins, payload_totals,
 };
 pub use writer::{
     BoundSandboxBackend, LaunchConfinement, RepinOutcome, WriterFence, WriterLaunch,
@@ -574,6 +575,12 @@ pub enum RunError {
     ReviewAcceptanceRequired,
     #[error("lane object import refused: {0}")]
     ObjectImportLimit(&'static str),
+    /// The lane's history forked from the host branch. Its commits stay in the
+    /// attempt's private Git; there is no automatic rebase or two-tree retry.
+    #[error(
+        "lane history diverged from the host branch; its commits are retained in the attempt's private Git for host recovery"
+    )]
+    PublicationDiverged,
     #[error(
         "lane tip {tip} descends from none of: its launch base {base}, the origin default branch, {}, or any pushed remote-tracking branch; push the branch it was rebased onto, or rebuild the lane from its launch base",
         .launch_ref.as_deref().map_or_else(|| "its launch ref".to_owned(), |name| format!("its launch ref {name}"))
@@ -628,6 +635,23 @@ pub enum RunError {
     Capacity,
     #[error("run store stayed contended past its busy timeout")]
     Contention,
+    /// Another holder kept a writer worktree's exclusion lock past the bounded
+    /// wait. Settlement retries; contention is never a recovery failure.
+    #[error("waiting for writer lock {}, held by {holder}", lock.display())]
+    WriterExclusionBusy {
+        lock: std::path::PathBuf,
+        holder: String,
+        /// Some holder may still release the lock: a live or unobservable
+        /// guardian, a live or unreadable settlement owner of another
+        /// reserved attempt, or a holder no reservation identifies.
+        holder_live: bool,
+    },
+    /// A steered writer's successor waits until settlement releases the
+    /// predecessor's worktree custody; the accepted steering stays queued.
+    #[error(
+        "steer continuation waits for the steered writer's settlement to release its worktree custody"
+    )]
+    SteerAwaitingCustody,
     #[error("run-store call was cancelled")]
     Cancelled,
     #[error("publication is visible but not durably synced")]
@@ -701,8 +725,23 @@ impl RunError {
     pub(crate) fn import_refusal_is_final(&self) -> bool {
         matches!(
             self,
-            Self::ObjectImportLimit(_) | Self::LaneTipUnrooted { .. }
+            Self::ObjectImportLimit(_) | Self::LaneTipUnrooted { .. } | Self::PublicationDiverged
         )
+    }
+
+    /// A publication the host refuses on the lane's own history. Retrying the
+    /// same tip cannot change it, and waiting only fences the worktree.
+    pub(crate) fn is_publication_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::LaneTipUnrooted { .. } | Self::PublicationDiverged
+        )
+    }
+
+    /// Writer-lock contention outlived its bounded wait. Settlement records it
+    /// as a wait naming the holder, never as a recovery failure.
+    pub(crate) fn is_writer_contention(&self) -> bool {
+        matches!(self, Self::WriterExclusionBusy { .. })
     }
 
     /// A generic code can wrap multiple guards; classify the typed cause rather

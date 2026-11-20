@@ -1,6 +1,6 @@
 name: Feature request
 description: Something the harness should handle and does not. Describe the problem.
-labels: ["enhancement"]
+type: Feature
 body:
   - type: markdown
     attributes:

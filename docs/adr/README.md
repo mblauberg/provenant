@@ -16,7 +16,7 @@ stable.
 | [0028](0028-rust-port-dependencies.md) | Accepted | A small allowlist of major Rust dependencies |
 | [0033](0033-weighted-route-pools-are-the-routing-unit.md) | Accepted | Weighted route pools are the routing unit |
 | [0034](0034-refusals-carry-stable-typed-codes.md) | Accepted | Refusals carry stable typed codes |
-| [0035](0035-four-hard-boundaries-and-flexible-everything-else.md) | Accepted | Four hard boundaries, flexible everything else |
+| [0035](0035-three-hard-boundaries-and-flexible-everything-else.md) | Accepted | Three hard boundaries, flexible everything else |
 | [0037](0037-batched-exact-candidate-landing.md) | Accepted | Gate an exact batched landing candidate |
 | [0039](0039-graph-of-templates.md) | Accepted | One graph of template nodes: a plain lane is one node, composites are data, one patch path changes a graph |
 | [0040](0040-open-lane-policy-with-explicit-boundaries.md) | Accepted | Ambient lane access with explicit mandatory boundaries |

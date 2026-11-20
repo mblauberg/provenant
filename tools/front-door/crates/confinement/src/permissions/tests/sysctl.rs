@@ -124,6 +124,12 @@ fn process_arguments_are_private_across_sandbox_boundaries()
                 git_grants_digest: [7; 32],
                 publishing: false,
                 common_git_dir: "/fixture/git".into(),
+                git_state: PathGrant {
+                    path:
+                        "/fixture/home/Library/Application Support/provenant/worktree-git/fixture"
+                            .into(),
+                    scope: PathScope::Subtree,
+                },
                 cargo_cache: PathGrant {
                     path: root.join("cache"),
                     scope: PathScope::Subtree,

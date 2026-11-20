@@ -126,6 +126,201 @@ fn cancellation_directory_watch_allows_idle_backoff_with_polling_fallback() {
     const { assert!(super::CANCEL_WATCH_POLL_MS > super::CANCEL_FALLBACK_POLL_MS) };
 }
 
+/// Drive the retained-custody schedule like the guardian loop: act, then
+/// block until the next deadline, capped like one reactor turn. Returns
+/// (escalations, observations, wakes) over the window.
+fn drive_retained(window_ms: u64, watched: bool, event_every_ms: Option<u64>) -> (u64, u64, u64) {
+    let mut schedule = super::RetainedSchedule {
+        watched,
+        ..Default::default()
+    };
+    let (mut escalations, mut observations, mut wakes) = (0, 0, 0);
+    let mut now = 0;
+    let mut next_event = event_every_ms;
+    while now <= window_ms {
+        match schedule.next(now) {
+            super::RetainedStep::Escalate => escalations += 1,
+            super::RetainedStep::Observe => observations += 1,
+            super::RetainedStep::Wait => {}
+        }
+        let mut wait = schedule.wait_ms(now).min(1_000);
+        if let Some(at) = next_event {
+            wait = wait.min(at.saturating_sub(now));
+        }
+        // A zero wait would spin; the schedule must always leave a deadline.
+        assert!(wait > 0, "retained schedule spun at {now} ms: {schedule:?}");
+        now += wait;
+        wakes += 1;
+        if let (Some(at), Some(every)) = (next_event, event_every_ms)
+            && now >= at
+        {
+            schedule.process_event = true;
+            next_event = Some(at + every);
+        }
+    }
+    (escalations, observations, wakes)
+}
+
+#[test]
+fn retained_custody_idles_on_events_instead_of_repeating_cleanup() {
+    // Ten idle minutes with a detached service alive: one immediate stop,
+    // then one per escalation backstop. Looks stay at the observation
+    // backstop; before #3560 a full stop pass ran every 100 ms.
+    let window = 600_000;
+    let stops = window / super::RETAINED_ESCALATION_MS + 1;
+    let (escalations, observations, wakes) = drive_retained(window, false, None);
+    assert_eq!(escalations, stops);
+    assert!(
+        observations + escalations <= window / super::RETAINED_OBSERVE_MS + 1,
+        "{observations} looks"
+    );
+    assert!(
+        wakes <= window / super::RETAINED_OBSERVE_MS + 1,
+        "{wakes} wakes"
+    );
+    // Healthy exit watches stretch looks to the full-census backstop.
+    let (escalations, observations, _) = drive_retained(window, true, None);
+    assert_eq!(escalations, stops);
+    assert!(observations + escalations <= window / super::FULL_CENSUS_INTERVAL_MS + stops);
+}
+
+#[test]
+fn retained_custody_looks_promptly_after_an_event_but_never_faster_than_the_walk_rate() {
+    // A service churning children wakes the guardian on every exit; looks
+    // stay at the census walk rate and never repeat the stop.
+    let window = 60_000;
+    let (escalations, observations, _) = drive_retained(window, true, Some(1));
+    assert_eq!(escalations, window / super::RETAINED_ESCALATION_MS + 1);
+    assert!(
+        observations <= window / super::CENSUS_INTERVAL_MS + 1,
+        "{observations} looks"
+    );
+    // One exit after a quiet spell is looked at without waiting for a backstop.
+    let mut schedule = super::RetainedSchedule {
+        watched: true,
+        ..Default::default()
+    };
+    assert_eq!(schedule.next(0), super::RetainedStep::Escalate);
+    assert_eq!(schedule.next(2_000), super::RetainedStep::Wait);
+    schedule.process_event = true;
+    assert_eq!(schedule.wait_ms(2_000), 0);
+    assert_eq!(schedule.next(2_000), super::RetainedStep::Observe);
+    assert!(!schedule.process_event);
+    assert_eq!(schedule.wait_ms(2_000), super::FULL_CENSUS_INTERVAL_MS);
+}
+
+/// A fake retained stop that counts censuses (looks) and waits.
+struct CountedStop {
+    looks: usize,
+    waits: usize,
+    /// Processes the stop may signal; a signal they do not survive ends them.
+    targets: Vec<ProcessIdentity>,
+    survives_term: bool,
+    survives_kill: bool,
+    signals: Vec<bool>,
+}
+impl CountedStop {
+    fn new(targets: usize, survives_term: bool, survives_kill: bool) -> Self {
+        Self {
+            looks: 0,
+            waits: 0,
+            targets: (0..targets)
+                .map(|index| ProcessIdentity {
+                    boot: "boot".into(),
+                    pid: 500 + index as i64,
+                    native_start: 1,
+                    group_id: 500,
+                    session_id: 500,
+                })
+                .collect(),
+            survives_term,
+            survives_kill,
+            signals: Vec::new(),
+        }
+    }
+}
+impl super::cleanup::RetainedStopPasses for CountedStop {
+    fn look(&mut self) -> Result<super::cleanup::Look> {
+        self.looks += 1;
+        Ok(if self.targets.is_empty() && !self.signals.is_empty() {
+            super::cleanup::Look::Settled
+        } else {
+            super::cleanup::Look::Pending
+        })
+    }
+    fn signal(&mut self, escalation: bool) -> Vec<ProcessIdentity> {
+        if self.targets.is_empty() {
+            return Vec::new();
+        }
+        self.signals.push(escalation);
+        let signalled = self.targets.clone();
+        let survives = if escalation {
+            self.survives_kill
+        } else {
+            self.survives_term
+        };
+        if !survives {
+            self.targets.clear();
+        }
+        signalled
+    }
+    fn await_exits(&mut self, _: &[ProcessIdentity]) {
+        self.waits += 1;
+    }
+}
+
+#[test]
+fn a_retained_stop_takes_at_most_three_censuses() {
+    // Nothing the guardian may signal: one census, no wait (the 20 ms
+    // cleanup poll ran about 130 per stop).
+    let mut idle = CountedStop::new(0, false, false);
+    assert!(!super::cleanup::retained_stop_flow(&mut idle).unwrap_or(true));
+    assert_eq!((idle.looks, idle.waits), (1, 0));
+    // TERM ends them: census, TERM, one wait on exit watches, census.
+    let mut polite = CountedStop::new(3, false, false);
+    assert!(super::cleanup::retained_stop_flow(&mut polite).unwrap_or(false));
+    assert_eq!((polite.looks, polite.waits), (2, 1));
+    assert_eq!(polite.signals, [false]);
+    // TERM ignored: KILL after the grace, then a final census.
+    let mut stubborn = CountedStop::new(3, true, false);
+    assert!(super::cleanup::retained_stop_flow(&mut stubborn).unwrap_or(false));
+    assert_eq!((stubborn.looks, stubborn.waits), (3, 2));
+    assert_eq!(stubborn.signals, [false, true]);
+    // KILL ignored too: still bounded, and custody stays unresolved.
+    let mut immortal = CountedStop::new(3, true, true);
+    assert!(!super::cleanup::retained_stop_flow(&mut immortal).unwrap_or(true));
+    assert_eq!((immortal.looks, immortal.waits), (3, 2));
+}
+
+#[test]
+fn retained_custody_off_macos_only_repeats_the_stop() {
+    let mut schedule = super::RetainedSchedule {
+        escalate_only: true,
+        ..Default::default()
+    };
+    assert_eq!(schedule.next(0), super::RetainedStep::Escalate);
+    schedule.process_event = true;
+    assert_eq!(schedule.wait_ms(10), super::RETAINED_ESCALATION_MS - 10);
+    assert_eq!(schedule.next(10), super::RetainedStep::Wait);
+    assert_eq!(schedule.next(5_000), super::RetainedStep::Wait);
+    assert_eq!(
+        schedule.next(super::RETAINED_ESCALATION_MS),
+        super::RetainedStep::Escalate
+    );
+}
+
+#[test]
+fn retained_custody_repeats_the_stop_at_once_on_cancellation() {
+    let mut schedule = super::RetainedSchedule::default();
+    assert_eq!(schedule.next(0), super::RetainedStep::Escalate);
+    assert_eq!(schedule.next(10), super::RetainedStep::Wait);
+    schedule.escalation_requested = true;
+    assert_eq!(schedule.wait_ms(10), 0);
+    assert_eq!(schedule.next(10), super::RetainedStep::Escalate);
+    assert_eq!(schedule.next(20), super::RetainedStep::Wait);
+    assert_eq!(schedule.wait_ms(20), super::RETAINED_OBSERVE_MS - 10);
+}
+
 #[cfg(all(feature = "fixture", target_os = "macos"))]
 #[test]
 #[allow(clippy::disallowed_methods)]
@@ -254,9 +449,11 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
         scope,
         writer.lease.as_ref().unwrap(),
         &publication.custody,
+        writer.holder.as_ref().unwrap(),
     )
     .unwrap();
     let message = LaunchMessage {
+        resource_sample_interval_ms: None,
         publication_values: Default::default(),
         policy: Default::default(),
         profile: None,
@@ -268,8 +465,6 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
         key: crate::custody::fixture_key(33),
         requester: provenant_core::ActorId::from_bytes([34; 16]),
         binding: writer.reservation.binding.clone(),
-        executable_snapshot: snapshot_executable(OsStr::new("/bin/sh")).unwrap(),
-        protected_commands: Vec::new(),
         argv: vec![
             b"/bin/sh".to_vec(),
             b"-c".to_vec(),
@@ -295,8 +490,10 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
         child.as_fd(),
         writer.lock_directory.handoff_file().as_fd(),
         publication.directory.handoff_file().as_fd(),
+        writer.directory.handoff_file().as_fd(),
         writer.lease.as_ref().unwrap().handoff_file().as_fd(),
         publication.custody.handoff_file().as_fd(),
+        writer.holder.as_ref().unwrap().handoff_file().as_fd(),
     ];
     let args = descriptors
         .iter()
@@ -703,16 +900,17 @@ fn spawn_missing_attempt_guardian(
         &clock,
     )
     .unwrap();
-    let executable_snapshot = snapshot_executable(OsStr::from_bytes(&argv[0])).unwrap();
     crate::custody::liveness::prepare_guardian_lifetime(
         &writer.directory,
         &publication.directory,
         scope,
         writer.lease.as_ref().unwrap(),
         &publication.custody,
+        writer.holder.as_ref().unwrap(),
     )
     .unwrap();
     let message = LaunchMessage {
+        resource_sample_interval_ms: None,
         publication_values: Default::default(),
         policy: Default::default(),
         profile: None,
@@ -724,8 +922,6 @@ fn spawn_missing_attempt_guardian(
         key: crate::custody::fixture_key(43),
         requester: provenant_core::ActorId::from_bytes([44; 16]),
         binding: writer.reservation.binding.clone(),
-        executable_snapshot,
-        protected_commands: Vec::new(),
         argv,
         environment: Vec::new(),
         lane_ports: None,
@@ -745,8 +941,10 @@ fn spawn_missing_attempt_guardian(
         child.as_fd(),
         writer.lock_directory.handoff_file().as_fd(),
         publication.directory.handoff_file().as_fd(),
+        writer.directory.handoff_file().as_fd(),
         writer.lease.as_ref().unwrap().handoff_file().as_fd(),
         publication.custody.handoff_file().as_fd(),
+        writer.holder.as_ref().unwrap().handoff_file().as_fd(),
     ];
     let args = descriptors
         .iter()
@@ -1194,6 +1392,7 @@ fn settlement_lock_clone_failure_retains_exclusion_and_returns_reconcile_hint() 
         .unwrap();
     let error = settlement_recovery(
         &mut writer.lease,
+        &mut writer.holder,
         writer.directory.try_clone().unwrap(),
         Err(FsError::Io {
             operation: "clone directory",
@@ -1241,6 +1440,7 @@ fn settlement_lock_clone_failure_retains_exclusion_and_returns_reconcile_hint() 
 #[test]
 fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
     let message = LaunchMessage {
+        resource_sample_interval_ms: None,
         publication_values: provenant_os::exec::SecretValues(vec![
             b"ambient-test-credential-3391".to_vec(),
         ]),
@@ -1259,14 +1459,6 @@ fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
         binding: StoredWriterBinding::ReadOnly {
             extra: Default::default(),
         },
-        executable_snapshot: ExecutableSnapshot {
-            device: 1,
-            inode: 2,
-            length: 1024,
-            modified_seconds: 1,
-            modified_nanoseconds: 0,
-        },
-        protected_commands: vec!["provenant".into(), "git".into()],
         argv: [
             "/fixture/claude/bin/claude",
             "-p",

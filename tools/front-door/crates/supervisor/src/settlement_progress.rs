@@ -36,6 +36,19 @@ pub struct Journal {
     pub recovery_failures: u32,
     #[serde(default)]
     pub blocking_reason: Option<String>,
+    /// Wall-clock milliseconds when `blocking_reason` was recorded; 0 for a
+    /// reason recorded before stamping existed. A reason is past evidence:
+    /// readers report it with this time, never as a current observation.
+    #[serde(default)]
+    pub blocking_recorded_ms: u64,
+    /// Process ID of the settlement worker or reconcile that recorded
+    /// `blocking_reason`; 0 when unknown.
+    #[serde(default)]
+    pub blocking_recorded_by: u32,
+    /// When settlement began waiting on a contended writer lock; 0 when it is
+    /// not waiting. Bounds how long a lock with no live holder is waited on.
+    #[serde(default)]
+    pub lock_wait_since_ms: u64,
     #[serde(default)]
     pub abandonment: Option<Abandonment>,
     #[serde(default, flatten)]
@@ -56,6 +69,14 @@ pub struct Abandonment {
 }
 
 impl Journal {
+    /// Record why settlement is blocked, stamped with when and by which
+    /// process, so later readers report it as past evidence.
+    pub fn record_blocking(&mut self, reason: String, now_ms: u64) {
+        self.blocking_reason = Some(reason);
+        self.blocking_recorded_ms = now_ms;
+        self.blocking_recorded_by = std::process::id();
+    }
+
     pub fn new(scope: Scope) -> Self {
         Self {
             schema_version: 1,
@@ -69,6 +90,9 @@ impl Journal {
             retry_after_ms: 0,
             recovery_failures: 0,
             blocking_reason: None,
+            blocking_recorded_ms: 0,
+            blocking_recorded_by: 0,
+            lock_wait_since_ms: 0,
             abandonment: None,
             extra: Default::default(),
         }
@@ -105,7 +129,12 @@ pub(crate) fn terminal_failed(attempt: &Directory, scope: Scope, reason: &str) -
         end -= 1;
     }
     reason.truncate(end);
-    journal.blocking_reason = Some(reason);
+    let now_ms = clock
+        .wall_now()
+        .ok()
+        .and_then(|time| u64::try_from(time.unix_millis()).ok())
+        .unwrap_or(0);
+    journal.record_blocking(reason, now_ms);
     custody::write_record(attempt, FILE, &journal, PublishMode::Replace)?.require_durable()?;
     Ok(())
 }

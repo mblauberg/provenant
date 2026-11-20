@@ -23,17 +23,26 @@ pub(crate) fn ensure_supported() -> io::Result<()> {
 
 pub(crate) struct Watch<'a>(PhantomData<BorrowedFd<'a>>);
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ProcessWatches {
+    pub(crate) added: bool,
+    pub(crate) gone: bool,
+    pub(crate) failures: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReactorEvent {
     pub(crate) supervisor_signal: bool,
     pub(crate) cancel_changed: bool,
     pub(crate) cancel_watch_failed: bool,
     pub(crate) process_changed: bool,
     pub(crate) process_overflow: bool,
-    pub(crate) io_ready: bool,
 }
 
-pub(crate) struct GuardianReactor;
+pub(crate) struct GuardianReactor {
+    // No reactor can be installed on an unsupported platform.
+    never: Infallible,
+}
 impl GuardianReactor {
     pub(crate) fn watch_cancellation_directory(
         &mut self,
@@ -42,7 +51,7 @@ impl GuardianReactor {
         Err(unsupported())
     }
 
-    pub(crate) fn watch_processes(&mut self, _: &BTreeSet<i64>) -> io::Result<(bool, usize)> {
+    pub(crate) fn watch_processes(&mut self, _: &BTreeSet<i64>) -> io::Result<ProcessWatches> {
         Err(unsupported())
     }
     pub(crate) fn install() -> io::Result<Self> {
@@ -53,8 +62,24 @@ impl GuardianReactor {
         &mut self,
         _watches: &[Option<Watch<'_>>],
         _timeout: Duration,
-    ) -> io::Result<ReactorEvent> {
-        Err(unsupported())
+    ) -> io::Result<bool> {
+        match self.never {}
+    }
+
+    pub(crate) fn pause(&mut self, _timeout: Duration) {
+        match self.never {}
+    }
+
+    pub(crate) fn take_events(&mut self) -> ReactorEvent {
+        match self.never {}
+    }
+
+    pub(crate) fn pending(&self) -> &ReactorEvent {
+        match self.never {}
+    }
+
+    pub(crate) fn signalled(&self) -> bool {
+        match self.never {}
     }
 }
 

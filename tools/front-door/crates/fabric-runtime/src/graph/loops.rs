@@ -694,6 +694,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 repair_growth: None,
                 review_verdict_correction_refused: None,
                 provisioned_source: None,
+                provisioned_owner: None,
                 warnings: Vec::new(),
                 fragment: None,
                 handoff: None,

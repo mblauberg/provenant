@@ -1,3 +1,29 @@
+/// Every launch-input refusal in the graph, peer, owner and unified paths names
+/// its field. A bare `InvalidInput` has no field to repair, so the paths that
+/// reject graph input must build their refusals with `FacadeError::field` or a
+/// typed detail, never with an empty one.
+// Spec: docs/specs/run-launch.md#writer-binding
+#[test]
+fn graph_input_refusals_name_their_field() {
+    let bare = ["InvalidInput { ", "detail: None }"].concat();
+    for (path, source) in [
+        ("src/fabric.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric.rs"))),
+        ("src/fabric/graph_execution.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric/graph_execution.rs"))),
+        ("src/fabric/graph_inputs.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric/graph_inputs.rs"))),
+        ("src/fabric/owner.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric/owner.rs"))),
+        ("src/fabric/peer.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric/peer.rs"))),
+        ("src/fabric/unified.rs", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/fabric/unified.rs"))),
+    ] {
+        let unnamed: Vec<usize> = source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains(&bare))
+            .map(|(index, _)| index + 1)
+            .collect();
+        assert!(unnamed.is_empty(), "{path} has an unnamed refusal at lines {unnamed:?}");
+    }
+}
+
 #[cfg(test)]
 #[test]
 fn peer_remote_base_pins_a_commit_reachable_from_the_remote()
@@ -591,6 +617,8 @@ pub(crate) mod peer_tests {
         assert!(std::panic::catch_unwind(|| assert_one_test_ran("case", b"running 0 tests\n")).is_err());
     }
 
+    const HOST_TEST_CEILING: std::time::Duration = std::time::Duration::from_secs(120);
+
     pub(crate) fn host_test(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
         if !provenant_cli::fabric::in_lane() {
             return Ok(false);
@@ -618,13 +646,10 @@ pub(crate) mod peer_tests {
             environment.push(("HOME".into(), fixture_home.path().as_os_str().to_owned()));
         }
         let cwd = std::env::current_dir()?;
-        // The graph-controls fixture now provisions and replays four variants.
-        let timeout = if name.ends_with("graph_run_controls_reach_the_sealed_attempt") {
-            120
-        } else {
-            30
-        };
-        let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(timeout));
+        // A hang ceiling, not a latency budget: the fixtures provision real
+        // repositories, so their duration scales with host load. A per-test
+        // table of longer ceilings only moved the flake to the next test.
+        let mut options = ExecOptions::new(&argv, &cwd, HOST_TEST_CEILING);
         options.env = Some(&environment);
         let output = SystemExecutor::new(1)?.execute(options)?;
         // Keep native-backend skip evidence visible through host isolation.

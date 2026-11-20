@@ -415,11 +415,13 @@ fn prepared_git_binding_is_not_ambient_for_every_adapter() -> Result<(), Provide
             assert!(bound.is_some(), "{id}");
             if let Some(bound) = bound {
                 assert_eq!(bound.worktree, Path::new("/fixture/repo"));
+                let state = Path::new("/fixture/scratch");
                 for (key, path) in [
-                    ("GIT_DIR", "/fixture/scratch/git-common"),
-                    ("GIT_COMMON_DIR", "/fixture/scratch/git-common"),
-                    ("GIT_WORK_TREE", "/fixture/repo"),
-                    ("GIT_OBJECT_DIRECTORY", "/fixture/scratch/git-objects"),
+                    ("GIT_DIR", state.join("git-common")),
+                    ("GIT_COMMON_DIR", state.join("git-common")),
+                    ("GIT_WORK_TREE", Path::new("/fixture/repo").to_path_buf()),
+                    ("GIT_OBJECT_DIRECTORY", state.join("git-objects")),
+                    ("GIT_INDEX_FILE", state.join("git-common/index")),
                 ] {
                     assert!(
                         spec.env.iter().all(|(name, _)| name != key),
@@ -431,7 +433,7 @@ fn prepared_git_binding_is_not_ambient_for_every_adapter() -> Result<(), Provide
                             .iter()
                             .find(|(name, _)| name == key)
                             .map(|(_, value)| value.as_os_str()),
-                        Some(std::ffi::OsStr::new(path)),
+                        Some(path.as_os_str()),
                         "{id} {key}"
                     );
                 }
@@ -447,7 +449,8 @@ fn prepared_git_binding_is_not_ambient_for_every_adapter() -> Result<(), Provide
                     step,
                     SetupStep::WriteFile { path, bytes }
                         if path == Path::new("/fixture/scratch/gitconfig")
-                            && bytes.starts_with(b"[user]\n\tuseConfigOnly = true\n")
+                            && bytes.windows(b"useConfigOnly = true".len()).any(|window| window == b"useConfigOnly = true")
+                            && !bytes.windows(b"worktree-git/fixture".len()).any(|window| window == b"worktree-git/fixture")
                 )));
                 let path = &spec.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
                 assert_eq!(
@@ -457,6 +460,70 @@ fn prepared_git_binding_is_not_ambient_for_every_adapter() -> Result<(), Provide
             }
         }
     }
+    Ok(())
+}
+
+#[test]
+fn worktree_writer_attempts_isolate_git_state_and_config() -> Result<(), ProviderError> {
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+
+    let base = fixture_access_plan(Access::WorktreeWrite, None, false);
+    let prompt = Prompt::new("fixture".into());
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
+    let token = fixture_token();
+    let first = claude::Claude.prepare(fixture_input(
+        &route,
+        &base,
+        &prompt,
+        Path::new("/fixture/repo"),
+        Some(&token),
+    ))?;
+
+    let mut permissions = base.permissions().clone();
+    permissions.scratch.path = Path::new("/fixture/attempt-two/scratch").to_path_buf();
+    let second_plan = ConfinedPlan::new(PlanRequest {
+        scope: base.scope(),
+        permissions,
+        codex: CodexPolicy::Clean,
+        extensions: ExtensionPolicy::Deny,
+        agy_state: None,
+    })
+    .unwrap();
+    let mut second_input = fixture_input(
+        &route,
+        &second_plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        Some(&token),
+    );
+    second_input.provenant.attempt = provenant_core::AttemptId::from_bytes([8; 16]);
+    let second = claude::Claude.prepare(second_input)?;
+
+    let value = |spec: &LaunchSpec, name: &str| {
+        spec.git_wrapper
+            .bound
+            .as_ref()
+            .and_then(|binding| binding.env.iter().find(|(key, _)| key == name))
+            .map(|(_, value)| value.as_os_str().to_owned())
+            .expect("bound Git environment value")
+    };
+    for name in ["GIT_DIR", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_INDEX_FILE"] {
+        assert_ne!(value(&first, name), value(&second, name), "{name}");
+    }
+    assert_ne!(
+        first
+            .env
+            .iter()
+            .find(|(key, _)| key == "GIT_CONFIG_GLOBAL")
+            .map(|(_, value)| value),
+        second
+            .env
+            .iter()
+            .find(|(key, _)| key == "GIT_CONFIG_GLOBAL")
+            .map(|(_, value)| value),
+        "attempt Git configuration remains private"
+    );
     Ok(())
 }
 
@@ -588,9 +655,10 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
             .is_some_and(|spec| spec.launch.write)
     }) {
         let id = entry.adapter.id();
-        // Share immutable repository/submodule setup; each adapter owns its
-        // scratch Git metadata and a distinct publishing ref.
+        // Share immutable repository/submodule setup; each adapter owns all
+        // Git metadata in its attempt scratch and a distinct publishing ref.
         let scratch = root.join(format!("scratch-{id}"));
+        let shared_git = root.join(format!("shared-git-{id}"));
         let published = format!("refs/heads/published-{id}");
         let base = fixture_access_plan(
             access,
@@ -612,6 +680,10 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
             permissions.read_only = None;
             let mut mode = serde_json::to_value(&permissions.mode)?;
             mode["authority"]["common_git_dir"] = serde_json::to_value(repo.join(".git"))?;
+            mode["authority"]["git_state"] = serde_json::json!({
+                "path": shared_git,
+                "scope": "subtree"
+            });
             permissions.mode = serde_json::from_value(mode)?;
         }
         let plan = ConfinedPlan::new(PlanRequest {
@@ -634,18 +706,25 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
         );
         input.provenant.git = &git;
         let spec = entry.adapter.prepare(input)?;
+        let writer = access == Access::WorktreeWrite;
+        let lane_git_common = scratch.join("git-common");
+        let lane_git_objects = scratch.join("git-objects");
         for step in &spec.setup {
             match step {
                 SetupStep::CreateDir(path)
-                    if path.starts_with(scratch.join("git-objects"))
+                    if path.starts_with(lane_git_objects.clone())
                         || path == &scratch.join("bin") =>
                 {
                     std::fs::create_dir_all(path).unwrap()
                 }
                 SetupStep::WriteFile { path, bytes }
-                    if path.starts_with(scratch.join("git-objects")) =>
+                    if path.starts_with(lane_git_objects.clone()) =>
                 {
                     std::fs::write(path, bytes).unwrap()
+                }
+                SetupStep::WriteFile { path, bytes } if path == &scratch.join("gitconfig") => {
+                    std::fs::create_dir_all(path.parent().expect("Git config parent")).unwrap();
+                    std::fs::write(path, bytes).unwrap();
                 }
                 SetupStep::WriteExecutable { path, bytes } if path == &scratch.join("bin/git") => {
                     std::fs::write(path, bytes).unwrap();
@@ -655,7 +734,7 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
             }
         }
         {
-            let objects = scratch.join("git-objects");
+            let objects = &lane_git_objects;
             std::fs::create_dir_all(objects.join("info"))?;
             std::fs::write(
                 objects.join("info/alternates"),
@@ -669,14 +748,37 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
                         .replace('\n', "\\n")
                 ),
             )?;
-            let private_common = scratch.join("git-common");
+            let private_common = &lane_git_common;
             std::fs::create_dir_all(private_common.join("objects"))?;
             std::fs::create_dir_all(private_common.join("refs"))?;
             std::fs::write(
                 private_common.join("config"),
-                std::fs::read(repo.join(".git/config"))?,
+                b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n",
             )?;
             std::fs::write(private_common.join("HEAD"), b"ref: refs/heads/linked\n")?;
+            std::fs::write(
+                private_common.join("config"),
+                std::fs::read(repo.join(".git/config"))?,
+            )?;
+            if writer {
+                let worktree_config = host_git(
+                    &linked,
+                    &[
+                        "rev-parse".as_ref(),
+                        "--git-path".as_ref(),
+                        "config.worktree".as_ref(),
+                    ],
+                );
+                let worktree_config = PathBuf::from(std::str::from_utf8(&worktree_config)?.trim());
+                let worktree_config = if worktree_config.is_absolute() {
+                    worktree_config
+                } else {
+                    linked.join(worktree_config)
+                };
+                if worktree_config.is_file() {
+                    std::fs::copy(&worktree_config, private_common.join("config.worktree"))?;
+                }
+            }
             let index = host_git(
                 &linked,
                 &[
@@ -873,10 +975,7 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
         let oid = lane_git(&["hash-object".as_ref(), "-w".as_ref(), input.as_os_str()]);
         let oid = std::str::from_utf8(&oid)?.trim();
         let relative = PathBuf::from(&oid[..2]).join(&oid[2..]);
-        assert!(
-            scratch.join("git-objects").join(&relative).is_file(),
-            "{id}"
-        );
+        assert!(lane_git_objects.join(&relative).is_file(), "{id}");
         assert!(!repo.join(".git/objects").join(&relative).exists(), "{id}");
         if access == Access::WorktreeWrite {
             std::fs::write(linked.join("lane-blob"), "private committed blob")?;
@@ -896,10 +995,7 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
             let head = lane_git(&["rev-parse".as_ref(), "HEAD".as_ref()]);
             let head = std::str::from_utf8(&head)?.trim();
             let relative = PathBuf::from(&head[..2]).join(&head[2..]);
-            assert!(
-                scratch.join("git-objects").join(&relative).is_file(),
-                "{id}"
-            );
+            assert!(lane_git_objects.join(&relative).is_file(), "{id}");
             assert!(!repo.join(".git/objects").join(&relative).exists(), "{id}");
             lane_git(&["cat-file".as_ref(), "-e".as_ref(), "HEAD^{commit}".as_ref()]);
             assert_eq!(
