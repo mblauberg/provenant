@@ -400,6 +400,15 @@ pub struct CargoBuildProfile {
     pub debug: String,
 }
 
+impl Default for CargoBuildProfile {
+    fn default() -> Self {
+        Self {
+            incremental: "0".into(),
+            debug: "line-tables-only".into(),
+        }
+    }
+}
+
 impl CargoBuildProfile {
     pub fn environment(&self) -> [(OsString, OsString); 2] {
         [

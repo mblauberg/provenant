@@ -102,6 +102,16 @@ the value and its source. A `shared` value from an older release is reported by
 `provenant config check` and the default applies; `provenant gc --apply`
 removes its old directories.
 
+The lane's `CARGO_INCREMENTAL` and `CARGO_PROFILE_DEV_DEBUG` defaults come from
+one settings source: `cargo_incremental` and `cargo_debug` under
+`[domains.fabric.lanes]`. `LaneBuildSettings` resolves them once per launch and
+the host's seed build resolves the same values the same way, so both compile
+with identical debuginfo and incremental settings. A value already present in
+the lane environment takes precedence in both. `provenant config show --full`
+shows the effective values and their sources. Changing a default affects only
+future builds: an existing target keeps the artifacts it was built with, so the
+change reclaims no space there until that target is rebuilt or removed.
+
 To build warm in a checkout outside a lane, seed its private target and use it:
 
 ```sh
