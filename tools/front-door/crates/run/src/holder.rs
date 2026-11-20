@@ -379,6 +379,117 @@ mod identity_policy_tests {
         }
         Ok(())
     }
+
+    // Spec: docs/specs/run-settlement.md#identity-mismatch-keeps-writer-work
+    #[test]
+    fn first_settlement_keeps_a_writers_commit_under_a_mismatched_identity()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+
+        let fixture = PrepareFixture::new()?;
+        let execution = registered_landed_writer_fixture(&fixture)?;
+        let (clock, cancel) = (crate::tests::clock(), CancelToken::new());
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&execution, &call)?;
+        let mut run = crate::tests::input();
+        run.request.task.writer = Some(fixture.writer.clone());
+        store.create(&run, &call)?;
+        let id = run.attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let scope = RunStore::scope(&record);
+        let attempt = store.attempt_dir(id, false)?;
+        let mut launch = crate::prepare_writer(
+            &fixture.writer,
+            execution.state_root.as_path(),
+            execution.project_id,
+        )?;
+        launch.snapshot(
+            execution.state_root.as_path(),
+            &attempt,
+            scope,
+            &Policy::default(),
+        )?;
+        let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+        std::fs::create_dir_all(&candidate)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        crate::objects::prepare_bound(
+            &git,
+            launch.worktree.repo(),
+            &attempt,
+            &candidate,
+            launch.branch.as_str(),
+            launch.base,
+        )?;
+        let pin = crate::objects::import_pin(scope.attempt, launch.base);
+        fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
+        // The writer committed before it exited, so its head moved past base.
+        // This is the evidence terminal settlement pins and seals below.
+        fixture.commit(&fixture.writer.worktree, "committed work")?;
+        let head =
+            crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?;
+        assert_ne!(head, launch.base, "fixture must produce a moved head");
+        // The bound private source is a snapshot taken before the commit, so
+        // advance its branch ref to the committed head that settlement pins.
+        std::fs::write(
+            candidate.join("git-common").join(launch.branch.as_str()),
+            format!("{head}\n"),
+        )?;
+        let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+        let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+            directory.try_clone()?,
+            scope,
+            binding,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        drop(provenant_supervisor::fixture::bind_writer_attempt(
+            lease, &attempt,
+        )?);
+        crate::artifacts::seal(
+            &attempt,
+            "launch.json",
+            &crate::db::bytes(&serde_json::json!({
+                "schema_version": 1,
+                "scope": scope,
+                "requester": execution.actor_id,
+            }))?,
+            RECORD_LIMIT,
+        )?;
+        let mut observed = crate::tests::exit();
+        observed.scope = scope;
+        crate::dispatch_tests::seal_exit(&store, &observed)?;
+        let mismatched = RouteRecord {
+            model: Some("fixture/other".into()),
+            ..crate::tests::route()
+        };
+        let fake = crate::dispatch_tests::Fake::with_observed(Some(mismatched), None);
+        let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
+        let AttemptState::Terminal {
+            outcome,
+            terminal_cause,
+            reason,
+            ..
+        } = &finished.state
+        else {
+            return Err("first settlement must be terminal".into());
+        };
+        assert_eq!(*outcome, Outcome::ReviewRequired, "reason: {reason:?}");
+        assert_eq!(*terminal_cause, Some(TerminalCause::IdentityMismatch));
+        let reason = reason.as_deref().ok_or("mismatch reason")?;
+        assert!(reason.contains("fixture/model"), "{reason}");
+        assert!(reason.contains("fixture/other"), "{reason}");
+        assert!(reason.contains(&head.to_string()), "{reason}");
+        Ok(())
+    }
 }
 
 fn account_directories(
@@ -2693,14 +2804,6 @@ impl RunStore {
             return Err(RunError::Validation("request changed after launch"));
         }
         let task = request.task;
-        // A writer's sealed head is the proof that it produced commits. Keep
-        // it before the identity decision so a mismatch can preserve the work
-        // instead of failing a lane that already did its job.
-        let committed_head = if task.writer.is_some() {
-            writer_committed_head(attempt, settlement.as_ref())?
-        } else {
-            None
-        };
         // A stop at the runtime deadline is a typed timeout, whatever partial
         // output the provider left, and the lane stays resumable.
         let typed_deadline = decoded.outcome == Outcome::TimedOut
@@ -3292,6 +3395,15 @@ impl RunStore {
                 decoded.reason = Some("provider result is empty or incomplete".into());
             }
         }
+        // A writer's head is pinned and sealed by terminal settlement above.
+        // Read it only after that call so the first settlement decides identity
+        // from the head that was actually committed, not from absent
+        // pre-terminal evidence; a mismatch then preserves the work for review.
+        let committed_head = if task.writer.is_some() {
+            writer_committed_head(attempt, settlement.as_ref())?
+        } else {
+            None
+        };
         if matches!(
             decoded.outcome,
             Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
