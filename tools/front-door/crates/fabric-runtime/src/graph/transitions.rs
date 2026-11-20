@@ -1756,7 +1756,22 @@ pub(super) fn record_separation(progress: &mut NodeProgress, record: FamilySepar
     progress.separation = Some(record);
 }
 
-pub(super) fn clear_settled_pause(checkpoint: &mut GraphCheckpoint) -> bool {
+pub(super) fn clear_settled_pause(
+    checkpoint: &mut GraphCheckpoint,
+    expanded: &GraphDocument,
+    plan: &PlannedGraph,
+    limits: &crate::config::GraphLimits,
+) -> bool {
+    // A structural-limit pause is durable admission state, not a settlement
+    // report. Settlement under a lowered limit must not clear it: the graph is
+    // still over the host limit and stays paused until the limit is raised.
+    // This only preserves a pause already saved while the graph was live; a
+    // fully settled graph does not acquire a new pause here (#3558).
+    if checkpoint.pause_cause() == Some(PauseCause::StructuralLimit)
+        && structural_limit(expanded, plan, limits).is_some()
+    {
+        return false;
+    }
     if checkpoint.nodes.iter().all(|node| node.state.settled())
         && !recovery_pending(checkpoint)
         && checkpoint

@@ -2882,8 +2882,9 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
             // settlement: returning here would leave its node running forever,
             // and the live node would in turn keep the structural pause in
             // place. Observing under the pause is already the non-resume
-            // behaviour; the pause is refreshed again after settlement and
-            // only clears when the whole graph settles (#3558).
+            // behaviour; the saved pause survives settlement while the graph
+            // is still over the limit and clears only once it is back within
+            // limits (#3558).
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
         if structural_pause.is_none() {
@@ -3540,7 +3541,7 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
             &mut stopped_children,
         )?;
         loops::refresh_pause(&mut checkpoint);
-        if transitions::clear_settled_pause(&mut checkpoint) {
+        if transitions::clear_settled_pause(&mut checkpoint, &expanded, &plan, limits) {
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
         // Close asks only after an obsolete pause is cleared, so its ask closes too.
