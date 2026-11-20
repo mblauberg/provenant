@@ -2783,7 +2783,9 @@ mod tests {
         };
         let warning = warn_live_record_change(&roots, &context)
             .expect("a format change with live attempts warns");
-        assert!(warning.contains("format 0 → 1"), "{warning}");
+        let current = provenant_records::LIVE_RECORD_FORMAT;
+        let change = format!("format {} → {current}", current - 1);
+        assert!(warning.contains(&change), "{warning}");
         assert!(warning.contains("live attempts:"), "{warning}");
         assert!(warning.contains(&attempt.to_string()), "{warning}");
         assert!(warning.contains("drain them"), "{warning}");
