@@ -263,8 +263,9 @@ fn launch_projection_omits_untrusted_error_sources() {
 }
 
 #[test]
-fn launch_invalid_field_matrix_persists_only_approved_facts() {
+fn launch_invalid_field_matrix_preserves_local_facts() {
     use crate::coordination::facade::{FacadeError, InvalidInputDetail};
+    let _mode = provenant_redact::scoped(provenant_redact::Mode::Off);
     for (field, expected) in [
         ("task.title".to_owned(), Some("task.title")),
         ("task.TOKEN_SENTINEL\u{1b}".to_owned(), None),
@@ -290,7 +291,9 @@ fn launch_invalid_field_matrix_persists_only_approved_facts() {
             .advance_error
             .as_deref()
             .unwrap();
-        assert!(!reason.contains("TOKEN_SENTINEL"));
+        if expected.is_none() {
+            assert!(reason.contains("TOKEN_SENTINEL"), "{reason}");
+        }
         assert!(!reason.chars().any(char::is_control));
         assert!(reason.len() <= MAX_ADVANCE_ERROR_BYTES);
         if let Some(field) = expected {

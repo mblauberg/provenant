@@ -4936,6 +4936,8 @@ pub(super) fn prepare_candidates_inner(
         {
             push_launch_warning(&mut route, advisory);
         }
+        // The record was created before launch preparation added diagnostics.
+        provider.launch_warnings = route.diagnostics.launch_warnings.clone();
         // Install on the host only once the head, route and lane setup are
         // known to be usable, and before the sandbox is entered.
         let dependency_event = match &writer {
