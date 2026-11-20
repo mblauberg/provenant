@@ -118,6 +118,8 @@ struct SeedQueue {
     launch_at: Option<WallTime>,
     active_at: Option<WallTime>,
     retry_at: Option<WallTime>,
+    #[serde(default)]
+    retry_attempt: u32,
 }
 
 fn publish<T: Serialize>(
@@ -582,6 +584,13 @@ fn merge_seed_requests(left: Option<SeedRequest>, right: SeedRequest) -> SeedReq
     SeedRequest::busy(keys.into_iter().take(MAX_BUSY_SEED_PROJECTS).collect())
 }
 
+/// Delay the first retry by one minute, doubling to a maximum of one hour.
+fn retry_delay(attempt: u32) -> i64 {
+    SEED_WORK_RETRY_MICROS
+        .saturating_mul(1_i64 << attempt.min(6))
+        .min(3_600_000_000)
+}
+
 impl SeedQueue {
     fn enqueue(&mut self, request: SeedRequest, now: WallTime) {
         if matches!(&request.scope, SeedScope::Full) {
@@ -594,7 +603,8 @@ impl SeedQueue {
 
     fn promote_due_retry(&mut self, now: WallTime) {
         if self.retry_at.is_some_and(|at| {
-            now.as_micros().saturating_sub(at.as_micros()) >= SEED_WORK_RETRY_MICROS
+            now.as_micros().saturating_sub(at.as_micros())
+                >= retry_delay(self.retry_attempt.saturating_sub(1))
         }) {
             if let Some(retry) = self.retry.take() {
                 self.pending = Some(merge_seed_requests(self.pending.take(), retry));
@@ -696,15 +706,13 @@ fn truncate_bytes(message: String, limit: usize) -> String {
 /// Find delayed busy retries and abandoned pending or active jobs.
 fn seed_retry_due(directory: &Directory, now: WallTime) -> bool {
     read_seed_queue(directory).is_ok_and(|queue| {
-        [
-            queue.retry_at,
-            queue.pending_at,
-            queue.launch_at,
-            queue.active_at,
-        ]
-        .into_iter()
-        .flatten()
-        .any(|at| now.as_micros().saturating_sub(at.as_micros()) >= SEED_WORK_RETRY_MICROS)
+        queue.retry_at.is_some_and(|at| {
+            now.as_micros().saturating_sub(at.as_micros())
+                >= retry_delay(queue.retry_attempt.saturating_sub(1))
+        }) || [queue.pending_at, queue.launch_at, queue.active_at]
+            .into_iter()
+            .flatten()
+            .any(|at| now.as_micros().saturating_sub(at.as_micros()) >= SEED_WORK_RETRY_MICROS)
     })
 }
 
@@ -1204,9 +1212,11 @@ fn finish_seed_job_with_lock(
     queue.active_at = None;
     queue.launch_at = None;
     if outcome.busy_project_keys.is_empty() {
+        queue.retry_attempt = 0;
         queue.retry = None;
         queue.retry_at = None;
     } else {
+        queue.retry_attempt = queue.retry_attempt.saturating_add(1);
         let retry = SeedRequest::busy(outcome.busy_project_keys);
         match queue.pending.take() {
             Some(pending) if matches!(&pending.scope, SeedScope::Full) => {
@@ -2572,6 +2582,20 @@ mod tests {
             &directory,
             WallTime::from_micros(stale.as_micros() + SEED_WORK_RETRY_MICROS).unwrap()
         ));
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn retry_delay_doubles_and_caps_at_one_hour() {
+        let delays: Vec<_> = (0..8).map(super::retry_delay).collect();
+        assert_eq!(
+            delays,
+            vec![60, 120, 240, 480, 960, 1920, 3600, 3600]
+                .into_iter()
+                .map(|seconds| seconds * 1_000_000)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(super::retry_delay(u32::MAX), 3_600_000_000);
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed
