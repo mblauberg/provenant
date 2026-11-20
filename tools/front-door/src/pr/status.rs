@@ -8,6 +8,7 @@ use std::path::Path;
 
 pub(crate) mod batch;
 mod ci;
+mod membership;
 
 /// Why a PR whose CI never reported checks stayed pending. Shared by the
 /// graph gate's CI summary and by `wait --pr` at a timeout.
@@ -63,6 +64,9 @@ struct Check {
 struct FailedCheck {
     name: String,
     url: Option<String>,
+    /// The observer bucket that produced this failure: `fail` or `cancel`.
+    #[serde(default)]
+    bucket: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +97,11 @@ pub(crate) struct Line {
     /// Links from the same observation, retained for completion reports.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     failed_check_details: Vec<FailedCheck>,
+    /// The shared per-job digest for this head, when checks failed. The same
+    /// report `ci failures` builds, embedded so status and wait never point at
+    /// a digest they do not show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) failures: Option<crate::ci::Report>,
     #[serde(default, deserialize_with = "display_default")]
     merge: String,
     #[serde(default)]
@@ -116,6 +125,17 @@ pub(crate) struct Line {
     pub(crate) actions_grace: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     error: Option<String>,
+    /// The open batch this pull request was merged into, when Git history
+    /// proves its head is carried there. Its own cancelled CI is superseded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) batch: Option<membership::Link>,
+    /// The members and file attribution a batch row reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) batch_detail: Option<membership::BatchDetail>,
+    /// Shared history with a batch that does not prove membership. Reported
+    /// without a batch claim so the member's own CI stays visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) batch_uncertain: Option<String>,
 }
 fn display_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
 where
@@ -185,6 +205,29 @@ impl Line {
         } else {
             "ready"
         }
+    }
+    /// The class a `pr status` summary reports. A member carried by a batch
+    /// is a state report, not a failure its own cancelled runs can cause.
+    pub(crate) fn display_class(&self) -> &'static str {
+        if self.batch.is_some() && self.checks_failed.unwrap_or(0) == 0 {
+            "superseded"
+        } else {
+            self.class()
+        }
+    }
+    /// A batch supersedes the cancelled checks on its member's head, not real
+    /// failures: only cancellations are dropped, so an actual failure stays
+    /// visible. The batch's CI is reported alongside instead.
+    pub(crate) fn suppress_own_ci(&mut self) {
+        self.failed_check_details
+            .retain(|check| check.bucket != "cancel");
+        self.failing_checks = self
+            .failed_check_details
+            .iter()
+            .map(|check| check.name.clone())
+            .collect();
+        self.checks_failed = Some(self.failed_check_details.len());
+        self.batch_uncertain = None;
     }
     /// What a waiter takes from this pull request: `Some(true)` once it
     /// merged or its checks passed, `Some(false)` once they failed or it
@@ -273,9 +316,75 @@ impl Line {
         if self.actions_grace {
             line.push_str(" awaiting Actions runs");
         }
+        if let Some(link) = &self.batch {
+            line.push_str(&link.suffix());
+        }
+        if let Some(detail) = &self.batch_detail {
+            line.push_str(&detail.suffix());
+        }
+        if let Some(note) = &self.batch_uncertain {
+            line.push_str(note);
+        }
         line.push_str(&self.cause_suffix());
         line
     }
+
+    /// Compact digest lines for this head's failed jobs, empty when nothing
+    /// failed or the digest could not be read.
+    pub(crate) fn digest_rows(&self) -> Vec<String> {
+        self.failures
+            .as_ref()
+            .map(crate::ci::digest_rows)
+            .unwrap_or_default()
+    }
+
+    /// Full digest text for this head, used by `--full` output.
+    pub(crate) fn digest_human(&self) -> String {
+        self.failures
+            .as_ref()
+            .map(crate::ci::digest_human)
+            .unwrap_or_default()
+    }
+
+    /// Read the shared per-job digest for a head whose checks failed. An
+    /// unreadable digest stays absent; the status line remains complete.
+    pub(crate) fn attach_failure_digest(
+        &mut self,
+        state: &Path,
+        project: &Path,
+        request: &provenant_config::ports::Request,
+    ) {
+        if self.failed_check_details.is_empty() || self.failures.is_some() {
+            return;
+        }
+        let checks: Vec<batch::RawCheck> = self
+            .failed_check_details
+            .iter()
+            .map(|check| batch::RawCheck {
+                name: check.name.clone(),
+                bucket: "fail".to_owned(),
+                url: check.url.clone(),
+            })
+            .collect();
+        let Some(repository) = checks
+            .iter()
+            .find_map(|check| check.url.as_deref().and_then(crate::ci::repository_of))
+            .or_else(|| batch::repository(state, project).ok())
+        else {
+            return;
+        };
+        self.failures = crate::ci::digest(
+            state,
+            project,
+            &repository,
+            self.number,
+            &self.head,
+            &checks,
+            request,
+        )
+        .ok();
+    }
+
     /// The diagnosis a waiter prints for a head whose checks never started.
     pub(crate) fn cause_suffix(&self) -> String {
         match (&self.cause, &self.next) {
@@ -918,8 +1027,10 @@ fn status_line(number: u64, view: View, checks: Option<&[super::observer::Check]
             .map(|check| FailedCheck {
                 name: display_check_name(&check.name),
                 url: check.url.as_deref().and_then(display_check_url),
+                bucket: check.bucket.clone(),
             })
             .collect(),
+        failures: None,
         merge: word(&view.merge),
         review: word(view.review.as_deref().unwrap_or_default()),
         state: view.state,
@@ -930,6 +1041,9 @@ fn status_line(number: u64, view: View, checks: Option<&[super::observer::Check]
         awaiting: None,
         actions_grace: false,
         error: None,
+        batch: None,
+        batch_detail: None,
+        batch_uncertain: None,
     }
 }
 
@@ -995,7 +1109,9 @@ fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
         .map(|(index, &number)| (number, index))
         .collect();
     lines.sort_by_key(|(number, _)| order.get(number).copied().unwrap_or(usize::MAX));
-    lines.into_iter().map(|(_, line)| line).collect()
+    let mut lines: Vec<Line> = lines.into_iter().map(|(_, line)| line).collect();
+    membership::annotate(project, state, &mut lines);
+    lines
 }
 
 /// The per-PR REST read, falling back to one GraphQL query when REST itself
@@ -1027,6 +1143,7 @@ fn rest_line(project: &Path, state: &Path, number: u64, try_graphql: bool) -> Li
                 failing_checks: Vec::new(),
                 pending_checks: Vec::new(),
                 failed_check_details: Vec::new(),
+                failures: None,
                 merge: "unknown".into(),
                 review: "unknown".into(),
                 cause: None,
@@ -1034,6 +1151,9 @@ fn rest_line(project: &Path, state: &Path, number: u64, try_graphql: bool) -> Li
                 awaiting: None,
                 actions_grace: false,
                 error: Some(provenant_cli::bounded_text(&error.to_string(), 256)),
+                batch: None,
+                batch_detail: None,
+                batch_uncertain: None,
             }
         }
     }
@@ -1060,7 +1180,12 @@ pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
         } else {
             numbers
         };
-        Ok(snapshot(&project, state.as_path(), &numbers))
+        let request = provenant_config::ports::Request::within(std::time::Duration::from_secs(60));
+        let mut lines = snapshot(&project, state.as_path(), &numbers);
+        for line in &mut lines {
+            line.attach_failure_digest(state.as_path(), &project, &request);
+        }
+        Ok(lines)
     })();
     match result {
         Ok(lines) => {
@@ -1079,7 +1204,14 @@ pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
                     }
                 }
             }
-            let text: String = lines.iter().map(|line| line.text() + "\n").collect();
+            let text: String = lines
+                .iter()
+                .map(|line| {
+                    let mut text = line.text() + "\n";
+                    text.push_str(&line.digest_human());
+                    text
+                })
+                .collect();
             let summary = summarise(&lines);
             let outcome = if !lines.is_empty() && lines.iter().all(|line| line.error.is_some()) {
                 Outcome::Unavailable
@@ -1107,6 +1239,7 @@ fn summarise(lines: &[Line]) -> provenant_cli::Summary {
         "review_required",
         "pending",
         "unavailable",
+        "superseded",
         "draft",
         "ready",
         "merged",
@@ -1116,16 +1249,30 @@ fn summarise(lines: &[Line]) -> provenant_cli::Summary {
     .map(|class| {
         (
             class,
-            lines.iter().filter(|line| line.class() == class).count(),
+            lines
+                .iter()
+                .filter(|line| line.display_class() == class)
+                .count(),
         )
     })
     .collect();
     let mut action: Vec<&Line> = lines
         .iter()
-        .filter(|line| order.contains(&line.class()))
+        .filter(|line| order.contains(&line.display_class()))
         .collect();
-    action.sort_by_key(|line| order.iter().position(|class| *class == line.class()));
-    let rows: Vec<String> = action.iter().map(|line| line.text()).collect();
+    action.sort_by_key(|line| {
+        order
+            .iter()
+            .position(|class| *class == line.display_class())
+    });
+    let rows: Vec<String> = action
+        .iter()
+        .flat_map(|line| {
+            let mut rows = vec![line.text()];
+            rows.extend(line.digest_rows());
+            rows
+        })
+        .collect();
     let quiet = lines.len() - action.len();
     let next = match action.first() {
         Some(line) if line.class() == "failing" => {
@@ -1137,7 +1284,7 @@ fn summarise(lines: &[Line]) -> provenant_cli::Summary {
         Some(line) => Some(format!("provenant pr status {} --full", line.number)),
         None => lines
             .iter()
-            .find(|line| line.class() == "ready")
+            .find(|line| line.display_class() == "ready")
             .map(|line| format!("provenant land {} --wait", line.number))
             .or_else(|| Some("provenant status".to_owned())),
     };
@@ -1169,6 +1316,7 @@ mod tests {
             failing_checks: Vec::new(),
             pending_checks: Vec::new(),
             failed_check_details: Vec::new(),
+            failures: None,
             merge: "clean".into(),
             review: "approved".into(),
             cause: None,
@@ -1176,8 +1324,54 @@ mod tests {
             awaiting: None,
             actions_grace: false,
             error: error.map(str::to_owned),
+            batch: None,
+            batch_detail: None,
+            batch_uncertain: None,
         }
     }
+    #[test]
+    fn a_failing_line_reports_the_shared_digest_in_text_and_json() {
+        let mut line = row(1669, "head", None);
+        line.failing_checks = vec!["ci-status".into()];
+        line.failed_check_details = vec![super::FailedCheck {
+            name: "ci-status".into(),
+            url: Some("https://github.com/owner/repo/actions/runs/7".into()),
+            bucket: "fail".into(),
+        }];
+        line.failures = Some(crate::ci::Report {
+            pr: Some(1669),
+            run: None,
+            head: Some("head".into()),
+            runs: vec![crate::ci::RunFailures {
+                run: 7,
+                jobs: vec![crate::ci::JobFailures {
+                    job: "lint".into(),
+                    step: Some("clippy".into()),
+                    class: crate::ci::JobClass::Failed,
+                    unrelated: Vec::new(),
+                    tests: Vec::new(),
+                    errors: vec!["error[E0308]: mismatched types".into()],
+                    truncated: false,
+                }],
+                error: None,
+            }],
+            unlogged: Vec::new(),
+            rerun: None,
+        });
+        let rows = line.digest_rows();
+        assert!(
+            rows.iter().any(|row| row.contains("mismatched types")),
+            "{rows:?}"
+        );
+        let json = serde_json::to_value(&line).expect("line serialises");
+        assert!(
+            json["failures"]["runs"][0]["jobs"][0]["errors"][0]
+                .as_str()
+                .is_some_and(|text| text.contains("mismatched types")),
+            "{json}"
+        );
+    }
+
     #[test]
     fn completion_report_retains_every_failed_check_and_link() {
         let check = |name: &str, bucket: &str, url: &str| super::super::observer::Check {
@@ -1255,6 +1449,122 @@ mod tests {
         assert!(!waiting.text().contains("pending_names="));
     }
 
+    // Spec: docs/specs/cli.md#integration-batch-membership
+    #[test]
+    fn a_superseded_member_renders_the_batch_and_drops_cancelled_failures() {
+        use super::membership::Link;
+        let mut member = row(7, "member-head", None);
+        member.checks_failed = Some(2);
+        member.failing_checks = vec!["ci-status".into(), "real-failure".into()];
+        member.failed_check_details = vec![
+            super::FailedCheck {
+                name: "ci-status".into(),
+                url: Some("https://ci/one".into()),
+                bucket: "cancel".into(),
+            },
+            super::FailedCheck {
+                name: "real-failure".into(),
+                url: Some("https://ci/two".into()),
+                bucket: "fail".into(),
+            },
+        ];
+        member.suppress_own_ci();
+        member.batch = Some(Link {
+            number: Some(9),
+            label: "#9".into(),
+            head: "batch-head".into(),
+            ci: "checks=2/2 fail=0 pending=0".into(),
+            head_moved: false,
+        });
+        let text = member.text();
+        assert!(
+            text.contains(
+                "in batch #9 (head merged); own CI superseded; batch ci=checks=2/2 fail=0 pending=0"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("fail=1 names=real-failure"), "{text}");
+        assert!(!text.contains("names=ci-status"), "{text}");
+        assert_eq!(member.checks_failed, Some(1));
+        assert_eq!(member.failing_checks, ["real-failure"]);
+        assert_eq!(
+            member.display_class(),
+            "failing",
+            "real failures still fail"
+        );
+        let json = serde_json::to_value(&member).unwrap();
+        assert_eq!(json["batch"]["number"], 9);
+        assert_eq!(json["batch"]["head"], "batch-head");
+        let summary = super::summarise(&[member]);
+        assert_eq!(summary.lines[0], "1 PRs: 1 failing");
+        assert_eq!(summary.lines.len(), 2, "the real failure is an action row");
+        assert!(summary.lines[1].contains("fail=1 names=real-failure"));
+    }
+
+    // Spec: docs/specs/cli.md#integration-batch-membership
+    #[test]
+    fn uncertain_ancestry_is_reported_without_claiming_a_batch_or_suppressing_ci() {
+        let mut member = row(7, "member-head", None);
+        member.checks_failed = Some(1);
+        member.failing_checks = vec!["real-failure".into()];
+        member.failed_check_details = vec![super::FailedCheck {
+            name: "real-failure".into(),
+            url: None,
+            bucket: "fail".into(),
+        }];
+        member.batch_uncertain =
+            Some(" batch=#9? shared history only; membership uncertain; own CI retained".into());
+        let text = member.text();
+        assert!(
+            text.contains("batch=#9? shared history only; membership uncertain; own CI retained"),
+            "{text}"
+        );
+        assert!(text.contains("fail=1 names=real-failure"), "{text}");
+        assert!(member.batch.is_none(), "uncertainty is not a batch claim");
+        assert_eq!(member.display_class(), "failing");
+        let json = serde_json::to_value(&member).unwrap();
+        assert!(
+            json["batch_uncertain"]
+                .as_str()
+                .is_some_and(|note| note.contains("#9"))
+        );
+        assert!(json["batch"].is_null());
+    }
+
+    // Spec: docs/specs/cli.md#integration-batch-membership
+    #[test]
+    fn a_batch_row_renders_its_members_and_per_file_attribution() {
+        use super::membership::{BatchDetail, FileOwner, MemberRow};
+        let mut batch = row(9, "batch-head", None);
+        batch.batch_detail = Some(BatchDetail {
+            members: vec![
+                MemberRow {
+                    number: 7,
+                    head_moved: false,
+                },
+                MemberRow {
+                    number: 8,
+                    head_moved: true,
+                },
+            ],
+            files: vec![
+                FileOwner {
+                    path: "src/a.rs".into(),
+                    member: 7,
+                },
+                FileOwner {
+                    path: "src/b.rs".into(),
+                    member: 8,
+                },
+            ],
+        });
+        let text = batch.text();
+        assert!(text.contains("batch_members=7:merged,8:moved"), "{text}");
+        assert!(text.contains("batch_files=src/a.rs:7,src/b.rs:8"), "{text}");
+        let json = serde_json::to_value(&batch).unwrap();
+        assert_eq!(json["batch_detail"]["files"][1]["member"], 8);
+    }
+
     #[test]
     fn complete_wait_keeps_failures_pending_until_all_checks_finish() {
         let mut line = row(1668, "head", None);
@@ -1330,18 +1640,22 @@ mod tests {
             super::FailedCheck {
                 name: "bad\nname\u{1b}[31m".into(),
                 url: Some("https://ci/ok".into()),
+                bucket: "fail".into(),
             },
             super::FailedCheck {
                 name: long_name,
                 url: Some(format!("https://ci/{}", "u".repeat(10_000))),
+                bucket: "fail".into(),
             },
             super::FailedCheck {
                 name: "spaced".into(),
                 url: Some("https://ci/a b".into()),
+                bucket: "cancel".into(),
             },
             super::FailedCheck {
                 name: "scheme".into(),
                 url: Some("javascript:alert(1)".into()),
+                bucket: "fail".into(),
             },
         ];
         let lines = line.failure_lines();

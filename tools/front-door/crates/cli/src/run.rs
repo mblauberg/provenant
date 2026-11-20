@@ -280,6 +280,53 @@ fn command_error(fail: &Fail) -> CommandError {
     }
 }
 
+/// The upstream head a stale read-only checkout should review. `head` is kept
+/// so a launch can name both the tree it would have read and the one it reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadOnlySourceRef {
+    pub commit: provenant_core::GitOid,
+    pub reference: String,
+    pub behind: u64,
+    pub head: provenant_core::GitOid,
+}
+
+/// Resolve the default source of a read-only launch from `source`. Only a
+/// checkout behind its fetched upstream yields a pin; a level or ahead checkout
+/// keeps its local tree. Missing Git evidence is advisory, never a refusal.
+pub fn read_only_source_ref(state: &Path, source: &Path) -> Option<ReadOnlySourceRef> {
+    provider::confinement::read_only_source_ref(state, source)
+}
+
+/// The warning a stale read-only checkout carries when an upstream source is
+/// pinned, naming the ref and commit the lane will read and the local head it
+/// replaces.
+pub fn read_only_source_warning(source: &Path, selected: &ReadOnlySourceRef) -> String {
+    format!(
+        "{} is {} commit{} behind {}; read-only lane will read {} ({}) instead of local {} because the checkout is stale",
+        source.display(),
+        selected.behind,
+        if selected.behind == 1 { "" } else { "s" },
+        selected.reference,
+        selected.reference,
+        selected.commit,
+        selected.head
+    )
+}
+
+/// The warning for an unpinned read-only launch. The lane still reads the
+/// local checkout; the fetched upstream is only the reason it is stale.
+pub fn read_only_local_checkout_warning(source: &Path, selected: &ReadOnlySourceRef) -> String {
+    format!(
+        "{} is {} commit{} behind {} ({}); read-only lane will read the local checkout ({}) because no upstream source was pinned",
+        source.display(),
+        selected.behind,
+        if selected.behind == 1 { "" } else { "s" },
+        selected.reference,
+        selected.commit,
+        selected.head
+    )
+}
+
 pub fn read_only_checkout_warning(state: &Path, source: &Path) -> Option<String> {
     provider::confinement::read_only_checkout_warning(state, source)
 }

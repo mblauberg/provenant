@@ -6,6 +6,11 @@ use serde::{Deserialize, Serialize};
 /// A newer reading clears a refusal only below this use (95%).
 const CLEAR_HEADROOM_BASIS_POINTS: u64 = 9500;
 
+/// How long a live free-pool refusal may go without a cheap tick probe. This
+/// bounds the check interval independently of a provider's much longer
+/// retry-after; a refusal the probe still confirms keeps its reset.
+pub const FREE_POOL_RECHECK_SECONDS: i64 = 600;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Refusal {
     #[serde(flatten)]
@@ -61,17 +66,25 @@ pub enum RefusalClearSource {
     Reading,
     /// A successful run on the route disproved the refusal.
     Run,
+    /// A successful run on the same free pool disproved its refusal.
+    ObservedSuccess,
     /// The owner cleared it with `provenant quota clear`.
     Manual,
 }
 impl RefusalClearSource {
     /// Every persisted clearing source, for exhaustive format tables.
-    pub const ALL: &[Self] = &[Self::Reading, Self::Run, Self::Manual];
+    pub const ALL: &[Self] = &[
+        Self::Reading,
+        Self::Run,
+        Self::ObservedSuccess,
+        Self::Manual,
+    ];
     /// Stable text for reports and diagnostics.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Reading => "reading",
             Self::Run => "run",
+            Self::ObservedSuccess => "observed_success",
             Self::Manual => "manual",
         }
     }
@@ -614,6 +627,45 @@ fn matches_pool(adapter: &str, window: &str, pool: &str) -> bool {
         || provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
             spec.grouped_quota_pools && spec.window_serves_pool(window, Some(pool))
         })
+}
+
+/// When a live free-pool refusal next warrants a cheap probe. The adapter must
+/// register both a free pool and a quota probe; without a probe there is no
+/// cheap way to re-check, so the refusal keeps its provider reset. The last
+/// attempt anchors the interval, so a probe that confirms the refusal buys
+/// another bounded window instead of re-probing on every tick.
+pub fn free_pool_recheck_due(record: &AccountRecord) -> Result<Option<i64>, QuotaError> {
+    let Some(spec) = provenant_records::AdapterSpec::get(&record.account.adapter) else {
+        return Ok(None);
+    };
+    if spec.free_pool.is_none() || spec.quota_probe == provenant_records::QuotaProbeKind::None {
+        return Ok(None);
+    }
+    let Some(pool) = free_pool(&record.account.adapter) else {
+        return Ok(None);
+    };
+    let mut due = None;
+    for refusal in record
+        .refusals
+        .iter()
+        .filter(|refusal| refusal.pool.as_deref() == Some(pool))
+    {
+        let observed = record
+            .last_attempt_unix_seconds
+            .map_or(refusal.observed_unix_seconds, |at| {
+                at.max(refusal.observed_unix_seconds)
+            });
+        let expires = refusal.expires_unix_seconds()?;
+        if expires <= observed {
+            continue;
+        }
+        let next = observed
+            .checked_add(FREE_POOL_RECHECK_SECONDS)
+            .ok_or(QuotaError::TimeRange)?
+            .min(expires);
+        due = Some(due.map_or(next, |earlier: i64| earlier.min(next)));
+    }
+    Ok(due)
 }
 
 #[cfg(test)]
@@ -1323,6 +1375,95 @@ mod admission_tests {
         assert_eq!(cleared.cleared_refusals[0].model, model);
         assert_eq!(cleared.cleared_refusals[0].cleared_unix_seconds, 1002);
     }
+
+    #[test]
+    fn observed_success_clearing_records_its_non_manual_source() {
+        assert_eq!(
+            RefusalClearSource::ObservedSuccess.as_str(),
+            "observed_success"
+        );
+        assert!(RefusalClearSource::ALL.contains(&RefusalClearSource::ObservedSuccess));
+        assert_eq!(
+            serde_json::to_value(RefusalClearSource::ObservedSuccess).unwrap(),
+            serde_json::json!("observed_success")
+        );
+        let account = record(QuotaStatus::Available).account;
+        let mut record = AccountRecord::empty(account.clone());
+        record.refusals.push(Refusal {
+            extra: Default::default(),
+            account: account.clone(),
+            model: "free-model".into(),
+            pool: Some("pool".into()),
+            observed_unix_seconds: 100,
+            resets_unix_seconds: Some(900),
+        });
+        let removed = clear_refusals(
+            &mut record,
+            150,
+            RefusalClearSource::ObservedSuccess,
+            |refusal| refusal.pool.as_deref() == Some("pool"),
+        )
+        .unwrap();
+        assert_eq!(removed.len(), 1);
+        assert!(record.refusals.is_empty());
+        assert_eq!(
+            record.cleared_refusals[0].source,
+            RefusalClearSource::ObservedSuccess
+        );
+    }
+
+    #[test]
+    fn free_pool_recheck_is_bounded_and_keeps_a_confirmed_refusal() {
+        let spec = provenant_records::ADAPTER_SPECS
+            .iter()
+            .find(|spec| {
+                spec.free_pool.is_some()
+                    && spec.quota_probe != provenant_records::QuotaProbeKind::None
+            })
+            .expect("free pool adapter with a quota probe");
+        let pool = spec.free_pool.expect("free pool").to_owned();
+        let account = AccountScope {
+            extra: Default::default(),
+            adapter: spec.name.into(),
+            account_key: "key".into(),
+            label: "zen".into(),
+        };
+        let mut record = AccountRecord::empty(account.clone());
+        record.last_attempt_unix_seconds = Some(1000);
+        record.refusals.push(Refusal {
+            extra: Default::default(),
+            account: account.clone(),
+            model: "free-model".into(),
+            pool: Some(pool),
+            observed_unix_seconds: 900,
+            resets_unix_seconds: Some(50_900),
+        });
+        assert_eq!(
+            free_pool_recheck_due(&record).unwrap(),
+            Some(1000 + FREE_POOL_RECHECK_SECONDS)
+        );
+        // A probe that confirms the refusal buys another bounded window; the
+        // provider reset is unchanged.
+        record.last_attempt_unix_seconds = Some(1000 + FREE_POOL_RECHECK_SECONDS);
+        assert_eq!(
+            free_pool_recheck_due(&record).unwrap(),
+            Some(1000 + 2 * FREE_POOL_RECHECK_SECONDS)
+        );
+        assert_eq!(record.refusals[0].resets_unix_seconds, Some(50_900));
+        // Model and account-wide refusals are not free-pool rechecks.
+        let mut scoped = record.clone();
+        scoped.refusals[0].pool = None;
+        assert_eq!(free_pool_recheck_due(&scoped).unwrap(), None);
+        // An adapter with no registered free pool cannot re-check cheaply.
+        let plain = provenant_records::ADAPTER_SPECS
+            .iter()
+            .find(|spec| spec.free_pool.is_none())
+            .expect("adapter without a free pool");
+        let mut no_pool = record.clone();
+        no_pool.account.adapter = plain.name.into();
+        assert_eq!(free_pool_recheck_due(&no_pool).unwrap(), None);
+    }
+
     // Spec: docs/specs/routing.md#unknown-never-means-ready
     #[test]
     fn agy_refusal_revalidates_instead_of_holding_a_multi_day_reset() {

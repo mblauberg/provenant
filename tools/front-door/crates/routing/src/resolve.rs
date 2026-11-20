@@ -2217,14 +2217,26 @@ fn candidate(
         .max_by_key(|(_, _, headroom)| *headroom)
         .or_else(|| evaluated.first());
     let availability = best.map(|(a, _, _)| *a);
+    // Issue #3724: an uncatalogued namespaced model written without its
+    // provider segment is served by none of the adapter's accounts. That is
+    // an unresolved account, not unverified readiness: no amount of quota
+    // probing makes the malformed model eligible. Name the accounts we could
+    // not match in the refusal instead of blaming readiness.
+    let account_unresolved = evaluated.is_empty()
+        && context.catalogue.model(model).is_none()
+        && context
+            .availability
+            .iter()
+            .any(|a| a.adapter == model.adapter());
     let reason = match best {
         Some((_, reason, _)) => reason.clone(),
+        None if account_unresolved => Some(RouteExclusionReason::UnresolvedAccount),
         None => availability_reason(None, context),
     };
     let account = availability.and_then(|a| a.account_key.clone());
     // No account was ready: keep each one's own reason, so a refusal can say
     // which accounts were passed over and why, not only the first one's.
-    let skipped: Vec<_> = evaluated
+    let mut skipped: Vec<_> = evaluated
         .iter()
         .filter_map(|(a, reason, _)| {
             Some(provenant_records::SkippedAccount {
@@ -2234,6 +2246,20 @@ fn candidate(
             })
         })
         .collect();
+    if skipped.is_empty() && account_unresolved {
+        skipped = context
+            .availability
+            .iter()
+            .filter(|a| a.adapter == model.adapter())
+            .filter_map(|a| {
+                Some(provenant_records::SkippedAccount {
+                    extra: Default::default(),
+                    account: a.account_key.clone()?,
+                    reason: RouteExclusionReason::UnresolvedAccount,
+                })
+            })
+            .collect();
+    }
     let readiness = match (reason, availability) {
         (Some(reason), _) => RouteReadiness::Unavailable {
             skipped_accounts: skipped,

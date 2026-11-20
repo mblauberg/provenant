@@ -668,6 +668,7 @@ fn account_evidence_reasons_carry_their_repair_text() {
         Reason::UnknownAvailability,
         Reason::StaleAvailability,
         Reason::UnknownAccount,
+        Reason::UnresolvedAccount,
         Reason::DisclosureDenied,
         Reason::ConfinementUnavailable,
         Reason::UnsupportedEffort,
@@ -695,6 +696,7 @@ fn account_evidence_reasons_carry_their_repair_text() {
             | Reason::UnknownAvailability
             | Reason::StaleAvailability
             | Reason::UnknownAccount
+            | Reason::UnresolvedAccount
             | Reason::DisclosureDenied
             | Reason::ConfinementUnavailable
             | Reason::UnsupportedEffort

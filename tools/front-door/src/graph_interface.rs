@@ -563,6 +563,37 @@ pub(crate) fn run(
     } else {
         provenant_routing::Catalogue::bundled().map_err(|error| cli_input_error(&error.to_string()))
     };
+    // Issue #3724: name a catalogued ID whose provider segment the caller
+    // omitted before dispatch can refuse the malformed model. The launch
+    // preparation repeats this against the effective (discovered) catalogue.
+    if let Some(id) = request
+        .model
+        .as_deref()
+        .and_then(|model| provenant_routing::ModelId::parse(model).ok())
+    {
+        let warning = catalogue
+            .as_ref()
+            .ok()
+            .and_then(|catalogue| catalogue.provider_segment_warning(&id))
+            .or_else(|| {
+                // A discovered exact model is absent from the bundled
+                // catalogue. This read is advisory: it never changes the
+                // catalogue dispatch uses or refuses the request.
+                crate::roots::resolve(
+                    globals,
+                    crate::roots::Workspace::Directory,
+                    crate::roots::Product::Optional,
+                )
+                .ok()
+                .and_then(|resolved| {
+                    provenant_cli::route::effective_catalogue(&resolved.roots).ok()
+                })
+                .and_then(|catalogue| catalogue.provider_segment_warning(&id))
+            });
+        if let Some(warning) = warning {
+            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+        }
+    }
     invoke(
         "run",
         catalogue.and_then(|catalogue| run_input(request, &catalogue)),
@@ -643,6 +674,7 @@ fn run_input(
             ("name", request.name),
             ("template", request.template),
             ("route", request.route),
+            ("source", request.source),
         ] {
             if let Some(value) = value {
                 input[field] = json!(value);
@@ -989,6 +1021,7 @@ mod tests {
             template: None,
             route: None,
             mode: None,
+            source: None,
             worktree: None,
             branch: None,
             base: None,

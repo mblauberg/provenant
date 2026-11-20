@@ -664,6 +664,17 @@ pub(crate) fn persist_capacity_cooldown(
     write_intent(&directory, state_root, &intent, &mut records)
 }
 
+/// The adapter's registered free pool when a successful model draws on it.
+/// Model classification comes from the catalogue and the pool name from the
+/// adapter registry; neither is a literal here.
+fn successful_free_pool(adapter: &str, model: &str) -> Option<String> {
+    let id = provenant_routing::ModelId::parse(model).ok()?;
+    let catalogue = provenant_routing::Catalogue::bundled().ok()?;
+    provenant_routing::free_pools(adapter, || catalogue.is_free_model(&id))
+        .into_iter()
+        .next()
+}
+
 /// Record successful account-scoped provider evidence, without inventing quota.
 pub(crate) fn persist_provider_success(
     state_root: &Path,
@@ -810,6 +821,17 @@ fn persist_success(
     // clear its recorded refusal with source `run`. A login probe proves only
     // authentication, so it never clears a quota refusal.
     if !login_probe && let Some(model) = route.model.as_deref() {
+        // A free-model launch proves the keyless pool, not just the one model
+        // that happened to hit the 429, so clear the pool's refusal first and
+        // name the observed success as its source.
+        if let Some(pool) = successful_free_pool(adapter, model) {
+            provenant_quota::clear_refusals(
+                &mut next,
+                now,
+                RefusalClearSource::ObservedSuccess,
+                |refusal| refusal.pool.as_deref() == Some(pool.as_str()),
+            )?;
+        }
         let prefix = format!("{adapter}/");
         let model = model.strip_prefix(&prefix).unwrap_or(model);
         provenant_quota::clear_refusals(&mut next, now, RefusalClearSource::Run, |refusal| {
@@ -4704,6 +4726,126 @@ mod tests {
             .find(|r| r.account.account_key == "key")
             .unwrap();
         assert_eq!(found.refusals.len(), 2);
+        assert_eq!(found.cleared_refusals.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn a_successful_free_launch_clears_its_pool_refusal_with_observed_success()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let root = private(temp.path())?;
+        let dir = child(&root, OsStr::new("quota"))?;
+        let spec = provenant_records::ADAPTER_SPECS
+            .iter()
+            .find(|spec| spec.free_pool.is_some())
+            .ok_or("free pool adapter")?;
+        let pool = spec.free_pool.expect("pool").to_owned();
+        let catalogue = provenant_routing::Catalogue::bundled()?;
+        let free = catalogue
+            .models()
+            .iter()
+            .find(|entry| entry.free && entry.model.adapter() == spec.name)
+            .ok_or("free model")?;
+        let account = AccountScope {
+            extra: Default::default(),
+            adapter: spec.name.into(),
+            account_key: "key".into(),
+            label: "zen".into(),
+        };
+        let refusal = |model: &str, pool: Option<&str>| Refusal {
+            extra: Default::default(),
+            account: account.clone(),
+            model: model.into(),
+            pool: pool.map(str::to_owned),
+            observed_unix_seconds: 100,
+            resets_unix_seconds: Some(900),
+        };
+        let mut record = AccountRecord::empty(account.clone());
+        record.revision = 1;
+        record.refusals = vec![
+            refusal("free-model", Some(&pool)),
+            refusal("other-model", None),
+        ];
+        write_intent(
+            &dir,
+            temp.path(),
+            &UpdateIntent {
+                account: account.clone(),
+                expected: None,
+                replacement: Some(record),
+                clear_provider_observations: false,
+                readiness_probe_result: None,
+                login_probe_expiry: None,
+            },
+            &mut Vec::new(),
+        )?;
+        let route = provenant_records::run::RouteRecord {
+            provider: Some(spec.name.into()),
+            model: Some(free.model.as_str().to_owned()),
+            account_label: Some("zen".into()),
+            account_key: Some("key".into()),
+            ..Default::default()
+        };
+        persist_provider_success(temp.path(), &route, 120)?;
+        let found = read_records(&dir)?;
+        let found = found
+            .iter()
+            .find(|r| r.account.account_key == "key")
+            .ok_or("account record")?;
+        assert_eq!(found.refusals.len(), 1);
+        assert_eq!(found.refusals[0].model, "other-model");
+        assert_eq!(found.cleared_refusals.len(), 1);
+        assert_eq!(
+            found.cleared_refusals[0].source,
+            RefusalClearSource::ObservedSuccess
+        );
+        assert_eq!(
+            found.cleared_refusals[0].pool.as_deref(),
+            Some(pool.as_str())
+        );
+        assert_eq!(found.cleared_refusals[0].cleared_unix_seconds, 120);
+
+        // A paid success on the same account is not evidence the free pool
+        // recovered: a fresh free-pool refusal stays until a free run clears it.
+        let paid = catalogue
+            .models()
+            .iter()
+            .find(|entry| !entry.free && entry.model.adapter() == spec.name)
+            .ok_or("paid model")?;
+        persist_provider_refusal(temp.path(), &route, Some(&pool), 200, Some(1000))?;
+        persist_provider_success(
+            temp.path(),
+            &provenant_records::run::RouteRecord {
+                model: Some(paid.model.as_str().to_owned()),
+                ..route
+            },
+            250,
+        )?;
+        let found = read_records(&dir)?;
+        let found = found
+            .iter()
+            .find(|r| r.account.account_key == "key")
+            .ok_or("account record")?;
+        // The paid run clears neither refusal: the fresh free-pool refusal
+        // stays live with its provider reset, and the unrelated model-scoped
+        // refusal from the first half is still held. Only a free-model success
+        // may clear the pool's refusal.
+        let live_pool = found
+            .refusals
+            .iter()
+            .find(|refusal| refusal.pool.as_deref() == Some(pool.as_str()))
+            .ok_or("live free-pool refusal")?;
+        assert_eq!(live_pool.observed_unix_seconds, 200);
+        assert_eq!(live_pool.resets_unix_seconds, Some(1000));
+        assert!(
+            found
+                .refusals
+                .iter()
+                .any(|refusal| refusal.model == "other-model" && refusal.pool.is_none())
+        );
         assert_eq!(found.cleared_refusals.len(), 1);
         Ok(())
     }

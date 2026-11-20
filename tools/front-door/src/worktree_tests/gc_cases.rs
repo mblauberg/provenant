@@ -1,5 +1,54 @@
 use super::*;
 
+fn stranded_worktree_path(value: &Value) -> Result<PathBuf> {
+    let wire = &value["data"]["path"];
+    let root = wire["root"].as_str().ok_or("worktree path root")?;
+    let relative = wire["relative"]["path"]
+        .as_str()
+        .ok_or("worktree relative path")?;
+    Ok(Path::new(root).join(relative))
+}
+
+pub(super) fn gc_keeps_and_names_stranded_work() -> Result {
+    let rig = repository()?;
+    let created = ok(
+        &rig,
+        &["worktree", "create", "fix/3650-stranded-work", "--json"],
+    )?;
+    let path = stranded_worktree_path(&created)?;
+    let file = path.join("stranded.txt");
+    fs::write(&file, "one\ntwo\nthree\n")?;
+    let older = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(86_400))
+        .ok_or("age arithmetic")?;
+    fs::File::open(&file)?.set_modified(older)?;
+
+    let report = ok(&rig, &["gc", "--apply", "--json"])?;
+    assert!(path.is_dir(), "gc removed a stranded worktree");
+    assert_eq!(fs::read_to_string(&file)?, "one\ntwo\nthree\n");
+    let rows = report["data"]["stranded_work"]
+        .as_array()
+        .ok_or("gc has no stranded_work array")?;
+    assert!(
+        rows.iter().any(|row| {
+            row["branch"] == "fix/3650-stranded-work"
+                && row["issue"] == "#3650"
+                && row["files"] == 1
+                && row["lines"] == 3
+                && row["age"] == "1d"
+        }),
+        "{report}"
+    );
+
+    let text_output = command(&rig, &["gc", "--apply"])?;
+    assert_eq!(code(&text_output), 0);
+    let text = String::from_utf8(text_output.stdout.bytes)?;
+    assert!(text.contains("stranded work:"), "{text}");
+    assert!(text.contains("#3650"), "{text}");
+    assert!(text.contains("1 file, 3 lines, 1d old"), "{text}");
+    Ok(())
+}
+
 fn mark_created_lane_as_managed(
     rig: &TestRig,
     roots: &provenant_core::Roots,
