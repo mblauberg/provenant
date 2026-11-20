@@ -64,6 +64,9 @@ struct Check {
 struct FailedCheck {
     name: String,
     url: Option<String>,
+    /// The observer bucket that produced this failure: `fail` or `cancel`.
+    #[serde(default)]
+    bucket: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +127,10 @@ pub(crate) struct Line {
     /// The members and file attribution a batch row reports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) batch_detail: Option<membership::BatchDetail>,
+    /// Shared history with a batch that does not prove membership. Reported
+    /// without a batch claim so the member's own CI stays visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) batch_uncertain: Option<String>,
 }
 fn display_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
 where
@@ -197,18 +204,25 @@ impl Line {
     /// The class a `pr status` summary reports. A member carried by a batch
     /// is a state report, not a failure its own cancelled runs can cause.
     pub(crate) fn display_class(&self) -> &'static str {
-        if self.batch.is_some() {
+        if self.batch.is_some() && self.checks_failed.unwrap_or(0) == 0 {
             "superseded"
         } else {
             self.class()
         }
     }
-    /// A superseded member's cancelled checks are no longer evidence of a
-    /// failure on its own head; the batch's CI is reported alongside instead.
+    /// A batch supersedes the cancelled checks on its member's head, not real
+    /// failures: only cancellations are dropped, so an actual failure stays
+    /// visible. The batch's CI is reported alongside instead.
     pub(crate) fn suppress_own_ci(&mut self) {
-        self.checks_failed = Some(0);
-        self.failing_checks.clear();
-        self.failed_check_details.clear();
+        self.failed_check_details
+            .retain(|check| check.bucket != "cancel");
+        self.failing_checks = self
+            .failed_check_details
+            .iter()
+            .map(|check| check.name.clone())
+            .collect();
+        self.checks_failed = Some(self.failed_check_details.len());
+        self.batch_uncertain = None;
     }
     /// What a waiter takes from this pull request: `Some(true)` once it
     /// merged or its checks passed, `Some(false)` once they failed or it
@@ -302,6 +316,9 @@ impl Line {
         }
         if let Some(detail) = &self.batch_detail {
             line.push_str(&detail.suffix());
+        }
+        if let Some(note) = &self.batch_uncertain {
+            line.push_str(note);
         }
         line.push_str(&self.cause_suffix());
         line
@@ -948,6 +965,7 @@ fn status_line(number: u64, view: View, checks: Option<&[super::observer::Check]
             .map(|check| FailedCheck {
                 name: display_check_name(&check.name),
                 url: check.url.as_deref().and_then(display_check_url),
+                bucket: check.bucket.clone(),
             })
             .collect(),
         merge: word(&view.merge),
@@ -962,6 +980,7 @@ fn status_line(number: u64, view: View, checks: Option<&[super::observer::Check]
         error: None,
         batch: None,
         batch_detail: None,
+        batch_uncertain: None,
     }
 }
 
@@ -1070,6 +1089,7 @@ fn rest_line(project: &Path, state: &Path, number: u64, try_graphql: bool) -> Li
                 error: Some(provenant_cli::bounded_text(&error.to_string(), 256)),
                 batch: None,
                 batch_detail: None,
+                batch_uncertain: None,
             }
         }
     }
@@ -1222,6 +1242,7 @@ mod tests {
             error: error.map(str::to_owned),
             batch: None,
             batch_detail: None,
+            batch_uncertain: None,
         }
     }
     #[test]
@@ -1306,12 +1327,20 @@ mod tests {
     fn a_superseded_member_renders_the_batch_and_drops_cancelled_failures() {
         use super::membership::Link;
         let mut member = row(7, "member-head", None);
-        member.checks_failed = Some(1);
-        member.failing_checks = vec!["ci-status".into()];
-        member.failed_check_details = vec![super::FailedCheck {
-            name: "ci-status".into(),
-            url: Some("https://ci/one".into()),
-        }];
+        member.checks_failed = Some(2);
+        member.failing_checks = vec!["ci-status".into(), "real-failure".into()];
+        member.failed_check_details = vec![
+            super::FailedCheck {
+                name: "ci-status".into(),
+                url: Some("https://ci/one".into()),
+                bucket: "cancel".into(),
+            },
+            super::FailedCheck {
+                name: "real-failure".into(),
+                url: Some("https://ci/two".into()),
+                bucket: "fail".into(),
+            },
+        ];
         member.suppress_own_ci();
         member.batch = Some(Link {
             number: Some(9),
@@ -1327,15 +1356,52 @@ mod tests {
             ),
             "{text}"
         );
-        assert!(!text.contains("fail=1"), "{text}");
+        assert!(text.contains("fail=1 names=real-failure"), "{text}");
         assert!(!text.contains("names=ci-status"), "{text}");
-        assert_eq!(member.display_class(), "superseded");
+        assert_eq!(member.checks_failed, Some(1));
+        assert_eq!(member.failing_checks, ["real-failure"]);
+        assert_eq!(
+            member.display_class(),
+            "failing",
+            "real failures still fail"
+        );
         let json = serde_json::to_value(&member).unwrap();
         assert_eq!(json["batch"]["number"], 9);
         assert_eq!(json["batch"]["head"], "batch-head");
         let summary = super::summarise(&[member]);
-        assert_eq!(summary.lines[0], "1 PRs: 1 superseded");
-        assert_eq!(&summary.lines[1..], &[] as &[String]);
+        assert_eq!(summary.lines[0], "1 PRs: 1 failing");
+        assert_eq!(summary.lines.len(), 2, "the real failure is an action row");
+        assert!(summary.lines[1].contains("fail=1 names=real-failure"));
+    }
+
+    // Spec: docs/specs/cli.md#integration-batch-membership
+    #[test]
+    fn uncertain_ancestry_is_reported_without_claiming_a_batch_or_suppressing_ci() {
+        let mut member = row(7, "member-head", None);
+        member.checks_failed = Some(1);
+        member.failing_checks = vec!["real-failure".into()];
+        member.failed_check_details = vec![super::FailedCheck {
+            name: "real-failure".into(),
+            url: None,
+            bucket: "fail".into(),
+        }];
+        member.batch_uncertain =
+            Some(" batch=#9? shared history only; membership uncertain; own CI retained".into());
+        let text = member.text();
+        assert!(
+            text.contains("batch=#9? shared history only; membership uncertain; own CI retained"),
+            "{text}"
+        );
+        assert!(text.contains("fail=1 names=real-failure"), "{text}");
+        assert!(member.batch.is_none(), "uncertainty is not a batch claim");
+        assert_eq!(member.display_class(), "failing");
+        let json = serde_json::to_value(&member).unwrap();
+        assert!(
+            json["batch_uncertain"]
+                .as_str()
+                .is_some_and(|note| note.contains("#9"))
+        );
+        assert!(json["batch"].is_null());
     }
 
     // Spec: docs/specs/cli.md#integration-batch-membership
@@ -1447,18 +1513,22 @@ mod tests {
             super::FailedCheck {
                 name: "bad\nname\u{1b}[31m".into(),
                 url: Some("https://ci/ok".into()),
+                bucket: "fail".into(),
             },
             super::FailedCheck {
                 name: long_name,
                 url: Some(format!("https://ci/{}", "u".repeat(10_000))),
+                bucket: "fail".into(),
             },
             super::FailedCheck {
                 name: "spaced".into(),
                 url: Some("https://ci/a b".into()),
+                bucket: "cancel".into(),
             },
             super::FailedCheck {
                 name: "scheme".into(),
                 url: Some("javascript:alert(1)".into()),
+                bucket: "fail".into(),
             },
         ];
         let lines = line.failure_lines();
