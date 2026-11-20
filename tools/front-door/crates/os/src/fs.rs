@@ -520,8 +520,19 @@ thread_local! {
 }
 
 #[cfg(any(test, feature = "fixture"))]
+type OwnerLockHook = Box<dyn FnMut(&OsStr)>;
+#[cfg(any(test, feature = "fixture"))]
 thread_local! {
     pub(crate) static EXISTING_LOCK_WAIT_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Run once after a contended lock is acquired but before the path's inode
+    /// is revalidated, so fixtures can simulate an unlink under the waiter.
+    pub(crate) static EXISTING_LOCK_ACQUIRE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Run once after an owner lock is acquired but before its inode is
+    /// revalidated, named so an unrelated acquisition in the same thread does
+    /// not consume the fixture's simulation of a concurrent reaper.
+    pub(crate) static OWNER_LOCK_ACQUIRE_HOOK: std::cell::RefCell<Option<OwnerLockHook>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -924,6 +935,12 @@ impl Directory {
                     if cancel.is_cancelled() {
                         return Err(FsError::Cancelled { path });
                     }
+                    #[cfg(any(test, feature = "fixture"))]
+                    if let Some(hook) =
+                        EXISTING_LOCK_ACQUIRE_HOOK.with(|hook| hook.borrow_mut().take())
+                    {
+                        hook();
+                    }
                     let guard = LockGuard {
                         _file: file,
                         exclusive: mode == LockMode::Exclusive,
@@ -934,6 +951,9 @@ impl Directory {
                             after_mode: after.mode,
                         }),
                     };
+                    // Re-validate the path's inode after locking: a holder that
+                    // unlinked this entry while we waited must not leave us
+                    // holding a lock on a stale inode.
                     self.verify_held_lock(name, &guard)?;
                     return Ok(guard);
                 }
@@ -999,6 +1019,12 @@ impl Directory {
                     if cancel.is_cancelled() {
                         return Err(FsError::Cancelled { path });
                     }
+                    #[cfg(any(test, feature = "fixture"))]
+                    OWNER_LOCK_ACQUIRE_HOOK.with(|hook| {
+                        if let Some(hook) = hook.borrow_mut().as_mut() {
+                            hook(name);
+                        }
+                    });
                     let guard = LockGuard {
                         _file: file,
                         exclusive: mode == LockMode::Exclusive,

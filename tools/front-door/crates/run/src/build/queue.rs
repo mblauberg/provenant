@@ -8,7 +8,7 @@ use provenant_os::admission::{
     AdmissionSlots, HeldGuard, HostHeldGuard, HostWaitGuard, WaitGuard, mark_held_with_command,
     mark_host_held_with_command, mark_host_waiting_with_command, mark_waiting_with_command,
 };
-use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode};
+use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, LockRefusal, PublishMode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -189,6 +189,38 @@ fn unavailable(error: impl std::fmt::Display) -> BuildError {
     BuildError::Unavailable(error.to_string())
 }
 
+/// A queue entry (ticket lock or slot) that departs during a scan can surface
+/// as three equivalent outcomes: `NotFound` when it vanished before a stat or
+/// open, `LinkCount` when the unlink landed between the surrounding stats, and
+/// `RaceRefused` when the path was unlinked or replaced after the descriptor
+/// was opened and its inode re-validated. All three mean the listed entry is
+/// gone; none is a real I/O failure.
+fn entry_departed(error: &FsError) -> bool {
+    error.is_not_found()
+        || matches!(
+            error,
+            FsError::RaceRefused { .. }
+                | FsError::LockRefused {
+                    reason: LockRefusal::LinkCount,
+                    ..
+                }
+        )
+}
+
+/// Try to take one slot, treating a slot file that vanished under the scan as
+/// an unavailable slot rather than a host failure. The slot's owner has
+/// departed; the scan moves on to the remaining slots.
+fn try_slot(
+    slots: &AdmissionSlots,
+    order: &[u64],
+) -> Result<Option<provenant_os::admission::SlotGuard>, BuildError> {
+    match slots.try_acquire_ordered(order) {
+        Ok(guard) => Ok(guard),
+        Err(error) if entry_departed(&error) => Ok(None),
+        Err(error) => Err(unavailable(error)),
+    }
+}
+
 fn ticket_key(ticket: &Ticket, now: u64) -> (u64, u64, &str) {
     let level = match ticket.priority {
         super::Priority::Interactive => 0u64,
@@ -204,14 +236,35 @@ fn ticket_key(ticket: &Ticket, now: u64) -> (u64, u64, &str) {
     )
 }
 
-fn live_tickets(dir: &Directory, path: &Path) -> Result<Vec<Ticket>, BuildError> {
+/// Scan the queue directory for live tickets.
+///
+/// `after_list` is an injectable seam run after an entry has been listed but
+/// before its lock is opened. Production supplies a no-op; tests use it to
+/// remove an entry between the two steps without relying on timing.
+fn live_tickets_with(
+    dir: &Directory,
+    path: &Path,
+    mut after_list: impl FnMut(&OsStr) -> std::io::Result<()>,
+) -> Result<Vec<Ticket>, BuildError> {
     let mut tickets = Vec::new();
-    for entry in std::fs::read_dir(path).map_err(unavailable)? {
-        let entry = entry.map_err(unavailable)?;
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        // The whole queue directory departed; the scan has nothing to report.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(tickets),
+        Err(error) => return Err(unavailable(error)),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            // A listed entry vanished before it could be examined; skip it.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(unavailable(error)),
+        };
         let name = entry.file_name();
         if Path::new(&name).extension() != Some(OsStr::new("lock")) {
             continue;
         }
+        after_list(&name).map_err(unavailable)?;
         match dir.try_lock_existing(&name, LockMode::Exclusive) {
             Ok(_guard) => {
                 // The waiter is gone: its lock was free, so reap both files.
@@ -226,15 +279,23 @@ fn live_tickets(dir: &Directory, path: &Path) -> Result<Vec<Ticket>, BuildError>
                         let ticket: Ticket = serde_json::from_slice(&bytes).map_err(unavailable)?;
                         tickets.push(ticket);
                     }
+                    // Its JSON departed with the entry; skip rather than fail.
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(unavailable(error)),
                 }
             }
-            Err(error) if error.is_not_found() => {}
+            // Every outcome of a vanished entry is a departure, including a
+            // stale-inode refusal after `try_lock_existing` revalidated the path.
+            Err(error) if entry_departed(&error) => {}
+            // Only a real I/O failure fails the scan.
             Err(error) => return Err(unavailable(error)),
         }
     }
     Ok(tickets)
+}
+
+fn live_tickets(dir: &Directory, path: &Path) -> Result<Vec<Ticket>, BuildError> {
+    live_tickets_with(dir, path, |_| Ok(()))
 }
 
 fn check_cancel(
@@ -280,7 +341,7 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
         return Err(unavailable("no eligible admission slots"));
     }
     let started = Instant::now();
-    if let Some(guard) = slots.try_acquire_ordered(&order).map_err(unavailable)? {
+    if let Some(guard) = try_slot(&slots, &order)? {
         check_cancel(request, &signals)?;
         return Ok(Admitted::Held {
             index: guard.index(),
@@ -323,9 +384,17 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
     // The separate sibling lock carries liveness: a waiter that dies releases
     // it, and any other waiter reaps both files. Lock names may not be renamed,
     // so the ticket bytes live in the adjacent JSON file.
-    let guard = dir
-        .try_lock(OsStr::new(&lock_name), LockMode::Exclusive)
-        .map_err(unavailable)?;
+    // A reaper in another participant's scan can unlink this freshly created
+    // lock in the window before our flock lands. That lock never became ours;
+    // recreate it. Bound the retries so a persistent refusal still surfaces.
+    let mut departed = 0;
+    let guard = loop {
+        match dir.try_lock(OsStr::new(&lock_name), LockMode::Exclusive) {
+            Ok(guard) => break guard,
+            Err(error) if entry_departed(&error) && departed < 8 => departed += 1,
+            Err(error) => return Err(unavailable(error)),
+        }
+    };
     let bytes = serde_json::to_vec(&ticket).map_err(unavailable)?;
     dir.atomic_write(
         OsStr::new(&ticket_name),
@@ -373,16 +442,12 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
             .ok_or_else(|| unavailable("queue ticket disappeared"))?;
         let mut free = 0;
         for index in &order {
-            if slots
-                .try_acquire_ordered(&[*index])
-                .map_err(unavailable)?
-                .is_some()
-            {
+            if try_slot(&slots, &[*index])?.is_some() {
                 free += 1;
             }
         }
         if rank < free
-            && let Some(guard) = slots.try_acquire_ordered(&order).map_err(unavailable)?
+            && let Some(guard) = try_slot(&slots, &order)?
         {
             check_cancel(request, &signals)?;
             return Ok(Admitted::Held {
@@ -689,6 +754,120 @@ mod tests {
             assert!(different.join().unwrap());
             assert!(newer.join().unwrap());
         });
+    }
+    #[test]
+    fn entry_vanishing_between_listing_and_open_is_skipped() {
+        let state = tempfile::tempdir().unwrap();
+        let path = state.path().join("build/queue/build");
+        std::fs::create_dir_all(&path).unwrap();
+        let dir = Directory::open_anchor(&path).unwrap();
+        // A departed participant left its lock behind. The seam removes it
+        // after listing but before the probe opens it, deterministically.
+        std::fs::write(path.join("vanished.lock"), b"").unwrap();
+        let mut removed = false;
+        let tickets = live_tickets_with(&dir, &path, |name| {
+            if name == "vanished.lock" {
+                std::fs::remove_file(path.join(name)).unwrap();
+                removed = true;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(removed);
+        assert!(tickets.is_empty());
+        assert!(!path.join("vanished.lock").exists());
+    }
+    #[test]
+    fn unlinked_ticket_lock_is_skipped_not_reported_unavailable() {
+        let state = tempfile::tempdir().unwrap();
+        let path = state.path().join("build/queue/build");
+        std::fs::create_dir_all(&path).unwrap();
+        let dir = Directory::open_anchor(&path).unwrap();
+        let lock = path.join("departed.lock");
+        std::fs::write(&lock, b"").unwrap();
+        let hook_lock = lock.clone();
+        // After the waiter takes the flock, the holder unlinks its lock and a
+        // newcomer creates a fresh inode under the same name. The waiter must
+        // refuse the stale inode, and the scan must treat that entry as gone.
+        provenant_os::fixture::on_existing_lock_acquire(move || {
+            std::fs::remove_file(&hook_lock).unwrap();
+            std::fs::write(&hook_lock, b"").unwrap();
+        });
+        let tickets = live_tickets(&dir, &path).unwrap();
+        assert!(tickets.is_empty());
+        assert!(lock.exists());
+    }
+    #[test]
+    fn link_count_refusal_from_departing_entry_is_skipped() {
+        let state = tempfile::tempdir().unwrap();
+        let path = state.path().join("build/queue/build");
+        std::fs::create_dir_all(&path).unwrap();
+        let dir = Directory::open_anchor(&path).unwrap();
+        let lock = path.join("hardlinked.lock");
+        let target = path.join("elsewhere");
+        std::fs::write(&lock, b"").unwrap();
+        std::fs::write(&target, b"").unwrap();
+        let hook_lock = lock.clone();
+        let hook_target = target.clone();
+        let tickets = live_tickets_with(&dir, &path, move |name| {
+            if name == "hardlinked.lock" {
+                // The listed lock departs and is replaced by an entry with a
+                // link count other than one, which the fs layer refuses.
+                std::fs::remove_file(&hook_lock).unwrap();
+                std::fs::hard_link(&hook_target, &hook_lock).unwrap();
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(tickets.is_empty());
+    }
+    #[test]
+    fn real_scan_io_error_surfaces() {
+        let state = tempfile::tempdir().unwrap();
+        let path = state.path().join("build/queue/build");
+        std::fs::create_dir_all(&path).unwrap();
+        let dir = Directory::open_anchor(&path).unwrap();
+        std::fs::write(path.join("present.lock"), b"").unwrap();
+        let result = live_tickets_with(&dir, &path, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected scan failure",
+            ))
+        });
+        assert!(matches!(result, Err(BuildError::Unavailable(_))));
+    }
+    #[test]
+    fn ticket_lock_reaped_before_flock_is_recreated() {
+        let state = tempfile::tempdir().unwrap();
+        AdmissionSlots::provision(state.path(), "build", 1).unwrap();
+        let held = AdmissionSlots::open(state.path(), "build")
+            .unwrap()
+            .try_acquire(1)
+            .unwrap()
+            .unwrap();
+        let path = state.path().join("build/queue/build");
+        let cancel = CancelToken::new();
+        let lock = path.join("reaped.lock");
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let hook_lock = lock.clone();
+                let mut fired = false;
+                provenant_os::fixture::on_owner_lock_acquire(move |name| {
+                    if name == "reaped.lock" && !fired {
+                        fired = true;
+                        // A concurrent reaper unlinks our brand-new ticket lock
+                        // before our flock lands, so the first acquisition is
+                        // stale and the waiter has to recreate the lock.
+                        let _ = std::fs::remove_file(&hook_lock);
+                    }
+                });
+                admit(&request(state.path(), "reaped", "owner", "a", &cancel))
+            });
+            wait_for(&path.join("reaped.json"));
+            cancel.cancel();
+            assert!(matches!(handle.join().unwrap(), Err(BuildError::Cancelled)));
+        });
+        drop(held);
     }
     #[test]
     fn concurrent_holders_never_exceed_limit() {
