@@ -499,17 +499,17 @@ pub(super) fn prior_uses_native_session_state(
 fn native_session_selection_follows_recorded_access_and_legacy_sandbox() {
     use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource};
     let mut route = run::RouteRecord::default();
-    assert!(!prior_uses_native_session_state(&route, "codex"));
+    assert!(!prior_uses_native_session_state(&route, "codex", None));
     route.lane_access = Some(LaneAccessReceipt {
         access: LaneAccess::Host,
         source: LaneAccessSource::Default,
         key: "lanes.access".into(),
         extra: Default::default(),
     });
-    assert!(prior_uses_native_session_state(&route, "codex"));
-    assert!(!prior_uses_native_session_state(&route, "opencode"));
+    assert!(prior_uses_native_session_state(&route, "codex", None));
+    assert!(!prior_uses_native_session_state(&route, "opencode", None));
     route.lane_access.as_mut().unwrap().access = LaneAccess::Isolated;
-    assert!(!prior_uses_native_session_state(&route, "codex"));
+    assert!(!prior_uses_native_session_state(&route, "codex", None));
 }
 
 pub(super) fn verify_native_continuation(
@@ -529,13 +529,13 @@ pub(super) fn verify_native_continuation(
     if let Some(field) = route_mismatch(applied, route) {
         return Err(ContinuationError::RouteMismatch(field));
     }
-    if !prior_uses_native_session_state(applied, &route.adapter) {
-        return Err(ContinuationError::RouteMismatch(F::SessionState));
-    }
     let prior_state = state_root
         .join("attempts")
         .join(prior.attempt_id.to_string())
         .join("provider-state");
+    if !prior_uses_native_session_state(applied, &route.adapter, Some(&prior_state)) {
+        return Err(ContinuationError::RouteMismatch(F::SessionState));
+    }
     let prior_root = super::observation::native_session_location_for_route(
         &prior_state,
         &route.adapter,

@@ -2705,6 +2705,7 @@ fn opencode_continuation_copies_a_linked_host_config_directory()
             lane_access: Some(&access),
         },
         &Default::default(),
+        None,
     )?;
     assert_eq!(continuation.session(), session);
     let copied = child_state.join("config/opencode/theme");

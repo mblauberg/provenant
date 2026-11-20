@@ -449,11 +449,7 @@ fn prepare(
         let private_opencode = private_config.join("opencode");
         setup.push(SetupStep::CreateDir(private_opencode.clone()));
         if let Ok(canonical) = std::fs::canonicalize(&config_dir)
-            && !provenant_confinement::refuses_lane_root(
-                &canonical,
-                true,
-                &input.credential_roots,
-            )
+            && !provenant_confinement::refuses_lane_root(&canonical, true, &input.credential_roots)
             && let Ok(entries) = std::fs::read_dir(&config_dir)
         {
             for entry in entries.flatten() {

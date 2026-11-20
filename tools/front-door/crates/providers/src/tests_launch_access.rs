@@ -847,9 +847,10 @@ fn opencode_profile_follows_lane_access() -> Result<(), Box<dyn std::error::Erro
     };
     let mut route = route("opencode", "configured/model");
     route.set_access(provenant_records::LaneAccess::Host);
+    let host_plan = plan_for(provenant_records::LaneAccess::Host)?;
     let mut input = fixture_input(
         &route,
-        &plan_for(provenant_records::LaneAccess::Host)?,
+        &host_plan,
         &prompt,
         Path::new("/fixture/repo"),
         None,
@@ -865,9 +866,10 @@ fn opencode_profile_follows_lane_access() -> Result<(), Box<dyn std::error::Erro
     assert!(!attached.argv.iter().any(|arg| arg == "--standalone"));
     assert!(attached.profile.spec.loopback_server);
     std::fs::remove_file(state.join("opencode/service.json"))?;
+    let fallback_plan = plan_for(provenant_records::LaneAccess::Host)?;
     let mut input = fixture_input(
         &route,
-        &plan_for(provenant_records::LaneAccess::Host)?,
+        &fallback_plan,
         &prompt,
         Path::new("/fixture/repo"),
         None,

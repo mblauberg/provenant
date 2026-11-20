@@ -151,7 +151,9 @@ fn stored_opencode_profile_is_ignored_and_names_lanes_access() {
         &config,
         "providers.opencode.profile: ignored; OpenCode profile follows lanes.access",
     );
-    assert!(!crate::knobs::documented_field("providers.opencode.profile"));
+    assert!(!crate::knobs::documented_field(
+        "providers.opencode.profile"
+    ));
 }
 
 #[test]
