@@ -4916,6 +4916,9 @@ pub(super) fn prepare_candidates_inner(
                 plan.codex_policy() == provenant_confinement::CodexPolicy::Clean,
             ));
         }
+        provider
+            .launch_warnings
+            .extend(spec.warnings.iter().cloned());
         provider.applied_access = Some(serde_json::from_value(
             spec.applied_access()
                 .receipt(&home, spec.credential_roots()),

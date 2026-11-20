@@ -228,6 +228,11 @@ without depending on the installed asset layout. Native integration differences
 belong to `AdapterSpec`, with a reason and source for an unavailable capability.
 - Why: provider selection must not silently narrow a lane's working surface.
 
+### Lane state stays outside the worktree
+
+`finalise_provider_env` rebinds `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` into the attempt scratch (`scratch/home` and `scratch/xdg/<name>`) whenever the final value is the lane's worktree or lies under it, compared lexically and canonically when the path exists; it creates each rebound directory mode 0700, records one warning naming the variable, old path, new path and reason, and leaves values outside the worktree unchanged.
+- Why: a lane that resolves tool state under a HOME inside its own checkout can commit that state with its work; the rebound happens in the one place every adapter finishes rather than per tool.
+
 The selected sandbox floor applies to each candidate and is sealed for
 continuations. Unsupported confinement is reported rather than represented as
 sandboxed execution.
