@@ -2188,7 +2188,20 @@ impl RunStore {
                     };
                     let terminal_note = if let Some(host_message) = refusal.host_message.as_deref()
                     {
-                        let host_message = provenant_redact::bounded_line(host_message, 160);
+                        // A pacing refusal names its route, account, window and
+                        // sourced setting; the usual short summary truncates those facts.
+                        let limit = if matches!(
+                            refusal.resource,
+                            Some(provenant_records::diagnostic::ResourceFact::PacingReserve { .. })
+                        ) || refusal.skipped_routes.iter().any(|route| {
+                            route.cause
+                                == Some(provenant_records::RouteExclusionReason::PacingReserve)
+                        }) {
+                            4096
+                        } else {
+                            160
+                        };
+                        let host_message = provenant_redact::bounded_line(host_message, limit);
                         Some(match terminal_note {
                             Some(note) => format!("{host_message}; {note}"),
                             None => host_message,

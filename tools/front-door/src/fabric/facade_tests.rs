@@ -534,6 +534,41 @@ fn lane_cap_refusal_retains_the_setting_through_both_adapters() {
 }
 
 #[test]
+fn pacing_dispatch_refusal_keeps_the_route_and_monthly_window_note() {
+    use provenant_records::diagnostic::{
+        Diagnostic, DiagnosticFact, PacingReserveSetting, PacingSettingSource, ResourceFact,
+    };
+    let fact = ResourceFact::PacingReserve {
+        percent: 10,
+        setting: PacingReserveSetting::Account,
+        origin: PacingSettingSource::Configuration,
+    };
+    let projection = fact
+        .project(Diagnostic::new("REFUSED").category("refused"))
+        .fact(DiagnosticFact::Resource(fact));
+    let failure = provenant_cli::run::Fail {
+        status: provenant_records::Outcome::Refused,
+        kind: provenant_run::ErrorKind::Refused,
+        message: "opencode/gpt-go account OpenCode Go; window=thirty_day; domains.routing.pacing.monthly (source: host configuration)".into(),
+        detail: None,
+        projection: Some(Box::new(projection)),
+    };
+
+    let error = dispatch_refused(failure);
+    let encoded = serde_json::to_string(&error).expect("serialized refusal");
+    assert!(encoded.contains("window=thirty_day"));
+    assert!(encoded.contains("domains.routing.pacing.monthly"));
+    let diagnostic = error.diagnostic();
+    let detail = diagnostic.detail.expect("refusal detail");
+    assert!(detail.contains("selected account is held by a 10% pacing reserve"), "{detail}");
+    assert!(detail.contains("opencode/gpt-go"), "{detail}");
+    assert!(detail.contains("OpenCode Go"), "{detail}");
+    assert!(detail.contains("window=thirty_day"), "{detail}");
+    assert!(detail.contains("domains.routing.pacing.monthly"), "{detail}");
+    assert!(detail.contains("source: host configuration"), "{detail}");
+}
+
+#[test]
 fn process_limit_retains_io_code_and_safe_resource_facts() {
     let failure = || {
         provenant_run::RunError::Admission(provenant_run::AdmissionError::Processes {

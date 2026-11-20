@@ -907,3 +907,57 @@ fn account_level_exhausted_record_stands_by_when_the_model_windows_are_unprobed(
     assert_eq!(candidate.factor_basis_points, 0);
     Ok(())
 }
+
+// Spec: docs/specs/routing.md#monthly-allowance-ledger
+#[test]
+fn go_missing_cycle_uses_ledger_and_warns_without_holding() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = go_fixture()?;
+    let mut observation = go_duplicate(&fixture.raw);
+    for window in &mut observation.snapshot.windows {
+        window.used_basis_points = 80;
+    }
+    let mut config = fixture.config.clone();
+    config
+        .pacing
+        .accounts
+        .get_mut("opencode/go")
+        .ok_or("account profile")?
+        .monthly = None;
+    let assessment = monthly_allowance_assessment(
+        &fixture.catalogue,
+        &config,
+        now()?,
+        &observation.model,
+        Some("go"),
+        Some(&observation),
+    )
+    .ok_or("monthly assessment")?;
+    assert_eq!(assessment.windows[0].estimated_basis_points, 80);
+    assert!(assessment.windows[0].estimated_cycle_source.is_some());
+    config.launch_policy.overlay(
+        &std::collections::BTreeMap::from([
+            (
+                "PACING_ADAPTER".into(),
+                provenant_records::policy::Strength::Warn,
+            ),
+            (
+                "PACING_ACCOUNT".into(),
+                provenant_records::policy::Strength::Warn,
+            ),
+        ]),
+        provenant_records::policy::Source::Dispatch,
+    );
+    let route = go_route(&fixture, config, &fixture.explicit, Some(observation))?;
+    assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    let warnings = &route
+        .diagnostics
+        .account_load
+        .as_ref()
+        .ok_or("account load")?
+        .warnings;
+    assert!(warnings.iter().any(|w| w.contains("local-ledger")
+        && w.contains("domains.routing.pacing.monthly")
+        && w.contains("source=")));
+    Ok(())
+}

@@ -1183,8 +1183,11 @@ impl FacadeError {
                 };
                 projected = projected.detail(reason).next(next);
             }
-            Self::DispatchRefused { fact: Some(DispatchRefusalFact::Resource(fact)), .. } => {
+            Self::DispatchRefused { fact: Some(DispatchRefusalFact::Resource(fact)), reason, .. } => {
                 projected = fact.project(projected);
+                if matches!(fact, provenant_records::diagnostic::ResourceFact::PacingReserve { .. }) && !reason.is_empty() {
+                    projected = projected.detail(reason);
+                }
             }
             Self::DispatchRefused { fact: Some(fact), .. } => {
                 let (detail, action) = match fact {

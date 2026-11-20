@@ -3,7 +3,7 @@ use provenant_quota::AllowanceLedger;
 
 // Spec: docs/specs/routing.md#monthly-allowance-ledger
 #[test]
-fn monthly_admission_caps_next_launch_and_constrains_missing_evidence()
+fn monthly_admission_caps_next_launch_and_warns_on_missing_evidence()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
@@ -27,7 +27,7 @@ fn monthly_admission_caps_next_launch_and_constrains_missing_evidence()
     debt.snapshot.observed_unix_seconds = 90; // A fresh but unchanged provider report.
     debt.allowance.observe(&debt.snapshot);
     assert!(assess(Some(&debt)).constrained);
-    assert!(assess(None).constrained);
+    assert!(!assess(None).constrained);
     for mutate in [
         |q: &mut QuotaObservation| q.expires_unix_seconds = 100,
         |q: &mut QuotaObservation| q.snapshot.observed_unix_seconds = 101,
@@ -42,7 +42,7 @@ fn monthly_admission_caps_next_launch_and_constrains_missing_evidence()
     ] {
         let mut invalid = q.clone();
         mutate(&mut invalid);
-        assert!(assess(Some(&invalid)).constrained);
+        assert!(!assess(Some(&invalid)).constrained);
     }
     // Elapsed time, not probe frequency, releases more budget.
     let mut later = debt.clone();
@@ -74,7 +74,7 @@ fn monthly_admission_caps_next_launch_and_constrains_missing_evidence()
     let cycle_end = provenant_core::WallTime::from_unix_seconds(30 * 86400)?;
     later.expires_unix_seconds = 60 * 86400;
     assert!(
-        monthly_allowance_assessment(
+        !monthly_allowance_assessment(
             &catalogue,
             &config,
             cycle_end,

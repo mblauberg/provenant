@@ -148,65 +148,89 @@ pub fn monthly_allowance_assessment(
             && Some(q.snapshot.account.account_key.as_str()) == account
     });
     let unknown = || {
-        if unregistered_local {
-            let (reset, duration, cycle_source) = estimated_cycle(scoped, now, &serves_pool)?;
-            let start = reset.checked_sub(duration)?;
-            let elapsed =
-                ((u128::from(now.saturating_sub(start) as u64) * 10_000) / duration as u128) as u64;
-            let budget = elapsed
-                .saturating_add(u64::from(settings.burst_percent) * 100)
-                .min(10_000);
-            let ledger = scoped.map(|q| &q.allowance);
-            let cost = ledger
-                .and_then(|l| {
-                    l.windows
-                        .iter()
-                        .filter(|(pool, _)| serves_pool(pool))
-                        .filter_map(|(_, w)| w.cost_basis_points)
-                        .max()
-                })
-                .unwrap_or(settings.initial_launch_cost_basis_points);
-            let launches = ledger.map_or(0, |l| l.launches_in_cycle(start, now));
-            let estimated = ledger.map_or(0, |l| {
-                let pending = l.estimated_in_cycle(start, now, cost);
+        let (reset, duration, cycle_source) = estimated_cycle(scoped, now, &serves_pool)?;
+        let start = reset.checked_sub(duration)?;
+        let elapsed =
+            ((u128::from(now.saturating_sub(start) as u64) * 10_000) / duration as u128) as u64;
+        let budget = elapsed
+            .saturating_add(u64::from(settings.burst_percent) * 100)
+            .min(10_000);
+        let ledger = scoped.map(|q| &q.allowance);
+        let cost = ledger
+            .and_then(|l| {
                 l.windows
                     .iter()
-                    .filter(|(pool, w)| serves_pool(pool) && w.reset == reset)
-                    .map(|(_, w)| l.estimated(w))
+                    .filter(|(pool, _)| serves_pool(pool))
+                    .filter_map(|(_, w)| w.cost_basis_points)
                     .max()
-                    .unwrap_or(pending)
-                    .max(pending)
-            });
-            let next = estimated.saturating_add(cost);
-            let constrained = next > budget;
-            return Some(MonthlyAllowanceAssessment {
-                active: true,
-                windows: vec![MonthlyBudget {
-                    pool: None,
-                    cycle_start_unix_seconds: start,
-                    estimated_basis_points: estimated,
-                    next_launch_basis_points: next,
-                    budget_basis_points: budget,
-                    elapsed_basis_points: elapsed,
-                    cost_basis_points: cost,
-                    estimated_cycle_source: Some(cycle_source.into()),
-                }],
-                settings: sourced(),
-                constrained,
-                initial_launch_cost_basis_points: settings.initial_launch_cost_basis_points,
-                detail: format!(
-                    "{prefix}; estimated cycle: {cycle_source}; reset={reset} duration={duration} estimated_bp={estimated} next_launch_bp={next} budget_bp={budget} elapsed_bp={elapsed} cost_bp={cost} ledger_launches={launches}{}",
-                    if constrained { "; constrained" } else { "" }
-                ),
-            });
-        }
+            })
+            .unwrap_or(settings.initial_launch_cost_basis_points);
+        let launches = ledger.map_or(0, |l| l.launches_in_cycle(start, now));
+        let recorded = scoped
+            .into_iter()
+            .filter(|q| {
+                q.snapshot.observed_unix_seconds <= now
+                    && q.expires_unix_seconds > now
+                    && q.snapshot
+                        .details
+                        .as_ref()
+                        .and_then(|d| d.source.as_deref())
+                        == Some("local-ledger")
+            })
+            .flat_map(|q| &q.snapshot.windows)
+            .filter(|w| provenant_quota::monthly_window(w) && serves_pool(&w.pool))
+            .map(|w| w.used_basis_points)
+            .max()
+            .unwrap_or(0);
+        let estimated = ledger.map_or(0, |l| {
+            let pending = l.estimated_in_cycle(start, now, cost);
+            l.windows
+                .iter()
+                .filter(|(pool, w)| serves_pool(pool) && w.reset == reset)
+                .map(|(_, w)| l.estimated(w))
+                .max()
+                .unwrap_or(pending)
+                .max(pending)
+        });
+        let estimated = estimated.max(recorded);
+        let next = estimated.saturating_add(cost);
+        // An inferred cycle cannot establish a registered account hold.
+        let constrained = unregistered_local && estimated > 0 && next > budget;
         Some(MonthlyAllowanceAssessment {
             active: true,
-            windows: Vec::new(),
+            windows: vec![MonthlyBudget {
+                pool: scoped
+                    .and_then(|q| {
+                        q.snapshot
+                            .windows
+                            .iter()
+                            .find(|w| provenant_quota::monthly_window(w) && serves_pool(&w.pool))
+                    })
+                    .map(|w| w.pool.clone()),
+                cycle_start_unix_seconds: start,
+                estimated_basis_points: estimated,
+                next_launch_basis_points: next,
+                budget_basis_points: budget,
+                elapsed_basis_points: elapsed,
+                cost_basis_points: cost,
+                estimated_cycle_source: Some(cycle_source.into()),
+            }],
             settings: sourced(),
-            constrained: true,
+            constrained,
             initial_launch_cost_basis_points: settings.initial_launch_cost_basis_points,
-            detail: format!("{prefix}; monthly window missing, stale or incomplete; constrained"),
+            detail: format!(
+                "{prefix}; monthly cycle evidence missing, stale or incomplete; estimated cycle: {cycle_source}; usage source: {}; reset={reset} duration={duration} estimated_bp={estimated} next_launch_bp={next} budget_bp={budget} elapsed_bp={elapsed} cost_bp={cost} ledger_launches={launches}{}",
+                if scoped
+                    .and_then(|q| q.snapshot.details.as_ref())
+                    .and_then(|d| d.source.as_deref())
+                    == Some("local-ledger")
+                {
+                    "local-ledger"
+                } else {
+                    "available ledger and snapshot"
+                },
+                if constrained { "; constrained" } else { "" }
+            ),
         })
     };
     let Some(q) = observation.filter(|q| {

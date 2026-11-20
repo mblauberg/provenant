@@ -1021,6 +1021,21 @@ fn pacing_factor_basis_points(
     {
         return (0, format!("{detail}; {}", assessment.detail), true);
     }
+    let inferred_factor = monthly.as_ref().and_then(|assessment| {
+        assessment
+            .windows
+            .iter()
+            .filter(|window| window.estimated_cycle_source.is_some())
+            .map(|window| {
+                let headroom = 10_000_u64.saturating_sub(window.estimated_basis_points.min(10_000));
+                let remaining = 10_000_u64
+                    .saturating_sub(window.elapsed_basis_points)
+                    .max(1);
+                ((headroom * 10_000 / remaining) as u32)
+                    .clamp(PACE_MIN_BASIS_POINTS, PACE_MAX_BASIS_POINTS)
+            })
+            .min()
+    });
     let detail = monthly.map_or(detail.clone(), |assessment| {
         format!("{detail}; {}", assessment.detail)
     });
@@ -1138,10 +1153,18 @@ fn pacing_factor_basis_points(
         );
     }
     result.map_or(
-        (NEUTRAL_FACTOR_BASIS_POINTS, neutral_detail, false),
+        (
+            inferred_factor.unwrap_or(NEUTRAL_FACTOR_BASIS_POINTS),
+            neutral_detail,
+            false,
+        ),
         |(factor, window, standby)| {
             (
-                if standby { 0 } else { factor },
+                if standby {
+                    0
+                } else {
+                    inferred_factor.map_or(factor, |inferred| factor.min(inferred))
+                },
                 format!("{detail} {window}"),
                 standby,
             )
@@ -1890,6 +1913,33 @@ fn account_load(
             u128::from(*headroom) * 3_600 / u128::from(eta.unwrap_or(3_600))
         });
     let mut warnings = Vec::new();
+    if let Some(assessment) = crate::monthly_allowance_assessment(
+        context.catalogue,
+        context.config,
+        context.now,
+        model,
+        key,
+        latest_reading(model, availability, context, false),
+    )
+    .filter(|a| a.active && a.windows.iter().any(|w| w.estimated_cycle_source.is_some()))
+    {
+        let detail = format!(
+            "account={} {}; inferred monthly cycle",
+            key.unwrap_or("unknown"),
+            assessment.detail
+        );
+        if let Some(message) = context
+            .config
+            .launch_policy
+            .check(
+                "PACING_ACCOUNT",
+                provenant_records::policy::Facts::violation(detail),
+            )
+            .message()
+        {
+            warnings.push(message.to_owned());
+        }
+    }
     if let Err(warning) = check_go_allowance(model, context.config, context.catalogue) {
         let source = context
             .config

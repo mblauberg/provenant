@@ -3866,7 +3866,49 @@ pub(super) fn prepare_candidates_inner(
                 provenant_routing::exclusion_detail(reason),
             );
             skipped.set_cause(reason.clone());
-            reasons.push(name_skipped_accounts(skipped, &route, &entries));
+            if reason == &provenant_records::RouteExclusionReason::PacingReserve {
+                skipped = name_skipped_accounts(skipped, &route, &entries);
+                if let Some(account_key) = route.account_key.as_deref() {
+                    let account = entries
+                        .iter()
+                        .find(|entry| entry.adapter == route.adapter && entry.key == account_key)
+                        .map_or_else(
+                            || "unregistered account".to_owned(),
+                            |entry| entry.label.clone(),
+                        );
+                    if !skipped
+                        .skipped_accounts
+                        .iter()
+                        .any(|skipped| skipped.account == account)
+                    {
+                        skipped
+                            .skipped_accounts
+                            .push(provenant_records::SkippedAccount {
+                                extra: Default::default(),
+                                account,
+                                reason: reason.clone(),
+                            });
+                    }
+                }
+                let monthly_details = route
+                    .diagnostics
+                    .account_exclusions
+                    .iter()
+                    .filter_map(|detail| {
+                        detail
+                            .split_once("monthly policy=")
+                            .map(|(_, monthly)| format!("monthly policy={monthly}"))
+                    })
+                    .collect::<Vec<_>>();
+                if !monthly_details.is_empty() {
+                    skipped.detail.push_str("; ");
+                    skipped.detail.push_str(&monthly_details.join("; "));
+                }
+            }
+            if reason != &provenant_records::RouteExclusionReason::PacingReserve {
+                skipped = name_skipped_accounts(skipped, &route, &entries);
+            }
+            reasons.push(skipped);
             continue;
         }
         if let Err(error) =

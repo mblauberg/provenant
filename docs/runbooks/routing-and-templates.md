@@ -78,8 +78,9 @@ Monthly windows are recognised by billing-cycle/monthly/thirty-day pool names
 or 28–31 day durations. An adapter's monthly-allowance declaration, account
 monthly profile or remembered monthly ledger also requires evidence when a
 snapshot omits its cycle. Missing, stale, future-dated, reset or incomplete
-registered-account cycles are constrained; local login estimates name their
-cycle source and pace the recorded launches. Other windows retain their existing treatment, and
+registered-account cycles use available usage and an inferred cycle, with a
+sourced policy warning rather than a hold based on uncertainty. Local login
+estimates name their cycle source and pace the recorded launches. Other windows retain their existing treatment, and
 monthly windows respect model-pool scope. Profiles can select other windows
 with `windows`. The launch journal spans one account's models and pools; its
 booked costs estimate usage rather than measure actual individual costs or
