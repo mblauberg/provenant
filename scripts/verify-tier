@@ -147,7 +147,7 @@ def main():
     touched, integrations = [], []
     if selection in ("packages", "integrations"):
         rust_command = next((command for command in templates if command.get("stack") == "rust"), None)
-        metadata_cwd = root / rust_command.get("cwd", ".") if rust_command else workspace
+        metadata_cwd = workspace / rust_command.get("cwd", ".") if rust_command else workspace
         metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=metadata_cwd, env=child_environment(), text=True))
         packages = [{"name": p["name"], "manifest_path": str(Path(p["manifest_path"]).relative_to(root))} for p in metadata["packages"] if p["id"] in metadata["workspace_members"]]
         paths = changed_paths(root, cfg["base"])
@@ -192,7 +192,7 @@ def main():
             expansions = {"{packages}": packages_arg, "{integration_args}": target_args, "{quarantine_args}": quarantine_args}
             command = [part for arg in template["argv"] for part in expansions.get(arg, [arg])]
             print(f"+ {shlex.join(command)}", flush=True)
-            status = subprocess.run(command, cwd=root / template.get("cwd", "."), env=env).returncode
+            status = subprocess.run(command, cwd=workspace / template.get("cwd", "."), env=env).returncode
             if status:
                 print(f"result: host=local tier={args.tier} commit={commit} exit_status={status}", flush=True)
                 return status

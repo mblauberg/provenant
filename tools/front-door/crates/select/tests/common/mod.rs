@@ -87,7 +87,7 @@ pub(super) fn commit(dir: &Path, message: &str) -> String {
 
 /// Runs a git command against the fixture, with lane bindings removed.
 pub(super) fn git(dir: &Path, args: &[&str]) -> Vec<u8> {
-    let output = provenant_os::fixture::git_command()
+    let output = provenant_test_support::git_command()
         .current_dir(dir)
         .args([
             "-c",

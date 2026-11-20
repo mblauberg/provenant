@@ -39,7 +39,7 @@
         "commands": [
           {
             "stack": "rust",
-            "cwd": "tools/front-door",
+            "cwd": ".",
             "argv": [
               "cargo",
               "fmt",
@@ -50,7 +50,7 @@
           },
           {
             "stack": "rust",
-            "cwd": "tools/front-door",
+            "cwd": ".",
             "argv": [
               "cargo",
               "check",
@@ -60,7 +60,7 @@
           },
           {
             "stack": "rust",
-            "cwd": "tools/front-door",
+            "cwd": ".",
             "argv": [
               "../../scripts/verify-nextest",
               "--profile",
@@ -79,7 +79,7 @@
         "commands": [
           {
             "stack": "rust",
-            "cwd": "tools/front-door",
+            "cwd": ".",
             "argv": [
               "../../scripts/verify-nextest",
               "--profile",
@@ -96,7 +96,7 @@
         "commands": [
           {
             "stack": "rust",
-            "cwd": "tools/front-door",
+            "cwd": ".",
             "argv": [
               "../../scripts/verify-nextest",
               "--profile",
@@ -110,7 +110,7 @@
           },
           {
             "stack": "rust",
-            "cwd": "tools/front-door",
+            "cwd": ".",
             "argv": [
               "cargo",
               "test",
@@ -132,7 +132,7 @@
         "commands": [
           {
             "stack": "rust",
-            "cwd": "tools/front-door",
+            "cwd": ".",
             "argv": [
               "../../scripts/verify-nextest",
               "--profile",
@@ -148,7 +148,7 @@
           },
           {
             "stack": "rust",
-            "cwd": "tools/front-door",
+            "cwd": ".",
             "argv": [
               "../../scripts/run-mutants"
             ]

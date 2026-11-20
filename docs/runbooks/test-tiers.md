@@ -28,7 +28,7 @@ paths, comparing committed and working-tree changes against `origin/main`.
 Base, workspace, commands, integration mappings, `package_paths` (non-Rust
 paths that affect a crate's unit tests), `test_threads` and runner hosts are set
 in the `verify` port in `config/ports.json` (also exposed through the optional `.provenant/ports.json` link). Tier names are free-form strings;
-each tier declares commands as argv arrays with a stack and project-relative cwd,
+each tier declares commands as argv arrays with a stack and cwd relative to the effective verify workspace,
 package/integration/all selection, and whether
 to warn under host load. Host-load warnings continue locally.
 

@@ -2841,8 +2841,13 @@ mod tests {
             }
             Ok(())
         }
-        copy_entries(source, &destination.anchored_path())
-            .map_err(|_| fallback_reasons::CLONE_FAILED)
+        copy_entries(
+            source,
+            &destination
+                .current_path()
+                .map_err(|_| fallback_reasons::CLONE_FAILED)?,
+        )
+        .map_err(|_| fallback_reasons::CLONE_FAILED)
     }
 
     #[cfg(unix)]
@@ -2886,6 +2891,8 @@ mod tests {
         crate::writer::record_cargo_setup_file(&directory, "setup.json", &main, &lint).unwrap();
         let record: serde_json::Value =
             serde_json::from_slice(&std::fs::read(tmp.path().join("setup.json")).unwrap()).unwrap();
+        assert_eq!(main.status, "seeded", "{main:?}; {lint:?}");
+        assert_eq!(lint.status, "seeded", "{main:?}; {lint:?}");
         for name in ["target", "target-lint"] {
             assert_eq!(
                 std::fs::read(
@@ -2893,13 +2900,20 @@ mod tests {
                         .join(name)
                         .join("debug/.fingerprint/dependency/dep-lib-dependency")
                 )
-                .unwrap(),
-                b"dependency"
+                .unwrap_or_else(|error| panic!("{error}: {main:?}; {lint:?}")),
+                b"dependency",
+                "{main:?}; {lint:?}"
             );
         }
-        assert_eq!(record["status"], "seeded");
-        assert_eq!(record["lint_target"]["status"], "seeded");
-        assert_eq!(record["seed_source"], record["lint_target"]["seed_source"]);
+        assert_eq!(record["status"], "seeded", "{main:?}; {lint:?}");
+        assert_eq!(
+            record["lint_target"]["status"], "seeded",
+            "{main:?}; {lint:?}"
+        );
+        assert_eq!(
+            record["seed_source"], record["lint_target"]["seed_source"],
+            "{main:?}; {lint:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -2955,14 +2969,18 @@ mod tests {
             } else {
                 ("seeded", "fallback", "target")
             };
-            assert_eq!(record["status"], main_status);
-            assert_eq!(record["lint_target"]["status"], lint_status);
-            assert!(!cache.join(failed).exists());
+            assert_eq!(record["status"], main_status, "{main:?}; {lint:?}");
+            assert_eq!(
+                record["lint_target"]["status"], lint_status,
+                "{main:?}; {lint:?}"
+            );
+            assert!(!cache.join(failed).exists(), "{main:?}; {lint:?}");
             assert!(
                 cache
                     .join(successful)
                     .join("debug/.fingerprint/dependency/dep-lib-dependency")
-                    .is_file()
+                    .is_file(),
+                "{main:?}; {lint:?}"
             );
         }
     }

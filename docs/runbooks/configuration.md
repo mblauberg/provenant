@@ -51,7 +51,7 @@ This repository keeps its source at `config/ports.json` and links the optional
 Provenant); the builtin verify tiers are neutral cargo commands.
 
 Each tier command is an object with `stack` (default empty), `cwd` (default
-`.` and relative to the project root, without `..`) and a non-empty `argv`
+`.` and relative to the effective verify workspace, without `..`) and a non-empty `argv`
 array. The whole elements `{packages}`, `{integration_args}` and
 `{quarantine_args}` expand to zero or more arguments; other elements are
 literal and are never shell split. Arrays replace across layers. Detected Rust-only tiers retain builtin selection, while tiers containing non-Rust commands select all and expand selection placeholders to nothing. An invalid tier command warns with its layer and tier, and that tier falls back to the next lower layer.

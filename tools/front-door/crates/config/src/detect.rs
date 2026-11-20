@@ -34,6 +34,7 @@ impl Detection {
 }
 
 /// Discover without invoking project commands or changing the project tree.
+/// Detected paths are relative to the project root, assuming the default verify workspace.
 pub fn detect(project: &Path) -> Detection {
     let mut result = Detection::default();
     let mut dirs = vec![PathBuf::from(".")];
@@ -237,24 +238,28 @@ mod tests {
     fn root_pnpm_with_nested_rust() {
         let root = tempfile::tempdir().unwrap();
         write(root.path(), "nested/Cargo.toml", "[workspace]\n");
-        write(root.path(), "package.json", r#"{"scripts":{"lint":"ok"}}"#);
+        write(
+            root.path(),
+            "package.json",
+            r#"{"scripts":{"lint":"ok","test":"ok","build":"ok"}}"#,
+        );
         write(root.path(), "pnpm-lock.yaml", "");
         let state = tempfile::tempdir().unwrap();
         let table = crate::PortTable::read_for(Some(root.path()), state.path()).unwrap();
-        assert_eq!(
-            table.verify.tiers["0"].selection,
-            crate::VerifySelection::Packages
-        );
-        let tier = &table.verify.tiers["0"].commands;
-        assert!(
-            tier.iter()
-                .filter(|c| c.stack == "rust")
-                .all(|c| c.cwd == Path::new("./nested"))
-        );
-        let node = tier.last().unwrap();
-        assert_eq!((&*node.stack, node.cwd.as_path()), ("node", Path::new(".")));
-        assert_eq!(node.argv, ["pnpm", "run", "lint"]);
-        assert!(tier[..tier.len() - 1].iter().all(|c| c.stack == "rust"));
+        for (name, script) in [("0", "lint"), ("1", "test"), ("2", "build")] {
+            let tier = &table.verify.tiers[name];
+            assert_eq!(tier.selection, crate::VerifySelection::All);
+            let (node, rust) = tier.commands.split_last().unwrap();
+            assert!(!rust.is_empty());
+            for command in rust {
+                assert_eq!(
+                    (&*command.stack, command.cwd.as_path()),
+                    ("rust", Path::new("./nested"))
+                );
+            }
+            assert_eq!((&*node.stack, node.cwd.as_path()), ("node", Path::new(".")));
+            assert_eq!(node.argv, ["pnpm", "run", script]);
+        }
     }
 
     fn snapshot(root: &Path, dir: &Path, entries: &mut Vec<(PathBuf, u64, SystemTime)>) {

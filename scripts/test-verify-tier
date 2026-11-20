@@ -298,8 +298,8 @@ class Selection(unittest.TestCase):
         self.assertIn("not (test(=flaky))", commands[-1])
         self.assertEqual(commands[-1][-2:], ["--test-threads", "2"])
 
-    def test_command_runs_in_its_own_project_directory(self):
-        cfg = dict(verify.DEFAULTS, tiers={"2": {"commands": [{"cwd": "nested", "argv": ["command"]}], "selection": "all", "warn_for_host_load": False}})
+    def test_command_runs_relative_to_verify_workspace(self):
+        cfg = dict(verify.DEFAULTS, workspace="host-workspace", tiers={"2": {"commands": [{"cwd": "nested", "argv": ["command"]}], "selection": "all", "warn_for_host_load": False}})
         with tempfile.TemporaryDirectory() as tmp, \
              mock.patch.object(verify, "config", return_value=cfg), \
              mock.patch.object(verify.subprocess, "check_output", return_value="abc\n"), \
@@ -307,7 +307,7 @@ class Selection(unittest.TestCase):
              mock.patch.object(verify.sys, "argv", ["verify-tier", "--tier", "2", "--project", tmp]), \
              mock.patch.object(verify.sys, "stdout", new_callable=io.StringIO):
             self.assertEqual(verify.main(), 0)
-            self.assertEqual(run.call_args.kwargs["cwd"], Path(tmp) / "nested")
+            self.assertEqual(run.call_args.kwargs["cwd"], Path(tmp) / "host-workspace" / "nested")
 
     def test_commands_keep_literal_braces(self):
         cfg = dict(verify.DEFAULTS, tiers={"2": {"commands": [{"argv": ['command', '{literal}']}], "selection": "all", "warn_for_host_load": True}})

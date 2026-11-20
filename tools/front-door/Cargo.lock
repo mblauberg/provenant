@@ -699,7 +699,7 @@ dependencies = [
 name = "provenant-select"
 version = "2.4.1"
 dependencies = [
- "provenant-os",
+ "provenant-test-support",
  "serde",
  "serde_json",
  "tempfile",

@@ -292,7 +292,7 @@ pub enum VerifySelection {
     All,
 }
 
-/// A command run from the project root joined with `cwd`.
+/// A command run from the effective verify workspace joined with `cwd`.
 /// The whole argv elements `{packages}`, `{integration_args}`, and
 /// `{quarantine_args}` expand to zero or more arguments; no shell splitting occurs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
