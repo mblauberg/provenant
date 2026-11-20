@@ -8,6 +8,7 @@ use std::path::Path;
 
 pub(crate) mod batch;
 mod ci;
+mod membership;
 
 /// Why a PR whose CI never reported checks stayed pending. Shared by the
 /// graph gate's CI summary and by `wait --pr` at a timeout.
@@ -116,6 +117,13 @@ pub(crate) struct Line {
     pub(crate) actions_grace: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     error: Option<String>,
+    /// The open batch this pull request was merged into, when Git history
+    /// proves its head is carried there. Its own cancelled CI is superseded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) batch: Option<membership::Link>,
+    /// The members and file attribution a batch row reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) batch_detail: Option<membership::BatchDetail>,
 }
 fn display_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
 where
@@ -185,6 +193,22 @@ impl Line {
         } else {
             "ready"
         }
+    }
+    /// The class a `pr status` summary reports. A member carried by a batch
+    /// is a state report, not a failure its own cancelled runs can cause.
+    pub(crate) fn display_class(&self) -> &'static str {
+        if self.batch.is_some() {
+            "superseded"
+        } else {
+            self.class()
+        }
+    }
+    /// A superseded member's cancelled checks are no longer evidence of a
+    /// failure on its own head; the batch's CI is reported alongside instead.
+    pub(crate) fn suppress_own_ci(&mut self) {
+        self.checks_failed = Some(0);
+        self.failing_checks.clear();
+        self.failed_check_details.clear();
     }
     /// What a waiter takes from this pull request: `Some(true)` once it
     /// merged or its checks passed, `Some(false)` once they failed or it
@@ -272,6 +296,12 @@ impl Line {
         }
         if self.actions_grace {
             line.push_str(" awaiting Actions runs");
+        }
+        if let Some(link) = &self.batch {
+            line.push_str(&link.suffix());
+        }
+        if let Some(detail) = &self.batch_detail {
+            line.push_str(&detail.suffix());
         }
         line.push_str(&self.cause_suffix());
         line
@@ -930,6 +960,8 @@ fn status_line(number: u64, view: View, checks: Option<&[super::observer::Check]
         awaiting: None,
         actions_grace: false,
         error: None,
+        batch: None,
+        batch_detail: None,
     }
 }
 
@@ -995,7 +1027,9 @@ fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
         .map(|(index, &number)| (number, index))
         .collect();
     lines.sort_by_key(|(number, _)| order.get(number).copied().unwrap_or(usize::MAX));
-    lines.into_iter().map(|(_, line)| line).collect()
+    let mut lines: Vec<Line> = lines.into_iter().map(|(_, line)| line).collect();
+    membership::annotate(project, state, &mut lines);
+    lines
 }
 
 /// The per-PR REST read, falling back to one GraphQL query when REST itself
@@ -1034,6 +1068,8 @@ fn rest_line(project: &Path, state: &Path, number: u64, try_graphql: bool) -> Li
                 awaiting: None,
                 actions_grace: false,
                 error: Some(provenant_cli::bounded_text(&error.to_string(), 256)),
+                batch: None,
+                batch_detail: None,
             }
         }
     }
@@ -1107,6 +1143,7 @@ fn summarise(lines: &[Line]) -> provenant_cli::Summary {
         "review_required",
         "pending",
         "unavailable",
+        "superseded",
         "draft",
         "ready",
         "merged",
@@ -1116,15 +1153,22 @@ fn summarise(lines: &[Line]) -> provenant_cli::Summary {
     .map(|class| {
         (
             class,
-            lines.iter().filter(|line| line.class() == class).count(),
+            lines
+                .iter()
+                .filter(|line| line.display_class() == class)
+                .count(),
         )
     })
     .collect();
     let mut action: Vec<&Line> = lines
         .iter()
-        .filter(|line| order.contains(&line.class()))
+        .filter(|line| order.contains(&line.display_class()))
         .collect();
-    action.sort_by_key(|line| order.iter().position(|class| *class == line.class()));
+    action.sort_by_key(|line| {
+        order
+            .iter()
+            .position(|class| *class == line.display_class())
+    });
     let rows: Vec<String> = action.iter().map(|line| line.text()).collect();
     let quiet = lines.len() - action.len();
     let next = match action.first() {
@@ -1137,7 +1181,7 @@ fn summarise(lines: &[Line]) -> provenant_cli::Summary {
         Some(line) => Some(format!("provenant pr status {} --full", line.number)),
         None => lines
             .iter()
-            .find(|line| line.class() == "ready")
+            .find(|line| line.display_class() == "ready")
             .map(|line| format!("provenant land {} --wait", line.number))
             .or_else(|| Some("provenant status".to_owned())),
     };
@@ -1176,6 +1220,8 @@ mod tests {
             awaiting: None,
             actions_grace: false,
             error: error.map(str::to_owned),
+            batch: None,
+            batch_detail: None,
         }
     }
     #[test]
@@ -1253,6 +1299,77 @@ mod tests {
         waiting.await_head("new");
         assert!(waiting.pending_checks.is_empty());
         assert!(!waiting.text().contains("pending_names="));
+    }
+
+    // Spec: docs/specs/cli.md#integration-batch-membership
+    #[test]
+    fn a_superseded_member_renders_the_batch_and_drops_cancelled_failures() {
+        use super::membership::Link;
+        let mut member = row(7, "member-head", None);
+        member.checks_failed = Some(1);
+        member.failing_checks = vec!["ci-status".into()];
+        member.failed_check_details = vec![super::FailedCheck {
+            name: "ci-status".into(),
+            url: Some("https://ci/one".into()),
+        }];
+        member.suppress_own_ci();
+        member.batch = Some(Link {
+            number: Some(9),
+            label: "#9".into(),
+            head: "batch-head".into(),
+            ci: "checks=2/2 fail=0 pending=0".into(),
+            head_moved: false,
+        });
+        let text = member.text();
+        assert!(
+            text.contains(
+                "in batch #9 (head merged); own CI superseded; batch ci=checks=2/2 fail=0 pending=0"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("fail=1"), "{text}");
+        assert!(!text.contains("names=ci-status"), "{text}");
+        assert_eq!(member.display_class(), "superseded");
+        let json = serde_json::to_value(&member).unwrap();
+        assert_eq!(json["batch"]["number"], 9);
+        assert_eq!(json["batch"]["head"], "batch-head");
+        let summary = super::summarise(&[member]);
+        assert_eq!(summary.lines[0], "1 PRs: 1 superseded");
+        assert_eq!(&summary.lines[1..], &[] as &[String]);
+    }
+
+    // Spec: docs/specs/cli.md#integration-batch-membership
+    #[test]
+    fn a_batch_row_renders_its_members_and_per_file_attribution() {
+        use super::membership::{BatchDetail, FileOwner, MemberRow};
+        let mut batch = row(9, "batch-head", None);
+        batch.batch_detail = Some(BatchDetail {
+            members: vec![
+                MemberRow {
+                    number: 7,
+                    head_moved: false,
+                },
+                MemberRow {
+                    number: 8,
+                    head_moved: true,
+                },
+            ],
+            files: vec![
+                FileOwner {
+                    path: "src/a.rs".into(),
+                    member: 7,
+                },
+                FileOwner {
+                    path: "src/b.rs".into(),
+                    member: 8,
+                },
+            ],
+        });
+        let text = batch.text();
+        assert!(text.contains("batch_members=7:merged,8:moved"), "{text}");
+        assert!(text.contains("batch_files=src/a.rs:7,src/b.rs:8"), "{text}");
+        let json = serde_json::to_value(&batch).unwrap();
+        assert_eq!(json["batch_detail"]["files"][1]["member"], 8);
     }
 
     #[test]
