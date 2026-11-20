@@ -4896,6 +4896,7 @@ mod tests {
             next: None,
             admission_holders: Vec::new(),
             admission_waiters: Vec::new(),
+            stranded_work: Vec::new(),
         };
         let summary = listing_summary(&listing, 50, 0);
         assert_eq!(live_lanes(&listing), 1);
@@ -4965,6 +4966,7 @@ mod tests {
             next: None,
             admission_holders: Vec::new(),
             admission_waiters: Vec::new(),
+            stranded_work: Vec::new(),
         };
         let summary = listing_summary(&listing, 50, 0);
         assert_eq!(live_lanes(&listing), 0);
