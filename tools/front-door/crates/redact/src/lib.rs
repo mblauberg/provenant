@@ -10,6 +10,67 @@ use thiserror::Error;
 
 const REDACTED: &[u8] = b"[REDACTED]";
 /// Short values are too ambiguous for document-wide substring replacement or refusal.
+/// Redaction policy for local output and text leaving this host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Mode {
+    #[default]
+    Off,
+    Secrets,
+    Full,
+}
+impl Mode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Secrets => "secrets",
+            Self::Full => "full",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "off" => Some(Self::Off),
+            "secrets" => Some(Self::Secrets),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+    pub const fn masks_egress(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+    pub const fn masks_local(self) -> bool {
+        matches!(self, Self::Full)
+    }
+    pub const fn masks_assignments(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+static MODE: std::sync::OnceLock<Mode> = std::sync::OnceLock::new();
+thread_local! { static MODE_OVERRIDE: std::cell::Cell<Option<Mode>> = const { std::cell::Cell::new(None) }; }
+pub fn init(mode: Mode) {
+    let _ = MODE.set(mode);
+}
+pub fn mode() -> Mode {
+    MODE_OVERRIDE
+        .with(|m| m.get())
+        .unwrap_or_else(|| MODE.get().copied().unwrap_or_default())
+}
+/// Thread-bound temporary policy, restored even during unwinding.
+pub struct ModeGuard {
+    previous: Option<Mode>,
+    thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+pub fn scoped(mode: Mode) -> ModeGuard {
+    ModeGuard {
+        previous: MODE_OVERRIDE.with(|m| m.replace(Some(mode))),
+        thread: std::marker::PhantomData,
+    }
+}
+impl Drop for ModeGuard {
+    fn drop(&mut self) {
+        MODE_OVERRIDE.with(|m| m.set(self.previous));
+    }
+}
+
 pub const MIN_EXACT_BYTES: usize = 8;
 const MAX_SECRETS: usize = 128;
 const MAX_SECRET_BYTES: usize = 64 * 1024;
@@ -1369,6 +1430,8 @@ pub struct Redactor {
     tokens: TokenScanner,
     assignments: AssignmentScanner,
     literal_only: bool,
+    passthrough: bool,
+    scan_assignments: bool,
     failed: bool,
     decisions: [DecisionQueue; 3],
     redaction_run: bool,
@@ -1392,6 +1455,11 @@ impl Redactor {
     pub fn for_publication(
         typed_values: impl IntoIterator<Item = Vec<u8>>,
     ) -> Result<Self, RedactorError> {
+        if !mode().masks_egress() {
+            let mut filter = Self::with_secrets(Vec::new(), true);
+            filter.passthrough = true;
+            return Ok(filter);
+        }
         let mut secrets = ambient_values()?;
         secrets.extend(scoped_values());
         secrets.extend(typed_values);
@@ -1407,6 +1475,8 @@ impl Redactor {
             tokens: TokenScanner::default(),
             assignments: AssignmentScanner::default(),
             literal_only,
+            passthrough: false,
+            scan_assignments: true,
             failed: false,
             decisions: std::array::from_fn(|_| DecisionQueue::default()),
             redaction_run: false,
@@ -1443,6 +1513,12 @@ impl Redactor {
         bytes: &[u8],
         sink: &mut dyn FnMut(&[u8]),
     ) -> Result<(), FilterError> {
+        if self.passthrough {
+            for chunk in bytes.chunks(FRAME_LIMIT) {
+                sink(chunk);
+            }
+            return Ok(());
+        }
         self.bind_publication_context()?;
         if self.failed {
             return Err(FilterError);
@@ -1469,9 +1545,14 @@ impl Redactor {
                     self.failed = true;
                     FilterError
                 })?;
-                self.assignments.filter(chunk, &mut self.decisions[2]);
-                self.insertions
-                    .extend(self.assignments.insertions.drain(..));
+                if self.scan_assignments {
+                    self.assignments.filter(chunk, &mut self.decisions[2]);
+                    self.insertions
+                        .extend(self.assignments.insertions.drain(..));
+                } else {
+                    self.decisions[2]
+                        .extend(chunk.iter().copied().map(|byte| (byte, false)).collect());
+                }
                 self.queue_tokens(tokens);
             }
             self.emit_decided(&mut emitter)?;
@@ -1481,6 +1562,9 @@ impl Redactor {
     }
 
     fn finish_frames(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+        if self.passthrough {
+            return Ok(());
+        }
         if self.failed {
             return Err(FilterError);
         }
@@ -1497,9 +1581,11 @@ impl Redactor {
                 self.failed = true;
                 FilterError
             })?;
-            self.assignments.finish(&mut self.decisions[2]);
-            self.insertions
-                .extend(self.assignments.insertions.drain(..));
+            if self.scan_assignments {
+                self.assignments.finish(&mut self.decisions[2]);
+                self.insertions
+                    .extend(self.assignments.insertions.drain(..));
+            }
             self.queue_tokens(tokens);
         }
         let mut emitter = FrameEmitter::new(sink);
@@ -1719,8 +1805,12 @@ pub fn publication_scope(
     values: impl IntoIterator<Item = Vec<u8>>,
 ) -> Result<PublicationScope, RedactorError> {
     let mut all = scoped_values();
-    all.extend(values);
-    let all = publication_secrets(all)?;
+    if mode().masks_egress() {
+        all.extend(values);
+        all = publication_secrets(all)?;
+    } else {
+        all.clear();
+    }
     let previous = PUBLICATION_VALUES.with_borrow_mut(|values| std::mem::replace(values, all));
     Ok(PublicationScope {
         previous,
@@ -1734,6 +1824,9 @@ pub fn launch_values(
     environment: &[(Vec<u8>, Vec<u8>)],
     secret: Option<&[u8]>,
 ) -> Result<Vec<Vec<u8>>, RedactorError> {
+    if !mode().masks_egress() {
+        return Ok(Vec::new());
+    }
     fn strings(value: &serde_json::Value, output: &mut Vec<Vec<u8>>) {
         match value {
             serde_json::Value::String(value) if !value.is_empty() => {
@@ -1846,6 +1939,9 @@ pub fn publication_text(
     bytes: &[u8],
     typed_values: impl IntoIterator<Item = Vec<u8>>,
 ) -> Result<Vec<u8>, RedactorError> {
+    if !mode().masks_egress() {
+        return Ok(bytes.to_vec());
+    }
     let mut secrets = ambient_values()?;
     secrets.extend(scoped_values());
     secrets.extend(typed_values);
@@ -1891,6 +1987,19 @@ fn credential_variable_name(name: &[u8]) -> bool {
 /// Filter a diagnostic using known literals and credential shapes. Input
 /// policy uses the shape-only disclosure scanner; content uses publication_text.
 pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
+    if !mode().masks_local() {
+        return Ok(bytes.to_vec());
+    }
+    filter_shapes(bytes, true)
+}
+/// Filter credential literals and token shapes at an egress boundary.
+pub fn egress_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
+    if !mode().masks_egress() {
+        return Ok(bytes.to_vec());
+    }
+    filter_shapes(bytes, mode().masks_assignments())
+}
+fn filter_shapes(bytes: &[u8], assignments: bool) -> Result<Vec<u8>, FilterError> {
     let secrets = publication_secrets(
         ambient_values()
             .map_err(|_| FilterError)?
@@ -1899,6 +2008,7 @@ pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
     )
     .map_err(|_| FilterError)?;
     let mut redactor = Redactor::new(secrets).map_err(|_| FilterError)?;
+    redactor.scan_assignments = assignments;
     let mut safe = Vec::new();
     let mut sink = |frame: &[u8]| {
         safe.extend_from_slice(frame);
@@ -1908,6 +2018,18 @@ pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
     }
     redactor.finish(&mut sink)?;
     Ok(safe)
+}
+
+/// Whether a value contains a recognised credential token shape.
+pub fn has_token_shape(bytes: &[u8]) -> Result<bool, FilterError> {
+    let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
+    redactor.scan_assignments = false;
+    let mut sink = |_: &[u8]| {};
+    for chunk in bytes.chunks(8192) {
+        redactor.filter(chunk, &mut sink)?;
+    }
+    redactor.finish(&mut sink)?;
+    Ok(redactor.tokens.matched)
 }
 
 /// Classify a known-shape match without exposing any matched bytes.
@@ -1928,6 +2050,9 @@ pub fn known_shape_rule(bytes: &[u8]) -> Result<Option<&'static str>, FilterErro
 }
 
 pub fn delivery_diagnostics(detail: &str) -> String {
+    if !mode().masks_local() {
+        return detail.to_owned();
+    }
     let filtered = match known_shapes(detail.as_bytes()) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(FilterError) => return "[REDACTED]".into(),
@@ -2010,9 +2135,58 @@ mod tests {
         output
     }
 
+    #[test]
+    fn mode_policy_controls_local_and_egress() {
+        assert_eq!(Mode::default(), Mode::Off);
+        for m in [Mode::Off, Mode::Secrets, Mode::Full] {
+            assert_eq!(Mode::parse(m.as_str()), Some(m));
+        }
+        assert_eq!(Mode::parse("invalid"), None);
+        let input = b"password=fixture-password actual=registered-value-3391";
+        let secret = b"registered-value-3391".to_vec();
+        let _off = scoped(Mode::Off);
+        assert_eq!(known_shapes(input).unwrap(), input);
+        assert_eq!(
+            delivery_diagnostics("password=fixture-password"),
+            "password=fixture-password"
+        );
+        assert_eq!(
+            bounded_line("password=fixture-password", 512),
+            "password=fixture-password"
+        );
+        assert_eq!(publication_text(input, [secret.clone()]).unwrap(), input);
+        let mut stream = Redactor::for_publication([secret.clone()]).unwrap();
+        assert_eq!(joined(&mut stream, &[input]), input);
+        {
+            let _secrets = scoped(Mode::Secrets);
+            assert_eq!(known_shapes(input).unwrap(), input);
+            let mut stream = Redactor::for_publication([secret.clone()]).unwrap();
+            assert_eq!(
+                joined(&mut stream, &[input]),
+                b"password=fixture-password actual=[REDACTED]"
+            );
+            assert_ne!(
+                egress_shapes(b"ghp_0123456789abcdef0123456789abcdef0123").unwrap(),
+                b"ghp_0123456789abcdef0123456789abcdef0123"
+            );
+            assert_eq!(
+                publication_text(input, [secret.clone()]).unwrap(),
+                b"password=fixture-password actual=[REDACTED]"
+            );
+            assert_eq!(
+                egress_shapes(b"password=fixture-password").unwrap(),
+                b"password=fixture-password"
+            );
+            let _full = scoped(Mode::Full);
+            assert_ne!(known_shapes(input).unwrap(), input);
+        }
+        assert_eq!(mode(), Mode::Off);
+    }
+
     // Spec: docs/specs/fabric.md#checkpoint-envelope
     #[test]
     fn known_values_mask_literals_but_preserve_unregistered_shapes() {
+        let _mode = scoped(Mode::Full);
         let input = b"password=example-3391 actual=real-value-3391";
         let safe = known_values(input, [b"real-value-3391".to_vec()]).unwrap();
         assert_eq!(safe, b"password=example-3391 actual=[REDACTED]");
@@ -2029,6 +2203,7 @@ mod tests {
     // Spec: docs/specs/fabric.md#checkpoint-envelope
     #[test]
     fn launch_descriptor_values_mask_capture_and_settlement_without_persistence() {
+        let _mode = scoped(Mode::Full);
         let secret = b"descriptor-credential-3391";
         let mut filter = Redactor::for_publication([]).unwrap();
         {
@@ -2050,6 +2225,7 @@ mod tests {
 
     #[test]
     fn matches_credential_value_for_retry_ignores_short_or_placeholder_values() {
+        let _mode = scoped(Mode::Full);
         // Short values (< 8 bytes) and placeholder '[REDACTED]' are ignored.
         let _scope = publication_scope([
             b"ollama".to_vec(),
@@ -2079,6 +2255,7 @@ mod tests {
 
     #[test]
     fn publication_text_masks_registered_values_and_keeps_examples() {
+        let _mode = scoped(Mode::Full);
         let encoded = serde_json::to_string("typed\"credential-3391").unwrap();
         let input = format!("example=sk-example-value actual={encoded}");
         assert_eq!(
@@ -2089,6 +2266,7 @@ mod tests {
 
     #[test]
     fn publication_stream_masks_typed_json_values_but_preserves_shapes() {
+        let _mode = scoped(Mode::Full);
         let secret = b"typed\"credential-3391";
         let encoded = serde_json::to_string(std::str::from_utf8(secret).unwrap()).unwrap();
         let input = format!("example=sk-example-value actual={encoded}");
@@ -2107,6 +2285,7 @@ mod tests {
     // Spec: docs/specs/retry-owner.md#credential-admission-and-publication
     #[test]
     fn ambient_bounds_are_lenient_only_for_retry() {
+        let _mode = scoped(Mode::Full);
         use std::ffi::OsString;
         for (count, length, retained, expected) in [
             (1, MAX_SECRET_LENGTH + 1, 0, RedactorError::SecretTooLong),
@@ -2140,6 +2319,7 @@ mod tests {
         reason = "fixture subprocess isolates ambient credentials and captures process-wide stderr"
     )]
     fn oversized_ambient_credential_withdraws_publication_but_admits_retry() {
+        let _mode = scoped(Mode::Full);
         const CHILD: &str = "PROVENANT_REDACT_BOUND_TEST";
         const NAME: &str = "UNTRUSTED\n\u{1b}[31m_API_KEY";
         let oversized = "oversized-held-credential-".repeat(800);
@@ -2181,6 +2361,7 @@ mod tests {
 
     #[test]
     fn publication_preserves_raw_escape_literal_matching() {
+        let _mode = scoped(Mode::Full);
         let secret = br"\u0042-escape-3391";
         let source = br"literal=\u0042-escape-3391";
         let expected = b"literal=[REDACTED]";
@@ -2201,7 +2382,9 @@ mod tests {
 
     #[test]
     fn publication_stream_masks_full_and_mixed_unicode_json_escapes_at_every_split() {
+        let _mode = scoped(Mode::Full);
         fn escape(text: &str, escape_even: bool) -> String {
+            let _mode = scoped(Mode::Full);
             use std::fmt::Write as _;
             let mut encoded = String::new();
             for (index, character) in text.chars().enumerate() {
@@ -2246,6 +2429,7 @@ mod tests {
 
     #[test]
     fn ambient_credential_names_reuse_assignment_key_boundaries() {
+        let _mode = scoped(Mode::Full);
         for name in [
             b"GH_TOKEN".as_slice(),
             b"GITHUB_TOKEN",
@@ -2264,6 +2448,7 @@ mod tests {
 
     #[test]
     fn literal_redaction_is_chunk_invariant_and_preserves_unmatched_text() {
+        let _mode = scoped(Mode::Full);
         let cases = [
             (
                 vec![b"token-123".to_vec()],
@@ -2333,6 +2518,7 @@ mod tests {
 
     #[test]
     fn ordinary_urls_and_embedded_token_markers_are_preserved() {
+        let _mode = scoped(Mode::Full);
         let mut redactor = Redactor::new([]).expect("empty secret set");
         let output = joined(
             &mut redactor,
@@ -2350,6 +2536,7 @@ mod tests {
     #[test]
     fn token_shapes_are_redacted_or_preserved_across_chunk_boundaries()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _mode = scoped(Mode::Full);
         token_markers_split_across_chunks_redact_only_at_word_boundaries();
         json_escaped_boundaries_redact_all_token_shapes_across_chunks();
         raw_backslashes_before_tokens_do_not_disable_redaction_across_chunks();
@@ -2360,6 +2547,7 @@ mod tests {
     }
 
     fn token_markers_split_across_chunks_redact_only_at_word_boundaries() {
+        let _mode = scoped(Mode::Full);
         let mut redactor = Redactor::new([]).expect("empty secret set");
         let output = joined(
             &mut redactor,
@@ -2369,6 +2557,7 @@ mod tests {
     }
 
     fn json_escaped_boundaries_redact_all_token_shapes_across_chunks() {
+        let _mode = scoped(Mode::Full);
         for (marker, kind) in TOKEN_MARKERS {
             let marker = marker_pattern(marker);
             let body = match kind {
@@ -2405,6 +2594,7 @@ mod tests {
     }
 
     fn raw_backslashes_before_tokens_do_not_disable_redaction_across_chunks() {
+        let _mode = scoped(Mode::Full);
         for (marker, kind) in TOKEN_MARKERS {
             let marker = marker_pattern(marker);
             let bodies: &[&str] = match kind {
@@ -2439,6 +2629,7 @@ mod tests {
     }
 
     fn unicode_escapes_inside_tokens_are_redacted_across_chunks() {
+        let _mode = scoped(Mode::Full);
         for (marker, kind) in TOKEN_MARKERS {
             let marker = marker_pattern(marker);
             let body = match kind {
@@ -2498,6 +2689,7 @@ mod tests {
     }
 
     fn bearer_and_credential_url_values_split_across_chunks_are_hidden() {
+        let _mode = scoped(Mode::Full);
         let mut redactor = Redactor::new([]).expect("empty secret set");
         let output = joined(
             &mut redactor,
@@ -2518,6 +2710,7 @@ mod tests {
 
     #[test]
     fn provider_token_shapes_are_known() {
+        let _mode = scoped(Mode::Full);
         for token in [
             "glpat-abcdefghij0123456789",
             "npm_abcdefghijklmnopqrstuvwxyz0123456789",
@@ -2558,6 +2751,7 @@ mod tests {
 
     #[test]
     fn short_or_case_mismatched_tokens_and_passwordless_userinfo_are_preserved() {
+        let _mode = scoped(Mode::Full);
         let mut redactor = Redactor::new([]).expect("empty secret set");
         let expected = b"bearer values | Bearer values | Bearer abcdefghijklmnopqrs | sk- | sk-abcdefghijklmnopqrs | SK-abcdefghijklmnopqrstuvwxyz | GHP_abcdefghijklmnopqrst | GHO_abcdefghijklmnopqrst | GHU_abcdefghijklmnopqrst | GHS_abcdefghijklmnopqrst | GHR_abcdefghijklmnopqrst | GitHub_pat_abcdefghijklmnopqrst | AKIA123456789012345 | Akia1234567890123456 | ssh://git@host | https://user@example.invalid/path";
         let output = joined(
@@ -2573,6 +2767,7 @@ mod tests {
 
     #[test]
     fn empty_password_component_in_url_userinfo_is_redacted() {
+        let _mode = scoped(Mode::Full);
         let mut redactor = Redactor::new([]).expect("empty secret set");
         let output = joined(&mut redactor, &[b"https://user:@example.invalid/path"]);
         assert_eq!(output, b"https://[REDACTED]@example.invalid/path");
@@ -2582,6 +2777,7 @@ mod tests {
     #[test]
     // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
     fn exact_redacted_assignments_are_preserved_across_chunk_boundaries() {
+        let _mode = scoped(Mode::Full);
         for input in [
             "token=[REDACTED]",
             "token=[REDACTED] next",
@@ -2611,6 +2807,7 @@ mod tests {
     #[test]
     // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
     fn credential_assignments_are_redacted_across_chunk_boundaries() {
+        let _mode = scoped(Mode::Full);
         let cases: &[(&str, &str)] = &[
             (r"token=[REDACTED]\suffix", "token=[REDACTED]"),
             (r"token=[REDACTED]\\suffix", "token=[REDACTED]"),
@@ -2774,6 +2971,7 @@ mod tests {
     #[test]
     // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
     fn quoted_credentials_are_line_bounded_and_hide_leading_bytes() {
+        let _mode = scoped(Mode::Full);
         let cases = [
             (
                 r#"{"msg": "escaped \" quote", "password": "val\\"} end"#,
@@ -2846,6 +3044,7 @@ mod tests {
 
     #[test]
     fn ordinary_prose_with_credential_words_is_preserved() {
+        let _mode = scoped(Mode::Full);
         let input = "token budget is 5; auth failed; oauth=1; compass=north; max_tokens=4096; passwords=3; tokenizer: fast; bypass: on";
         for split in 0..=input.len() {
             let mut redactor = Redactor::new([]).expect("empty secret set");
@@ -2865,6 +3064,7 @@ mod tests {
 
     #[test]
     fn bounded_line_redacts_credential_assignments() {
+        let _mode = scoped(Mode::Full);
         assert_eq!(
             bounded_line("unclassified; password=fixture-secret", 512),
             "unclassified; password=[REDACTED]"
@@ -2872,6 +3072,7 @@ mod tests {
     }
 
     fn token_markers_redact_at_minimum_body_lengths_across_chunks() {
+        let _mode = scoped(Mode::Full);
         let mut redactor = Redactor::new([]).expect("empty secret set");
         let output = joined(
             &mut redactor,
@@ -2903,6 +3104,7 @@ mod tests {
     #[test]
     // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
     fn overlapping_literal_does_not_change_assignment_boundaries() {
+        let _mode = scoped(Mode::Full);
         let input = b"password=\"X\\\"LEAK_SENTINEL\" end\nnext";
         let expected = b"password=\"[REDACTED]\" end\nnext";
         for split in 0..=input.len() {
@@ -2937,6 +3139,7 @@ mod tests {
     #[test]
     // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
     fn expansions_and_long_delimiters_are_chunk_invariant_and_framed() {
+        let _mode = scoped(Mode::Full);
         let short = b"x x x tail";
         let short_expected = b"[REDACTED] [REDACTED] [REDACTED] tail";
         for split in 0..=short.len() {
@@ -3003,6 +3206,7 @@ mod tests {
     #[test]
     // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
     fn authority_tokens_are_masked_at_every_split() {
+        let _mode = scoped(Mode::Full);
         for input in [
             b"https://ghp_abcdefghijklmnopqrst@example.invalid/".as_slice(),
             b"https://user:ghp_abcdefghijklmnopqrst@example.invalid/".as_slice(),
@@ -3025,6 +3229,7 @@ mod tests {
     #[test]
     // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
     fn long_withheld_run_drains_in_bounded_calls() {
+        let _mode = scoped(Mode::Full);
         let slashes = vec![b'\\'; 1024 * 1024 - 1];
         let mut opener = b"password=".to_vec();
         opener.extend(&slashes);
@@ -3053,6 +3258,7 @@ mod tests {
 
     #[test]
     fn invalid_secret_sets_are_rejected_without_rendering_values() {
+        let _mode = scoped(Mode::Full);
         assert_eq!(
             Redactor::new([Vec::new()]).err(),
             Some(RedactorError::EmptySecret)
