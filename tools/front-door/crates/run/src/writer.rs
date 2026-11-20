@@ -1878,27 +1878,33 @@ impl LaunchConfinement {
         self.cargo_home
             .source_environment(self.plan.permissions().network, environment);
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
-        let target_outcome = match (&self.plan.permissions().mode, writer) {
+        let (target_outcome, lint_outcome) = match (&self.plan.permissions().mode, writer) {
             (AccessMode::WorktreeWrite(authority), Some((worktree, _))) => {
                 if self.cargo_target.value.is_project() {
-                    // The worktree's own target: Cargo creates it inside the
-                    // writer-controlled tree; the host never writes there.
-                    crate::cargo_seed::Outcome::skipped("project_target")
+                    skipped_cargo_targets("project_target")
                 } else if self.cargo_target.value.is_custom() {
                     let _ = std::fs::create_dir_all(&target);
-                    crate::cargo_seed::Outcome::skipped("custom_target")
+                    skipped_cargo_targets("custom_target")
                 } else {
-                    self.seed_cargo_target(
-                        worktree,
-                        &authority.cargo_cache().path,
-                        environment,
-                        cancel,
-                    )
+                    seed_both_cargo_targets(|destination| {
+                        self.seed_cargo_target(
+                            worktree,
+                            &authority.cargo_cache().path,
+                            environment,
+                            cancel,
+                            destination,
+                        )
+                    })
                 }
             }
-            _ => crate::cargo_seed::Outcome::skipped("read_only_lane"),
+            _ => skipped_cargo_targets("read_only_lane"),
         };
         if self.cargo_target.value.is_private() {
+            if matches!(&self.plan.permissions().mode, AccessMode::WorktreeWrite(_)) {
+                for managed_target in [&target, &lint_target] {
+                    let _ = std::fs::create_dir_all(managed_target);
+                }
+            }
             for managed_target in [&target, &lint_target] {
                 if let Err(error) =
                     crate::build_dir_gc::mark_managed_target_use(&self.home, managed_target)
@@ -1911,22 +1917,63 @@ impl LaunchConfinement {
                 }
             }
         }
-        if let Some(warning) =
-            target_outcome.fallback_warning("the Cargo target", "this lane builds without it")
-        {
-            use std::io::Write;
-            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+        for (outcome, name) in [
+            (&target_outcome, "the Cargo target"),
+            (&lint_outcome, "the Cargo lint target"),
+        ] {
+            if let Some(warning) = outcome.fallback_warning(name, "this lane builds without it") {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "{warning}");
+            }
         }
-        if let Err(error) =
-            record_cargo_setup_file(attempt_dir, "cargo-target-setup.json", &target_outcome)
-        {
+        if let Err(error) = record_cargo_setup_file(
+            attempt_dir,
+            "cargo-target-setup.json",
+            &target_outcome,
+            &lint_outcome,
+        ) {
             use std::io::Write;
             let _ = writeln!(
                 std::io::stderr().lock(),
                 "warning: could not record Cargo target setup: {error}"
             );
         }
-        target_outcome.is_seeded()
+        target_outcome.is_seeded() || lint_outcome.is_seeded()
+    }
+
+    /// Show seed health once at lane start. Every read is advisory: a bad
+    /// policy or unreadable store warns but never stops the lane.
+    fn warn_seed_health(&self, project_key: &str, worktree: &VerifiedWorktree) {
+        let Ok(now) = provenant_os::clock::SystemClock::new().wall_now() else {
+            return;
+        };
+        let (stale_after, stale_after_text, source, policy_warning) =
+            match provenant_config::PortTable::read_for(Some(worktree.path()), &self.state_root) {
+                Ok(table) => crate::target_seed_health::stale_after_policy(&table),
+                Err(error) => (
+                    crate::target_seed_health::DEFAULT_STALE_AFTER,
+                    "24h".to_owned(),
+                    "default".to_owned(),
+                    Some(format!(
+                        "build.seed.stale_after could not be read ({error}); using 24h from default"
+                    )),
+                ),
+            };
+        let health = crate::target_seed_health::seed_health(
+            &self.state_root,
+            project_key,
+            stale_after,
+            &stale_after_text,
+            &source,
+            now,
+        );
+        let mut warnings = health.warnings();
+        if let Some(warning) = policy_warning {
+            warnings.insert(0, warning);
+        }
+        for warning in warnings {
+            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+        }
     }
 
     fn seed_cargo_target(
@@ -1935,6 +1982,7 @@ impl LaunchConfinement {
         cache: &Path,
         environment: &[(OsString, OsString)],
         cancel: &CancelToken,
+        destination: &str,
     ) -> crate::cargo_seed::Outcome {
         use crate::cargo_seed::Outcome;
         if !self.cargo_target_seed {
@@ -1951,6 +1999,8 @@ impl LaunchConfinement {
                     );
                 }
             };
+        let project_key = crate::target_seed::project_key(worktree.repo().common_git_dir());
+        self.warn_seed_health(&project_key, worktree);
         if cfg!(unix)
             && let Err(detail) =
                 verified_cargo_config(&build, &self.cargo_home.path).and_then(|()| {
@@ -1971,10 +2021,12 @@ impl LaunchConfinement {
             &self.state_root,
             cache,
             worktree.path(),
-            &crate::target_seed::project_key(worktree.repo().common_git_dir()),
+            &project_key,
             &self.home,
             environment,
             cancel,
+            destination,
+            true,
             |allocated_bytes| {
                 // A generation built before sizes were recorded has no figure
                 // to reserve, so nothing is evicted for it. The outcome records
@@ -2009,9 +2061,9 @@ impl LaunchConfinement {
                 &self.plan.permissions().credential_roots,
             )
             .map_err(RunError::Confinement)?;
-            // A project target lies in the writer-controlled worktree, where
-            // Cargo creates it; the host creates only targets outside it.
-            if !self.cargo_target.value.is_project() {
+            // Custom targets need directories now; private targets are created
+            // after seeding, and project targets belong to the worktree.
+            if self.cargo_target.value.is_custom() {
                 let (target, lint_target) = self
                     .cargo_target
                     .target_paths(None, &authority.cargo_cache().path);
@@ -2475,12 +2527,40 @@ pub fn trusted_lane_toolchain_diagnostic(
     Err(codes::RUSTC_NOT_ON_PATH)
 }
 
-fn record_cargo_setup_file(
+fn skipped_cargo_targets(
+    reason: &'static str,
+) -> (crate::cargo_seed::Outcome, crate::cargo_seed::Outcome) {
+    (
+        crate::cargo_seed::Outcome::skipped(reason),
+        crate::cargo_seed::Outcome::skipped(reason),
+    )
+}
+
+pub(crate) fn seed_both_cargo_targets(
+    mut seed: impl FnMut(&str) -> crate::cargo_seed::Outcome,
+) -> (crate::cargo_seed::Outcome, crate::cargo_seed::Outcome) {
+    (seed("target"), seed("target-lint"))
+}
+
+#[derive(serde::Serialize)]
+struct CargoTargetSetup<'a> {
+    #[serde(flatten)]
+    target: &'a crate::cargo_seed::Outcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lint_target: Option<&'a crate::cargo_seed::Outcome>,
+}
+
+pub(crate) fn record_cargo_setup_file(
     directory: &Directory,
     name: &str,
     outcome: &crate::cargo_seed::Outcome,
+    lint_outcome: &crate::cargo_seed::Outcome,
 ) -> std::result::Result<(), String> {
-    let bytes = serde_json::to_vec(outcome).map_err(|error| error.to_string())?;
+    let bytes = serde_json::to_vec(&CargoTargetSetup {
+        target: outcome,
+        lint_target: (!lint_outcome.is_skipped()).then_some(lint_outcome),
+    })
+    .map_err(|error| error.to_string())?;
     directory
         .atomic_write(
             OsStr::new(name),
@@ -3688,29 +3768,37 @@ mod cargo_setup_tests {
     fn target_setup_record_reports_seed_outcomes_and_publication_failures() {
         let tmp = tempfile::tempdir().unwrap();
         let directory = Directory::open_anchor(tmp.path()).unwrap();
-        for reason in ["disabled", "read_only_lane"] {
+        for reason in [
+            "disabled",
+            "read_only_lane",
+            "project_target",
+            "custom_target",
+            "non_cargo_project",
+        ] {
             let outcome = crate::cargo_seed::Outcome::skipped(reason);
-            record_cargo_setup_file(&directory, "cargo-target-setup.json", &outcome).unwrap();
+            record_cargo_setup_file(&directory, "cargo-target-setup.json", &outcome, &outcome)
+                .unwrap();
             let record: serde_json::Value = serde_json::from_slice(
                 &std::fs::read(tmp.path().join("cargo-target-setup.json")).unwrap(),
             )
             .unwrap();
             assert_eq!(record["status"], "skipped");
             assert_eq!(record["reason"], reason);
+            assert!(record.get("lint_target").is_none());
         }
         // A fallback names the specific refusal; other outcomes carry no detail.
         let refusal = crate::cargo_seed::Outcome::fallback_detail(
             "toolchain_unverified",
             codes::PATH_ENTRY_WRITABLE,
         );
-        record_cargo_setup_file(&directory, "cargo-target-setup.json", &refusal).unwrap();
+        record_cargo_setup_file(&directory, "cargo-target-setup.json", &refusal, &refusal).unwrap();
         let record: serde_json::Value = serde_json::from_slice(
             &std::fs::read(tmp.path().join("cargo-target-setup.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(
             record,
-            serde_json::json!({"status":"fallback","reason":"toolchain_unverified","detail":codes::PATH_ENTRY_WRITABLE})
+            serde_json::json!({"status":"fallback","reason":"toolchain_unverified","detail":codes::PATH_ENTRY_WRITABLE,"lint_target":{"status":"fallback","reason":"toolchain_unverified","detail":codes::PATH_ENTRY_WRITABLE}})
         );
         std::fs::remove_file(tmp.path().join("cargo-target-setup.json")).unwrap();
         std::fs::create_dir(tmp.path().join("cargo-target-setup.json")).unwrap();
@@ -3718,6 +3806,7 @@ mod cargo_setup_tests {
             record_cargo_setup_file(
                 &directory,
                 "cargo-target-setup.json",
+                &crate::cargo_seed::Outcome::skipped("disabled"),
                 &crate::cargo_seed::Outcome::skipped("disabled")
             )
             .is_err()

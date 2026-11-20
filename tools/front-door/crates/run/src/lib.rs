@@ -56,6 +56,11 @@ mod cargo_seed;
 pub use cargo_seed::{WorktreeSeed, seed_worktree_target};
 pub mod target_seed;
 pub mod target_seed_gc;
+pub mod target_seed_health;
+pub use target_seed_health::{
+    DEFAULT_STALE_AFTER, GenerationAge, RefreshRecord, SeedHealth, read_refresh, record_refresh,
+    seed_health, stale_after_policy,
+};
 mod writer;
 pub mod writer_dirty;
 

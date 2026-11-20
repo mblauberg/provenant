@@ -272,6 +272,9 @@ fallback_reasons! {
     STORE_UNAVAILABLE = "store_unavailable",
     NO_GENERATIONS = "no_generations",
     MANIFEST_INVALID = "manifest_invalid",
+    IDENTITY_UNAVAILABLE = "identity_unavailable",
+    IDENTITY_MISMATCH = "identity_mismatch",
+    FULL_GENERATION = "full_generation",
     TOOLCHAIN_MISMATCH = "toolchain_mismatch",
     TRIPLE_MISMATCH = "triple_mismatch",
     CARGO_PROFILE_MISMATCH = "cargo_profile_mismatch",
@@ -512,6 +515,10 @@ impl Outcome {
             ..Self::fallback(reason)
         }
     }
+    pub(crate) fn is_skipped(&self) -> bool {
+        self.status == "skipped"
+    }
+
     pub(crate) fn is_seeded(&self) -> bool {
         self.status == "seeded"
     }
@@ -552,10 +559,12 @@ fn seed_repair(reason: &str) -> Option<&'static str> {
         fallback_reasons::NO_GENERATIONS
         | fallback_reasons::STORE_UNAVAILABLE
         | fallback_reasons::MANIFEST_INVALID
+        | fallback_reasons::IDENTITY_MISMATCH
+        | fallback_reasons::FULL_GENERATION
         | fallback_reasons::TOOLCHAIN_MISMATCH
         | fallback_reasons::TRIPLE_MISMATCH
         | fallback_reasons::CARGO_PROFILE_MISMATCH => Some(
-            "host seeds are built from the verify base by `provenant worktree seed-build` and refreshed by tick when it moves; build one with the toolchain and profile above, then run seed-target again",
+            "tick refreshes requested host seeds for the lane commit; alternatively run `provenant worktree seed-build` and retry with a matching toolchain and profile",
         ),
         fallback_reasons::SEED_LAYOUT_UNRECOGNISED => Some(
             "this release cannot age the seed's Cargo build layout; upgrade provenant, or rebuild the seed with `provenant worktree seed-build` after upgrading",
@@ -622,6 +631,8 @@ pub fn seed_worktree_target(
                 home,
                 &environment,
                 &provenant_core::CancelToken::new(),
+                "target",
+                false,
                 |_| {},
             ),
         },
@@ -657,6 +668,8 @@ pub(crate) fn seed_target_with_reservation(
     home: &Path,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
     cancel: &provenant_core::CancelToken,
+    destination: &str,
+    split_clone_budget: bool,
     before_clone: impl FnOnce(Option<u64>),
 ) -> Outcome {
     #[cfg(unix)]
@@ -677,7 +690,32 @@ pub(crate) fn seed_target_with_reservation(
                 return Outcome::fallback_refusal(fallback_reasons::TOOLCHAIN_UNVERIFIED, refusal);
             }
         };
-        seed_target_cancellable(
+        let checkout = match worktree.canonicalize() {
+            Ok(path) => path,
+            Err(_) => return Outcome::fallback(fallback_reasons::IDENTITY_UNAVAILABLE),
+        };
+        let workspace = match crate::target_seed::cargo_build_directory(&checkout, state) {
+            Ok(Some(path)) => match path.strip_prefix(&checkout) {
+                Ok(path) => path.to_path_buf(),
+                Err(_) => return Outcome::fallback(fallback_reasons::IDENTITY_UNAVAILABLE),
+            },
+            _ => return Outcome::fallback(fallback_reasons::IDENTITY_UNAVAILABLE),
+        };
+        let source = crate::target_seed::GitSeedSource {
+            checkout: &checkout,
+            commit: None,
+        };
+        let identity = match crate::target_seed::seed_identity(
+            &source,
+            &workspace,
+            &version,
+            &triple,
+            &cargo_profile,
+        ) {
+            Ok(identity) => identity.hash,
+            Err(_) => return Outcome::fallback(fallback_reasons::IDENTITY_UNAVAILABLE),
+        };
+        let outcome = seed_target_cancellable_inner_for_destination(
             state,
             cache,
             SeedCompatibility {
@@ -685,11 +723,53 @@ pub(crate) fn seed_target_with_reservation(
                 triple: &triple,
                 cargo_profile: &cargo_profile,
                 project_key,
+                identity: &identity,
             },
             Some(cancel),
             before_clone,
             |source, dest, deadline| clone_target_until(source, dest, cancel, deadline),
-        )
+            SeedBudget::for_step,
+            destination,
+            split_clone_budget,
+        );
+        if matches!(
+            outcome.reason.as_str(),
+            fallback_reasons::NO_GENERATIONS
+                | fallback_reasons::MANIFEST_INVALID
+                | fallback_reasons::FULL_GENERATION
+                | fallback_reasons::TOOLCHAIN_MISMATCH
+                | fallback_reasons::TRIPLE_MISMATCH
+                | fallback_reasons::CARGO_PROFILE_MISMATCH
+                | fallback_reasons::IDENTITY_MISMATCH
+        ) {
+            let request = (|| -> Result<(), Box<dyn std::error::Error>> {
+                let commit = crate::git_context::seed_git(
+                    &checkout,
+                    &["rev-parse", "--verify", "HEAD^{commit}"],
+                )?;
+                let commit = std::str::from_utf8(&commit)?.trim().to_owned();
+                let requested_at = SystemClock::new().wall_now()?;
+                crate::target_seed::queue_request(
+                    state,
+                    &crate::target_seed::SeedRequest {
+                        schema: 1,
+                        project_key: project_key.to_owned(),
+                        commit,
+                        identity,
+                        requested_at,
+                        attempt: 0,
+                    },
+                )?;
+                Ok(())
+            })();
+            if let Err(error) = request {
+                #[allow(clippy::print_stderr)]
+                {
+                    eprintln!("warning: could not queue Cargo seed request: {error}");
+                }
+            }
+        }
+        outcome
     }
     #[cfg(not(unix))]
     {
@@ -701,6 +781,8 @@ pub(crate) fn seed_target_with_reservation(
             home,
             environment,
             cancel,
+            destination,
+            split_clone_budget,
             before_clone,
         );
         Outcome::skipped("unsupported_platform")
@@ -726,6 +808,7 @@ fn seed_target_with(
             triple,
             cargo_profile: &cargo_profile,
             project_key: "",
+            identity: "identity",
         },
         None,
         |_| {},
@@ -739,6 +822,7 @@ struct SeedCompatibility<'a> {
     triple: &'a str,
     cargo_profile: &'a provenant_config::CargoBuildProfile,
     project_key: &'a str,
+    identity: &'a str,
 }
 
 /// The first line of `rustc -vV`, which names the release, commit and date.
@@ -755,7 +839,7 @@ fn describe_profile(profile: &provenant_config::CargoBuildProfile) -> String {
     )
 }
 
-#[cfg(any(unix, test))]
+#[cfg(test)]
 fn seed_target_cancellable(
     state: &Path,
     cache: &Path,
@@ -778,7 +862,7 @@ fn seed_target_cancellable(
 /// Same seeding flow, with the per-step budget construction injected. Production
 /// passes the real per-step builder; tests inject a clock-backed one so a slow
 /// clone can be simulated without waiting on the real clock.
-#[cfg(any(unix, test))]
+#[cfg(test)]
 fn seed_target_cancellable_inner(
     state: &Path,
     cache: &Path,
@@ -787,6 +871,32 @@ fn seed_target_cancellable_inner(
     before_clone: impl FnOnce(Option<u64>),
     clone: impl FnOnce(&Path, &provenant_os::fs::Directory, &SeedBudget) -> Result<(), &'static str>,
     budget: impl Fn(&provenant_config::SeedBudgetSetting, BudgetStep) -> SeedBudget,
+) -> Outcome {
+    seed_target_cancellable_inner_for_destination(
+        state,
+        cache,
+        compatibility,
+        cancel,
+        before_clone,
+        clone,
+        budget,
+        "target",
+        false,
+    )
+}
+
+#[cfg(any(unix, test))]
+#[allow(clippy::too_many_arguments)]
+fn seed_target_cancellable_inner_for_destination(
+    state: &Path,
+    cache: &Path,
+    compatibility: SeedCompatibility<'_>,
+    cancel: Option<&provenant_core::CancelToken>,
+    before_clone: impl FnOnce(Option<u64>),
+    clone: impl FnOnce(&Path, &provenant_os::fs::Directory, &SeedBudget) -> Result<(), &'static str>,
+    budget: impl Fn(&provenant_config::SeedBudgetSetting, BudgetStep) -> SeedBudget,
+    destination: &str,
+    split_clone_budget: bool,
 ) -> Outcome {
     // One configured budget, one deadline per step. Cleanup, selection, clone
     // and aging each start their own deadline when the step begins, so a slow
@@ -816,7 +926,7 @@ fn seed_target_cancellable_inner(
     let Ok(cache_dir) = Directory::open_anchor(cache) else {
         return Outcome::fallback(fallback_reasons::CACHE_UNAVAILABLE);
     };
-    match cache_dir.metadata_at(OsStr::new("target"), false) {
+    match cache_dir.metadata_at(OsStr::new(destination), false) {
         Ok(_) => return Outcome::skipped("existing_target"),
         Err(error) if error.is_not_found() => {}
         Err(_) => return Outcome::fallback(fallback_reasons::TARGET_UNAVAILABLE),
@@ -866,11 +976,13 @@ fn seed_target_cancellable_inner(
     let mut saw_triple = false;
     let mut saw_cargo_profile = false;
     let mut saw_manifest = false;
+    let mut saw_full_generation = false;
     let mut saw_entry = false;
     // What the complete generations held, for a refusal that names it.
     let mut found_versions = std::collections::BTreeSet::new();
     let mut found_triples = std::collections::BTreeSet::new();
     let mut found_profiles = std::collections::BTreeSet::new();
+    let mut found_identities = std::collections::BTreeSet::new();
     let mut selected_project = None;
     let mut selected_shared = None;
     for entry in entries {
@@ -903,21 +1015,50 @@ fn seed_target_cancellable_inner(
             continue;
         };
         saw_manifest = true;
+        // A generation that still holds the checkout's own units can go stale
+        // against this worktree. It is never a candidate, whatever else matches.
+        if manifest.contents != "deps" {
+            saw_full_generation = true;
+            continue;
+        }
         if manifest.rustc_vv != compatibility.version {
-            found_versions.insert(compiler_line(&manifest.rustc_vv).to_owned());
+            found_versions.insert(format!(
+                "{} (identity {})",
+                compiler_line(&manifest.rustc_vv),
+                manifest.identity.as_deref().unwrap_or("missing")
+            ));
             continue;
         }
         saw_version = true;
         if manifest.host_triple != compatibility.triple {
-            found_triples.insert(manifest.host_triple.clone());
+            found_triples.insert(format!(
+                "{} (identity {})",
+                manifest.host_triple,
+                manifest.identity.as_deref().unwrap_or("missing")
+            ));
             continue;
         }
         saw_triple = true;
         if &manifest.cargo_profile != compatibility.cargo_profile {
-            found_profiles.insert(describe_profile(&manifest.cargo_profile));
+            found_profiles.insert(format!(
+                "{} (identity {})",
+                describe_profile(&manifest.cargo_profile),
+                manifest.identity.as_deref().unwrap_or("missing")
+            ));
             continue;
         }
         saw_cargo_profile = true;
+        if manifest.project_key != compatibility.project_key
+            || manifest.identity.as_deref() != Some(compatibility.identity)
+        {
+            found_identities.insert(
+                manifest
+                    .identity
+                    .clone()
+                    .unwrap_or_else(|| "missing".into()),
+            );
+            continue;
+        }
         let project_match = !compatibility.project_key.is_empty()
             && manifest.project_key == compatibility.project_key;
         let candidate = SeedCandidate {
@@ -939,11 +1080,19 @@ fn seed_target_cancellable_inner(
             Outcome::fallback(fallback_reasons::NO_GENERATIONS)
         } else if !saw_manifest {
             Outcome::fallback(fallback_reasons::MANIFEST_INVALID)
+        } else if saw_full_generation {
+            // Only obsolete full generations were found; a deps generation is
+            // needed, and refresh will build one.
+            Outcome::fallback(fallback_reasons::FULL_GENERATION)
         } else if !saw_version {
             Outcome::fallback_differs(
                 fallback_reasons::TOOLCHAIN_MISMATCH,
                 Difference::new(
-                    compiler_line(compatibility.version),
+                    format!(
+                        "{} (identity {})",
+                        compiler_line(compatibility.version),
+                        compatibility.identity
+                    ),
                     Difference::found_among(&found_versions),
                 ),
             )
@@ -951,7 +1100,10 @@ fn seed_target_cancellable_inner(
             Outcome::fallback_differs(
                 fallback_reasons::TRIPLE_MISMATCH,
                 Difference::new(
-                    compatibility.triple,
+                    format!(
+                        "{} (identity {})",
+                        compatibility.triple, compatibility.identity
+                    ),
                     Difference::found_among(&found_triples),
                 ),
             )
@@ -959,12 +1111,22 @@ fn seed_target_cancellable_inner(
             Outcome::fallback_differs(
                 fallback_reasons::CARGO_PROFILE_MISMATCH,
                 Difference::new(
-                    describe_profile(compatibility.cargo_profile),
+                    format!(
+                        "{} (identity {})",
+                        describe_profile(compatibility.cargo_profile),
+                        compatibility.identity
+                    ),
                     Difference::found_among(&found_profiles),
                 ),
             )
         } else {
-            Outcome::fallback(fallback_reasons::MANIFEST_INVALID)
+            Outcome::fallback_differs(
+                fallback_reasons::IDENTITY_MISMATCH,
+                Difference::new(
+                    compatibility.identity,
+                    Difference::found_among(&found_identities),
+                ),
+            )
         };
     };
     let source = selected.target;
@@ -986,7 +1148,12 @@ fn seed_target_cancellable_inner(
     if cache_dir.mkdir(&stage, 0o700).is_err() {
         return Outcome::fallback(fallback_reasons::STAGING_UNAVAILABLE);
     }
-    let cloning = budget(&setting, BudgetStep::Clone);
+    let mut clone_setting = setting.clone();
+    if split_clone_budget {
+        clone_setting.micros /= 2;
+        clone_setting.setting = format!("{} (half share)", setting.setting);
+    }
+    let cloning = budget(&clone_setting, BudgetStep::Clone);
     // The size was measured once at publication; record whether this
     // generation has one so a missing size is visible without a per-launch
     // warning. Eviction accounting resumes when the seed is refreshed.
@@ -1005,7 +1172,7 @@ fn seed_target_cancellable_inner(
             .sync()
             .map_err(|_| fallback_reasons::STAGING_SYNC_FAILED)?;
         cache_dir
-            .rename_noreplace(&stage, &cache_dir, OsStr::new("target"))
+            .rename_noreplace(&stage, &cache_dir, OsStr::new(destination))
             .map_err(|_| fallback_reasons::PUBLISH_FAILED)?;
         Ok(())
     })();
@@ -1034,7 +1201,14 @@ fn seed_target_cancellable_inner(
             // retried by the next seed under the store lock.
             let _ = remove_seed_tree(&cache_dir, &stage, None, &fresh_cleanup());
             if is_budget_detail(reason) {
-                Outcome::budget_fallback(reason, &setting)
+                Outcome::budget_fallback(
+                    reason,
+                    if reason == BudgetStep::Clone.detail() {
+                        &clone_setting
+                    } else {
+                        &setting
+                    },
+                )
             } else {
                 Outcome::fallback(reason)
             }
@@ -1081,6 +1255,10 @@ const MAX_TREE_DEPTH: usize = 128;
 /// dep-info that is missing or lies outside the target, or a non-empty seed in
 /// which none is named is `seed_layout_unrecognised`: publishing it would
 /// silently skip the protection for some units. Returns how many files were aged.
+///
+/// Kept for generations that still hold a full build. This pass is removed once
+/// the real-Cargo `older_sources_rebuild_after_deps_only_seed` invariant passes
+/// in CI: a deps-only seed has no member units to protect, so no ageing is needed.
 #[cfg(any(unix, test))]
 fn age_dep_info(
     target: &Path,
@@ -1398,12 +1576,14 @@ mod tests {
                     project_key: String::new(),
                     rustc_vv: "v1".into(),
                     host_triple: "host".into(),
+                    identity: Some("identity".into()),
                     commit: "abc".into(),
                     profile: "dev".into(),
                     cargo_profile: cargo_profile.clone(),
                     features: vec![],
                     flags: vec![],
                     allocated_bytes: recorded,
+                    contents: "deps".into(),
                 },
                 None,
             );
@@ -1417,6 +1597,7 @@ mod tests {
                     triple: "host",
                     cargo_profile: &cargo_profile,
                     project_key: "",
+                    identity: "identity",
                 },
                 None,
                 |bytes| reported.set(bytes),
@@ -1525,6 +1706,7 @@ mod tests {
                 triple: "host",
                 cargo_profile: &profile,
                 project_key: "",
+                identity: "identity",
             },
             None,
             |_| {},
@@ -1572,11 +1754,13 @@ mod tests {
             rustc_vv: "v1".into(),
             host_triple: "host".into(),
             commit: "abc".into(),
+            identity: Some("identity".into()),
             profile: "dev".into(),
             cargo_profile: profile.clone(),
             features: vec![],
             flags: vec![],
             allocated_bytes: Some(1),
+            contents: "deps".into(),
         })
         .unwrap();
         old.as_object_mut().unwrap().remove("allocated_bytes");
@@ -1598,6 +1782,7 @@ mod tests {
                 triple: "host",
                 cargo_profile: &profile,
                 project_key: "",
+                identity: "identity",
             },
             None,
             |bytes| reported.set(bytes),
@@ -1635,6 +1820,7 @@ mod tests {
                 triple: "host",
                 cargo_profile: &profile,
                 project_key: "",
+                identity: "identity",
             },
             None,
             |_| {},
@@ -1696,12 +1882,14 @@ mod tests {
                 project_key: project_key.into(),
                 rustc_vv: version.into(),
                 host_triple: triple.into(),
+                identity: Some("identity".into()),
                 commit: "abc".into(),
                 profile: "dev".into(),
                 cargo_profile,
                 features: vec![],
                 flags: vec![],
                 allocated_bytes: None,
+                contents: "deps".into(),
             },
             None,
         );
@@ -1736,6 +1924,19 @@ mod tests {
             serde_json::to_vec(manifest).unwrap(),
         )
         .unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_generation_identity(state: &Path, hash: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::target_seed::store_path(state).join("generations/001");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.join("manifest.json");
+        let mut manifest: crate::target_seed::Manifest =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest.identity = Some(hash.into());
+        std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
     }
 
@@ -2046,18 +2247,81 @@ mod tests {
             run("unknown", "host"),
             Outcome::fallback_differs(
                 fallback_reasons::TOOLCHAIN_MISMATCH,
-                Difference::new("unknown", "v1, v2")
+                Difference::new(
+                    "unknown (identity identity)",
+                    "v1 (identity identity), v2 (identity identity)"
+                )
             )
         );
         assert_eq!(
             run("v1", "other"),
             Outcome::fallback_differs(
                 fallback_reasons::TRIPLE_MISMATCH,
-                Difference::new("other", "host")
+                Difference::new("other (identity identity)", "host (identity identity)")
             )
         );
         assert_eq!(run("v1", "host").status, "seeded");
         assert_eq!(run("v1", "host"), Outcome::skipped("existing_target"));
+    }
+
+    /// A full generation is obsolete: selection skips it with a stable reason
+    /// rather than cloning member units that a lane's own sources can outdate.
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn full_generation_is_skipped_by_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        let profile = provenant_config::LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .expect("default Cargo profile is UTF-8");
+        let mut manifest = crate::target_seed::Manifest {
+            project_key: String::new(),
+            rustc_vv: "v1".into(),
+            host_triple: "host".into(),
+            commit: "abc".into(),
+            identity: Some("identity".into()),
+            profile: "dev".into(),
+            cargo_profile: profile.clone(),
+            features: vec![],
+            flags: vec![],
+            allocated_bytes: None,
+            contents: String::new(),
+        };
+        publish_generation(&state, "001", &manifest, None);
+        let compatibility = || SeedCompatibility {
+            version: "v1",
+            triple: "host",
+            cargo_profile: &profile,
+            project_key: "",
+            identity: "identity",
+        };
+        let outcome = seed_target_cancellable(
+            &state,
+            &cache,
+            compatibility(),
+            None,
+            |_| {},
+            |_, _, _| panic!("a full generation must never be cloned"),
+        );
+        assert_eq!(outcome.reason, fallback_reasons::FULL_GENERATION);
+
+        // A deps generation in the store remains selectable.
+        manifest.contents = "deps".into();
+        publish_generation(&state, "002", &manifest, None);
+        let outcome = seed_target_cancellable(
+            &state,
+            &cache,
+            compatibility(),
+            None,
+            |_| {},
+            |_, _, _| Ok(()),
+        );
+        assert_eq!(
+            (outcome.status.as_str(), outcome.reason.as_str()),
+            ("seeded", "cloned")
+        );
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed
@@ -2080,6 +2344,7 @@ mod tests {
                 triple: "host",
                 cargo_profile: &profile,
                 project_key: "project-a",
+                identity: "identity",
             },
             None,
             |_| {},
@@ -2109,6 +2374,39 @@ mod tests {
 
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
+    fn generation_selection_requires_matching_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        generation_for_project(&state, "001", "v1", "host", "project-a");
+        let profile = provenant_config::CargoBuildProfile::default();
+        let select = |identity| {
+            seed_target_cancellable(
+                &state,
+                &cache,
+                SeedCompatibility {
+                    version: "v1",
+                    triple: "host",
+                    cargo_profile: &profile,
+                    project_key: "project-a",
+                    identity,
+                },
+                None,
+                |_| {},
+                |_, _, _| Ok(()),
+            )
+        };
+        let mismatch = select("different");
+        assert_eq!(mismatch.reason, fallback_reasons::IDENTITY_MISMATCH);
+        assert_eq!(
+            mismatch.differs,
+            Some(Difference::new("different", "identity"))
+        );
+        assert_eq!(select("identity").status, "seeded");
+    }
+
+    #[test]
     fn seed_with_a_different_cargo_profile_is_not_selected() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
@@ -2129,6 +2427,7 @@ mod tests {
                 triple: "host",
                 cargo_profile: &profile,
                 project_key: "project-a",
+                identity: "identity",
             },
             None,
             |_| {},
@@ -2138,14 +2437,17 @@ mod tests {
             outcome,
             Outcome::fallback_differs(
                 fallback_reasons::CARGO_PROFILE_MISMATCH,
-                Difference::new(describe_profile(&profile), describe_profile(&different))
+                Difference::new(
+                    format!("{} (identity identity)", describe_profile(&profile)),
+                    format!("{} (identity identity)", describe_profile(&different))
+                )
             )
         );
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
-    fn compatible_foreign_generation_is_used_only_when_project_seed_is_absent() {
+    fn foreign_generation_is_not_selected() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let cache = tmp.path().join("cache");
@@ -2162,22 +2464,13 @@ mod tests {
                 triple: "host",
                 cargo_profile: &profile,
                 project_key: "project-a",
+                identity: "identity",
             },
             None,
             |_| {},
-            |source, _, _| {
-                assert!(source.ends_with("001/target"));
-                Ok(())
-            },
+            |_, _, _| panic!("foreign seed must not be cloned"),
         );
-        assert_eq!(outcome.status, "seeded");
-        assert_eq!(
-            outcome.seed_source,
-            Some(SeedSource {
-                generation_id: Some("001".into()),
-                project_match: false,
-            })
-        );
+        assert_eq!(outcome.reason, fallback_reasons::IDENTITY_MISMATCH);
     }
 
     #[test]
@@ -2269,7 +2562,17 @@ mod tests {
         )
         .unwrap();
         let report = "rustc 1.99.1\nhost: test-host\nrelease: 1.99.1\n";
-        std::fs::create_dir(worktree.join(".git")).unwrap();
+        std::fs::write(build.join("Cargo.lock"), "version = 3\n").unwrap();
+        provenant_os::fixture::run_git(&worktree, &["init", "-q"]).unwrap();
+        provenant_os::fixture::run_git(
+            &worktree,
+            &[
+                "add",
+                "arbitrary/nested/cargo/workspace/Cargo.toml",
+                "arbitrary/nested/cargo/workspace/Cargo.lock",
+            ],
+        )
+        .unwrap();
         let project_key = crate::target_seed::project_key(&worktree.join(".git"));
         let rustc = bin.join("rustc");
         std::fs::write(
@@ -2279,6 +2582,20 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&rustc, std::fs::Permissions::from_mode(0o755)).unwrap();
         generation_for_project(&state, "001", report, "test-host", &project_key);
+        let source = crate::target_seed::GitSeedSource {
+            checkout: &worktree,
+            commit: None,
+        };
+        let hash = crate::target_seed::seed_identity(
+            &source,
+            Path::new("arbitrary/nested/cargo/workspace"),
+            report,
+            "test-host",
+            &provenant_config::CargoBuildProfile::default(),
+        )
+        .unwrap()
+        .hash;
+        set_generation_identity(&state, &hash);
         // No ambient CARGO_HOME: the same finalisation used by handoff must
         // make a fresh, arbitrarily nested Cargo project seedable.
         let mut env = vec![];
@@ -2293,6 +2610,8 @@ mod tests {
             &home,
             &env,
             &provenant_core::CancelToken::new(),
+            "target",
+            false,
             |_| {},
         );
         assert_eq!(
@@ -2320,6 +2639,8 @@ mod tests {
             &tmp.path().join("home"),
             &refused,
             &provenant_core::CancelToken::new(),
+            "target",
+            false,
             |_: Option<u64>| panic!("a refused seed must not clone"),
         );
         assert_eq!(
@@ -2520,11 +2841,14 @@ mod tests {
         let cache = root.path().join("cache");
         let state = root.path().join("state");
         let bin = home.join(format!(".rustup/toolchains/{release}-test-host/bin"));
-        for directory in [&bin, &worktree.join(".git"), &cache] {
+        for directory in [&bin, &worktree, &cache] {
             std::fs::create_dir_all(directory).unwrap();
         }
         std::fs::write(home.join(".rustup/settings.toml"), "[overrides]\n").unwrap();
         std::fs::write(worktree.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(worktree.join("Cargo.lock"), "version = 3\n").unwrap();
+        provenant_os::fixture::run_git(&worktree, &["init", "-q"]).unwrap();
+        provenant_os::fixture::run_git(&worktree, &["add", "Cargo.toml", "Cargo.lock"]).unwrap();
         std::fs::write(
             worktree.join("rust-toolchain.toml"),
             format!("[toolchain]\nchannel = '{release}'\n"),
@@ -2549,6 +2873,21 @@ mod tests {
     }
 
     impl OutsideLane {
+        fn identity(&self) -> String {
+            let source = crate::target_seed::GitSeedSource {
+                checkout: &self.worktree,
+                commit: None,
+            };
+            crate::target_seed::seed_identity(
+                &source,
+                Path::new(""),
+                &self.report,
+                "test-host",
+                &provenant_config::CargoBuildProfile::default(),
+            )
+            .unwrap()
+            .hash
+        }
         fn seed(&self, environment: &[(&str, &PathBuf)]) -> WorktreeSeed {
             let environment: Vec<_> = environment
                 .iter()
@@ -2587,11 +2926,17 @@ mod tests {
         assert_eq!(unset.detail, None);
         assert_eq!(
             unset.differs,
-            Some(Difference::new("rustc 1.99.1", "rustc 1.98.0"))
+            Some(Difference::new(
+                format!("rustc 1.99.1 (identity {})", fixture.identity()),
+                "rustc 1.98.0 (identity identity)"
+            ))
         );
         let warning = unset.warning.as_deref().unwrap();
         assert!(
-            warning.contains("expected rustc 1.99.1, found rustc 1.98.0"),
+            warning.contains(&format!(
+                "expected rustc 1.99.1 (identity {}), found rustc 1.98.0 (identity identity)",
+                fixture.identity()
+            )),
             "{warning}"
         );
         assert!(unset.repair.is_some_and(|text| text.contains("seed-build")));
@@ -2638,7 +2983,10 @@ mod tests {
         assert_eq!(seed.reason, "triple_mismatch");
         assert_eq!(
             seed.differs,
-            Some(Difference::new("test-host", "other-host"))
+            Some(Difference::new(
+                format!("test-host (identity {})", fixture.identity()),
+                "other-host (identity identity)"
+            ))
         );
 
         let fixture = outside_lane("1.99.1");
@@ -2660,8 +3008,12 @@ mod tests {
         assert_eq!(
             seed.differs,
             Some(Difference::new(
-                describe_profile(&profile),
-                describe_profile(&different)
+                format!(
+                    "{} (identity {})",
+                    describe_profile(&profile),
+                    fixture.identity()
+                ),
+                format!("{} (identity identity)", describe_profile(&different))
             ))
         );
     }
@@ -2678,6 +3030,7 @@ mod tests {
             "test-host",
             &project_key,
         );
+        set_generation_identity(&fixture.state, &fixture.identity());
         let seed = fixture.seed(&[("HOME", &fixture.home)]);
         assert_eq!(
             (seed.status.as_str(), seed.reason.as_str()),
@@ -2687,6 +3040,171 @@ mod tests {
         assert_eq!(seed.generation.as_deref(), Some("001"));
         assert!(seed.warning.is_none() && seed.differs.is_none());
         assert!(fixture.cache.join("target").is_dir());
+    }
+
+    // These tests exercise independent outcomes, not filesystem reflink support.
+    #[cfg(unix)]
+    fn copy_fixture_target(
+        source: &Path,
+        destination: &provenant_os::fs::Directory,
+    ) -> Result<(), &'static str> {
+        fn copy_entries(source: &Path, destination: &Path) -> std::io::Result<()> {
+            for entry in std::fs::read_dir(source)? {
+                let entry = entry?;
+                let target = destination.join(entry.file_name());
+                if entry.file_type()?.is_dir() {
+                    std::fs::create_dir(&target)?;
+                    copy_entries(&entry.path(), &target)?;
+                } else {
+                    std::fs::copy(entry.path(), target)?;
+                }
+            }
+            Ok(())
+        }
+        copy_entries(
+            source,
+            &destination
+                .current_path()
+                .map_err(|_| fallback_reasons::CLONE_FAILED)?,
+        )
+        .map_err(|_| fallback_reasons::CLONE_FAILED)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lint_target_seeds_independently() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        generation(&state, "001", "v1", "host");
+        let source = crate::target_seed::store_path(&state).join("generations/001/target");
+        let fingerprint = unit(
+            &source,
+            "debug/.fingerprint/dependency",
+            "lib-dependency",
+            &check_dep_info("debug/.fingerprint/dependency/dep-lib-dependency"),
+        );
+        std::fs::write(fingerprint.join("dep-lib-dependency"), b"dependency").unwrap();
+        let profile = provenant_config::LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .unwrap();
+        let (main, lint) = crate::writer::seed_both_cargo_targets(|name| {
+            seed_target_cancellable_inner_for_destination(
+                &state,
+                &cache,
+                SeedCompatibility {
+                    version: "v1",
+                    triple: "host",
+                    cargo_profile: &profile,
+                    project_key: "",
+                    identity: "identity",
+                },
+                None,
+                |_| {},
+                |src, dst, _| copy_fixture_target(src, dst),
+                SeedBudget::for_step,
+                name,
+                true,
+            )
+        });
+        let directory = provenant_os::fs::Directory::open_anchor(tmp.path()).unwrap();
+        crate::writer::record_cargo_setup_file(&directory, "setup.json", &main, &lint).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(tmp.path().join("setup.json")).unwrap()).unwrap();
+        assert_eq!(main.status, "seeded", "{main:?}; {lint:?}");
+        assert_eq!(lint.status, "seeded", "{main:?}; {lint:?}");
+        for name in ["target", "target-lint"] {
+            assert_eq!(
+                std::fs::read(
+                    cache
+                        .join(name)
+                        .join("debug/.fingerprint/dependency/dep-lib-dependency")
+                )
+                .unwrap_or_else(|error| panic!("{error}: {main:?}; {lint:?}")),
+                b"dependency",
+                "{main:?}; {lint:?}"
+            );
+        }
+        assert_eq!(record["status"], "seeded", "{main:?}; {lint:?}");
+        assert_eq!(
+            record["lint_target"]["status"], "seeded",
+            "{main:?}; {lint:?}"
+        );
+        assert_eq!(
+            record["seed_source"], record["lint_target"]["seed_source"],
+            "{main:?}; {lint:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_fallback_never_blocks_other() {
+        for failed in ["target", "target-lint"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let state = tmp.path().join("state");
+            let cache = tmp.path().join("cache");
+            std::fs::create_dir(&cache).unwrap();
+            generation(&state, "001", "v1", "host");
+            let source = crate::target_seed::store_path(&state).join("generations/001/target");
+            let fingerprint = unit(
+                &source,
+                "debug/.fingerprint/dependency",
+                "lib-dependency",
+                &check_dep_info("debug/.fingerprint/dependency/dep-lib-dependency"),
+            );
+            std::fs::write(fingerprint.join("dep-lib-dependency"), b"dependency").unwrap();
+            let profile = provenant_config::LaneBuildSettings::default()
+                .cargo_build_profile(&[])
+                .unwrap();
+            let (main, lint) = crate::writer::seed_both_cargo_targets(|name| {
+                seed_target_cancellable_inner_for_destination(
+                    &state,
+                    &cache,
+                    SeedCompatibility {
+                        version: "v1",
+                        triple: "host",
+                        cargo_profile: &profile,
+                        project_key: "",
+                        identity: "identity",
+                    },
+                    None,
+                    |_| {},
+                    |src, dst, _| {
+                        if name == failed {
+                            return Err(fallback_reasons::CLONE_FAILED);
+                        }
+                        copy_fixture_target(src, dst)
+                    },
+                    SeedBudget::for_step,
+                    name,
+                    true,
+                )
+            });
+            let directory = provenant_os::fs::Directory::open_anchor(tmp.path()).unwrap();
+            crate::writer::record_cargo_setup_file(&directory, "setup.json", &main, &lint).unwrap();
+            let record: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(tmp.path().join("setup.json")).unwrap())
+                    .unwrap();
+            let (main_status, lint_status, successful) = if failed == "target" {
+                ("fallback", "seeded", "target-lint")
+            } else {
+                ("seeded", "fallback", "target")
+            };
+            assert_eq!(record["status"], main_status, "{main:?}; {lint:?}");
+            assert_eq!(
+                record["lint_target"]["status"], lint_status,
+                "{main:?}; {lint:?}"
+            );
+            assert!(!cache.join(failed).exists(), "{main:?}; {lint:?}");
+            assert!(
+                cache
+                    .join(successful)
+                    .join("debug/.fingerprint/dependency/dep-lib-dependency")
+                    .is_file(),
+                "{main:?}; {lint:?}"
+            );
+        }
     }
 
     /// The #3561 protection against the Cargo that is actually pinned, not a tree
@@ -2804,12 +3322,16 @@ mod tests {
                 project_key: String::new(),
                 rustc_vv: "v1".into(),
                 host_triple: "host".into(),
+                identity: Some("identity".into()),
                 commit: "abc".into(),
                 profile: "dev".into(),
                 cargo_profile: profile.clone(),
                 features: vec![],
                 flags: vec![],
                 allocated_bytes: None,
+                // This fixture still carries a full target; its manifest is
+                // marked deps so selection reaches the dep-info ageing check.
+                contents: "deps".into(),
             },
             Some(&built),
         );
@@ -2839,6 +3361,7 @@ mod tests {
                 triple: "host",
                 cargo_profile: &profile,
                 project_key: "",
+                identity: "identity",
             },
             None,
             |_| {},

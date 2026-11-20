@@ -65,26 +65,63 @@ Target seeding and clone machinery are used only for `private`. A lane's seed ou
 ## Cargo target seed
 
 A target seed store is shared across registered repositories on the host. Each
-generation records a hash of the verified canonical shared Git directory and
-verify-base commit plus its Rust compiler identity and effective
-`CARGO_INCREMENTAL` and `CARGO_PROFILE_DEV_DEBUG` values, so a toolchain or
-profile change rebuilds the seed even when the commit is unchanged. Compiler
-identity uses toolchain pins read from the verify-base tree at the selected
-workspace, not the registered checkout's current toolchain. The same selected
-workspace path is used to validate and build the pinned checkout. Linked
-checkouts share identity and another repository's newer generation does not
-force a rebuild. A writer lane prefers the newest compatible generation for its
-verified project identity, then uses a compatible generation from another
-project if no own generation exists. The seed builder and writer preparation
-use the same lane profile defaults and preserve explicit environment values;
-incompatible profile generations are skipped. Refresh currentness requires the
-recorded verify-base commit to match; writer selection uses compatible
-generations and Cargo's normal per-unit freshness checks before reusing artifacts. A generation records the allocated size of its built target, measured once at seed-build time, so cloning need not walk the whole seed first. At launch the seed reservation carries that recorded allocated size to the collector, which resolves it against the byte unit its own census used: near-zero clone-private bytes on a reflink filesystem, the full allocated size where private size is unavailable. Because a lane clone reflinks the seed's blocks, under a private-byte census it privately owns almost nothing at clone time, so it reserves no budget and cannot evict an unrelated under-budget target for blocks it never privately consumes; under an allocated-byte census the recorded size is charged and an under-budget target near the limit is evicted to make room. A generation built before the size field existed records none, and the clone reserves nothing for it. Such a seed is accepted quietly rather than warning on every launch: its outcome records `size_recorded: false` in `cargo-target-setup.json`, and eviction accounting resumes once the seed is refreshed with a recorded size. A clone ages every
+generation records the verified canonical shared Git directory and a file-only
+identity of its dependency inputs. Currentness and lane selection require the
+same project key, identity hash and `deps` contents; the recorded commit is the
+built-from record. The identity hashes Cargo.lock, tracked manifest dependency,
+feature, patch and replace tables, workspace profile tables and applicable
+`.cargo/config.toml` or extensionless `.cargo/config` profile tables (the extensionless file wins when both exist in one directory), rustc version and host triple, contents and
+the effective Cargo build profile. Cargo-home configuration is host state and is not an identity input; profile settings reach lanes through the effective Cargo build profile. Manifest declarations are canonicalised, so
+formatting and package metadata do not affect the hash. Edits that do not change
+resolved units can still invalidate it. Both sides use Git's tracked file list;
+no Cargo metadata runs during identity calculation, so lanes can calculate it
+before confinement. Failure to calculate it leaves the lane cold with a warning.
+A private lane that finds no matching generation atomically queues
+`<state>/cargo-target-seeds/requests/<project_key>/seed-request.json` with
+schema 1, project key, lane commit, identity, request time and attempt. The
+newest request per project replaces an older one under the store lock. Tick
+admits pending projects into its existing single-flight queue; a lane never
+builds a seed. The host checks out the requested commit, recomputes its
+commit-tree identity and checks the prepared checkout before publication. A
+mismatch records `identity_mismatch` and publishes nothing. Each attempt writes
+an atomic `seed-result.json` in the project request directory containing schema
+1, the request, outcome and generation when built. A terminal result removes
+only the matching identity and request time, so an older acknowledgement cannot
+remove a replacement. Busy and failed requests remain pending with an incremented
+attempt and retry through the queue's exponential backoff, capped at one hour.
+The regular scheduled refresh still uses the verify base.
+Compiler identity uses the selected commit's toolchain pin. A seed build is not a lane: the
+compiler-selection keys the lane eligibility check lists (`RUSTC_WRAPPER`,
+`RUSTUP_*`, `RUSTFLAGS`, `CARGO_BUILD_TARGET` and the other classes) are inherited
+from whoever launched the build, so the seed build removes them from its Cargo
+and rustc children rather than refusing. It keeps the values it sets itself
+(`RUSTUP_AUTO_INSTALL=0` and the effective Cargo profile), warns once on stderr
+with the cleared key names and never their values, and records those names in
+`seed-result.json`. A cleared key is not recorded as a build flag. A lane whose
+own environment changes the compiler still cannot use such a seed: the
+eligibility check warns and leaves that lane cold.
+`build.prepare` is an ordered list of argv arrays. After the verify base is
+checked out and before the first Cargo command, every command runs in order with
+the checkout root as its working directory (not the selected workspace
+subdirectory), in the same sanitised child environment as the seed build's
+Cargo commands. The runner reads the live project and host port tables; the
+repository only declares the command, nothing is added to it, and an unreadable
+or invalid table warns and runs no prepare command. A failing command fails that
+build: the project's outcome is `prepare_failed` with the command and the last
+2 KiB of the combined output in `seed-result.json` and the refresh record, while
+the operator note gives a repair and never echoes the output. The same prepare
+list runs before every seed generation build and, later, slot builds. Writer selection uses matching generations and Cargo's normal per-unit freshness checks before reusing artifacts.
+
+A generation holds dependency units only. After `cargo build`, `cargo test --no-run` and `cargo check --workspace --all-targets --locked`, the seed build enumerates the checkout with `cargo metadata --format-version 1 --locked` using the same child environment and target overrides, and runs `cargo clean -p` for every path package it finds (packages with no `source`): workspace members and non-member path packages alike. Registry and other non-path dependencies stay in the seed, including build and check-mode units that clippy can reuse. The manifest records this as `contents: "deps"`; older generations without the marker (or with another value) hold a full build. Those older full generations are not current: refresh builds a deps-only replacement for the same identity, and lane selection skips them with the stable `full_generation` fallback instead of reusing member units whose sources can move with a lane. Collection removes full generations as obsolete outside the keep-count and whatever the keep-count is; they never displace a deps generation from a retained slot, and the removal is reported with a distinguishing `obsolete_full_generation` reason.
+
+Private writer lanes seed `target` and `target-lint` independently from the generation. Each clone gets half the effective clone budget and its own cache-size reservation; a fallback for either target does not prevent the other attempt. `cargo-target-setup.json` retains the main target outcome at the top level and records the lint outcome in a typed `lint_target` object with the same fields. When the whole lane is skipped, the same reason applies to both targets and the `lint_target` object is omitted.
+
+A generation records the allocated size of its built target, measured once at seed-build time, so cloning need not walk the whole seed first. At launch the seed reservation carries that recorded allocated size to the collector, which resolves it against the byte unit its own census used: near-zero clone-private bytes on a reflink filesystem, the full allocated size where private size is unavailable. Because a lane clone reflinks the seed's blocks, under a private-byte census it privately owns almost nothing at clone time, so it reserves no budget and cannot evict an unrelated under-budget target for blocks it never privately consumes; under an allocated-byte census the recorded size is charged and an under-budget target near the limit is evicted to make room. A generation built before the size field existed records none, and the clone reserves nothing for it. Such a seed is accepted quietly rather than warning on every launch: its outcome records `size_recorded: false` in `cargo-target-setup.json`, and eviction accounting resumes once the seed is refreshed with a recorded size. A clone ages every
 dep-info file to the epoch before it is published, so each unit that lists source files (workspace
 members) rebuilds once against the worktree's sources while registry packages, which list none, stay
 fresh. Cargo does not promise a build-directory layout (`.fingerprint/<unit>/` before Cargo 1.100,
 `build/<package>/<hash>/fingerprint/` after) or which units keep dep-info, so the pass is driven by the
-fingerprints themselves. One host knob `lanes.cargo_seed_budget` (default 5m, ceiling 1h) bounds each step: stage cleanup, generation selection, the clone, and dep-info aging each start with a fresh deadline from the same budget when that step begins, so a slow step cannot consume another's time. In particular stage cleanup gets its own deadline that is not charged to selection, and dep-info aging starts its deadline only after the clone returns. A fallback whose budget ran out names the step and reports the effective setting with its source (host or compiled default) in `cargo-target-setup.json` and the warning. An unreadable host config warns with its path and uses the compiled default, reported as such. Within the clone's depth limit, its own budget and cancellation, it finds the
+fingerprints themselves. One host knob `lanes.cargo_seed_budget` (default 5m, ceiling 1h) bounds each step: stage cleanup, generation selection and dep-info aging each start with a fresh deadline from the full budget, while each of the two lane clones gets half the budget when that step begins, so a slow step cannot consume another's time. In particular stage cleanup gets its own deadline that is not charged to selection, and dep-info aging starts its deadline only after the clone returns. A fallback whose budget ran out names the step and reports the effective setting with its source (host or compiled default) in `cargo-target-setup.json` and the warning. An unreadable host config warns with its path and uses the compiled default, reported as such. Within the clone's depth limit, its own budget and cancellation, it finds the
 `*.json` fingerprints in `fingerprint` and `.fingerprint` directories, reads each one's `local` entries
 (ignoring unknown fields) and ages exactly the files its `CheckDepInfo` entries name, relative to the target
 root. A fingerprint that cannot be read, a named dep-info that is missing or not a path inside the target, or
@@ -95,13 +132,14 @@ immutable, and collection cannot race an active clone. `max_generations` keeps
 history per project; `max_bytes` is a host-wide allocated-byte collection target.
 Collection always keeps each project's newest complete generation, even when
 that generation alone exceeds the target; busy stores and active clones remain
-protected. Seeding is per project. Each project
-resolves its own verify base and gets its own outcome in `seed-result.json`: `built`, `current`,
-`busy`, `not_cargo`, `failed` with its cause, or `skipped` with a typed reason
+protected. Full (non-`deps`) generations are collected as obsolete outside this
+count, so they are reclaimed whatever the count is without displacing a deps
+generation from a retained slot. Seeding is per project. Scheduled refresh resolves each project's verify base and records its outcome in the tick `seed-result.json`: `built`, `current`,
+`busy`, `not_cargo`, `identity_mismatch`, `failed` with its cause, or `skipped` with a typed reason
 (`verify_base_unset`, `verify_base_unresolved`, `workspace_absent_at_base`) and a repair step.
 A skipped or failed project never stops or hides another project's seed, and a skip is
-not a failed pass. Failed projects retry at the next scheduled collection, while busy
-projects retry on the next tick without rebuilding the others: a busy retry replaces
+not a failed pass. Failed and busy projects retry with exponential backoff, capped at one hour;
+these scoped retries run on a later tick without rebuilding the others: a busy retry replaces
 only its own projects' outcomes and keeps every other record. Full requests supersede
 queued busy retries and reevaluate every project. Detached pending and active scopes
 survive process interruption and are retried after a minute. Pass-level failures
@@ -113,6 +151,20 @@ expose persisted command output, repository paths or environment values, and doe
 change the tick outcome or retry schedule. Because seeding follows a complete or partial
 collection and never a failed one, an interrupted collection is retried promptly (see
 [scheduled collection](state.md#retention-keeps-evidence)) and seeding resumes with it.
+Seed health is advisory. The last refresh outcome is persisted atomically at
+`<state>/cargo-target-seeds/refresh/<project_key>.json` with a schema, an instant and
+an outcome of `built`, `current`, `busy`, `failed`, `prepare_failed` or `skipped`;
+a reason is bounded to 2 KiB. A writer lane with a private Cargo target and a
+project that has a Cargo manifest warns once at start when no complete generation
+exists, when the newest complete generation for the project is older than
+`build.seed.stale_after` (the age comes from its `complete` marker), or when the
+last refresh outcome is `failed` or `prepare_failed`. `provenant worktree doctor`
+shows the newest generation and age, the last outcome and reason, the effective
+`build.seed.stale_after` with its layer, and the same warnings. Every warning
+names the last outcome, the knob with its effective value and source, and tells
+the reader to run `provenant worktree seed-build` in the repository. A missing,
+corrupt or newer-schema refresh file is treated as no record; a malformed knob
+warns and falls back to 24h from `default`. None of these facts refuses a lane.
 - Why: reuse must not introduce incompatible or partially collected build output.
 
 ## Publication order

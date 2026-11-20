@@ -14,30 +14,101 @@
     "tiers": {
       "0": {
         "commands": [
-          "cargo fmt {packages} -- --check",
-          "cargo check --locked {packages}",
-          "cargo nextest run --profile lane --locked {packages} --lib --bins"
+          {
+            "stack": "rust",
+            "cwd": ".",
+            "argv": [
+              "cargo",
+              "fmt",
+              "{packages}",
+              "--",
+              "--check"
+            ]
+          },
+          {
+            "stack": "rust",
+            "cwd": ".",
+            "argv": [
+              "cargo",
+              "check",
+              "--locked",
+              "{packages}"
+            ]
+          },
+          {
+            "stack": "rust",
+            "cwd": ".",
+            "argv": [
+              "cargo",
+              "nextest",
+              "run",
+              "--profile",
+              "lane",
+              "--locked",
+              "{packages}",
+              "--lib",
+              "--bins"
+            ]
+          }
         ],
         "selection": "packages",
         "warn_for_host_load": false
       },
       "1": {
         "commands": [
-          "cargo nextest run --profile lane --locked {integration_args}"
+          {
+            "stack": "rust",
+            "cwd": ".",
+            "argv": [
+              "cargo",
+              "nextest",
+              "run",
+              "--profile",
+              "lane",
+              "--locked",
+              "{integration_args}"
+            ]
+          }
         ],
         "selection": "integrations",
         "warn_for_host_load": false
       },
       "2": {
         "commands": [
-          "cargo nextest run --profile ci --workspace --locked"
+          {
+            "stack": "rust",
+            "cwd": ".",
+            "argv": [
+              "cargo",
+              "nextest",
+              "run",
+              "--profile",
+              "ci",
+              "--workspace",
+              "--locked"
+            ]
+          }
         ],
         "selection": "all",
         "warn_for_host_load": true
       },
       "3": {
         "commands": [
-          "cargo nextest run --profile ci --workspace --locked --stress-count 20"
+          {
+            "stack": "rust",
+            "cwd": ".",
+            "argv": [
+              "cargo",
+              "nextest",
+              "run",
+              "--profile",
+              "ci",
+              "--workspace",
+              "--locked",
+              "--stress-count",
+              "20"
+            ]
+          }
         ],
         "selection": "all",
         "warn_for_host_load": true
@@ -110,5 +181,24 @@
     "backend": {
       "kind": "builtin"
     }
+  },
+  "build": {
+    "source": "builtin",
+    "prepare": [],
+    "seed": {
+      "stale_after": "24h"
+    },
+    "strategy": "lane_seed",
+    "wrapper": {
+      "argv": []
+    },
+    "command": {
+      "argv": []
+    },
+    "offload": "auto",
+    "overflow": "local",
+    "clean": "none",
+    "stacks": [],
+    "snapshot_retention": "7d"
   }
 }

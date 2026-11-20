@@ -37,32 +37,122 @@
     "tiers": {
       "0": {
         "commands": [
-          "cargo fmt {packages} -- --check",
-          "cargo check --locked {packages}",
-          "../../scripts/verify-nextest --profile lane --locked {packages} --lib --bins"
+          {
+            "stack": "rust",
+            "cwd": ".",
+            "argv": [
+              "cargo",
+              "fmt",
+              "{packages}",
+              "--",
+              "--check"
+            ]
+          },
+          {
+            "stack": "rust",
+            "cwd": ".",
+            "argv": [
+              "cargo",
+              "check",
+              "--locked",
+              "{packages}"
+            ]
+          },
+          {
+            "stack": "rust",
+            "cwd": ".",
+            "argv": [
+              "../../scripts/verify-nextest",
+              "--profile",
+              "lane",
+              "--locked",
+              "{packages}",
+              "--lib",
+              "--bins"
+            ]
+          }
         ],
         "selection": "packages",
         "warn_for_host_load": false
       },
       "1": {
         "commands": [
-          "../../scripts/verify-nextest --profile lane --locked {integration_args}"
+          {
+            "stack": "rust",
+            "cwd": ".",
+            "argv": [
+              "../../scripts/verify-nextest",
+              "--profile",
+              "lane",
+              "--locked",
+              "{integration_args}"
+            ]
+          }
         ],
         "selection": "integrations",
         "warn_for_host_load": false
       },
       "2": {
         "commands": [
-          "../../scripts/verify-nextest --profile ci --workspace --locked --features provenant-providers/recording {quarantine_args}",
-          "cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result"
+          {
+            "stack": "rust",
+            "cwd": ".",
+            "argv": [
+              "../../scripts/verify-nextest",
+              "--profile",
+              "ci",
+              "--workspace",
+              "--locked",
+              "--features",
+              "provenant-providers/recording",
+              "{quarantine_args}"
+            ]
+          },
+          {
+            "stack": "rust",
+            "cwd": ".",
+            "argv": [
+              "cargo",
+              "test",
+              "--locked",
+              "-p",
+              "provenant-providers",
+              "--features",
+              "recording",
+              "--example",
+              "record",
+              "bash_proof_needs_a_matching_successful_tool_result"
+            ]
+          }
         ],
         "selection": "all",
         "warn_for_host_load": true
       },
       "3": {
         "commands": [
-          "../../scripts/verify-nextest --profile ci --workspace --locked --features provenant-providers/recording {quarantine_args} --stress-count 20",
-          "../../scripts/run-mutants"
+          {
+            "stack": "rust",
+            "cwd": ".",
+            "argv": [
+              "../../scripts/verify-nextest",
+              "--profile",
+              "ci",
+              "--workspace",
+              "--locked",
+              "--features",
+              "provenant-providers/recording",
+              "{quarantine_args}",
+              "--stress-count",
+              "20"
+            ]
+          },
+          {
+            "stack": "rust",
+            "cwd": ".",
+            "argv": [
+              "../../scripts/run-mutants"
+            ]
+          }
         ],
         "selection": "all",
         "warn_for_host_load": true

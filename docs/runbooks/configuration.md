@@ -19,14 +19,22 @@ behaviour and [GC](gc.md) for retention configuration.
 
 ## Port table
 
-The port table layers compiled builtins, host `state/ports.json`, then project
-`.provenant/ports.json`. A layer only needs the fields it changes: object fields
-deep-merge over the lower layer, so `{"verify": {"base": "origin/master"}}`
-keeps the other verify fields from the layers below it. `schema_version` is
-optional in a layer; it defaults to the current version, and a mismatch warns
-rather than refuses a compatible shape. `provenant config show --full` lists the
-effective `verify.base` and `verify.remote` with the layer or inferred ref that
-supplied each value.
+The port table applies layers in precedence order, lowest to highest:
+`builtin` < `detected` < `host` < `host-project` < `project`. Compiled builtins
+come first, then auto-detected defaults, then host `state/ports.json`, then
+`state/projects/<project_key>/ports.json`, and finally project
+`.provenant/ports.json`. The keyed host-project layer lets a consumer repository
+be configured entirely from host state with no files in its tree; a missing
+project key or keyed layer is skipped silently. A layer only needs the fields it
+changes: object fields deep-merge over the lower layer, so
+`{"verify": {"base": "origin/master"}}` keeps the other verify fields from the
+layers below it. `schema_version` is optional in a layer; it defaults to the
+current version, and a mismatch warns rather than refuses a compatible shape.
+Provenance is tracked per dotted leaf (for example `build.prepare`,
+`verify.base`, `verify.tiers.0.commands`): each leaf reports the highest layer
+that set it, and a port's label is derived from those leaves. `provenant config
+show --full` lists every effective leaf, including build and tier values, with
+the layer or inferred ref that supplied it.
 
 When no layer sets `verify.base`, Provenant infers it from
 `refs/remotes/<remote>/HEAD` for the effective `verify.remote` and marks the
@@ -41,6 +49,59 @@ This repository keeps its source at `config/ports.json` and links the optional
 `.provenant/ports.json` path to it. Repository-specific scripts such as
 `scripts/verify-nextest` belong in that source (direct CI reads it without
 Provenant); the builtin verify tiers are neutral cargo commands.
+
+Each tier command is an object with `stack` (default empty), `cwd` (default
+`.` and relative to the effective verify workspace, without `..`) and a non-empty `argv`
+array. The whole elements `{packages}`, `{integration_args}` and
+`{quarantine_args}` expand to zero or more arguments; other elements are
+literal and are never shell split. Arrays replace across layers. Detected Rust tiers 0 and 1 select packages and tier 2 selects all; tiers containing non-Rust commands select all and expand selection placeholders to nothing. An invalid tier command warns with its layer and tier, and that tier falls back to the next lower layer.
+
+The `build` port carries the shared seed-build interface. Its compiled defaults
+are `strategy = "lane_seed"`, `prepare = []`, `seed.stale_after = "24h"`,
+`wrapper.argv = []`, `command.argv = []`, `offload = "auto"`,
+`overflow = "local"`, `clean = "none"`, `stacks = []` and
+`snapshot_retention = "7d"`. `strategy` documents `slots`, `lane_seed`, `lane`,
+`wrapper` and `command`; only `lane_seed` is consumed today. The strategy,
+wrapper, command, offload, overflow, clean, stacks and retention keys only
+declare their shape here; later slices consume them. `build.prepare` is an
+ordered list of argv arrays: each command runs in order with the checkout root
+as its working directory before every seed generation build (and, later, slot
+builds), in the same sanitised child environment as the Cargo steps. A failing
+command fails that build with a `prepare_failed` outcome that records the
+command and the last 2 KiB of the combined output; an unreadable or invalid
+table warns and runs no prepare command. Arrays replace rather than concatenate
+across layers. `build.seed.stale_after` is the age after which a seed is
+considered stale, expressed in the host-gc duration syntax (0 or whole seconds,
+minutes, hours, days or weeks, e.g. `24h`, the default); a reader warns and
+falls back to `24h` on a bad value, reported with source `default`; a valid
+value reports the layer that declared it (`builtin`, `detected`, `host`,
+`host_project` or `project`). Every key layers like other port fields, so a
+layer can set only the one it changes, and each leaf reports its source. A
+writer lane with a private Cargo target warns once when a
+project has no complete seed generation, when the newest one is older than
+`build.seed.stale_after` (aged from its `complete` marker), or when the last
+refresh outcome is `failed` or `prepare_failed`. `provenant worktree doctor`
+shows the same generation age, last outcome and reason, and effective knob with
+its source. The warning names the outcome, the knob and its value/source, and
+says to run `provenant worktree seed-build` in the repository; it never refuses
+the lane. Refresh outcomes are stored atomically at
+`<state>/cargo-target-seeds/refresh/<project_key>.json` with a schema, instant,
+outcome and a reason capped at 2 KiB. A missing, corrupt or newer-schema file
+is read as no record. For example, to ensure generated files exist before
+seeding:
+
+```json
+{
+  "build": {
+    "prepare": [["node", "tools/ensure-generated.mjs"]]
+  }
+}
+```
+
+A later slice removes the `build_admission` command key as a breaking
+configuration change; the key remains declared here for now. Build admission is
+chosen through `build.strategy` and its named `[admission.<class>]` limits, and
+this slice does not remove or reinterpret the old key.
 
 ## Provider model scope
 
@@ -83,6 +144,15 @@ at it, because Cargo then serves one branch's artifacts to another
 the value and its source. A `shared` value from an older release is reported by
 `provenant config check` and the default applies; `provenant gc --apply`
 removes its old directories.
+
+The lane's `CARGO_INCREMENTAL` and `CARGO_PROFILE_DEV_DEBUG` defaults come from
+one settings source: `cargo_incremental` and `cargo_debug` under
+`[domains.fabric.lanes]`. `LaneBuildSettings` resolves them once per launch and
+the host's seed build resolves the same values the same way, so both compile
+with identical debuginfo and incremental settings. A value already present in
+the lane environment takes precedence in both. Changing a default affects only
+future builds: an existing target keeps the artifacts it was built with, so the
+change reclaims no space there until that target is rebuilt or removed.
 
 To build warm in a checkout outside a lane, seed its private target and use it:
 
@@ -234,3 +304,22 @@ execution phases. Nested invocations within an admitted command detect the
 inherited slot lease and pass through without re-acquiring or deadlocking.
 Holders, waiters, elapsed wait durations, and admission classes are visible in
 `provenant status`.
+
+### Stack discovery
+
+`provenant config detect` reports read-only stack discovery, proposed commands and
+warnings. Rust discovery selects the nearest Cargo manifest with a workspace or
+package table, at most two directories below the root; equal-depth candidates
+warn and skip Rust. Node discovery reads only the root `package.json`: its
+`packageManager` takes precedence over pnpm, yarn, npm and bun lockfiles, and
+npm is the warned fallback. Only existing lint, typecheck, test and build scripts
+are proposed: lint and typecheck in tier 0, test in tier 1, and build in tier 2.
+Rust tiers use Cargo fmt, check and lib/bin tests in tier 0, Cargo integration tests in tier 1, and workspace tests in tier 2; detection adds no stress tier. Mixed tiers list Rust commands first, with each command's own
+project-relative working directory.
+
+`provenant config show --full` includes detected commands and effective build and
+verify tier leaves with their sources. `provenant config path --project` prints
+the host-project ports path and whether it exists. Detection never overrides
+configured values. Its default tier fills a gap below host, host-project and
+project layers. When a stack is detected, its tier table replaces the builtin tier table; when none is detected, the builtin tiers remain. Host,
+host-project and project declarations override detected leaves.

@@ -4118,8 +4118,12 @@ pub(super) fn prepare_candidates_inner(
                     .and_then(|provider| provider.runtime_deadline_seconds),
             },
         );
-        let build_class =
-            provenant_config::ResolvedAdmissionClass::resolve("build", state_root, Some(&source));
+        let build_class = provenant_config::ResolvedAdmissionClass::resolve(
+            "build",
+            state_root,
+            Some(&source),
+            provenant_config::project_key_for(&source).as_deref(),
+        );
         let cargo_target = run::ResolvedCargoTarget::resolve_with_brief(&task.profile, prompt_text);
         let (cargo_cache_budget, cargo_cache_budget_warning) =
             match provenant_config::cargo_cache_budget(

@@ -6,7 +6,7 @@ use provenant_run::target_seed::{self, Manifest};
 use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs, io,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -15,16 +15,104 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const PUBLICATION_WAIT_SECONDS: u64 = 10;
+/// Bound on the output tail a failing `build.prepare` command carries into its
+/// typed error, its refresh record and the seed result.
+const OUTPUT_TAIL_BYTES: usize = 2 * 1024;
 
-fn ensure_host_seed_environment_eligible() -> Result<()> {
-    let environment = std::env::vars_os().collect::<Vec<_>>();
-    if let Some(setting) = target_seed::unsupported_seed_build_environment(&environment) {
-        return Err(io::Error::other(format!(
-            "shared Cargo target seed is unavailable while {setting} is set; native Cargo builds keep that setting"
-        ))
-        .into());
+/// The single stderr seam for seed-build operator lines. Warnings and the
+/// `build.prepare` trace are facts for the operator, never refusals by themselves.
+#[allow(clippy::print_stderr)]
+fn seed_build_stderr(line: impl std::fmt::Display) {
+    eprintln!("{line}");
+}
+
+/// A failing `build.prepare` command. It travels as the error of `refresh` or
+/// `build`, so a caller tells it from a generic failure by type. The public
+/// fields let the tick record the command and its bounded output tail without
+/// echoing either in an operator diagnostic.
+#[derive(Debug)]
+pub struct PrepareFailed {
+    pub index: usize,
+    pub argv: Vec<String>,
+    pub exit: Option<i32>,
+    pub tail: String,
+}
+
+impl std::fmt::Display for PrepareFailed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "build.prepare[{}] command failed: {}",
+            self.index,
+            self.argv.join(" ")
+        )?;
+        match self.exit {
+            Some(code) => write!(formatter, " (exit {code})"),
+            None => write!(formatter, " (no exit code)"),
+        }
     }
-    Ok(())
+}
+
+impl Error for PrepareFailed {}
+
+/// The `build.prepare` failure an error carries, if any, anywhere in its source
+/// chain, like [`skip_of`] but for a failed command rather than a skip.
+pub fn prepare_failed_of<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a PrepareFailed> {
+    let mut cause = Some(error);
+    while let Some(error) = cause {
+        if let Some(failed) = error.downcast_ref::<PrepareFailed>() {
+            return Some(failed);
+        }
+        cause = error.source();
+    }
+    None
+}
+
+/// What a failed seed command leaves behind: its exit status, when the child
+/// exited normally, and the last [`OUTPUT_TAIL_BYTES`] of its combined output.
+#[derive(Debug)]
+struct CommandFailure {
+    exit: Option<i32>,
+    tail: String,
+}
+
+impl std::fmt::Display for CommandFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("seed command failed")
+    }
+}
+
+impl Error for CommandFailure {}
+
+/// The last 2 KiB of the combined stdout and stderr, lossily decoded and bounded.
+fn output_tail(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut combined = Vec::with_capacity(stdout.len() + stderr.len());
+    combined.extend_from_slice(stdout);
+    combined.extend_from_slice(stderr);
+    let start = combined.len().saturating_sub(OUTPUT_TAIL_BYTES);
+    String::from_utf8_lossy(&combined[start..]).into_owned()
+}
+
+/// Report the inherited compiler-selection keys a seed build removes from its
+/// child environment. A seed build is not a lane: wrappers and rustup overrides
+/// come from whoever launched it, so the build clears them rather than refusing.
+/// Lane use of a mismatched seed is still guarded by the eligibility check in
+/// `target_seed.rs`. At most one line is printed per process, whatever the
+/// number of projects a tick pass refreshes.
+#[allow(clippy::print_stderr)] // The warning is the operator-facing output of the refresh.
+fn ensure_host_seed_environment_eligible() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let environment = std::env::vars_os().collect::<Vec<_>>();
+    let cleared = target_seed::seed_build_cleared_keys(&environment);
+    if cleared.is_empty() {
+        return;
+    }
+    WARNED.call_once(|| {
+        eprintln!(
+            "warning: seed-build cleared inherited compiler-selection environment: {}",
+            cleared.join(", ")
+        );
+    });
 }
 
 fn cargo_config_ineligibility(reason: &str) -> io::Error {
@@ -222,14 +310,52 @@ fn make_directories_writable(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn run(cwd: &Path, argv: &[OsString], overrides: &[(OsString, OsString)]) -> Result<Vec<u8>> {
-    let mut env: Vec<_> = std::env::vars_os()
+/// The environment a seed-build child process sees. Inherited compiler-selection
+/// keys are dropped, as are `GIT_*` keys and keys Provenant sets through
+/// `overrides`; overrides are then applied last so the safe values win.
+fn seed_build_child_environment(
+    inherited: &[(OsString, OsString)],
+    overrides: &[(OsString, OsString)],
+) -> Vec<(OsString, OsString)> {
+    let cleared = target_seed::seed_build_cleared_keys(inherited);
+    let mut env: Vec<_> = inherited
+        .iter()
         .filter(|(key, _)| {
             !key.to_string_lossy().starts_with("GIT_")
                 && !overrides.iter().any(|(name, _)| name == key)
+                && !cleared.iter().any(|name| OsStr::new(name) == key)
         })
+        .cloned()
         .collect();
     env.extend_from_slice(overrides);
+    env
+}
+
+/// The manifest flags that describe inherited build settings. A cleared key no
+/// longer applies to the child process, so it must not be recorded as if it did.
+fn seed_build_flags(environment: &[(OsString, OsString)]) -> Vec<String> {
+    let cleared = target_seed::seed_build_cleared_keys(environment);
+    [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_BUILD_RUSTFLAGS",
+        "CARGO_BUILD_TARGET",
+    ]
+    .into_iter()
+    .filter(|key| !cleared.iter().any(|name| name == key))
+    .filter_map(|key| {
+        let value = environment
+            .iter()
+            .find(|(name, _)| name.as_os_str() == OsStr::new(key))
+            .and_then(|(_, value)| value.to_str())?;
+        Some(format!("{key}={value}"))
+    })
+    .collect()
+}
+
+fn run(cwd: &Path, argv: &[OsString], overrides: &[(OsString, OsString)]) -> Result<Vec<u8>> {
+    let inherited = std::env::vars_os().collect::<Vec<_>>();
+    let env = seed_build_child_environment(&inherited, overrides);
     let mut options = ExecOptions::new(argv, cwd, Duration::from_secs(4 * 60 * 60));
     options.env = Some(&env);
     options.process_group = true;
@@ -250,6 +376,51 @@ fn run(cwd: &Path, argv: &[OsString], overrides: &[(OsString, OsString)]) -> Res
     }
     Ok(result.stdout.bytes)
 }
+
+/// Like [`run`], but keeps the combined output tail when a command fails. Both
+/// streams use a tail policy: a long prepare log cannot grow the error without
+/// bound, and the retained bytes are enough to explain a failed generation step.
+/// A tail stream's `truncated` flag is expected, so unlike `run` it is not a
+/// failure on its own.
+fn run_with_tail(
+    cwd: &Path,
+    argv: &[OsString],
+    overrides: &[(OsString, OsString)],
+) -> std::result::Result<Vec<u8>, CommandFailure> {
+    let inherited = std::env::vars_os().collect::<Vec<_>>();
+    let env = seed_build_child_environment(&inherited, overrides);
+    let mut options = ExecOptions::new(argv, cwd, Duration::from_secs(4 * 60 * 60));
+    options.env = Some(&env);
+    options.process_group = true;
+    options.stdout = provenant_os::exec::StreamPolicy::Tail {
+        limit: OUTPUT_TAIL_BYTES,
+    };
+    options.stderr = provenant_os::exec::StreamPolicy::Tail {
+        limit: OUTPUT_TAIL_BYTES,
+    };
+    let failed = |tail: String, exit: Option<i32>| CommandFailure { exit, tail };
+    let executor = SystemExecutor::new(1)
+        .map_err(|error| failed(seed_error("running seed command", &error).to_string(), None))?;
+    let result = executor
+        .execute(options)
+        .map_err(|error| failed(seed_error("running seed command", &error).to_string(), None))?;
+    if result.termination != Termination::Exit(0)
+        || result.timed_out
+        || result.stdout.read_failed
+        || result.stderr.read_failed
+    {
+        let exit = match result.termination {
+            Termination::Exit(code) => i32::try_from(code).ok(),
+            Termination::Signal(_) => None,
+        };
+        return Err(failed(
+            output_tail(&result.stdout.bytes, &result.stderr.bytes),
+            exit,
+        ));
+    }
+    Ok(result.stdout.bytes)
+}
+
 fn git(cwd: &Path, args: &[OsString]) -> Result<Vec<u8>> {
     let executable =
         provenant_os::git::git_executable().ok_or_else(|| io::Error::other("git unavailable"))?;
@@ -570,11 +741,12 @@ fn verify_base(host_state: &Path, project: &Path, workspace: &Path) -> Result<Ve
 pub enum Refresh {
     /// This project has no selected Cargo workspace; nothing to seed.
     NotCargo,
-    /// A complete generation for this repository matches its verify-base commit,
-    /// compiler and effective Cargo profile.
+    /// A complete generation matches the verify-base dependency identity.
     Current,
     /// Another host seed build holds the build lock; nothing was started.
     Busy,
+    /// The requested commit did not produce the requested identity.
+    IdentityMismatch,
     /// A new generation was published.
     Built(String),
 }
@@ -586,6 +758,7 @@ struct GenerationIdentity {
     rustc_vv: String,
     host_triple: String,
     cargo_profile: CargoBuildProfile,
+    hash: String,
 }
 
 fn workspace_relative(state: &Path, project: &Path) -> Result<Option<PathBuf>> {
@@ -663,6 +836,13 @@ fn refresh_identity_with_probe(
     let base = verify_base(state, project, &workspace)?;
     let (rustc_vv, host_triple) = rustc_metadata_for_base(state, &base, probe)?;
     let cargo_profile = cargo_build_profile(state)?;
+    let source = target_seed::GitSeedSource {
+        checkout: project,
+        commit: Some(&base.commit),
+    };
+    let hash =
+        target_seed::seed_identity(&source, &workspace, &rustc_vv, &host_triple, &cargo_profile)?
+            .hash;
     Ok(IdentityRefresh::Ready {
         identity: GenerationIdentity {
             project_key: base.project_key,
@@ -670,6 +850,7 @@ fn refresh_identity_with_probe(
             rustc_vv,
             host_triple,
             cargo_profile,
+            hash,
         },
         workspace,
     })
@@ -706,6 +887,41 @@ fn cargo_build_profile(state: &Path) -> Result<CargoBuildProfile> {
         .ok_or_else(|| io::Error::other("Cargo profile environment is not UTF-8").into())
 }
 
+/// Record a refresh fact for part A's lane-start and doctor readers. A failed
+/// write warns and is otherwise ignored: health is advisory and never changes
+/// whether a build succeeded.
+fn record_refresh_outcome(state: &Path, project_key: &str, outcome: &str, reason: Option<&str>) {
+    let at = match provenant_os::clock::SystemClock.wall_now() {
+        Ok(at) => at,
+        Err(error) => {
+            seed_build_stderr(format!(
+                "warning: could not record seed refresh outcome: clock unavailable: {error}"
+            ));
+            return;
+        }
+    };
+    if let Err(error) =
+        provenant_run::target_seed_health::record_refresh(state, project_key, outcome, reason, at)
+    {
+        seed_build_stderr(format!(
+            "warning: could not record seed refresh outcome for {outcome}: {error}"
+        ));
+    }
+}
+
+/// A short, bounded cause for a recorded refresh failure. Prepare failures name
+/// the command and its output tail; skips name their typed reason; everything
+/// else keeps the error text, which `record_refresh` caps at 2 KiB.
+fn refresh_failure_reason(error: &(dyn Error + 'static)) -> String {
+    if let Some(prepare) = prepare_failed_of(error) {
+        format!("{}: {}", prepare.argv.join(" "), prepare.tail)
+    } else if let Some(skip) = skip_of(error) {
+        format!("{}: {}", skip.reason.cause(), skip)
+    } else {
+        error.to_string()
+    }
+}
+
 /// Rebuild this repository's seed when its verify base has no complete
 /// generation, at most one build at a time. Call after a fetch that may have
 /// advanced the base; it does nothing when the seed is current or a build
@@ -717,7 +933,7 @@ fn cargo_build_profile(state: &Path) -> Result<CargoBuildProfile> {
 #[allow(dead_code)]
 pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
     refuse_in_lane()?;
-    ensure_host_seed_environment_eligible()?;
+    ensure_host_seed_environment_eligible();
     let (identity, workspace) = match refresh_identity(state, project)? {
         IdentityRefresh::NotCargo => return Ok(Refresh::NotCargo),
         IdentityRefresh::Busy => return Ok(Refresh::Busy),
@@ -726,8 +942,10 @@ pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
             workspace,
         } => (identity, workspace),
     };
-    refresh_with(state, &identity, |stage| {
+    let project_key = identity.project_key.clone();
+    let outcome = refresh_with(state, &identity, |stage| {
         build_into(
+            state,
             stage,
             project,
             &workspace,
@@ -735,8 +953,126 @@ pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
             &identity.project_key,
             &identity.cargo_profile,
         )
-    })
+    });
+    match &outcome {
+        Ok(Refresh::Built(_)) => record_refresh_outcome(state, &project_key, "built", None),
+        Ok(Refresh::Current) => record_refresh_outcome(state, &project_key, "current", None),
+        Ok(Refresh::Busy) => record_refresh_outcome(state, &project_key, "busy", None),
+        Ok(Refresh::IdentityMismatch) => {
+            record_refresh_outcome(state, &project_key, "identity_mismatch", None)
+        }
+        Ok(Refresh::NotCargo) => {}
+        Err(error) => {
+            let (recorded, reason) = if prepare_failed_of(error.as_ref()).is_some() {
+                ("prepare_failed", refresh_failure_reason(error.as_ref()))
+            } else if skip_of(error.as_ref()).is_some() {
+                ("skipped", refresh_failure_reason(error.as_ref()))
+            } else {
+                ("failed", refresh_failure_reason(error.as_ref()))
+            };
+            record_refresh_outcome(state, &project_key, recorded, Some(&reason));
+        }
+    }
+    outcome
 }
+
+/// Refresh exactly the commit named by a lane request, checking both its tree
+/// and the prepared checkout before allowing publication.
+pub fn refresh_requested(
+    state: &Path,
+    project: &Path,
+    request: &target_seed::SeedRequest,
+) -> Result<Refresh> {
+    refuse_in_lane()?;
+    ensure_host_seed_environment_eligible();
+    let Some(_lock) = lock_for_identity_probe(state)? else {
+        return Ok(Refresh::Busy);
+    };
+    let Some(workspace) = workspace_relative(state, project)? else {
+        return Ok(Refresh::NotCargo);
+    };
+    let stage = Staging(target_seed::store_path(state).join(format!(
+        ".staging-request-{}",
+        provenant_os::fs::temporary_name()?.to_string_lossy()
+    )));
+    fs::create_dir(&stage.0)?;
+    let checkout = stage.0.join("checkout");
+    checkout_commit(project, &checkout, &request.commit)?;
+    let (rustc_vv, host_triple) = target_seed::rustc_metadata(&checkout.join(&workspace))?;
+    let cargo_profile = cargo_build_profile(state)?;
+    let source = target_seed::GitSeedSource {
+        checkout: project,
+        commit: Some(&request.commit),
+    };
+    let hash =
+        target_seed::seed_identity(&source, &workspace, &rustc_vv, &host_triple, &cargo_profile)?
+            .hash;
+    if hash != request.identity {
+        record_refresh_outcome(state, &request.project_key, "identity_mismatch", None);
+        return Ok(Refresh::IdentityMismatch);
+    }
+    let identity = GenerationIdentity {
+        project_key: request.project_key.clone(),
+        commit: request.commit.clone(),
+        rustc_vv,
+        host_triple,
+        cargo_profile,
+        hash,
+    };
+    drop(stage);
+    drop(_lock);
+    let result = refresh_with(state, &identity, |stage| {
+        let manifest = build_into(
+            state,
+            stage,
+            project,
+            &workspace,
+            &identity.commit,
+            &identity.project_key,
+            &identity.cargo_profile,
+        )?;
+        if manifest.identity.as_deref() != Some(identity.hash.as_str()) {
+            return Err(IdentityMismatch.into());
+        }
+        Ok(manifest)
+    });
+    match result {
+        Err(error) if error.downcast_ref::<IdentityMismatch>().is_some() => {
+            record_refresh_outcome(state, &request.project_key, "identity_mismatch", None);
+            Ok(Refresh::IdentityMismatch)
+        }
+        other => {
+            match &other {
+                Ok(Refresh::Built(_)) => {
+                    record_refresh_outcome(state, &request.project_key, "built", None)
+                }
+                Ok(Refresh::Current) => {
+                    record_refresh_outcome(state, &request.project_key, "current", None)
+                }
+                Ok(Refresh::Busy) => {
+                    record_refresh_outcome(state, &request.project_key, "busy", None)
+                }
+                Err(error) => record_refresh_outcome(
+                    state,
+                    &request.project_key,
+                    "failed",
+                    Some(&refresh_failure_reason(error.as_ref())),
+                ),
+                _ => {}
+            }
+            other
+        }
+    }
+}
+
+#[derive(Debug)]
+struct IdentityMismatch;
+impl std::fmt::Display for IdentityMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("requested seed identity changed")
+    }
+}
+impl Error for IdentityMismatch {}
 
 /// Raised under the build lock when another refresher published this commit
 /// while we waited for it.
@@ -796,8 +1132,8 @@ fn refresh_racing_with_publication_wait(
 }
 
 /// Check every complete generation because a newer generation may belong to
-/// another repository in the shared seed store. A match includes the compiler
-/// and effective Cargo profile, not just the commit.
+/// another repository in the shared seed store. The identity includes the
+/// compiler and effective Cargo profile.
 fn has_generation(state: &Path, identity: &GenerationIdentity) -> bool {
     let generations = target_seed::store_path(state).join("generations");
     let Ok(entries) = fs::read_dir(generations) else {
@@ -818,11 +1154,11 @@ fn has_generation(state: &Path, identity: &GenerationIdentity) -> bool {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
             .is_some_and(|manifest| {
-                manifest.project_key == identity.project_key
-                    && manifest.commit == identity.commit
-                    && manifest.rustc_vv == identity.rustc_vv
-                    && manifest.host_triple == identity.host_triple
-                    && manifest.cargo_profile == identity.cargo_profile
+                // A full generation holds the checkout's own units and can go
+                // stale against a lane's sources; it is never current.
+                manifest.contents == "deps"
+                    && manifest.project_key == identity.project_key
+                    && manifest.identity.as_deref() == Some(&identity.hash)
             })
     })
 }
@@ -836,13 +1172,15 @@ fn refuse_in_lane() -> Result<()> {
 
 pub fn build(state: &Path, project: &Path) -> Result<String> {
     refuse_in_lane()?;
-    ensure_host_seed_environment_eligible()?;
+    ensure_host_seed_environment_eligible();
     let workspace = workspace_relative(state, project)?
         .ok_or_else(|| io::Error::other("project has no selected Cargo workspace"))?;
     let base = verify_base(state, project, &workspace)?;
     let cargo_profile = cargo_build_profile(state)?;
-    publish(state, |stage| {
+    let project_key = base.project_key.clone();
+    let outcome = publish(state, |stage| {
         build_into(
+            state,
             stage,
             project,
             &workspace,
@@ -850,10 +1188,66 @@ pub fn build(state: &Path, project: &Path) -> Result<String> {
             &base.project_key,
             &cargo_profile,
         )
-    })
+    });
+    match &outcome {
+        Ok(_) => record_refresh_outcome(state, &project_key, "built", None),
+        Err(error) => {
+            let (recorded, reason) = if prepare_failed_of(error.as_ref()).is_some() {
+                ("prepare_failed", refresh_failure_reason(error.as_ref()))
+            } else if skip_of(error.as_ref()).is_some() {
+                ("skipped", refresh_failure_reason(error.as_ref()))
+            } else {
+                ("failed", refresh_failure_reason(error.as_ref()))
+            };
+            record_refresh_outcome(state, &project_key, recorded, Some(&reason));
+        }
+    }
+    outcome
+}
+
+/// Run every `build.prepare` argv in order from the checkout root, before any
+/// Cargo command touches the tree. The port table is read from the live project
+/// and the host state, not from the checkout: the repository declares the
+/// commands, and the checkout supplies only the working directory for them. An
+/// unreadable or invalid table warns and runs nothing; a failing command fails
+/// that build with a typed error carrying its bounded output tail.
+fn run_prepares(
+    state: &Path,
+    project: &Path,
+    checkout_root: &Path,
+    overrides: &[(OsString, OsString)],
+) -> Result<()> {
+    let table = match provenant_config::PortTable::read_for(Some(project), state) {
+        Ok(table) => table,
+        Err(error) => {
+            seed_build_stderr(format!(
+                "warning: seed-build build.prepare could not be read ({error}); no prepare command ran"
+            ));
+            return Ok(());
+        }
+    };
+    let layer = provenant_config::port_source_layer(table.build.source);
+    for (index, argv) in table.build.prepare.iter().enumerate() {
+        seed_build_stderr(format!(
+            "seed-build: build.prepare[{index}] (source {layer}): {}",
+            argv.join(" ")
+        ));
+        let argv = argv.iter().map(OsString::from).collect::<Vec<_>>();
+        run_with_tail(checkout_root, &argv, overrides).map_err(|failure| PrepareFailed {
+            index,
+            argv: argv
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect(),
+            exit: failure.exit,
+            tail: failure.tail,
+        })?;
+    }
+    Ok(())
 }
 
 fn build_into(
+    state: &Path,
     stage: &Path,
     project: &Path,
     workspace_relative: &Path,
@@ -864,6 +1258,38 @@ fn build_into(
     let checkout = stage.join("checkout");
     checkout_commit(project, &checkout, commit)?;
     let checkout_root = checkout.canonicalize()?;
+    let target = stage.join("target");
+    fs::create_dir(&target)?;
+    let environment = std::env::vars_os().collect::<Vec<_>>();
+    let cargo = target_seed::cargo_tool(&environment, "cargo")?;
+    let mut flags = vec![
+        "cargo build --locked --all-targets".to_owned(),
+        "cargo test --locked --no-run".to_owned(),
+        "cargo check --workspace --all-targets --locked".to_owned(),
+    ];
+    flags.extend(seed_build_flags(&environment));
+    let mut overrides = cargo_profile.environment().to_vec();
+    let mut paths = vec![
+        cargo
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
+    ];
+    if let Some(path) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&path));
+    }
+    overrides.push((
+        "PATH".into(),
+        std::env::join_paths(paths)
+            .map_err(|error| io::Error::other(format!("cargo PATH unresolved: {error}")))?,
+    ));
+    overrides.extend([
+        ("CARGO_TARGET_DIR".into(), target.as_os_str().into()),
+        ("CARGO_BUILD_BUILD_DIR".into(), target.as_os_str().into()),
+        // Provenant's safe value; an inherited non-zero value is cleared.
+        ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
+    ]);
+    run_prepares(state, project, &checkout_root, &overrides)?;
     let worktree = checkout.join(workspace_relative).canonicalize()?;
     if !worktree.starts_with(&checkout_root) || !worktree.join("Cargo.toml").metadata()?.is_file() {
         return Err(io::Error::other(
@@ -871,53 +1297,39 @@ fn build_into(
         )
         .into());
     }
-    let target = stage.join("target");
-    fs::create_dir(&target)?;
     let (rustc_vv, host_triple) = target_seed::rustc_metadata(&worktree)?;
-    let environment = std::env::vars_os().collect::<Vec<_>>();
-    let cargo = target_seed::cargo_tool(&environment, "cargo")?;
-    let mut flags = vec![
-        "cargo build --locked --all-targets".to_owned(),
-        "cargo test --locked --no-run".to_owned(),
-    ];
-    flags.extend(
-        [
-            "RUSTFLAGS",
-            "CARGO_ENCODED_RUSTFLAGS",
-            "CARGO_BUILD_RUSTFLAGS",
-            "CARGO_BUILD_TARGET",
-        ]
-        .into_iter()
-        .filter_map(|key| std::env::var(key).ok().map(|v| format!("{key}={v}"))),
-    );
+    // Capture the checkout after preparation, so generated changes cannot be
+    // published under the unchanged commit-tree identity.
+    let source = target_seed::GitSeedSource {
+        checkout: &checkout_root,
+        commit: None,
+    };
+    let identity = target_seed::seed_identity(
+        &source,
+        workspace_relative,
+        &rustc_vv,
+        &host_triple,
+        cargo_profile,
+    )?;
+    fs::write(
+        stage.join("identity.json"),
+        serde_json::to_vec_pretty(&identity)?,
+    )?;
+    make_read_only(&stage.join("identity.json"))?;
     for args in [
         &["build", "--locked", "--all-targets"][..],
         &["test", "--locked", "--no-run"][..],
+        &["check", "--workspace", "--all-targets", "--locked"][..],
     ] {
         let argv: Vec<OsString> = std::iter::once(cargo.as_os_str().to_owned())
             .chain(args.iter().map(OsString::from))
             .collect();
-        let mut overrides = cargo_profile.environment().to_vec();
-        let mut paths = vec![
-            cargo
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf(),
-        ];
-        if let Some(path) = std::env::var_os("PATH") {
-            paths.extend(std::env::split_paths(&path));
-        }
-        overrides.push((
-            "PATH".into(),
-            std::env::join_paths(paths)
-                .map_err(|error| io::Error::other(format!("cargo PATH unresolved: {error}")))?,
-        ));
-        overrides.extend([
-            ("CARGO_TARGET_DIR".into(), target.as_os_str().into()),
-            ("CARGO_BUILD_BUILD_DIR".into(), target.as_os_str().into()),
-        ]);
         run(&worktree, &argv, &overrides)?;
     }
+    // The checkout's own units are never reusable by a lane: their sources move
+    // with the lane, and a stale artifact would be trusted by mtime. Clean every
+    // path package, leaving only dependency units in the seed.
+    clean_path_packages(&cargo, &worktree, &overrides)?;
     // Record the size once, while building the host seed is already walking the
     // tree; a lane clone must not walk a multi-gigabyte seed before starting.
     let allocated_bytes = target_seed::allocated_tree_bytes(&target);
@@ -927,12 +1339,60 @@ fn build_into(
         rustc_vv,
         host_triple,
         commit: commit.to_owned(),
+        identity: Some(identity.hash),
         profile: "dev".into(),
         cargo_profile: cargo_profile.clone(),
         features: vec!["default".into()],
         flags,
         allocated_bytes,
+        contents: "deps".into(),
     })
+}
+
+/// Remove the units of every path package from a built seed target. `cargo
+/// metadata` lists workspace members and path dependencies alike with a null
+/// `source`; registry and other non-path dependencies are left untouched. The
+/// enumeration and the clean use the same child environment and target overrides
+/// as the build, through the process helper that applies `seed_build_child_environment`.
+fn clean_path_packages(
+    cargo: &Path,
+    worktree: &Path,
+    overrides: &[(OsString, OsString)],
+) -> Result<()> {
+    let metadata = [
+        OsString::from("metadata"),
+        "--format-version".into(),
+        "1".into(),
+        "--locked".into(),
+    ];
+    let argv: Vec<OsString> = std::iter::once(cargo.as_os_str().to_owned())
+        .chain(metadata)
+        .collect();
+    let output = run(worktree, &argv, overrides)?;
+    let metadata: serde_json::Value = serde_json::from_slice(&output)
+        .map_err(|error| io::Error::other(format!("cargo metadata: {error}")))?;
+    let packages = metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| io::Error::other("cargo metadata has no package list"))?;
+    let mut specs = Vec::new();
+    for package in packages {
+        if package.get("source").is_none_or(serde_json::Value::is_null)
+            && let Some(id) = package.get("id").and_then(serde_json::Value::as_str)
+        {
+            specs.push(id.to_owned());
+        }
+    }
+    for spec in specs {
+        let argv: Vec<OsString> = vec![
+            cargo.as_os_str().to_owned(),
+            "clean".into(),
+            "-p".into(),
+            spec.into(),
+        ];
+        run(worktree, &argv, overrides)?;
+    }
+    Ok(())
 }
 
 fn publish(state: &Path, build: impl FnOnce(&Path) -> Result<Manifest>) -> Result<String> {
@@ -1232,6 +1692,7 @@ mod checkout_tests {
             "[package]\nname='seed-fixture'\nversion='0.1.0'\nedition='2021'\n",
         )
         .unwrap();
+        fs::write(remote.join("Cargo.lock"), "version = 3\n").unwrap();
         fs::write(
             remote.join("rust-toolchain.toml"),
             include_str!("../rust-toolchain.toml"),
@@ -1242,6 +1703,7 @@ mod checkout_tests {
             &[
                 "add".into(),
                 "Cargo.toml".into(),
+                "Cargo.lock".into(),
                 "rust-toolchain.toml".into(),
             ],
         )
@@ -1295,11 +1757,13 @@ mod checkout_tests {
                 rustc_vv: identity.rustc_vv.clone(),
                 host_triple: identity.host_triple.clone(),
                 commit: identity.commit.clone(),
+                identity: Some(identity.hash.clone()),
                 profile: "dev".into(),
                 cargo_profile: identity.cargo_profile.clone(),
                 features: vec![],
                 flags: vec![],
                 allocated_bytes: None,
+                contents: "deps".into(),
             })
         })
         .unwrap();
@@ -1349,11 +1813,98 @@ mod tests {
             0
         );
     }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn seed_build_clears_inherited_compiler_selection_env() {
+        let profile = LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .expect("default Cargo profile is UTF-8");
+        let inherited: Vec<(OsString, OsString)> = [
+            ("RUSTC_WRAPPER", "/secret/wrap"),
+            ("RUSTUP_TOOLCHAIN", "nightly"),
+            ("RUSTFLAGS", "-C secretflag"),
+            ("RUSTUP_AUTO_INSTALL", "1"),
+            ("GIT_CONFIG_GLOBAL", "/secret/gitconfig"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+        .chain(
+            [
+                OsString::from("CARGO_INCREMENTAL"),
+                OsString::from("CARGO_PROFILE_DEV_DEBUG"),
+            ]
+            .into_iter()
+            .map(|key| (key, OsString::from("profile-value"))),
+        )
+        .collect();
+        let mut overrides = profile.environment().to_vec();
+        overrides.extend([
+            ("CARGO_TARGET_DIR".into(), OsString::from("/seed/target")),
+            ("RUSTUP_AUTO_INSTALL".into(), OsString::from("0")),
+        ]);
+
+        let child = seed_build_child_environment(&inherited, &overrides);
+        for key in [
+            "RUSTC_WRAPPER",
+            "RUSTUP_TOOLCHAIN",
+            "RUSTFLAGS",
+            "GIT_CONFIG_GLOBAL",
+        ] {
+            assert!(
+                !child.iter().any(|(name, _)| name == key),
+                "{key} must not reach the child"
+            );
+        }
+        assert_eq!(
+            child
+                .iter()
+                .filter(|(name, _)| name == "RUSTUP_AUTO_INSTALL")
+                .count(),
+            1
+        );
+        // The inherited auto-install value is replaced by the safe one, and
+        // profile/target values Provenant sets survive exactly once.
+        assert_eq!(
+            child
+                .iter()
+                .filter(|(name, value)| name == "RUSTUP_AUTO_INSTALL" && value == "0")
+                .count(),
+            1
+        );
+        for key in [
+            "CARGO_INCREMENTAL",
+            "CARGO_PROFILE_DEV_DEBUG",
+            "CARGO_TARGET_DIR",
+        ] {
+            assert_eq!(
+                child.iter().filter(|(name, _)| name == key).count(),
+                1,
+                "{key} is set by Provenant and must be kept"
+            );
+        }
+        // The cleared environment leaves no unsupported override, so the build
+        // proceeds: the seed is no longer refused for the launcher's shell.
+        assert_eq!(
+            target_seed::unsupported_seed_build_environment(&child),
+            None
+        );
+
+        // Flags record only settings that still apply to the child.
+        let flags = seed_build_flags(&inherited);
+        assert!(
+            !flags.iter().any(|flag| flag.contains("RUSTFLAGS")),
+            "a cleared key must not be recorded: {flags:?}"
+        );
+        assert_eq!(flags, Vec::<String>::new());
+    }
+
     #[allow(dead_code)] // The harness-free target includes this module without its tests.
     fn identity(project_key: &str, commit: &str) -> GenerationIdentity {
         GenerationIdentity {
             project_key: project_key.into(),
             commit: commit.into(),
+            hash: "identity".into(),
             rustc_vv: "version".into(),
             host_triple: "host".into(),
             cargo_profile: LaneBuildSettings::default()
@@ -1368,11 +1919,13 @@ mod tests {
             rustc_vv: identity.rustc_vv.clone(),
             host_triple: identity.host_triple.clone(),
             commit: identity.commit.clone(),
+            identity: Some(identity.hash.clone()),
             profile: "dev".into(),
             cargo_profile: identity.cargo_profile.clone(),
             features: vec![],
             flags: vec![],
             allocated_bytes: None,
+            contents: "deps".into(),
         }
     }
     #[allow(dead_code)] // The harness-free target includes this module without its tests.
@@ -1411,13 +1964,8 @@ mod tests {
         argv: &[OsString],
         overrides: &[(OsString, OsString)],
     ) -> Result<String> {
-        let mut env: Vec<_> = std::env::vars_os()
-            .filter(|(key, _)| {
-                !key.to_string_lossy().starts_with("GIT_")
-                    && !overrides.iter().any(|(name, _)| name == key)
-            })
-            .collect();
-        env.extend_from_slice(overrides);
+        let inherited = std::env::vars_os().collect::<Vec<_>>();
+        let env = seed_build_child_environment(&inherited, overrides);
         let mut options = ExecOptions::new(argv, cwd, Duration::from_secs(4 * 60 * 60));
         options.env = Some(&env);
         options.process_group = true;
@@ -1521,6 +2069,271 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Exercises real Cargo freshness.
+    fn clippy_reuses_seeded_check_units() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        let write = |path: &str, text: &str| {
+            let path = app.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write(
+            "rust-toolchain.toml",
+            include_str!("../rust-toolchain.toml"),
+        );
+        write(
+            "Cargo.toml",
+            "[package]\nname='app'\nversion='0.1.0'\nedition='2021'\n[dependencies]\nvendored='1'\n",
+        );
+        write(
+            "src/lib.rs",
+            "pub fn value() -> u32 { vendored::value() }\n",
+        );
+        write(
+            ".cargo/config.toml",
+            "[source.crates-io]\nreplace-with='vendor'\n[source.vendor]\ndirectory='vendor'\n",
+        );
+        write(
+            "vendor/vendored/Cargo.toml",
+            "[package]\nname='vendored'\nversion='1.0.0'\nedition='2021'\n",
+        );
+        write(
+            "vendor/vendored/src/lib.rs",
+            "pub fn value() -> u32 { 1 }\n",
+        );
+        write(
+            "vendor/vendored/.cargo-checksum.json",
+            &format!("{{\"files\":{{}},\"package\":\"{}\"}}", "0".repeat(64)),
+        );
+        let seed = temp.path().join("seed");
+        let run_cargo = |target: &Path, args: &[&str]| {
+            let output = std::process::Command::new(
+                std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
+            )
+            .args(args)
+            .current_dir(&app)
+            .env("CARGO_TARGET_DIR", target)
+            .env("CARGO_BUILD_BUILD_DIR", target)
+            .env("CARGO_INCREMENTAL", "0")
+            .output()
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output
+        };
+        run_cargo(&seed, &["generate-lockfile", "--offline"]);
+        run_cargo(
+            &seed,
+            &[
+                "check",
+                "--workspace",
+                "--all-targets",
+                "--locked",
+                "--offline",
+            ],
+        );
+        run_cargo(&seed, &["clean", "-p", "app", "--offline"]);
+        let lint = temp.path().join("target-lint");
+        copy_tree(&seed, &lint).unwrap();
+        let output = run_cargo(
+            &lint,
+            &[
+                "check",
+                "--workspace",
+                "--all-targets",
+                "--locked",
+                "--offline",
+                "--message-format=json",
+            ],
+        );
+        let messages: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let dependency: Vec<_> = messages
+            .iter()
+            .filter(|message| {
+                message["reason"] == "compiler-artifact" && message["target"]["name"] == "vendored"
+            })
+            .collect();
+        assert!(
+            !dependency.is_empty(),
+            "missing dependency artifacts: {messages:?}"
+        );
+        assert!(
+            dependency.iter().all(|message| message["fresh"] == true),
+            "{dependency:?}"
+        );
+    }
+
+    /// A deps-only seed holds no units of the checkout, so a lane must rebuild
+    /// its own members even when their sources are older than the seed's
+    /// artifacts, while dependency units stay fresh. The fixture uses real
+    /// Cargo with a build script, a member-to-member dependency and a non-member
+    /// path package, so every local unit kind is covered.
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Runs the pinned Cargo and reads the real file clock.
+    fn older_sources_rebuild_after_deps_only_seed() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let write = |path: &str, text: &str| {
+            let path = workspace.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write(
+            "rust-toolchain.toml",
+            include_str!("../rust-toolchain.toml"),
+        );
+        write(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"member\", \"inner\"]\nexclude = [\"dep-path\"]\nresolver = \"2\"\n",
+        );
+        write(
+            "member/Cargo.toml",
+            "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ninner = { path = \"../inner\" }\ndep-path = { path = \"../dep-path\" }\nvendored = \"1\"\n",
+        );
+        write(
+            "member/src/lib.rs",
+            "pub fn value() -> u32 { inner::value() + dep_path::value() + vendored::value() }\n",
+        );
+        write(
+            "inner/Cargo.toml",
+            "[package]\nname = \"inner\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n\n[dependencies]\nvendored = \"1\"\n",
+        );
+        write(
+            "inner/build.rs",
+            "fn main() { println!(\"cargo:rerun-if-changed=build.rs\"); }\n",
+        );
+        write(
+            "inner/src/lib.rs",
+            "pub fn value() -> u32 { vendored::value() }\n",
+        );
+        write(
+            "dep-path/Cargo.toml",
+            "[package]\nname = \"dep-path\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nvendored = \"1\"\n",
+        );
+        write(
+            "dep-path/src/lib.rs",
+            "pub fn value() -> u32 { vendored::value() }\n",
+        );
+        // A directory source stands in for a registry offline: its units are
+        // dependency units and must stay fresh in the deps-only seed.
+        write(
+            ".cargo/config.toml",
+            "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"vendor\"\n",
+        );
+        write(
+            "vendor/vendored/Cargo.toml",
+            "[package]\nname = \"vendored\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            "vendor/vendored/src/lib.rs",
+            "pub fn value() -> u32 { 1 }\n",
+        );
+        write(
+            "vendor/vendored/.cargo-checksum.json",
+            &format!("{{\"files\":{{}},\"package\":\"{}\"}}", "0".repeat(64)),
+        );
+
+        let profile = LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .expect("default Cargo profile is UTF-8");
+        let mut base_env = profile.environment().to_vec();
+        base_env.push(("CARGO_NET_OFFLINE".into(), "true".into()));
+        let generate_lock = [
+            OsString::from("cargo"),
+            "generate-lockfile".into(),
+            "--offline".into(),
+        ];
+        run(&workspace, &generate_lock, &base_env).unwrap();
+
+        let seed_target = temp.path().join("seed-target");
+        let mut seed_env = base_env.clone();
+        seed_env.extend([
+            ("CARGO_TARGET_DIR".into(), seed_target.as_os_str().into()),
+            (
+                "CARGO_BUILD_BUILD_DIR".into(),
+                seed_target.as_os_str().into(),
+            ),
+        ]);
+        let build_seed = [
+            OsString::from("cargo"),
+            "build".into(),
+            "--locked".into(),
+            "--all-targets".into(),
+            "--offline".into(),
+        ];
+        run(&workspace, &build_seed, &seed_env).unwrap();
+        let environment = std::env::vars_os().collect::<Vec<_>>();
+        let cargo = target_seed::cargo_tool(&environment, "cargo").unwrap();
+        clean_path_packages(&cargo, &workspace, &seed_env).unwrap();
+
+        // Clone the seed as a lane target, then backdate the checkout's own
+        // sources so mtime alone would call their units fresh.
+        let lane_target = temp.path().join("lane-target");
+        copy_tree(&seed_target, &lane_target).unwrap();
+        let older = fs::metadata(workspace.join("member/src/lib.rs"))
+            .unwrap()
+            .modified()
+            .unwrap()
+            - Duration::from_secs(3600);
+        for path in [
+            "member/Cargo.toml",
+            "member/src/lib.rs",
+            "inner/Cargo.toml",
+            "inner/build.rs",
+            "inner/src/lib.rs",
+            "dep-path/Cargo.toml",
+            "dep-path/src/lib.rs",
+        ] {
+            fs::File::open(workspace.join(path))
+                .unwrap()
+                .set_modified(older)
+                .unwrap();
+        }
+
+        let mut lane_env = base_env;
+        lane_env.extend([
+            ("CARGO_TARGET_DIR".into(), lane_target.as_os_str().into()),
+            (
+                "CARGO_BUILD_BUILD_DIR".into(),
+                lane_target.as_os_str().into(),
+            ),
+        ]);
+        let build_lane = [
+            OsString::from("cargo"),
+            "build".into(),
+            "--locked".into(),
+            "--offline".into(),
+            "--message-format=json".into(),
+        ];
+        let output = run_cargo_output(&workspace, &build_lane, &lane_env).unwrap();
+        let mut freshness = std::collections::BTreeMap::new();
+        for line in output.lines() {
+            let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if message["reason"] == "compiler-artifact" {
+                let name = message["target"]["name"].as_str().unwrap().to_owned();
+                freshness.insert(name, message["fresh"].as_bool().unwrap());
+            }
+        }
+        for name in ["member", "inner", "dep_path", "build-script-build"] {
+            assert_eq!(freshness.get(name), Some(&false), "{name}: {freshness:?}");
+        }
+        assert_eq!(freshness.get("vendored"), Some(&true), "{freshness:?}");
+    }
+
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
     fn refresh_checks_all_generations_for_this_repository() {
@@ -1541,9 +2354,53 @@ mod tests {
         let generations = target_seed::store_path(state.path()).join("generations");
         fs::create_dir(generations.join("99999999999999999999-partial")).unwrap();
         assert!(has_generation(state.path(), &identity("repo-a", "aaa")));
-        assert!(matches!(run("bbb"), Refresh::Built(_)));
         assert_eq!(run("bbb"), Refresh::Current);
-        assert_eq!(builds.get(), 2);
+        assert_eq!(
+            builds.get(),
+            1,
+            "a different commit with matching inputs is current"
+        );
+        let mut changed = identity("repo-a", "bbb");
+        changed.hash = "different".into();
+        assert!(!has_generation(state.path(), &changed));
+        freeze(state.path());
+    }
+
+    /// A full generation predates the deps-only contract. Even when every other
+    /// identity field matches, it is not current: refresh must build a
+    /// replacement that holds dependency units only.
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn current_full_generation_triggers_replacement() {
+        let state = tempfile::tempdir().unwrap();
+        let identity = identity("repo", "aaa");
+        publish(state.path(), |stage| {
+            fs::create_dir(stage.join("target"))?;
+            let mut full = manifest(&identity);
+            full.contents.clear();
+            Ok(full)
+        })
+        .unwrap();
+        assert!(!has_generation(state.path(), &identity));
+
+        let builds = std::cell::Cell::new(0);
+        assert!(matches!(
+            refresh_with(state.path(), &identity, |stage| {
+                builds.set(builds.get() + 1);
+                built(stage, &identity)
+            })
+            .unwrap(),
+            Refresh::Built(_)
+        ));
+        assert_eq!(builds.get(), 1);
+        assert!(has_generation(state.path(), &identity));
+        assert_eq!(
+            refresh_with(state.path(), &identity, |_| {
+                panic!("the replacement deps generation is current")
+            })
+            .unwrap(),
+            Refresh::Current
+        );
         freeze(state.path());
     }
 
@@ -1565,16 +2422,19 @@ mod tests {
 
         let mut profile_changed = baseline.clone();
         profile_changed.cargo_profile.debug = "full".into();
+        profile_changed.hash = "profile".into();
         assert!(matches!(run(&profile_changed), Refresh::Built(_)));
         assert_eq!(run(&profile_changed), Refresh::Current);
 
         let mut compiler_changed = profile_changed.clone();
         compiler_changed.rustc_vv = "new version".into();
+        compiler_changed.hash = "compiler".into();
         assert!(matches!(run(&compiler_changed), Refresh::Built(_)));
         assert_eq!(run(&compiler_changed), Refresh::Current);
 
         let mut triple_changed = compiler_changed.clone();
         triple_changed.host_triple = "new host".into();
+        triple_changed.hash = "triple".into();
         assert!(matches!(run(&triple_changed), Refresh::Built(_)));
         assert_eq!(builds.get(), 4);
         freeze(state.path());
@@ -1830,6 +2690,7 @@ mod tests {
                 rustc_vv: "version".into(),
                 host_triple: "host".into(),
                 commit: "commit".into(),
+                identity: None,
                 profile: "dev".into(),
                 cargo_profile: LaneBuildSettings::default()
                     .cargo_build_profile(&[])
@@ -1837,6 +2698,7 @@ mod tests {
                 features: vec![],
                 flags: vec![],
                 allocated_bytes: None,
+                contents: "deps".into(),
             })
         })
         .unwrap();
@@ -1855,5 +2717,304 @@ mod tests {
             provenant_confinement::cache::CACHE_DIRECTORY_TAG_CONTENT
         );
         make_directories_writable(&generation).unwrap();
+    }
+
+    /// A Cargo project whose build succeeds only once a prepare command has
+    /// written a gitignored `src/generated.rs` into the checkout root. The
+    /// prepare script records its working directory so the test can see which
+    /// directory it ran in after the disposable checkout is removed.
+    #[allow(dead_code)] // The harness-free target includes this module without its tests.
+    fn prepared_project(temp: &Path) -> (PathBuf, String, PathBuf) {
+        let project = temp.join("project");
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname='prepare-fixture'\nversion='0.1.0'\nedition='2021'\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("src/main.rs"),
+            "mod generated;\nfn main() { generated::value(); }\n",
+        )
+        .unwrap();
+        fs::write(project.join(".gitignore"), "src/generated.rs\n").unwrap();
+        run(
+            &project,
+            &[
+                OsString::from("cargo"),
+                "generate-lockfile".into(),
+                "--offline".into(),
+            ],
+            &[],
+        )
+        .unwrap();
+        git(&project, &["init".into(), "--initial-branch=main".into()]).unwrap();
+        git(
+            &project,
+            &[
+                "add".into(),
+                "Cargo.toml".into(),
+                "Cargo.lock".into(),
+                "src/main.rs".into(),
+                ".gitignore".into(),
+            ],
+        )
+        .unwrap();
+        provenant_os::fixture::run_git(&project, &["commit", "-m", "base"]).unwrap();
+        let commit =
+            String::from_utf8(git(&project, &["rev-parse".into(), "HEAD".into()]).unwrap())
+                .unwrap()
+                .trim()
+                .to_owned();
+        let marker = temp.join("prepare-cwd");
+        let script = temp.join("generate.sh");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf 'pub fn value() {{}}\\n' > src/generated.rs\nprintf '%s' \"$PWD\" > {}\nprintf '%s\\n' \"$CARGO_TARGET_DIR\" \"$CARGO_BUILD_BUILD_DIR\" \"$RUSTUP_AUTO_INSTALL\" \"$CARGO_INCREMENTAL\" \"$CARGO_PROFILE_DEV_DEBUG\" \"$PATH\" > {}.env\n",
+                marker.display(), marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        (project, commit, marker)
+    }
+
+    #[allow(dead_code)] // The harness-free target includes this module without its tests.
+    fn write_prepare(project: &Path, commands: Vec<Vec<String>>) {
+        fs::create_dir_all(project.join(".provenant")).unwrap();
+        fs::write(
+            project.join(".provenant/ports.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 2,
+                "build": { "prepare": commands },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn request_builds_its_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state).unwrap();
+        let (project, commit, _) = prepared_project(temp.path());
+        write_prepare(
+            &project,
+            vec![vec![
+                temp.path()
+                    .join("generate.sh")
+                    .to_string_lossy()
+                    .into_owned(),
+            ]],
+        );
+        fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
+        provenant_os::fixture::run_git(&project, &["commit", "-am", "later"]).unwrap();
+        let (rustc, triple) = target_seed::rustc_metadata(&project).unwrap();
+        let profile = cargo_build_profile(&state).unwrap();
+        let source = target_seed::GitSeedSource {
+            checkout: &project,
+            commit: Some(&commit),
+        };
+        let hash = target_seed::seed_identity(&source, Path::new(""), &rustc, &triple, &profile)
+            .unwrap()
+            .hash;
+        let request = target_seed::SeedRequest {
+            schema: 1,
+            project_key: "abcd".into(),
+            commit: commit.clone(),
+            identity: hash,
+            requested_at: provenant_core::WallTime::from_micros(1).unwrap(),
+            attempt: 0,
+        };
+        let mut mismatched = request.clone();
+        mismatched.identity = "different".into();
+        assert_eq!(
+            refresh_requested(&state, &project, &mismatched).unwrap(),
+            Refresh::IdentityMismatch
+        );
+        assert!(
+            fs::read_dir(target_seed::store_path(&state).join("generations"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        let Refresh::Built(id) = refresh_requested(&state, &project, &request).unwrap() else {
+            panic!("requested commit must be built")
+        };
+        let bytes = fs::read(
+            target_seed::store_path(&state)
+                .join("generations")
+                .join(id)
+                .join("manifest.json"),
+        )
+        .unwrap();
+        let manifest: Manifest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(manifest.commit, commit);
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn prepare_runs_before_seed_build_in_checkout_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (project, commit, marker) = prepared_project(temp.path());
+        write_prepare(
+            &project,
+            vec![vec![
+                temp.path()
+                    .join("generate.sh")
+                    .to_string_lossy()
+                    .into_owned(),
+            ]],
+        );
+        let stage = temp.path().join("stage");
+        fs::create_dir(&stage).unwrap();
+        let identity = identity("prepare-key", &commit);
+        let manifest = build_into(
+            state.path(),
+            &stage,
+            &project,
+            Path::new("."),
+            &commit,
+            "prepare-key",
+            &identity.cargo_profile,
+        )
+        .unwrap();
+        let observed = fs::read_to_string(marker.with_extension("env")).unwrap();
+        let lines: Vec<_> = observed.lines().collect();
+        assert_eq!(lines[0], stage.join("target").to_string_lossy());
+        assert_eq!(lines[1], lines[0]);
+        assert_eq!(lines[2], "0");
+        for (index, (_, value)) in identity.cargo_profile.environment().iter().enumerate() {
+            assert_eq!(lines[index + 3], value.to_string_lossy());
+        }
+        let cargo =
+            target_seed::cargo_tool(&std::env::vars_os().collect::<Vec<_>>(), "cargo").unwrap();
+        assert_eq!(
+            std::env::split_paths(lines[5]).next().unwrap(),
+            cargo.parent().unwrap()
+        );
+        assert!(
+            manifest
+                .flags
+                .iter()
+                .any(|flag| flag == "cargo check --workspace --all-targets --locked")
+        );
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            stage
+                .canonicalize()
+                .unwrap()
+                .join("checkout")
+                .to_string_lossy(),
+            "prepare ran in the checkout root, not the workspace subdirectory"
+        );
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn failing_prepare_fails_the_build_and_records_prepare_failed_with_bounded_tail() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (project, commit, _) = prepared_project(temp.path());
+        let script = temp.path().join("fail.sh");
+        fs::write(
+            &script,
+            "#!/bin/sh\nhead -c 8192 /dev/zero | tr '\\0' 'x' >&2\nexit 7\n",
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        write_prepare(&project, vec![vec![script.to_string_lossy().into_owned()]]);
+        let stage = temp.path().join("stage");
+        fs::create_dir(&stage).unwrap();
+        let identity = identity("prepare-key", &commit);
+        let error = build_into(
+            state.path(),
+            &stage,
+            &project,
+            Path::new("."),
+            &commit,
+            "prepare-key",
+            &identity.cargo_profile,
+        )
+        .unwrap_err();
+        let prepare = prepare_failed_of(error.as_ref()).expect("typed prepare failure");
+        assert_eq!(prepare.index, 0);
+        assert_eq!(prepare.exit, Some(7));
+        assert!(prepare.tail.len() <= OUTPUT_TAIL_BYTES);
+        assert!(prepare.tail.contains("xxx"));
+        // The target directory exists before prepare (prepare shares the build
+        // environment that points at it), but cargo must not have written to it.
+        assert!(
+            fs::read_dir(stage.join("target")).is_ok_and(|mut entries| entries.next().is_none()),
+            "cargo never runs after a failed prepare command"
+        );
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn empty_prepare_changes_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (project, _, marker) = prepared_project(temp.path());
+        // Commit the generated module so this project builds with no prepare
+        // step; the marker script stays on disk but is not referenced.
+        fs::write(project.join("src/generated.rs"), "pub fn value() {}\n").unwrap();
+        git(
+            &project,
+            &["add".into(), "-f".into(), "src/generated.rs".into()],
+        )
+        .unwrap();
+        provenant_os::fixture::run_git(&project, &["commit", "-m", "generated"]).unwrap();
+        let commit =
+            String::from_utf8(git(&project, &["rev-parse".into(), "HEAD".into()]).unwrap())
+                .unwrap()
+                .trim()
+                .to_owned();
+        write_prepare(&project, Vec::new());
+        let stage = temp.path().join("stage");
+        fs::create_dir(&stage).unwrap();
+        let identity = identity("prepare-key", &commit);
+        build_into(
+            state.path(),
+            &stage,
+            &project,
+            Path::new("."),
+            &commit,
+            "prepare-key",
+            &identity.cargo_profile,
+        )
+        .unwrap();
+        assert!(!marker.exists(), "an empty prepare runs no command");
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn refresh_records_outcome_for_health() {
+        let state = tempfile::tempdir().unwrap();
+        let key = "project-key";
+        record_refresh_outcome(state.path(), key, "built", None);
+        assert_eq!(
+            provenant_run::target_seed_health::read_refresh(state.path(), key)
+                .unwrap()
+                .outcome,
+            "built"
+        );
+        record_refresh_outcome(state.path(), key, "failed", Some("cargo failed"));
+        let failed = provenant_run::target_seed_health::read_refresh(state.path(), key).unwrap();
+        assert_eq!(failed.outcome, "failed");
+        assert_eq!(failed.reason.as_deref(), Some("cargo failed"));
+        record_refresh_outcome(
+            state.path(),
+            key,
+            "prepare_failed",
+            Some("node gen.mjs: output tail"),
+        );
+        let prepare = provenant_run::target_seed_health::read_refresh(state.path(), key).unwrap();
+        assert_eq!(prepare.outcome, "prepare_failed");
+        assert_eq!(prepare.reason.as_deref(), Some("node gen.mjs: output tail"));
     }
 }

@@ -556,7 +556,7 @@ fn parsed_globals(matches: &clap::ArgMatches, json: bool) -> (Globals, Option<Cl
         if let Some(values) = matches.get_many::<std::path::PathBuf>("state_dir") {
             into.state_dir.extend(values.cloned());
         }
-        if let Some(values) = matches.get_many::<std::path::PathBuf>("project") {
+        if let Ok(Some(values)) = matches.try_get_many::<std::path::PathBuf>("project") {
             into.project.extend(values.cloned());
         }
         if let Some((_, child)) = matches.subcommand() {
@@ -679,6 +679,9 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
             format!("{parent} {}", command.get_name())
         };
         for global in globals {
+            if path == "provenant config path" && global.get_id() == "project" {
+                continue;
+            }
             if command
                 .get_arguments()
                 .any(|arg| arg.get_id() == global.get_id())

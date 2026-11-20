@@ -504,6 +504,7 @@ dependencies = [
  "provenant-test-support",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "toml_edit",
@@ -692,6 +693,17 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml_edit",
+]
+
+[[package]]
+name = "provenant-select"
+version = "2.4.1"
+dependencies = [
+ "provenant-test-support",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

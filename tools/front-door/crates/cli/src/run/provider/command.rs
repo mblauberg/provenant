@@ -616,10 +616,19 @@ pub(super) fn configure_build_slots(
     provenant_config::dispatch_port_backend(
         &port.backend,
         || {
-            let all_classes =
-                provenant_config::ResolvedAdmissionClass::resolve_all(state, Some(project));
+            let project_key = provenant_config::project_key_for(project);
+            let all_classes = provenant_config::ResolvedAdmissionClass::resolve_all(
+                state,
+                Some(project),
+                project_key.as_deref(),
+            );
             let class_config = all_classes.get("build").cloned().unwrap_or_else(|| {
-                provenant_config::ResolvedAdmissionClass::resolve("build", state, Some(project))
+                provenant_config::ResolvedAdmissionClass::resolve(
+                    "build",
+                    state,
+                    Some(project),
+                    project_key.as_deref(),
+                )
             });
             let slots = class_config.slots;
             for (class_name, cfg) in &all_classes {

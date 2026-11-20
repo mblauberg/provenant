@@ -627,6 +627,8 @@ fn sync_registered_account(
 enum ConfigAction<'a> {
     Show,
     Ports,
+    Detect,
+    Path,
     Schema {
         all: bool,
     },
@@ -756,6 +758,18 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                     .collect();
                 serde_json::json!({ "schema_version": table.schema_version, "ports": ports })
             }
+            ConfigAction::Detect => serde_json::to_value(config::detect::detect(&context.project))?,
+            ConfigAction::Path => {
+                let key = config::project_key_for(&context.project)
+                    .ok_or("cannot determine project key")?;
+                let path = roots
+                    .state
+                    .as_path()
+                    .join("projects")
+                    .join(key)
+                    .join("ports.json");
+                serde_json::json!({"exists": path.is_file(), "path": path})
+            }
             ConfigAction::Show => {
                 let (resolved, revision) = config::show(&roots, sections)?;
                 let mut value = serde_json::to_value(&resolved)?;
@@ -764,6 +778,7 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                     serde_json::to_value(config::ResolvedAdmissionClass::resolve_all(
                         roots.state.as_path(),
                         Some(&context.project),
+                        provenant_config::project_key_for(&context.project).as_deref(),
                     ))?;
                 let policy = resolved.domains.policy.resolve_with_knobs(
                     &provenant_os::git::repository_path(
@@ -785,6 +800,35 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 value["policy"] = serde_json::to_value(&policy)?;
                 value["policy_render"] = policy.render().into();
                 value["ports"] = config_show_ports(&context.project, roots.state.as_path());
+                if globals.full {
+                    let table = config::PortTable::read_for_inspection(
+                        Some(&context.project),
+                        roots.state.as_path(),
+                    )?;
+                    let serialized = serde_json::to_value(&table)?;
+                    let leaves: serde_json::Map<String, serde_json::Value> = table
+                        .provenance()
+                        .iter()
+                        .filter(|(key, _)| {
+                            key.starts_with("build.")
+                                || key.starts_with("verify.tiers.")
+                                || *key == "verify.default_tier"
+                        })
+                        .filter_map(|(key, source)| {
+                            let mut v = &serialized;
+                            for part in key.split('.') {
+                                v = v.get(part)?;
+                            }
+                            Some((
+                                key.clone(),
+                                serde_json::json!({"value": v, "source": source}),
+                            ))
+                        })
+                        .collect();
+                    value["port_leaves"] = leaves.into();
+                    value["detection"] =
+                        serde_json::to_value(config::detect::detect(&context.project))?;
+                }
                 value
             }
             ConfigAction::Schema { all } => {
@@ -1360,6 +1404,12 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Config(provenant_cli::Config::Ports) => {
             config_command("config ports", ConfigAction::Ports, globals)
         }
+        Command::Config(provenant_cli::Config::Detect) => {
+            config_command("config detect", ConfigAction::Detect, globals)
+        }
+        Command::Config(provenant_cli::Config::Path { project_layer: _ }) => {
+            config_command("config path", ConfigAction::Path, globals)
+        }
         Command::Config(provenant_cli::Config::Check(page)) => checks::config(page, globals),
         Command::Config(provenant_cli::Config::Show) => {
             config_command("config show", ConfigAction::Show, globals)
@@ -1848,6 +1898,7 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
                     class,
                     state,
                     Some(&resolved.project),
+                    provenant_config::project_key_for(&resolved.project).as_deref(),
                 );
                 if let Err(error) =
                     provenant_os::admission::AdmissionSlots::provision(state, class, config.slots)

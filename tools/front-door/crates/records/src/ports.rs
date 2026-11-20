@@ -2,11 +2,15 @@
 use crate::{CanonicalV1, FileDigest};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The layer that declared a port leaf. Variant order is the precedence order
+/// (lowest to highest) and is enforced by the derived [`Ord`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PortSource {
     Builtin,
+    Detected,
     Host,
+    HostProject,
     Project,
 }
 
@@ -65,7 +69,13 @@ mod tests {
 
     #[test]
     fn port_source_round_trips_and_rejects_unknown_values() {
-        for source in [PortSource::Builtin, PortSource::Host, PortSource::Project] {
+        for source in [
+            PortSource::Builtin,
+            PortSource::Detected,
+            PortSource::Host,
+            PortSource::HostProject,
+            PortSource::Project,
+        ] {
             let encoded = serde_json::to_value(source).expect("source serialises");
             assert_eq!(
                 serde_json::from_value::<PortSource>(encoded).expect("source decodes"),
@@ -73,6 +83,14 @@ mod tests {
             );
         }
         assert!(serde_json::from_value::<PortSource>(serde_json::json!("unknown")).is_err());
+    }
+
+    #[test]
+    fn port_source_order_is_the_documented_precedence() {
+        assert!(PortSource::Builtin < PortSource::Detected);
+        assert!(PortSource::Detected < PortSource::Host);
+        assert!(PortSource::Host < PortSource::HostProject);
+        assert!(PortSource::HostProject < PortSource::Project);
     }
 
     #[test]
