@@ -328,6 +328,121 @@ pub fn store_path(state: &Path) -> PathBuf {
     state.join("cargo-target-seeds")
 }
 
+/// A lane's desired dependency identity, serviced by the host tick worker.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SeedRequest {
+    pub schema: u32,
+    pub project_key: String,
+    pub commit: String,
+    pub identity: String,
+    pub requested_at: provenant_core::WallTime,
+    pub attempt: u32,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SeedRequestResult {
+    pub schema: u32,
+    pub request: SeedRequest,
+    pub outcome: String,
+    pub generation: Option<String>,
+}
+
+fn request_dir(state: &Path, key: &str) -> io::Result<PathBuf> {
+    if key.is_empty() || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(io::Error::other("invalid seed project key"));
+    }
+    Ok(store_path(state).join("requests").join(key))
+}
+
+pub fn read_request(state: &Path, key: &str) -> io::Result<Option<SeedRequest>> {
+    match std::fs::read(request_dir(state, key)?.join("seed-request.json")) {
+        Ok(bytes) => {
+            let request: SeedRequest = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+            if request.schema != 1 || request.project_key != key {
+                return Err(io::Error::other("invalid seed request"));
+            }
+            Ok(Some(request))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn write_request_file(
+    state: &Path,
+    key: &str,
+    name: &str,
+    value: &impl serde::Serialize,
+) -> io::Result<()> {
+    let path = request_dir(state, key)?;
+    let directory = provenant_config::private_directory(&path, true).map_err(io::Error::other)?;
+    let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
+    directory
+        .atomic_write(
+            name.as_ref(),
+            "seed-request",
+            &bytes,
+            provenant_os::fs::PublishMode::Replace,
+        )
+        .map(|_| ())
+        .map_err(io::Error::other)
+}
+
+/// Serialize replacement and acknowledgement under the store lock.
+pub fn queue_request(state: &Path, request: &SeedRequest) -> io::Result<()> {
+    let _lock = lock_store_for_publication(state, 10)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    if read_request(state, &request.project_key)?
+        .is_none_or(|old| old.requested_at < request.requested_at)
+    {
+        write_request_file(state, &request.project_key, "seed-request.json", request)?;
+    }
+    Ok(())
+}
+
+pub fn acknowledge_request(
+    state: &Path,
+    result: &SeedRequestResult,
+    retry: bool,
+) -> io::Result<()> {
+    let _lock = lock_store_for_publication(state, 10)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let request = &result.request;
+    write_request_file(state, &request.project_key, "seed-result.json", result)?;
+    if let Some(mut current) = read_request(state, &request.project_key)?
+        && current.identity == request.identity
+        && current.requested_at == request.requested_at
+    {
+        if retry {
+            current.attempt = current.attempt.saturating_add(1);
+            write_request_file(state, &request.project_key, "seed-request.json", &current)?;
+        } else {
+            std::fs::remove_file(
+                request_dir(state, &request.project_key)?.join("seed-request.json"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+pub fn pending_request_keys(state: &Path) -> io::Result<Vec<String>> {
+    let root = store_path(state).join("requests");
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut keys = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let key = entry.file_name().to_string_lossy().into_owned();
+        if read_request(state, &key).ok().flatten().is_some() {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
 /// Resolve host Cargo tools from the same Cargo home used by lanes, independent
 /// of the daemon's PATH. Errors are stable diagnostics and disclose the path
 /// searched without consulting a shell or guessing a home directory.
@@ -1321,5 +1436,72 @@ mod lane_probe_tests {
                 "RUSTUP_HOME unset"
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    fn request(at: i64, identity: &str) -> SeedRequest {
+        SeedRequest {
+            schema: 1,
+            project_key: "abcd".into(),
+            commit: "1234".into(),
+            identity: identity.into(),
+            requested_at: provenant_core::WallTime::from_micros(at).unwrap(),
+            attempt: 0,
+        }
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn newer_request_replaces_older() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state).unwrap();
+        let old = request(1, "old");
+        let new = request(2, "new");
+        queue_request(&state, &new).unwrap();
+        queue_request(&state, &old).unwrap();
+        assert_eq!(read_request(&state, "abcd").unwrap(), Some(new));
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn result_acknowledges_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state).unwrap();
+        let old = request(1, "old");
+        let new = request(2, "new");
+        queue_request(&state, &old).unwrap();
+        queue_request(&state, &new).unwrap();
+        let result = SeedRequestResult {
+            schema: 1,
+            request: old,
+            outcome: "built".into(),
+            generation: Some("generation".into()),
+        };
+        acknowledge_request(&state, &result, false).unwrap();
+        assert_eq!(read_request(&state, "abcd").unwrap(), Some(new.clone()));
+        let saved: SeedRequestResult = serde_json::from_slice(
+            &std::fs::read(
+                request_dir(&state, "abcd")
+                    .unwrap()
+                    .join("seed-result.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved.request, result.request);
+        let result = SeedRequestResult {
+            request: new,
+            ..result
+        };
+        acknowledge_request(&state, &result, true).unwrap();
+        assert_eq!(read_request(&state, "abcd").unwrap().unwrap().attempt, 1);
+        acknowledge_request(&state, &result, false).unwrap();
+        assert!(read_request(&state, "abcd").unwrap().is_none());
     }
 }

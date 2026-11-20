@@ -564,7 +564,7 @@ fn seed_repair(reason: &str) -> Option<&'static str> {
         | fallback_reasons::TOOLCHAIN_MISMATCH
         | fallback_reasons::TRIPLE_MISMATCH
         | fallback_reasons::CARGO_PROFILE_MISMATCH => Some(
-            "host seeds are built from the verify base by `provenant worktree seed-build` and refreshed by tick when it moves; build one with the toolchain and profile above, then run seed-target again",
+            "tick refreshes requested host seeds for the lane commit; alternatively run `provenant worktree seed-build` and retry with a matching toolchain and profile",
         ),
         fallback_reasons::SEED_LAYOUT_UNRECOGNISED => Some(
             "this release cannot age the seed's Cargo build layout; upgrade provenant, or rebuild the seed with `provenant worktree seed-build` after upgrading",
@@ -715,7 +715,7 @@ pub(crate) fn seed_target_with_reservation(
             Ok(identity) => identity.hash,
             Err(_) => return Outcome::fallback(fallback_reasons::IDENTITY_UNAVAILABLE),
         };
-        seed_target_cancellable_inner_for_destination(
+        let outcome = seed_target_cancellable_inner_for_destination(
             state,
             cache,
             SeedCompatibility {
@@ -731,7 +731,45 @@ pub(crate) fn seed_target_with_reservation(
             SeedBudget::for_step,
             destination,
             split_clone_budget,
-        )
+        );
+        if matches!(
+            outcome.reason.as_str(),
+            fallback_reasons::NO_GENERATIONS
+                | fallback_reasons::MANIFEST_INVALID
+                | fallback_reasons::FULL_GENERATION
+                | fallback_reasons::TOOLCHAIN_MISMATCH
+                | fallback_reasons::TRIPLE_MISMATCH
+                | fallback_reasons::CARGO_PROFILE_MISMATCH
+                | fallback_reasons::IDENTITY_MISMATCH
+        ) {
+            let request = (|| -> Result<(), Box<dyn std::error::Error>> {
+                let commit = crate::git_context::seed_git(
+                    &checkout,
+                    &["rev-parse", "--verify", "HEAD^{commit}"],
+                )?;
+                let commit = std::str::from_utf8(&commit)?.trim().to_owned();
+                let requested_at = SystemClock::new().wall_now()?;
+                crate::target_seed::queue_request(
+                    state,
+                    &crate::target_seed::SeedRequest {
+                        schema: 1,
+                        project_key: project_key.to_owned(),
+                        commit,
+                        identity,
+                        requested_at,
+                        attempt: 0,
+                    },
+                )?;
+                Ok(())
+            })();
+            if let Err(error) = request {
+                #[allow(clippy::print_stderr)]
+                {
+                    eprintln!("warning: could not queue Cargo seed request: {error}");
+                }
+            }
+        }
+        outcome
     }
     #[cfg(not(unix))]
     {

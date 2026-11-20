@@ -76,7 +76,21 @@ formatting and package metadata do not affect the hash. Edits that do not change
 resolved units can still invalidate it. Both sides use Git's tracked file list;
 no Cargo metadata runs during identity calculation, so lanes can calculate it
 before confinement. Failure to calculate it leaves the lane cold with a warning.
-Compiler identity uses the verify-base toolchain pin. A seed build is not a lane: the
+A private lane that finds no matching generation atomically queues
+`<state>/cargo-target-seeds/requests/<project_key>/seed-request.json` with
+schema 1, project key, lane commit, identity, request time and attempt. The
+newest request per project replaces an older one under the store lock. Tick
+admits pending projects into its existing single-flight queue; a lane never
+builds a seed. The host checks out the requested commit, recomputes its
+commit-tree identity and checks the prepared checkout before publication. A
+mismatch records `identity_mismatch` and publishes nothing. Each attempt writes
+an atomic `seed-result.json` in the project request directory containing schema
+1, the request, outcome and generation when built. A terminal result removes
+only the matching identity and request time, so an older acknowledgement cannot
+remove a replacement. Busy and failed requests remain pending with an incremented
+attempt and retry through the queue's exponential backoff, capped at one hour.
+The regular scheduled refresh still uses the verify base.
+Compiler identity uses the selected commit's toolchain pin. A seed build is not a lane: the
 compiler-selection keys the lane eligibility check lists (`RUSTC_WRAPPER`,
 `RUSTUP_*`, `RUSTFLAGS`, `CARGO_BUILD_TARGET` and the other classes) are inherited
 from whoever launched the build, so the seed build removes them from its Cargo
@@ -120,13 +134,12 @@ Collection always keeps each project's newest complete generation, even when
 that generation alone exceeds the target; busy stores and active clones remain
 protected. Full (non-`deps`) generations are collected as obsolete outside this
 count, so they are reclaimed whatever the count is without displacing a deps
-generation from a retained slot. Seeding is per project. Each project
-resolves its own verify base and gets its own outcome in `seed-result.json`: `built`, `current`,
-`busy`, `not_cargo`, `failed` with its cause, or `skipped` with a typed reason
+generation from a retained slot. Seeding is per project. Scheduled refresh resolves each project's verify base and records its outcome in the tick `seed-result.json`: `built`, `current`,
+`busy`, `not_cargo`, `identity_mismatch`, `failed` with its cause, or `skipped` with a typed reason
 (`verify_base_unset`, `verify_base_unresolved`, `workspace_absent_at_base`) and a repair step.
 A skipped or failed project never stops or hides another project's seed, and a skip is
-not a failed pass. Failed projects retry at the next scheduled collection, while busy
-projects retry on the next tick without rebuilding the others: a busy retry replaces
+not a failed pass. Failed and busy projects retry with exponential backoff, capped at one hour;
+these scoped retries run on a later tick without rebuilding the others: a busy retry replaces
 only its own projects' outcomes and keeps every other record. Full requests supersede
 queued busy retries and reevaluate every project. Detached pending and active scopes
 survive process interruption and are retried after a minute. Pass-level failures

@@ -725,6 +725,7 @@ enum SeedProjectOutcome {
     Built,
     Current,
     Busy,
+    IdentityMismatch,
     /// No selected Cargo manifest: nothing to seed.
     NotCargo,
     Skipped {
@@ -1012,6 +1013,7 @@ fn refresh_projects(
                     Ok(Refresh::NotCargo) => SeedProjectOutcome::NotCargo,
                     Ok(Refresh::Current) => SeedProjectOutcome::Current,
                     Ok(Refresh::Busy) => SeedProjectOutcome::Busy,
+                    Ok(Refresh::IdentityMismatch) => SeedProjectOutcome::IdentityMismatch,
                     Err(error) => {
                         if let Some(skip) = crate::target_seed_build::skip_of(error.as_ref()) {
                             SeedProjectOutcome::skipped(skip)
@@ -1221,31 +1223,19 @@ fn finish_seed_job_with_lock(
     queue.active_at = None;
     queue.launch_at = None;
     if outcome.retry_project_keys.is_empty() {
-        queue.retry_attempt = 0;
-        queue.retry = None;
-        queue.retry_at = None;
-    } else {
+        if queue.retry.is_none() {
+            queue.retry_attempt = 0;
+            queue.retry_at = None;
+        }
+    } else if !queue
+        .pending
+        .as_ref()
+        .is_some_and(|pending| matches!(pending.scope, SeedScope::Full))
+    {
         queue.retry_attempt = queue.retry_attempt.saturating_add(1);
         let retry = SeedRequest::busy(outcome.retry_project_keys);
-        match queue.pending.take() {
-            Some(pending) if matches!(&pending.scope, SeedScope::Full) => {
-                // The full pass covers this busy result.
-                queue.pending = Some(pending);
-                queue.pending_at.get_or_insert(now);
-                queue.retry = None;
-                queue.retry_at = None;
-            }
-            Some(pending) => {
-                queue.pending = Some(merge_seed_requests(Some(pending), retry));
-                queue.pending_at.get_or_insert(now);
-                queue.retry = None;
-                queue.retry_at = None;
-            }
-            None => {
-                queue.retry = Some(retry);
-                queue.retry_at = Some(now);
-            }
-        }
+        queue.retry = Some(merge_seed_requests(queue.retry.take(), retry));
+        queue.retry_at.get_or_insert(now);
     }
 
     if let Some(next) = queue.pending.take() {
@@ -1318,6 +1308,26 @@ fn registered_seed_projects(
     discovery
 }
 
+fn request_key_for_project(
+    state: &Path,
+    project: &Path,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use provenant_confinement::utility::{UtilityBudget, UtilityRuntime};
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let executor = SystemExecutor::new(1)?;
+    let utility = UtilityRuntime::read_only(&git, state)?;
+    let budget = UtilityBudget::bounded(std::time::Duration::from_secs(60))?;
+    let repo = utility.open_read_repo(
+        &executor,
+        project,
+        budget,
+        &provenant_core::CancelToken::new(),
+    )?;
+    Ok(provenant_run::target_seed::project_key(
+        repo.common_git_dir(),
+    ))
+}
+
 /// Detached cargo-seed refresh queued by the daily collector. The build can
 /// run for hours, so it never runs inline in the tick; its durable result
 /// replaces discarded detached-process output.
@@ -1365,7 +1375,40 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
                         &provenant_core::CancelToken::new(),
                     ))
                 },
-                |project| crate::target_seed_build::refresh(state, project),
+                |project| {
+                    let key = request_key_for_project(state, project)?;
+                    let Some(lane_request) = provenant_run::target_seed::read_request(state, &key)?
+                    else {
+                        return crate::target_seed_build::refresh(state, project);
+                    };
+                    let outcome =
+                        crate::target_seed_build::refresh_requested(state, project, &lane_request);
+                    let (name, generation, retry) = match &outcome {
+                        Ok(crate::target_seed_build::Refresh::Built(id)) => {
+                            ("built", Some(id.clone()), false)
+                        }
+                        Ok(crate::target_seed_build::Refresh::Current) => ("current", None, false),
+                        Ok(crate::target_seed_build::Refresh::Busy) => ("busy", None, true),
+                        Ok(crate::target_seed_build::Refresh::NotCargo) => {
+                            ("not_cargo", None, false)
+                        }
+                        Ok(crate::target_seed_build::Refresh::IdentityMismatch) => {
+                            ("identity_mismatch", None, false)
+                        }
+                        Err(_) => ("failed", None, true),
+                    };
+                    provenant_run::target_seed::acknowledge_request(
+                        state,
+                        &provenant_run::target_seed::SeedRequestResult {
+                            schema: 1,
+                            request: lane_request,
+                            outcome: name.into(),
+                            generation,
+                        },
+                        retry,
+                    )?;
+                    outcome
+                },
             )?;
             let now = SystemClock.wall_now()?;
             match finish_seed_job(&directory, now, &mut worker_lock, outcome)? {
@@ -1443,7 +1486,7 @@ fn seed_summary(result: &SeedResult) -> String {
             SeedProjectOutcome::Failed { .. } | SeedProjectOutcome::PrepareFailed { .. } => {
                 failed += 1
             }
-            SeedProjectOutcome::NotCargo => {}
+            SeedProjectOutcome::NotCargo | SeedProjectOutcome::IdentityMismatch => {}
         }
     }
     failed += usize::from(result.error.is_some());
@@ -1741,8 +1784,25 @@ fn tick(
         Ok(directory) => {
             // Busy retries and abandoned detached jobs are re-admitted here.
             // The queue protocol retains their scope and coalesces a full pass.
-            if seed_retry_due(&directory, now) {
-                match queue_seed(&directory, now, None, || {
+            let queued = read_seed_queue(&directory).unwrap_or_default();
+            let incoming =
+                provenant_run::target_seed::pending_request_keys(resolved.roots.state.as_path())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|key| {
+                        ![&queued.pending, &queued.active, &queued.retry]
+                            .into_iter()
+                            .flatten()
+                            .any(|scope| {
+                                matches!(scope.scope, SeedScope::Full)
+                                    || scope.project_keys().contains(key)
+                            })
+                    })
+                    .take(MAX_BUSY_SEED_PROJECTS)
+                    .collect::<Vec<_>>();
+            if !incoming.is_empty() || seed_retry_due(&directory, now) {
+                let incoming = (!incoming.is_empty()).then(|| SeedRequest::busy(incoming));
+                match queue_seed(&directory, now, incoming, || {
                     spawn_seed_worker(resolved.roots.state.as_path(), &resolved.home)
                 }) {
                     Err(error) => Task::idle_with_diagnostic(
@@ -2804,6 +2864,40 @@ mod tests {
             read_seed_queue(&directory).unwrap().pending,
             Some(SeedRequest::full())
         );
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn unrelated_pending_work_does_not_bypass_retry_backoff() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let directory = provenant_config::private_directory(&root, true).unwrap();
+        let now = WallTime::from_micros(1_000_000).unwrap();
+        let queue = SeedQueue {
+            pending: Some(SeedRequest::busy(vec!["other".into()])),
+            ..Default::default()
+        };
+        write_seed_queue(&directory, &queue).unwrap();
+        let mut worker = Some(
+            directory
+                .try_lock("seed-worker.lock".as_ref(), LockMode::Exclusive)
+                .unwrap(),
+        );
+        let next = finish_seed_job(
+            &directory,
+            now,
+            &mut worker,
+            SeedOutcome {
+                retry_project_keys: vec!["failed".into()],
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(next, SeedRequest::busy(vec!["other".into()]));
+        finish_seed_job(&directory, now, &mut worker, SeedOutcome::default()).unwrap();
+        let saved = read_seed_queue(&directory).unwrap();
+        assert_eq!(saved.retry, Some(SeedRequest::busy(vec!["failed".into()])));
+        assert!(!seed_retry_due(&directory, now));
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed

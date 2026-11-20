@@ -745,6 +745,8 @@ pub enum Refresh {
     Current,
     /// Another host seed build holds the build lock; nothing was started.
     Busy,
+    /// The requested commit did not produce the requested identity.
+    IdentityMismatch,
     /// A new generation was published.
     Built(String),
 }
@@ -956,6 +958,9 @@ pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
         Ok(Refresh::Built(_)) => record_refresh_outcome(state, &project_key, "built", None),
         Ok(Refresh::Current) => record_refresh_outcome(state, &project_key, "current", None),
         Ok(Refresh::Busy) => record_refresh_outcome(state, &project_key, "busy", None),
+        Ok(Refresh::IdentityMismatch) => {
+            record_refresh_outcome(state, &project_key, "identity_mismatch", None)
+        }
         Ok(Refresh::NotCargo) => {}
         Err(error) => {
             let (recorded, reason) = if prepare_failed_of(error.as_ref()).is_some() {
@@ -970,6 +975,104 @@ pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
     }
     outcome
 }
+
+/// Refresh exactly the commit named by a lane request, checking both its tree
+/// and the prepared checkout before allowing publication.
+pub fn refresh_requested(
+    state: &Path,
+    project: &Path,
+    request: &target_seed::SeedRequest,
+) -> Result<Refresh> {
+    refuse_in_lane()?;
+    ensure_host_seed_environment_eligible();
+    let Some(_lock) = lock_for_identity_probe(state)? else {
+        return Ok(Refresh::Busy);
+    };
+    let Some(workspace) = workspace_relative(state, project)? else {
+        return Ok(Refresh::NotCargo);
+    };
+    let stage = Staging(target_seed::store_path(state).join(format!(
+        ".staging-request-{}",
+        provenant_os::fs::temporary_name()?.to_string_lossy()
+    )));
+    fs::create_dir(&stage.0)?;
+    let checkout = stage.0.join("checkout");
+    checkout_commit(project, &checkout, &request.commit)?;
+    let (rustc_vv, host_triple) = target_seed::rustc_metadata(&checkout.join(&workspace))?;
+    let cargo_profile = cargo_build_profile(state)?;
+    let source = target_seed::GitSeedSource {
+        checkout: project,
+        commit: Some(&request.commit),
+    };
+    let hash =
+        target_seed::seed_identity(&source, &workspace, &rustc_vv, &host_triple, &cargo_profile)?
+            .hash;
+    if hash != request.identity {
+        record_refresh_outcome(state, &request.project_key, "identity_mismatch", None);
+        return Ok(Refresh::IdentityMismatch);
+    }
+    let identity = GenerationIdentity {
+        project_key: request.project_key.clone(),
+        commit: request.commit.clone(),
+        rustc_vv,
+        host_triple,
+        cargo_profile,
+        hash,
+    };
+    drop(stage);
+    drop(_lock);
+    let result = refresh_with(state, &identity, |stage| {
+        let manifest = build_into(
+            state,
+            stage,
+            project,
+            &workspace,
+            &identity.commit,
+            &identity.project_key,
+            &identity.cargo_profile,
+        )?;
+        if manifest.identity.as_deref() != Some(identity.hash.as_str()) {
+            return Err(IdentityMismatch.into());
+        }
+        Ok(manifest)
+    });
+    match result {
+        Err(error) if error.downcast_ref::<IdentityMismatch>().is_some() => {
+            record_refresh_outcome(state, &request.project_key, "identity_mismatch", None);
+            Ok(Refresh::IdentityMismatch)
+        }
+        other => {
+            match &other {
+                Ok(Refresh::Built(_)) => {
+                    record_refresh_outcome(state, &request.project_key, "built", None)
+                }
+                Ok(Refresh::Current) => {
+                    record_refresh_outcome(state, &request.project_key, "current", None)
+                }
+                Ok(Refresh::Busy) => {
+                    record_refresh_outcome(state, &request.project_key, "busy", None)
+                }
+                Err(error) => record_refresh_outcome(
+                    state,
+                    &request.project_key,
+                    "failed",
+                    Some(&refresh_failure_reason(error.as_ref())),
+                ),
+                _ => {}
+            }
+            other
+        }
+    }
+}
+
+#[derive(Debug)]
+struct IdentityMismatch;
+impl std::fmt::Display for IdentityMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("requested seed identity changed")
+    }
+}
+impl Error for IdentityMismatch {}
 
 /// Raised under the build lock when another refresher published this commit
 /// while we waited for it.
@@ -2684,6 +2787,67 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn request_builds_its_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state).unwrap();
+        let (project, commit, _) = prepared_project(temp.path());
+        write_prepare(
+            &project,
+            vec![vec![
+                temp.path()
+                    .join("generate.sh")
+                    .to_string_lossy()
+                    .into_owned(),
+            ]],
+        );
+        fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
+        provenant_os::fixture::run_git(&project, &["commit", "-am", "later"]).unwrap();
+        let (rustc, triple) = target_seed::rustc_metadata(&project).unwrap();
+        let profile = cargo_build_profile(&state).unwrap();
+        let source = target_seed::GitSeedSource {
+            checkout: &project,
+            commit: Some(&commit),
+        };
+        let hash = target_seed::seed_identity(&source, Path::new(""), &rustc, &triple, &profile)
+            .unwrap()
+            .hash;
+        let request = target_seed::SeedRequest {
+            schema: 1,
+            project_key: "abcd".into(),
+            commit: commit.clone(),
+            identity: hash,
+            requested_at: provenant_core::WallTime::from_micros(1).unwrap(),
+            attempt: 0,
+        };
+        let mut mismatched = request.clone();
+        mismatched.identity = "different".into();
+        assert_eq!(
+            refresh_requested(&state, &project, &mismatched).unwrap(),
+            Refresh::IdentityMismatch
+        );
+        assert!(
+            fs::read_dir(target_seed::store_path(&state).join("generations"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        let Refresh::Built(id) = refresh_requested(&state, &project, &request).unwrap() else {
+            panic!("requested commit must be built")
+        };
+        let bytes = fs::read(
+            target_seed::store_path(&state)
+                .join("generations")
+                .join(id)
+                .join("manifest.json"),
+        )
+        .unwrap();
+        let manifest: Manifest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(manifest.commit, commit);
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed
