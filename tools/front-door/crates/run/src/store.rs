@@ -1600,17 +1600,23 @@ impl RunStore {
                 limit: RESULT_LIMIT,
             });
         }
+        // A reviewer-held writer may carry a contradicted identity: the
+        // mismatch is the reason for review, with its committed head retained.
+        // That is the only review outcome allowed to pass without a verified
+        // identity; a success never is.
+        let identity_verified = super::reader::route_identity(
+            publication.resolved_route.as_ref(),
+            publication.applied_route.as_ref(),
+            publication.observed_route.as_ref(),
+        )
+        .permits_success(&publication.partial_signals);
+        let identity_permitted = identity_verified
+            || (publication.outcome == Outcome::ReviewRequired
+                && publication.terminal_cause == Some(TerminalCause::IdentityMismatch));
         if matches!(
             publication.outcome,
             Outcome::Succeeded | Outcome::ReviewRequired
-        ) && (!publication.complete
-            || publication.result.is_empty()
-            || !super::reader::route_identity(
-                publication.resolved_route.as_ref(),
-                publication.applied_route.as_ref(),
-                publication.observed_route.as_ref(),
-            )
-            .permits_success(&publication.partial_signals))
+        ) && (!publication.complete || publication.result.is_empty() || !identity_permitted)
         {
             return Err(RunError::Validation(
                 "success lacks complete result or verified provider identity",

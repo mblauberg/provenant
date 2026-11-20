@@ -71,7 +71,10 @@ tools; `knobs.quota.model_discovery` disables discovery globally (default true).
 Probes run concurrently within the quota tick's remaining wall budget, with one
 second reserved for reporting. Failed or overdue probes retain their previous
 snapshots. Advisory family selectors resolve independently, retaining bundled advice
-for a family absent from a partial listing. Discovery messages are transient command
+for a family absent from a partial listing. A graph route's family alias such as
+`claude/sonnet` also resolves through that effective catalogue to its latest
+matching exact model, so launch does not warn that the alias is uncatalogued; an
+unknown or ambiguous alias still warns. Discovery messages are transient command
 output, not part of the persisted quota report. Route listings name the source of
 model, valid pair, named route and pool entries, and the configuration layer that
 set each pool weight (bundled, host config or project config), in human and JSON

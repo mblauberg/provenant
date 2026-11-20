@@ -1875,6 +1875,39 @@ impl Catalogue {
             .and_then(|selected| self.models.iter().find(|row| row.model == selected.model))
             .map(|row| &row.model)
     }
+    /// Resolve a provider family alias such as `claude/sonnet` against the
+    /// catalogue. An exact ID wins. Otherwise the alias must name exactly one
+    /// family for that adapter, as a whole hyphen-delimited segment of its
+    /// models' IDs; the latest version of that family is the exact model the
+    /// alias resolves to. An unknown or ambiguous alias stays unresolved.
+    pub fn resolve_family_alias(&self, id: &ModelId) -> Option<&ModelId> {
+        if self.model(id).is_some() {
+            return Some(id);
+        }
+        let alias = id.model();
+        let mut families: Vec<String> = Vec::new();
+        for row in self
+            .models
+            .iter()
+            .filter(|row| row.model.adapter() == id.adapter())
+        {
+            let name = row.model.model();
+            if !name.split('-').any(|part| part == alias) {
+                continue;
+            }
+            let Some(end) = name.find(alias).map(|start| start + alias.len()) else {
+                continue;
+            };
+            let family = name[..end].to_owned();
+            if !families.contains(&family) {
+                families.push(family);
+            }
+        }
+        let [family] = families.as_slice() else {
+            return None;
+        };
+        self.latest_family(&format!("{}/{family}-*", id.adapter()))
+    }
     pub fn pool_models(&self) -> impl Iterator<Item = &ModelId> {
         self.pools.values().flatten().map(|member| &member.model)
     }
@@ -2082,6 +2115,40 @@ mod tests {
         assert_eq!(
             serde_json::to_value(RoutingConfig::default())?,
             serde_json::to_value(asset)?
+        );
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#provider-model-discovery
+    #[test]
+    fn family_aliases_resolve_to_the_latest_catalogued_model()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let catalogue = Catalogue::bundled()?;
+        assert_eq!(
+            catalogue
+                .resolve_family_alias(&ModelId::parse("claude/sonnet")?)
+                .map(ModelId::as_str),
+            Some("claude/claude-sonnet-5-5")
+        );
+        assert_eq!(
+            catalogue
+                .resolve_family_alias(&ModelId::parse("claude/opus")?)
+                .map(ModelId::as_str),
+            Some("claude/claude-opus-5-5")
+        );
+        assert_eq!(
+            catalogue
+                .resolve_family_alias(&ModelId::parse("claude/claude-sonnet-5")?)
+                .map(ModelId::as_str),
+            Some("claude/claude-sonnet-5")
+        );
+        assert_eq!(
+            catalogue.resolve_family_alias(&ModelId::parse("claude/unicorn")?),
+            None
+        );
+        assert_eq!(
+            catalogue.resolve_family_alias(&ModelId::parse("claude/claude")?),
+            None
         );
         Ok(())
     }
