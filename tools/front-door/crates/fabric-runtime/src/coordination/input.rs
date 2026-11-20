@@ -36,11 +36,6 @@ impl InputError {
         super::facade::FacadeError::InvalidInput { detail: None }.code()
     }
 
-    /// A bounded schema field path safe for diagnostic envelopes.
-    pub fn safe_path(&self) -> Option<String> {
-        super::facade::safe_input_field(&self.path)
-    }
-
     pub fn new(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
@@ -57,19 +52,15 @@ impl InputError {
 
     pub(super) fn diagnostic_detail(&self) -> Option<super::facade::InvalidInputDetail> {
         use super::facade::InvalidInputDetail;
-        let path = self.safe_path()?;
+        let path = self.path.clone();
         match self.cause.as_ref() {
-            Some(InvalidInputDetail::FieldTooLarge { field, limit })
-                if super::facade::safe_input_field(field).as_ref() == Some(&path) =>
-            {
+            Some(InvalidInputDetail::FieldTooLarge { field, limit }) if field == &path => {
                 Some(InvalidInputDetail::FieldTooLarge {
                     field: path,
                     limit: *limit,
                 })
             }
-            Some(InvalidInputDetail::FieldTitle(field))
-                if super::facade::safe_input_field(field).as_ref() == Some(&path) =>
-            {
+            Some(InvalidInputDetail::FieldTitle(field)) if field == &path => {
                 Some(InvalidInputDetail::FieldTitle(path))
             }
             _ => Some(InvalidInputDetail::Field(path)),

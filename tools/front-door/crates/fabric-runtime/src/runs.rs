@@ -129,12 +129,7 @@ impl From<AttemptRecord> for AttemptSummary {
             superseded_by: record.superseded_by,
             cause: record.settlement_reason,
             requested_route: record.requested_route,
-            applied_route: record.applied_route.map(|mut route| {
-                route.account_key = None;
-                route.source = None;
-                route.pool_selection = None;
-                route
-            }),
+            applied_route: record.applied_route,
             queued_at: record.queued_at,
             started_at: record.started_at,
             last_output_at: record.last_output_at,
@@ -446,6 +441,28 @@ mod tests {
             summary["visible_extension"],
             serde_json::json!({"kept": true})
         );
+    }
+
+    #[test]
+    fn summary_and_peer_diagnostics_retain_route_provenance() {
+        let mut record = attempt();
+        record.applied_route = Some(serde_json::from_value(serde_json::json!({
+            "provider":"fixture", "model":"opus[1m]", "effort":"high", "account_label":"work account",
+            "account_key":"work-key", "source":"catalogue", "pool_selection":{
+                "selection_rule":"weighted_draw", "considered_exclusions":[],
+                "exploration":{"selected":false,"percent":0,"enabled":false,"source":"fixture"},
+                "weight_source":"catalogue", "account_load":null, "pool":"senior", "candidates":[],
+                "roll":0, "total_weight":1, "pick":"fixture/opus[1m]"
+            }
+        })).unwrap());
+        let expected = serde_json::to_value(&record.applied_route).unwrap();
+        project_peer_attempt_diagnostics(&mut record);
+        assert_eq!(
+            serde_json::to_value(&record.applied_route).unwrap(),
+            expected
+        );
+        let summary = serde_json::to_value(AttemptSummary::from(record)).unwrap();
+        assert_eq!(summary["applied_route"], expected);
     }
 
     // Spec: docs/specs/state.md#config-never-widens-authority

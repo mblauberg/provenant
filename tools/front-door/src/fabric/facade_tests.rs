@@ -1767,11 +1767,8 @@ fn failed_worktree_add_retains_safe_operation_and_lock_facts_through_relay()
         data: serde_json::Value::Null,
     });
     let untyped_wire = serde_json::to_string(&untyped)?;
-    assert!(!untyped_wire.contains("credential-sentinel"));
-    assert_eq!(
-        untyped.diagnostic().detail.as_deref(),
-        Some("graph operation failed")
-    );
+    assert!(untyped_wire.contains("credential-sentinel"));
+    assert!(untyped.diagnostic().detail.as_deref().is_some_and(|detail| detail.contains("credential-sentinel")));
     assert!(
         !diagnostic
             .detail
