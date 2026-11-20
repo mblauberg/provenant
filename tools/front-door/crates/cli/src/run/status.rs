@@ -282,15 +282,33 @@ impl HostView {
 }
 
 pub fn admission_holder_description(h: &provenant_os::admission::HeldInfo) -> String {
-    let base = match &h.attempt_id {
-        Some(attempt) => format!("slot {}: attempt {} (pid {})", h.slot, attempt, h.pid),
-        None => format!("slot {}: pid {}", h.slot, h.pid),
-    };
+    let base = format!(
+        "slot {}: {}",
+        h.slot,
+        admission_actor_description(h.pid, h.attempt_id.as_deref(), h.lane.as_ref())
+    );
     match &h.command {
         // The holder's masked argv names the command actually blocking the
         // slot, so a lock wait is distinguishable from a hung writer.
         Some(command) => format!("{base} running {command}"),
         None => base,
+    }
+}
+
+pub fn admission_actor_description(
+    pid: i64,
+    attempt: Option<&str>,
+    lane: Option<&provenant_os::admission::LaneIdentity>,
+) -> String {
+    match (lane, attempt) {
+        (Some(lane), _) => format!(
+            "project {} lane {} (pid {})",
+            lane.project.display(),
+            lane.name,
+            pid
+        ),
+        (None, Some(attempt)) => format!("attempt {attempt} (pid {pid})"),
+        (None, None) => format!("pid {pid}"),
     }
 }
 
@@ -373,12 +391,14 @@ fn project_lane_inner(
             );
             let elapsed = now_sec.saturating_sub(wait_info.start_unix_seconds);
             let mut holders = provenant_os::admission::host_holders(root, &wait_info.class);
-            holders.extend(
-                lane_holders
+            for holder in lane_holders.iter().filter(|h| h.class == wait_info.class) {
+                if !holders
                     .iter()
-                    .filter(|h| h.class == wait_info.class)
-                    .cloned(),
-            );
+                    .any(|known| known.pid == holder.pid && known.slot == holder.slot)
+                {
+                    holders.push(holder.clone());
+                }
+            }
             if holders.is_empty() {
                 format!("waiting for a host {} slot ({}s)", wait_info.class, elapsed)
             } else {
@@ -908,6 +928,7 @@ mod tests {
             pid: 42,
             start_unix_seconds: 0,
             attempt_id: Some(ID.into()),
+            lane: None,
             command: Some("cargo build --release".into()),
         }];
         let holding = project_lane_with_admission(
