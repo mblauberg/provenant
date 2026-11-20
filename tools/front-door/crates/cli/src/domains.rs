@@ -541,7 +541,18 @@ timeout_seconds = 60
     FieldMetadata::new("land.compose.completion", "string"),
     FieldMetadata::new("land.projects.{project}.compose", "table"),
     FieldMetadata::new("land.projects.{project}.branches", "array"),
+    FieldMetadata::new("land.projects.{project}.compose.candidate", "string"),
+    FieldMetadata::new("land.projects.{project}.compose.completion", "string"),
+    FieldMetadata::new("land.projects.{project}.compose.dependencies", "string"),
+    FieldMetadata::new("land.projects.{project}.compose.publication", "string"),
+    FieldMetadata::new("land.projects.{project}.compose.schedule", "string"),
     FieldMetadata::new("land.tiers.{tier}.compose", "table"),
+    FieldMetadata::new("land.tiers.{tier}.branches", "array"),
+    FieldMetadata::new("land.tiers.{tier}.compose.candidate", "string"),
+    FieldMetadata::new("land.tiers.{tier}.compose.completion", "string"),
+    FieldMetadata::new("land.tiers.{tier}.compose.dependencies", "string"),
+    FieldMetadata::new("land.tiers.{tier}.compose.publication", "string"),
+    FieldMetadata::new("land.tiers.{tier}.compose.schedule", "string"),
     FieldMetadata::int("land.batch_size", 1, i64::MAX),
     FieldMetadata::new("land.batch_wait_seconds", "int"),
     FieldMetadata::new("land.approval_sources", "array"),
@@ -766,9 +777,121 @@ pub static SECTIONS: DomainSections<Domains> = DomainSections::new(&ENTRIES);
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::config_shape::{covered_by, typed_paths};
     use provenant_core::{PathResolver, Roots};
     use serde_json::json;
     use std::path::Path;
+
+    fn registry_declarations() -> Vec<String> {
+        let registry: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../../config/harness-knobs.json"))
+                .expect("registry parses");
+        let mut declared = Vec::new();
+        fn collect(section: &serde_json::Value, declared: &mut Vec<String>) {
+            match section {
+                serde_json::Value::Object(map) => {
+                    if let Some(path) = map.get("path").and_then(|value| value.as_str()) {
+                        match map.get("settings").and_then(|value| value.as_object()) {
+                            Some(settings) => {
+                                declared.extend(settings.keys().map(|key| format!("{path}.{key}")));
+                            }
+                            None => declared.push(path.to_owned()),
+                        }
+                    }
+                    for value in map.values() {
+                        collect(value, declared);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for value in values {
+                        collect(value, declared);
+                    }
+                }
+                _ => {}
+            }
+        }
+        collect(&registry, &mut declared);
+        declared
+    }
+
+    // Probe each owner separately: a custom deserializer in one domain can
+    // stop an aggregate probe before it reaches later domains.
+    fn typed_setting_paths() -> Vec<String> {
+        [
+            (
+                "policy",
+                typed_paths::<provenant_config::policy::Settings>(),
+            ),
+            ("wait", typed_paths::<crate::wait::Settings>()),
+            (
+                "accounts",
+                typed_paths::<provenant_providers::accounts::Settings>(),
+            ),
+            ("quota", typed_paths::<provenant_quota::Settings>()),
+            ("routing", typed_paths::<provenant_routing::RoutingConfig>()),
+            (
+                "fabric",
+                typed_paths::<provenant_fabric_runtime::config::FabricConfig>(),
+            ),
+            (
+                "run",
+                typed_paths::<provenant_confinement::run_config::RunConfig>(),
+            ),
+            ("pr", typed_paths::<PrSettings>()),
+            ("lanes", typed_paths::<LanesSettings>()),
+            ("steward", typed_paths::<crate::steward::Settings>()),
+        ]
+        .into_iter()
+        .flat_map(|(name, paths)| {
+            paths
+                .into_iter()
+                .map(move |path| format!("domains.{name}.{path}"))
+        })
+        .collect()
+    }
+
+    // Spec: docs/specs/cli.md#configuration-schema-completeness
+    #[test]
+    fn every_domain_setting_has_field_metadata() {
+        let metadata: Vec<String> = SECTIONS
+            .entries
+            .iter()
+            .flat_map(|section| {
+                section
+                    .fields
+                    .iter()
+                    .map(move |field| format!("domains.{}.{}", section.name, field.path))
+            })
+            .collect();
+        let typed = typed_setting_paths();
+        let missing: Vec<&str> = typed
+            .iter()
+            .filter(|path| !covered_by(&metadata, path))
+            .map(|path| path.as_str())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "deserializable domain settings without field metadata:\n{}",
+            missing.join("\n")
+        );
+    }
+
+    // Spec: docs/specs/cli.md#configuration-schema-completeness
+    #[test]
+    fn every_domain_setting_is_declared_in_the_registry() {
+        let declared = registry_declarations();
+        let typed = typed_setting_paths();
+        let missing: Vec<&str> = typed
+            .iter()
+            .filter(|path| !covered_by(&declared, path))
+            .map(|path| path.as_str())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "deserializable domain settings missing from config/harness-knobs.json:\n{}",
+            missing.join("\n")
+        );
+    }
 
     // Every registered section publishes FieldMetadata, so this walk covers
     // every domain that declares a setting. A section registered later with an

@@ -222,6 +222,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
         crate::MAX_HISTORY_MAX_BYTES as i64,
     ),
     FieldMetadata::enumeration("display.headline", &["auto", "5h", "weekly"]),
+    FieldMetadata::new("display.icon", "string"),
     FieldMetadata::int("polling_intervals.{adapter}.timer_seconds", 1, i64::MAX / 4),
     FieldMetadata::int("polling_intervals.{adapter}.panel_seconds", 1, i64::MAX / 4),
     FieldMetadata::int("calibration.{account}.five_hour", 0, 100),

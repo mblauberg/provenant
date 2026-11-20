@@ -7,6 +7,7 @@ pub mod check;
 pub mod ci;
 pub mod cloud;
 pub mod config_reads;
+pub mod config_shape;
 pub mod console;
 pub mod domains;
 pub mod external_contract;

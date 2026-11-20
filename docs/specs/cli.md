@@ -8,6 +8,12 @@ Use `provenant help --all` for commands and `provenant config schema` for config
 The outward contract is declared in `crates/cli/src/external_contract.rs`, covering commands, lane environment and JSON schemas.
 `scripts/generate-reference` renders `external-contract.md` from that declaration through `provenant-cli print-reference-data`; the same data derives threshold behaviour from the policy table. Every enumeration an owner declares for the editor, such as `gc.projects.{project}.foreign_worktrees`, publishes its values and runtime default through the same data; the configuration reference fills them in and refuses an entry that restates them.
 The [consumer contract](consumer-contract.md) describes output and variable tiers; command names may change freely. Direct internal-state readers are unsupported.
+
+## Configuration schema completeness
+
+Every setting a registered domain deserializes has field metadata and a `config/harness-knobs.json` entry. The typed schema is the authority: a probe over each domain's serde types names every accepted setting, and a test fails when metadata or the registry omits one. Metadata and the registry cannot replace that source, because a setting absent from all three lists would otherwise pass unnoticed.
+
+- Why: three independently maintained lists drift silently unless each is checked against what the runtime actually accepts.
 Conditional PR wait observations report `review=unknown` because the REST response has no GraphQL review decision; CI settlement still determines the wait verdict. One-shot `pr status` keeps its detailed review observation.
 Repository CI reads its tier declaration from `config/ports.json`; the optional `.provenant/ports.json` entry links that same table, so running repository checks requires neither an installed Provenant nor a `.provenant` directory.
 Repository CI selection, its gate and quarantine validation are specified in [CI](ci.md).
