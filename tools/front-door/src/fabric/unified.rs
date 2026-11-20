@@ -817,11 +817,15 @@ pub(crate) fn status_summary(rows: &[Value]) -> provenant_cli::Summary {
             .collect()
     };
 
-    let tally = ranked_tally(
-        lines
-            .iter()
-            .map(|(node, _)| node["state"].as_str().unwrap_or("unknown")),
-    );
+    let tally = ranked_tally(lines.iter().map(|(node, attempt)| {
+        super::graph_status::lane_state(
+            node["state"].as_str().unwrap_or("unknown"),
+            attempt.and_then(|attempt| attempt["state"].as_str()),
+            attempt
+                .and_then(|attempt| attempt["presence"].as_str())
+                .or_else(|| node["presence"].as_str()),
+        )
+    }));
     let headline = if tally.is_empty() {
         "no rows".to_string()
     } else {
@@ -851,8 +855,14 @@ pub(crate) fn status_summary(rows: &[Value]) -> provenant_cli::Summary {
         node["open_asks"].as_array().is_some_and(|a| !a.is_empty())
     };
 
-    let is_live = |node: &Value| -> bool {
-        let state = node["state"].as_str().unwrap_or("");
+    let is_live = |node: &Value, attempt: Option<&Value>| -> bool {
+        let state = super::graph_status::lane_state(
+            node["state"].as_str().unwrap_or(""),
+            attempt.and_then(|attempt| attempt["state"].as_str()),
+            attempt
+                .and_then(|attempt| attempt["presence"].as_str())
+                .or_else(|| node["presence"].as_str()),
+        );
         StateRank::of(state).is_live()
     };
 
@@ -886,7 +896,7 @@ pub(crate) fn status_summary(rows: &[Value]) -> provenant_cli::Summary {
     if live_slots > 0 {
         let mut added = 0;
         for (i, (node, attempt)) in lines.iter().enumerate() {
-            if !shown_indices.contains(&i) && is_live(node) {
+            if !shown_indices.contains(&i) && is_live(node, *attempt) {
                 summary_rows.push(format_row(node, *attempt));
                 shown_indices.insert(i);
                 added += 1;
@@ -2294,7 +2304,7 @@ pub(crate) fn graph_listing(
                 human.push_str(&format!(
                     "{} {} {} {} {age}\n",
                     graph.name,
-                    graph.state,
+                    listed_state(graph),
                     graph.template.as_deref().unwrap_or("-"),
                     graph.nodes
                 ));
@@ -2543,12 +2553,39 @@ fn live_lanes(listing: &Listing) -> usize {
         .count()
 }
 
+/// The state a graph is listed and tallied under. It is the state of its own
+/// nodes and attempts, never the graph checkpoint's coarse status: an
+/// unfinished graph reports `pending` there even while its attempt is live.
+/// The most urgent node wins, with a live attempt breaking ties; an unenriched
+/// graph (no digests) keeps its checkpoint state.
+fn listed_state(graph: &ListedGraph) -> &str {
+    graph
+        .digests
+        .iter()
+        .map(|digest| {
+            let state = digest.display_state();
+            let rank = match state {
+                // A presence label or a pre-admission wait is still live work,
+                // even though those words are not node states.
+                "unattended" | "settling" | "unknown" | "waiting" => StateRank::Live,
+                state => StateRank::of(state),
+            };
+            (
+                state,
+                rank,
+                std::cmp::Reverse(digest.attempt_presence.as_deref() == Some("live")),
+            )
+        })
+        .min_by_key(|(_, rank, live)| (*rank, *live))
+        .map_or(graph.state.as_str(), |(state, _, _)| state)
+}
+
 fn listing_summary(
     listing: &Listing,
     command_limit: u64,
     now_micros: i64,
 ) -> provenant_cli::Summary {
-    let tally = ranked_tally(listing.rows.iter().map(|g| g.state.as_str()));
+    let tally = ranked_tally(listing.rows.iter().map(listed_state));
     let mut headline = if tally.is_empty() {
         "no graphs".to_string()
     } else {
@@ -2563,11 +2600,11 @@ fn listing_summary(
     let mut shown_indices = std::collections::BTreeSet::new();
 
     for (i, graph) in listing.rows.iter().enumerate() {
-        if StateRank::of(&graph.state).needs_attention() {
+        if StateRank::of(listed_state(graph)).needs_attention() {
             let mut line = format!(
                 "{} {} {} {}",
                 graph.name,
-                graph.state,
+                listed_state(graph),
                 graph.template.as_deref().unwrap_or("-"),
                 graph.nodes
             );
@@ -2584,11 +2621,11 @@ fn listing_summary(
     if live_slots > 0 {
         let mut added = 0;
         for (i, graph) in listing.rows.iter().enumerate() {
-            if !shown_indices.contains(&i) && StateRank::of(&graph.state).is_live() {
+            if !shown_indices.contains(&i) && StateRank::of(listed_state(graph)).is_live() {
                 summary_rows.push(format!(
                     "{} {} {} {}",
                     graph.name,
-                    graph.state,
+                    listed_state(graph),
                     graph.template.as_deref().unwrap_or("-"),
                     graph.nodes
                 ));
@@ -4774,6 +4811,147 @@ mod tests {
             summary.lines[0].matches("live lanes").count(),
             1,
             "the live count leads the headline once"
+        );
+    }
+
+    // Spec: docs/specs/cli.md#status-selection
+    #[test]
+    fn live_attempt_graph_is_running_in_the_summary_and_the_detail() {
+        let key = json!(
+            provenant_records::WorkKey::new(
+                provenant_core::ProjectId::from_bytes([7; 16]),
+                "rep-identity",
+                "implement",
+                1,
+            )
+            .expect("valid work key")
+        );
+        let rows = vec![
+            json!({
+                "id":"rep-identity/implement","kind":"node","graph_id":"rep-identity",
+                "node_id":"implement","work_key":key,"state":"running"
+            }),
+            json!({
+                "id":"rep-identity/implement#1","kind":"attempt","graph_id":"rep-identity",
+                "node_id":"implement","work_key":key,"state":"running","presence":"live",
+                "latest_attempt":true,"graph_state":"running"
+            }),
+        ];
+
+        let digests = super::super::graph_status::node_digests(&rows);
+        assert_eq!(digests.len(), 1);
+        assert_eq!(digests[0].display_state(), "running");
+        assert!(
+            digests[0]
+                .line
+                .contains("running node_state=running attempt_state=running"),
+            "detail line: {}",
+            digests[0].line
+        );
+        assert!(digests[0].line.contains("attempt_presence=live"));
+
+        // The checkpoint still reads `pending`, but the listing must use the
+        // lane's own state, the same one the detail line uses.
+        let mut graph = listed("rep-identity", false, 10);
+        assert_eq!(graph.state, "pending");
+        graph.digests = digests;
+        let listing = Listing {
+            rows: vec![graph],
+            omitted: Default::default(),
+            next: None,
+            admission_holders: Vec::new(),
+            admission_waiters: Vec::new(),
+        };
+        let summary = listing_summary(&listing, 50, 0);
+        assert_eq!(live_lanes(&listing), 1);
+        assert!(
+            summary.lines[0].contains("1 running"),
+            "headline: {}",
+            summary.lines[0]
+        );
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line.starts_with("rep-identity running")),
+            "rows: {:?}",
+            summary.lines
+        );
+
+        let detail_summary = status_summary(&rows);
+        assert!(
+            detail_summary.lines[0].contains("1 running"),
+            "detail headline: {}",
+            detail_summary.lines[0]
+        );
+    }
+
+    // Spec: docs/specs/cli.md#status-selection
+    #[test]
+    fn graph_waiting_for_admission_is_pending_in_the_summary_and_the_detail() {
+        let key = json!(
+            provenant_records::WorkKey::new(
+                provenant_core::ProjectId::from_bytes([7; 16]),
+                "rep-identity",
+                "implement",
+                1,
+            )
+            .expect("valid work key")
+        );
+        let wait = "waiting for a host build slot (12s)";
+        let rows = vec![
+            json!({
+                "id":"rep-identity/implement","kind":"node","graph_id":"rep-identity",
+                "node_id":"implement","work_key":key,"state":"waiting","waiting_for":wait,
+                "reason":wait
+            }),
+            json!({
+                "id":"rep-identity/implement#1","kind":"attempt","graph_id":"rep-identity",
+                "node_id":"implement","work_key":key,"state":"queued","latest_attempt":true
+            }),
+        ];
+
+        let digests = super::super::graph_status::node_digests(&rows);
+        assert_eq!(digests.len(), 1);
+        assert_eq!(digests[0].display_state(), "pending");
+        assert!(
+            digests[0]
+                .line
+                .contains("pending node_state=waiting attempt_state=queued"),
+            "detail line: {}",
+            digests[0].line
+        );
+
+        let mut graph = listed("rep-identity", false, 10);
+        graph.digests = digests;
+        let listing = Listing {
+            rows: vec![graph],
+            omitted: Default::default(),
+            next: None,
+            admission_holders: Vec::new(),
+            admission_waiters: Vec::new(),
+        };
+        let summary = listing_summary(&listing, 50, 0);
+        assert_eq!(live_lanes(&listing), 0);
+        assert!(
+            summary.lines[0].starts_with("1 pending"),
+            "headline: {}",
+            summary.lines[0]
+        );
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line.starts_with("rep-identity pending")),
+            "rows: {:?}",
+            summary.lines
+        );
+
+        let detail_summary = status_summary(&rows);
+        assert!(
+            detail_summary.lines[0].starts_with("1 pending"),
+            "detail headline: {}",
+            detail_summary.lines[0]
         );
     }
 
