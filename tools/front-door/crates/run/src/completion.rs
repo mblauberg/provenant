@@ -555,7 +555,8 @@ mod tests {
             "schema_version=1\n[admission.build]\nslots=7\n",
         )
         .unwrap();
-        let class = provenant_config::ResolvedAdmissionClass::resolve("build", state.path(), None);
+        let class =
+            provenant_config::ResolvedAdmissionClass::resolve("build", state.path(), None, None);
         let extras = PreambleExtras {
             build_cap: Some(BuildCap::from(&class)),
             ..Default::default()

@@ -2650,10 +2650,14 @@ fn process_tree_interval(
     if configured > 0 {
         return Some(std::time::Duration::from_millis(configured));
     }
-    provenant_config::ResolvedAdmissionClass::resolve_all(state, Some(project))
-        .into_values()
-        .any(|class| class.memory_per_slot_bytes.is_some())
-        .then_some(provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL)
+    provenant_config::ResolvedAdmissionClass::resolve_all(
+        state,
+        Some(project),
+        provenant_config::project_key_for(project).as_deref(),
+    )
+    .into_values()
+    .any(|class| class.memory_per_slot_bytes.is_some())
+    .then_some(provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL)
 }
 
 /// How long the guardian may retain custody of an unresolved exit, resolved
