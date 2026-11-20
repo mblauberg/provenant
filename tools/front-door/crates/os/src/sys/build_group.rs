@@ -106,7 +106,11 @@ impl Forwarder {
     }
 
     pub(crate) fn signal_received(&self) -> bool {
-        GROUP_SIGNALS[self.index].load(Ordering::SeqCst) != 0
+        self.signal() != 0
+    }
+
+    pub(crate) fn signal(&self) -> i32 {
+        GROUP_SIGNALS[self.index].load(Ordering::SeqCst)
     }
 }
 
