@@ -172,8 +172,11 @@ def main():
             return 2
         env["VERIFY_TIER_TEST_THREADS"] = str(threads)
         env["RUST_TEST_THREADS"] = str(threads)
+    whole_non_rust = selection == "all" and any(
+        command.get("stack") and command["stack"] != "rust" for command in templates
+    )
     quarantine_args = []
-    if any("{quarantine_args}" in template["argv"] for template in templates):
+    if not whole_non_rust and any("{quarantine_args}" in template["argv"] for template in templates):
         command = cfg.get("quarantine_command") or ["true"]
         try:
             quarantine = subprocess.check_output(command, cwd=root, env=child_environment(), text=True).strip()
@@ -183,7 +186,7 @@ def main():
         if quarantine:
             quarantine_args = ["-E", f"not ({quarantine})"]
     for template in templates:
-        targets = integrations if "{integration_args}" in template["argv"] else [None]
+        targets = integrations if "{integration_args}" in template["argv"] and not whole_non_rust else [None]
         for target in targets:
             target_args = ["-p", target[0], "--test", target[1]] if target else []
             expansions = {"{packages}": packages_arg, "{integration_args}": target_args, "{quarantine_args}": quarantine_args}

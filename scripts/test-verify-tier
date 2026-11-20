@@ -118,6 +118,21 @@ class Selection(unittest.TestCase):
                 self.assertEqual(verify.main(), 0)
             self.assertEqual(run.call_args.args[0], ["custom-check", "--full"])
 
+    def test_node_tier_runs_without_cargo_selection(self):
+        cfg = dict(verify.DEFAULTS, tiers={"0": {"commands": [
+            {"stack": "node", "argv": ["npm", "test", "{packages}", "{integration_args}", "{quarantine_args}"]}
+        ], "selection": "all", "warn_for_host_load": False}})
+        with mock.patch.object(verify, "config", return_value=cfg), \
+             mock.patch.object(verify, "changed_paths", return_value=[]), \
+             mock.patch.object(verify.subprocess, "check_output", return_value="abc\n") as output, \
+             mock.patch.object(verify.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
+             mock.patch.object(verify.sys, "argv", ["verify-tier", "--tier", "0"]), \
+             mock.patch.object(verify.sys, "stdout", new_callable=io.StringIO):
+            self.assertEqual(verify.main(), 0)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["npm", "test"])
+        self.assertTrue(all(call.args[0][0] != "cargo" for call in output.call_args_list))
+
     def test_default_runs_only_touched_crate(self):
         metadata = {"packages": [
             {"name": "root", "id": "root", "manifest_path": str(verify.ROOT / "tools/front-door/Cargo.toml")},

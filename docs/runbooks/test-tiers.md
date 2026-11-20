@@ -71,8 +71,6 @@ root `package.json`, its package manager field or lockfile, and only scripts
 that exist. The detected default and commands are below all configured layers and replace
 builtin commands for matching tier keys. Whole argv elements `{packages}`,
 `{integration_args}` and `{quarantine_args}` expand to argument lists; no
-shell splitting occurs. Detected commands inherit the existing tier selection:
-package and integration tiers still require Cargo metadata and matching changes,
-so a Node-only or mixed repository may need configured tier selection. Use
+shell splitting occurs. Detected Rust-only tiers retain builtin selection; tiers containing non-Rust commands select all and expand selection placeholders to nothing. Use
 `provenant config show --full` for effective leaves and sources, and
 `provenant config path --project` for the host-project ports file.
