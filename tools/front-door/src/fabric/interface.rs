@@ -5110,6 +5110,70 @@ mod tests {
     }
 
     #[test]
+    // Regression #3744: a launch prepared for a cross-host peer must survive
+    // the peer-side graph-document decode exactly as a remote launch does.
+    fn cross_host_launch_document_round_trips_through_peer_decode() -> Result {
+        let rig = TestRig::new()?;
+        let remote_host = provenant_core::HostId::from_bytes([2; 16]);
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let mut context = Context::open_inspection(roots, &rig.home, &rig.project)?;
+        context.in_lane = false;
+        context.config.peers.insert(
+            "workshop".into(),
+            provenant_fabric_runtime::config::Peer {
+                host: remote_host,
+                destination: "workshop".into(),
+                remote_executable: None,
+                connect_timeout_seconds: 10,
+            },
+        );
+        let factory = Factory {
+            context,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            workers: &Workers,
+        };
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let cancel = CancelToken::new();
+        let launch = factory.graph_document(
+            json!({
+                "op":"run", "template":"explore", "brief":"Inspect the parser",
+                "host":"workshop", "explain":true
+            }),
+            budget,
+            &cancel,
+        )?;
+        let bytes = serde_json::to_vec(&launch["document"])?;
+        let decoded = decode_graph_document(&bytes)
+            .map_err(|error| format!("peer decode of cross-host launch: {error:?}"))?;
+        assert_eq!(serde_json::to_value(&decoded)?, launch["document"]);
+        // Mirror what the host does next: publish the document and launch it.
+        let scratch = factory
+            .prepare_scratch(&cancel)
+            .map_err(|error| format!("{error:?}"))?;
+        let path = publish_graph_document(&scratch, &launch["document"])
+            .map_err(|error| format!("publish: {error}"))?;
+        let run = factory
+            .graph(
+                GraphInput::Run {
+                    extra: Default::default(),
+                    document: path,
+                },
+                budget,
+                &cancel,
+            )
+            .map_err(|error| format!("cross-host launch: {error:?}"))?;
+        assert_eq!(run.checkpoint.graph_id, decoded.graph_id);
+        Ok(())
+    }
+
+    #[test]
     // Spec: docs/specs/routing.md#pinned-review-selection
     fn reviews_of_the_same_subject_attach_to_the_completed_attempt() -> Result {
         use provenant_fabric_runtime::graph::{self, AttemptOwner, GraphExecution};
@@ -7426,7 +7490,7 @@ mod tests {
 }
 
 /// Prints a launch warning for the operator; a warning never blocks a launch.
-fn warn_operator(warning: impl std::fmt::Display) {
+pub(super) fn warn_operator(warning: impl std::fmt::Display) {
     use std::io::Write;
     let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
 }

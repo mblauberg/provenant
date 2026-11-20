@@ -1543,6 +1543,12 @@ impl BinaryRunOwner<'_> {
             }
             let mut attempt = attempt.unwrap_or_default();
             attempt.host = None;
+            // `directory` is this host's selected checkout, bound by the relay
+            // for a live read-only child. It is meaningless on the receiver,
+            // which binds its own source checkout from the pinned head; leaving
+            // it on the wire made the peer reject an absolute path it cannot
+            // accept (#3744).
+            attempt.directory = None;
             attempt.parent_sandboxed |= floored;
             // Local admission stamps graph provenance from this host's work
             // key. That stamp is not evidence on the wire: the peer refuses a

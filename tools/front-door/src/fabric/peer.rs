@@ -1266,7 +1266,14 @@ pub fn peer(
                     if request.agent != format!("graph-{actor}") {
                         return Err(FacadeError::ConfinementRefused { resource: None });
                     }
-                    let attempt = graph_context.attempt.clone();
+                    let mut attempt = graph_context.attempt.clone();
+                    // A sender checkout is local to its host. Ignore it rather
+                    // than decode it as a binder path on this host (#3744).
+                    if attempt.directory.take().is_some() {
+                        super::interface::warn_operator(
+                            "ignored a sender-local attempt directory; the peer binds its own source checkout",
+                        );
+                    }
                     if attempt.host.is_some()
                         || attempt.new_worktree.is_some()
                         || !attempt.write_roots.is_empty()
@@ -1808,7 +1815,7 @@ pub(crate) fn peer_submit_graph(
         &factory.context.config.graph.limits,
         factory.context.port_table.worktree_layout.clone(),
     )
-    .map_err(|_| FacadeError::field("document"))?;
+    .map_err(super::interface::graph_patch_error)?;
     let mut journal = FileJournal::open(
         &factory.context.roots.state,
         factory.context.identity.project,
