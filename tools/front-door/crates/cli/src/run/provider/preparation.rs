@@ -1492,7 +1492,8 @@ fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError 
                         | provenant_records::RouteExclusionReason::LoginExpired => {
                             TerminalCause::AccountLoginRequired
                         }
-                        provenant_records::RouteExclusionReason::UnknownAccount => {
+                        provenant_records::RouteExclusionReason::UnknownAccount
+                        | provenant_records::RouteExclusionReason::UnresolvedAccount => {
                             TerminalCause::UnregisteredAccount
                         }
                         _ => TerminalCause::RouteResolutionRefused,
@@ -5044,10 +5045,17 @@ pub(super) fn prepare_candidates_inner(
         // make a discovered exact model look uncatalogued at launch. A family
         // alias such as `claude/sonnet` resolves to an exact model here too.
         if catalogue.resolve_family_alias(&model_id).is_none() {
-            let warning = format!(
-                "model {}/{} is not in the catalogue; the provider will check it",
-                route.adapter, route.model
-            );
+            // Issue #3724: a namespaced model written without its provider
+            // segment is not uncatalogued. Name the full catalogued ID (or
+            // every candidate) before falling back to the generic warning.
+            let warning = catalogue
+                .provider_segment_warning(&model_id)
+                .unwrap_or_else(|| {
+                    format!(
+                        "model {}/{} is not in the catalogue; the provider will check it",
+                        route.adapter, route.model
+                    )
+                });
             push_launch_warning(&mut route, warning);
         }
         for warning in config.domains.routing.pool_effort_warnings(&catalogue) {
