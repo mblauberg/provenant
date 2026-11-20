@@ -916,7 +916,7 @@ fn write_seed_progress(
 
 #[derive(Debug, Default)]
 struct SeedOutcome {
-    busy_project_keys: Vec<String>,
+    retry_project_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1087,7 +1087,7 @@ fn seed_pass_locked(
         .map(|result| (result.projects, result.omitted_projects))
         .unwrap_or_default();
     write_seed_progress(directory, at()?, "running", None)?;
-    let (records, error, busy_project_keys) = match projects() {
+    let (records, error, retry_keys) = match projects() {
         Ok(mut discovery) => {
             if !retry_project_keys.is_empty() {
                 discovery
@@ -1115,9 +1115,16 @@ fn seed_pass_locked(
                     discovery.omitted_errors
                 )
             });
-            let busy_project_keys = fresh
+            let retry_keys = fresh
                 .iter()
-                .filter(|record| matches!(record.outcome, SeedProjectOutcome::Busy))
+                .filter(|record| {
+                    matches!(
+                        record.outcome,
+                        SeedProjectOutcome::Busy
+                            | SeedProjectOutcome::Failed { .. }
+                            | SeedProjectOutcome::PrepareFailed { .. }
+                    )
+                })
                 .map(|record| record.project_key.clone())
                 .take(MAX_BUSY_SEED_PROJECTS)
                 .collect();
@@ -1131,7 +1138,7 @@ fn seed_pass_locked(
                 })
                 .collect();
             records.extend(fresh);
-            (records, error, busy_project_keys)
+            (records, error, retry_keys)
         }
         Err(error) => (prior, Some(error), Vec::new()),
     };
@@ -1146,7 +1153,9 @@ fn seed_pass_locked(
         directory,
         &SeedResult::finished(at()?, error, records).with_omitted_before(omitted_before),
     )?;
-    Ok(SeedOutcome { busy_project_keys })
+    Ok(SeedOutcome {
+        retry_project_keys: retry_keys,
+    })
 }
 
 fn claim_seed_job(
@@ -1211,13 +1220,13 @@ fn finish_seed_job_with_lock(
     queue.active = None;
     queue.active_at = None;
     queue.launch_at = None;
-    if outcome.busy_project_keys.is_empty() {
+    if outcome.retry_project_keys.is_empty() {
         queue.retry_attempt = 0;
         queue.retry = None;
         queue.retry_at = None;
     } else {
         queue.retry_attempt = queue.retry_attempt.saturating_add(1);
-        let retry = SeedRequest::busy(outcome.busy_project_keys);
+        let retry = SeedRequest::busy(outcome.retry_project_keys);
         match queue.pending.take() {
             Some(pending) if matches!(&pending.scope, SeedScope::Full) => {
                 // The full pass covers this busy result.
@@ -2665,7 +2674,7 @@ mod tests {
             now,
             &mut worker,
             SeedOutcome {
-                busy_project_keys: vec!["project-a".into()],
+                retry_project_keys: vec!["project-a".into()],
             },
         )
         .unwrap()
@@ -2799,7 +2808,7 @@ mod tests {
 
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
-    fn a_busy_retry_replaces_only_its_projects_and_keeps_every_other_outcome() {
+    fn busy_and_failed_retry_with_capped_backoff() {
         use crate::target_seed_build::Refresh;
         let temp = tempfile::tempdir().unwrap();
         // macOS temp roots sit behind a /var symlink, which private_directory refuses.
@@ -2809,6 +2818,7 @@ mod tests {
         let projects = vec![project("a"), project("b"), project("c"), project("d")];
         let entries = SeedDiscovery::from_paths(projects.clone()).projects;
         let busy_key = entries[0].project_key.clone();
+        let failed_key = entries[1].project_key.clone();
         let wall = seed_clock().wall_now().unwrap();
         queue_seed(&directory, wall, Some(SeedRequest::full()), || Ok(())).unwrap();
         let (worker, request) = claim_seed_job(&directory, wall).unwrap().unwrap();
@@ -2828,7 +2838,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(outcome.busy_project_keys, vec![busy_key.clone()]);
+        assert_eq!(
+            outcome.retry_project_keys,
+            vec![busy_key.clone(), failed_key.clone()]
+        );
         assert!(
             finish_seed_job(&directory, wall, &mut worker, outcome)
                 .unwrap()
@@ -2854,16 +2867,27 @@ mod tests {
         );
         assert!(target_seed_task(&directory).error.is_none());
 
+        assert_eq!(read_seed_queue(&directory).unwrap().retry_attempt, 1);
+        assert_eq!(retry_delay(1), 120_000_000);
         assert!(!seed_retry_due(&directory, wall), "just written: not due");
         let far = WallTime::from_micros(wall.as_micros() + SEED_WORK_RETRY_MICROS + 1).unwrap();
-        assert!(seed_retry_due(&directory, far), "busy is retried next tick");
+        assert!(
+            seed_retry_due(&directory, far),
+            "busy and failed projects are retried next tick"
+        );
         let retry = read_seed_queue(&directory).unwrap().retry.unwrap();
-        assert_eq!(retry.scope, SeedScope::Busy(vec![busy_key.clone()]));
+        assert_eq!(
+            retry.scope,
+            SeedScope::Busy(vec![busy_key.clone(), failed_key.clone()])
+        );
         queue_seed(&directory, far, None, || Ok(())).unwrap();
         let queued = read_seed_queue(&directory).unwrap();
         assert_eq!(
             queued.pending,
-            Some(SeedRequest::busy(vec![busy_key.clone()]))
+            Some(SeedRequest::busy(vec![
+                busy_key.clone(),
+                failed_key.clone()
+            ]))
         );
         assert!(queued.retry.is_none());
         let (worker_lock, request) = claim_seed_job(&directory, far).unwrap().unwrap();
@@ -2878,7 +2902,10 @@ mod tests {
             || Ok(SeedDiscovery::from_paths(projects.clone())),
             |project| {
                 retried.borrow_mut().push(project.to_owned());
-                assert_eq!(project.file_name().unwrap(), "a");
+                assert!(matches!(
+                    project.file_name().unwrap().to_str(),
+                    Some("a" | "b")
+                ));
                 Ok(Refresh::Current)
             },
         )
@@ -2888,17 +2915,22 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(*retried.borrow(), vec![projects[0].clone()]);
+        assert_eq!(
+            *retried.borrow(),
+            vec![projects[0].clone(), projects[1].clone()]
+        );
         assert_eq!(
             seed_state(&directory),
-            "ok:3 failed:1",
-            "the retry kept the failed project and the seeded ones"
+            "ok:4",
+            "the retry kept the seeded projects and recovered both failures"
         );
         assert!(
             !seed_retry_due(&directory, far),
-            "resolved busy work is not retried"
+            "resolved work is not retried"
         );
 
+        assert_eq!(read_seed_queue(&directory).unwrap().retry_attempt, 0);
+        assert_eq!(retry_delay(u32::MAX), 3_600_000_000);
         seed_pass(
             &directory,
             &root,
