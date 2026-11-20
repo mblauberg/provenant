@@ -336,9 +336,11 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "pr_contribution_roundtrip",
             "pr_contribution_unbound_project",
             "pr_contribution_land_warns_when_binding_fails",
+            "land_binding_never_reads_or_warns_about_other_prs",
         ],
         |name| {
             let result = match name {
+                "land_binding_never_reads_or_warns_about_other_prs" => crate::pr_land_tests::land_binding_never_reads_or_warns_about_other_prs(),
                 "pr_contribution_land_warns_when_binding_fails" => crate::pr_land_tests::pr_contribution_land_warns_when_binding_fails(),
                 "pr_contribution_unbound_project" => crate::pr_land_tests::pr_contribution_unbound_project(),
                 "pr_contribution_roundtrip" => crate::pr_land_tests::pr_contribution_roundtrip(),
