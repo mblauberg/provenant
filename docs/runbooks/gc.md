@@ -88,13 +88,17 @@ tombstone an interrupted removal left. A target's last use is the newer of its
 `worktree seed-target`, and its newest file time; `target-lint` shares its
 cache's worktree. Just before removing a target or a lane cache, `--apply`
 rechecks that last use with the Cargo locks held; a launch or seed that
-stamped it meanwhile keeps it, and a later pass decides again. `gc --dry-run` shows measured allocated bytes against the
-budget with the budget and idle settings and their sources, and names each
-target it would remove with its worktree, reason (`worktree gone`,
-`worktree replaced`, `idle`, `over budget`, `tombstone`) and the evidence
-that dated its last use (`last-use stamp` or `file times`); it names what
-`--apply` would remove from the same state, and incomplete previews say so. Allocated bytes include blocks shared with APFS
-clones, so the volume may gain less.
+stamped it meanwhile keeps it, and a later pass decides again. `gc --dry-run` shows measured private bytes -- the
+blocks no other clone shares -- against the budget with the budget and idle
+settings and their sources, and names each target it would remove with its
+worktree, reason (`worktree gone`, `worktree replaced`, `idle`, `over budget`,
+`tombstone`) and the evidence that dated its last use (`last-use stamp` or
+`file times`); it names what `--apply` would remove from the same state, and
+incomplete previews say so. Seeded targets are clones whose allocated bytes
+include blocks shared with the seed, so private bytes keep the preview from
+overstating what removal frees. The private measure is taken in the same
+bounded census and resumes with it; where the filesystem cannot report private
+bytes, GC says so, reports allocated bytes instead and never reports zero.
 Targets of the removed `lanes.cargo_target = "shared"` mode under
 `~/Library/Caches/provenant-shared-cargo/` count toward both the budget and the
 free-space sweep until full GC retires them. A preview probes and measures each
