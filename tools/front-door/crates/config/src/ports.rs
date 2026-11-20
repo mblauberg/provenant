@@ -292,9 +292,26 @@ pub enum VerifySelection {
     All,
 }
 
+/// A command run from the project root joined with `cwd`.
+/// The whole argv elements `{packages}`, `{integration_args}`, and
+/// `{quarantine_args}` expand to zero or more arguments; no shell splitting occurs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TierCommand {
+    #[serde(default)]
+    pub stack: String,
+    #[serde(default = "tier_command_cwd")]
+    pub cwd: PathBuf,
+    #[serde(default)]
+    pub argv: Vec<String>,
+}
+
+fn tier_command_cwd() -> PathBuf {
+    PathBuf::from(".")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifyTier {
-    pub commands: Vec<String>,
+    pub commands: Vec<TierCommand>,
     pub selection: VerifySelection,
     pub warn_for_host_load: bool,
 }
@@ -562,10 +579,7 @@ impl PortEntry for VerifyPort {
             && self.load_per_cpu > 0.0
             && self.test_threads.is_none_or(|threads| threads > 0)
             && self.tiers.contains_key(&self.default_tier)
-            && self
-                .tiers
-                .iter()
-                .all(|(name, tier)| !name.is_empty() && !tier.commands.is_empty())
+            && self.tiers.iter().all(|(name, tier)| !name.is_empty() && !tier.commands.is_empty())
     }
 }
 impl PortEntry for LandPort {
@@ -794,6 +808,7 @@ fn apply_layer(
     path: &Path,
     source: PortSource,
     on_unknown: &mut impl FnMut(&[u8], &provenant_records::InputWarning),
+    on_malformed: &mut impl FnMut(&Path, &io::Error),
 ) -> io::Result<()> {
     let file = match fs::File::open(path) {
         Ok(file) => file,
@@ -809,6 +824,37 @@ fn apply_layer(
     }
     let mut overlay: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|error| layer_error(path, "json", error))?;
+    if let Some(tiers) = overlay
+        .pointer_mut("/verify/tiers")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        tiers.retain(|name, tier| {
+            let Some(commands) = tier.get("commands").and_then(serde_json::Value::as_array) else {
+                return true;
+            };
+            for value in commands {
+                if let Ok(command) = serde_json::from_value::<TierCommand>(value.clone()) {
+                    let reason = if command.argv.is_empty() {
+                        Some("empty argv")
+                    } else if command.argv[0].is_empty() {
+                        Some("empty program")
+                    } else if !relative(&command.cwd, true) {
+                        Some("cwd must be relative and contain no .. component")
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = reason {
+                        on_malformed(
+                            path,
+                            &layer_error(path, &format!("verify.tiers.{name}"), reason),
+                        );
+                        return false;
+                    }
+                }
+            }
+            true
+        });
+    }
     record_leaf_sources(&overlay, source, "", provenance);
     let object = overlay
         .as_object_mut()
@@ -984,7 +1030,7 @@ impl PortTable {
                 use std::io::Write;
                 let _ = writeln!(
                     io::stderr().lock(),
-                    "warning: {}: malformed port layer ignored: {error}",
+                    "warning: {}: malformed port declaration ignored: {error}",
                     path.display()
                 );
             },
@@ -1009,7 +1055,7 @@ impl PortTable {
             use std::io::Write;
             let _ = writeln!(
                 io::stderr().lock(),
-                "warning: {}: malformed port layer ignored: {error}",
+                "warning: {}: malformed port declaration ignored: {error}",
                 path.display()
             );
         })
@@ -1024,11 +1070,30 @@ impl PortTable {
         let mut document = serde_json::to_value(Self::builtin()).map_err(io::Error::other)?;
         let mut provenance = BTreeMap::new();
         record_leaf_sources(&document, PortSource::Builtin, "", &mut provenance);
-        if let Some(default_tier) =
-            project.and_then(|project| crate::detect::detect(project).default_tier)
-        {
-            document["verify"]["default_tier"] = default_tier.into();
-            provenance.insert("verify.default_tier".into(), PortSource::Detected);
+        if let Some(project) = project {
+            let detected = crate::detect::detect(project);
+            if let Some(default_tier) = detected.default_tier {
+                document["verify"]["default_tier"] = default_tier.into();
+                provenance.insert("verify.default_tier".into(), PortSource::Detected);
+            }
+            for (name, commands) in detected.tiers {
+                let tier = &mut document["verify"]["tiers"][&name];
+                if tier.is_null() {
+                    *tier = serde_json::json!({"selection": "all", "warn_for_host_load": false});
+                }
+                if commands.iter().any(|command| command.stack != "rust") {
+                    tier["selection"] = "all".into();
+                    provenance.insert(
+                        format!("verify.tiers.{name}.selection"),
+                        PortSource::Detected,
+                    );
+                }
+                tier["commands"] = serde_json::to_value(commands).map_err(io::Error::other)?;
+                provenance.insert(
+                    format!("verify.tiers.{name}.commands"),
+                    PortSource::Detected,
+                );
+            }
         }
         if let Some(host_state) = host_state {
             apply_layer(
@@ -1037,6 +1102,7 @@ impl PortTable {
                 &host_state.join("ports.json"),
                 PortSource::Host,
                 &mut on_unknown,
+                &mut on_malformed,
             )?;
             // A consumer repository can be configured entirely from host
             // state: its keyed layer sits between host and project. A missing
@@ -1049,6 +1115,7 @@ impl PortTable {
                     &path,
                     PortSource::HostProject,
                     &mut on_unknown,
+                    &mut on_malformed,
                 )?;
             }
         }
@@ -1063,6 +1130,7 @@ impl PortTable {
                 &path,
                 PortSource::Project,
                 &mut |bytes, warning| warnings.push((bytes.to_vec(), warning.clone())),
+                &mut on_malformed,
             );
             match applied {
                 Ok(()) => {
@@ -1466,13 +1534,134 @@ mod tests {
     }
 
     #[test]
+    fn invalid_tier_command_warns_and_falls_back() {
+        for (cwd, argv, reason) in [
+            (".", vec![], "empty argv"),
+            (".", vec![""], "empty program"),
+            ("/absolute", vec!["true"], "cwd"),
+            ("a/../b", vec!["true"], "cwd"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join(".provenant")).unwrap();
+            let path = root.path().join(PORTS_CONFIG);
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({"verify":{"tiers":{
+                    "0":{"commands":[{"cwd":cwd,"argv":argv}],"selection":"all"},
+                    "1":{"commands":[{"argv":["valid"]}]}
+                }}}))
+                .unwrap(),
+            )
+            .unwrap();
+            let mut warnings = Vec::new();
+            let table = PortTable::read_layers(
+                Some(root.path()),
+                None,
+                |_, _| {},
+                |file, error| {
+                    warnings.push((file.to_owned(), error.to_string()));
+                },
+            )
+            .unwrap();
+            assert!(table.validate().is_ok());
+            assert_eq!(
+                table.verify.tiers["0"],
+                PortTable::builtin().verify.tiers["0"]
+            );
+            assert_eq!(
+                table.provenance()["verify.tiers.0.commands"],
+                PortSource::Builtin
+            );
+            assert_eq!(table.verify.tiers["1"].commands[0].argv, ["valid"]);
+            assert_eq!(warnings.len(), 1);
+            assert_eq!(warnings[0].0, path);
+            assert!(warnings[0].1.contains("verify.tiers.0") && warnings[0].1.contains(reason));
+        }
+    }
+
+    #[test]
+    fn detected_selection_respects_stack_mix() {
+        for (rust, node, expected0, expected1) in [
+            (
+                true,
+                false,
+                VerifySelection::Packages,
+                VerifySelection::Integrations,
+            ),
+            (false, true, VerifySelection::All, VerifySelection::All),
+            (true, true, VerifySelection::All, VerifySelection::All),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            if rust {
+                std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+            }
+            if node {
+                std::fs::write(
+                    root.path().join("package.json"),
+                    r#"{"scripts":{"lint":"ok","test":"ok"}}"#,
+                )
+                .unwrap();
+            }
+            let table = PortTable::read_layers(
+                Some(root.path()),
+                None,
+                |_, _| {},
+                |_, error| panic!("{error}"),
+            )
+            .unwrap();
+            assert_eq!(table.verify.tiers["0"].selection, expected0);
+            assert_eq!(table.verify.tiers["1"].selection, expected1);
+            assert_eq!(table.verify.tiers["2"].selection, VerifySelection::All);
+        }
+    }
+
+    #[test]
+    fn detected_tiers_fill_gaps_and_configured_wins() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"lint":"ok","test":"ok"}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir(root.path().join(".provenant")).unwrap();
+        std::fs::write(
+            root.path().join(PORTS_CONFIG),
+            r#"{"verify":{"tiers":{"1":{"commands":[{"argv":["custom"]}]}}}}"#,
+        )
+        .unwrap();
+        let table = PortTable::read_for(Some(root.path()), state.path()).unwrap();
+        assert_eq!(table.verify.tiers["0"].commands[0].stack, "node");
+        assert_eq!(table.verify.tiers["1"].commands[0].argv, ["custom"]);
+        assert_eq!(
+            table.verify.tiers["2"],
+            PortTable::builtin().verify.tiers["2"]
+        );
+        assert_eq!(
+            table.provenance()["verify.tiers.0.commands"],
+            PortSource::Detected
+        );
+        assert_eq!(
+            table.provenance()["verify.tiers.1.commands"],
+            PortSource::Project
+        );
+        assert_eq!(
+            table.provenance()["verify.tiers.2.commands"],
+            PortSource::Builtin
+        );
+    }
+
+    #[test]
     fn builtin_verify_tiers_are_neutral_and_base_is_inferred() {
         let builtin = PortTable::builtin();
         assert!(builtin.verify.base.is_empty());
         for tier in builtin.verify.tiers.values() {
             for command in &tier.commands {
-                assert!(!command.contains("scripts/"), "{command}");
-                assert!(command.starts_with("cargo "), "{command}");
+                assert!(
+                    command.argv.iter().all(|arg| !arg.contains("scripts/")),
+                    "{command:?}"
+                );
+                assert_eq!(command.argv.first().map(String::as_str), Some("cargo"));
             }
         }
     }

@@ -10,17 +10,12 @@ pub struct DetectedStack {
     pub cwd: PathBuf,
 }
 
-#[derive(Debug, Serialize)]
-pub struct DetectedCommand {
-    pub stack: String,
-    pub cwd: PathBuf,
-    pub argv: Vec<String>,
-}
+use crate::ports::TierCommand;
 
 #[derive(Debug, Default, Serialize)]
 pub struct Detection {
     pub stacks: Vec<DetectedStack>,
-    pub tiers: BTreeMap<String, Vec<DetectedCommand>>,
+    pub tiers: BTreeMap<String, Vec<TierCommand>>,
     pub default_tier: Option<String>,
     pub warnings: Vec<String>,
 }
@@ -30,7 +25,7 @@ impl Detection {
         self.tiers
             .entry(tier.into())
             .or_default()
-            .push(DetectedCommand {
+            .push(TierCommand {
                 stack: stack.into(),
                 cwd: cwd.into(),
                 argv: argv.iter().map(|s| (*s).into()).collect(),
@@ -244,8 +239,13 @@ mod tests {
         write(root.path(), "nested/Cargo.toml", "[workspace]\n");
         write(root.path(), "package.json", r#"{"scripts":{"lint":"ok"}}"#);
         write(root.path(), "pnpm-lock.yaml", "");
-        let result = detect(root.path());
-        let tier = &result.tiers["0"];
+        let state = tempfile::tempdir().unwrap();
+        let table = crate::PortTable::read_for(Some(root.path()), state.path()).unwrap();
+        assert_eq!(
+            table.verify.tiers["0"].selection,
+            crate::VerifySelection::Packages
+        );
+        let tier = &table.verify.tiers["0"].commands;
         assert!(
             tier.iter()
                 .filter(|c| c.stack == "rust")
@@ -298,11 +298,11 @@ mod tests {
         write(
             state.path(),
             "ports.json",
-            r#"{"verify":{"default_tier":"2","tiers":{"1":{"commands":["custom"]}}}}"#,
+            r#"{"verify":{"default_tier":"2","tiers":{"1":{"commands":[{"argv":["custom"]}]}}}}"#,
         );
         let table = crate::PortTable::read_for(Some(root.path()), state.path()).unwrap();
         assert_eq!(table.verify.default_tier, "2");
-        assert_eq!(table.verify.tiers["1"].commands, ["custom"]);
+        assert_eq!(table.verify.tiers["1"].commands[0].argv, ["custom"]);
         assert_eq!(
             table.provenance()["verify.default_tier"],
             crate::PortSource::Host
@@ -314,7 +314,15 @@ mod tests {
         let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
         let state = tempfile::tempdir().unwrap();
         let table = crate::PortTable::read_for(Some(&project), state.path()).unwrap();
-        let actual = serde_json::to_value(table.verify).unwrap();
+        let mut actual = serde_json::to_value(&table.verify).unwrap();
+        for (name, tier) in &table.verify.tiers {
+            actual["tiers"][name]["commands"] = serde_json::json!(
+                tier.commands
+                    .iter()
+                    .map(|command| command.argv.join(" "))
+                    .collect::<Vec<_>>()
+            );
+        }
         let expected: serde_json::Value =
             serde_json::from_str(include_str!("../tests/golden/verify.json")).unwrap();
         assert_eq!(actual, expected);
