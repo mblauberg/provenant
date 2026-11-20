@@ -418,11 +418,20 @@ fn project_lane_inner(
         .then(|| root.join("attempts").join(lane.attempt_id.to_string()))
         .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok());
     // There is no wall-clock column on a run event; the newest observed
-    // activity is the last output, else the launch, else the queue time.
-    let last_event_at = lane
+    // activity is the last output, else the launch, else the queue time. Carry
+    // which fallback was used so a quiet writer's old output is not read as a
+    // fresh heartbeat.
+    let (last_event_at, last_event_source) = lane
         .last_output_at
-        .or(lane.started_at)
-        .unwrap_or(lane.queued_at);
+        .map(|at| (at, provenant_records::wire::LastEventSource::Output))
+        .or_else(|| {
+            lane.started_at
+                .map(|at| (at, provenant_records::wire::LastEventSource::Started))
+        })
+        .unwrap_or((
+            lane.queued_at,
+            provenant_records::wire::LastEventSource::Queued,
+        ));
     let retained = (host_artifacts
         && lane.settlement_receipts.as_ref().is_some_and(|receipts| {
             matches!(
@@ -450,6 +459,7 @@ fn project_lane_inner(
             waiting_for,
             lane_class: wait.map(|wait| wait.lane_class.as_str().to_owned()),
             last_event_at: Some(last_event_at),
+            last_event_source: Some(last_event_source),
             attempt_directory,
             child_command,
             overdue: now_wall.map(|now| run::overdue_at(lane, now)),
@@ -775,4 +785,153 @@ fn facts_of(
     facts.risk = risk;
     facts.reviews = reviews;
     Ok(facts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provenant_records::wire::LastEventSource;
+
+    const ID: &str = "11111111111111111111111111111111";
+
+    /// A running attempt whose only write grant is a lane scratch directory.
+    fn running_lane(scratch: &Path) -> run::AttemptRecord {
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let mut record: run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": ID,
+            "project_id": ID,
+            "key": {"project": ID, "graph": "graph", "node": "node", "attempt": 1},
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 1,
+            "requested_route": {"kind": "named", "name": "senior"},
+            "authority_digest": digest,
+            "queued_at": "2026-10-29T00:00:00.000000Z",
+            "state": {"state": "running"},
+            "usage": {},
+            "read_only_writable": [],
+            "protected_paths": [],
+            "trace": {},
+            "prompt": {
+                "path": {"encoding": "utf8", "path": "prompt.md"},
+                "digest": digest,
+                "bytes": 0,
+                "complete": true,
+                "redacted": false
+            }
+        }))
+        .expect("running attempt fixture");
+        record.write_grants.push(run::WriteGrantRecord {
+            extra: Default::default(),
+            source: provenant_records::run::WriteSource::Scratch,
+            path: provenant_records::AbsolutePath::new(scratch).expect("scratch path"),
+            scope: provenant_records::run::PathScope::Subtree,
+        });
+        record
+    }
+
+    // Spec: docs/specs/cli.md#status-selection
+    #[test]
+    fn project_lane_inner_keeps_host_artifacts_private_from_peers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scratch = temp.path().join("scratch");
+        std::fs::create_dir_all(scratch.join(provenant_os::admission::SHIM_DIRECTORY))
+            .expect("shim directory");
+        let _waiting = provenant_os::admission::mark_waiting_with_command(
+            &scratch,
+            "build",
+            43,
+            Some(ID),
+            Some("cargo test --locked".into()),
+        )
+        .expect("waiting marker");
+        let lane = running_lane(&scratch);
+
+        let host = project_lane_with_census(&lane, &[], temp.path(), None, true, Err(()));
+        assert!(host.attempt_directory.is_some(), "{host:?}");
+        assert_eq!(host.child_command.as_deref(), Some("cargo test --locked"));
+
+        let peer = project_lane_presence_only(&lane, temp.path(), None);
+        assert!(peer.attempt_directory.is_none(), "{peer:?}");
+        assert!(peer.child_command.is_none(), "{peer:?}");
+    }
+
+    // Spec: docs/specs/cli.md#status-selection
+    #[test]
+    fn admission_wait_and_hold_commands_resolve_for_waiting_and_holding_lanes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let waiting_scratch = temp.path().join("waiting");
+        std::fs::create_dir_all(waiting_scratch.join(provenant_os::admission::SHIM_DIRECTORY))
+            .expect("shim directory");
+        let _waiting = provenant_os::admission::mark_waiting_with_command(
+            &waiting_scratch,
+            "build",
+            43,
+            Some(ID),
+            Some("cargo test --locked".into()),
+        )
+        .expect("waiting marker");
+        let waiter = running_lane(&waiting_scratch);
+        let waiting = project_lane_with_census(&waiter, &[], temp.path(), None, true, Err(()));
+        assert_eq!(
+            waiting.child_command.as_deref(),
+            Some("cargo test --locked"),
+            "{waiting:?}"
+        );
+        assert!(
+            waiting
+                .waiting_for
+                .as_deref()
+                .is_some_and(|reason| reason.contains("host build slot")),
+            "{waiting:?}"
+        );
+
+        let holding_scratch = temp.path().join("holding");
+        std::fs::create_dir_all(holding_scratch.join(provenant_os::admission::SHIM_DIRECTORY))
+            .expect("shim directory");
+        let holder_record = running_lane(&holding_scratch);
+        let holders = [provenant_os::admission::HeldInfo {
+            class: "build".into(),
+            slot: 2,
+            pid: 42,
+            start_unix_seconds: 0,
+            attempt_id: Some(ID.into()),
+            command: Some("cargo build --release".into()),
+        }];
+        let holding = project_lane_with_admission(
+            &holder_record,
+            &[],
+            temp.path(),
+            None,
+            true,
+            Err(()),
+            &holders,
+        );
+        assert_eq!(
+            holding.child_command.as_deref(),
+            Some("cargo build --release"),
+            "{holding:?}"
+        );
+    }
+
+    // Spec: docs/specs/cli.md#status-selection
+    #[test]
+    fn last_event_source_names_which_fallback_supplied_the_time() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let scratch = temp.path().join("scratch");
+        let mut lane = running_lane(&scratch);
+        lane.last_output_at = Some(WallTime::from_micros(2_000_000).expect("output time"));
+        lane.started_at = Some(WallTime::from_micros(1_000_000).expect("start time"));
+        let output = project_lane(&lane, &[], temp.path(), None, false);
+        assert_eq!(output.last_event_source, Some(LastEventSource::Output));
+
+        lane.last_output_at = None;
+        let started = project_lane(&lane, &[], temp.path(), None, false);
+        assert_eq!(started.last_event_source, Some(LastEventSource::Started));
+
+        lane.started_at = None;
+        let queued = project_lane(&lane, &[], temp.path(), None, false);
+        assert_eq!(queued.last_event_source, Some(LastEventSource::Queued));
+    }
 }

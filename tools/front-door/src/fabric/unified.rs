@@ -576,6 +576,11 @@ pub(crate) fn render_graph_status(rows: &[Value]) -> String {
             human.push_str(&digest.line);
             human.push('\n');
             append_status_warnings(&mut human, node);
+            // The digest line replaces the plain status line, but the newest
+            // attempt's liveness still belongs in the full human view.
+            if let Some(attempt) = attempt {
+                human.push_str(&liveness_detail(attempt));
+            }
             continue;
         }
         let name = attempt.map_or_else(|| plain(&node["id"]), |attempt| plain(&attempt["id"]));
@@ -613,16 +618,47 @@ fn plain(value: &Value) -> String {
     provenant_fabric_runtime::hosts::plain_text(value.as_str().unwrap_or(""), 1024)
 }
 
-/// One bounded detail line for a live attempt in `status --full`: its newest
-/// observed event, host-local attempt directory, masked current child command
-/// and known wait reason. Absent observations are simply omitted, never guessed.
+/// Whether an attempt row is settled. Lane projections carry `finished_at` for
+/// every terminal attempt; graph rows carry a terminal state. Everything else
+/// — pending, running, starting, settling and the liveness-overridden
+/// unattended/unknown states — is still worth a liveness line: a dead writer is
+/// exactly the case where the last-event time matters most.
+fn settled_attempt(attempt: &Value) -> bool {
+    if !attempt["finished_at"].is_null() {
+        return true;
+    }
+    matches!(
+        attempt["state"].as_str(),
+        Some(
+            "succeeded"
+                | "complete"
+                | "terminal"
+                | "failed"
+                | "blocked"
+                | "skipped"
+                | "unreadable"
+                | "unresolved"
+        )
+    )
+}
+
+/// One bounded detail line for an unsettled attempt in `status --full`: its
+/// newest observed event, host-local attempt directory, masked current child
+/// command and known wait reason. Absent observations are simply omitted, never
+/// guessed.
 fn liveness_detail(attempt: &Value) -> String {
-    if !StateRank::of(attempt["state"].as_str().unwrap_or("")).is_live() {
+    if settled_attempt(attempt) {
         return String::new();
     }
     let mut parts = Vec::new();
     if attempt["last_event_at"].is_string() {
-        parts.push(format!("last event {}", plain(&attempt["last_event_at"])));
+        let time = plain(&attempt["last_event_at"]);
+        let source = plain(&attempt["last_event_source"]);
+        if source.is_empty() {
+            parts.push(format!("last event {time}"));
+        } else {
+            parts.push(format!("last event {time} ({source})"));
+        }
     }
     if let Ok(path) = serde_json::from_value::<provenant_records::StructuredPathWire>(
         attempt["attempt_directory"].clone(),
@@ -3782,10 +3818,11 @@ mod tests {
 
     // Spec: docs/specs/cli.md#status-selection
     #[test]
-    fn full_status_liveness_detail_names_event_directory_command_and_wait() {
+    fn full_status_liveness_detail_names_event_source_directory_command_and_wait() {
         let attempt = json!({
             "state": "running",
             "last_event_at": "2026-11-20T10:00:00.000000Z",
+            "last_event_source": "output",
             "attempt_directory": {
                 "kind": "path",
                 "root": "/",
@@ -3796,7 +3833,7 @@ mod tests {
         });
         let detail = liveness_detail(&attempt);
         assert!(
-            detail.contains("last event 2026-11-20T10:00:00.000000Z"),
+            detail.contains("last event 2026-11-20T10:00:00.000000Z (output)"),
             "{detail}"
         );
         assert!(detail.contains("attempt /state/attempts/abc"), "{detail}");
@@ -3808,6 +3845,83 @@ mod tests {
 
         let settled = json!({"state": "succeeded", "child_command": "cargo build"});
         assert!(liveness_detail(&settled).is_empty());
+    }
+
+    // Spec: docs/specs/cli.md#status-selection
+    #[test]
+    fn full_status_shows_liveness_below_the_digest_line_for_a_running_attempt() {
+        let target = GraphTarget {
+            graph: "g".into(),
+            node: None,
+            attempt: None,
+        };
+        let mut rows = status_rows(&graph_snapshot(checkpoint("g")), &target);
+        super::status_keys(&mut rows, provenant_core::ProjectId::from_bytes([3; 16])).unwrap();
+        assert!(
+            !super::super::graph_status::node_digests(&rows).is_empty(),
+            "fixture must take the digest path"
+        );
+        let attempt = rows
+            .iter_mut()
+            .find(|row| row["kind"] == "attempt")
+            .unwrap();
+        attempt["state"] = json!("running");
+        attempt["last_event_at"] = json!("2026-11-20T10:01:00.000000Z");
+        attempt["last_event_source"] = json!("started");
+
+        let reading = render_graph_status(&rows);
+        assert!(
+            reading.contains("last event 2026-11-20T10:01:00.000000Z (started)"),
+            "{reading}"
+        );
+    }
+
+    // Spec: docs/specs/cli.md#status-selection
+    #[test]
+    fn full_status_shows_liveness_for_an_unattended_attempt() {
+        let target = GraphTarget {
+            graph: "g".into(),
+            node: None,
+            attempt: None,
+        };
+        let mut rows = status_rows(&graph_snapshot(checkpoint("g")), &target);
+        super::status_keys(&mut rows, provenant_core::ProjectId::from_bytes([3; 16])).unwrap();
+        let attempt = rows
+            .iter_mut()
+            .find(|row| row["kind"] == "attempt")
+            .unwrap();
+        attempt["state"] = json!("unattended");
+        attempt["presence"] = json!("unattended");
+        attempt["last_event_at"] = json!("2026-11-20T09:00:00.000000Z");
+        attempt["last_event_source"] = json!("output");
+
+        let reading = render_graph_status(&rows);
+        assert!(
+            reading.contains("last event 2026-11-20T09:00:00.000000Z (output)"),
+            "{reading}"
+        );
+    }
+
+    // Spec: docs/specs/cli.md#status-selection
+    #[test]
+    fn full_status_shows_no_liveness_for_a_settled_attempt() {
+        let target = GraphTarget {
+            graph: "g".into(),
+            node: None,
+            attempt: None,
+        };
+        let mut rows = status_rows(&graph_snapshot(checkpoint("g")), &target);
+        super::status_keys(&mut rows, provenant_core::ProjectId::from_bytes([3; 16])).unwrap();
+        let attempt = rows
+            .iter_mut()
+            .find(|row| row["kind"] == "attempt")
+            .unwrap();
+        attempt["state"] = json!("succeeded");
+        attempt["last_event_at"] = json!("2026-11-20T10:01:00.000000Z");
+        attempt["last_event_source"] = json!("output");
+
+        let reading = render_graph_status(&rows);
+        assert!(!reading.contains("last event"), "{reading}");
     }
 
     #[test]

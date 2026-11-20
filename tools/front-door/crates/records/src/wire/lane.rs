@@ -129,6 +129,7 @@ lane_row! {
         capabilities: Value => array(object(&[("name", string()), ("source", string())], &[]));
         attempt_directory: crate::StructuredPathWire => nullable(super::schema::worktree_path());
         child_command: String => nullable(string());
+        last_event_source: LastEventSource => nullable(choices(&["output", "started", "queued"]));
     }
 }
 
@@ -229,6 +230,9 @@ pub struct LaneProjectionFacts {
     pub transcript: Option<LaneTranscript>,
     /// Most recent observed activity event: last output, else launch, else queue.
     pub last_event_at: Option<provenant_core::WallTime>,
+    /// Which observation supplied `last_event_at`, so a quiet writer's stale
+    /// timestamp is not mistaken for a fresh heartbeat.
+    pub last_event_source: Option<LastEventSource>,
     /// Host-local attempt directory; never projected across a peer boundary.
     pub attempt_directory: Option<crate::StructuredPathWire>,
     /// Masked, bounded argv of the writer's current child command.
@@ -250,6 +254,15 @@ pub enum LanePresence {
     Unattended,
     Unknown,
     Settling,
+}
+
+/// Which observation supplied an attempt's newest event time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LastEventSource {
+    Output,
+    Started,
+    Queued,
 }
 
 fn project_route(route: Option<&crate::run::RouteRecord>) -> Value {
@@ -554,6 +567,7 @@ impl LaneRow {
             finished_at: json!(finished_at),
             last_output_at: json!(lane.last_output_at),
             last_event_at: json!(facts.last_event_at),
+            last_event_source: facts.last_event_source,
             runtime_deadline: json!(lane.runtime_deadline),
             overdue: facts.overdue,
             stale: facts.stale,

@@ -176,16 +176,23 @@ incomplete evidence and unreachable peers remain `unknown`; status does not
 mutate or schedule recovery.
 Unattended and settling rows name the scoped `provenant reconcile` action,
 which rechecks custody before settlement.
-`status NAME --full` gives each live attempt row its newest observed event time,
-its host-local attempt directory, the masked and bounded argv of the writer's
-current child command, and its wait reason when one is known. The event time is
+`status NAME --full` gives each unsettled attempt row its newest observed event
+time, its host-local attempt directory, the masked and bounded argv of the
+writer's current child command, and its wait reason when one is known. A dead
+or unobservable writer (`unattended`/`unknown`) is still shown, because the
+last-event time matters most there; a settled attempt is not. The event time is
 the most recent supervisor-observed activity, falling back to launch and then
-queue time: a run event carries a sequence, not a wall clock. Admission shims
-mask and bound the command before publishing a wait or a hold, so raw arguments
-never reach the state directory or a reader. A lane waiting for a repository's
-heavy-job lock reports both the reason and the command it is waiting to run,
-which distinguishes a wait from a hung writer. The attempt directory and child
-command stay host-local and never cross a peer boundary.
+queue time: a run event carries a sequence, not a wall clock. The line names
+which value supplied it — `output`, `started` or `queued` — so a quiet writer's
+old output is not mistaken for a fresh heartbeat. `child_command` is the
+admission-gated command: it is set only when the child went through the
+admission shim (a lane waiting for or holding a slot), not for an arbitrary
+writer. Admission shims mask and bound the command before publishing a wait or a
+hold, so raw arguments never reach the state directory or a reader. A lane
+waiting for a repository's heavy-job lock reports both the reason and the
+command it is waiting to run, which distinguishes a wait from a hung writer.
+The attempt directory and child command stay host-local and never cross a peer
+boundary.
 
 `adopt KIND:ID` takes custody of an external item; `release KIND:ID` records an
 explicit release. `fabric claim acquire|renew|verify|release` takes the same

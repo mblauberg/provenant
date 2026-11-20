@@ -40,7 +40,7 @@ pub use cancel::{
 pub use error::{CodeKind, EDGE_ERROR_CODES, EdgeErrorCode, error_schema};
 pub use lane::{
     LaneList, LanePresence, LaneProjectionFacts, LaneRow, LaneSettlement, LaneTranscript,
-    provider_seconds,
+    LastEventSource, provider_seconds,
 };
 pub use output::{ChunkBytes, CompositeChunk, OutputChunk, OutputData, ReviewerReceipt};
 
