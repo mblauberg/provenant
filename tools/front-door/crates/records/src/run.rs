@@ -1774,6 +1774,15 @@ impl SkippedRoute {
             reason.push_str("; ");
             reason.push_str(&next);
         }
+        // A monthly hold carries a trusted router assessment in `detail`.
+        // Preserve its window and sourced setting in refusal output while
+        // keeping arbitrary provider and OS details hidden for other causes.
+        if self.cause == Some(crate::RouteExclusionReason::PacingReserve)
+            && let Some((_, monthly)) = self.detail.split_once("monthly policy=")
+        {
+            reason.push_str("; monthly policy=");
+            reason.push_str(&crate::diagnostic::safe_text(monthly));
+        }
         let accounts = &self.skipped_accounts;
         if !accounts.is_empty() {
             reason.push_str("; accounts skipped: ");
@@ -2975,6 +2984,34 @@ pub struct RunEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pacing_reserve_refusal_names_monthly_window_and_sourced_knob() {
+        let mut skipped = SkippedRoute {
+            route: "opencode/gpt-go".into(),
+            kind: SkipKind::Unavailable,
+            cause: Some(crate::RouteExclusionReason::PacingReserve),
+            detail: "pacing reserve reached; monthly policy=Pace policy_source=configuration enabled=true source=configuration knob=domains.routing.pacing.monthly; window=thirty_day estimated_bp=9800 next_launch_bp=10000 budget_bp=9000; constrained".into(),
+            guard_resource: Some(crate::diagnostic::ResourceFact::PacingReserve {
+                percent: 10,
+                setting: crate::diagnostic::PacingReserveSetting::Account,
+                origin: crate::diagnostic::PacingSettingSource::Configuration,
+            }),
+            ..Default::default()
+        };
+        skipped.skipped_accounts.push(crate::SkippedAccount {
+            extra: Default::default(),
+            account: "OpenCode Go account".into(),
+            reason: crate::RouteExclusionReason::PacingReserve,
+        });
+
+        let text = skipped.describe();
+        assert!(text.contains("opencode/gpt-go"), "{text}");
+        assert!(text.contains("OpenCode Go account"), "{text}");
+        assert!(text.contains("window=thirty_day"), "{text}");
+        assert!(text.contains("domains.routing.pacing.monthly"), "{text}");
+        assert!(text.contains("source=configuration"), "{text}");
+    }
 
     #[test]
     fn a_pin_mismatch_has_its_own_honest_cause_text() {

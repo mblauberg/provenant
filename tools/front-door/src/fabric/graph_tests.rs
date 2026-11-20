@@ -1059,7 +1059,16 @@ mod graph_writer_admission_tests {
                 cause: Some(provenant_records::RouteExclusionReason::PacingReserve),
                 detail: "pacing reserve".into(),
             });
+        pacing.skipped_routes[0].detail = "monthly policy=Pace source=configuration knob=domains.routing.pacing.monthly; window=thirty_day".into();
+        pacing.skipped_routes[0].skipped_accounts.push(provenant_records::SkippedAccount {
+            extra: Default::default(), account: "Go account".into(), reason: provenant_records::RouteExclusionReason::PacingReserve,
+        });
         assert!(durable_launch_refusal(&[pacing.clone()]).is_some());
+        let refusal = launch_refusal(&[], std::slice::from_ref(&pacing)).ok_or("pacing refusal")?;
+        let wire = serde_json::to_string(&refusal)?;
+        for expected in ["codex/gpt-6-luna", "Go account", "window=thirty_day", "domains.routing.pacing.monthly", "source=configuration"] {
+            assert!(wire.contains(expected), "{wire}");
+        }
         assert!(durable_launch_refusal(&[pacing, lanes[0].clone()]).is_none());
         // child_reason is a Preparation refusal even though its cause names
         // access policy. Persist that exact producer shape and replay it.

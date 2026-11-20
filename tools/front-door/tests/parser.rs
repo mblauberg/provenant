@@ -584,6 +584,17 @@ fn config_set_reports_only_the_changed_effective_setting() -> Result {
 }
 
 #[test]
+fn config_set_accepts_documented_domain_settings() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    let key = "domains.routing.opencode_go.min_monthly_allowance_usd";
+    let output = rig.command(&["config", "set", key, "42", "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(result["data"]["effective"]["value"], 42);
+    Ok(())
+}
+
+#[test]
 // Spec: docs/specs/cli.md#results
 fn config_set_profile_reports_effective_source() -> Result {
     let rig = TestRig::new()?.without_state()?;

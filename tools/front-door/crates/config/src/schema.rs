@@ -501,6 +501,44 @@ pub fn dedicated_command(path: &str) -> Option<&'static str> {
     None
 }
 
+/// Apply the same editable schema to a single CLI setting. Registry knobs keep
+/// their existing parser; typed fields are decoded according to their owner.
+pub fn apply_edit<T: Serialize>(
+    edit: KnobEdit<'_>,
+    document: &mut DocumentMut,
+    config: &ResolvedConfig<T>,
+    sections: &DomainSections<T>,
+) -> Result<(), ConfigError> {
+    let (name, text) = match edit {
+        KnobEdit::Profile(_) => return edit.apply(document),
+        KnobEdit::Set { name, value } => (name, Some(value)),
+        KnobEdit::Unset(name) => (name, None),
+    };
+    if registry()?.knobs.contains_key(name) {
+        return edit.apply(document);
+    }
+    let editable = schema(config, sections, String::new())?;
+    let field = editable.fields.iter().find(|f| matches(&f.path, name));
+    let Some(field) = field else {
+        return edit.apply(document);
+    };
+    let value = match text {
+        None => Value::Null,
+        Some(text)
+            if matches!(
+                field.kind,
+                "string" | "enum" | "duration" | "size" | "cargo_target"
+            ) =>
+        {
+            Value::String(text.to_owned())
+        }
+        Some(text) => serde_json::from_str(text)
+            .map_err(|_| ConfigError::Refused(format!("{name}: invalid {} value", field.kind)))?,
+    };
+    let patch = Value::Object([(name.to_owned(), value)].into_iter().collect());
+    apply_patch(&patch, document, config, sections)
+}
+
 /// Apply a flat patch of `{"field": value}` to the document; a null value
 /// clears the field. Profile and knobs go through the knob editor; any other
 /// field must be one the schema lists, and the owning domain validates it when

@@ -172,6 +172,8 @@ pub(crate) enum EdgeError {
     HistoryTooLarge,
     #[error("{0}")]
     Display(String),
+    #[error("{0}")]
+    MonthlyPacing(String),
     #[error("quota report path is not UTF-8")]
     Path,
 }
@@ -360,7 +362,7 @@ pub(crate) fn reserve_allowance_launch(
         return Ok(None);
     }
     if assessment.constrained {
-        return Err(EdgeError::Display(assessment.detail));
+        return Err(EdgeError::MonthlyPacing(assessment.detail));
     }
     let scope = AccountScope {
         extra: Default::default(),
@@ -419,7 +421,7 @@ pub(crate) fn reserve_allowance_launch(
         return Ok(None);
     };
     if assessment.constrained {
-        return Err(EdgeError::Display(assessment.detail));
+        return Err(EdgeError::MonthlyPacing(assessment.detail));
     }
     next.allowance.record_launch(
         launch_id,
@@ -3105,6 +3107,7 @@ pub fn run(
                 EdgeError::Config(provenant_config::ConfigError::Read { .. }) => Outcome::Error,
                 EdgeError::Adapter
                 | EdgeError::Display(_)
+                | EdgeError::MonthlyPacing(_)
                 | EdgeError::Config(_)
                 | EdgeError::Quota(
                     QuotaError::Invalid(_) | QuotaError::Record(_) | QuotaError::NumberOutOfRange,
@@ -3346,17 +3349,24 @@ mod tests {
         assert!(reserve(&route, "attempt-c", &config).is_err()); // Same allowance across models.
         assert_eq!(read_cache(&roots)?[0].allowance.launches, 1);
         route.account_key = Some("other".into());
-        assert!(reserve(&route, "attempt-d", &config).is_err()); // Missing monthly cycle.
+        // Missing cycle evidence does not refuse a registered account; debt is retained.
+        reserve(&route, "attempt-d", &config)?;
+        assert!(
+            read_cache(&roots)?
+                .iter()
+                .any(|r| r.account.account_key == "other" && r.allowance.launches == 1)
+        );
+        route.account_key = Some("bypassed".into());
         let relaxed: provenant_routing::RoutingConfig =
             serde_json::from_value(serde_json::json!({
-                "pacing":{"accounts":{"cursor/other":{"monthly":{"enabled":false}}}}
+                "pacing":{"accounts":{"cursor/bypassed":{"monthly":{"enabled":false}}}}
             }))?;
         reserve(&route, "attempt-d", &relaxed)?;
         // Bypassed accounts never wait on a quota publication or book monthly debt.
         assert!(
             !read_cache(&roots)?
                 .iter()
-                .any(|r| r.account.account_key == "other")
+                .any(|r| r.account.account_key == "bypassed")
         );
         let held = directory.try_lock(OsStr::new("quota.lock"), LockMode::Exclusive)?;
         assert!(reserve(&route, "attempt-e", &relaxed)?.is_none());

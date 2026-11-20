@@ -339,10 +339,17 @@
             .diagnostics
             .launch_warnings
             .push("warning: pinned model is outside the configured provider scope".into());
+        preview.route.diagnostics.account_exclusions.push(
+            "OpenCode Go: pacing reserve reached; monthly policy=Pace source=host configuration knob=domains.routing.pacing.monthly; window=thirty_day next_launch_bp=10000 budget_bp=9000".into(),
+        );
         let text = super::resolved_text(&preview);
         assert!(!text.contains("PRIVATE_SENTINEL"), "{text}");
         assert!(!text.contains("Carry the task to completion"), "{text}");
         assert!(text.contains("warning: pinned model is outside the configured provider scope"));
+        assert!(text.contains("OpenCode Go"), "{text}");
+        assert!(text.contains("window=thirty_day"), "{text}");
+        assert!(text.contains("domains.routing.pacing.monthly"), "{text}");
+        assert!(text.contains("source=host configuration"), "{text}");
         Ok(())
     }
 
