@@ -44,6 +44,37 @@ fn leaf_change_selects_leaf_and_dependents() {
 }
 
 #[test]
+fn dependency_kind_change_selects_the_changed_member() {
+    let fixture = workspace();
+    let dir = fixture.path();
+    // Moving `leaf` from a normal to a dev dependency changes app's manifest
+    // dependency set without changing the lockfile's package set.
+    fs::write(
+        dir.join("app/Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dev-dependencies]\nleaf = { path = \"../leaf\" }\n",
+    )
+    .expect("edit app manifest");
+    let head = commit(dir, "change dependency kind");
+    let state = tempfile::tempdir().expect("state dir");
+    seed_state(state.path(), KEY, base_time());
+
+    let selection = select(
+        dir,
+        &fixture.base,
+        &head,
+        &Policy::default(),
+        state.path(),
+        KEY,
+        base_time(),
+    )
+    .expect("select");
+
+    assert!(!selection.full);
+    assert_eq!(selection.packages, ["app"]);
+    assert_eq!(selection.reason, Reason::Changed);
+}
+
+#[test]
 fn lockfile_or_toolchain_change_selects_full() {
     type Trigger = fn(&Path);
     type Acceptor = fn(&str) -> bool;

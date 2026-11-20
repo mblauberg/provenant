@@ -81,6 +81,8 @@ const LAYERS: &[(&str, &[&str])] = &[
             "sqlite",
         ],
     ),
+    // Affected-crate selection reads only workspace metadata; no internal edges.
+    ("select", &[]),
     ("sqlite", &["core", "os"]),
     ("fabric-store", &["core", "records", "os", "sqlite"]),
     (

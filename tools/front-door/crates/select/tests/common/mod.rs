@@ -17,6 +17,7 @@ use tempfile::TempDir;
 /// A named program keeps the process-creation site explicit and out of the
 /// literal `Command::new("git")` guard in the workspace policy test.
 const GIT_PROGRAM: &str = "git";
+const CARGO_PROGRAM: &str = "cargo";
 
 /// A clock well after the Unix epoch, shared by fixtures and seeded state.
 pub(super) fn base_time() -> SystemTime {
@@ -59,12 +60,16 @@ pub(super) fn workspace() -> Fixture {
     fs::write(dir.join("app/src/main.rs"), "fn main() { leaf::leaf(); }\n").expect("app source");
 
     // Generate a valid lockfile so a later lockfile edit stays parseable.
-    guppy::MetadataCommand::new()
-        .manifest_path(dir.join("Cargo.toml"))
+    let metadata = Command::new(CARGO_PROGRAM)
         .current_dir(dir)
-        .other_options(["--offline"])
-        .build_graph()
-        .expect("base metadata");
+        .args(["metadata", "--format-version", "1", "--offline"])
+        .output()
+        .expect("spawn cargo metadata");
+    assert!(
+        metadata.status.success(),
+        "base metadata failed: {}",
+        String::from_utf8_lossy(&metadata.stderr)
+    );
 
     git(dir, &["init", "-q"]);
     git(dir, &["add", "-A"]);
