@@ -292,6 +292,7 @@ pub(super) fn prepare_command(
         task,
         roots.state.as_path(),
     ));
+    launch_warnings.extend(spec.warnings.iter().cloned());
     apply_lane_capabilities(&mut spec.profile.spec, &task.access);
     let common_git_path = repository
         .as_ref()

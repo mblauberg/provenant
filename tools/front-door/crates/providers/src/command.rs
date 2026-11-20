@@ -131,6 +131,7 @@ fn prepare(
         cwd: input.cwd.to_owned(),
         setup,
         omitted_discovery,
+        warnings: Vec::new(),
         user_skills: Default::default(),
         tool_requirements: Default::default(),
         git_wrapper: Default::default(),
