@@ -681,6 +681,9 @@ pub struct GraphRunArgs {
     /// Pin a review to this pull request (host resolves its base and head)
     #[arg(long, value_name = "NUMBER", catalog_u64_range = 1..)]
     pub pr: Option<u64>,
+    /// Expected head for `--pr`: re-read the forge briefly, then refuse a persistent mismatch
+    #[arg(long, value_name = "SHA", requires = "pr")]
+    pub head: Option<String>,
     /// Advisory relative paths; empty or unset means the whole worktree; repeatable
     #[arg(long = "write-scope")]
     pub write_scope: Vec<String>,

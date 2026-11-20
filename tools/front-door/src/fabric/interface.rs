@@ -1310,7 +1310,7 @@ impl Factory {
             .resolve(template_name)
             .map_err(|_| invalid())?
             .accepts_review_range();
-        let review_subject = self.review_subject(input, review)?;
+        let review_subject = self.review_subject(input, review, &CancelToken::new())?;
         let idempotency_key = if let Some(subject) = &review_subject
             && name.is_some()
             && input
@@ -1802,7 +1802,10 @@ impl Factory {
         // Review ranges are launch controls: resolve them on the host before
         // admitting a graph, and bind immutable object IDs into its identity.
         let review_launch = declared.accepts_review_range();
-        let review_subject = self.review_subject(input, review_launch)?;
+        let review_subject = self.review_subject(input, review_launch, cancel)?;
+        let review_pin = review_subject
+            .as_ref()
+            .map(|subject| json!({"base":subject.base,"head":subject.head}));
         let git = provenant_os::git::git_executable();
         let mut resolved_head = review_subject.as_ref().map(|subject| subject.head.clone());
         let resolved_review_base = review_subject.as_ref().map(|subject| subject.base.clone());
@@ -2392,6 +2395,9 @@ impl Factory {
         let replayed = result["replayed"].as_bool().unwrap_or(false);
         if let Some(object) = result.as_object_mut() {
             object.remove("replayed");
+        }
+        if let Some(pin) = review_pin {
+            result["review_subject"] = pin;
         }
         result["warnings"] = json!(warnings);
         result["named"] = json!({
@@ -4543,6 +4549,13 @@ mod tests {
                         let changed_wait = factory.relay_document(&named, budget, &cancel)?;
                         assert_eq!(first["request_id"], changed_wait["request_id"]);
                     }
+                    // The launch receipt names the commit pair the review is pinned to.
+                    let mut launch = request.clone();
+                    launch["explain"] = json!(false);
+                    launch["name"] = json!("review-receipt-pin");
+                    let receipt = factory.graph_document(launch, budget, &cancel)?;
+                    assert_eq!(receipt["review_subject"]["base"], base);
+                    assert_eq!(receipt["review_subject"]["head"], head);
                 }
                 let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
                 let expanded = document.expanded(&factory.context.config.graph.limits)?;

@@ -656,6 +656,9 @@ fn run_input(
         if let Some(pr) = request.pr {
             input["pr"] = json!(pr);
         }
+        if let Some(head) = request.head {
+            input["head"] = json!(head);
+        }
         if let Some(base) = request.base {
             input["base"] = json!(base);
         }
@@ -990,6 +993,7 @@ mod tests {
             branch: None,
             base: None,
             pr: None,
+            head: None,
             write_scope: Vec::new(),
             over: Vec::new(),
             set: Vec::new(),
@@ -1009,6 +1013,17 @@ mod tests {
         request.pr = Some(7);
         let input = run_input_fixture(request).unwrap();
         assert_eq!(input["pr"], 7);
+    }
+
+    #[test]
+    fn review_head_reaches_host_launch_input() {
+        let mut request = run_request();
+        request.template = Some("review.correctness".into());
+        request.pr = Some(7);
+        request.head = Some("aabbccddeeff00112233445566778899aabbccdd".into());
+        let input = run_input_fixture(request).unwrap();
+        assert_eq!(input["pr"], 7);
+        assert_eq!(input["head"], "aabbccddeeff00112233445566778899aabbccdd");
     }
 
     #[test]
