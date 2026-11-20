@@ -1066,7 +1066,6 @@ fn main() -> Result<()> {
         let mut nonce = [0u8; 16];
         nonce.copy_from_slice(&Sha256::digest(args.root.as_os_str().as_encoded_bytes())[..16]);
         let mut spec = adapter.prepare(PrepareInput {
-            opencode_profile: provenant_config::OpenCodeProfile::Lane,
             images: &[],
             command: None,
             route: &route,

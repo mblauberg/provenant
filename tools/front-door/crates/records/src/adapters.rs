@@ -621,10 +621,6 @@ pub struct AdapterSpec {
     pub github_auth: Option<GithubAuth>,
     /// Supports launching a transferred interactive session.
     pub session_handoff: bool,
-    /// Lanes use the adapter's host profile and native session store instead of
-    /// an isolated lane home. The host service owns session identity, so a
-    /// continuation reuses the recorded host session rather than copying state.
-    pub host_profile: bool,
     /// Refresh an account token through the authorised credential broker at launch.
     pub launch_token_refresh: bool,
     /// Remove a duplicated complete answer from the provider stream.
@@ -907,7 +903,6 @@ adapter_specs! { $;
         refusal_revalidation_seconds: None,
         github_auth: Some(GithubAuth::Environment),
         session_handoff: true,
-        host_profile: false,
         launch_token_refresh: true,
         deduplicate_result: false,
         result_event_usage: true,
@@ -1021,7 +1016,6 @@ adapter_specs! { $;
         refusal_revalidation_seconds: None,
         github_auth: Some(GithubAuth::ShellEnvironment),
         session_handoff: false,
-        host_profile: false,
         launch_token_refresh: false,
         deduplicate_result: false,
         result_event_usage: false,
@@ -1140,7 +1134,6 @@ adapter_specs! { $;
         refusal_revalidation_seconds: None,
         github_auth: None,
         session_handoff: false,
-        host_profile: false,
         launch_token_refresh: false,
         deduplicate_result: false,
         result_event_usage: false,
@@ -1260,7 +1253,6 @@ adapter_specs! { $;
         refusal_revalidation_seconds: Some(300),
         github_auth: None,
         session_handoff: false,
-        host_profile: false,
         launch_token_refresh: false,
         deduplicate_result: true,
         result_event_usage: false,
@@ -1375,7 +1367,6 @@ adapter_specs! { $;
         refusal_revalidation_seconds: None,
         github_auth: None,
         session_handoff: false,
-        host_profile: true,
         launch_token_refresh: false,
         deduplicate_result: false,
         result_event_usage: false,
@@ -1466,7 +1457,6 @@ adapter_specs! { $;
         refusal_revalidation_seconds: None,
         github_auth: None,
         session_handoff: false,
-        host_profile: false,
         launch_token_refresh: false,
         deduplicate_result: false,
         result_event_usage: false,
@@ -1556,7 +1546,6 @@ adapter_specs! { $;
         refusal_revalidation_seconds: None,
         github_auth: None,
         session_handoff: false,
-        host_profile: false,
         launch_token_refresh: false,
         deduplicate_result: false,
         result_event_usage: false,
@@ -1645,7 +1634,6 @@ adapter_specs! { $;
         refusal_revalidation_seconds: None,
         github_auth: None,
         session_handoff: false,
-        host_profile: false,
         launch_token_refresh: false,
         deduplicate_result: false,
         result_event_usage: false,

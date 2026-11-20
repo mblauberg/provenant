@@ -277,12 +277,11 @@ sources. An absent optional setting leaves ordinary files, tools, local
 services and network access open. Capacity settings warn by default; a sourced
 configured stop remains distinct from a mandatory boundary refusal.
 
-OpenCode's `providers.opencode.profile = "host"` is an explicit exception for
-its profile directories: it points the client at the host's real XDG data,
-config, state and cache directories and grants the lane access to them, including
-their credential stores. The profile defaults to `host`; `lane` keeps the
-isolated per-attempt directories. Host mode attaches to the service when
-available, and the lane continues its sessions by the recorded session ID in
+OpenCode's profile follows `lanes.access`: `host` (the default) points the
+client at the host's real XDG data, config, state and cache directories and
+grants the lane access to them, including their credential stores; `isolated`
+keeps the private per-attempt directories. Host access attaches to the service
+when available, and the lane continues its sessions by the recorded session ID in
 the host store. If the prior session is unavailable in the selected host store, launch warns and
 starts a fresh session; without a service it warns and runs standalone on the host
 profile. The client needs loopback access to attach. Attached tools
@@ -290,8 +289,8 @@ execute in the host service process with the attempt worktree as their directory
 outside the lane's process confinement; standalone tools remain subject to the
 lane profile. Launch diagnostics report the effective profile and its source.
 
-Every credential declaration is enforced independently, except for an explicit
-profile choice such as OpenCode host mode above. An exception for an
+Every credential declaration is enforced independently, except for the host
+access choice above. An exception for an
 enclosing runtime, package or selected authentication root cannot open a nested
 declared store. Selected authentication and its exact aliases retain only their
 declared access. A lane cannot create a hard link to a file in a credential root, the shared

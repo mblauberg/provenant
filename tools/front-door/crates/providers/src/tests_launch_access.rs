@@ -73,7 +73,6 @@ pub(super) fn fixture_input<'a>(
 ) -> PrepareInput<'a> {
     let executable = std::path::Path::new("/opt/homebrew/Cellar/provider/1.0/bin/provider");
     PrepareInput {
-            opencode_profile: provenant_config::OpenCodeProfile::Lane,
         images: &[],
         command: None,
         route,
@@ -797,7 +796,7 @@ fn claude_read_only_adds_read_roots_outside_the_working_directory() -> Result<()
 }
 
 #[test]
-fn opencode_profiles_choose_host_service_or_private_standalone() -> Result<(), Box<dyn std::error::Error>> {
+fn opencode_profile_follows_lane_access() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let home = temp.path();
     let state = home.join("state");
@@ -819,12 +818,44 @@ fn opencode_profiles_choose_host_service_or_private_standalone() -> Result<(), B
         stream.write_all(b"HTTP/1.1 401 Unauthorized\r\n\r\n").expect("health response");
     });
     let prompt = Prompt::new("fixture prompt".into());
-    let route = route("opencode", "configured/model");
-    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
-    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    let base = fixture_access_plan(Access::ReadOnly, Some("login"), false);
+    let plan_for = |access: provenant_records::LaneAccess| {
+        use provenant_records::{LaneAccessReceipt, LaneAccessSource};
+        let mut permissions = base.permissions().clone();
+        let mut policy = provenant_confinement::run_config::RunConfig::default().policy_for_launch(
+            &state,
+            provenant_confinement::permissions::MandatoryRoots::new(
+                home,
+                &state,
+                Path::new("/fixture/repo"),
+            )?,
+        );
+        policy.mandatory_mut().set_lane_access(LaneAccessReceipt {
+            access,
+            source: LaneAccessSource::Default,
+            key: "lanes.access".into(),
+            extra: Default::default(),
+        });
+        permissions.policy = Some(policy);
+        provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
+            scope: base.scope(),
+            permissions,
+            codex: provenant_confinement::CodexPolicy::Clean,
+            extensions: provenant_confinement::ExtensionPolicy::Deny,
+            agy_state: None,
+        })
+    };
+    let mut route = route("opencode", "configured/model");
+    route.set_access(provenant_records::LaneAccess::Host);
+    let mut input = fixture_input(
+        &route,
+        &plan_for(provenant_records::LaneAccess::Host)?,
+        &prompt,
+        Path::new("/fixture/repo"),
+        None,
+    );
     input.home = home;
     input.host_var = &lookup;
-    input.opencode_profile = provenant_config::OpenCodeProfile::Host;
     let attached = opencode::OpenCode.prepare(input)?;
     server.join().expect("health server");
     for (key, name) in [("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"), ("XDG_STATE_HOME", "state"), ("XDG_CACHE_HOME", "cache")] {
@@ -834,22 +865,28 @@ fn opencode_profiles_choose_host_service_or_private_standalone() -> Result<(), B
     assert!(!attached.argv.iter().any(|arg| arg == "--standalone"));
     assert!(attached.profile.spec.loopback_server);
     std::fs::remove_file(state.join("opencode/service.json"))?;
-    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    let mut input = fixture_input(
+        &route,
+        &plan_for(provenant_records::LaneAccess::Host)?,
+        &prompt,
+        Path::new("/fixture/repo"),
+        None,
+    );
     input.home = home;
     input.host_var = &lookup;
-    input.opencode_profile = provenant_config::OpenCodeProfile::Host;
     let fallback = opencode::OpenCode.prepare(input)?;
     assert!(fallback.argv.iter().any(|arg| arg == "--standalone"));
     assert!(fallback.warnings.iter().any(|warning| warning.contains("host service unavailable")));
     assert_eq!(fallback.session_state, crate::SessionStateLocation::Native { root: home.join("data/opencode") });
-    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    route.set_access(provenant_records::LaneAccess::Isolated);
+    let lane_plan = plan_for(provenant_records::LaneAccess::Isolated)?;
+    let mut input = fixture_input(&route, &lane_plan, &prompt, Path::new("/fixture/repo"), None);
     input.home = home;
     input.host_var = &lookup;
-    input.opencode_profile = provenant_config::OpenCodeProfile::Lane;
     let lane = opencode::OpenCode.prepare(input)?;
     assert!(lane.argv.iter().any(|arg| arg == "--standalone"));
     assert_eq!(lane.session_state, crate::SessionStateLocation::AttemptPrivate);
-    let private = &plan.permissions().private_state.as_ref().expect("private state").path;
+    let private = &lane_plan.permissions().private_state.as_ref().expect("private state").path;
     assert_eq!(lane.env.iter().find(|(k, _)| k == "XDG_DATA_HOME").map(|(_, v)| Path::new(v)), Some(private.join("data").as_path()));
     Ok(())
 }

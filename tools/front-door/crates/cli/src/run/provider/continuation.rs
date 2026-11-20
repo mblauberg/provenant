@@ -5,12 +5,6 @@ use provenant_records::diagnostic::{
     ContinuationField as F, ContinuationGuard, ContinuationIssue as I, ContinuationRule as R,
 };
 
-/// Whether the adapter's declared registry facts put its sessions in the host
-/// profile's native store instead of lane-private state.
-fn uses_host_profile(adapter: &str) -> bool {
-    AdapterSpec::get(adapter).is_some_and(|spec| spec.host_profile)
-}
-
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ContinuationRequestError {
     #[error(
@@ -345,7 +339,10 @@ pub(super) fn continuation_for_policy(
         .join(prior.attempt_id.to_string())
         .join("provider-state");
     if let Some(current_root) = opencode_data_root {
-        if !uses_host_profile(&route.adapter) || !current_root.is_absolute() {
+        if !AdapterSpec::get(&route.adapter)
+            .is_some_and(|spec| spec.id == provenant_records::Harness::Opencode)
+            || !current_root.is_absolute()
+        {
             return Err(ContinuationError::Provider(
                 provenant_providers::ProviderError::UnknownIdentity,
             ));
@@ -366,7 +363,9 @@ pub(super) fn continuation_for_policy(
         provenant_providers::opencode::session_exists(current_root, session)?;
         return Ok(continuation);
     }
-    if uses_host_profile(&route.adapter) {
+    if AdapterSpec::get(&route.adapter)
+        .is_some_and(|spec| spec.id == provenant_records::Harness::Opencode)
+    {
         match super::observation::native_session_location_for_route(
             &prior_state,
             &route.adapter,
@@ -466,7 +465,8 @@ pub(super) fn prior_uses_native_session_state(
     provider: &str,
     provider_state: Option<&Path>,
 ) -> bool {
-    let host_profile_session = uses_host_profile(provider)
+    let host_profile_session = AdapterSpec::get(provider)
+        .is_some_and(|spec| spec.id == provenant_records::Harness::Opencode)
         && provider_state.is_some_and(|provider_state| {
             applied
                 .model

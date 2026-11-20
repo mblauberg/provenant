@@ -1363,7 +1363,6 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
     let prompt = Prompt::new("describe".into());
     let launch_policy = provenant_records::policy::Policy::default();
     let launch = provenant_providers::codex::Codex.prepare(PrepareInput {
-            opencode_profile: provenant_config::OpenCodeProfile::Lane,
         credential_roots: plan.permissions().credential_roots.clone(),
         images: &access.attachments,
         policy: &launch_policy,

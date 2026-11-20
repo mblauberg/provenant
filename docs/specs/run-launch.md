@@ -284,15 +284,15 @@ sandboxed lane. The credential inventory retains its exact socket boundary for
 isolated lanes; the host-access grant does not open its parent directory.
 - Why: a same-host lane can authenticate through the user's SSH agent.
 
-Provider `prepare` implementations for Codex, Cursor, Claude and Agy use the
-native home and session store under host access, including sandboxed launches.
-An explicitly selected account keeps its account-specific home to select that
-login. Claude uses native authentication there; isolated launches retain the
-managed token pipe and private configuration. `PrepareInput::stage_user_skills`
-copies and filters skills for isolated launches; native discovery reads the
-user's own skills and linked references directly. OpenCode keeps a private
-home linked to the host auth file, so it stages skills under host access too,
-without credential-classification filtering.
+Provider `prepare` implementations for every adapter, including OpenCode, use
+the native home and session store under host access, including sandboxed
+launches. OpenCode uses the host XDG profile and attaches to its service when
+available; isolated launches use its private per-attempt profile. An explicitly
+selected account keeps its account-specific home to select that login. Claude
+uses native authentication there; isolated launches retain the managed token
+pipe and private configuration. `PrepareInput::stage_user_skills` copies and
+filters skills for isolated launches; native discovery reads the user's own
+skills and linked references directly.
 
 `resolve_lane_access` gives an explicit launch, template or tier knob priority
 over route policy, then uses the host or project knob, then the default. The

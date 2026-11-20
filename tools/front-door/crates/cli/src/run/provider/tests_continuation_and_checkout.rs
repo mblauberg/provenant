@@ -714,7 +714,6 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
                 home.join(".codex"),
             )?;
             let launch = Codex.prepare(PrepareInput {
-                opencode_profile: provenant_config::OpenCodeProfile::Lane,
                 credential_roots: plan.permissions().credential_roots.clone(),
                 images: &[],
                 policy: &launch_policy,

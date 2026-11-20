@@ -224,19 +224,12 @@ pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Opt
     })
 }
 
-fn opencode_profile_message(
-    profile: provenant_config::OpenCodeProfile,
-    origin: Option<&provenant_config::Origin>,
-) -> String {
-    let source = match origin {
-        Some(provenant_config::Origin::User { .. }) => "host configuration",
-        _ => "compiled default",
-    };
-    let profile = match profile {
-        provenant_config::OpenCodeProfile::Host => "host",
-        provenant_config::OpenCodeProfile::Lane => "lane",
-    };
-    format!("OpenCode profile={profile} (providers.opencode.profile; source: {source})")
+fn opencode_access_message(access: &provenant_records::LaneAccessReceipt) -> String {
+    format!(
+        "OpenCode profile={} (lanes.access; source: {})",
+        access.access.as_str(),
+        access.source.as_str()
+    )
 }
 
 fn push_launch_warning(route: &mut ResolvedRoute, warning: impl Into<String>) {
@@ -4063,14 +4056,9 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(setup_skip(&label, error));
             continue;
         }
-        let opencode_profile = config
-            .providers
-            .get(adapter.id())
-            .map_or(provenant_config::OpenCodeProfile::Host, |settings| {
-                settings.profile
-            });
-        let opencode_host = adapter_spec.is_some_and(|spec| spec.host_profile)
-            && opencode_profile == provenant_config::OpenCodeProfile::Host;
+        let opencode_host = adapter_spec
+            .is_some_and(|spec| spec.id == provenant_records::Harness::Opencode)
+            && !lane_access.access.is_isolated();
         let opencode_homes = provenant_providers::opencode::host_xdg_homes(&home, &|key| {
             host_provider_var(registry, key)
         });
@@ -4093,7 +4081,7 @@ pub(super) fn prepare_candidates_inner(
             ) {
                 Ok(continuation) => Some(continuation),
                 Err(error)
-                    if adapter_spec.is_some_and(|spec| spec.host_profile)
+                    if opencode_host
                         && matches!(
                             error,
                             ContinuationError::Provider(
@@ -4582,7 +4570,6 @@ pub(super) fn prepare_candidates_inner(
             });
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
-                opencode_profile,
                 credential_roots: credential_roots.clone(),
                 images: &task.access.attachments,
                 policy: &launch_policy,
@@ -4708,12 +4695,7 @@ pub(super) fn prepare_candidates_inner(
         let native_root = match &spec.session_state {
             provenant_providers::SessionStateLocation::AttemptPrivate => None,
             provenant_providers::SessionStateLocation::Native { root }
-                if (!sandbox.effective
-                    || !lane_access.access.is_isolated()
-                    || (adapter_spec.is_some_and(|spec| spec.host_profile)
-                        && config.providers.get(adapter.id()).is_none_or(|settings| {
-                            settings.profile == provenant_config::OpenCodeProfile::Host
-                        })))
+                if (!sandbox.effective || !lane_access.access.is_isolated())
                     && root.is_absolute() =>
             {
                 Some(root.clone())
@@ -5217,11 +5199,8 @@ pub(super) fn prepare_candidates_inner(
                 .map(|tool| tool.receipt())
                 .collect(),
         ))?);
-        if adapter_spec.is_some_and(|spec| spec.host_profile) {
-            let message = opencode_profile_message(
-                opencode_profile,
-                config.origins.get("providers.opencode.profile"),
-            );
+        if adapter_spec.is_some_and(|spec| spec.id == provenant_records::Harness::Opencode) {
+            let message = opencode_access_message(&lane_access);
             let _ = writeln!(std::io::stderr().lock(), "{message}");
             for warning in spec.warnings.iter().chain(continuation_warning.iter()) {
                 let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
@@ -6003,18 +5982,22 @@ fn user_skills_exposure(
 
 #[cfg(test)]
 #[test]
-fn opencode_profile_message_reports_value_and_source() -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_config::{OpenCodeProfile, Origin};
-    let origin = Origin::User {
-        path: serde_json::from_value(serde_json::json!({"encoding":"utf8", "path":"config.toml"}))?,
-    };
-    let default = opencode_profile_message(OpenCodeProfile::Host, None);
-    assert!(default.contains("profile=host") && default.contains("source: compiled default"));
-    let configured = opencode_profile_message(OpenCodeProfile::Lane, Some(&origin));
-    assert!(
-        configured.contains("profile=lane") && configured.contains("source: host configuration")
-    );
-    Ok(())
+fn opencode_access_message_reports_value_and_source() {
+    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource};
+    let default = opencode_access_message(&LaneAccessReceipt {
+        access: LaneAccess::Host,
+        source: LaneAccessSource::Default,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    });
+    assert!(default.contains("profile=host") && default.contains("source: default"));
+    let configured = opencode_access_message(&LaneAccessReceipt {
+        access: LaneAccess::Isolated,
+        source: LaneAccessSource::Host,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    });
+    assert!(configured.contains("profile=isolated") && configured.contains("source: host"));
 }
 
 #[cfg(test)]
@@ -6144,7 +6127,6 @@ mod user_skills_tests {
                     route.set_user_skills(state != "off");
                     let launch_policy = provenant_records::policy::Policy::default();
                     let input = PrepareInput {
-                        opencode_profile: provenant_config::OpenCodeProfile::Lane,
                         credential_roots: provenant_core::CredentialRoots::for_home(&home),
                         route: &route,
                         provider_model: None,

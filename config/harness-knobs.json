@@ -39,7 +39,6 @@
       "providers.{provider}.update",
       "providers.{provider}.runtime_deadline_seconds",
       "providers.codex.clean_config",
-      "providers.opencode.profile",
       "gc.graph_checkpoint_days"
   ],
   "host_gc_settings": {
@@ -108,12 +107,6 @@
     "path": "providers.codex",
     "settings": {
       "clean_config": {"type": "bool", "default": false, "effect": "Suppress inherited Codex configuration for writers. Read-only execution always uses clean configuration."}
-    }
-  },
-  "host_opencode_settings": {
-    "path": "providers.opencode",
-    "settings": {
-      "profile": {"type": "enum", "allowed": "host or lane", "default": "host", "effect": "Select the host OpenCode profile or a private per-attempt profile."}
     }
   },
   "provider_updates": {

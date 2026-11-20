@@ -1484,6 +1484,14 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
             ),
         });
     }
+    if key == "providers.opencode.profile" {
+        return Ok(Finding {
+            rule: issue.rule.into(),
+            path: user_path()?,
+            line: issue.location.line,
+            message: format!("{key}: ignored; OpenCode profile follows lanes.access (host or isolated)"),
+        });
+    }
     if issue.rule == "unknown_key" {
         return Ok(Finding {
             rule: issue.rule.into(),

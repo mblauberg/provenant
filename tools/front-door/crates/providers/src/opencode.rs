@@ -246,7 +246,9 @@ fn prepare(
         input.policy,
         "OPENCODE_PREPARE_NONE",
     )?;
-    let host_profile = input.opencode_profile == provenant_config::OpenCodeProfile::Host;
+    // OpenCode's profile follows lane access: host access uses the host XDG
+    // profile and service; isolated access uses a private per-attempt profile.
+    let host_access = !config_isolated;
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "run".as_ref(),
@@ -264,7 +266,7 @@ fn prepare(
     let [config_home, data_home, state_home, cache_home] =
         host_xdg_homes(input.home, input.host_var);
     let service_available =
-        host_profile && service_reachable(&state_home.join("opencode/service.json"));
+        host_access && service_reachable(&state_home.join("opencode/service.json"));
     if !service_available {
         argv.push("--standalone".into());
     }
@@ -379,14 +381,9 @@ fn prepare(
     // or skills into the lane. Do not follow unrelated config links.
     let config_dir = config_home.join("opencode");
     let optional_start = runtime_reads.len();
-    if !host_profile
+    if config_isolated
         && let Ok(config_dir) = std::fs::canonicalize(&config_dir)
-        && (!config_isolated
-            || !provenant_confinement::refuses_lane_root(
-                &config_dir,
-                true,
-                &input.credential_roots,
-            ))
+        && !provenant_confinement::refuses_lane_root(&config_dir, true, &input.credential_roots)
         && let Ok(entries) = std::fs::read_dir(&config_dir)
     {
         runtime_reads.push(exact(&config_dir));
@@ -403,7 +400,7 @@ fn prepare(
             }
         }
     }
-    if config_isolated || !host_profile
+    if config_isolated
         && let Ok(config_dir) = std::fs::canonicalize(&config_dir)
         && provenant_confinement::refuses_lane_root(&config_dir, true, &input.credential_roots)
         && !omitted_discovery.iter().any(|entry| {
@@ -425,13 +422,13 @@ fn prepare(
         crate::launch::OmissionSource::ProviderConfig,
         &mut omitted_discovery,
     )?;
-    let authentication_roots = if host_profile {
+    let authentication_roots = if host_access {
         Vec::new()
     } else {
         vec![exact(host_data.join("auth.json"))]
     };
     runtime_reads.extend(skill_reads);
-    let mut setup = if host_profile {
+    let mut setup = if host_access {
         [&config_home, &data_home, &state_home, &cache_home]
             .into_iter()
             .map(|home| SetupStep::CreateDir(home.join("opencode")))
@@ -448,16 +445,15 @@ fn prepare(
     // Mirror ordinary provider settings as individual links. Lane-owned
     // instructions, hooks and skills use their own private paths.
     let private_config = private.join("config");
-    if !host_profile {
+    if !host_access {
         let private_opencode = private_config.join("opencode");
         setup.push(SetupStep::CreateDir(private_opencode.clone()));
         if let Ok(canonical) = std::fs::canonicalize(&config_dir)
-            && (!config_isolated
-                || !provenant_confinement::refuses_lane_root(
-                    &canonical,
-                    true,
-                    &input.credential_roots,
-                ))
+            && !provenant_confinement::refuses_lane_root(
+                &canonical,
+                true,
+                &input.credential_roots,
+            )
             && let Ok(entries) = std::fs::read_dir(&config_dir)
         {
             for entry in entries.flatten() {
@@ -481,7 +477,7 @@ fn prepare(
     // `shell` holds per-project shell state; the server creates its entry
     // while resolving the location, and refuses every request (HTTP 500)
     // when that mkdir is denied.
-    for name in if host_profile {
+    for name in if host_access {
         &[][..]
     } else {
         &["log", "storage", "snapshot", "shell"][..]
@@ -500,7 +496,7 @@ fn prepare(
         // and installs it there when absent. The lane sets XDG_CACHE_HOME to
         // its private state, whose grant already covers the read, so grant
         // exactly that binary for execution, alongside system grep.
-        let rg = if host_profile {
+        let rg = if host_access {
             cache_home.join("opencode/bin/rg")
         } else {
             private.join("cache/opencode/bin/rg")
@@ -527,7 +523,7 @@ fn prepare(
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         (
             "XDG_CONFIG_HOME".into(),
-            if host_profile {
+            if host_access {
                 config_home.clone()
             } else {
                 private_config
@@ -536,7 +532,7 @@ fn prepare(
         ),
         (
             "XDG_DATA_HOME".into(),
-            if host_profile {
+            if host_access {
                 data_home.clone()
             } else {
                 private_data
@@ -545,7 +541,7 @@ fn prepare(
         ),
         (
             "XDG_CACHE_HOME".into(),
-            if host_profile {
+            if host_access {
                 cache_home.clone()
             } else {
                 private.join("cache")
@@ -554,7 +550,7 @@ fn prepare(
         ),
         (
             "XDG_STATE_HOME".into(),
-            if host_profile {
+            if host_access {
                 state_home.clone()
             } else {
                 private.join("state")
@@ -562,12 +558,12 @@ fn prepare(
             .into_os_string(),
         ),
     ]);
-    if !host_profile {
+    if !host_access {
         env.push(("OPENCODE_CONFIG_CONTENT".into(), config.into()));
     }
     // No repository configuration or Claude Code files. Provenant's global
     // plugin is loaded from the private OpenCode config home.
-    for key in if host_profile {
+    for key in if host_access {
         &[][..]
     } else {
         &[
@@ -587,7 +583,7 @@ fn prepare(
         cwd: input.cwd.to_owned(),
         setup,
         omitted_discovery,
-        warnings: if host_profile && !service_available {
+        warnings: if host_access && !service_available {
             vec![
                 "OpenCode host service unavailable; running standalone with the host profile"
                     .into(),
@@ -600,7 +596,7 @@ fn prepare(
         git_wrapper: Default::default(),
         policy: input.policy.clone(),
         credential_roots: input.credential_roots.clone(),
-        session_state: if host_profile {
+        session_state: if host_access {
             crate::SessionStateLocation::Native {
                 root: host_data.clone(),
             }
@@ -616,7 +612,7 @@ fn prepare(
                 // The standalone server is a child copy of the same program.
                 allow_process_fork: true,
                 runtime_reads,
-                state_writes: if host_profile {
+                state_writes: if host_access {
                     [
                         config_home.join("opencode"),
                         host_data.clone(),

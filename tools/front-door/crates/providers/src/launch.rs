@@ -415,8 +415,6 @@ impl LaunchSpec {
 /// Frozen confinement policy and launch facts, compiled before launch by the
 /// composition edge. Paths must be canonical: providers never resolve them.
 pub struct PrepareInput<'a> {
-    /// Selected OpenCode profile for this launch.
-    pub opencode_profile: provenant_config::OpenCodeProfile,
     pub route: &'a ResolvedRoute,
     /// Provider-facing spelling for the invocation only. Route identity and
     /// continuation validation always use the canonical `route.model`.
@@ -539,9 +537,9 @@ impl PrepareInput<'_> {
     }
 
     pub(crate) fn stage_user_skills(&self) -> crate::StagedUserSkills {
-        // OpenCode keeps a private home linked to the host login, so it needs
-        // staging under host access too; other adapters discover skills natively.
-        if !self.isolated() && !(self.sandboxed() && self.route.adapter == "opencode") {
+        // Host access uses the native provider home and skill discovery; only
+        // isolated launches need a staged copy of the user's skills.
+        if !self.isolated() {
             return crate::StagedUserSkills::default();
         }
         let Some(source) = self
@@ -1324,15 +1322,9 @@ pub(crate) fn finalise_provider_env(
 /// Project the instruction content bound into this product build into each
 /// private harness configuration home, using only its install data. Host access
 /// uses the native home and must not require (or rewrite) a provider config
-/// variable that is no longer set; OpenCode keeps a private home, so it still
-/// receives the projection.
+/// variable that is no longer set; isolated launches receive the projection.
 fn lane_instructions(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<(), ProviderError> {
-    let host_profile = provenant_records::AdapterSpec::get(&input.route.adapter)
-        .is_some_and(|spec| spec.host_profile);
-    if !input.sandboxed()
-        || (!input.isolated() && !host_profile)
-        || (host_profile && input.opencode_profile == provenant_config::OpenCodeProfile::Host)
-    {
+    if !input.isolated() {
         return Ok(());
     }
     let Some(install) = provenant_records::AdapterSpec::get(&input.route.adapter)
@@ -1372,12 +1364,13 @@ fn lane_instructions(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<
 }
 
 /// Render Provenant's declared hooks into the isolated harness configuration.
-/// Native Claude uses its explicit settings file in scratch. OpenCode host
-/// mode and other native harnesses keep their
-/// install-managed host configuration untouched.
+/// Native Claude uses its explicit settings file in scratch. OpenCode under
+/// host access and other native harnesses keep their install-managed host
+/// configuration untouched.
 fn lane_hooks(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<bool, ProviderError> {
-    if input.route.adapter == "opencode"
-        && input.opencode_profile == provenant_config::OpenCodeProfile::Host
+    if !input.access().is_isolated()
+        && provenant_records::AdapterSpec::get(&input.route.adapter)
+            .is_some_and(|spec| spec.id == provenant_records::Harness::Opencode)
     {
         return Ok(true);
     }
