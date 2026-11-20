@@ -4571,9 +4571,11 @@ mod tests {
             setting: "128K".into(),
             source: provenant_records::LimitSource::Default,
         };
+        // Applying collection needs a private host state root, as in production.
+        let state = private_state();
         let mut refresh = || TargetProtection::default();
         collect_with_reservation(
-            home,
+            state.path(),
             home,
             limits(budget_bytes, 0),
             false,
