@@ -398,6 +398,7 @@ pub fn schema<T: Serialize>(
                 Kind::Fraction => "fraction",
                 Kind::CargoTarget => "cargo_target",
                 Kind::Size => "size",
+                Kind::Duration => "duration",
             },
             min: spec.min,
             max: spec.max,

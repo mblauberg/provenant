@@ -15,7 +15,7 @@ enum BudgetStep {
     Cleanup,
 }
 impl BudgetStep {
-    fn detail(self) -> &'static str {
+    const fn detail(self) -> &'static str {
         match self {
             Self::Selection => "seed_budget_selection",
             Self::Clone => "seed_budget_clone",
@@ -23,7 +23,7 @@ impl BudgetStep {
             Self::Cleanup => "seed_budget_cleanup",
         }
     }
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Selection => "generation selection",
             Self::Clone => "clone",
@@ -75,13 +75,21 @@ fn display_source(source: provenant_records::LimitSource) -> &'static str {
 /// The filesystem preparation edge samples time through the shared clock. One
 /// deadline is carried through one step; a fresh one starts at the next step.
 struct SeedBudget {
-    clock: SystemClock,
+    clock: Box<dyn Clock>,
     deadline: Deadline,
     step: BudgetStep,
 }
 impl SeedBudget {
     fn for_step(setting: &provenant_config::SeedBudgetSetting, step: BudgetStep) -> Self {
-        let clock = SystemClock::new();
+        Self::for_step_clock(Box::new(SystemClock::new()), setting, step)
+    }
+    /// Build a step against an injected clock. Tests advance the clock during
+    /// a slow clone to prove the next step starts with a fresh deadline.
+    fn for_step_clock(
+        clock: Box<dyn Clock>,
+        setting: &provenant_config::SeedBudgetSetting,
+        step: BudgetStep,
+    ) -> Self {
         let deadline = WaitBudget::up_to(
             clock.mono_now(),
             DurationMicros::from_micros(setting.micros),
@@ -110,11 +118,9 @@ impl SeedBudget {
     }
     #[cfg(test)]
     fn exhausted(step: BudgetStep) -> Self {
-        let clock = SystemClock::new();
-        let deadline = WaitBudget::nonblocking(provenant_core::MonoTime::from_micros(0)).deadline();
         Self {
-            clock,
-            deadline,
+            clock: Box::new(SystemClock::new()),
+            deadline: WaitBudget::nonblocking(provenant_core::MonoTime::from_micros(0)).deadline(),
             step,
         }
     }
@@ -750,14 +756,53 @@ fn seed_target_cancellable(
     before_clone: impl FnOnce(Option<u64>),
     clone: impl FnOnce(&Path, &provenant_os::fs::Directory, &SeedBudget) -> Result<(), &'static str>,
 ) -> Outcome {
-    // One configured budget, one deadline per step. A slow selection or clone
-    // no longer spends the time allowed to the other steps.
-    let setting = provenant_config::cargo_seed_budget(state)
-        .unwrap_or_else(|_| provenant_config::SeedBudgetSetting::compiled_default());
-    let selection = SeedBudget::for_step(&setting, BudgetStep::Selection);
-    // Cleanup runs after a step has spent its budget, so it always gets a fresh
-    // one rather than inheriting a spent deadline.
-    let fresh_cleanup = || SeedBudget::for_step(&setting, BudgetStep::Cleanup);
+    seed_target_cancellable_inner(
+        state,
+        cache,
+        compatibility,
+        cancel,
+        before_clone,
+        clone,
+        SeedBudget::for_step,
+    )
+}
+
+/// Same seeding flow, with the per-step budget construction injected. Production
+/// passes the real per-step builder; tests inject a clock-backed one so a slow
+/// clone can be simulated without waiting on the real clock.
+#[cfg(any(unix, test))]
+fn seed_target_cancellable_inner(
+    state: &Path,
+    cache: &Path,
+    compatibility: SeedCompatibility<'_>,
+    cancel: Option<&provenant_core::CancelToken>,
+    before_clone: impl FnOnce(Option<u64>),
+    clone: impl FnOnce(&Path, &provenant_os::fs::Directory, &SeedBudget) -> Result<(), &'static str>,
+    budget: impl Fn(&provenant_config::SeedBudgetSetting, BudgetStep) -> SeedBudget,
+) -> Outcome {
+    // One configured budget, one deadline per step. Cleanup, selection, clone
+    // and aging each start their own deadline when the step begins, so a slow
+    // step cannot spend another's time.
+    let setting = match provenant_config::cargo_seed_budget(state) {
+        Ok(setting) => setting,
+        Err(error) => {
+            use std::io::Write;
+            let path = state.join("config.toml");
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: could not read the Cargo seed budget from {}: {error}; using the compiled default {}",
+                path.display(),
+                provenant_config::CARGO_SEED_BUDGET_DEFAULT
+            );
+            provenant_config::SeedBudgetSetting::compiled_default()
+        }
+    };
+    // Cleanup runs before selection: give it its own deadline and create the
+    // selection deadline only afterwards, so time spent removing an interrupted
+    // stage is not charged to selection.
+    let cleanup = budget(&setting, BudgetStep::Cleanup);
+    // Cleanup after a clone or publish has spent its own budget gets a fresh one.
+    let fresh_cleanup = || budget(&setting, BudgetStep::Cleanup);
     use provenant_os::fs::{Directory, temporary_name};
     use std::ffi::{OsStr, OsString};
     let Ok(cache_dir) = Directory::open_anchor(cache) else {
@@ -778,8 +823,8 @@ fn seed_target_cancellable(
         return Outcome::fallback(fallback_reasons::STAGING_CLEANUP_FAILED);
     };
     for stage in stages {
-        if selection.expired() {
-            return Outcome::budget_fallback(BudgetStep::Selection.detail(), &setting);
+        if cleanup.expired() {
+            return Outcome::budget_fallback(BudgetStep::Cleanup.detail(), &setting);
         }
         if cancel.is_some_and(|token| token.is_cancelled()) {
             return Outcome::fallback(fallback_reasons::CANCELLED);
@@ -788,7 +833,7 @@ fn seed_target_cancellable(
             return Outcome::fallback(fallback_reasons::STAGING_CLEANUP_FAILED);
         };
         if stage.to_string_lossy().starts_with(".target-seed-") {
-            match remove_seed_tree(&cache_dir, &stage, cancel, &fresh_cleanup()) {
+            match remove_seed_tree(&cache_dir, &stage, cancel, &cleanup) {
                 Ok(true) => {}
                 Ok(false) => {
                     return if cancel.is_some_and(|token| token.is_cancelled()) {
@@ -801,6 +846,8 @@ fn seed_target_cancellable(
             }
         }
     }
+    // Selection starts only now: stage cleanup above has its own deadline.
+    let selection = budget(&setting, BudgetStep::Selection);
     let generations = crate::target_seed::store_path(state).join("generations");
     let Ok(entries) = std::fs::read_dir(generations) else {
         return Outcome::fallback(fallback_reasons::STORE_UNAVAILABLE);
@@ -931,14 +978,19 @@ fn seed_target_cancellable(
     if cache_dir.mkdir(&stage, 0o700).is_err() {
         return Outcome::fallback(fallback_reasons::STAGING_UNAVAILABLE);
     }
-    // Cloning and aging each start with their own full budget.
-    let cloning = SeedBudget::for_step(&setting, BudgetStep::Clone);
-    let aging = SeedBudget::for_step(&setting, BudgetStep::Aging);
+    let cloning = budget(&setting, BudgetStep::Clone);
+    // The size was measured once at publication; record whether this
+    // generation has one so a missing size is visible without a per-launch
+    // warning. Eviction accounting resumes when the seed is refreshed.
+    let size_recorded = selected.allocated_bytes.is_some();
     let result = (|| {
         let staging = cache_dir
             .open_verified_directory(&stage)
             .map_err(|_| fallback_reasons::STAGING_UNAVAILABLE)?;
         clone(&source, &staging, &cloning)?;
+        // Aging starts only after the clone returns: its deadline is a full
+        // budget from this moment, never whatever the clone left behind.
+        let aging = budget(&setting, BudgetStep::Aging);
         age_dep_info(&cache.join(&stage), &aging, cancel)?;
         // Publish only a complete private target.
         staging
@@ -964,7 +1016,13 @@ fn seed_target_cancellable(
                 project_match: selected.project_match,
             }),
             budget: None,
-            extra: Default::default(),
+            extra: if size_recorded {
+                Default::default()
+            } else {
+                let mut extra = provenant_records::ExtraFields::new();
+                extra.insert("size_recorded".into(), serde_json::json!(false));
+                extra
+            },
         },
         Err(reason) if is_budget_detail(reason) || reason == fallback_reasons::CANCELLED => {
             // The step's own budget or the token is spent; remove the partial
@@ -1407,6 +1465,193 @@ mod tests {
                 source: "compiled default".into(),
                 step: "clone".into(),
             })
+        );
+    }
+
+    /// A test clock shared by every step budget, whose monotonic reading only
+    /// moves when a test advances it. Clones of the handle share the reading,
+    /// so a slow clone can be simulated without a real-time wait.
+    #[derive(Clone)]
+    struct AdvancingClock(std::sync::Arc<std::sync::atomic::AtomicU64>);
+    impl AdvancingClock {
+        fn new() -> Self {
+            Self(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)))
+        }
+        fn advance(&self, micros: u64) {
+            self.0
+                .fetch_add(micros, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    impl provenant_core::Clock for AdvancingClock {
+        fn wall_now(&self) -> Result<provenant_core::WallTime, provenant_core::TimeError> {
+            provenant_core::WallTime::from_micros(0)
+                .map_err(|_| provenant_core::TimeError::WallRange)
+        }
+        fn mono_now(&self) -> provenant_core::MonoTime {
+            provenant_core::MonoTime::from_micros(self.0.load(std::sync::atomic::Ordering::SeqCst))
+        }
+        fn wait_until(
+            &self,
+            _deadline: provenant_core::MonoTime,
+        ) -> Result<(), provenant_core::TimeError> {
+            Ok(())
+        }
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn aging_starts_with_a_full_budget_after_a_slow_clone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        generation(&state, "001", "v1", "host");
+        let profile = provenant_config::LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .unwrap();
+        let clock = AdvancingClock::new();
+        let budget_clock = clock.clone();
+        let clone_clock = clock.clone();
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = seen.clone();
+        let outcome = seed_target_cancellable_inner(
+            &state,
+            &cache,
+            SeedCompatibility {
+                version: "v1",
+                triple: "host",
+                cargo_profile: &profile,
+                project_key: "",
+            },
+            None,
+            |_| {},
+            move |_, _, _| {
+                // Simulate a slow clone consuming most of the default 5m step.
+                clone_clock.advance(290 * 1_000_000);
+                Ok(())
+            },
+            move |setting, step| {
+                let budget =
+                    SeedBudget::for_step_clock(Box::new(budget_clock.clone()), setting, step);
+                recorded
+                    .borrow_mut()
+                    .push((step, budget.deadline.as_mono_time()));
+                budget
+            },
+        );
+        assert!(outcome.is_seeded(), "{outcome:?}");
+        let seen = seen.borrow();
+        let clone_at = seen
+            .iter()
+            .find(|(step, _)| *step == BudgetStep::Clone)
+            .map(|(_, at)| *at)
+            .expect("a clone budget");
+        let aging_at = seen
+            .iter()
+            .find(|(step, _)| *step == BudgetStep::Aging)
+            .map(|(_, at)| *at)
+            .expect("an aging budget");
+        // Aging's deadline was taken after the clone advanced the clock, so it
+        // starts a full budget later rather than inheriting the clone's spend.
+        assert_eq!(aging_at.as_micros() - clone_at.as_micros(), 290 * 1_000_000);
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn old_manifest_without_a_size_is_quiet_and_recorded_unmeasured() {
+        let profile = provenant_config::LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .unwrap();
+        // A generation published before allocated_bytes existed: the field is
+        // absent from the manifest and deserialises to None.
+        let mut old = serde_json::to_value(crate::target_seed::Manifest {
+            project_key: String::new(),
+            rustc_vv: "v1".into(),
+            host_triple: "host".into(),
+            commit: "abc".into(),
+            profile: "dev".into(),
+            cargo_profile: profile.clone(),
+            features: vec![],
+            flags: vec![],
+            allocated_bytes: Some(1),
+        })
+        .unwrap();
+        old.as_object_mut().unwrap().remove("allocated_bytes");
+        let manifest: crate::target_seed::Manifest = serde_json::from_value(old).unwrap();
+        assert_eq!(manifest.allocated_bytes, None);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        publish_generation(&state, "001", &manifest, None);
+        let reported = std::rc::Rc::new(std::cell::Cell::new(Some(1_u64)));
+        let seen = reported.clone();
+        let outcome = seed_target_cancellable(
+            &state,
+            &cache,
+            SeedCompatibility {
+                version: "v1",
+                triple: "host",
+                cargo_profile: &profile,
+                project_key: "",
+            },
+            None,
+            |bytes| reported.set(bytes),
+            |_, _, _| Ok(()),
+        );
+        assert!(outcome.is_seeded(), "{outcome:?}");
+        assert_eq!(seen.get(), None, "an old seed reserves no cache budget");
+        let record = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(record["size_recorded"], serde_json::json!(false));
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn knob_setting_and_source_flow_into_the_budget_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version = 1\n[knobs]\n\"lanes.cargo_seed_budget\" = '45s'\n",
+        )
+        .unwrap();
+        generation(&state, "001", "v1", "host");
+        let profile = provenant_config::LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .unwrap();
+        // An always-spent budget makes selection fall back without a real wait.
+        let outcome = seed_target_cancellable_inner(
+            &state,
+            &cache,
+            SeedCompatibility {
+                version: "v1",
+                triple: "host",
+                cargo_profile: &profile,
+                project_key: "",
+            },
+            None,
+            |_| {},
+            |_, _, _| panic!("an expired selection never clones"),
+            |_, step| SeedBudget::exhausted(step),
+        );
+        assert_eq!(outcome.reason, fallback_reasons::SEED_BUDGET_EXHAUSTED);
+        assert_eq!(
+            outcome.detail.as_deref(),
+            Some(BudgetStep::Selection.detail())
+        );
+        assert_eq!(outcome.budget.as_ref().unwrap().setting, "45s");
+        assert_eq!(outcome.budget.as_ref().unwrap().source, "host");
+        let warning = outcome
+            .fallback_warning("the Cargo target", "builds start cold")
+            .unwrap();
+        assert!(warning.contains("budget 45s (source host)"), "{warning}");
+        assert!(
+            warning.contains("ran out in generation selection"),
+            "{warning}"
         );
     }
 

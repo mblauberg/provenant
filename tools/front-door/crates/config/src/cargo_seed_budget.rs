@@ -65,8 +65,8 @@ pub fn resolve(state: &Path) -> std::io::Result<SeedBudgetSetting> {
     let settings = crate::loader::read_settings(state, "knobs", |settings: &Settings| {
         settings
             .value()
-            .map(parse_seconds)
-            .unwrap_or(Ok(0))
+            .map(|value| parse_seconds(value).map(|_| ()))
+            .unwrap_or(Ok(()))
             .map_err(|_| "invalid_value")
     })?;
     let (setting, source) = match settings.value() {
