@@ -54,6 +54,7 @@ mod providers;
 pub use providers::{
     OutOfScopePin, ProviderSettings, ProviderUpdate, defaults as provider_defaults,
 };
+pub mod detect;
 pub mod ports;
 mod project_binding;
 pub use ports::{
@@ -64,11 +65,11 @@ pub use ports::{
     PortCommandPublication, PortCommandReceipt, PortCommandReceiptCollectionLock,
     PortCommandReceiptEntry, PortCommandReceiptInventory, PortCommandReceiptProof, PortError,
     PortEvidenceError, PortExecution, PortReceiptIssue, PortReceiptLifetime, PortSource, PortTable,
-    VerifyPort, VerifySelection, VerifyTier, WorktreeLayoutPort, dispatch_port_backend,
-    execute_port_command, execute_port_command_with_input, infer_verify_base, land_backend,
-    port_command_environment, port_command_receipt_proof, port_command_receipts, port_source_layer,
-    record_port_command, remove_port_command_receipt, try_lock_port_command_receipts,
-    verify_base_unset_error,
+    TierCommand, VerifyPort, VerifySelection, VerifyTier, WorktreeLayoutPort,
+    dispatch_port_backend, execute_port_command, execute_port_command_with_input,
+    infer_verify_base, land_backend, port_command_environment, port_command_receipt_proof,
+    port_command_receipts, port_source_layer, project_key, project_key_for, record_port_command,
+    remove_port_command_receipt, try_lock_port_command_receipts, verify_base_unset_error,
 };
 mod release;
 pub mod repository_files;
@@ -116,7 +117,7 @@ pub use schema::{
     declared_enums, dedicated_command, probe_field, schema,
 };
 
-use serde::{Deserialize, Serialize, Serializer};
+use serde::Serialize;
 use std::{collections::BTreeMap, fmt, path::PathBuf};
 use thiserror::Error;
 
@@ -276,30 +277,6 @@ fn close_matches(close: &[String]) -> String {
         String::new()
     } else {
         format!("; did you mean {}?", close.join(", "))
-    }
-}
-
-/// Secret values can be decoded and used by their owner but every serialiser
-/// and Debug formatter emits a placeholder. Display/show cannot expose `T`.
-#[derive(Clone, PartialEq, Eq, Deserialize)]
-#[serde(transparent)]
-pub struct Redacted<T>(T);
-impl<T> Redacted<T> {
-    pub fn new(value: T) -> Self {
-        Self(value)
-    }
-    pub fn expose(&self) -> &T {
-        &self.0
-    }
-}
-impl<T> Serialize for Redacted<T> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str("[redacted]")
-    }
-}
-impl<T> fmt::Debug for Redacted<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("[redacted]")
     }
 }
 

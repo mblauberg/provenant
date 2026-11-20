@@ -16,10 +16,12 @@ fixture = [
 [dependencies]
 jiff = { workspace = true }
 provenant-os = { workspace = true }
+provenant-redact = { workspace = true }
 serde_json = { workspace = true }
 provenant-core = { workspace = true }
 provenant-records = { workspace = true }
 serde = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 toml_edit = { workspace = true }
 

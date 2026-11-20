@@ -355,29 +355,6 @@ impl InvalidInputDetail {
         Self::GraphReason(reason.to_string())
     }
 
-    /// The fact with any field path reduced to its disclosable form.
-    fn redacted(&self) -> Self {
-        let clean = |field: &String| safe_input_field(field).unwrap_or_default();
-        match self {
-            Self::RetryNode { graph, node } => Self::RetryNode {
-                graph: safe_retry_name(graph).unwrap_or("NAME").into(),
-                node: safe_retry_name(node).unwrap_or("NODE").into(),
-            },
-            Self::Field(path) => Self::Field(clean(path)),
-            Self::FieldDecode { field, missing } => Self::FieldDecode {
-                field: safe_decoded_field(field).unwrap_or_default(),
-                missing: *missing,
-            },
-            Self::FieldTooLarge { field, limit } => Self::FieldTooLarge {
-                field: clean(field),
-                limit: *limit,
-            },
-            Self::FieldTitle(field) => Self::FieldTitle(clean(field)),
-            Self::Parameter(refusal) => Self::Parameter(Box::new(refusal.bounded())),
-            other => other.clone(),
-        }
-    }
-
     /// Mutable text carried by a refusal until its destination applies the
     /// appropriate disclosure projection.
     pub(crate) fn strings_mut(&mut self) -> Vec<&mut String> {
@@ -415,26 +392,16 @@ impl InvalidInputDetail {
             // text. They are not approved facts, even when a secret scanner
             // does not recognise their contents.
             Self::OperationFailed => Some("graph operation failed".into()),
-            Self::GraphReason(reason) => Some(
-                safe_template_name_error(reason)
-                    .unwrap_or_else(|| "graph input could not be processed".into()),
-            ),
+            Self::GraphReason(reason) => Some(reason.clone()),
             Self::Parameter(refusal) => Some(refusal.bounded().to_string()),
             Self::GraphRelayCause(cause) => Some(cause.text().into()),
-            Self::RetryNode { graph, node } => {
-                if safe_retry_name(graph).is_some() && safe_retry_name(node).is_some() {
-                    Some(format!("select a node to retry with `provenant retry {graph}/{node}`"))
-                } else {
-                    Some("select a node to retry with `provenant retry NAME/NODE`".into())
-                }
-            }
+            Self::RetryNode { graph, node } => Some(format!("select a node to retry with `provenant retry {graph}/{node}`")),
 
             Self::UpgradeDrainRequired => Some("Finish or cancel old pending graphs and drain live lanes with the previous release before admitting new work.".into()),
             Self::CutoverFindings(findings) => Some(findings.clone()),
             Self::TemplateInvalid => Some("invalid input field `templates`: template could not be loaded or validated".into()),
             Self::Schema => Some("graph document schema_version is invalid".into()),
-            Self::UnresolvableBase(name) => safe_base_ref(name)
-                .map(|name| format!("unresolvable base `{name}`")),
+            Self::UnresolvableBase(name) => Some(format!("unresolvable base `{name}`")),
             Self::InputUnreadable => {
                 Some("input file is unreadable or is not a regular file".into())
             }
@@ -445,83 +412,22 @@ impl InvalidInputDetail {
                 let bound = crate::config::GraphLimits::document_bytes_bound();
                 Some(format!("limits.{}={} reached; set by {}", bound.name, bound.maximum, bound.owner))
             }
-            Self::Field(path) => {
-                safe_input_field(path).map(|path| format!("invalid input field `{path}`"))
-            }
-            Self::FieldDecode { field, missing } => safe_decoded_field(field).map(|path| {
-                format!("invalid input field `{path}`: {}", if *missing { "required field is missing" } else { "invalid type or value" })
-            }),
-            Self::FieldTooLarge { field, limit } => safe_input_field(field)
-                .map(|path| format!("invalid input field `{path}`: exceeds {limit} bytes")),
-            Self::FieldTitle(field) => safe_input_field(field).map(|path| format!("invalid input field `{path}`: task title must be 1 to 256 bytes and contain no control characters")),
+            Self::Field(path) => Some(format!("invalid input field `{path}`")),
+            Self::FieldDecode { field, missing } => Some(format!("invalid input field `{field}`: {}", if *missing { "required field is missing" } else { "invalid type or value" })),
+            Self::FieldTooLarge { field, limit } => Some(format!("invalid input field `{field}`: exceeds {limit} bytes")),
+            Self::FieldTitle(field) => Some(format!("invalid input field `{field}`: task title must be 1 to 256 bytes and contain no control characters")),
         }
     }
 }
 
-fn safe_retry_name(name: &str) -> Option<&str> {
-    (!name.is_empty()
-        && name.len() <= 128
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')))
-    .then_some(name)
-}
-
-// Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
 #[test]
-fn retry_node_suggestion_redacts_unsafe_names() -> Result<(), Box<dyn std::error::Error>> {
+fn retry_node_suggestion_keeps_names() -> Result<(), Box<dyn std::error::Error>> {
     let detail = InvalidInputDetail::RetryNode {
-        graph: "graph".into(),
-        node: "secret\nvalue".into(),
+        graph: "graph name".into(),
+        node: "node[1]".into(),
     };
-    let wire = serde_json::to_string(&detail.redacted())?;
-    assert!(!wire.contains("secret"));
-    assert!(
-        detail
-            .safe_text()
-            .is_some_and(|message| message.contains("NAME/NODE"))
-    );
+    assert!(detail.safe_text().unwrap().contains("graph name/node[1]"));
     Ok(())
-}
-
-/// Template lookup failures are safe to disclose only in the exact form the
-/// resolver constructs, with every name still inside its declared grammar.
-fn safe_template_name_error(reason: &str) -> Option<String> {
-    let message = reason
-        .find("unknown template ")
-        .map(|offset| &reason[offset..])?;
-    let (unknown, remainder) = message
-        .strip_prefix("unknown template ")?
-        .split_once("; ")?;
-    if !crate::graph::template::valid_template_name(unknown)
-        || crate::graph::patch::scan_for_secrets(unknown).is_err()
-    {
-        return None;
-    }
-    if remainder == "no known templates are available" {
-        return Some(message.to_owned());
-    }
-    if let Some(base) = remainder
-        .strip_prefix("base template ")
-        .and_then(|base| base.strip_suffix(" has no known flavours"))
-    {
-        return crate::graph::template::valid_template_name(base).then(|| message.to_owned());
-    }
-    let remainder = remainder.strip_prefix("known ")?;
-    let (known, names) = remainder.split_once(": ")?;
-    let known = known.strip_suffix(" flavours").unwrap_or(known);
-    if known != "templates" && !crate::graph::template::valid_template_name(known) {
-        return None;
-    }
-    let names = names.split(", ").collect::<Vec<_>>();
-    if names.is_empty()
-        || names
-            .iter()
-            .any(|name| !crate::graph::template::valid_template_name(name))
-    {
-        return None;
-    }
-    Some(message.to_owned())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
@@ -595,20 +501,18 @@ pub enum FacadeError {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resource: Option<provenant_records::diagnostic::ResourceFact>,
     },
-    /// A writer bind refused because another lease holds the worktree. Holder
-    /// facts are local-only: peers receive the typed code and repair action,
-    /// never an unanchored worktree path.
+    /// A writer bind refused because another lease holds the worktree.
     #[error("writer lease held{}", .holder.map_or_else(String::new, |holder| format!(" by {holder}")))]
     WriterLeaseHeld {
-        #[serde(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         holder: Option<AttemptId>,
-        #[serde(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
-        #[serde(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         worktree: Option<String>,
-        #[serde(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         age: Option<String>,
-        #[serde(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         live: Option<bool>,
     },
     /// A typed run refusal with no richer facade projection. It carries the
@@ -904,15 +808,14 @@ fn directory_security_diagnostic(
     path: &std::path::Path,
     mode: u32,
     owner_matches: bool,
-    destination: provenant_records::diagnostic::Destination<'_>,
+    destination: provenant_records::diagnostic::Destination,
     label: &str,
 ) -> provenant_records::diagnostic::Diagnostic {
-    use provenant_records::diagnostic::{Diagnostic, safe_path, shell_path};
+    use provenant_records::diagnostic::{Diagnostic, shell_path};
     let exposed = mode & 0o077 != 0;
-    let detail = safe_path(path, destination).map_or_else(
-        || state_directory_security_detail(label, None, mode, owner_matches, exposed),
-        |path| state_directory_security_detail(label, Some(&path), mode, owner_matches, exposed),
-    );
+    let path_display = path.to_string_lossy();
+    let detail =
+        state_directory_security_detail(label, Some(&path_display), mode, owner_matches, exposed);
     let action = shell_path(path, destination).map_or_else(
         || {
             if owner_matches {
@@ -941,7 +844,7 @@ impl FacadeError {
     /// their owning error path and are not reclassified here.
     pub fn project_binding_directory_diagnostic(
         error: &provenant_config::ConfigError,
-        destination: provenant_records::diagnostic::Destination<'_>,
+        destination: provenant_records::diagnostic::Destination,
     ) -> Option<provenant_records::diagnostic::Diagnostic> {
         let provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
             path,
@@ -964,7 +867,7 @@ impl FacadeError {
     pub fn state_directory_permissions(
         path: &std::path::Path,
         mode: u32,
-        destination: provenant_records::diagnostic::Destination<'_>,
+        destination: provenant_records::diagnostic::Destination,
     ) -> provenant_records::diagnostic::Diagnostic {
         Self::state_directory_security(path, mode, true, destination)
     }
@@ -974,7 +877,7 @@ impl FacadeError {
         path: &std::path::Path,
         mode: u32,
         owner_matches: bool,
-        destination: provenant_records::diagnostic::Destination<'_>,
+        destination: provenant_records::diagnostic::Destination,
     ) -> provenant_records::diagnostic::Diagnostic {
         directory_security_diagnostic(
             path,
@@ -1123,8 +1026,7 @@ impl FacadeError {
             }
             Self::InvalidInput { detail: Some(InvalidInputDetail::GraphReason(reason)) }
             | Self::GraphRelayRefused { detail: Some(InvalidInputDetail::GraphReason(reason)), .. } => {
-                let detail = safe_template_name_error(reason)
-                    .unwrap_or_else(|| "graph input could not be processed".into());
+                let detail = reason.clone();
                 let next = if detail.starts_with("unknown template ") {
                     "use one of the listed template names and retry"
                 } else {
@@ -1175,7 +1077,7 @@ impl FacadeError {
                     .next("remove the cyclic dependency and retry");
             }
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphPlan), reason, .. } => {
-                let reason = safe_graph_plan_reason(&provenant_core::bounded_line(reason, 4096));
+                let reason = reason.clone();
                 let next = if reason.contains("writer worktree") {
                     "provide --worktree PATH, or --branch B --base REF"
                 } else {
@@ -1352,226 +1254,13 @@ impl FacadeError {
     }
 }
 
-/// Graph validator reasons are static contract text. Keep their useful words
-/// while refusing control characters and bounding malformed remote values.
-fn safe_graph_plan_reason(reason: &str) -> String {
-    let safe: String = reason
-        .chars()
-        .filter(|character| {
-            character.is_ascii_alphanumeric()
-                || matches!(character, ' ' | '_' | '-' | '.' | ':' | '[' | ']' | '`')
-        })
-        .take(1024)
-        .collect();
-    if safe.is_empty() {
-        "graph plan validator refused the named node".into()
-    } else {
-        safe
-    }
-}
-
-/// The ": reason" suffix of an invalid-input message, control characters
-/// escaped so a detail echoing caller text cannot forge terminal output.
+/// The detail suffix of an invalid-input message.
 fn invalid_detail(detail: &Option<InvalidInputDetail>) -> String {
     detail
         .as_ref()
         .and_then(InvalidInputDetail::safe_text)
         .map(|detail| format!(": {detail}"))
         .unwrap_or_default()
-}
-
-// Refs are caller input and actionable, but cannot contain terminal controls
-// or quoting characters when disclosed in diagnostics or on the peer wire.
-fn safe_base_ref(name: &str) -> Option<&str> {
-    (!name.is_empty()
-        && name.len() <= 256
-        && name.bytes().all(|b| {
-            b.is_ascii_alphanumeric()
-                || matches!(
-                    b,
-                    b'/' | b'.' | b'_' | b'-' | b'~' | b'^' | b'@' | b'{' | b'}'
-                )
-        }))
-    .then_some(name)
-}
-
-/// Fields whose children are caller-chosen map keys rather than schema names.
-/// A decode path stops at one of these: nothing beneath it is disclosed.
-const MAP_KEY_PARENTS: [&str; 12] = [
-    "set",
-    "templates",
-    "parameters",
-    "capability_sources",
-    "extra",
-    "env",
-    "commands",
-    "host_native",
-    "home_hosts",
-    "peers",
-    "projects",
-    "ci_poll_overrides",
-];
-
-/// Whether `name` is a field whose children are user-chosen map keys.
-pub fn is_map_key_parent(name: &str) -> bool {
-    MAP_KEY_PARENTS.contains(&name)
-}
-
-/// A bounded decoder-derived path safe to disclose: snake_case schema field
-/// names and indexes only. It ends at a user map field, so no key can appear;
-/// a path that continues beneath one is refused. A supplied value is never
-/// part of a path.
-pub(super) fn safe_decoded_field(field: &str) -> Option<String> {
-    if field.is_empty() || field.len() > 128 {
-        return None;
-    }
-    let mut after_map = false;
-    let mut rest = field;
-    while !rest.is_empty() {
-        if let Some(tail) = rest.strip_prefix('[') {
-            let (index, tail) = tail.split_once(']')?;
-            if after_map || index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            rest = tail;
-            continue;
-        }
-        let tail = rest.strip_prefix('.').unwrap_or(rest);
-        let end = tail.find(['.', '[']).unwrap_or(tail.len());
-        let (part, tail) = tail.split_at(end);
-        if after_map
-            || part.is_empty()
-            || !part
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-        {
-            return None;
-        }
-        after_map = is_map_key_parent(part);
-        rest = tail;
-    }
-    Some(field.to_owned())
-}
-
-/// Allowlist for paths written by hand in code (not derived from a decoder).
-pub(super) fn safe_input_field(field: &str) -> Option<String> {
-    let allowed = [
-        "scope",
-        "use",
-        "brief",
-        "over",
-        "set",
-        "node",
-        "by",
-        "tier",
-        "templates",
-        "read_roots",
-        "op",
-        "source_head",
-        "paths",
-        "path",
-        "key",
-        "task",
-        "context",
-        "title",
-        "prompt",
-        "base",
-        "head",
-        "account",
-        "worktree",
-        "deliver",
-        "remote",
-        "branch",
-        "integration_branch",
-        "schema_version",
-        "action",
-        "commit",
-        "graph_context",
-        "max_nodes",
-        "node_id",
-        "part",
-        "source",
-        "limits",
-        "delivery",
-        "review_base",
-        "decision_session",
-        "retry",
-        "exclude",
-        "network",
-        "capability",
-        "no_capability",
-        "route",
-        "adapter",
-        "provider",
-        "model",
-        "effort",
-        "timeout_seconds",
-        "knobs",
-        "session",
-        "recipients",
-        "after",
-        "through",
-        "state",
-        "extend",
-        "id",
-        "reason",
-        "concurrency",
-        "targets",
-        "max_bytes",
-        "wait_seconds",
-        "plan",
-        "patch",
-        "write_scope",
-        "operation_id",
-        "artifacts",
-        "artifact",
-        "limit",
-        "document",
-        "target",
-        "condition",
-        "proof",
-        "reference",
-        "body",
-        "note",
-        "name",
-        "host",
-        "attempt",
-        "nodes",
-        "graph_id",
-        "access",
-        "placement",
-        "cloud",
-        "environment",
-        "repository",
-        "deadline_seconds",
-        "provider_timeout",
-        "confidential",
-        "capabilities",
-        "build_heavy",
-        "local_cargo",
-        "ci_scope",
-        "preset",
-        "isolation",
-        "receipts",
-        "write_roots",
-        "digest",
-        "encoding",
-        "generation",
-        "expected",
-        "replace",
-    ];
-    if field.len() <= 128
-        && field.bytes().all(|b| {
-            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'[' | b']')
-        })
-        && field
-            .split(['.', '[', ']'])
-            .filter(|part| !part.is_empty())
-            .all(|part| part.bytes().all(|b| b.is_ascii_digit()) || allowed.contains(&part))
-    {
-        return Some(field.to_owned());
-    }
-    None
 }
 
 // Keep source text and its independently typed fact together until the peer
@@ -1589,13 +1278,7 @@ mod invalid_detail_wire {
             && let Some(text) = fact.safe_text()
         {
             map.serialize_entry("detail", &text)?;
-            let safe_fact = match fact {
-                InvalidInputDetail::GraphReason(reason) => InvalidInputDetail::GraphReason(
-                    super::safe_template_name_error(reason).unwrap_or_default(),
-                ),
-                fact => fact.redacted(),
-            };
-            map.serialize_entry("detail_fact", &safe_fact)?;
+            map.serialize_entry("detail_fact", fact)?;
         }
         map.end()
     }
@@ -1856,102 +1539,14 @@ mod diagnostic_tests {
     }
 
     #[test]
-    fn graph_reason_wire_contains_only_disclosed_text() -> Result<(), Box<dyn std::error::Error>> {
-        // Spec: docs/specs/cli.md#template-name-errors
-        for reason in [
-            "sk-abcdefghijklmnopqrstuvwx".to_owned(),
-            "PROMPT_SENTINEL unclassified source text".to_owned(),
-            "line\ncontrol\u{1b}".to_owned(),
-            "long".repeat(4096),
-        ] {
-            let error = FacadeError::invalid(super::InvalidInputDetail::graph_reason(&reason));
-            let wire = serde_json::to_value(&error)?;
-            let text = wire["detail"].as_str().ok_or("detail")?;
-            let fact = wire["detail_fact"]["value"].as_str().ok_or("fact")?;
-            assert_eq!(text, "graph input could not be processed");
-            assert!(fact.is_empty());
-            assert!(!fact.chars().any(char::is_control));
-            assert!(fact.chars().count() <= 4096);
-            assert!(!serde_json::to_string(&wire)?.contains("sk-abcdefghijklmnopqrstuvwx"));
-            assert!(!serde_json::to_string(&wire)?.contains("PROMPT_SENTINEL"));
-        }
-        let error = FacadeError::invalid(super::InvalidInputDetail::graph_reason(
-            "node review: unknown template review.reliability; known review flavours: review.adversarial, review.correctness, review.contract, review.design, review.security, review.synthesis, review.tests, review.verify",
-        ));
+    fn graph_reason_wire_preserves_text() -> Result<(), Box<dyn std::error::Error>> {
+        let reason = "node review: parser rejected value [fixture]";
+        let error = FacadeError::invalid(super::InvalidInputDetail::graph_reason(reason));
         let wire = serde_json::to_value(&error)?;
-        assert_eq!(
-            wire["detail"],
-            "unknown template review.reliability; known review flavours: review.adversarial, review.correctness, review.contract, review.design, review.security, review.synthesis, review.tests, review.verify"
-        );
-        assert!(
-            error
-                .diagnostic()
-                .detail
-                .as_deref()
-                .unwrap_or_default()
-                .contains("review.reliability")
-        );
-
-        let library = crate::graph::template::TemplateLibrary::bundled();
-        let distant = library
-            .resolve("a-distant-but-valid-template-name")
-            .unwrap_err();
-        assert!(
-            distant.starts_with(
-                "unknown template a-distant-but-valid-template-name; known templates: "
-            )
-        );
-        let projected = FacadeError::invalid(super::InvalidInputDetail::graph_reason(format!(
-            "node task: {distant}"
-        )));
-        assert_eq!(
-            projected.diagnostic().detail.as_deref(),
-            Some(distant.as_str())
-        );
-
-        let no_flavours = library.resolve("task.some-flavour").unwrap_err();
-        assert_eq!(
-            no_flavours,
-            "unknown template task.some-flavour; base template task has no known flavours"
-        );
-        let projected = FacadeError::invalid(super::InvalidInputDetail::graph_reason(format!(
-            "node task: {no_flavours}"
-        )));
-        assert_eq!(
-            projected.diagnostic().detail.as_deref(),
-            Some(no_flavours.as_str())
-        );
-        let wire = serde_json::to_value(&projected)?;
-        assert_eq!(wire["detail"], no_flavours);
+        assert_eq!(wire["detail"], reason);
+        assert_eq!(wire["detail_fact"]["value"], reason);
+        assert_eq!(error.diagnostic().detail.as_deref(), Some(reason));
         Ok(())
-    }
-
-    #[test]
-    fn an_unresolvable_base_is_named_but_unsafe_text_is_not() {
-        use super::InvalidInputDetail;
-        let named = FacadeError::invalid(InvalidInputDetail::UnresolvableBase(
-            "refs/heads/batch/graph".into(),
-        ));
-        assert_eq!(
-            named.diagnostic().detail.as_deref(),
-            Some("unresolvable base `refs/heads/batch/graph`")
-        );
-        let encoded = serde_json::to_value(&named).expect("encode error");
-        let decoded: FacadeError = serde_json::from_value(encoded).expect("decode error");
-        assert_eq!(decoded, named);
-        for name in ["x\u{1b}[31m", "x`forged", "", &"x".repeat(257)] {
-            let forged = FacadeError::invalid(InvalidInputDetail::UnresolvableBase(name.into()));
-            assert_eq!(forged.diagnostic().detail, None);
-            assert_eq!(
-                serde_json::to_value(&forged).expect("encode error")["detail"],
-                serde_json::Value::Null
-            );
-            let incoming: FacadeError = serde_json::from_value(serde_json::json!({
-                "code": "invalid_input", "detail": format!("unresolvable base `{name}`")
-            }))
-            .expect("decode peer error");
-            assert_eq!(incoming, FacadeError::InvalidInput { detail: None });
-        }
     }
 
     #[test]
@@ -2037,16 +1632,9 @@ mod diagnostic_tests {
         let path = std::path::Path::new("/private/a b");
         let local = FacadeError::state_directory_permissions(path, 0o755, Destination::Local);
         assert!(local.next.unwrap().contains("chmod 700 '/private/a b'"));
-        let remote = FacadeError::state_directory_permissions(
-            path,
-            0o755,
-            Destination::Remote {
-                repository: None,
-                home: None,
-            },
-        );
+        let remote = FacadeError::state_directory_permissions(path, 0o755, Destination::Remote);
         let wire = serde_json::to_string(&remote).unwrap();
-        assert!(!wire.contains("/private"));
+        assert!(wire.contains("/private/a b"));
         assert!(remote.next.is_some());
     }
 
@@ -2077,15 +1665,11 @@ mod diagnostic_tests {
 
         let remote = FacadeError::project_binding_directory_diagnostic(
             &error,
-            provenant_records::diagnostic::Destination::Remote {
-                repository: None,
-                home: Some(std::path::Path::new("/private")),
-            },
+            provenant_records::diagnostic::Destination::Remote,
         )
         .unwrap();
         let remote_wire = serde_json::to_string(&remote).unwrap();
-        assert!(remote_wire.contains("~/state with"));
-        assert!(!remote_wire.contains("/private"));
+        assert!(remote_wire.contains("/private/state with"));
         assert!(
             remote
                 .next
@@ -2460,7 +2044,7 @@ mod diagnostic_tests {
     }
 
     #[test]
-    fn invalid_input_projects_only_safe_fields() {
+    fn invalid_input_preserves_typed_fields() {
         let bare = FacadeError::InvalidInput { detail: None };
         assert_eq!(bare.to_string(), "invalid input");
         assert_eq!(
@@ -2498,7 +2082,10 @@ mod diagnostic_tests {
             "detail_fact": {"kind": "field", "value": "TOKEN_SENTINEL"}
         }))
         .unwrap();
-        assert_eq!(forged.diagnostic().detail.as_deref(), Some("invalid input"));
+        assert_eq!(
+            forged.diagnostic().detail.as_deref(),
+            Some("invalid input field `TOKEN_SENTINEL`")
+        );
         for input in [
             format!("schema version TOKEN_SENTINEL\u{1b}{}", "é".repeat(2048)),
             "invalid input field `scope.paths` TOKEN_SENTINEL".to_owned(),
@@ -2517,7 +2104,7 @@ mod diagnostic_tests {
             detail: Some(super::InvalidInputDetail::Field("secret_token".into())),
         };
         assert!(
-            !serde_json::to_string(&fake_field)
+            serde_json::to_string(&fake_field)
                 .unwrap()
                 .contains("secret_token")
         );

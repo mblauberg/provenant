@@ -149,6 +149,20 @@ fn read_git(
     read_git_with_env(executor, git, cwd, args, limit, &environment()).map(|(out, _)| out)
 }
 
+/// Read a complete bounded Git response for seed input discovery.
+pub(crate) fn seed_git(cwd: &Path, args: &[&str]) -> std::io::Result<Vec<u8>> {
+    let git = provenant_os::git::git_executable()
+        .ok_or_else(|| std::io::Error::other("Git unavailable"))?;
+    let executor = SystemExecutor::new(1).map_err(std::io::Error::other)?;
+    let (out, timed_out) =
+        read_git_with_env(&executor, &git, cwd, args, 64 * 1024 * 1024, &environment())
+            .map_err(std::io::Error::other)?;
+    if timed_out || out.truncated {
+        return Err(std::io::Error::other("incomplete Git seed input"));
+    }
+    Ok(out.bytes)
+}
+
 fn read_git_with_env(
     executor: &dyn Executor,
     git: &Path,

@@ -501,9 +501,11 @@ dependencies = [
  "provenant-core",
  "provenant-os",
  "provenant-records",
+ "provenant-redact",
  "provenant-test-support",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "toml_edit",
@@ -695,6 +697,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "provenant-select"
+version = "2.4.1"
+dependencies = [
+ "provenant-test-support",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "provenant-sqlite"
 version = "2.5.1"
 dependencies = [
@@ -713,6 +726,7 @@ dependencies = [
  "provenant-core",
  "provenant-os",
  "provenant-records",
+ "provenant-redact",
  "provenant-supervisor",
  "provenant-test-support",
  "serde",

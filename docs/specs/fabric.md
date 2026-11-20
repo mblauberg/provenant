@@ -223,24 +223,18 @@ the complete retained extension list contributes to the checkpoint envelope.
 
 Admission refusals may name node IDs, loop keys and field paths that passed the
 identifier grammar, and host-owned rule identifiers and schema positions. They
-never echo free-form caller text such as prompt or brief bodies. A disclosure
-identifier containing a registered credential is omitted (`null`) in structured
-output and displayed as `[masked]` in text while the refusal keeps its typed cause. `SchemaPath` retains schema positions only. Arbitrary
-map keys become `[<key>]`; array positions may use indices. Secret-shaped input
-produces a `SECRET_SHAPED_INPUT` warning naming the field and saying it looks
-like a credential, without echoing the value. The compiled default is Warn;
-`policy.SECRET_SHAPED_INPUT` can suppress the warning; shape-only matches never
-refuse, including when a retained policy requests Refuse. Warnings name their source
-and knob. Operator retry briefs refuse only exact known credential values of at
-least eight bytes, excluding `[REDACTED]`; this check never opens credential
-stores. Out-of-bounds ambient credentials (>16 KiB, >128 variables or >64 KiB total)
-are skipped only by `matches_credential_value_for_retry`, with one warning per process
-that contains no environment names or values, and never refuse retry. Publication
-collection (`ambient_values`) remains strict: an over-bound credential set fails
-validation and withdraws publication, including streaming filters, diagnostic
-projection and per-launch publication context. No raw fallback is allowed.
-The retry refusal precedes any mutation or reservation. Automatic writer restarts reuse accepted input
-without this operator admission check.
+never echo free-form caller text such as prompt or brief bodies. `SchemaPath`
+retains schema positions only; arbitrary map keys become `[<key>]` and array
+positions may use indices. Graph status keeps route fields verbatim, including
+model, effort, account label, alias, name and extra fields. Over-length values or
+control characters warn without dropping the values.
+
+Under `secrets` or `full`, an operator retry brief holding an exact known
+credential value of at least eight bytes warns and proceeds; `[REDACTED]` is
+excluded. Under `off` this check and its warning are skipped. It never opens
+credential stores. Out-of-bounds ambient credentials (>16 KiB, >128 variables
+or >64 KiB total) are skipped by the retry check with one warning per process
+without names or values. Automatic writer restarts reuse accepted input.
 Warnings are returned in command/relay receipts, including detached launches. Extension causes carry a closed extension
 kind and rule; limit causes name the host limit, never the supplied value.
 CLI stderr, diagnostic JSON and relay wire details project the same cause.
@@ -493,15 +487,13 @@ Oversized findings use content-addressed graph text while the checkpoint retains
 
 ### Publication boundary
 
-Local execution, graph inputs and retained state are intended to remain raw and
-lossless under their existing custody and integrity controls. Disclosure masking
-belongs at an external publication destination, including graph and peer
-exports, forge content and fixture exports. `publication::Projector` protects
-known exact credential values and typed secret fields. Exact-value matching
-uses typed-field and ambient credentials of at least eight bytes; prose
-assignments mask only their own value spans. Its projection binds the
-raw and published byte lengths and digests separately. A projection error withholds
-the affected publication and never substitutes raw bytes.
+Local execution, graph inputs and retained state remain raw and lossless under
+their custody and integrity controls. The `redaction` modes govern publication:
+`off` passes text unchanged; `secrets` masks credential values and token shapes
+at egress; `full` also masks assignments and local text. Graph and peer exports,
+forge content and fixture exports are egress. Metadata is never hidden. When
+masking is enabled, projection failure withholds the affected publication. Raw
+and published byte lengths and digests are bound separately.
 
 `PeerAction::Output` declares an `OutputAudience`. A graph execution claim is
 not authorisation: the receiver must bind the authenticated actor, retained
@@ -510,8 +502,9 @@ transport. The sender derives the claim from the retained upstream attempt and
 the receiver checks its actor namespace, launch receipt, origin and target.
 All cross-host payloads, including authenticated execution submissions and
 results, pass through `CrossHostTransport`; authentication never exempts
-disclosure. Same-host execution stays raw. Encoded hand-off attachments are
-decoded and projected as text, or withheld when they cannot be inspected. Peer
+disclosure policy. Same-host execution stays raw unless `full` applies to local
+display. When masking is enabled, encoded hand-off attachments are decoded and
+projected as text, or withheld when they cannot be inspected. Peer
 output projects the complete verified text before paging, with published lengths
 and digests. Cross-host projection selects declared free-text fields (prompts,
 decoded attachments, output text and messages), preserving envelope keys, tags,
@@ -588,7 +581,7 @@ Each host owns its records and liveness; an unreachable peer is unknown, not
 dead. An uncertain remote mutation is resolved by the owner's receipt, never
 resent. Remote attempts bind the origin identity, and transferred Git objects
 are verified before use. Protocol mismatch is refused before decoding;
-credentials do not cross hosts.
+cross-host text follows the configured disclosure policy.
 
 A peer locator identifies a registered Git common directory. Git's verified
 worktree inventory selects the checkout that owns project configuration; a

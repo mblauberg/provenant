@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 
-Changed: 2026-11-19, #3448: four open-ended classes narrowed to three outcomes.
+Changed: 2026-11-20, #3688: output redaction is opt-in.
 
 ## Context
 
@@ -18,7 +18,8 @@ This is the single definition of the hard boundaries. Each is an outcome, not a
 mechanism:
 
 1. **Credentials and secrets** never reach a lane, provider or output that was
-   not granted them, and never cross hosts. GitHub access and its read-only
+   not granted them. Output masking, including GitHub publication and cross-host
+   text, is opt-in and defaults off. GitHub access and its read-only
    credential-store exception are governed by [ADR 0040](0040-open-lane-policy-with-explicit-boundaries.md#permitted-exceptions).
 2. **Other lanes' work:** no lane moves, rewrites or deletes another lane's
    refs, commits or uncommitted files, and nothing destroys uncommitted work.
@@ -54,17 +55,18 @@ step when one is needed.
 
 Local execution data, provider histories and graph text remain lossless in
 host-owned private state. File modes are defence in depth, not isolation from
-same-user processes; lanes receive only authorised state. Publication projections
-protect known credential values and typed secret fields at their destination,
-without mutating unrelated task text. Authenticated execution transport across
-hosts is projected just like exported diagnostics and artefacts. Same-host
-execution remains raw. Raw and exported representations have
-separate accurate lengths and digests. Projection failure withholds the affected
-publication without changing the local execution outcome.
+same-user processes; lanes receive only authorised state. The `redaction` knob
+defaults to `off`; `secrets` and `full` opt into masking. The owner decided on
+20 November 2026 that modern models are aligned enough not to post credentials,
+and masking is hard to make reliable and causes more issues than it guards
+against. The modes and their destinations are specified in the
+[supervisor spec](../specs/supervisor.md#disclosure-and-safe-git-evidence). Raw
+and exported representations retain separate accurate lengths and digests. When
+an enabled projection fails, it withholds the affected publication without
+changing the local execution outcome.
 
-Install publication coverage before removing local redaction. Provider and host
-restrictions are explicit, sourced and configurable; ordinary filesystem, tools
-and network access remain open by default.
+Provider and host restrictions are explicit, sourced and configurable; ordinary
+filesystem, tools and network access remain open by default.
 
 ## Consequences
 

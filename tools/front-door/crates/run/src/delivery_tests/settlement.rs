@@ -545,6 +545,7 @@ fn prepare_labels_unsupported_ssh_command() -> std::result::Result<(), Box<dyn s
 
 #[test]
 fn delivery_diagnostics_redact_url_userinfo() {
+    let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
     for (input, expected) in [
         ("https://u:pa/ss@h/repo", "https://[REDACTED]@h/repo"),
         ("https://u:pa?ss@h/repo", "https://[REDACTED]@h/repo"),
@@ -719,6 +720,7 @@ fn prepare_accepts_absolute_shell_helper_outside_path()
 #[test]
 fn prepare_failures_name_step_and_bound_git_stderr()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
     for (pattern, step) in [
         ("remote get-url", DeliveryPrepareStep::RemoteUrl),
         ("symbolic-ref --quiet", DeliveryPrepareStep::Head),

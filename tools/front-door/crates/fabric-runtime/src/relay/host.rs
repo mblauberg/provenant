@@ -229,8 +229,10 @@ impl HostRelay {
         listener.set_nonblocking(true)?;
         let cancel = relay.cancel.clone();
         let publication = provenant_redact::capture_publication_scope();
+        let mode = provenant_redact::mode();
         relay.thread = Some(thread::Builder::new().name("fabric-relay".into()).spawn(
             move || {
+                let _mode = provenant_redact::scoped(mode);
                 let _publication = publication.enter();
                 serve_connections(limits, &handler, &graph, &cancel, |send| {
                     while !cancel.is_cancelled() {
@@ -275,11 +277,13 @@ fn serve_connections(
     let (send, receive) = mpsc::sync_channel::<(UnixStream, Option<i64>)>(32);
     let receive = Mutex::new(receive);
     let publication = provenant_redact::capture_publication_scope();
+    let mode = provenant_redact::mode();
     thread::scope(|scope| {
         for _ in 0..WORKERS {
             let receive = &receive;
             let publication = publication.clone();
             scope.spawn(move || {
+                let _mode = provenant_redact::scoped(mode);
                 let _publication = publication.enter();
                 while !cancel.is_cancelled() {
                     let received = match receive.lock() {
@@ -448,6 +452,51 @@ fn confirm_budget(
     Ok(Duration::from_millis(milliseconds))
 }
 
+// Relay payloads mix host-owned metadata with free text. Project only declared
+// prose, keeping routing, identifiers and paths intact.
+fn project_relay_prose(value: &mut Value) -> io::Result<()> {
+    fn collect<'a>(value: &'a mut Value, selected: bool, texts: &mut Vec<&'a mut String>) {
+        match value {
+            Value::String(text) if selected => texts.push(text),
+            Value::Array(items) => {
+                for item in items {
+                    collect(item, selected, texts);
+                }
+            }
+            Value::Object(map) => {
+                for (key, item) in map {
+                    if let Some(paths) = crate::hosts::handoff_field_paths(key) {
+                        crate::hosts::report_texts(item, paths, texts);
+                        continue;
+                    }
+                    let prose = matches!(
+                        key.as_str(),
+                        "text"
+                            | "message"
+                            | "reason"
+                            | "detail"
+                            | "prompt"
+                            | "body"
+                            | "warnings"
+                            | "launch_warnings"
+                            | "availability_warning"
+                            | "discovery_warnings"
+                    );
+                    collect(item, prose, texts);
+                }
+            }
+            _ => {}
+        }
+    }
+    let projector = provenant_confinement::publication::Projector::ambient()
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    let mut texts = Vec::new();
+    collect(value, false, &mut texts);
+    provenant_confinement::publication::CrossHostTransport::new(&projector)
+        .texts(&mut texts)
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))
+}
+
 fn reply(result: Result<Value, ServiceError>) -> Reply {
     match result {
         Ok(value) => Reply::Ok(value),
@@ -520,6 +569,8 @@ fn serve_one_with_peer(
         }
     };
     let deadline = Instant::now() + IO_TIMEOUT;
+    let mut reply = serde_json::to_value(reply)?;
+    project_relay_prose(&mut reply)?;
     if serde_json::to_vec(&reply)?.len() as u64 > MAX_BYTES {
         return write(
             stream,
@@ -750,10 +801,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn relay_projects_prose_and_preserves_route_metadata() {
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        for mode in [provenant_redact::Mode::Off, provenant_redact::Mode::Secrets] {
+            let _mode = provenant_redact::scoped(mode);
+            let mut value = serde_json::json!({"model":token,"account_key":token,"reason":token,"handoff":{"spec_concerns":[{"criterion":token,"claim":token,"evidence":token,"proposed_change":token,"status":"as_written"}]}});
+            project_relay_prose(&mut value).unwrap();
+            assert_eq!(value["model"], token);
+            assert_eq!(value["account_key"], token);
+            for field in ["criterion", "claim", "evidence", "proposed_change"] {
+                assert_eq!(
+                    value["handoff"]["spec_concerns"][0][field],
+                    if mode == provenant_redact::Mode::Off {
+                        token
+                    } else {
+                        "[REDACTED]"
+                    }
+                );
+            }
+            assert_eq!(value["handoff"]["spec_concerns"][0]["status"], "as_written");
+            assert_eq!(
+                value["reason"],
+                if mode == provenant_redact::Mode::Off {
+                    token
+                } else {
+                    "[REDACTED]"
+                }
+            );
+        }
+    }
+
     // Spec: docs/specs/fabric.md#checkpoint-envelope
     #[test]
-    fn relay_workers_mask_parent_descriptor_values_and_keep_examples()
+    fn relay_workers_mask_parent_descriptor_values_and_token_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("relay/socket");
         let secret = b"parent-descriptor-3391";
@@ -763,7 +846,7 @@ mod tests {
             provenant_records::Limits::CONFIG,
             |_, _, _| {
                 let safe = provenant_redact::publication_text(
-                    b"parent-descriptor-3391 sk-unregistered-example-3391",
+                    b"parent-descriptor-3391 ghp_abcdefghijklmnopqrstuvwxyz0123456789",
                     [],
                 )
                 .map_err(|_| FacadeError::StateCorrupt)?;
@@ -776,7 +859,7 @@ mod tests {
             &CancelToken::new(),
             Duration::from_secs(5),
         )?;
-        assert_eq!(result["text"], "[REDACTED] sk-unregistered-example-3391");
+        assert_eq!(result["text"], "[REDACTED] [REDACTED]");
         drop(relay);
         Ok(())
     }

@@ -70,6 +70,10 @@ locations may also differ from `HOME`.
 
 | Variable | Channel | Stability | Meaning | When |
 |---|---|---|---|---|
+| `PROVENANT_ROUTE` | lane | evolving | Applied adapter/model with optional @effort. | when the applied model is known |
+| `PROVENANT_MODEL` | lane | evolving | Applied model identifier. | when the applied model is known |
+| `PROVENANT_EFFORT` | lane | evolving | Applied effort. | when an effort is applied |
+| `PROVENANT_ACCOUNT` | lane | evolving | Applied account label. | when an account label is known |
 | `PROVENANT_SANDBOX` | lane | stable | `on` when the lane runs inside Provenant's native sandbox, `off` when it does not. | every lane |
 | `PROVENANT_LANE_DEPTH` | lane | evolving | Nesting depth: 1 for a lane the caller started, one more per nested lane. Absent or `0` means not in a lane. | every lane |
 | `PROVENANT_PROCESS_TREE` | lane | stable | Names the sample behind `provenant process-tree --json`. Its presence is the contract; read the sample through that command, never the file. | while the supervisor samples the lane's processes (`domains.run.resource_sample_interval_ms` set, or an admission class sets `memory_per_slot`; off otherwise) |

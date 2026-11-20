@@ -505,21 +505,28 @@ available from `provenant config show --full`.
 
 ### Disclosure and safe Git evidence
 
-Disclosure is selected by destination, not transport. Authorised execution
-context remains lossless; external publication projects known credential values
-and typed secret fields, and withholds publication if projection fails. Raw and
-exported bytes have separate lengths and digests.
+`redaction` is one sourced setting: `off` (default), `secrets` or `full`.
+`config show` reports its value and source on one line; under `off` that is the
+only trace, with no masking or per-field warnings anywhere. `secrets` masks only
+credential values and credential token shapes in text leaving the host, including
+GitHub publication, cross-host peer and relay projection and fixture export, and
+credential-shaped values in config history. Local output remains raw. `full`
+applies the previous text masking locally and at egress, including assignment
+masking and bounded diagnostics. Model, effort, adapter, alias, name, tier,
+account label and key, source, pool selection, paths, worktree, stage, graph and
+node names are never hidden under any mode.
 
-A prompt snapshot with a known secret is refused before sealing. Host-local
-provider captures preserve raw bytes for settlement replay; decoded results and
-artifact text are redacted at publication and disclosure boundaries. Quoted credential values
-are masked until a definite closing quote: one that every plausible escape layer,
-from the opener's own up to the length of the backslash run, agrees is a close.
-No fixed depth cap applies, because a value can be escaped one layer deeper than
-any cap. Without a definite close, masking continues through the end of the raw line. Scanning resumes
-after a definite close or the line end. An assignment value that is exactly
-`[REDACTED]` stays unchanged across chunks and rescans; further value bytes are
-masked. Marker recognition never changes the input to token scanning.
+Raw and exported bytes have separate lengths and digests. When an enabled
+projection fails, it withholds the affected publication. Host-local provider
+captures preserve raw bytes for settlement replay. In `full` mode quoted
+credential assignments remain masked until a definite closing quote, agreed by
+every plausible escape layer, or through the end of the raw line. Scanning
+resumes after the close or line end; an exact `[REDACTED]` marker remains stable
+across chunks and rescans.
+
+In-memory Debug masking, fence-token argv masking, git-config credential
+withholding (controlled by `domains.lanes.git_config_allow`), the GitHub token
+receipt and chair checkpoint scoping are unconditional and are not output policy.
 
 Provider stdout and stderr are retained losslessly within bounded, host-owned
 private capture. Provider JSONL frames are decoded without rewriting their bytes;

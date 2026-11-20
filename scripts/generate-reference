@@ -286,6 +286,8 @@ HOST_SECTIONS = (
     ("host_review_settings", "Host review settings", "Omit a key for its default."),
     ("host_review_lens_settings", "Host review lens settings",
      "Omit the table for the bundled rules."),
+    ("port_build_settings", "Build port settings",
+     "Omit a key for its default; each key layers across builtin, host, host-project and project."),
     ("host_model_policy_settings", "Host model policy settings",
      "Omit a key for its bundled or empty default. `rules.policy` takes the same fields as `defaults`."),
 )
@@ -325,7 +327,8 @@ def config_reference(data, all_fields=False):
         host = data.get(key)
         if not host:
             continue
-        text += (f"## {title}\n\nSet these in `[{host['path']}]` in the host configuration. {intro}\n\n"
+        where = host.get("where") or f"`[{host['path']}]` in the host configuration"
+        text += (f"## {title}\n\nSet these in {where}. {intro}\n\n"
                  "| Key | Default | Effect |\n|---|---|---|\n")
         for name, setting in host["settings"].items():
             auto = setting.get("auto_value")

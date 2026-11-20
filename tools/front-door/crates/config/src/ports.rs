@@ -6,6 +6,7 @@ pub use provenant_records::{
     PortSource,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -34,6 +35,27 @@ pub use forge::{
 pub use request::Request;
 const MAX_PORTS_BYTES: u64 = 65_536;
 const BRANCH_TOKEN: &str = "<branch>";
+
+/// Hash a repository's canonical common Git directory into a stable project
+/// key. Linked checkouts share that directory and therefore share this key.
+/// This is the single definition used by target-seed ownership and by the
+/// host-project configuration layer.
+pub fn project_key(common_git_dir: &Path) -> String {
+    provenant_core::hex(&Sha256::digest(
+        common_git_dir.as_os_str().as_encoded_bytes(),
+    ))
+}
+
+/// Derive the project key from a checkout directory alone, for callers that
+/// hold a path rather than a verified repository handle. The read-only marker
+/// resolver parses the `.git` file and its `commondir`, then canonicalises the
+/// result so the digest matches one computed from a verified handle.
+pub fn project_key_for(project: &Path) -> Option<String> {
+    let marker = provenant_os::git::repository_marker(project)?;
+    let common_dir = marker.common_dir?;
+    let canonical = fs::canonicalize(common_dir).ok()?;
+    Some(project_key(&canonical))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortBackendKind {
@@ -270,9 +292,26 @@ pub enum VerifySelection {
     All,
 }
 
+/// A command run from the effective verify workspace joined with `cwd`.
+/// The whole argv elements `{packages}`, `{integration_args}`, and
+/// `{quarantine_args}` expand to zero or more arguments; no shell splitting occurs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TierCommand {
+    #[serde(default)]
+    pub stack: String,
+    #[serde(default = "tier_command_cwd")]
+    pub cwd: PathBuf,
+    #[serde(default)]
+    pub argv: Vec<String>,
+}
+
+fn tier_command_cwd() -> PathBuf {
+    PathBuf::from(".")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifyTier {
-    pub commands: Vec<String>,
+    pub commands: Vec<TierCommand>,
     pub selection: VerifySelection,
     pub warn_for_host_load: bool,
 }
@@ -383,6 +422,110 @@ impl WorktreeLayoutPort {
     }
 }
 
+/// Seed-build staleness policy. A later slice consumes this through
+/// [`BuildSeed::stale_after_duration`], warning and falling back to the default
+/// when the value is malformed rather than refusing the port table.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildSeed {
+    #[serde(default = "default_seed_stale_after")]
+    pub stale_after: String,
+}
+
+fn default_seed_stale_after() -> String {
+    "24h".to_owned()
+}
+
+impl Default for BuildSeed {
+    fn default() -> Self {
+        Self {
+            stale_after: default_seed_stale_after(),
+        }
+    }
+}
+
+impl BuildSeed {
+    /// Parse `stale_after` with the host-gc duration parser so there is one
+    /// duration syntax. Errors are reported to a reader that warns and falls
+    /// back to 24h; this never panics.
+    pub fn stale_after_duration(&self) -> Result<Duration, String> {
+        crate::gc::parse_gc_idle_duration(&self.stale_after)
+            .map(Duration::from_secs)
+            .map_err(|error| error.to_owned())
+    }
+}
+
+/// A declared argv for a build wrapper or command. Empty by default; a later
+/// slice consumes these once it selects the corresponding build strategy.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildArgv {
+    #[serde(default)]
+    pub argv: Vec<String>,
+}
+
+fn default_build_strategy() -> String {
+    "lane_seed".to_owned()
+}
+fn default_build_offload() -> String {
+    "auto".to_owned()
+}
+fn default_build_overflow() -> String {
+    "local".to_owned()
+}
+fn default_build_clean() -> String {
+    "none".to_owned()
+}
+fn default_build_snapshot_retention() -> String {
+    "7d".to_owned()
+}
+
+/// The build port declares the seed-build interface. Only the shape is
+/// declared here: a consumer repository may override any leaf in a lower layer
+/// and higher layers override them independently. A later slice consumes the
+/// strategy, wrapper, command, offload, overflow, clean, stack and retention
+/// fields; `build.prepare` and `build.seed.stale_after` are already in use.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildPort {
+    pub source: PortSource,
+    #[serde(default)]
+    pub prepare: Vec<Vec<String>>,
+    #[serde(default)]
+    pub seed: BuildSeed,
+    #[serde(default = "default_build_strategy")]
+    pub strategy: String,
+    #[serde(default)]
+    pub wrapper: BuildArgv,
+    #[serde(default)]
+    pub command: BuildArgv,
+    #[serde(default = "default_build_offload")]
+    pub offload: String,
+    #[serde(default = "default_build_overflow")]
+    pub overflow: String,
+    #[serde(default = "default_build_clean")]
+    pub clean: String,
+    #[serde(default)]
+    pub stacks: Vec<String>,
+    #[serde(default = "default_build_snapshot_retention")]
+    pub snapshot_retention: String,
+}
+
+impl PortEntry for BuildPort {
+    fn source(&self) -> PortSource {
+        self.source
+    }
+    fn set_source(&mut self, source: PortSource) {
+        self.source = source;
+    }
+    fn backend_kind(&self) -> PortBackendKind {
+        PortBackendKind::Builtin
+    }
+    fn valid(&self) -> bool {
+        let declared = |argv: &[String]| argv.first().is_some_and(|program| !program.is_empty());
+        self.prepare.iter().all(|argv| declared(argv))
+            && (self.wrapper.argv.is_empty() || declared(&self.wrapper.argv))
+            && (self.command.argv.is_empty() || declared(&self.command.argv))
+    }
+}
+
 trait PortEntry {
     fn source(&self) -> PortSource;
     fn set_source(&mut self, source: PortSource);
@@ -435,11 +578,8 @@ impl PortEntry for VerifyPort {
             && self.load_per_cpu.is_finite()
             && self.load_per_cpu > 0.0
             && self.test_threads.is_none_or(|threads| threads > 0)
-            && self.tiers.contains_key(&self.default_tier)
-            && self
-                .tiers
-                .iter()
-                .all(|(name, tier)| !name.is_empty() && !tier.commands.is_empty())
+            && (self.tiers.is_empty() || self.tiers.contains_key(&self.default_tier))
+            && self.tiers.iter().all(|(name, tier)| !name.is_empty() && !tier.commands.is_empty())
     }
 }
 impl PortEntry for LandPort {
@@ -514,7 +654,11 @@ macro_rules! declare_ports {
         #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
         pub struct PortTable {
             pub schema_version: u16,
-            $(pub $field: $kind),+
+            $(pub $field: $kind),+,
+            /// Highest layer that set each leaf. Derived from the same walk
+            /// that labels ports, excluded from every serialised layer.
+            #[serde(skip)]
+            provenance: BTreeMap<String, PortSource>,
         }
 
         impl PortTable {
@@ -522,6 +666,23 @@ macro_rules! declare_ports {
 
             fn set_sources(&mut self, source: PortSource) {
                 $(self.$field.set_source(source);)+
+            }
+
+            /// Derive each port's label from the highest layer that declared
+            /// any of its leaves, so the label and `provenance` cannot disagree.
+            fn sync_sources_from_provenance(&mut self) {
+                $({
+                    let name = stringify!($field);
+                    let mut highest = PortSource::Builtin;
+                    for (path, source) in &self.provenance {
+                        if (path == name || path.starts_with(&format!("{name}.")))
+                            && *source > highest
+                        {
+                            highest = *source;
+                        }
+                    }
+                    self.$field.set_source(highest);
+                })+
             }
 
             pub fn entries(&self) -> impl Iterator<Item = (&'static str, PortSource, PortBackendKind, bool, Option<&'static str>)> + '_ {
@@ -545,6 +706,7 @@ declare_ports! {
     release: Port,
     admission: Port,
     build_admission: Port,
+    build: BuildPort,
 }
 
 /// An error in one port-table layer always names its file and the key that
@@ -607,15 +769,56 @@ fn first_type_mismatch(
     }
 }
 
+/// Record the leaves an overlay declares against its layer. Objects recurse
+/// (tier names are object keys); arrays and scalars are leaves. The synthetic
+/// `source` label and `schema_version` are not configuration leaves.
+fn record_leaf_sources(
+    value: &serde_json::Value,
+    source: PortSource,
+    prefix: &str,
+    provenance: &mut BTreeMap<String, PortSource>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                // Skip only the synthetic root/port metadata. A tier name is
+                // a repository-defined key and must stay in the walk.
+                if path == "schema_version" || (key == "source" && !prefix.contains('.')) {
+                    continue;
+                }
+                record_leaf_sources(child, source, &path, provenance);
+            }
+        }
+        _ => {
+            if !prefix.is_empty() {
+                provenance.insert(prefix.to_owned(), source);
+            }
+        }
+    }
+}
+
 fn apply_layer(
     table: &mut serde_json::Value,
+    provenance: &mut BTreeMap<String, PortSource>,
     path: &Path,
     source: PortSource,
     on_unknown: &mut impl FnMut(&[u8], &provenant_records::InputWarning),
+    on_malformed: &mut impl FnMut(&Path, &io::Error),
 ) -> io::Result<()> {
     let file = match fs::File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || (source == PortSource::HostProject
+                    && error.kind() == io::ErrorKind::NotADirectory) =>
+        {
+            return Ok(());
+        }
         Err(error) => return Err(layer_error(path, "file", error)),
     };
     let mut bytes = Vec::new();
@@ -627,6 +830,41 @@ fn apply_layer(
     }
     let mut overlay: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|error| layer_error(path, "json", error))?;
+    if let Some(tiers) = overlay
+        .pointer_mut("/verify/tiers")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        tiers.retain(|name, tier| {
+            let Some(commands) = tier.get("commands").and_then(serde_json::Value::as_array) else {
+                return true;
+            };
+            for (index, value) in commands.iter().enumerate() {
+                let decoded = serde_json::from_value::<TierCommand>(value.clone());
+                let reason = match decoded {
+                    Err(error) => Some(format!("invalid command: {error}")),
+                    Ok(command) if command.argv.is_empty() => Some("empty argv".into()),
+                    Ok(command) if command.argv[0].is_empty() => Some("empty program".into()),
+                    Ok(command) if !relative(&command.cwd, true) => {
+                        Some("cwd must be relative and contain no .. component".into())
+                    }
+                    Ok(_) => None,
+                };
+                if let Some(reason) = reason {
+                    on_malformed(
+                        path,
+                        &layer_error(
+                            path,
+                            &format!("verify.tiers.{name}.commands[{index}]"),
+                            reason,
+                        ),
+                    );
+                    return false;
+                }
+            }
+            true
+        });
+    }
+    record_leaf_sources(&overlay, source, "", provenance);
     let object = overlay
         .as_object_mut()
         .ok_or_else(|| layer_error(path, "<root>", "port table must be an object"))?;
@@ -673,13 +911,6 @@ fn apply_layer(
                 .get_mut(name)
                 .ok_or_else(|| layer_error(path, name, "unknown port"))?;
             merge_layer(existing, value);
-            let entry = existing
-                .as_object_mut()
-                .ok_or_else(|| layer_error(path, name, "merged port entry is not an object"))?;
-            entry.insert(
-                "source".into(),
-                serde_json::to_value(source).map_err(|error| layer_error(path, name, error))?,
-            );
         } else {
             target.insert(name.clone(), value.clone());
         }
@@ -703,7 +934,9 @@ fn apply_layer(
 pub fn port_source_layer(source: PortSource) -> &'static str {
     match source {
         PortSource::Builtin => "builtin",
+        PortSource::Detected => "detected",
         PortSource::Host => "host",
+        PortSource::HostProject => "host_project",
         PortSource::Project => "project",
     }
 }
@@ -740,6 +973,11 @@ impl PortTable {
             .expect("compiled port table asset must match its schema");
         table.set_sources(PortSource::Builtin);
         table
+    }
+
+    /// The highest layer that set each leaf, keyed by dotted path.
+    pub fn provenance(&self) -> &BTreeMap<String, PortSource> {
+        &self.provenance
     }
 
     /// Resolve the configured path for a managed writer branch.
@@ -801,7 +1039,7 @@ impl PortTable {
                 use std::io::Write;
                 let _ = writeln!(
                     io::stderr().lock(),
-                    "warning: {}: malformed port layer ignored: {error}",
+                    "warning: {}: malformed port declaration ignored: {error}",
                     path.display()
                 );
             },
@@ -826,7 +1064,7 @@ impl PortTable {
             use std::io::Write;
             let _ = writeln!(
                 io::stderr().lock(),
-                "warning: {}: malformed port layer ignored: {error}",
+                "warning: {}: malformed port declaration ignored: {error}",
                 path.display()
             );
         })
@@ -839,27 +1077,78 @@ impl PortTable {
         mut on_malformed: impl FnMut(&Path, &io::Error),
     ) -> io::Result<Self> {
         let mut document = serde_json::to_value(Self::builtin()).map_err(io::Error::other)?;
+        let mut provenance = BTreeMap::new();
+        record_leaf_sources(&document, PortSource::Builtin, "", &mut provenance);
+        if let Some(project) = project {
+            let detected = crate::detect::detect(project);
+            if !detected.stacks.is_empty() {
+                document["verify"]["default_tier"] =
+                    detected.default_tier.unwrap_or_default().into();
+                provenance.insert("verify.default_tier".into(), PortSource::Detected);
+                document["verify"]["tiers"] = serde_json::json!({});
+                provenance.retain(|key, _| !key.starts_with("verify.tiers."));
+                for (name, commands) in detected.tiers {
+                    let selection =
+                        if name == "2" || commands.iter().any(|command| command.stack != "rust") {
+                            "all"
+                        } else {
+                            "packages"
+                        };
+                    document["verify"]["tiers"][&name] = serde_json::json!({
+                        "selection": selection,
+                        "warn_for_host_load": false,
+                        "commands": commands,
+                    });
+                    record_leaf_sources(
+                        &document["verify"]["tiers"][&name],
+                        PortSource::Detected,
+                        &format!("verify.tiers.{name}"),
+                        &mut provenance,
+                    );
+                }
+            }
+        }
         if let Some(host_state) = host_state {
             apply_layer(
                 &mut document,
+                &mut provenance,
                 &host_state.join("ports.json"),
                 PortSource::Host,
                 &mut on_unknown,
+                &mut on_malformed,
             )?;
+            // A consumer repository can be configured entirely from host
+            // state: its keyed layer sits between host and project. A missing
+            // key or file simply skips this layer.
+            if let Some(key) = project.and_then(project_key_for) {
+                let path = host_state.join("projects").join(key).join("ports.json");
+                apply_layer(
+                    &mut document,
+                    &mut provenance,
+                    &path,
+                    PortSource::HostProject,
+                    &mut on_unknown,
+                    &mut on_malformed,
+                )?;
+            }
         }
         if let Some(project) = project {
             let path = project.join(PORTS_CONFIG);
             let mut candidate = document.clone();
+            let mut candidate_provenance = provenance.clone();
             let mut warnings = Vec::new();
             let applied = apply_layer(
                 &mut candidate,
+                &mut candidate_provenance,
                 &path,
                 PortSource::Project,
                 &mut |bytes, warning| warnings.push((bytes.to_vec(), warning.clone())),
+                &mut on_malformed,
             );
             match applied {
                 Ok(()) => {
                     document = candidate;
+                    provenance = candidate_provenance;
                     for (bytes, warning) in warnings {
                         on_unknown(&bytes, &warning);
                     }
@@ -870,7 +1159,10 @@ impl PortTable {
                 Err(error) => on_malformed(&path, &error),
             }
         }
-        serde_json::from_value(document).map_err(io::Error::other)
+        let mut table: Self = serde_json::from_value(document).map_err(io::Error::other)?;
+        table.provenance = provenance;
+        table.sync_sources_from_provenance();
+        Ok(table)
     }
 }
 
@@ -903,16 +1195,19 @@ mod tests {
                 Some(&serde_json::to_value(source).unwrap()),
                 "{name} source"
             );
-            let expected_backend = match backend {
-                PortBackendKind::Builtin => "builtin",
-                PortBackendKind::Command => "command",
-                PortBackendKind::None => "none",
-            };
-            assert_eq!(
-                entry.get("backend").and_then(|value| value.get("kind")),
-                Some(&serde_json::json!(expected_backend)),
-                "{name} backend"
-            );
+            if name != "build" {
+                // build declares no backend; it is builtin by construction.
+                let expected_backend = match backend {
+                    PortBackendKind::Builtin => "builtin",
+                    PortBackendKind::Command => "command",
+                    PortBackendKind::None => "none",
+                };
+                assert_eq!(
+                    entry.get("backend").and_then(|value| value.get("kind")),
+                    Some(&serde_json::json!(expected_backend)),
+                    "{name} backend"
+                );
+            }
         }
         assert_eq!(serde_json::from_value::<PortTable>(value).unwrap(), table);
 
@@ -994,7 +1289,13 @@ mod tests {
             provenant_records::landing::RepositoryCommandOutcome::Unknown,
         );
 
-        let source_cases = [PortSource::Builtin, PortSource::Host, PortSource::Project];
+        let source_cases = [
+            PortSource::Builtin,
+            PortSource::Detected,
+            PortSource::Host,
+            PortSource::HostProject,
+            PortSource::Project,
+        ];
         for source in source_cases {
             let value = serde_json::to_value(source).unwrap();
             assert_eq!(serde_json::from_value::<PortSource>(value).unwrap(), source);
@@ -1246,13 +1547,191 @@ mod tests {
     }
 
     #[test]
+    fn invalid_tier_command_warns_and_falls_back() {
+        for (cwd, argv, reason) in [
+            (".", vec![], "empty argv"),
+            (".", vec![""], "empty program"),
+            ("/absolute", vec!["true"], "cwd"),
+            ("a/../b", vec!["true"], "cwd"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join(".provenant")).unwrap();
+            let path = root.path().join(PORTS_CONFIG);
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({"verify":{"tiers":{
+                    "0":{"commands":[{"cwd":cwd,"argv":argv}],"selection":"all"},
+                    "1":{"commands":[{"argv":["valid"]}]}
+                }}}))
+                .unwrap(),
+            )
+            .unwrap();
+            let mut warnings = Vec::new();
+            let table = PortTable::read_layers(
+                Some(root.path()),
+                None,
+                |_, _| {},
+                |file, error| {
+                    warnings.push((file.to_owned(), error.to_string()));
+                },
+            )
+            .unwrap();
+            assert!(table.validate().is_ok());
+            assert_eq!(
+                table.verify.tiers["0"],
+                PortTable::builtin().verify.tiers["0"]
+            );
+            assert_eq!(
+                table.provenance()["verify.tiers.0.commands"],
+                PortSource::Builtin
+            );
+            assert_eq!(table.verify.tiers["1"].commands[0].argv, ["valid"]);
+            assert_eq!(warnings.len(), 1);
+            assert_eq!(warnings[0].0, path);
+            assert!(warnings[0].1.contains("verify.tiers.0") && warnings[0].1.contains(reason));
+        }
+    }
+
+    #[test]
+    fn malformed_command_drops_only_its_tier_from_each_layer() {
+        for command in [serde_json::json!({}), serde_json::json!({"argv": 42})] {
+            for host in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let state = tempfile::tempdir().unwrap();
+                let path = if host {
+                    state.path().join("ports.json")
+                } else {
+                    std::fs::create_dir(root.path().join(".provenant")).unwrap();
+                    root.path().join(PORTS_CONFIG)
+                };
+                std::fs::write(
+                    &path,
+                    serde_json::to_vec(&serde_json::json!({
+                        "verify": {"base":"upstream/main", "tiers":{"1":{"commands":[command]}}}
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+                let mut warnings = Vec::new();
+                let table = PortTable::read_layers(
+                    Some(root.path()),
+                    Some(state.path()),
+                    |_, _| {},
+                    |file, error| warnings.push((file.to_owned(), error.to_string())),
+                )
+                .unwrap();
+                assert_eq!(table.verify.base, "upstream/main");
+                assert_eq!(
+                    table.verify.tiers["1"],
+                    PortTable::builtin().verify.tiers["1"]
+                );
+                assert_eq!(
+                    table.provenance()["verify.tiers.1.commands"],
+                    PortSource::Builtin
+                );
+                assert_eq!(warnings.len(), 1);
+                assert_eq!(warnings[0].0, path);
+                assert!(warnings[0].1.contains("verify.tiers.1.commands[0]"));
+            }
+        }
+    }
+
+    #[test]
+    fn detected_selection_respects_stack_mix() {
+        for (rust, node, expected0, expected1) in [
+            (
+                true,
+                false,
+                VerifySelection::Packages,
+                VerifySelection::Packages,
+            ),
+            (false, true, VerifySelection::All, VerifySelection::All),
+            (true, true, VerifySelection::All, VerifySelection::All),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            if rust {
+                std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+            }
+            if node {
+                std::fs::write(
+                    root.path().join("package.json"),
+                    r#"{"scripts":{"lint":"ok","test":"ok"}}"#,
+                )
+                .unwrap();
+            }
+            let table = PortTable::read_layers(
+                Some(root.path()),
+                None,
+                |_, _| {},
+                |_, error| panic!("{error}"),
+            )
+            .unwrap();
+            assert_eq!(table.verify.tiers["0"].selection, expected0);
+            assert_eq!(table.verify.tiers["1"].selection, expected1);
+            if rust {
+                assert_eq!(table.verify.tiers["2"].selection, VerifySelection::All);
+            } else {
+                assert!(!table.verify.tiers.contains_key("2"));
+            }
+            assert!(!table.verify.tiers.contains_key("3"));
+        }
+    }
+
+    #[test]
+    fn detection_without_commands_leaves_no_builtin_tiers() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("package.json"), "{}").unwrap();
+        let table = PortTable::read_for(Some(root.path()), state.path()).unwrap();
+        assert!(table.verify.tiers.is_empty());
+        assert!(table.verify.default_tier.is_empty());
+        assert_eq!(
+            table.provenance()["verify.default_tier"],
+            PortSource::Detected
+        );
+    }
+
+    #[test]
+    fn detected_tiers_replace_builtin_and_configured_wins() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"lint":"ok","test":"ok"}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir(root.path().join(".provenant")).unwrap();
+        std::fs::write(
+            root.path().join(PORTS_CONFIG),
+            r#"{"verify":{"tiers":{"1":{"commands":[{"argv":["custom"]}]}}}}"#,
+        )
+        .unwrap();
+        let table = PortTable::read_for(Some(root.path()), state.path()).unwrap();
+        assert_eq!(table.verify.tiers["0"].commands[0].stack, "node");
+        assert_eq!(table.verify.tiers["1"].commands[0].argv, ["custom"]);
+        assert!(!table.verify.tiers.contains_key("2"));
+        assert!(!table.verify.tiers.contains_key("3"));
+        assert_eq!(
+            table.provenance()["verify.tiers.0.commands"],
+            PortSource::Detected
+        );
+        assert_eq!(
+            table.provenance()["verify.tiers.1.commands"],
+            PortSource::Project
+        );
+    }
+
+    #[test]
     fn builtin_verify_tiers_are_neutral_and_base_is_inferred() {
         let builtin = PortTable::builtin();
         assert!(builtin.verify.base.is_empty());
         for tier in builtin.verify.tiers.values() {
             for command in &tier.commands {
-                assert!(!command.contains("scripts/"), "{command}");
-                assert!(command.starts_with("cargo "), "{command}");
+                assert!(
+                    command.argv.iter().all(|arg| !arg.contains("scripts/")),
+                    "{command:?}"
+                );
+                assert_eq!(command.argv.first().map(String::as_str), Some("cargo"));
             }
         }
     }
@@ -1318,7 +1797,10 @@ mod tests {
         for &name in PortTable::PORT_NAMES {
             for serialised_source in [None, Some(PortSource::Builtin)] {
                 let mut entry = builtin[name].clone();
-                entry["backend"] = serde_json::json!({"kind": "none"});
+                if name != "build" {
+                    // build has no backend field; its layer override is prepare.
+                    entry["backend"] = serde_json::json!({"kind": "none"});
+                }
                 let object = entry.as_object_mut().unwrap();
                 object.remove("source");
                 if let Some(source) = serialised_source {
@@ -1364,5 +1846,329 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn build_defaults_are_lane_seed_and_generic() {
+        let table = PortTable::builtin();
+        let build = &table.build;
+        assert_eq!(build.source, PortSource::Builtin);
+        assert!(build.prepare.is_empty());
+        assert_eq!(build.strategy, "lane_seed");
+        assert!(build.wrapper.argv.is_empty());
+        assert!(build.command.argv.is_empty());
+        assert_eq!(build.offload, "auto");
+        assert_eq!(build.overflow, "local");
+        assert_eq!(build.clean, "none");
+        assert!(build.stacks.is_empty());
+        assert_eq!(build.snapshot_retention, "7d");
+        assert_eq!(build.seed, BuildSeed::default());
+        assert_eq!(
+            build.seed.stale_after_duration().unwrap(),
+            Duration::from_secs(24 * 60 * 60)
+        );
+        let (_, source, backend, valid, reason) =
+            table.entries().find(|entry| entry.0 == "build").unwrap();
+        assert_eq!(source, PortSource::Builtin);
+        assert_eq!(backend, PortBackendKind::Builtin);
+        assert!(valid);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn build_prepare_layers_project_over_host() {
+        let temp = tempfile::tempdir().unwrap();
+        let host = temp.path().join("host");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&host).unwrap();
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        let host_prepare = vec![vec!["node".to_owned(), "host-prepare.mjs".to_owned()]];
+        let project_prepare = vec![vec!["node".to_owned(), "project-prepare.mjs".to_owned()]];
+
+        std::fs::write(
+            host.join("ports.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": PORTS_SCHEMA_VERSION,
+                "build": {"prepare": host_prepare},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // No project layer: the host value and its source survive, and the
+        // omitted seed inherits the compiled 24h default.
+        let table = PortTable::read_for(None, &host).unwrap();
+        assert_eq!(table.build.prepare, host_prepare);
+        assert_eq!(table.build.source, PortSource::Host);
+        assert_eq!(
+            table.build.seed.stale_after_duration().unwrap(),
+            Duration::from_secs(24 * 60 * 60)
+        );
+
+        // A project layer that sets build.prepare wins and reports its source.
+        std::fs::write(
+            project.join(PORTS_CONFIG),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": PORTS_SCHEMA_VERSION,
+                "build": {"prepare": project_prepare},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let table = PortTable::read_for(Some(project.as_path()), &host).unwrap();
+        assert_eq!(table.build.prepare, project_prepare);
+        assert_eq!(table.build.source, PortSource::Project);
+        // Arrays replace rather than concatenate across layers.
+        assert_eq!(table.build.prepare.len(), 1);
+
+        // A project layer that omits build keeps the host declaration.
+        std::fs::write(
+            project.join(PORTS_CONFIG),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": PORTS_SCHEMA_VERSION,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let table = PortTable::read_for(Some(project.as_path()), &host).unwrap();
+        assert_eq!(table.build.prepare, host_prepare);
+        assert_eq!(table.build.source, PortSource::Host);
+
+        // With no layer setting build at all, it stays builtin and empty.
+        let empty_host = temp.path().join("empty-host");
+        std::fs::create_dir_all(&empty_host).unwrap();
+        let table = PortTable::read_for(None, &empty_host).unwrap();
+        assert_eq!(table.build.source, PortSource::Builtin);
+        assert!(table.build.prepare.is_empty());
+    }
+
+    #[test]
+    fn invalid_prepare_argv_is_invalid_port() {
+        let mut table = PortTable::builtin();
+        table.build.prepare.push(Vec::new());
+        assert!(table.validate().is_err());
+        let (_, _, _, valid, reason) = table.entries().find(|entry| entry.0 == "build").unwrap();
+        assert!(!valid);
+        assert!(reason.is_some());
+
+        let mut table = PortTable::builtin();
+        table.build.prepare.push(vec![String::new()]);
+        assert!(table.validate().is_err());
+
+        // A declared program is accepted; arguments after it are free-form.
+        let mut table = PortTable::builtin();
+        table.build.prepare.push(vec![
+            "node".to_owned(),
+            "tools/ensure-generated.mjs".to_owned(),
+        ]);
+        assert!(table.validate().is_ok());
+    }
+
+    #[test]
+    fn stale_after_bad_value_is_reported_not_panicking() {
+        let bad = BuildSeed {
+            stale_after: "not-a-duration".to_owned(),
+        };
+        assert!(bad.stale_after_duration().is_err());
+
+        // A bad duration stays a well-typed port: readers warn and fall back
+        // to 24h rather than the table refusing to load.
+        let mut table = PortTable::builtin();
+        table.build.seed = bad;
+        assert!(table.validate().is_ok());
+
+        for (text, expected) in [
+            ("36h", Some(36 * 60 * 60)),
+            ("0", Some(0)),
+            ("999999999999999999999w", None),
+        ] {
+            let seed = BuildSeed {
+                stale_after: text.to_owned(),
+            };
+            assert_eq!(
+                seed.stale_after_duration().ok(),
+                expected.map(Duration::from_secs),
+                "{text}"
+            );
+        }
+    }
+
+    fn checkout_with_key(temp: &Path) -> (PathBuf, PathBuf, String) {
+        let host = temp.join("host");
+        let project = temp.join("project");
+        std::fs::create_dir_all(&host).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        let key = project_key_for(&project).expect("a checkout resolves its project key");
+        (host, project, key)
+    }
+
+    #[test]
+    fn host_project_layer_order_for_ports() {
+        let temp = tempfile::tempdir().unwrap();
+        let (host, project, key) = checkout_with_key(temp.path());
+        let keyed = host.join("projects").join(&key);
+        std::fs::create_dir_all(&keyed).unwrap();
+
+        // builtin < host < host-project < project: each leaf overrides the
+        // layer below it, and the leaf reports the layer that set it.
+        std::fs::write(
+            host.join("ports.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "verify": {"base": "host/main", "remote": "host-remote"},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            keyed.join("ports.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "verify": {"base": "host-project/main"},
+                "build": {"strategy": "wrapper"},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(PORTS_CONFIG),
+            serde_json::to_vec(&serde_json::json!({
+                "verify": {"base": "project/main"},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let table = PortTable::read_for(Some(&project), &host).unwrap();
+        assert_eq!(table.verify.base, "project/main");
+        assert_eq!(table.verify.remote, "host-remote");
+        assert_eq!(table.build.strategy, "wrapper");
+
+        let provenance = table.provenance();
+        assert_eq!(provenance.get("verify.base"), Some(&PortSource::Project));
+        assert_eq!(provenance.get("verify.remote"), Some(&PortSource::Host));
+        assert_eq!(
+            provenance.get("build.strategy"),
+            Some(&PortSource::HostProject)
+        );
+        assert_eq!(provenance.get("build.prepare"), Some(&PortSource::Builtin));
+        assert_eq!(
+            provenance.get("verify.tiers.0.commands"),
+            Some(&PortSource::Builtin)
+        );
+
+        // Port labels agree with the leaves they own.
+        assert_eq!(table.verify.source, PortSource::Project);
+        assert_eq!(table.build.source, PortSource::HostProject);
+        assert_eq!(table.land.source, PortSource::Builtin);
+    }
+
+    #[test]
+    fn provenance_reports_highest_layer_per_leaf() {
+        let temp = tempfile::tempdir().unwrap();
+        let (host, project, key) = checkout_with_key(temp.path());
+        let keyed = host.join("projects").join(&key);
+        std::fs::create_dir_all(&keyed).unwrap();
+        std::fs::write(
+            host.join("ports.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "build": {"prepare": [["host-prepare"]], "offload": "remote"},
+                "verify": {"base": "host/main"},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            keyed.join("ports.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "build": {"prepare": [["host-project-prepare"]]},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(PORTS_CONFIG),
+            serde_json::to_vec(&serde_json::json!({
+                "build": {"seed": {"stale_after": "36h"}},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let table = PortTable::read_for(Some(&project), &host).unwrap();
+        let provenance = table.provenance();
+        assert_eq!(
+            provenance.get("build.prepare"),
+            Some(&PortSource::HostProject)
+        );
+        assert_eq!(provenance.get("build.offload"), Some(&PortSource::Host));
+        assert_eq!(
+            provenance.get("build.seed.stale_after"),
+            Some(&PortSource::Project)
+        );
+        assert_eq!(provenance.get("build.strategy"), Some(&PortSource::Builtin));
+        assert_eq!(provenance.get("verify.base"), Some(&PortSource::Host));
+        assert_eq!(table.build.source, PortSource::Project);
+
+        // Provenance is derived state: it never appears in a serialised layer.
+        let encoded = serde_json::to_value(&table).unwrap();
+        assert!(encoded.get("provenance").is_none());
+        assert_eq!(
+            serde_json::from_value::<PortTable>(encoded)
+                .unwrap()
+                .provenance()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn host_project_absent_is_silent() {
+        let temp = tempfile::tempdir().unwrap();
+        let host = temp.path().join("host");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&host).unwrap();
+        std::fs::create_dir_all(project.join(".provenant")).unwrap();
+        std::fs::write(
+            host.join("ports.json"),
+            serde_json::to_vec(&serde_json::json!({"build": {"strategy": "lane"}})).unwrap(),
+        )
+        .unwrap();
+
+        // No key (a directory with no checkout marker) skips the layer.
+        let table = PortTable::read_for(Some(&project), &host).unwrap();
+        assert_eq!(table.build.strategy, "lane");
+        assert_eq!(table.build.source, PortSource::Host);
+        assert!(
+            table
+                .provenance()
+                .values()
+                .all(|source| *source != PortSource::HostProject)
+        );
+
+        // A key with no layer directory also skips it silently.
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        let table = PortTable::read_for(Some(&project), &host).unwrap();
+        assert_eq!(table.build.strategy, "lane");
+        assert_eq!(table.build.source, PortSource::Host);
+        assert!(
+            table
+                .provenance()
+                .values()
+                .all(|source| *source != PortSource::HostProject)
+        );
+        std::fs::write(host.join("projects"), "not a directory").unwrap();
+        let table = PortTable::read_for(Some(&project), &host).unwrap();
+        assert_eq!(table.build.strategy, "lane");
+        assert_eq!(table.build.source, PortSource::Host);
+    }
+
+    #[test]
+    fn project_key_moved_and_reexported_is_stable() {
+        let fixed = Path::new("/repo/project/.git");
+        assert_eq!(
+            project_key(fixed),
+            "e76e734a733dbce36a72e56fc8d5cff62d989351bb7e0aa357eb627686706354"
+        );
+        assert_eq!(project_key(fixed), project_key(fixed));
     }
 }

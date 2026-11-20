@@ -1,6 +1,5 @@
 //! Document-based graph service shared by the CLI and the lane relay.
 use super::*;
-use provenant_fabric_runtime::coordination::facade::is_map_key_parent;
 use provenant_fabric_runtime::graph::{
     FileJournal, GraphDocument, GraphJournal, GraphStatus, Layer, Template, TemplateLibrary,
     patch::{self, LiveGraph, Patch, PatchContext},
@@ -17,49 +16,19 @@ fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
 }
 
-// Do not expose serde's message: it can contain supplied values. Preserve only
-// a schema path and a bounded reason, both filtered at the diagnostic boundary.
+// Preserve the parser's field path and message for actionable diagnostics.
 fn decode_input<T: serde::de::DeserializeOwned>(
     value: Value,
     prefix: &str,
 ) -> Result<T, FacadeError> {
-    use serde_path_to_error::Segment;
     serde_path_to_error::deserialize(value).map_err(|error| {
-        let message = error.inner().to_string();
-        let missing = message
-            .strip_prefix("missing field `")
-            .and_then(|s| s.split_once('`'))
-            .map(|(field, _)| field);
-        let mut field = prefix.to_owned();
-        // Build from segments, stopping at a user map field so no key is kept.
-        let mut in_map = false;
-        for segment in error.path().iter() {
-            match segment {
-                Segment::Seq { index } => field.push_str(&format!("[{index}]")),
-                Segment::Map { key } => {
-                    if !field.is_empty() {
-                        field.push('.');
-                    }
-                    field.push_str(key);
-                    if is_map_key_parent(key) {
-                        in_map = true;
-                        break;
-                    }
-                }
-                Segment::Enum { .. } | Segment::Unknown => {}
-            }
-        }
-        let missing = missing.filter(|_| !in_map);
-        if let Some(missing) = missing {
-            if !field.is_empty() {
-                field.push('.');
-            }
-            field.push_str(missing);
-        }
-        FacadeError::invalid(InvalidInputDetail::FieldDecode {
-            field,
-            missing: missing.is_some(),
-        })
+        let path = error.path().to_string();
+        let separator = if prefix.is_empty() || path.starts_with('[') || path == "." {
+            ""
+        } else {
+            "."
+        };
+        graph_input_reason(format!("{prefix}{separator}{path}: {}", error.inner()))
     })
 }
 
@@ -136,7 +105,7 @@ pub(super) fn relay_error(error: ServiceError) -> FacadeError {
         }
         error => FacadeError::GraphRelayRefused {
             refusal_code: error.code().to_owned(),
-            detail: Some(InvalidInputDetail::OperationFailed),
+            detail: Some(InvalidInputDetail::graph_reason(error)),
         },
     }
 }
@@ -2697,19 +2666,16 @@ impl Factory {
         document: &GraphDocument,
         checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
     ) -> Result<(), FacadeError> {
-        if let Some(brief) = input.get("brief").and_then(Value::as_str) {
+        if provenant_redact::mode().masks_egress()
+            && let Some(brief) = input.get("brief").and_then(Value::as_str)
+        {
             match provenant_redact::matches_credential_value_for_retry(brief.as_bytes()) {
-                Err(_) => {
-                    return Err(FacadeError::io_caused(
-                        "check retry brief credentials",
-                        Some("retry brief credential check failed"),
-                    ));
-                }
-                Ok(true) => {
-                    return Err(FacadeError::invalid(InvalidInputDetail::GraphRelayCause(
-                        provenant_fabric_runtime::coordination::facade::GraphRelayCause::CredentialValue,
-                    )));
-                }
+                Ok(true) => warn_operator(
+                    "declared credential value rule: retry brief holds a value matching a known credential",
+                ),
+                Err(_) => warn_operator(
+                    "declared credential value rule: retry brief credential check failed",
+                ),
                 Ok(false) => {}
             }
         }
@@ -3585,7 +3551,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_errors_name_schema_paths_without_keys_or_values() -> Result<()> {
+    fn decode_errors_preserve_paths_and_parser_text() -> Result<()> {
         use provenant_fabric_runtime::graph::GraphDocument;
         let node = |field: &str, value: Value| {
             let mut node = json!({"id":"one","access":"read_only","prompt":"p","route":{"adapter":"mock","model":"m"}});
@@ -3604,16 +3570,16 @@ mod tests {
                 .expect_err("decode must fail");
             let text = error.diagnostic().detail.unwrap_or_default();
             assert!(text.contains(path), "{text}");
-            assert!(text.contains("invalid type or value"), "{text}");
+            assert!(text.contains("invalid type"), "{text}");
         }
         let secret = "ghp_TOKEN_SENTINEL";
         let mut doc = node("role", json!("fine"));
         doc["nodes"][0]["access"] = json!(secret);
         let error = super::decode_input::<GraphDocument>(doc, "").expect_err("decode must fail");
         let wire = serde_json::to_string(&error).unwrap();
-        assert!(!wire.contains(secret), "{wire}");
+        assert!(wire.contains(secret), "{wire}");
         assert!(wire.contains("nodes[0].access"), "{wire}");
-        // Map keys never appear, whatever characters they contain.
+        // Caller-selected map keys remain visible in the field path.
         for key in ["foo.secret", "k[0]secret", "userkey"] {
             #[derive(Debug, serde::Deserialize)]
             #[allow(dead_code, reason = "decoded only to provoke a typed map failure")]
@@ -3633,15 +3599,12 @@ mod tests {
             let doc = json!({"nodes":[{"attempt":{"extra":{key: "not a number"}}}]});
             let error = super::decode_input::<Doc>(doc, "").expect_err("decode must fail");
             let wire = serde_json::to_string(&error).unwrap();
-            assert!(
-                !wire.contains("secret") && !wire.contains("userkey"),
-                "{wire}"
-            );
+            assert!(wire.contains(key), "{wire}");
             let back: FacadeError = serde_json::from_str(&wire).unwrap();
             assert_eq!(back, error);
             assert_eq!(serde_json::to_string(&back).unwrap(), wire);
             let text = back.diagnostic().detail.unwrap_or_default();
-            assert!(text.contains("nodes[0].attempt.extra`"), "{text}");
+            assert!(text.contains("nodes[0].attempt.extra"), "{text}");
         }
         Ok(())
     }
@@ -3661,21 +3624,26 @@ mod tests {
             assert!(matches!(
                 &error,
                 FacadeError::GraphRelayRefused {
-                    detail: Some(InvalidInputDetail::OperationFailed),
+                    detail: Some(InvalidInputDetail::GraphReason(_)),
                     ..
                 }
             ));
             let diagnostic = error.diagnostic();
             assert_eq!(diagnostic.code, code);
-            assert_eq!(diagnostic.detail.as_deref(), Some("graph operation failed"));
-            assert!(!serde_json::to_string(&error)?.contains(detail));
+            assert!(
+                diagnostic
+                    .detail
+                    .as_deref()
+                    .is_some_and(|text| text.contains(detail))
+            );
+            assert!(serde_json::to_string(&error)?.contains(detail));
             let restored: FacadeError = serde_json::from_value(serde_json::to_value(&error)?)?;
             assert_eq!(restored.code(), code);
             assert_eq!(restored.diagnostic(), diagnostic);
             let structured = ServiceError::Facade(error).structured_error();
             assert_eq!(structured["code"], code);
             assert!(
-                !structured["message"]
+                structured["message"]
                     .as_str()
                     .unwrap_or_default()
                     .contains(detail)
@@ -3916,9 +3884,9 @@ mod tests {
     }
 
     #[test]
-    fn admission_refusals_disclose_no_caller_text_and_preserve_publication() -> Result {
+    fn admission_refusals_preserve_publication() -> Result {
         if super::super::peer_tests::host_test(
-            "fabric::interface::tests::admission_refusals_disclose_no_caller_text_and_preserve_publication",
+            "fabric::interface::tests::admission_refusals_preserve_publication",
         )? {
             return Ok(());
         }
@@ -3982,10 +3950,6 @@ mod tests {
                 }}),
             ),
             (
-                "retry",
-                json!({"op":"retry", "id":"g-test/reader", "brief":secret}),
-            ),
-            (
                 "edit",
                 json!({"op":"edit", "id":"g-test", "patch":{"schema_version":99, "replace":[keyed]}}),
             ),
@@ -4009,30 +3973,6 @@ mod tests {
             let error = factory
                 .graph_document(request, budget, &cancel)
                 .expect_err(path_name);
-            for projection in [
-                error.to_string(),
-                serde_json::to_string(&error)?,
-                serde_json::to_string(&error.diagnostic())?,
-            ] {
-                assert!(!projection.contains(marker), "{path_name}: {projection}");
-                assert!(
-                    !projection.contains("sk-abcdefghijklmnopqrstuvwx"),
-                    "{path_name}: {projection}"
-                );
-            }
-            if path_name == "retry" {
-                assert!(
-                    matches!(
-                        error,
-                        FacadeError::InvalidInput {
-                            detail: Some(InvalidInputDetail::GraphRelayCause(
-                                provenant_fabric_runtime::coordination::facade::GraphRelayCause::CredentialValue
-                            ))
-                        }
-                    ),
-                    "unexpected retry refusal cause: {error:?}"
-                );
-            }
             if path_name == "extension" {
                 assert!(
                     error.to_string().contains("per_graph.tokens"),

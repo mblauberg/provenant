@@ -3979,6 +3979,7 @@ pub(crate) mod tests {
 
     #[test]
     fn missing_remote_fetch_reports_bounded_sanitised_stderr() -> Result<(), Box<dyn Error>> {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
         let mut fixture = Fixture::new()?;
         add_missing_test_remote(&mut fixture)?;
 

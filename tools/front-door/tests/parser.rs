@@ -247,6 +247,8 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
     let leaves: Vec<Vec<&str>> = vec![
         vec!["root"],
         vec!["config", "show"],
+        vec!["config", "detect"],
+        vec!["config", "path", "--project"],
         vec!["install", "--source", "/fixture", "--harness", "claude"],
         vec!["uninstall", "--harness", "claude"],
         vec!["route", "list"],
@@ -328,6 +330,45 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
     ])?;
     assert_eq!(code(&internal), 3); // Reaches supervisor's typed invalid-handshake error.
     rig.assert_v1_root_untouched()
+}
+
+#[test]
+fn config_detection_and_project_path_are_inspectable() -> Result {
+    let rig = TestRig::new()?;
+    std::fs::write(
+        rig.project.join("package.json"),
+        r#"{"packageManager":"pnpm@9","scripts":{"lint":"ok"}}"#,
+    )?;
+    let out = rig.command(&["config", "detect", "--json"])?;
+    assert_eq!(code(&out), 0, "{out:?}");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(
+        value["data"]["tiers"]["0"][0]["argv"],
+        serde_json::json!(["pnpm", "run", "lint"])
+    );
+    let out = rig.command(&["config", "path", "--project", "--json"])?;
+    assert_eq!(code(&out), 0, "{out:?}");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let key = provenant_config::project_key_for(&rig.project).ok_or("project key")?;
+    assert_eq!(
+        value["data"]["path"],
+        rig.state
+            .join("projects")
+            .join(key)
+            .join("ports.json")
+            .to_str()
+            .ok_or("path")?
+    );
+    assert_eq!(value["data"]["exists"], false);
+    let out = rig.command(&["config", "show", "--full", "--json"])?;
+    assert_eq!(code(&out), 0, "{out:?}");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(
+        value["data"]["port_leaves"]["build.strategy"]["source"],
+        "builtin"
+    );
+    assert_eq!(value["data"]["detection"]["stacks"][0]["stack"], "node");
+    Ok(())
 }
 
 #[test]

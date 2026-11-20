@@ -29,13 +29,13 @@ const LAYERS: &[(&str, &[&str])] = &[
     // Test-only helpers, reachable through dev-dependencies or optional fixture features.
     ("test-support", &["core"]),
     ("records", &["core"]),
-    ("config", &["core", "records", "os"]),
+    ("config", &["core", "records", "os", "redact"]),
     ("os", &["core"]),
     // Per-byte redaction, built optimised in dev and test profiles.
     ("redact", &["core", "os"]),
     // Port-plan tests read the default lane settings from config (a sibling
     // layer), so the edge is acyclic.
-    ("supervisor", &["core", "records", "os", "config"]),
+    ("supervisor", &["core", "records", "os", "config", "redact"]),
     (
         "confinement",
         // Worktree lifecycle tests open a real host store; fabric-store sits
@@ -81,6 +81,8 @@ const LAYERS: &[(&str, &[&str])] = &[
             "sqlite",
         ],
     ),
+    // Affected-crate selection reads only workspace metadata; no internal edges.
+    ("select", &[]),
     ("sqlite", &["core", "os"]),
     ("fabric-store", &["core", "records", "os", "sqlite"]),
     (
@@ -177,13 +179,18 @@ fn rust_tokens(source: &str) -> Vec<&str> {
             }
             continue;
         }
-        if bytes[i] == b'r' {
-            let mut quote = i + 1;
+        let raw_start = if bytes[i..].starts_with(b"br") || bytes[i..].starts_with(b"cr") {
+            i + 1
+        } else {
+            i
+        };
+        if bytes[raw_start] == b'r' {
+            let mut quote = raw_start + 1;
             while bytes.get(quote) == Some(&b'#') {
                 quote += 1;
             }
             if bytes.get(quote) == Some(&b'"') {
-                let hashes = quote - i - 1;
+                let hashes = quote - raw_start - 1;
                 i = quote + 1;
                 while i < bytes.len() {
                     if bytes[i] == b'"'
@@ -203,6 +210,15 @@ fn rust_tokens(source: &str) -> Vec<&str> {
             let mut end = i + 1;
             if bytes.get(end) == Some(&b'\\') {
                 end += 2;
+                if bytes.get(end - 1) == Some(&b'u') && bytes.get(end) == Some(&b'{') {
+                    end += 1;
+                    while end < bytes.len() && bytes[end] != b'}' {
+                        end += 1;
+                    }
+                    end = (end + 1).min(bytes.len());
+                } else if bytes.get(end - 1) == Some(&b'x') {
+                    end = (end + 2).min(bytes.len());
+                }
             } else if let Some(character) = source[end..].chars().next() {
                 end += character.len_utf8();
             }
@@ -415,7 +431,7 @@ fn selected_test_scopes(source: &str, test_file: bool, fixtures: bool) -> Vec<&s
                 ">" if depth == 0 && generics > 0 => generics -= 1,
                 // Leaving the enclosing group (a parameter or field attribute) ends the item.
                 ")" | "]" | "," if depth + nesting + generics == 0 => break,
-                ")" | "]" => nesting -= 1,
+                ")" | "]" => nesting = nesting.saturating_sub(1),
                 ";" if depth + nesting == 0 => {
                     scopes.push(&source[offset(attribute[0])..=offset(token)]);
                     break;
@@ -425,7 +441,7 @@ fn selected_test_scopes(source: &str, test_file: bool, fixtures: bool) -> Vec<&s
                     scopes.push(&source[offset(attribute[0])..=offset(token)]);
                     break;
                 }
-                "}" => depth -= 1,
+                "}" => depth = depth.saturating_sub(1),
                 _ => {}
             }
         }
@@ -1072,6 +1088,30 @@ fn native_boundaries_mirror_workspace_lints_except_for_unsafe_code() -> Result<(
         );
     }
     Ok(())
+}
+
+#[test]
+fn test_scopes_preserve_policy_after_rust_literals() {
+    let source = r###"
+        #[test]
+        fn fixture<'a>(value: &'a str) {
+            let bytes = br#"{"paths":["}", "[", "\\\"nested\\\""]}"#;
+            let text = cr##"{ ] ) }"##;
+            let chars = [')', '\u{1b}', '\x5d'];
+            git_executable();
+            ExecOptions::new();
+            fixture_command_here;
+        }
+        fn production() { production_marker(); }
+    "###
+    .replace("fixture_command_here", concat!("Command::new(", "\"git\")"));
+    let scopes = test_scopes(&source, false);
+    assert_eq!(scopes.len(), 1);
+    assert!(scopes[0].contains("ExecOptions::new"));
+    assert!(!scopes[0].contains("production_marker"));
+    assert!(executor_git_violation(&source, false));
+    let git_command = regex::Regex::new(r#"Command\s*::\s*new\s*\(\s*"git""#).unwrap();
+    assert!(fixture_git_violation(&source, false, &git_command));
 }
 
 #[test]

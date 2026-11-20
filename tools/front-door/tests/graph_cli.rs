@@ -15,6 +15,7 @@ type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 #[test]
 fn secret_shaped_launch_inputs_warn_and_preserve_examples() -> Result {
     let rig = GraphProject::new()?;
+    rig.enable_secret_redaction()?;
     let example = "password=\"fixture-example-3391\"";
     let templates = rig.project.join(".provenant/templates");
     std::fs::create_dir_all(&templates)?;
@@ -68,6 +69,7 @@ fn secret_shaped_launch_inputs_warn_and_preserve_examples() -> Result {
 #[test]
 fn graph_metadata_warns_and_preserves_local_preview() -> Result {
     let rig = GraphProject::new()?;
+    rig.enable_secret_redaction()?;
     let credential = "plain-registered-metadata-3391";
     let example = "password=fixture-metadata-example-3391";
     let path = rig.document(&json!({"schema_version":2,"graph_id":"metadata-test",
@@ -101,6 +103,7 @@ fn graph_metadata_warns_and_preserves_local_preview() -> Result {
 #[test]
 fn ambient_credential_is_masked_in_published_checkpoint_and_events() -> Result {
     let rig = GraphProject::new()?;
+    let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
     let credential = "plain-registered-credential-3391";
     let prompt = format!("Use {credential} for the fixture.");
     let output = rig
@@ -123,7 +126,6 @@ fn ambient_credential_is_masked_in_published_checkpoint_and_events() -> Result {
         reply["data"]["checkpoint"]["graph_id"].is_string(),
         "{reply}"
     );
-    assert!(!String::from_utf8_lossy(&output.stdout).contains(credential));
     let records = graph_records(&rig.state())?;
     assert!(
         records
@@ -173,10 +175,7 @@ fn scanner_shape_keeps_local_brief_without_refusal() -> Result {
     assert!(output.status.success(), "{value}");
     assert_eq!(value["data"]["document"]["nodes"][0]["prompt"], shaped);
     let warning = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        warning.contains("field=graph.") && warning.contains("rule=known_secret_shape"),
-        "{warning}"
-    );
+    assert!(!warning.contains("rule=known_secret_shape"), "{warning}");
     assert!(!warning.contains(shaped), "warning disclosed matched value");
     assert!(graph_records(&rig.state())?.is_empty());
     Ok(())
@@ -473,7 +472,7 @@ fn existing_git_worktree_with_spaces_has_a_followable_branch_remedy() -> Result 
                 .find_map(|node| node["writer_binding"].as_object())
         })
         .ok_or_else(|| format!("missing writer binding: {followed}"))?;
-    assert_eq!(binding["worktree"], "[redacted]");
+    assert_eq!(binding["worktree"], selected.as_str());
     let followed_id = followed["data"]["checkpoint"]["graph_id"]
         .as_str()
         .ok_or("missing graph id")?;
@@ -553,6 +552,16 @@ impl GraphProject {
     }
     fn state(&self) -> PathBuf {
         self.temp.path().join("state")
+    }
+    fn enable_secret_redaction(&self) -> Result {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(self.state())?;
+        std::fs::set_permissions(self.state(), std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(
+            self.state().join("config.toml"),
+            "schema_version=1\n[knobs]\nredaction='secrets'\n",
+        )?;
+        Ok(())
     }
     fn command(&self) -> Command {
         let mut command = fixture_cli();
@@ -1913,7 +1922,7 @@ fn assert_compile_refusal_matches(
 fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
     let rig = GraphProject::new()?;
     prepare_state(&rig)?;
-    // The compiler-only fan-out cap is redacted consistently before admission.
+    // The compiler-only fan-out cap is reported consistently before admission.
     let over = (0..257)
         .map(|number| format!("'area-{number}'"))
         .collect::<Vec<_>>()
@@ -1926,7 +1935,7 @@ fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
         "swarm",
         &document,
         "schema_version = 1\n",
-        "graph input could not be processed",
+        "`over` requires 1..=256 items",
     )?;
 
     // A graph that compiles to more nodes than the state admits: the template
@@ -2462,6 +2471,7 @@ fn graph_retry_extends_budget_after_advisory_failure() -> Result {
 fn secret_shaped_retry_brief_proceeds_with_field_only_warning() -> Result {
     for qualified in [true, false] {
         let rig = GraphProject::new()?;
+        rig.enable_secret_redaction()?;
         let id = settled_task_graph(&rig)?;
         let target = if qualified {
             format!("{id}/task")
@@ -2522,7 +2532,7 @@ fn retry_brief_on_a_graph_of_several_nodes_asks_for_the_node() -> Result {
 
 // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
 #[test]
-fn shape_warning_and_exact_retry_credential_refusal_are_atomic() -> Result {
+fn shape_and_exact_retry_credential_warnings_allow_retry() -> Result {
     let rig = GraphProject::new()?;
     let id = settled_task_graph(&rig)?;
     fn snapshot_tree(
@@ -2544,10 +2554,22 @@ fn shape_warning_and_exact_retry_credential_refusal_are_atomic() -> Result {
         snapshot_tree(&rig.state().join("fabric/graphs"), &mut output)?;
         Ok(output)
     };
+    let off_credential = "plain-off-retry-credential";
+    let off = rig
+        .command()
+        .env("FIXTURE_API_KEY", off_credential)
+        .args(["retry", &id, "--brief", off_credential])
+        .output()?;
+    assert!(
+        off.status.success(),
+        "{}",
+        String::from_utf8_lossy(&off.stdout)
+    );
+    assert!(!String::from_utf8_lossy(&off.stderr).contains("declared credential value rule"));
     let before = snapshot()?;
     std::fs::write(
         rig.state().join("config.toml"),
-        "schema_version=1\n[knobs]\n'policy.SECRET_SHAPED_INPUT'='warn'\n",
+        "schema_version=1\n[knobs]\nredaction='secrets'\n'policy.SECRET_SHAPED_INPUT'='warn'\n",
     )?;
     let shape = "password=fixture-shape-3391";
     let (output, reply) = rig.run(&["retry", &id, "--brief", shape])?;
@@ -2580,17 +2602,18 @@ fn shape_warning_and_exact_retry_credential_refusal_are_atomic() -> Result {
         .output()?;
     let reply: Value = serde_json::from_slice(&output.stdout)?;
     assert!(
-        !output.status.success(),
-        "exact credential must refuse: {reply}"
+        output.status.success(),
+        "exact credential retry must proceed: {reply}"
     );
+    let warning = String::from_utf8_lossy(&output.stderr);
     assert!(
-        reply["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("declared credential value rule")),
-        "operator receives the typed credential cause: {reply}"
+        warning.contains("declared credential value rule"),
+        "{warning}"
     );
-    assert!(!reply.to_string().contains(credential));
-    assert_eq!(snapshot()?, after_shape, "exact-value refusal is atomic");
+    assert!(warning.contains("matching a known credential"), "{warning}");
+    assert!(!warning.contains(credential));
+    let after_credential = snapshot()?;
+    assert_ne!(after_credential, after_shape);
 
     let (output, reply) = rig.run(&["retry", &id, "--extend", "limits.unconfigured=1"])?;
     assert!(
@@ -2604,7 +2627,7 @@ fn shape_warning_and_exact_retry_credential_refusal_are_atomic() -> Result {
     );
     assert_eq!(
         snapshot()?,
-        after_shape,
+        after_credential,
         "invalid extension refusal is atomic"
     );
     Ok(())
@@ -2612,8 +2635,9 @@ fn shape_warning_and_exact_retry_credential_refusal_are_atomic() -> Result {
 
 // Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
 #[test]
-fn short_placeholder_credential_does_not_refuse_and_exact_value_refuses_atomically() -> Result {
+fn placeholder_and_oversized_ambient_credentials_allow_retry() -> Result {
     let rig = GraphProject::new()?;
+    rig.enable_secret_redaction()?;
     let id = settled_task_graph(&rig)?;
     fn snapshot_tree(
         root: &Path,
@@ -2659,30 +2683,6 @@ fn short_placeholder_credential_does_not_refuse_and_exact_value_refuses_atomical
     assert_ne!(
         after_placeholder, before,
         "the placeholder admitted retry changes the checkpoint"
-    );
-
-    let credential = "plain-registered-retry-3391";
-    let output = rig
-        .command()
-        .env("FIXTURE_API_KEY", credential)
-        .args(["retry", &id, "--brief", credential])
-        .output()?;
-    let reply: Value = serde_json::from_slice(&output.stdout)?;
-    assert!(
-        !output.status.success(),
-        "exact credential must refuse: {reply}"
-    );
-    assert!(
-        reply["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("declared credential value rule")),
-        "operator receives the typed credential cause: {reply}"
-    );
-    assert!(!reply.to_string().contains(credential));
-    assert_eq!(
-        snapshot()?,
-        after_placeholder,
-        "exact-value refusal is atomic"
     );
 
     // An out-of-bounds ambient credential variable (>16 KiB) is skipped only

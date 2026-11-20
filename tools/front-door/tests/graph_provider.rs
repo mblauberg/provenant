@@ -5520,6 +5520,7 @@ fn uncatalogued_cli_model_launches_and_surfaces_provider_failure() -> Result {
 }
 
 fn assert_private_retention_and_projected_exports(root: &std::path::Path) -> Result {
+    let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
     use provenant_confinement::publication::{Destination, Projector};
     let secret = b"ghp_abcdefghijklmnopqrstuvwxyz0123456789";
     let projector = Projector::new([secret.to_vec()])?;

@@ -819,6 +819,17 @@ fn main() -> Result<()> {
     inputs.environment_state_dir =
         std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
     let host_roots = provenant_os::fs::bind_roots(&inputs)?;
+    let mode = provenant_config::read_knobs(&host_roots)
+        .ok()
+        .and_then(|config| {
+            config
+                .knobs
+                .get("redaction")
+                .and_then(|knob| knob.value.as_str())
+                .and_then(provenant_redact::Mode::parse)
+        })
+        .unwrap_or_default();
+    provenant_redact::init(mode);
     let accounts: provenant_providers::accounts::Settings =
         provenant_config::read_domain(host_roots.state.as_path(), "accounts")?;
     let mut credentials = host_credential_roots(|name| std::env::var_os(name));
@@ -1021,7 +1032,6 @@ fn main() -> Result<()> {
     let mut records = Vec::new();
     let mut continuation = None;
     let mut last_profile = None;
-    let mut session_ids = Vec::new();
     let fresh_prompt = if args.writer && args.adapter == "claude" {
         SHELL_WRITER_PROMPT
     } else if args.writer && args.adapter == "agy" {
@@ -1111,9 +1121,6 @@ fn main() -> Result<()> {
                 .take(2000)
                 .collect::<String>()
         );
-        if let Some(id) = outcome.session() {
-            session_ids.push(id.to_owned());
-        }
         let writer_shell_proof =
             args.writer && args.adapter == "claude" && successful_bash(&run.outcome.stdout.bytes);
         if args.writer && args.adapter == "claude" && !writer_shell_proof {
@@ -1208,16 +1215,7 @@ fn main() -> Result<()> {
     }
     profile.observations = observed;
 
-    let mut literals: Vec<(String, String)> = session_ids
-        .iter()
-        .map(|id| (id.clone(), "FIXTURE_SESSION_IDENTIFIER".into()))
-        .collect();
-    literals.push((
-        args.root.to_string_lossy().into_owned(),
-        "FIXTURE_ROOT".into(),
-    ));
-    literals.push((home.to_string_lossy().into_owned(), "FIXTURE_HOME".into()));
-    let redactor = Redactor::new(literals, token.as_ref())?;
+    let redactor = Redactor::new(token.as_ref())?;
     let access = if args.writer {
         "worktree_write"
     } else {

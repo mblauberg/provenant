@@ -2,7 +2,6 @@
 #[cfg(any(unix, test))]
 use crate::cargo_seed::{Refusal, codes};
 use provenant_os::fs::{Directory, LockGuard, LockMode};
-use sha2::{Digest, Sha256};
 use std::{
     ffi::{OsStr, OsString},
     io,
@@ -16,6 +15,8 @@ pub struct Manifest {
     pub rustc_vv: String,
     pub host_triple: String,
     pub commit: String,
+    #[serde(default)]
+    pub identity: Option<String>,
     pub profile: String,
     pub cargo_profile: provenant_config::CargoBuildProfile,
     pub features: Vec<String>,
@@ -25,6 +26,241 @@ pub struct Manifest {
     /// Older generations leave this unset; a clone then reserves nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allocated_bytes: Option<u64>,
+    /// What the generation's target holds. `"deps"` means the seed keeps only
+    /// dependency units: every path package of the checkout was cleaned after
+    /// the build. An older full generation leaves this unset (or records another
+    /// value); it is not current and is collected as obsolete rather than kept.
+    #[serde(default)]
+    pub contents: String,
+}
+
+/// Dependency inputs used to decide whether a host generation can be reused.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SeedIdentity {
+    pub schema: u32,
+    pub inputs: serde_json::Value,
+    pub hash: String,
+}
+
+/// File access is supplied by the caller; paths are checkout-relative.
+pub trait SeedSource {
+    fn list_manifests(&self) -> io::Result<Vec<PathBuf>>;
+    fn read_file(&self, path: &Path) -> io::Result<Option<Vec<u8>>>;
+}
+
+/// Git-backed source for a checkout or a pinned commit tree.
+pub struct GitSeedSource<'a> {
+    pub checkout: &'a Path,
+    pub commit: Option<&'a str>,
+}
+
+impl GitSeedSource<'_> {
+    fn git(&self, args: &[&str]) -> io::Result<Vec<u8>> {
+        crate::git_context::seed_git(self.checkout, args)
+    }
+
+    fn tree_file(&self, commit: &str, path: &Path, depth: usize) -> io::Result<Option<Vec<u8>>> {
+        if depth > 32 {
+            return Err(io::Error::other("seed symlink depth exceeded"));
+        }
+        let name = path
+            .to_str()
+            .ok_or_else(|| io::Error::other("non-UTF-8 seed path"))?;
+        let listing = self.git(&["--literal-pathspecs", "ls-tree", "-z", commit, "--", name])?;
+        if listing.is_empty() {
+            return Ok(None);
+        }
+        let bytes = self.git(&["show", &format!("{commit}:{name}")])?;
+        if !listing.starts_with(b"120000 ") {
+            return Ok(Some(bytes));
+        }
+        let target = std::str::from_utf8(&bytes).map_err(io::Error::other)?;
+        let mut resolved = path.parent().unwrap_or(Path::new("")).to_path_buf();
+        for component in Path::new(target).components() {
+            match component {
+                std::path::Component::Normal(part) => resolved.push(part),
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir if resolved.pop() => {}
+                _ => return Err(io::Error::other("seed symlink escapes checkout")),
+            }
+        }
+        self.tree_file(commit, &resolved, depth + 1)
+    }
+}
+
+impl SeedSource for GitSeedSource<'_> {
+    fn list_manifests(&self) -> io::Result<Vec<PathBuf>> {
+        let bytes = if let Some(commit) = self.commit {
+            self.git(&[
+                "--literal-pathspecs",
+                "ls-tree",
+                "-r",
+                "--name-only",
+                "-z",
+                commit,
+                "--",
+            ])?
+        } else {
+            self.git(&["ls-files", "-z", "--"])?
+        };
+        bytes
+            .split(|b| *b == 0)
+            .filter(|p| !p.is_empty())
+            .map(|p| {
+                let name = std::str::from_utf8(p).map_err(io::Error::other)?;
+                Ok(PathBuf::from(name))
+            })
+            .filter(|p: &io::Result<PathBuf>| {
+                p.as_ref()
+                    .map_or(true, |p| p.file_name().is_some_and(|n| n == "Cargo.toml"))
+            })
+            .collect()
+    }
+    fn read_file(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        if let Some(commit) = self.commit {
+            self.tree_file(commit, path, 0)
+        } else {
+            match std::fs::read(self.checkout.join(path)) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
+
+/// SHA-256 of compact canonical JSON `{schema: 1, inputs: ...}`. Inputs contain
+/// the lock digest, sorted manifest dependency tables and root profiles, Cargo
+/// config profiles, rustc text and host triple, `deps`, and the effective build
+/// profile. Paths are checkout-relative and object keys are sorted. This can
+/// over-invalidate when declarations change without changing units, but does not
+/// omit any listed input. Cargo metadata is not run: lanes must identify seeds
+/// before Cargo can run under confinement. See state.md "One digest preimage".
+pub fn seed_identity(
+    source: &impl SeedSource,
+    workspace: &Path,
+    rustc_vv: &str,
+    host_triple: &str,
+    cargo_profile: &provenant_config::CargoBuildProfile,
+) -> io::Result<SeedIdentity> {
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeMap;
+    if workspace.is_absolute()
+        || workspace
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(io::Error::other("workspace outside checkout"));
+    }
+    let workspace: PathBuf = workspace
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => Some(part),
+            _ => None,
+        })
+        .collect();
+    let workspace = workspace.as_path();
+    let required = |path: &Path| {
+        source.read_file(path)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("missing {}", path.display()),
+            )
+        })
+    };
+    let parse = |bytes: &[u8]| -> io::Result<serde_json::Value> {
+        toml_edit::de::from_str(std::str::from_utf8(bytes).map_err(io::Error::other)?)
+            .map_err(io::Error::other)
+    };
+    let lock = required(&workspace.join("Cargo.lock"))?;
+    let mut manifests = BTreeMap::new();
+    for path in source.list_manifests()? {
+        let mut value = parse(&required(&path)?)?;
+        let table = value
+            .as_object_mut()
+            .ok_or_else(|| io::Error::other("invalid manifest"))?;
+        table.retain(|k, _| {
+            matches!(
+                k.as_str(),
+                "features"
+                    | "dependencies"
+                    | "dev-dependencies"
+                    | "build-dependencies"
+                    | "target"
+                    | "workspace"
+                    | "patch"
+                    | "replace"
+            )
+        });
+        if let Some(w) = table
+            .get_mut("workspace")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            w.retain(|k, _| k == "dependencies");
+        }
+        if let Some(t) = table
+            .get_mut("target")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for v in t.values_mut().filter_map(serde_json::Value::as_object_mut) {
+                v.retain(|k, _| {
+                    matches!(
+                        k.as_str(),
+                        "dependencies" | "dev-dependencies" | "build-dependencies"
+                    )
+                });
+            }
+            t.retain(|_, v| v.as_object().is_none_or(|v| !v.is_empty()));
+        }
+        manifests.insert(
+            path.to_str()
+                .ok_or_else(|| io::Error::other("non-UTF-8 manifest path"))?
+                .to_owned(),
+            value,
+        );
+    }
+    let root = parse(&required(&workspace.join("Cargo.toml"))?)?;
+    let profiles = root
+        .get("profile")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let mut configs = BTreeMap::new();
+    let mut dir = workspace;
+    loop {
+        let toml_path = dir.join(".cargo/config.toml");
+        let legacy_path = dir.join(".cargo/config");
+        let (path, bytes) = match source.read_file(&legacy_path)? {
+            Some(bytes) => (legacy_path, Some(bytes)),
+            None => (toml_path.clone(), source.read_file(&toml_path)?),
+        };
+        if let Some(bytes) = bytes {
+            let config = parse(&bytes)?;
+            if let Some(profile) = config.get("profile") {
+                configs.insert(path.to_string_lossy().into_owned(), profile.clone());
+            }
+        }
+        if dir.as_os_str().is_empty() {
+            break;
+        }
+        dir = dir
+            .parent()
+            .ok_or_else(|| io::Error::other("workspace parent unavailable"))?;
+    }
+    let inputs = serde_json::json!({"lock_sha256": provenant_core::hex(&Sha256::digest(&lock)), "manifests": manifests, "profiles": profiles, "configs": configs, "rustc_vv": rustc_vv, "host_triple": host_triple, "contents": "deps", "cargo_profile": cargo_profile});
+    let hash = identity_hash(&inputs)?;
+    Ok(SeedIdentity {
+        schema: 1,
+        hash,
+        inputs,
+    })
+}
+
+fn identity_hash(inputs: &serde_json::Value) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let preimage =
+        provenant_records::CanonicalV1::bytes(&serde_json::json!({"schema": 1, "inputs": inputs}))
+            .map_err(io::Error::other)?;
+    Ok(provenant_core::hex(&Sha256::digest(preimage.as_bytes())))
 }
 
 /// Allocated bytes of a seed target, measured at seed-build time. A clone of a
@@ -57,11 +293,9 @@ pub fn allocated_tree_bytes(_path: &Path) -> Option<u64> {
 
 /// Hash a verified repository handle's canonical common Git directory for
 /// stable host-seed ownership. Linked checkouts share that directory and key.
-pub fn project_key(common_git_dir: &Path) -> String {
-    provenant_core::hex(&Sha256::digest(
-        common_git_dir.as_os_str().as_encoded_bytes(),
-    ))
-}
+/// The definition now lives in config so the host-project configuration layer
+/// and target-seed ownership key every checkout identically.
+pub use provenant_config::project_key;
 
 /// Select the project's Cargo build directory using the same workspace selector
 /// as the verification tiers. Read only data here: lane preparation must never
@@ -97,6 +331,121 @@ pub fn cargo_build_directory(project: &Path, host_state: &Path) -> io::Result<Op
 
 pub fn store_path(state: &Path) -> PathBuf {
     state.join("cargo-target-seeds")
+}
+
+/// A lane's desired dependency identity, serviced by the host tick worker.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SeedRequest {
+    pub schema: u32,
+    pub project_key: String,
+    pub commit: String,
+    pub identity: String,
+    pub requested_at: provenant_core::WallTime,
+    pub attempt: u32,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SeedRequestResult {
+    pub schema: u32,
+    pub request: SeedRequest,
+    pub outcome: String,
+    pub generation: Option<String>,
+}
+
+fn request_dir(state: &Path, key: &str) -> io::Result<PathBuf> {
+    if key.is_empty() || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(io::Error::other("invalid seed project key"));
+    }
+    Ok(store_path(state).join("requests").join(key))
+}
+
+pub fn read_request(state: &Path, key: &str) -> io::Result<Option<SeedRequest>> {
+    match std::fs::read(request_dir(state, key)?.join("seed-request.json")) {
+        Ok(bytes) => {
+            let request: SeedRequest = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+            if request.schema != 1 || request.project_key != key {
+                return Err(io::Error::other("invalid seed request"));
+            }
+            Ok(Some(request))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn write_request_file(
+    state: &Path,
+    key: &str,
+    name: &str,
+    value: &impl serde::Serialize,
+) -> io::Result<()> {
+    let path = request_dir(state, key)?;
+    let directory = provenant_config::private_directory(&path, true).map_err(io::Error::other)?;
+    let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
+    directory
+        .atomic_write(
+            name.as_ref(),
+            "seed-request",
+            &bytes,
+            provenant_os::fs::PublishMode::Replace,
+        )
+        .map(|_| ())
+        .map_err(io::Error::other)
+}
+
+/// Serialize replacement and acknowledgement under the store lock.
+pub fn queue_request(state: &Path, request: &SeedRequest) -> io::Result<()> {
+    let _lock = lock_store_for_publication(state, 10)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    if read_request(state, &request.project_key)?
+        .is_none_or(|old| old.requested_at < request.requested_at)
+    {
+        write_request_file(state, &request.project_key, "seed-request.json", request)?;
+    }
+    Ok(())
+}
+
+pub fn acknowledge_request(
+    state: &Path,
+    result: &SeedRequestResult,
+    retry: bool,
+) -> io::Result<()> {
+    let _lock = lock_store_for_publication(state, 10)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let request = &result.request;
+    write_request_file(state, &request.project_key, "seed-result.json", result)?;
+    if let Some(mut current) = read_request(state, &request.project_key)?
+        && current.identity == request.identity
+        && current.requested_at == request.requested_at
+    {
+        if retry {
+            current.attempt = current.attempt.saturating_add(1);
+            write_request_file(state, &request.project_key, "seed-request.json", &current)?;
+        } else {
+            std::fs::remove_file(
+                request_dir(state, &request.project_key)?.join("seed-request.json"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+pub fn pending_request_keys(state: &Path) -> io::Result<Vec<String>> {
+    let root = store_path(state).join("requests");
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut keys = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let key = entry.file_name().to_string_lossy().into_owned();
+        if read_request(state, &key).ok().flatten().is_some() {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
 }
 
 /// Resolve host Cargo tools from the same Cargo home used by lanes, independent
@@ -161,6 +510,29 @@ pub fn unsupported_seed_build_environment(
         }
         unsupported_seed_build_environment_key(key)
     })
+}
+
+/// Names of inherited compiler-selection keys a seed build removes from its
+/// child environment. Only names are returned, never values; the result is
+/// sorted and deduplicated so the build's warning and the tick's seed record
+/// cannot disagree. `RUSTUP_AUTO_INSTALL=0` is the exception Provenant sets
+/// itself; a different inherited value is an override to remove. Profile keys
+/// (`CARGO_INCREMENTAL`, `CARGO_PROFILE_*`, `CARGO_TARGET_DIR`) are not listed:
+/// they are set by the caller's Cargo profile and are part of the seed identity.
+pub fn seed_build_cleared_keys(environment: &[(OsString, OsString)]) -> Vec<String> {
+    let mut keys: Vec<String> = environment
+        .iter()
+        .filter_map(|(key, value)| {
+            let name = key.to_str()?;
+            if name == "RUSTUP_AUTO_INSTALL" {
+                return (value != "0").then(|| name.to_owned());
+            }
+            unsupported_seed_build_environment_key(key).map(|_| name.to_owned())
+        })
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 /// Apply the same bounded TOML policy to live Cargo config files and config
@@ -231,9 +603,17 @@ pub fn lock_build(state: &Path) -> Result<LockGuard, Box<dyn std::error::Error>>
 
 pub fn rustc_metadata(worktree: &Path) -> io::Result<(String, String)> {
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
-    let mut env: Vec<_> = std::env::vars_os().collect();
-    let rustc = cargo_tool(&env, "rustc")?;
+    let inherited: Vec<_> = std::env::vars_os().collect();
+    let rustc = cargo_tool(&inherited, "rustc")?;
     let argv = [rustc.into_os_string(), "-vV".into()];
+    // A seed build is not a lane: wrappers and rustup overrides come from the
+    // launcher's shell, not this repository. Probe with the compiler the pinned
+    // verify base selects, not the one the caller happened to export.
+    let cleared = seed_build_cleared_keys(&inherited);
+    let mut env: Vec<_> = inherited
+        .into_iter()
+        .filter(|(key, _)| !cleared.iter().any(|name| OsStr::new(name) == key))
+        .collect();
     env.retain(|(key, _)| key != "RUSTUP_AUTO_INSTALL");
     env.push(("RUSTUP_AUTO_INSTALL".into(), "0".into()));
     let mut options = ExecOptions::new(&argv, worktree, std::time::Duration::from_secs(30));
@@ -511,6 +891,174 @@ fn lane_release_pin(worktree: &Path, home: &Path, host_state: &Path) -> Result<S
 mod lane_probe_tests {
     use super::*;
 
+    #[derive(Default)]
+    struct MemorySource(std::collections::BTreeMap<PathBuf, Vec<u8>>);
+    impl SeedSource for MemorySource {
+        fn list_manifests(&self) -> io::Result<Vec<PathBuf>> {
+            Ok(self
+                .0
+                .keys()
+                .filter(|p| p.file_name().is_some_and(|n| n == "Cargo.toml"))
+                .cloned()
+                .collect())
+        }
+        fn read_file(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+            Ok(self.0.get(path).cloned())
+        }
+    }
+
+    #[test]
+    fn identity_changes_with_each_input() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join(".cargo")).unwrap();
+        fs::write(root.join("Cargo.lock"), "lock one").unwrap();
+        let manifest = "[package]\nname = \"sample\"\nversion = \"1.0.0\"\ndescription = \"first\"\n[dependencies]\nexample = \"1\"\n[profile.dev]\nopt-level = 0\n";
+        fs::write(root.join("Cargo.toml"), manifest).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[profile.dev]\nopt-level = 1\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            fs::create_dir(root.join(".hidden")).unwrap();
+            fs::write(
+                root.join(".hidden/declarations"),
+                "[dependencies]\nhidden = '1'\n",
+            )
+            .unwrap();
+            std::os::unix::fs::symlink("declarations", root.join(".hidden/Cargo.toml")).unwrap();
+        }
+        provenant_os::fixture::run_git(root, &["init", "-q"]).unwrap();
+        provenant_os::fixture::run_git(root, &["add", "-A"]).unwrap();
+        provenant_os::fixture::run_git(
+            root,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "inputs",
+            ],
+        )
+        .unwrap();
+        let source = GitSeedSource {
+            checkout: root,
+            commit: None,
+        };
+        let tree = GitSeedSource {
+            checkout: root,
+            commit: Some("HEAD"),
+        };
+        let mut memory = MemorySource::default();
+        for path in ["Cargo.toml", "Cargo.lock", ".cargo/config.toml"] {
+            memory
+                .0
+                .insert(path.into(), fs::read(root.join(path)).unwrap());
+        }
+        #[cfg(unix)]
+        memory.0.insert(
+            ".hidden/Cargo.toml".into(),
+            fs::read(root.join(".hidden/Cargo.toml")).unwrap(),
+        );
+        let profile = provenant_config::CargoBuildProfile::default();
+        let identity =
+            |version: &str, host: &str, profile: &provenant_config::CargoBuildProfile| {
+                seed_identity(&source, Path::new(""), version, host, profile)
+                    .unwrap()
+                    .hash
+            };
+        fs::write(root.join("source.rs"), "source one").unwrap();
+        let original = identity("rustc one", "host one", &profile);
+        let tree_hash =
+            seed_identity(&tree, Path::new(""), "rustc one", "host one", &profile).unwrap();
+        let memory_hash =
+            seed_identity(&memory, Path::new(""), "rustc one", "host one", &profile).unwrap();
+        assert_eq!(original, tree_hash.hash);
+        assert_eq!(original, memory_hash.hash);
+        assert_eq!(memory_hash.inputs["contents"], "deps");
+        let mut other_contents = memory_hash.inputs.clone();
+        other_contents["contents"] = serde_json::json!("full");
+        assert_ne!(original, identity_hash(&other_contents).unwrap());
+        fs::write(root.join("source.rs"), "source two").unwrap();
+        assert_eq!(original, identity("rustc one", "host one", &profile));
+        fs::write(root.join("Cargo.toml"), manifest.replace("1.0.0", "2.0.0")).unwrap();
+        assert_eq!(original, identity("rustc one", "host one", &profile));
+        fs::write(root.join("Cargo.toml"), manifest.replace("first", "second")).unwrap();
+        assert_eq!(original, identity("rustc one", "host one", &profile));
+        fs::write(root.join("Cargo.lock"), "lock two").unwrap();
+        assert_ne!(original, identity("rustc one", "host one", &profile));
+        fs::write(root.join("Cargo.lock"), "lock one").unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            manifest.replace("example = \"1\"", "example = \"2\""),
+        )
+        .unwrap();
+        assert_ne!(original, identity("rustc one", "host one", &profile));
+        fs::write(
+            root.join("Cargo.toml"),
+            manifest.replace("opt-level = 0", "opt-level = 1"),
+        )
+        .unwrap();
+        assert_ne!(original, identity("rustc one", "host one", &profile));
+        fs::write(root.join("Cargo.toml"), manifest).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[profile.dev]\nopt-level = 2\n",
+        )
+        .unwrap();
+        assert_ne!(original, identity("rustc one", "host one", &profile));
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[profile.dev]\nopt-level = 1\n",
+        )
+        .unwrap();
+        fs::remove_file(root.join(".cargo/config.toml")).unwrap();
+        fs::write(root.join(".cargo/config"), "[profile.dev]\nopt-level = 1\n").unwrap();
+        let legacy = identity("rustc one", "host one", &profile);
+        fs::write(root.join(".cargo/config"), "[profile.dev]\nopt-level = 2\n").unwrap();
+        assert_ne!(legacy, identity("rustc one", "host one", &profile));
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[profile.dev]\nopt-level = 1\n",
+        )
+        .unwrap();
+        let preferred = identity("rustc one", "host one", &profile);
+        assert_ne!(original, preferred);
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[profile.dev]\nopt-level = 3\n",
+        )
+        .unwrap();
+        assert_eq!(preferred, identity("rustc one", "host one", &profile));
+        fs::remove_file(root.join(".cargo/config")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[profile.dev]\nopt-level = 1\n",
+        )
+        .unwrap();
+        assert_ne!(original, identity("rustc two", "host one", &profile));
+        assert_ne!(original, identity("rustc one", "host two", &profile));
+        let mut other = profile.clone();
+        other.incremental.push('x');
+        assert_ne!(original, identity("rustc one", "host one", &other));
+        assert!(
+            original
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        );
+    }
+
+    #[test]
+    fn project_key_reexport_matches_config() {
+        let path = Path::new("/repo/project/.git");
+        assert_eq!(project_key(path), provenant_config::project_key(path));
+    }
+
     #[test]
     fn seed_cargo_resolves_from_fixture_cargo_home_without_path() {
         let root = tempfile::tempdir().unwrap();
@@ -587,6 +1135,65 @@ mod lane_probe_tests {
             )]),
             None
         );
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn cleared_keys_helper_names_only_and_keeps_provenant_set_keys() {
+        let env = vec![
+            (
+                OsString::from("RUSTC_WRAPPER"),
+                OsString::from("/secret/wrap"),
+            ),
+            (
+                OsString::from("RUSTUP_TOOLCHAIN"),
+                OsString::from("nightly"),
+            ),
+            (
+                OsString::from("CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"),
+                OsString::from("secret-ld"),
+            ),
+            (OsString::from("RUSTFLAGS"), OsString::from("-C secretflag")),
+            // Provenant sets these itself; they are not inherited overrides.
+            (OsString::from("RUSTUP_AUTO_INSTALL"), OsString::from("0")),
+            (OsString::from("CARGO_INCREMENTAL"), OsString::from("0")),
+            (
+                OsString::from("CARGO_PROFILE_DEV_DEBUG"),
+                OsString::from("line-tables-only"),
+            ),
+            (
+                OsString::from("CARGO_TARGET_DIR"),
+                OsString::from("/secret/target"),
+            ),
+            // A repeated key must not be recorded twice.
+            (
+                OsString::from("RUSTC_WRAPPER"),
+                OsString::from("/secret/wrap2"),
+            ),
+        ];
+        assert_eq!(
+            seed_build_cleared_keys(&env),
+            vec![
+                "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
+                "RUSTC_WRAPPER",
+                "RUSTFLAGS",
+                "RUSTUP_TOOLCHAIN",
+            ]
+        );
+        let rendered = format!("{:?}", seed_build_cleared_keys(&env));
+        assert!(
+            !rendered.contains("secret"),
+            "names only, never values: {rendered}"
+        );
+
+        // A non-zero auto-install value is an inherited override and is named;
+        // the Provenant-set zero value never is.
+        let bad_auto_install = [(OsString::from("RUSTUP_AUTO_INSTALL"), OsString::from("1"))];
+        assert_eq!(
+            seed_build_cleared_keys(&bad_auto_install),
+            vec!["RUSTUP_AUTO_INSTALL"]
+        );
+        assert!(seed_build_cleared_keys(&[]).is_empty());
     }
 
     #[test]
@@ -858,5 +1465,72 @@ mod lane_probe_tests {
                 "RUSTUP_HOME unset"
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    fn request(at: i64, identity: &str) -> SeedRequest {
+        SeedRequest {
+            schema: 1,
+            project_key: "abcd".into(),
+            commit: "1234".into(),
+            identity: identity.into(),
+            requested_at: provenant_core::WallTime::from_micros(at).unwrap(),
+            attempt: 0,
+        }
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn newer_request_replaces_older() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state).unwrap();
+        let old = request(1, "old");
+        let new = request(2, "new");
+        queue_request(&state, &new).unwrap();
+        queue_request(&state, &old).unwrap();
+        assert_eq!(read_request(&state, "abcd").unwrap(), Some(new));
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn result_acknowledges_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state).unwrap();
+        let old = request(1, "old");
+        let new = request(2, "new");
+        queue_request(&state, &old).unwrap();
+        queue_request(&state, &new).unwrap();
+        let result = SeedRequestResult {
+            schema: 1,
+            request: old,
+            outcome: "built".into(),
+            generation: Some("generation".into()),
+        };
+        acknowledge_request(&state, &result, false).unwrap();
+        assert_eq!(read_request(&state, "abcd").unwrap(), Some(new.clone()));
+        let saved: SeedRequestResult = serde_json::from_slice(
+            &std::fs::read(
+                request_dir(&state, "abcd")
+                    .unwrap()
+                    .join("seed-result.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved.request, result.request);
+        let result = SeedRequestResult {
+            request: new,
+            ..result
+        };
+        acknowledge_request(&state, &result, true).unwrap();
+        assert_eq!(read_request(&state, "abcd").unwrap().unwrap().attempt, 1);
+        acknowledge_request(&state, &result, false).unwrap();
+        assert!(read_request(&state, "abcd").unwrap().is_none());
     }
 }

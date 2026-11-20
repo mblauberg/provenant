@@ -326,6 +326,7 @@ fn settlement_recovery(
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LaunchMessage {
+    redaction: String,
     policy: provenant_records::policy::Policy,
     schema_version: u64,
     priority: u8,
@@ -373,6 +374,7 @@ pub(crate) fn handoff(
         return Err(CustodyError::InvalidRecord);
     }
     let message = LaunchMessage {
+        redaction: provenant_redact::mode().as_str().to_owned(),
         policy: owned.command.policy,
         schema_version: 1,
         profile: owned
@@ -646,6 +648,9 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         crate::process_os::handoff::receive(&mut inherited.channel, Duration::from_secs(10))?;
     let mut message: LaunchMessage =
         decode_v1(payload.as_slice(), LAUNCH_LIMITS).map_err(|_| CustodyError::InvalidRecord)?;
+    provenant_redact::init(
+        provenant_redact::Mode::parse(&message.redaction).ok_or(CustodyError::InvalidRecord)?,
+    );
     let _publication_scope = hooks
         .publication_scope
         .map(|bind| {

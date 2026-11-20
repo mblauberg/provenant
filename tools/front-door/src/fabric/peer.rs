@@ -435,18 +435,22 @@ fn project_peer_output_with(
             bytes: OutputBytes::Utf8(text),
             reason,
             planner_fallback,
+            extra,
             ..
         } => {
             texts.push(text);
+            provenant_fabric_runtime::hosts::output_lane_texts(extra, &mut texts);
             texts.extend(reason.iter_mut());
             texts.extend(planner_fallback.iter_mut());
         }
         OutputResult::Artifact {
             bytes: OutputBytes::Utf8(text),
             planner_fallback,
+            extra,
             ..
         } => {
             texts.push(text);
+            provenant_fabric_runtime::hosts::output_lane_texts(extra, &mut texts);
             texts.extend(planner_fallback.iter_mut());
         }
         _ => return Err(failure()),
@@ -517,6 +521,7 @@ mod output_projection_tests {
     // Spec: docs/specs/fabric.md#publication-boundary
     #[test]
     fn graph_result_projects_typed_credentials_before_paging() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         use super::*;
         let projector = provenant_confinement::publication::Projector::new([]).unwrap();
         let target: AttemptTarget = serde_json::from_value(
@@ -559,9 +564,56 @@ mod output_projection_tests {
         );
     }
 
+    #[test]
+    fn output_projects_lane_prose_and_preserves_metadata() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
+        use super::*;
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let projector = provenant_confinement::publication::Projector::new([]).unwrap();
+        let target: AttemptTarget = serde_json::from_value(
+            serde_json::json!({"attempt":"11111111111111111111111111111111"}),
+        )
+        .unwrap();
+        let input = OutputInput::Read {
+            extra: Default::default(),
+            target: target.clone(),
+            part: OutputPart::Result,
+            offset: 0,
+            max_bytes: 4096,
+        };
+        let output = project_peer_output_with(&input, &projector, |_| {
+            serde_json::from_value(serde_json::json!({
+                "kind":"chunk", "target":target, "part":"result", "state":"succeeded", "reason":null,
+                "offset":0, "next_offset":2, "eof":true,
+                "digest":provenant_core::Digest::from_bytes(*provenant_records::CanonicalV1::file_digest(b"ok").bytes()),
+                "bytes":{"encoding":"utf8","data":"ok"}, "length":2,
+                "title":token, "model":token, "skipped_routes":[{"detail":token,"name":token}],
+                "applied_route":{"model":token,"launch_warnings":[token]},
+                "handoff":{"Ok":{"note":token,"spec_concerns":[{"criterion":token,"claim":token,"evidence":token,"proposed_change":token}]}}
+            })).map_err(|_| FacadeError::StateCorrupt)
+        }).unwrap();
+        let row = serde_json::to_value(output).unwrap();
+        assert_eq!(row["model"], token);
+        assert_eq!(row["applied_route"]["model"], token);
+        assert_eq!(row["skipped_routes"][0]["name"], token);
+        for text in [
+            &row["title"],
+            &row["skipped_routes"][0]["detail"],
+            &row["applied_route"]["launch_warnings"][0],
+            &row["handoff"]["Ok"]["note"],
+            &row["handoff"]["Ok"]["spec_concerns"][0]["criterion"],
+            &row["handoff"]["Ok"]["spec_concerns"][0]["claim"],
+            &row["handoff"]["Ok"]["spec_concerns"][0]["evidence"],
+            &row["handoff"]["Ok"]["spec_concerns"][0]["proposed_change"],
+        ] {
+            assert_eq!(text, "[REDACTED]");
+        }
+    }
+
     // Spec: docs/specs/fabric.md#publication-boundary
     #[test]
     fn paged_projection_survives_every_mask_boundary_and_response_encoding() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         use super::*;
         use provenant_fabric_runtime::hosts::{PeerResponse, PeerResult, encode_peer_response};
         let limit = provenant_records::run::OUTPUT_LIMIT as usize;
@@ -681,6 +733,7 @@ mod output_projection_tests {
 
     #[test]
     fn projects_before_paging_and_binds_published_bytes() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         use super::*;
         let secret = "a-long-private-value";
         let projector =
@@ -1140,20 +1193,12 @@ pub fn peer(
                         extra: Default::default(),
                     }
                 } else {
-                    peer_result(
-                        owner.snapshots_local(targets, &cancel).map(|mut data| {
-                            for attempt in &mut data {
-                                provenant_fabric_runtime::runs::project_peer_attempt_diagnostics(
-                                    attempt,
-                                );
-                            }
-                            data
-                        }),
-                        |data| PeerResult::RunStatuses {
+                    peer_result(owner.snapshots_local(targets, &cancel), |data| {
+                        PeerResult::RunStatuses {
                             data,
                             extra: Default::default(),
-                        },
-                    )
+                        }
+                    })
                 }
             }
             PeerAction::CancelSubmission { .. } => peer_result(
@@ -1204,7 +1249,6 @@ pub fn peer(
                                 after,
                             )?);
                         }
-                        value.project_peer_diagnostics();
                         Ok(value)
                     });
                 peer_result(observed, |value| PeerResult::Run {
@@ -1324,30 +1368,22 @@ pub fn peer(
                     extra: Default::default(),
                 },
             ),
-            PeerAction::RunEvents { after, limit, .. } => peer_result(
-                owner.events(*after, *limit, &cancel).map(|mut data| {
-                    for event in &mut data.items {
-                        provenant_fabric_runtime::runs::project_peer_run_event_diagnostics(event);
+            PeerAction::RunEvents { after, limit, .. } => {
+                peer_result(owner.events(*after, *limit, &cancel), |data| {
+                    PeerResult::RunEvents {
+                        data,
+                        extra: Default::default(),
                     }
-                    data
-                }),
-                |data| PeerResult::RunEvents {
-                    data,
-                    extra: Default::default(),
-                },
-            ),
-            PeerAction::Lanes { all, limit, .. } => peer_result(
-                owner.lanes_local(*all, *limit, &cancel).map(|mut data| {
-                    for attempt in &mut data {
-                        provenant_fabric_runtime::runs::project_peer_attempt_diagnostics(attempt);
+                })
+            }
+            PeerAction::Lanes { all, limit, .. } => {
+                peer_result(owner.lanes_local(*all, *limit, &cancel), |data| {
+                    PeerResult::RunStatuses {
+                        data,
+                        extra: Default::default(),
                     }
-                    data
-                }),
-                |data| PeerResult::RunStatuses {
-                    data,
-                    extra: Default::default(),
-                },
-            ),
+                })
+            }
             PeerAction::LaneWaits { targets, .. } => {
                 if !(1..=100).contains(&targets.len()) {
                     PeerResult::Error {

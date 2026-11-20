@@ -123,7 +123,7 @@ pub(super) fn apply_gate_result(
     }
 }
 
-/// Apply redacted launch metadata from the owner without reading host state.
+/// Retain launch warnings supplied by the owner.
 pub(super) fn apply_launch_metadata(
     checkpoint: &mut GraphCheckpoint,
     node_index: usize,
@@ -135,41 +135,41 @@ pub(super) fn apply_launch_metadata(
 }
 
 pub(super) fn apply_route(progress: &mut NodeProgress, applied_route: Option<GraphRoute>) {
-    if let Some(mut route) = applied_route {
-        let clean = |value: &mut Option<String>| {
-            if value.as_ref().is_some_and(|value| {
-                value.is_empty()
-                    || value.len() > HOST_ID_BYTES
-                    || value.starts_with('/')
-                    || !value.bytes().all(|b| {
-                        b.is_ascii_alphanumeric()
-                            || matches!(b, b'/' | b'-' | b'_' | b'.' | b':' | b'@' | b'+')
-                    })
-            }) {
-                *value = None;
+    if let Some(route) = applied_route {
+        fn warn_value(warnings: &mut Vec<String>, field: &str, value: &serde_json::Value) {
+            match value {
+                serde_json::Value::String(value) => {
+                    for (bad, reason) in [
+                        (value.len() > HOST_ID_BYTES, "exceeds 256 bytes"),
+                        (
+                            value.chars().any(char::is_control),
+                            "contains control characters",
+                        ),
+                    ] {
+                        let message = format!("route.{field} {reason}");
+                        if bad && !warnings.contains(&message) {
+                            warnings.push(message);
+                        }
+                    }
+                }
+                serde_json::Value::Object(fields) => {
+                    for (key, value) in fields {
+                        warn_value(warnings, &format!("{field}.{key}"), value);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for (index, value) in values.iter().enumerate() {
+                        warn_value(warnings, &format!("{field}[{index}]"), value);
+                    }
+                }
+                _ => {}
             }
-        };
-        for value in [
-            &mut route.adapter,
-            &mut route.name,
-            &mut route.model,
-            &mut route.alias,
-            &mut route.effort,
-            &mut route.account,
-            &mut route.tier,
-        ] {
-            clean(value);
         }
-        // An applied route identifies one selection. Keep its concrete
-        // model when present, otherwise retain the alias before a name.
-        // This also bounds the retained selection to four fields.
-        if route.model.is_some() {
-            route.alias = None;
-            route.name = None;
-        } else if route.alias.is_some() {
-            route.name = None;
+        if let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(&route) {
+            for (field, value) in fields {
+                warn_value(&mut progress.warnings, &field, &value);
+            }
         }
-        route.extra.clear();
         if let Some(manifest) = progress
             .attempts
             .last_mut()

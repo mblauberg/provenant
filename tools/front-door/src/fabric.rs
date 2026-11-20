@@ -40,7 +40,7 @@ pub(crate) use graph_human::graph_human;
 #[cfg(test)]
 #[allow(unused_imports)]
 use graph_human::graph_summary;
-use graph_status::{graph_snapshot, graph_status_elapsed, redact_checkout_paths};
+use graph_status::{graph_snapshot, graph_status_elapsed};
 pub use peer::{hosts, peer};
 pub(crate) use settlement::advance_live_graph;
 

@@ -2276,7 +2276,12 @@ impl RunStore {
                 continue;
             }
             let limits = plan.limits.clone();
-            set_lane_environment(&mut plan.environment, request.lane_depth.unwrap_or(1), id);
+            set_lane_environment(
+                &mut plan.environment,
+                request.lane_depth.unwrap_or(1),
+                id,
+                &plan.route,
+            );
             let limit = providers.write_grant_limit(&policy).checked(&policy);
             plan.route.write_grant_limit = Some(limit.receipt());
             let write_grants = applied_write_grants(&plan, limit, &policy);
@@ -2592,7 +2597,25 @@ fn set_lane_environment(
     environment: &mut Vec<(OsString, OsString)>,
     depth: u64,
     parent: AttemptId,
+    route: &RouteRecord,
 ) {
+    use provenant_core::consumer_env::{ACCOUNT, EFFORT, MODEL, ROUTE};
+    let label = crate::route_label(
+        route.provider.as_deref(),
+        route.model.as_deref(),
+        route.effort.as_deref(),
+    );
+    for (name, value) in [
+        (ROUTE, label.as_deref()),
+        (MODEL, route.model.as_deref()),
+        (EFFORT, route.effort.as_deref()),
+        (ACCOUNT, route.account_label.as_deref()),
+    ] {
+        environment.retain(|(existing, _)| existing != name);
+        if let Some(value) = value {
+            set_environment_value(environment, name, value.to_owned());
+        }
+    }
     set_environment_value(
         environment,
         provenant_core::consumer_env::LANE_DEPTH,
@@ -2663,10 +2686,14 @@ fn process_tree_interval(
     if configured > 0 {
         return Some(std::time::Duration::from_millis(configured));
     }
-    provenant_config::ResolvedAdmissionClass::resolve_all(state, Some(project))
-        .into_values()
-        .any(|class| class.memory_per_slot_bytes.is_some())
-        .then_some(provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL)
+    provenant_config::ResolvedAdmissionClass::resolve_all(
+        state,
+        Some(project),
+        provenant_config::project_key_for(project).as_deref(),
+    )
+    .into_values()
+    .any(|class| class.memory_per_slot_bytes.is_some())
+    .then_some(provenant_supervisor::process_tree::DEFAULT_SAMPLE_INTERVAL)
 }
 
 /// How long the guardian may retain custody of an unresolved exit, resolved
@@ -2771,6 +2798,46 @@ mod lane_environment_tests {
     }
 
     #[test]
+    fn lane_environment_exposes_applied_route_and_clears_absent_values() {
+        use provenant_core::consumer_env::{ACCOUNT, EFFORT, MODEL, ROUTE};
+        let mut environment = vec![];
+        let mut route = RouteRecord {
+            provider: Some("claude".into()),
+            model: Some("opus[1m]".into()),
+            effort: Some("high".into()),
+            account_label: Some("work [east]".into()),
+            ..Default::default()
+        };
+        let parent = AttemptId::from_bytes([6; 16]);
+        set_lane_environment(&mut environment, 1, parent, &route);
+        for (name, value) in [
+            (ROUTE, "claude/opus[1m]@high"),
+            (MODEL, "opus[1m]"),
+            (EFFORT, "high"),
+            (ACCOUNT, "work [east]"),
+        ] {
+            assert!(
+                environment
+                    .iter()
+                    .any(|(key, actual)| key == name && actual == value)
+            );
+        }
+        route.effort = None;
+        route.account_label = None;
+        set_lane_environment(&mut environment, 1, parent, &route);
+        assert!(
+            environment
+                .iter()
+                .any(|(key, value)| key == ROUTE && value == "claude/opus[1m]")
+        );
+        assert!(
+            !environment
+                .iter()
+                .any(|(key, _)| key == EFFORT || key == ACCOUNT)
+        );
+    }
+
+    #[test]
     fn lane_environment_overrides_adapter_values() {
         let parent = AttemptId::from_bytes([6; 16]);
         let mut environment = vec![
@@ -2780,7 +2847,7 @@ mod lane_environment_tests {
             ),
             (OsString::from("OTHER"), OsString::from("kept")),
         ];
-        set_lane_environment(&mut environment, 2, parent);
+        set_lane_environment(&mut environment, 2, parent, &RouteRecord::default());
         assert_eq!(
             environment,
             vec![

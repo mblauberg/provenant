@@ -1272,7 +1272,6 @@ impl Factory {
                     // who created this submission. A matching waiter only reads.
                     *replayed = true;
                     let mut run = graph_snapshot(checkpoint.ok_or(FacadeError::StateCorrupt)?);
-                    redact_checkout_paths(&mut run.checkpoint);
                     run.advance_error = FileJournal::read_advance_error(
                         &self.context.roots.state,
                         self.context.identity.project,
@@ -1504,8 +1503,6 @@ impl Factory {
                 }
                 _ => FacadeError::StateCorrupt,
             })?;
-            let mut run = run;
-            redact_checkout_paths(&mut run.checkpoint);
             // A manual advance that succeeded supersedes an earlier failure.
             FileJournal::set_advance_error(
                 &self.context.roots.state,

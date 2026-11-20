@@ -1827,7 +1827,7 @@ impl HostDeliveryContext {
             .chain(args.iter().map(OsString::from))
             .collect();
         let executor = SystemExecutor::new(1).map_err(|error| failure(error.to_string()))?;
-        let mut redactor = if stage == Stage::Prepare {
+        let mut redactor = if stage == Stage::Prepare && provenant_redact::mode().masks_local() {
             Some(
                 Redactor::new(
                     self.environment

@@ -3426,6 +3426,7 @@ mod provisioning_tests {
     #[test]
     fn lost_child_receipt_replays_while_active_and_after_graph_settlement()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         use provenant_fabric_runtime::graph::{
             AttemptState, GraphCheckpoint, GraphExecution, NodeState,
         };
