@@ -127,55 +127,6 @@ pub fn project_lane(
     )
 }
 
-/// Collect live admission markers only from active lanes' scratch grants.
-pub fn active_lane_admission(
-    store: &run::RunStore,
-    call: &run::Request<'_>,
-) -> run::Result<(
-    Vec<provenant_os::admission::HeldInfo>,
-    Vec<provenant_os::admission::WaitInfo>,
-)> {
-    let mut query = lane_query(false, 100, 0);
-    let mut holders = Vec::new();
-    let mut waiters = Vec::new();
-    loop {
-        let page = store.lanes(&query, call)?;
-        for lane in page.lanes {
-            if !matches!(lane.state, run::AttemptState::Running { .. }) {
-                continue;
-            }
-            for grant in &lane.write_grants {
-                if grant.source == provenant_records::run::WriteSource::Scratch
-                    && let Ok(path) = grant.path.to_path_buf()
-                {
-                    let attempt = lane.attempt_id.to_string();
-                    holders.extend(
-                        provenant_os::admission::lane_holders(&path)
-                            .into_iter()
-                            .map(|mut info| {
-                                info.attempt_id = Some(attempt.clone());
-                                info
-                            }),
-                    );
-                    waiters.extend(
-                        provenant_os::admission::lane_waiters(&path)
-                            .into_iter()
-                            .map(|mut info| {
-                                info.attempt_id = Some(attempt.clone());
-                                info
-                            }),
-                    );
-                }
-            }
-        }
-        match page.next {
-            Some(next) => query.after = next,
-            None => break,
-        }
-    }
-    Ok((holders, waiters))
-}
-
 /// Ids of every live (non-terminal) lane in the store, across all projects.
 /// A read-only caller uses this before a release swap to name attempts that may
 /// still settle under the new format. An install replaces the shared binary for

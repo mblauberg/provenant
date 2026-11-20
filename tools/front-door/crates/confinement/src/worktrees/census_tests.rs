@@ -1,4 +1,5 @@
 //! Worker census and native observation tests.
+use super::census::worker_evidence_from_census;
 use super::lifecycle_tests::*;
 use super::*;
 use crate::test_support::Fixture;
@@ -181,6 +182,7 @@ fn session_refusal_uses_decision_evidence_and_missing_root_is_unknown() -> Resul
                     }),
                 )]),
                 details: BTreeMap::from([(root, "first observation".into())]),
+                held_incomplete: false,
             }
         }
     }
@@ -3522,6 +3524,65 @@ fn held_report_uses_one_bounded_census_and_only_reports() -> Result<(), Box<dyn 
 /// caller's session is not. This drives the real `observe_worker_holders_while`
 /// path, where `holders` keeps only the first process per root.
 #[test]
+fn failed_process_listing_makes_held_report_incomplete() {
+    use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
+    struct FailedListing;
+    impl ProcessObserver for FailedListing {
+        fn boot_identity(&self) -> Result<String, CensusError> {
+            Ok("boot".into())
+        }
+        fn observe(&self, _: i64) -> ProcessObservation {
+            ProcessObservation::Absent
+        }
+        fn census(&self, _: usize) -> Result<Census, CensusError> {
+            Err(CensusError::ProcessList(std::io::Error::other(
+                "listing failed",
+            )))
+        }
+    }
+    impl CwdObserver for FailedListing {
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::Gone)
+        }
+    }
+    impl WorkerObserver for FailedListing {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, Occupancy::Available))
+                .collect()
+        }
+        fn observe_evidence_while(
+            &self,
+            roots: &[PathBuf],
+            _: bool,
+            keep_going: &dyn Fn() -> bool,
+        ) -> Option<WorkerEvidence> {
+            let current = ProcessFact {
+                identity: ProcessIdentity {
+                    boot: "boot".into(),
+                    pid: 1,
+                    native_start: 1,
+                    group_id: 1,
+                    session_id: 1,
+                },
+                parent_pid: 0,
+                zombie: false,
+                cpu_micros: None,
+                command: None,
+            };
+            keep_going().then(|| {
+                worker_evidence_from_census(roots, true, self, self, &current, Some(keep_going))
+            })
+        }
+    }
+    let report = held_report(&FailedListing, &[PathBuf::from("/fixture")], &|| true);
+    assert!(report.incomplete);
+    assert!(report.processes.is_empty());
+}
+
+#[test]
 fn held_report_names_every_foreign_dweller_and_excludes_the_callers_session()
 -> Result<(), Box<dyn Error>> {
     use provenant_supervisor::census::{Census, ProcessIdentity};
@@ -3568,6 +3629,36 @@ fn held_report_names_every_foreign_dweller_and_excludes_the_callers_session()
         current: current.clone(),
         platform_uids: BTreeMap::new(),
     };
+    // The existing census fixture includes both positive dwellers. Marking the
+    // listing incomplete must retain those rows while exposing the gap.
+    let partial = Census::from_observations(
+        observer.census.facts().cloned().collect::<Vec<_>>(),
+        [],
+        [],
+        false,
+        false,
+        32,
+    )?;
+    let partial_observer = InjectedCensus {
+        census: partial,
+        cwds: observer.cwds.clone(),
+        current: current.clone(),
+        platform_uids: observer.platform_uids.clone(),
+    };
+    let evidence = worker_evidence_from_census(
+        std::slice::from_ref(&root),
+        true,
+        &partial_observer,
+        &partial_observer,
+        &current,
+        Some(&|| true),
+    );
+    assert!(evidence.held_incomplete);
+    assert!(
+        evidence.held[&root]
+            .iter()
+            .any(|process| process.pid == 201)
+    );
     let mut held = HeldProcesses::new();
     let (states, _, _, _) = observe_worker_holders_while(
         std::slice::from_ref(&root),

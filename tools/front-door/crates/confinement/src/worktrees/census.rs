@@ -15,7 +15,7 @@ pub const HELD_CENSUS_INCOMPLETE_WARNING: &str =
     "dweller census incomplete (budget/cancel); results may be missing";
 
 /// One bounded dweller report. `incomplete` means the census was cut short by
-/// its budget or cancellation, so `processes` may be missing dwellers.
+/// its budget, cancellation or an observation gap, so rows may be missing.
 #[derive(Clone, Debug, Default)]
 pub struct HeldReport {
     pub processes: Vec<super::HeldProcess>,
@@ -124,6 +124,8 @@ pub struct WorkerEvidence {
     pub holders: BTreeMap<PathBuf, ObservedProcess>,
     /// Every process the same census saw inside each root. Diagnostic only.
     pub held: HeldProcesses,
+    /// True when acquisition or coverage could have missed a dweller.
+    pub held_incomplete: bool,
     pub details: BTreeMap<PathBuf, String>,
     pub taints: BTreeMap<PathBuf, TaintCause>,
 }
@@ -542,6 +544,9 @@ pub trait WorkerObserver: Send + Sync {
         attach_worker_evidence(&mut states, &BTreeMap::new(), &details);
         WorkerEvidence {
             taints: default_taints(&states, &|_| None),
+            held_incomplete: states
+                .values()
+                .any(|state| matches!(state, Occupancy::Unknown { .. })),
             states,
             holders: BTreeMap::new(),
             held: BTreeMap::new(),
@@ -578,6 +583,9 @@ pub trait WorkerObserver: Send + Sync {
         attach_worker_evidence(&mut states, &BTreeMap::new(), &details);
         let evidence = WorkerEvidence {
             taints: default_taints(&states, &|_| None),
+            held_incomplete: states
+                .values()
+                .any(|state| matches!(state, Occupancy::Unknown { .. })),
             states,
             holders: BTreeMap::new(),
             held: finish_held(held),
@@ -664,6 +672,9 @@ pub trait WorkerObserver: Send + Sync {
         let (states, details) = self.observe_roots_with_policy(roots, entries, for_land);
         WorkerEvidence {
             taints: default_taints(&states, &|_| None),
+            held_incomplete: states
+                .values()
+                .any(|state| matches!(state, Occupancy::Unknown { .. })),
             states,
             holders: BTreeMap::new(),
             held: BTreeMap::new(),
@@ -841,6 +852,7 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
                         )
                     })
                     .collect(),
+                held_incomplete: true,
                 ..WorkerEvidence::default()
             };
         };
@@ -962,7 +974,7 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
 /// Report every process one bounded census saw inside any of `roots`. The
 /// report is advisory: no caller of this function may signal a named PID from
 /// a cwd, executable or descriptor observation. A census cut short by its
-/// budget or cancellation is reported as incomplete rather than as no rows.
+/// budget, cancellation or incomplete observation is reported rather than as no rows.
 pub fn held_report(
     workers: &dyn WorkerObserver,
     roots: &[PathBuf],
@@ -986,7 +998,7 @@ pub fn held_report(
                     .filter_map(|process| super::HeldProcess::new(root, process))
             })
             .collect(),
-        incomplete: false,
+        incomplete: evidence.held_incomplete,
     }
 }
 
@@ -1273,18 +1285,39 @@ fn system_worker_evidence_while(
                 .cloned()
                 .map(|root| (root, detail.clone()))
                 .collect(),
+            held_incomplete: true,
             ..WorkerEvidence::default()
         };
     };
+    worker_evidence_from_census(
+        roots,
+        ancestors,
+        &SystemProcessObserver,
+        &PolicyCwdObserver(entries),
+        &current,
+        keep_going,
+    )
+}
+
+pub(super) fn worker_evidence_from_census(
+    roots: &[PathBuf],
+    ancestors: bool,
+    observer: &dyn ProcessObserver,
+    cwd_observer: &dyn CwdObserver,
+    current: &ProcessFact,
+    keep_going: Option<&dyn Fn() -> bool>,
+) -> WorkerEvidence {
+    let mut incomplete = false;
     let mut unreadable_warnings = BTreeSet::new();
     let mut held = BTreeMap::new();
     let (states, holders, details, taints) = observe_worker_holders_while(
         roots,
-        &SystemProcessObserver,
-        &PolicyCwdObserver(entries),
-        &current,
+        observer,
+        cwd_observer,
+        current,
         ancestors,
         &mut |pid, condition| {
+            incomplete = true;
             if condition == Some(UNREADABLE_NO_CANDIDATE_PATH)
                 && let Some(pid) = pid
             {
@@ -1299,6 +1332,7 @@ fn system_worker_evidence_while(
         states,
         holders,
         held: finish_held(held),
+        held_incomplete: incomplete,
         details,
         taints,
     }
@@ -1956,6 +1990,7 @@ pub(super) fn observe_worker_holders_while(
             }
         }
         if let Some(gap) = occupancy_gap {
+            unplaceable(Some(pid), Some("process occupancy incomplete"));
             record_unknown_all_with_taint(
                 &mut states,
                 &mut details,

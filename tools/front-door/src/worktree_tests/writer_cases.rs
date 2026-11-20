@@ -79,6 +79,45 @@ pub(super) fn writer_dispatch_edits_a_linked_worktree() -> Result {
     let second_terminal = await_terminal(&store, second_attempt, &call)?;
     assert_terminal_outcome(&second_terminal, provenant_run::Outcome::Succeeded)?;
     wait_for_writer_release(&store)?;
+    // A settled attempt remains a report root even after its lane is gone.
+    git(&rig, &["worktree", "remove", "--force", path_text])?;
+    assert!(!path.exists());
+    let attempt_root = context
+        .state_root
+        .as_path()
+        .join("attempts")
+        .join(first_attempt.to_string());
+    let report_roots =
+        crate::gc_support::project_settled_attempt_roots(&roots, context.project_id, &cancel);
+    assert!(report_roots.contains(&attempt_root), "{report_roots:?}");
+    struct Dweller(PathBuf);
+    impl provenant_confinement::worktrees::WorkerObserver for Dweller {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy>
+        {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
+                .collect()
+        }
+        fn live_process(
+            &self,
+            root: &Path,
+        ) -> Option<provenant_confinement::worktrees::ObservedProcess> {
+            (root == self.0).then(|| {
+                provenant_confinement::worktrees::ObservedProcess::cwd(4242, Some("fixture".into()))
+            })
+        }
+    }
+    let report = provenant_confinement::worktrees::held_report(
+        &Dweller(attempt_root),
+        &report_roots,
+        &|| true,
+    );
+    assert!(report.processes.iter().any(|process| process.pid == 4242));
     cleanup.disarm();
     Ok(())
 }
