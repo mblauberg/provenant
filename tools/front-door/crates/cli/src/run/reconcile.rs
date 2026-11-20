@@ -240,6 +240,7 @@ pub(super) fn reconcile_inner(
                 .push(provenant_supervisor::custody::ReservationIssue {
                     reservation: reservation_root(&session.context),
                     reason: error.to_string(),
+                    kind: provenant_supervisor::custody::ReservationIssueKind::Other,
                 });
             listing
         }

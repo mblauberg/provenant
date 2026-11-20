@@ -281,6 +281,19 @@ declared access. A lane cannot create a hard link to a file in a credential root
 Git control directory or another lane's worktree; every other hard link is
 allowed.
 
+### Host inventory problems stay local
+
+Host confinement inventories registered projects, worktree allocations, owned
+worktrees and writer custody. An unusable sibling entry is protected as a denied
+root and reported through the host warning channel with its anchor path and
+reason; it does not refuse an unrelated launch. If the entry's directory cannot
+be named, inventory refuses with that path and stage. The selected writer's own
+slot remains fail-closed, including legacy guardian evidence, which stays fenced
+until that attempt is reconciled.
+- Why: retained sibling evidence must not become a host-wide launch outage.
+- Owner: `crates/confinement/src/permissions/policy/host.rs`,
+  `crates/supervisor/src/custody.rs`
+
 ### Plans refuse unsafe roots
 
 Confinement refuses traversal, symlinked state or lock leaves, declared

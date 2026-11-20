@@ -1488,6 +1488,84 @@ mod tests {
     }
 
     #[test]
+    fn queued_abandonment_ignores_another_attempts_legacy_custody() -> TestResult {
+        // Spec: docs/specs/supervisor.md#explicit-abandonment
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = crate::RunStore::open(&context, &call)?;
+
+        let mut queued = crate::tests::input();
+        queued.request.task.writer = Some(crate::WriterRequest {
+            extra: Default::default(),
+            custody_project: Some(context.project_id),
+            project: temp.path().join("checkout"),
+            worktree: temp.path().join("checkout/.worktrees/queued"),
+        });
+        store.create(&queued, &call)?;
+
+        let mut legacy = crate::tests::input();
+        legacy.attempt_id = AttemptId::from_bytes([7; 16]);
+        legacy.operation_id = "run-legacy-sibling".parse()?;
+        crate::tests::rekey(&mut legacy);
+        legacy.request.task.writer = Some(crate::WriterRequest {
+            extra: Default::default(),
+            custody_project: Some(context.project_id),
+            project: temp.path().join("checkout"),
+            worktree: temp.path().join("checkout/.worktrees/legacy"),
+        });
+        store.create(&legacy, &call)?;
+
+        let legacy_record = store.record(legacy.attempt_id, &call)?;
+        let legacy_scope = crate::RunStore::scope(&legacy_record);
+        let slot = store
+            .attempt_writer_slot(legacy.attempt_id, &call)?
+            .ok_or("missing legacy writer slot")?;
+        std::fs::create_dir_all(&slot)?;
+        let lease = provenant_supervisor::fixture::acquire_writer(
+            Directory::open_anchor(&slot)?,
+            legacy_scope,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        drop(lease);
+        std::fs::write(
+            slot.join(legacy.attempt_id.to_string())
+                .join("guardian-lock.json"),
+            br#"{"schema_version":1}"#,
+        )?;
+
+        let listing = store.writer_fence_listing()?;
+        assert_eq!(listing.issues.len(), 1);
+        assert_eq!(
+            listing.issues[0].kind,
+            provenant_supervisor::custody::ReservationIssueKind::LegacyEvidence
+        );
+        let reason = "unresolvable queued route";
+        assert!(matches!(
+            store.abandon_settlement(
+                queued.attempt_id,
+                reason,
+                &provenant_confinement::worktrees::SystemWorkerObserver,
+                &call,
+            )?,
+            crate::Reconciled::Abandoned { reason: saved } if saved == reason
+        ));
+        assert!(matches!(
+            store.record(queued.attempt_id, &call)?.state,
+            crate::AttemptState::Terminal {
+                outcome: crate::Outcome::Cancelled,
+                ..
+            }
+        ));
+        assert_eq!(store.writer_fence_listing()?.issues.len(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn queued_abandonment_preserves_evidence_and_refuses_custody() -> TestResult {
         for fenced in [false, true] {
             let temp = tempfile::tempdir()?;
@@ -3008,7 +3086,18 @@ impl crate::RunStore {
         call: &crate::Request<'_>,
     ) -> Result<()> {
         let listing = self.writer_fence_listing()?;
-        if !listing.issues.is_empty()
+        // A schema-1 guardian lock is known legacy evidence for the attempt
+        // named by its reservation path. It remains fenced, but it must not
+        // prevent an unrelated, never-dispatched queue entry from being
+        // abandoned. Unknown or malformed issues still fail closed.
+        let legacy_sibling_issues_only = !listing.issues.is_empty()
+            && listing.issues.iter().all(|issue| {
+                issue.kind == provenant_supervisor::custody::ReservationIssueKind::LegacyEvidence
+                    && self
+                        .writer_issue_candidate(issue, call)
+                        .is_some_and(|(id, _)| id != record.attempt_id)
+            });
+        if (!listing.issues.is_empty() && !legacy_sibling_issues_only)
             || record.started_at.is_some()
             || record.provider_launched == Some(true)
             || record.exit_evidence.is_some()

@@ -149,6 +149,14 @@ fn inventory_error(path: &Path, stage: &'static str) -> PermissionError {
     }
 }
 
+fn warn_inventory(warnings: &mut impl Write, path: &Path, stage: &str, reason: &str) {
+    let _ = writeln!(
+        warnings,
+        "warning: {stage} incomplete at {}: {reason}; protecting this directory",
+        path.display()
+    );
+}
+
 // Declared file layouts in provider identities and host credential stores.
 // Identity directory names are arbitrary. These endpoints are also tracked
 // when missing, so a later change is caught during compilation.
@@ -650,9 +658,12 @@ impl MandatoryRoots {
         // Common Git directories are flagged so no host write can open them.
         let mut controls: Vec<(PathGrant, bool)> =
             protected.iter().map(|root| (root.clone(), false)).collect();
-        for binding in provenant_config::registered_projects(roots)
-            .map_err(|_| inventory_error(roots.state.as_path(), "registered project inventory"))?
-        {
+        let mut warnings = std::io::stderr().lock();
+        // Aggregate failures do not name the affected checkout. Denying the
+        // registry or Git metadata alone cannot protect an unknown worktree.
+        let bindings = provenant_config::registered_projects(roots)
+            .map_err(|_| inventory_error(roots.state.as_path(), "registered project inventory"))?;
+        for binding in bindings {
             let common = binding.common_dir();
             let git = common.file_name() == Some(OsStr::new(".git"))
                 || (common.join("HEAD").is_file() && common.join("objects").is_dir());
@@ -678,10 +689,7 @@ impl MandatoryRoots {
                             .map_err(|_| {
                                 inventory_error(&project_state, "writer custody inventory")
                             })?;
-                    if !listing.issues.is_empty() {
-                        return Err(inventory_error(&project_state, "writer custody inventory"));
-                    }
-                    listing
+                    let mut slots = listing
                         .reservations
                         .iter()
                         .map(|reservation| {
@@ -692,7 +700,28 @@ impl MandatoryRoots {
                                     inventory_error(&project_state, "writer custody inventory")
                                 })
                         })
-                        .collect::<Result<Vec<_>, _>>()?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for issue in listing.issues {
+                        let Some(std::path::Component::Normal(slot)) =
+                            issue.reservation.components().next()
+                        else {
+                            return Err(inventory_error(
+                                &project_state,
+                                "writer custody inventory",
+                            ));
+                        };
+                        let slot = PathBuf::from(slot);
+                        let path = project_state.join(&slot);
+                        warn_inventory(
+                            &mut warnings,
+                            &path,
+                            "writer custody inventory",
+                            &issue.reason,
+                        );
+                        controls.push((subtree(&path), false));
+                        slots.push(slot);
+                    }
+                    slots
                 }
                 Err(error) if error.is_not_found() => Vec::new(),
                 Err(_) => return Err(inventory_error(&project_state, "writer custody inventory")),
@@ -780,6 +809,80 @@ mod tests {
         let mut input = provenant_core::RootInputs::new(root.join("home"), root.join("source"));
         input.state_dir = Some(root.join("state"));
         Ok(input.resolve(&provenant_os::fs::SystemPathResolver)?)
+    }
+
+    #[test]
+    fn legacy_sibling_custody_does_not_refuse_other_launches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::Clock;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let roots = fixture_roots(&root)?;
+        let common = root.join("other/.git");
+        std::fs::create_dir_all(&common)?;
+        let binding = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(common)?,
+        )?;
+        let slot = roots
+            .state
+            .as_path()
+            .join("worktrees")
+            .join(binding.project_id().to_string())
+            .join("sibling");
+        std::fs::create_dir_all(&slot)?;
+        let scope = provenant_records::custody::Scope {
+            attempt: provenant_core::AttemptId::from_bytes([42; 16]),
+            generation: 1,
+        };
+        let clock = provenant_os::clock::SystemClock::new();
+        let lease = provenant_supervisor::fixture::acquire_writer(
+            Directory::open_anchor(&slot)?,
+            scope,
+            provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+            &provenant_core::CancelToken::new(),
+            &clock,
+        )?;
+        drop(lease);
+        std::fs::write(
+            slot.join(scope.attempt.to_string())
+                .join("guardian-lock.json"),
+            br#"{"schema_version":1}"#,
+        )?;
+
+        let inventory = MandatoryRoots::for_host_with_scratch_mode(
+            &roots,
+            &root.join("home"),
+            &root.join("source"),
+            &root.join("scratch"),
+            &provenant_core::CredentialRoots::for_home(&root.join("home")),
+            &[],
+            &[],
+            false,
+        )?;
+        let grant = PathGrant {
+            path: slot,
+            scope: PathScope::Subtree,
+        };
+        assert!(inventory.protected().contains(&grant));
+        assert!(inventory.validate_extra_write(&grant).is_err());
+        assert!(!inventory.host_writes().contains(&grant));
+        Ok(())
+    }
+
+    #[test]
+    fn custody_inventory_warning_names_the_path_and_reason() {
+        let mut warnings = Vec::new();
+        warn_inventory(
+            &mut warnings,
+            Path::new("/state/slot"),
+            "writer custody inventory",
+            "legacy evidence",
+        );
+        let warning = String::from_utf8(warnings).unwrap();
+        assert!(warning.contains("/state/slot"));
+        assert!(warning.contains("legacy evidence"));
     }
 
     #[test]
