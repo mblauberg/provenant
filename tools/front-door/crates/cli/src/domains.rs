@@ -867,9 +867,13 @@ mod tests {
                 match field.kind {
                     "bool" => json!(false),
                     "int" | "fraction" => json!(field.min.unwrap_or(1).max(1)),
+                    "float" => json!(1.0),
                     "array" | "list" | "string_list" | "census_ignore_list" => json!([]),
                     "table" => json!({"dependencies": "independent"}),
                     "enum" => json!(field.values.first().cloned().unwrap_or_default()),
+                    "string" if name == "domains.routing.model_policy.defaults.result.fallback" => {
+                        json!("codex/gpt-6-luna")
+                    }
                     _ => json!("probe"),
                 }
             } else {
