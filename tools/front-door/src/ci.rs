@@ -624,10 +624,25 @@ fn gate_inputs_from_jobs(jobs: &[ApiJob]) -> Option<GateInputs> {
 struct WorkflowNeed {
     key: String,
     name: Option<String>,
+    matrix: Option<WorkflowMatrix>,
 }
 
-/// The part of a workflow file the digest reads: job keys, display names and
-/// declared dependencies. Every other workflow key is ignored.
+impl WorkflowNeed {
+    /// The display names this declaration is expected to produce. A matrix
+    /// name expands to every declared combination, so a member that never
+    /// produced a job is visible as missing rather than silently tolerated.
+    fn patterns(&self) -> Vec<String> {
+        let pattern = self.name.as_deref().unwrap_or(&self.key);
+        self.matrix
+            .as_ref()
+            .and_then(|matrix| expand_matrix_name(pattern, matrix))
+            .unwrap_or_else(|| vec![pattern.to_owned()])
+    }
+}
+
+/// The part of a workflow file the digest reads: job keys, display names,
+/// declared dependencies and matrix values. Every other workflow key is
+/// ignored.
 #[derive(Deserialize)]
 struct Workflow {
     jobs: BTreeMap<String, WorkflowJob>,
@@ -639,6 +654,77 @@ struct WorkflowJob {
     name: Option<String>,
     #[serde(default)]
     needs: Option<Needs>,
+    #[serde(default)]
+    strategy: Option<WorkflowStrategy>,
+}
+
+#[derive(Clone, Deserialize)]
+struct WorkflowStrategy {
+    #[serde(default)]
+    matrix: Option<WorkflowMatrix>,
+}
+
+/// Matrix dimensions are lists of scalar values. Runner-only keys such as
+/// `include` hold mappings and are never used to expand a display name.
+#[derive(Clone, Deserialize)]
+struct WorkflowMatrix {
+    #[serde(flatten)]
+    dimensions: BTreeMap<String, Value>,
+}
+
+fn matrix_values(value: &Value) -> Option<Vec<String>> {
+    let entries = value.as_array()?;
+    let values: Vec<String> = entries
+        .iter()
+        .map(|value| match value {
+            Value::String(text) => Some(text.clone()),
+            Value::Number(number) => Some(number.to_string()),
+            Value::Bool(flag) => Some(flag.to_string()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!values.is_empty() && values.len() <= 256).then_some(values)
+}
+
+/// Expand each `${{ matrix.<dimension> }}` in a display name into every
+/// declared value. An unreadable or absent dimension yields no evidence: the
+/// caller then falls back to matching the literal template.
+fn expand_matrix_name(pattern: &str, matrix: &WorkflowMatrix) -> Option<Vec<String>> {
+    let mut placeholders = Vec::new();
+    let mut rest = pattern;
+    while let Some(start) = rest.find("${{") {
+        let tail = &rest[start + 3..];
+        let close = tail.find("}}")?;
+        let dimension = tail[..close].trim().strip_prefix("matrix.")?;
+        if dimension.is_empty() {
+            return None;
+        }
+        let end = start + 3 + close + 2;
+        placeholders.push((start, end, dimension.to_owned()));
+        rest = &rest[end..];
+    }
+    if placeholders.is_empty() {
+        return None;
+    }
+    let mut names = vec![pattern.to_owned()];
+    // Replace from the end so the byte offsets of earlier placeholders stay
+    // valid as values of different lengths are substituted.
+    for (start, end, dimension) in placeholders.into_iter().rev() {
+        let values = matrix.dimensions.get(&dimension).and_then(matrix_values)?;
+        let mut expanded = Vec::with_capacity(names.len() * values.len());
+        for name in &names {
+            for value in &values {
+                let mut candidate = name.clone();
+                candidate.replace_range(start..end, value);
+                expanded.push(candidate);
+            }
+        }
+        if expanded.len() > 256 {
+            return None;
+        }
+        names = expanded;
+    }
+    Some(names)
 }
 
 /// Bound the workflow read the same way the front door bounds other YAML.
@@ -669,36 +755,38 @@ fn parse_workflow_needs(text: &str) -> Result<Option<Vec<WorkflowNeed>>, String>
         needs
             .into_vec()
             .into_iter()
-            .map(|key| WorkflowNeed {
-                name: workflow.jobs.get(&key).and_then(|job| job.name.clone()),
-                key,
+            .map(|key| {
+                let declared = workflow.jobs.get(&key);
+                WorkflowNeed {
+                    name: declared.and_then(|job| job.name.clone()),
+                    matrix: declared
+                        .and_then(|job| job.strategy.clone())
+                        .and_then(|strategy| strategy.matrix),
+                    key,
+                }
             })
             .collect(),
     ))
 }
 
-/// Map workflow dependencies to the ended jobs they produced. A matrix job's
-/// display name is a template, so its literal parts are matched around each
-/// `${{ ... }}` placeholder.
+/// Map workflow dependencies to the ended jobs they produced. Every expected
+/// display name must resolve to a job: a missing matrix member leaves the
+/// inputs incomplete, so a cancelled sibling cannot explain the gate's failure.
 fn inputs_from_workflow(needs: &[WorkflowNeed], jobs: &[ApiJob]) -> GateInputs {
     let mut ids = Vec::new();
     let mut complete = true;
     for need in needs {
-        let matches: Vec<u64> = jobs
-            .iter()
-            .filter(|job| {
-                name_matches(&need.key, &job.name)
-                    || need
-                        .name
-                        .as_deref()
-                        .is_some_and(|pattern| name_matches(pattern, &job.name))
-            })
-            .map(|job| job.id)
-            .collect();
-        if matches.is_empty() {
-            complete = false;
+        for pattern in need.patterns() {
+            let matches: Vec<u64> = jobs
+                .iter()
+                .filter(|job| name_matches(&pattern, &job.name))
+                .map(|job| job.id)
+                .collect();
+            if matches.is_empty() {
+                complete = false;
+            }
+            ids.extend(matches);
         }
-        ids.extend(matches);
     }
     GateInputs { ids, complete }
 }
@@ -871,7 +959,9 @@ fn run_digest(
             match job_log(state, project, repository, job.id, request) {
                 Ok(text) => parse_failed_log(&text),
                 Err(error) => {
-                    errors.push(format!("job {}: {error}", job.name));
+                    // Keep the gh message: an unreadable log is not evidence
+                    // that the job had no failures.
+                    errors.push(format!("job {}: unreadable log: {error}", job.name));
                     Vec::new()
                 }
             }
@@ -956,8 +1046,10 @@ fn parse_jobs(bytes: &[u8]) -> Result<Vec<ApiJob>, String> {
 
 /// Fetch one job's log. `gh api` follows the `jobs/{id}/logs` 302 redirect to
 /// the signed log archive and returns the text; the redirect strips the
-/// forge token at the archive host. The log of an ended job never changes, so
-/// it is cached per job id for the short observation interval.
+/// forge token at the archive host. Test logs carry terminal escape sequences,
+/// which `gh api` refuses to print unless asked explicitly. The log of an
+/// ended job never changes, so it is cached per job id for the short
+/// observation interval.
 fn job_log(
     state: &Path,
     project: &Path,
@@ -969,12 +1061,12 @@ fn job_log(
         .map_err(|error| format!("cannot open shared CI cache: {error}"))?;
     let name = format!("job-log-{job_id}.json");
     let endpoint = format!("repos/{repository}/actions/jobs/{job_id}/logs");
-    cached_text(state, project, &dir, &name, || {
+    let text = cached_text(state, project, &dir, &name, || {
         let bytes = successful(
             forge_execute(
                 state,
                 project,
-                &["gh", "api", &endpoint],
+                &["gh", "api", "--allow-escape-sequences", &endpoint],
                 request,
                 false,
                 None,
@@ -983,7 +1075,66 @@ fn job_log(
         )
         .map_err(|error| error.to_string())?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
-    })
+    })?;
+    // Strip on read as well as on fetch: a cache entry written before this
+    // read path could still hold raw escape sequences.
+    Ok(strip_terminal_escapes(&text))
+}
+
+/// Remove terminal control sequences from an Actions log before it is parsed.
+/// Colour and cursor control graphics are not part of a failure's text, and
+/// leaving them in breaks a test-name or error-line match.
+fn strip_terminal_escapes(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut plain = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != 0x1b {
+            let Some(character) = text[index..].chars().next() else {
+                break;
+            };
+            plain.push(character);
+            index += character.len_utf8();
+            continue;
+        }
+        index += 1;
+        let Some(kind) = bytes.get(index).copied() else {
+            break;
+        };
+        match kind {
+            // CSI: parameters and intermediates, then a final byte 0x40..0x7e.
+            b'[' => {
+                index += 1;
+                while index < bytes.len() {
+                    let byte = bytes[index];
+                    index += 1;
+                    if (0x40..=0x7e).contains(&byte) {
+                        break;
+                    }
+                }
+            }
+            // OSC: ends at BEL or the string terminator ESC backslash.
+            b']' => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == 0x07 {
+                        index += 1;
+                        break;
+                    }
+                    if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'\\') {
+                        index += 2;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            // Two-byte escape sequences such as ESC 7 or ESC ( B.
+            0x40..=0x5f => index += 1,
+            // An unknown escape: drop the ESC and keep reading the text.
+            _ => {}
+        }
+    }
+    plain
 }
 
 /// Share the bounded cache used by per-job logs. A completed job's log and a
@@ -1320,6 +1471,9 @@ fn class_label(class: JobClass) -> &'static str {
 fn rows(report: &Report) -> Vec<String> {
     let mut rows = Vec::new();
     for run in &report.runs {
+        if let Some(error) = &run.error {
+            rows.push(format!("run {}: unreadable: {error}", run.run));
+        }
         for job in &run.jobs {
             let prefix = match &job.step {
                 Some(step) => format!("run {} {} [{}]", run.run, job.job, step),
@@ -1366,7 +1520,11 @@ fn human(report: &Report) -> String {
     for run in &report.runs {
         if let Some(error) = &run.error {
             text.push_str(&format!("run {}: unreadable: {error}\n", run.run));
-            continue;
+            // A failed log read still leaves failed jobs in the metadata. Show
+            // them with their step and class instead of reporting zero.
+            if run.jobs.is_empty() {
+                continue;
+            }
         }
         for job in &run.jobs {
             let step = job
@@ -1738,6 +1896,54 @@ mod tests {
 
     // Spec: docs/specs/cli.md#ci-observations
     #[test]
+    fn terminal_escapes_do_not_hide_a_failing_test() {
+        let raw = "\u{1b}[31mFAIL\u{1b}[0m [ 0.004s] ( 1/2) ci::tests::coloured_failure\n";
+        let plain = strip_terminal_escapes(raw);
+        assert_eq!(plain, "FAIL [ 0.004s] ( 1/2) ci::tests::coloured_failure\n");
+        let jobs = parse_failed_log(&plain);
+        assert_eq!(jobs[0].tests.len(), 1);
+        assert_eq!(jobs[0].tests[0].name, "ci::tests::coloured_failure");
+    }
+
+    // Spec: docs/specs/cli.md#ci-observations
+    #[test]
+    fn an_unreadable_log_keeps_the_failed_job_and_the_gh_message_visible() {
+        let gh = "the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway";
+        let report = Report {
+            pr: Some(3727),
+            run: None,
+            head: None,
+            runs: vec![RunFailures {
+                run: 44_764_262_586,
+                jobs: vec![JobFailures {
+                    job: "Rust front door (1/3)".into(),
+                    step: Some("Run native tests".into()),
+                    class: JobClass::Failed,
+                    unrelated: Vec::new(),
+                    tests: Vec::new(),
+                    errors: Vec::new(),
+                    truncated: false,
+                }],
+                error: Some(format!(
+                    "job Rust front door (1/3): unreadable log: external command failed: {gh}"
+                )),
+            }],
+            unlogged: Vec::new(),
+            rerun: None,
+        };
+        assert_eq!(real_jobs(&report.runs[0].jobs), 1);
+        let text = human(&report);
+        assert!(text.contains(gh), "{text}");
+        assert!(text.contains("Rust front door (1/3)"), "{text}");
+        assert!(
+            rows(&report)
+                .iter()
+                .any(|row| row.contains("unreadable log"))
+        );
+    }
+
+    // Spec: docs/specs/cli.md#ci-observations
+    #[test]
     fn job_log_with_nextest_failure_yields_test_and_panic() {
         let jobs = parse_failed_log(include_str!("ci/fixtures/job-nextest-failure.log"));
         let job = &jobs[0];
@@ -1880,6 +2086,26 @@ mod tests {
         assert!(!inputs.complete);
         let classes = classify_jobs(&jobs, &inputs);
         assert_eq!(classes[&33], JobClass::Uncertain);
+    }
+
+    // Spec: docs/specs/cli.md#ci-observations
+    #[test]
+    fn a_matrix_declaration_expects_every_expanded_member() {
+        let needs = parse_workflow_needs(include_str!("ci/fixtures/workflow-ci.yml"))
+            .expect("workflow fixture")
+            .expect("gate needs");
+        let rust = needs
+            .iter()
+            .find(|need| need.key == "rust")
+            .expect("rust need");
+        assert_eq!(
+            rust.patterns(),
+            [
+                "Rust front door (1/3)",
+                "Rust front door (2/3)",
+                "Rust front door (3/3)",
+            ]
+        );
     }
 
     // Spec: docs/specs/cli.md#ci-observations
