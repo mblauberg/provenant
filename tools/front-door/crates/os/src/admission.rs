@@ -59,6 +59,11 @@ pub struct WaitInfo {
     pub attempt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lane: Option<LaneIdentity>,
+    /// The masked, bounded argv of the command waiting for the slot. The
+    /// admission shim records it before publication, so raw arguments never
+    /// reach a reader or the state directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,6 +76,9 @@ pub struct HeldInfo {
     pub attempt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lane: Option<LaneIdentity>,
+    /// The masked, bounded argv of the command holding the slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 /// Host-owned attribution for a lane sharing admission slots with other projects.
@@ -154,12 +162,24 @@ pub fn mark_waiting(
     pid: i64,
     attempt_id: Option<&str>,
 ) -> Result<WaitGuard> {
+    mark_waiting_with_command(scratch, class, pid, attempt_id, None)
+}
+
+/// Record a waiter together with the masked command it is waiting to run.
+pub fn mark_waiting_with_command(
+    scratch: &Path,
+    class: &str,
+    pid: i64,
+    attempt_id: Option<&str>,
+    command: Option<String>,
+) -> Result<WaitGuard> {
     let info = WaitInfo {
         class: class.to_string(),
         pid,
         start_unix_seconds: now_unix_seconds(),
         attempt_id: attempt_id.map(str::to_string),
         lane: None,
+        command,
     };
     let (lock, json_path, lock_path) =
         mark_record(&scratch.join(SHIM_DIRECTORY).join("waiters"), pid, &info)?;
@@ -179,6 +199,18 @@ pub fn mark_held(
     pid: i64,
     attempt_id: Option<&str>,
 ) -> Result<HeldGuard> {
+    mark_held_with_command(scratch, class, slot, pid, attempt_id, None)
+}
+
+/// Record a holder together with the masked command it is running.
+pub fn mark_held_with_command(
+    scratch: &Path,
+    class: &str,
+    slot: u64,
+    pid: i64,
+    attempt_id: Option<&str>,
+    command: Option<String>,
+) -> Result<HeldGuard> {
     let info = HeldInfo {
         class: class.to_string(),
         slot,
@@ -186,6 +218,7 @@ pub fn mark_held(
         start_unix_seconds: now_unix_seconds(),
         attempt_id: attempt_id.map(str::to_string),
         lane: None,
+        command,
     };
     let (lock, json_path, lock_path) =
         mark_record(&scratch.join(SHIM_DIRECTORY).join("holders"), pid, &info)?;
@@ -263,6 +296,16 @@ impl Drop for HostHeldGuard {
 }
 
 pub fn mark_host_waiting(state: &Path, class: &str, pid: i64) -> Result<HostWaitGuard> {
+    mark_host_waiting_with_command(state, class, pid, None)
+}
+
+/// Record a host-wide waiter together with its masked command.
+pub fn mark_host_waiting_with_command(
+    state: &Path,
+    class: &str,
+    pid: i64,
+    command: Option<String>,
+) -> Result<HostWaitGuard> {
     use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
     let clock = crate::clock::SystemClock::new();
     let dir_path = class_directory(state, class).join("waiters");
@@ -273,6 +316,7 @@ pub fn mark_host_waiting(state: &Path, class: &str, pid: i64) -> Result<HostWait
         start_unix_seconds: now_unix_seconds(),
         attempt_id: None,
         lane: None,
+        command,
     };
     let json_file = format!("{pid}.json");
     let lock_file = format!("{pid}.lock");
@@ -302,6 +346,17 @@ pub fn mark_host_waiting(state: &Path, class: &str, pid: i64) -> Result<HostWait
 }
 
 pub fn mark_host_held(state: &Path, class: &str, slot: u64, pid: i64) -> Result<HostHeldGuard> {
+    mark_host_held_with_command(state, class, slot, pid, None)
+}
+
+/// Record a host-wide holder together with its masked command.
+pub fn mark_host_held_with_command(
+    state: &Path,
+    class: &str,
+    slot: u64,
+    pid: i64,
+    command: Option<String>,
+) -> Result<HostHeldGuard> {
     use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
     let clock = crate::clock::SystemClock::new();
     let dir_path = class_directory(state, class).join("holders");
@@ -313,6 +368,7 @@ pub fn mark_host_held(state: &Path, class: &str, slot: u64, pid: i64) -> Result<
         start_unix_seconds: now_unix_seconds(),
         attempt_id: None,
         lane: None,
+        command,
     };
     let json_file = format!("{pid}.json");
     let lock_file = format!("{pid}.lock");
@@ -714,6 +770,43 @@ mod tests {
         assert_eq!(holding.pid, 42);
         drop(held_guard);
         assert!(lane_holders(&scratch).is_empty());
+    }
+
+    #[test]
+    fn wait_and_hold_records_keep_the_child_command() {
+        let _serial = serial();
+        let temp = tempfile::tempdir().unwrap();
+        let scratch = temp.path().join("scratch");
+        std::fs::create_dir_all(scratch.join(SHIM_DIRECTORY)).unwrap();
+
+        let waiting = mark_waiting_with_command(
+            &scratch,
+            "heavy",
+            42,
+            Some("attempt-1"),
+            Some("cargo test --locked".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            lane_waiters(&scratch)[0].command.as_deref(),
+            Some("cargo test --locked")
+        );
+        drop(waiting);
+
+        let holding = mark_held_with_command(
+            &scratch,
+            "heavy",
+            0,
+            42,
+            Some("attempt-1"),
+            Some("cargo build --release".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            lane_holders(&scratch)[0].command.as_deref(),
+            Some("cargo build --release")
+        );
+        drop(holding);
     }
 
     #[test]

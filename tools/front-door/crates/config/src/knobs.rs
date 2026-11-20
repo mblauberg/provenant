@@ -33,6 +33,7 @@ pub(crate) enum Kind {
     Fraction,
     CargoTarget,
     Size,
+    Duration,
 }
 #[derive(Deserialize)]
 pub(crate) struct Spec {
@@ -351,6 +352,11 @@ fn check(spec: &Spec, value: &Value) -> Result<(), &'static str> {
         }
         Value::Number(number) if spec.kind == Kind::Size => {
             number.as_u64().map(|_| ()).ok_or("invalid_size")
+        }
+        Value::String(text) if spec.kind == Kind::Duration => {
+            crate::is_valid_cargo_seed_budget(text)
+                .then_some(())
+                .ok_or("invalid_duration")
         }
         Value::Number(number) if spec.kind == Kind::Int => {
             let n = number.as_i64().ok_or("type")?;

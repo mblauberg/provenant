@@ -1095,6 +1095,15 @@ knob = "policy.WRITE_SCOPE"
 justification = "Paths inside the writer worktree are advisory scope. Report paths outside the declared scope; only an explicit strict setting refuses settlement."
 
 [[rule]]
+code = "LANE_TOOL_STATE_COMMITTED"
+site = "run/src/writer.rs#WriterLaunch::report_tool_state_paths"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.LANE_TOOL_STATE_COMMITTED"
+justification = "Writer commits that add or modify .local, .config or .cache paths at the repository root warn at settlement and name the paths. Settlement proceeds unless an explicit strict setting refuses."
+
+[[rule]]
 code = "WRITER_CENSUS"
 site = "confinement/src/worktrees/custody.rs#lock_worktree_for_launch"
 boundary = "none"

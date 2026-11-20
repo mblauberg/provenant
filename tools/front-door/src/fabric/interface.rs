@@ -8,60 +8,6 @@ use provenant_fabric_runtime::graph::{
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-// Advisory only: a direct junior writer can run without a sizing plan.
-fn implementation_warnings(
-    nodes: &[provenant_fabric_runtime::graph::GraphNode],
-    input: &Value,
-    enabled: bool,
-) -> Vec<String> {
-    if !enabled
-        || input.pointer("/set/plan").is_some()
-        || input.pointer("/document/with/plan").is_some()
-    {
-        return Vec::new();
-    }
-    fn has_plan_parameter(value: &Value, id: &str) -> bool {
-        match value {
-            Value::Object(fields) => {
-                let name = fields
-                    .get("id")
-                    .or_else(|| fields.get("item"))
-                    .and_then(Value::as_str);
-                if name.is_some_and(|name| id == name || id.ends_with(&format!("--{name}")))
-                    && fields
-                        .get("with")
-                        .and_then(|with| with.get("plan"))
-                        .is_some()
-                {
-                    return true;
-                }
-                fields.values().any(|value| has_plan_parameter(value, id))
-            }
-            Value::Array(values) => values.iter().any(|value| has_plan_parameter(value, id)),
-            _ => false,
-        }
-    }
-    let planners: std::collections::BTreeSet<_> = nodes
-        .iter()
-        .filter(|node| {
-            node.plan.is_some()
-                || node
-                    .template
-                    .as_deref()
-                    .is_some_and(|name| name == "plan" || name.starts_with("plan."))
-        })
-        .map(|node| node.id.as_str())
-        .collect();
-    nodes.iter().filter(|node| {
-        node.template.as_deref().is_some_and(|name| name == "implement" || name.starts_with("implement."))
-            && node.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
-            && node.route.as_ref().and_then(|route| route.alias.as_deref()) == Some("junior")
-            && node.write_scope.is_empty()
-            && !has_plan_parameter(input, &node.id)
-            && !node.inputs.iter().any(|input| planners.contains(input.node.as_str()))
-    }).map(|node| format!("unbounded_brief_junior_writer: {} (brief source: launch input) has no plan input or write scope; use --plan to size the brief", node.id)).collect()
-}
-
 /// A `wait_seconds` that is not a usable wait budget.
 fn wait_seconds_invalid() -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::Field("wait_seconds".into()))
@@ -1372,30 +1318,6 @@ impl Factory {
             }
         }
         bind_directory(&mut compiled, &self.cwd);
-        // Child launches compile on the calling host; surface the same advisory
-        // before handing the node to the graph relay.
-        fn collect_nodes(
-            node: &provenant_fabric_runtime::graph::GraphNode,
-            out: &mut Vec<provenant_fabric_runtime::graph::GraphNode>,
-        ) {
-            out.push(node.clone());
-            if let Some(composite) = &node.composite {
-                for child in &composite.nodes {
-                    collect_nodes(child, out);
-                }
-            }
-        }
-        let typed: provenant_fabric_runtime::graph::GraphNode =
-            serde_json::from_value(compiled.clone()).map_err(|_| invalid())?;
-        let mut warning_nodes = Vec::new();
-        collect_nodes(&typed, &mut warning_nodes);
-        for warning in implementation_warnings(
-            &warning_nodes,
-            input,
-            self.context.config.implement.warn_unbounded_junior,
-        ) {
-            warn_operator(warning);
-        }
         let writer = compiled["access"] == "worktree_write"
             && compiled.get("composite").is_none()
             && compiled.get("loop").is_none();
@@ -2186,6 +2108,9 @@ impl Factory {
             )
             .map_err(graph_patch_error)?;
         }
+        // Static admission is the single compile gate: a launch no longer seals
+        // the submission patch above, so admit here to keep every entry on the
+        // same typed (redacted) refusal.
         provenant_fabric_runtime::graph::admit_candidate(
             &document,
             None,
@@ -2195,17 +2120,6 @@ impl Factory {
             Some(&self.requester_lane_path()?),
         )
         .map_err(FacadeError::graph_candidate)?;
-        // Static admission is the single compile gate: a launch no longer seals
-        // the submission patch above, so admit here to keep every entry on the
-        // same typed (redacted) refusal.
-        let expanded_for_warnings = document
-            .admit_expanded(&self.context.config.graph.limits)
-            .map_err(FacadeError::graph_admission)?;
-        input_warnings.extend(implementation_warnings(
-            &expanded_for_warnings.nodes,
-            input,
-            self.context.config.implement.warn_unbounded_junior,
-        ));
         if let Some(warning) = review_subject.and_then(|subject| subject.warning) {
             input_warnings.push(warning);
         }

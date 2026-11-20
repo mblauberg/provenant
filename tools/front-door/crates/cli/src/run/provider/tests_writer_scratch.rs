@@ -1,19 +1,28 @@
 #[test]
-fn writer_plan_stages_scratch_in_private_temporary_directory()
--> Result<(), Box<dyn std::error::Error>> {
-    writer_preparation_fixture(false, false)
+fn writer_plan_stages_scratch_missing_auth() -> Result<(), Box<dyn std::error::Error>> {
+    writer_preparation_fixture(false, false, "missing")
+}
+
+#[test]
+fn writer_plan_stages_scratch_symlink_auth() -> Result<(), Box<dyn std::error::Error>> {
+    writer_preparation_fixture(false, false, "symlink")
+}
+
+#[test]
+fn writer_plan_stages_scratch_symlink_xdg_auth() -> Result<(), Box<dyn std::error::Error>> {
+    writer_preparation_fixture(false, false, "symlink-xdg")
 }
 
 // Medium: real provider fences, routing and preparation, with synthetic CLIs.
 #[test]
 fn provider_fence_preparation_reports_causes_and_selects_available_candidate()
 -> Result<(), Box<dyn std::error::Error>> {
-    writer_preparation_fixture(true, false)
+    writer_preparation_fixture(true, false, "missing")
 }
 
 #[test]
 fn build_slot_preparation_does_not_require_a_target() -> Result<(), Box<dyn std::error::Error>> {
-    writer_preparation_fixture(false, true)
+    writer_preparation_fixture(false, true, "missing")
 }
 
 thread_local! {
@@ -25,12 +34,42 @@ fn phase(name: &'static str) {
     PHASE.set(name);
 }
 
-fn writer_preparation_fixture(fence_only: bool, gate_only: bool) -> Result<(), Box<dyn std::error::Error>> {
-    writer_preparation_steps(fence_only, gate_only)
+fn writer_preparation_fixture(
+    fence_only: bool,
+    gate_only: bool,
+    auth_layout: &'static str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    writer_preparation_steps(fence_only, gate_only, auth_layout)
         .map_err(|error| format!("{error:?} during fixture phase \"{}\"", PHASE.get()).into())
 }
 
-fn writer_preparation_steps(fence_only: bool, gate_only: bool) -> Result<(), Box<dyn std::error::Error>> {
+/// Find the continuation copy of the retained session without assuming the
+/// candidate index its private state was staged under.
+fn find_retained_transcript(root: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fn visit(dir: &Path, found: &mut Option<PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.ends_with("chats/fixture-session/transcript") && path.is_file() {
+                *found = Some(path);
+                return Ok(());
+            }
+            if entry.file_type()?.is_dir() {
+                visit(&path, found)?;
+            }
+        }
+        Ok(())
+    }
+    let mut found = None;
+    visit(root, &mut found)?;
+    found.ok_or_else(|| "continuation did not copy the retained fixture session".into())
+}
+
+fn writer_preparation_steps(
+    fence_only: bool,
+    gate_only: bool,
+    auth_layout: &'static str,
+) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
     use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId, WaitBudget};
     use provenant_os::clock::SystemClock;
@@ -47,43 +86,41 @@ fn writer_preparation_steps(fence_only: bool, gate_only: bool) -> Result<(), Box
     // same process environment that production preparation reads.
     const CHILD: &str = "PROVENANT_TEST_WRITER_TOKEN_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        // Each auth layout runs the real preparation boundary in an isolated
-        // process; neither depends on another test's host credential state.
-        let (test, layouts): (&str, &[&str]) = if fence_only {
-            (
-                "provider_fence_preparation_reports_causes_and_selects_available_candidate",
-                &["missing"],
-            )
+        // Each auth layout runs the real preparation boundary in its own
+        // isolated process and test; none depends on another test's host
+        // credential state or on a shared slow-test budget.
+        let test = if fence_only {
+            "provider_fence_preparation_reports_causes_and_selects_available_candidate"
         } else if gate_only {
-            ("build_slot_preparation_does_not_require_a_target", &["missing"])
+            "build_slot_preparation_does_not_require_a_target"
         } else {
-            (
-                "writer_plan_stages_scratch_in_private_temporary_directory",
-                &["missing", "symlink", "symlink-xdg"],
-            )
+            match auth_layout {
+                "missing" => "writer_plan_stages_scratch_missing_auth",
+                "symlink" => "writer_plan_stages_scratch_symlink_auth",
+                "symlink-xdg" => "writer_plan_stages_scratch_symlink_xdg_auth",
+                other => return Err(format!("unknown writer scratch layout {other}").into()),
+            }
         };
-        for layout in layouts {
-            #[allow(clippy::disallowed_methods)]
-            let output = std::process::Command::new(std::env::current_exe()?)
-                .arg(test)
-                .env_clear()
-                .envs(provenant_os::fixture::git_env())
-                .env(CHILD, layout)
-                .env("GH_TOKEN", "fixture-host-token")
-                .env_remove("GIT_CONFIG_GLOBAL")
-                .env_remove("GH_CONFIG_DIR")
-                .env_remove("XDG_CONFIG_HOME")
-                .env_remove(provenant_core::consumer_env::GIT)
-                .env_remove(provenant_core::consumer_env::PRIMARY_CHECKOUT)
-                .env_remove(provenant_core::consumer_env::WORKTREE_GITDIR)
-                .output()?;
-            assert!(
-                output.status.success(),
-                "GitHub config layout {layout}:\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
+        #[allow(clippy::disallowed_methods)]
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .arg(test)
+            .env_clear()
+            .envs(provenant_os::fixture::git_env())
+            .env(CHILD, auth_layout)
+            .env("GH_TOKEN", "fixture-host-token")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env_remove("GH_CONFIG_DIR")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove(provenant_core::consumer_env::GIT)
+            .env_remove(provenant_core::consumer_env::PRIMARY_CHECKOUT)
+            .env_remove(provenant_core::consumer_env::WORKTREE_GITDIR)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "GitHub config layout {auth_layout}:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         return Ok(());
     }
 
@@ -97,7 +134,7 @@ fn writer_preparation_steps(fence_only: bool, gate_only: bool) -> Result<(), Box
     for path in [&home, &state, &project, &assets, &git_home] {
         std::fs::DirBuilder::new().mode(0o700).create(path)?;
     }
-    if std::env::var_os(CHILD).as_deref() == Some(std::ffi::OsStr::new("symlink-xdg")) {
+    if auth_layout == "symlink-xdg" {
         let config = base.join("host-xdg-config");
         std::fs::create_dir(&config)?;
         std::os::unix::fs::symlink(config, home.join(".config"))?;
@@ -1290,10 +1327,7 @@ printf 'agy 1.0.0\n'
     // Exercise the host project policy through preparation and the actual
     // generated shim, with a fake gh so no GitHub access is needed.
     std::fs::create_dir_all(home.join(".config"))?;
-    if std::env::var_os(CHILD)
-        .as_deref()
-        .is_some_and(|layout| layout != "missing")
-    {
+    if auth_layout != "missing" {
         let gh_config = base.join("host-gh-config");
         std::fs::create_dir(&gh_config)?;
         // Token launches must not consult even a malformed host configuration.
@@ -1966,7 +2000,17 @@ printf 'agy 1.0.0\n'
         name: "retired-pool".into(),
         effort: None,
     };
-    prior.applied_route = Some(launch.route.clone());
+    // The retained copy is only used when the prior attempt's recorded sandbox
+    // was effective. Make that explicit instead of inheriting a CI-dependent
+    // receipt from the launch, so this phase always exercises the copy path.
+    let mut applied = launch.route.clone();
+    applied.sandbox = Some(run::SandboxModeReceipt {
+        requested: true,
+        effective: true,
+        source: run::SandboxSourceReceipt::Route,
+        ..Default::default()
+    });
+    prior.applied_route = Some(applied);
     prior.session = Some("fixture-session".into());
     // Cursor continuation is retained in the settled attempt, never the host home.
     let retained_session = paths
@@ -1980,6 +2024,14 @@ printf 'agy 1.0.0\n'
     let mut continued_task = task.clone();
     continued_task.route = prior.requested_route.clone();
     continued_task.account = Some("retired-account-alias".into());
+    // Match the effective prior receipt above: a sandboxed resume keeps its
+    // session state attempt-private, which is the retained-copy mode. Without
+    // this, the host's default mode would be native and preparation would
+    // refuse the resume as a session-state mismatch before reaching the copy.
+    continued_task
+        .profile
+        .knobs
+        .insert("lanes.sandbox".into(), serde_json::json!("on"));
     let continued_paths = run::LaunchPaths {
         attempt_id: paths.attempt_id,
         operation_id: OperationId::parse("different-resume-seed")?,
@@ -2015,12 +2067,9 @@ printf 'agy 1.0.0\n'
     assert_eq!(continued.route.account_key, launch.route.account_key);
     assert!(continued.route.pool_selection.is_none());
     assert!(continued.argv.iter().any(|arg| arg == "--resume"));
+    let copied_transcript = find_retained_transcript(continued_paths.provider_state.as_path())?;
     assert_eq!(
-        std::fs::read(
-            continued_paths
-                .provider_state
-                .join("candidate-0/chats/fixture-session/transcript")
-        )?,
+        std::fs::read(copied_transcript)?,
         b"retained fixture session"
     );
     let confinement = launch.confinement.ok_or("writer confinement missing")?;

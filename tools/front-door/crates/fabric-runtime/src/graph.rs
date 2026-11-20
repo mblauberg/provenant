@@ -2877,14 +2877,14 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
         let structural_pause =
             transitions::refresh_structure_pause(&mut checkpoint, &expanded, &plan, limits);
         if structural_pause.is_some() {
+            // Persist the durable pause before observing attempts. A resume
+            // against tighter limits still owes every launched attempt its
+            // settlement: returning here would leave a finished node running
+            // forever. A resume under the pause admits no new launch (see
+            // the guard in the attempt loop) but never stops observing work the host already
+            // accepted; it survives while any node is live and clears when
+            // the graph fully settles or limits are raised (#3558).
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
-            // A resume against tighter limits must return the durable pause
-            // before observing attempts can settle the graph and clear it.
-            if resume {
-                return Ok(ScheduleExit::Done(Box::new(transitions::graph_run(
-                    checkpoint,
-                ))));
-            }
         }
         if structural_pause.is_none() {
             if let Some(next) =
@@ -3281,6 +3281,22 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                     .clone();
                 let key = transitions::attempt_key(&plan, node_index, &checkpoint, route_index)
                     .map_err(|error| GraphError::Invalid(error.into()))?;
+
+                // A resume under tighter limits admits no new launch: a saved
+                // attempt with no host reference would be started by the
+                // observation below, so it waits unless the host has already
+                // accepted it. An attempt with a reference is only observed,
+                // so finished work still settles (#3558). An ordinary advance
+                // keeps its pinned behaviour of re-submitting a saved attempt.
+                if resume
+                    && checkpoint.pause_cause() == Some(PauseCause::StructuralLimit)
+                    && let Some(last) = checkpoint.nodes[node_index].attempts.last()
+                    && last.state != AttemptState::Terminal
+                    && last.attempt_ref.is_none()
+                    && !owner.launch_accepted(last).map_err(GraphError::Run)?
+                {
+                    break;
+                }
 
                 {
                     let prior = checkpoint.nodes[node_index]

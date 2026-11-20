@@ -71,7 +71,13 @@ tools; `knobs.quota.model_discovery` disables discovery globally (default true).
 Probes run concurrently within the quota tick's remaining wall budget, with one
 second reserved for reporting. Failed or overdue probes retain their previous
 snapshots. Advisory family selectors resolve independently, retaining bundled advice
-for a family absent from a partial listing. Discovery messages are transient command
+for a family absent from a partial listing. A graph route's family alias such as
+`claude/sonnet` also resolves through that effective catalogue to its latest
+matching exact model, so launch does not warn that the alias is uncatalogued; an
+unknown or ambiguous alias still warns. That resolution happens once at launch
+selection: the provider is launched with the exact model and the launch receipt
+and identity comparison carry it too, while the attempt's requested route keeps
+the alias. Discovery messages are transient command
 output, not part of the persisted quota report. Route listings name the source of
 model, valid pair, named route and pool entries, and the configuration layer that
 set each pool weight (bundled, host config or project config), in human and JSON
@@ -193,6 +199,8 @@ Capacity (`model_unavailable`) and account allowance (`quota_limited`) are
 separate outcomes. A capacity cooldown is an advisory selection preference that
 explicit models ignore; only a quota-limited outcome cools an account. Retries
 spend the single lineage allowance in [retry owner](retry-owner.md).
+An unclassified provider error settles as `Unclassified`, including after text
+and exit 0; a clean exit without an error still settles as `Succeeded`.
 - Why: capacity and quota need different remedies without multiplying retries.
 
 ## Unknown never means ready

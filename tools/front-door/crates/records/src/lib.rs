@@ -73,8 +73,9 @@ pub mod landing;
 pub mod workflow;
 
 pub use install::{
-    AbsolutePath, Harness, INSTALL_RECEIPT_SCHEMA_VERSION, InstallReceipt, OwnedEntry, OwnedValue,
-    ReleaseFile, ReleaseManifest, ResolvedHarnessTarget, STATE_FORMAT_VERSION, VersionInfo,
+    AbsolutePath, Harness, INSTALL_RECEIPT_SCHEMA_VERSION, InstallReceipt, LIVE_RECORD_FORMAT,
+    OwnedEntry, OwnedValue, ReleaseFile, ReleaseManifest, ResolvedHarnessTarget,
+    STATE_FORMAT_VERSION, VersionInfo,
 };
 
 mod command_result;

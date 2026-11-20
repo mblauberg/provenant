@@ -12,6 +12,9 @@ allocation is sealed. A sealed allocation replays transactionally; conflicting
 replays or additional links are refused. An attempt counts once per PR. Branch
 generations prevent later work from being attributed to a closed binding.
 Ambiguous or truncated coverage must not be counted as a complete allocation.
+`land` binds only the PR it lands: it never reads or warns about other PRs on
+the branch, leaving stale-binding reconciliation to `pr open` and
+`pr contributions --bind`.
 - Why: attribution must not double-count work or invent a share.
 
 ## Work correlation

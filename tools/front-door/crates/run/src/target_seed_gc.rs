@@ -997,6 +997,7 @@ mod tests {
                 .expect("default Cargo profile is UTF-8"),
             features: vec![],
             flags: vec![],
+            allocated_bytes: None,
         };
         fs::write(
             dir.join("manifest.json"),
