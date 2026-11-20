@@ -140,6 +140,7 @@ impl<'a, 'f> StreamCapture<'a, 'f> {
             StreamPolicy::Capture { limit }
             | StreamPolicy::Tail { limit }
             | StreamPolicy::Tee { limit, .. } => *limit,
+            StreamPolicy::Inherit => 0,
             StreamPolicy::Discard => 0,
         };
         if limit > MAX_CAPTURE_LIMIT {
@@ -424,7 +425,7 @@ impl Frames {
         }
         let limit = match policy {
             StreamPolicy::Capture { limit } | StreamPolicy::Tee { limit, .. } => *limit,
-            StreamPolicy::Discard | StreamPolicy::Tail { .. } => return,
+            StreamPolicy::Discard | StreamPolicy::Inherit | StreamPolicy::Tail { .. } => return,
         };
         let room = limit.saturating_sub(out.bytes.len());
         out.bytes.extend_from_slice(&bytes[..bytes.len().min(room)]);

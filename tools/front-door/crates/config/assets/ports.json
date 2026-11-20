@@ -116,7 +116,13 @@
     },
     "integrations": [],
     "runners": {},
-    "default_tier": "0"
+    "default_tier": "0",
+    "affected": {
+      "enabled": false,
+      "global_paths": [],
+      "full_every": 10,
+      "full_after": "24h"
+    }
   },
   "land": {
     "source": "builtin",
@@ -170,12 +176,6 @@
       "kind": "builtin"
     }
   },
-  "build_admission": {
-    "source": "builtin",
-    "backend": {
-      "kind": "builtin"
-    }
-  },
   "forge": {
     "source": "builtin",
     "backend": {
@@ -193,12 +193,40 @@
       "argv": []
     },
     "command": {
-      "argv": []
+      "argv": [],
+      "exit_codes": {
+        "success": [0],
+        "unknown": [],
+        "other": "refused"
+      }
     },
     "offload": "auto",
-    "overflow": "local",
-    "clean": "none",
+    "overflow": "auto",
+    "clean": "untracked",
     "stacks": [],
-    "snapshot_retention": "7d"
+    "snapshot_retention": "7d",
+    "priority": {
+      "check": "interactive",
+      "clippy": "interactive",
+      "test": "test",
+      "nextest": "test",
+      "tier": "test",
+      "gate": "train",
+      "maintenance": "prewarm",
+      "other": "interactive"
+    },
+    "queue_aging": "120s",
+    "prewarm_budget": 1,
+    "canary_every": "24h",
+    "slot_idle": "7d",
+    "soak": {
+      "min_runs": 50,
+      "min_days": 7,
+      "interactive_wait_p95": "60s",
+      "test_wait_p95": "300s",
+      "rss_fraction": 0.75,
+      "local_exception_fraction": 0.05,
+      "churn_clean_fraction": 0.99
+    }
   }
 }

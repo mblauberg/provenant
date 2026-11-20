@@ -29,6 +29,22 @@ The catalogue derives flag relationships and child commands from the parser, and
 
 - Why: inspection must be safe outside a checkout and paths must not change in transit.
 
+## Build commands
+
+The build command surface is `provenant build status [--json]`,
+`provenant build report [--since DUR] [--project P] [--json]`,
+`provenant build reset [--project P] [--slot N] [--full]`, and
+`provenant build maintain --project P`. The `--json`, `--project`, and
+`--full` flags use the shared global options. These handlers currently return
+`BUILD_NOT_IMPLEMENTED` while the build report and hygiene owners are added.
+
+`provenant verify [TIER] --commit REV --affected` accepts the commit and
+affected-selection flags; verification continues to use its existing behavior
+until the caller slice implements them.
+
+- Why: the command grammar can be shared before the owning build and verify
+  implementations land.
+
 ## Console catalogue and peer coverage
 
 Console reads do not allocate product state. Peer observations retain local

@@ -81,8 +81,7 @@ pub const ADMISSION_SLOT: &str = "PROVENANT_ADMISSION_SLOT";
 pub const ADMISSION_SLOT_STATE: &str = "PROVENANT_ADMISSION_SLOT_STATE";
 pub const ADMISSION_SLOTS: &str = "PROVENANT_ADMISSION_SLOTS";
 pub const ADMISSION_WAIT_DIR: &str = "PROVENANT_ADMISSION_WAIT_DIR";
-pub const ADMISSION_BACKEND: &str = "PROVENANT_ADMISSION_BACKEND";
-pub const ADMISSION_SOURCE: &str = "PROVENANT_ADMISSION_SOURCE";
+pub const BUILD_CONTEXT: &str = "PROVENANT_BUILD_CONTEXT";
 pub const ADMISSION_DISK_LIMITS: &str = "PROVENANT_ADMISSION_DISK_LIMITS";
 pub const ADMISSION_MEMORY_LIMIT: &str = "PROVENANT_ADMISSION_MEMORY_LIMIT";
 pub const ADMISSION_TRIM_ACTION: &str = "PROVENANT_ADMISSION_TRIM_ACTION";
@@ -429,17 +428,10 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         ADMITTED_COMMAND,
     ),
     var(
-        ADMISSION_BACKEND,
+        BUILD_CONTEXT,
         Lane,
         Internal,
-        "Encoded admission backend selected by the host.",
-        ADMITTED_COMMAND,
-    ),
-    var(
-        ADMISSION_SOURCE,
-        Lane,
-        Internal,
-        "Source of the selected admission backend.",
+        "Frozen host-side build strategy, repository and toolchain context.",
         ADMITTED_COMMAND,
     ),
     var(

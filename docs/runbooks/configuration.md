@@ -98,10 +98,13 @@ seeding:
 }
 ```
 
-A later slice removes the `build_admission` command key as a breaking
-configuration change; the key remains declared here for now. Build admission is
-chosen through `build.strategy` and its named `[admission.<class>]` limits, and
-this slice does not remove or reinterpret the old key.
+Build execution is selected through the layered `build.*` port. Set
+`build.strategy` to `slots`, `lane_seed`, `lane` or `command`; the existing
+`[admission.build].slots` value remains the shared concurrency limit. For a
+repository wrapper, set `build.strategy = "command"` and configure
+`build.command` with its argv and exit-code dispositions. The removed
+`build_admission` key is treated as an unknown port and produces the normal
+unknown-key warning.
 
 ## Provider model scope
 

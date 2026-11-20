@@ -89,6 +89,8 @@ pub enum StreamPolicy<'a> {
     Capture {
         limit: usize,
     },
+    /// Inherit the caller's output descriptor without capturing it.
+    Inherit,
     /// Retain the most recent bytes while continuing to drain the stream.
     Tail {
         limit: usize,
@@ -110,11 +112,16 @@ impl StreamPolicy<'_> {
     pub(crate) fn limit(&self) -> usize {
         match self {
             Self::Capture { limit } | Self::Tail { limit } | Self::Tee { limit, .. } => *limit,
+            Self::Inherit => 0,
             Self::Discard => 0,
         }
     }
     pub(crate) fn piped(&self) -> bool {
-        !matches!(self, Self::Discard)
+        !matches!(self, Self::Discard | Self::Inherit)
+    }
+
+    fn inherited(&self) -> bool {
+        matches!(self, Self::Inherit)
     }
 }
 /// Frames are decoded before retention and redaction; full queues are loss,
@@ -298,6 +305,15 @@ impl SystemExecutor {
         Ok(Self {
             reaper: Reaper::new(capacity).map_err(io_error("start reaper"))?,
         })
+    }
+
+    /// Run a private process group, forwarding caller INT, TERM and HUP to
+    /// every active forwarding group and applying the configured grace period.
+    pub fn execute_forwarding_group(
+        &self,
+        options: ExecOptions<'_>,
+    ) -> Result<ExecOutcome, ExecError> {
+        run_inner(&self.reaper, options, None, true)
     }
 }
 
@@ -495,7 +511,7 @@ impl Executor for SystemExecutor {
     }
 }
 fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
-    run_inner(reaper, options, None)
+    run_inner(reaper, options, None, false)
 }
 
 struct PreparedRefTransaction<'a> {
@@ -552,6 +568,7 @@ fn run_prepared_ref_transaction(
             commands_through_prepare,
             commit_after_prepare,
         }),
+        false,
     )
 }
 
@@ -561,6 +578,7 @@ fn run_inner<'a>(
     reaper: &Reaper,
     options: ExecOptions<'a>,
     mut transaction: Option<PreparedRefTransaction<'_>>,
+    forward_signals: bool,
 ) -> Result<ExecOutcome, ExecError> {
     if options.argv.is_empty() {
         return Err(ExecError::EmptyArgv);
@@ -572,6 +590,9 @@ fn run_inner<'a>(
         && (options.wait_for_completion
             || !(options.process_group && options.cleanup_process_group))
     {
+        return Err(ExecError::WatchdogRequiresGroupCleanup);
+    }
+    if forward_signals && !options.process_group {
         return Err(ExecError::WatchdogRequiresGroupCleanup);
     }
     if options.cancel.is_some_and(CancelToken::is_cancelled) {
@@ -587,6 +608,14 @@ fn run_inner<'a>(
         .and_then(|at| at.checked_add(options.reap_timeout))
         .ok_or(ExecError::DurationOutOfRange)?;
     let permit = reaper.reserve().ok_or(ExecError::Busy)?;
+    let signal_forwarder = if forward_signals {
+        Some(
+            crate::sys::build_group::Forwarder::install()
+                .map_err(io_error("install signal forwarding"))?,
+        )
+    } else {
+        None
+    };
     let mut child = RawChild::spawn_with_watchdog(
         permit,
         crate::sys::raw_exec::SpawnSpec {
@@ -603,9 +632,16 @@ fn run_inner<'a>(
             capture_stderr: options.stderr.piped(),
         },
         options.group_watchdog.then_some(options.timeout),
+        options.stdout.inherited(),
+        options.stderr.inherited(),
     )
     .map_err(io_error("spawn"))?;
     child.cleanup_process_group_on_exit(options.cleanup_process_group);
+    if let Some(forwarder) = &signal_forwarder
+        && let Some(pid) = child.id()
+    {
+        forwarder.child(i32::try_from(pid).unwrap_or(0));
+    }
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
     let mut stdin = child.stdin.take();
@@ -724,22 +760,31 @@ fn run_inner<'a>(
         }
         let overflow = options.stop_on_output_limit
             && (out_pump.outcome().truncated || err_pump.outcome().truncated);
-        let cancelled = options.cancel.is_some_and(CancelToken::is_cancelled);
+        let forwarded_signal = signal_forwarder
+            .as_ref()
+            .is_some_and(crate::sys::build_group::Forwarder::signal_received);
+        let cancelled = options.cancel.is_some_and(CancelToken::is_cancelled) || forwarded_signal;
         if !options.wait_for_completion
             && status.is_none()
             && term_at.is_none()
             && (now >= deadline || overflow || cancelled)
         {
             stdin = None;
-            let delivered = match child.signal(if options.process_group {
-                Signal::Kill
+            let delivered = if forwarded_signal {
+                true
             } else {
-                Signal::Terminate
-            }) {
-                Ok(delivered) => delivered,
-                Err(error) => {
-                    child.fail_and_transfer();
-                    return Err(io_error("SIGTERM")(error));
+                match child.signal(if forward_signals {
+                    Signal::Terminate
+                } else if options.process_group {
+                    Signal::Kill
+                } else {
+                    Signal::Terminate
+                }) {
+                    Ok(delivered) => delivered,
+                    Err(error) => {
+                        child.fail_and_transfer();
+                        return Err(io_error("SIGTERM")(error));
+                    }
                 }
             };
             output.timed_out = delivered && now >= deadline;

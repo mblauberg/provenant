@@ -9,6 +9,9 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+#[allow(unsafe_code)]
+pub(crate) mod build_group;
+
 /// Read the host's effective Git identity before preparing a lane.
 #[allow(clippy::disallowed_methods)]
 pub fn git_identity(git: &Path, cwd: &Path) -> Vec<(OsString, OsString)> {

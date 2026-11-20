@@ -92,7 +92,7 @@ impl Rig {
             .env_remove(provenant_core::consumer_env::ADMISSION_SLOT)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        set_builtin_admission(&mut command)?;
+        set_build_context(&mut command, self, "slots")?;
         Ok(command)
     }
 
@@ -117,16 +117,68 @@ impl Rig {
     }
 }
 
-fn set_builtin_admission(command: &mut Command) -> Result {
-    command
-        .env(
-            provenant_core::consumer_env::ADMISSION_BACKEND,
-            serde_json::to_string(&provenant_config::PortBackend::Builtin)?,
-        )
-        .env(
-            provenant_core::consumer_env::ADMISSION_SOURCE,
-            serde_json::to_string(&provenant_config::PortSource::Builtin)?,
-        );
+fn build_context(rig: &Rig, strategy: &str) -> Result<String> {
+    let project = std::env::current_dir()?;
+    let table = provenant_config::PortTable::read_for(Some(&project), &rig.state)?;
+    let mut port = table.build;
+    port.strategy = strategy.to_owned();
+    let strategy_source = port.source;
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".cargo"));
+    let rustup_home = std::env::var_os("RUSTUP_HOME").map(PathBuf::from);
+    let host_path = std::env::var_os("PATH")
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let context = serde_json::json!({
+        "schema": 1,
+        "project": project,
+        "project_key": provenant_config::project_key_for(&project)
+            .unwrap_or_else(|| "admission-test".to_owned()),
+        "worktree": project,
+        "attempt": null,
+        "sandboxed": false,
+        "git": null,
+        "port": port,
+        "strategy_source": strategy_source,
+        "host_home": home,
+        "rustup_home": rustup_home,
+        "cargo_home": cargo_home,
+        "host_path": host_path,
+        "verify_base": null,
+    });
+    Ok(serde_json::to_string(&context)?)
+}
+
+fn set_build_context(command: &mut Command, rig: &Rig, strategy: &str) -> Result {
+    command.env(
+        provenant_core::consumer_env::BUILD_CONTEXT,
+        build_context(rig, strategy)?,
+    );
+    Ok(())
+}
+
+fn set_command_build_context(
+    command: &mut Command,
+    rig: &Rig,
+    wrapper: &PathBuf,
+    mode: &str,
+) -> Result {
+    let mut context: serde_json::Value = serde_json::from_str(&build_context(rig, "command")?)?;
+    context["port"]["command"] = serde_json::json!({
+        "argv": [wrapper, mode],
+        "exit_codes": {"success": [17], "unknown": [23], "other": "refused"}
+    });
+    context["port"]["leaf_sources"]["build.strategy"] = serde_json::json!("project");
+    context["strategy_source"] = serde_json::json!("project");
+    command.env(
+        provenant_core::consumer_env::BUILD_CONTEXT,
+        serde_json::to_string(&context)?,
+    );
     Ok(())
 }
 
@@ -267,7 +319,7 @@ fn concurrent_cargo_commands_wait_for_the_single_host_slot() -> Result {
             .env_remove(provenant_core::consumer_env::ADMISSION_SLOT)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        set_builtin_admission(&mut command)?;
+        set_build_context(&mut command, &rig, "slots")?;
         Ok(command)
     };
     let mut first = agent_command("exec cargo check", &rig.state)?.spawn()?;
@@ -363,7 +415,7 @@ fn missing_builtin_slot_settings_still_run_the_build() -> Result {
         .env("PATH", "/usr/bin:/bin")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    set_builtin_admission(&mut command)?;
+    set_build_context(&mut command, &rig, "slots")?;
     let mut child = command.spawn()?;
     assert!(finish(&mut child, Duration::from_secs(10))?);
     assert!(rig.started("end"), "Command ran without a slot grant");
@@ -371,37 +423,123 @@ fn missing_builtin_slot_settings_still_run_the_build() -> Result {
 }
 
 #[test]
-fn absent_or_malformed_port_metadata_does_not_start_cargo() -> Result {
+fn unavailable_strategy_warns_and_falls_back_to_local_build() -> Result {
     let rig = Rig::new()?;
-    let builtin = serde_json::to_string(&provenant_config::PortBackend::Builtin)?;
-    let source = serde_json::to_string(&provenant_config::PortSource::Builtin)?;
-    let cases = [
-        (None, Some(source.as_str())),
-        (Some("{"), Some(source.as_str())),
-        (Some(builtin.as_str()), None),
-        (Some(builtin.as_str()), Some("\"unknown\"")),
-    ];
-    for (backend, source) in cases {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
+    command
+        .args(["admit", "build", "--"])
+        .arg(&rig.cargo)
+        .arg("build")
+        .env("PROVENANT_ADMISSION_SLOT_STATE", &rig.state)
+        .env("PROVENANT_ADMISSION_SLOTS", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    set_build_context(&mut command, &rig, "wrapper")?;
+    let output = command.output()?;
+    assert!(
+        output.status.success(),
+        "unavailable strategy must not refuse cargo"
+    );
+    assert!(
+        rig.started("end"),
+        "Cargo should run through the local fallback"
+    );
+    let warning = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        warning.contains("build.strategy"),
+        "warning should name the setting"
+    );
+    Ok(())
+}
+
+#[test]
+fn command_strategy_matches_former_backend() -> Result {
+    let rig = Rig::new()?;
+    let wrapper = rig._temp.path().join("build-wrapper");
+    let wrapper_log = rig._temp.path().join("wrapper-log");
+    fs::write(&wrapper_log, "")?;
+    fs::write(
+        &wrapper,
+        r##"#!/bin/sh
+{
+  printf 'argv='; for arg in "$@"; do printf '<%s>' "$arg"; done; printf '\n'
+  printf 'path=%s home=%s cargo_home=%s rustup_home=%s\n' "$PATH" "$HOME" "$CARGO_HOME" "$RUSTUP_HOME"
+  printf 'target=%s jobs=%s encoded=%s rustflags=%s rustdocflags=%s\n' "$CARGO_TARGET_DIR" "$CARGO_BUILD_JOBS" "$CARGO_ENCODED_RUSTFLAGS" "$RUSTFLAGS" "$RUSTDOCFLAGS"
+  printf 'rustc=%s rustdoc=%s wrapper=%s workspace_wrapper=%s slot=%s\n' "$RUSTC" "$RUSTDOC" "$RUSTC_WRAPPER" "$RUSTC_WORKSPACE_WRAPPER" "$PROVENANT_ADMISSION_SLOT"
+  printf 'phase=%s source=%s attempt=%s token=%s context=%s\n' "$PROVENANT_PORT_PHASE" "$PROVENANT_PORT_SOURCE" "${PROVENANT_ATTEMPT_ID-unset}" "${GH_TOKEN-unset}" "${PROVENANT_BUILD_CONTEXT-unset}"
+} >> '@LOG@'
+case "$1" in
+  success) exit 17 ;;
+  unknown) exit 23 ;;
+  refused) exit 29 ;;
+  zero-refused) exit 0 ;;
+esac
+"##.replace("@LOG@", &wrapper_log.display().to_string()),
+    )?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+
+    let run = |mode: &str| -> Result<std::process::Output> {
         let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
         command
             .args(["admit", "build", "--"])
             .arg(&rig.cargo)
-            .arg("build")
-            .env_clear()
+            .args(["check", "--release"])
+            .env("PROVENANT_ADMISSION_SLOT_STATE", &rig.state)
             .env("PATH", "/usr/bin:/bin")
+            .env("HOME", "/tmp/build-home")
+            .env("CARGO_HOME", "/tmp/cargo-home")
+            .env("RUSTUP_HOME", "/tmp/rustup-home")
+            .env("CARGO_TARGET_DIR", "/tmp/build-target")
+            .env("CARGO_BUILD_JOBS", "7")
+            .env("CARGO_ENCODED_RUSTFLAGS", "-Clink-arg=-Wl,test")
+            .env("RUSTFLAGS", "-C debuginfo=0")
+            .env("RUSTDOCFLAGS", "-D warnings")
+            .env("RUSTC", "/toolchain/rustc")
+            .env("RUSTDOC", "/toolchain/rustdoc")
+            .env("RUSTC_WRAPPER", "/wrapper/rustc")
+            .env("RUSTC_WORKSPACE_WRAPPER", "/wrapper/workspace")
+            .env(
+                provenant_core::consumer_env::ADMISSION_SLOT,
+                "build:123:456",
+            )
+            .env("PROVENANT_ATTEMPT_ID", "attempt-secret")
+            .env("GH_TOKEN", "credential-secret")
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if let Some(backend) = backend {
-            command.env(provenant_core::consumer_env::ADMISSION_BACKEND, backend);
-        }
-        if let Some(source) = source {
-            command.env(provenant_core::consumer_env::ADMISSION_SOURCE, source);
-        }
+            .stderr(Stdio::piped());
+        set_command_build_context(&mut command, &rig, &wrapper, mode)?;
+        Ok(command.output()?)
+    };
+
+    let success = run("success")?;
+    assert_eq!(success.status.code(), Some(0));
+    let unknown = run("unknown")?;
+    assert_eq!(unknown.status.code(), Some(23));
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("unknown outcome"));
+    let refused = run("refused")?;
+    assert_eq!(refused.status.code(), Some(29));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("refused cargo"));
+    let zero_refused = run("zero-refused")?;
+    assert_eq!(zero_refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&zero_refused.stderr).contains("refused cargo"));
+
+    let log = fs::read_to_string(wrapper_log)?;
+    assert!(
+        log.contains(&format!(
+            "argv=<success><{}><check><--release>",
+            rig.cargo.display()
+        )),
+        "configured argv must prefix the original executable and arguments: {log}"
+    );
+    for expected in [
+        "path=/usr/bin:/bin home=/tmp/build-home cargo_home=/tmp/cargo-home rustup_home=/tmp/rustup-home",
+        "target=/tmp/build-target jobs=7 encoded=-Clink-arg=-Wl,test rustflags=-C debuginfo=0 rustdocflags=-D warnings",
+        "rustc=/toolchain/rustc rustdoc=/toolchain/rustdoc wrapper=/wrapper/rustc workspace_wrapper=/wrapper/workspace slot=build:123:456",
+        "phase=build source=project attempt=unset token=unset context=unset",
+    ] {
         assert!(
-            !command.status()?.success(),
-            "invalid metadata must fail closed"
+            log.contains(expected),
+            "wrapper environment mismatch: {expected}; got {log}"
         );
-        assert!(!rig.started("end"), "invalid metadata must not run Cargo");
     }
     Ok(())
 }
@@ -420,7 +558,7 @@ fn the_shims_exit_code_is_the_builds() -> Result {
         .env_remove("PROVENANT_ADMISSION_SLOT_STATE")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    set_builtin_admission(&mut failing_command)?;
+    set_build_context(&mut failing_command, &rig, "slots")?;
     let failing = failing_command.status()?;
     assert_eq!(failing.code(), Some(7));
     Ok(())
@@ -658,10 +796,10 @@ fn lane_nextest_runs_through_admission_slot() -> Result {
     fs::set_permissions(&fake_nextest, fs::Permissions::from_mode(0o755))?;
 
     let provenant_bin = PathBuf::from(env!("CARGO_BIN_EXE_provenant"));
+    let build_context = build_context(&rig, "slots")?;
     let gate = provenant_providers::BuildSlotGate {
         project: temp_lane.path(),
-        backend: provenant_config::PortBackend::Builtin,
-        source: provenant_config::PortSource::Builtin,
+        build_context: &build_context,
         provenant: &provenant_bin,
         state: &rig.state,
         slots: 1,
@@ -770,10 +908,10 @@ fn custom_admission_class_in_confined_lane() -> Result {
     fs::create_dir_all(&scratch)?;
 
     let provenant_bin = PathBuf::from(env!("CARGO_BIN_EXE_provenant"));
+    let build_context = build_context(&rig, "slots")?;
     let gate = provenant_providers::BuildSlotGate {
         project: temp_lane.path(),
-        backend: provenant_config::PortBackend::Builtin,
-        source: provenant_config::PortSource::Builtin,
+        build_context: &build_context,
         provenant: &provenant_bin,
         state: &rig.state,
         slots: 1,

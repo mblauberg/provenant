@@ -323,7 +323,9 @@ pub(super) fn prepare_command(
     let coordination_reads = configure_build_slots(
         &mut spec,
         &settings,
-        &source,
+        project_path,
+        worktree_path,
+        &git,
         &home,
         &scratch,
         &runtime,
@@ -552,6 +554,8 @@ pub(super) fn configure_build_slots(
     spec: &mut provenant_providers::LaunchSpec,
     _settings: &provenant_config::LaneBuildSettings,
     project: &Path,
+    worktree: &Path,
+    git: &Path,
     home: &Path,
     scratch: &Path,
     runtime: &Path,
@@ -561,18 +565,54 @@ pub(super) fn configure_build_slots(
     lane_name: &str,
 ) -> Result<Vec<PathGrant>, String> {
     let table = provenant_config::PortTable::read_for(Some(project), state)
-        .map_err(|error| format!("cannot resolve build admission port: {error}"))?;
-    let port = table.build_admission;
-    let builtin = matches!(&port.backend, provenant_config::PortBackend::Builtin);
-    if builtin
-        && spec
-            .env
-            .iter()
-            .any(|(name, value)| name == provenant_core::consumer_env::SANDBOX && value == "off")
+        .map_err(|error| format!("cannot resolve build port: {error}"))?;
+    let build_context =
+        build_context_for_launch(&table, project, worktree, git, home, scratch, &spec.env)?;
+    spec.env
+        .retain(|(name, _)| name != provenant_core::consumer_env::BUILD_CONTEXT);
+    spec.env.push((
+        provenant_core::consumer_env::BUILD_CONTEXT.into(),
+        build_context.clone().into(),
+    ));
+    if spec
+        .env
+        .iter()
+        .any(|(name, value)| name == provenant_core::consumer_env::SANDBOX && value == "off")
     {
         check_sandbox_off_build_disk(&spec.env, state, policy)?;
     }
-    let default_cargo = home.join(".cargo/bin/cargo");
+    let project_key = provenant_config::project_key_for(project)
+        .ok_or_else(|| "cannot derive build project key from the checkout".to_owned())?;
+    let all_classes = provenant_config::ResolvedAdmissionClass::resolve_all(
+        state,
+        Some(project),
+        Some(project_key.as_str()),
+    );
+    let class_config = all_classes.get("build").cloned().unwrap_or_else(|| {
+        provenant_config::ResolvedAdmissionClass::resolve(
+            "build",
+            state,
+            Some(project),
+            Some(project_key.as_str()),
+        )
+    });
+    let slots = class_config.slots;
+    for (class_name, cfg) in &all_classes {
+        if let Err(error) =
+            provenant_os::admission::AdmissionSlots::provision(state, class_name, cfg.slots)
+        {
+            eprintln!(
+                "provenant: admission slots for '{class_name}' unavailable for this lane, proceeding without them: {error}"
+            );
+        }
+    }
+    let host_home = host_path_value("HOME", &spec.env)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.to_path_buf());
+    let cargo_home = host_path_value("CARGO_HOME", &spec.env)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| host_home.join(".cargo"));
+    let default_cargo = cargo_home.join("bin/cargo");
     let cargo = if let Some(cargo) = spec
         .env
         .iter()
@@ -592,7 +632,7 @@ pub(super) fn configure_build_slots(
         .find(|(name, _)| name == "PATH")
         .and_then(|(_, path)| real_binary_on_path("nextest", path, scratch))
         .or_else(|| {
-            let candidate = home.join(".cargo/bin/nextest");
+            let candidate = cargo_home.join("bin/nextest");
             if candidate.is_file() {
                 Some(candidate)
             } else {
@@ -605,175 +645,248 @@ pub(super) fn configure_build_slots(
         .find(|(name, _)| name == "PATH")
         .and_then(|(_, path)| real_binary_on_path("cargo-nextest", path, scratch))
         .or_else(|| {
-            let candidate = home.join(".cargo/bin/cargo-nextest");
+            let candidate = cargo_home.join("bin/cargo-nextest");
             if candidate.is_file() {
                 Some(candidate)
             } else {
                 None
             }
         });
-    let spec = std::cell::RefCell::new(spec);
-    provenant_config::dispatch_port_backend(
-        &port.backend,
-        || {
-            let project_key = provenant_config::project_key_for(project);
-            let all_classes = provenant_config::ResolvedAdmissionClass::resolve_all(
-                state,
-                Some(project),
-                project_key.as_deref(),
+    let disk_gate = provenant_config::GcSettings::read(state)
+        .and_then(|gc| gc.disk_limits(state))
+        .map(|limits| Some(provenant_config::DiskGate::new(limits, policy)))
+        .unwrap_or_else(|error| {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "provenant: build disk limits unavailable; critical limit could not be resolved, so the build may proceed without the disk gate: {error}"
             );
-            let class_config = all_classes.get("build").cloned().unwrap_or_else(|| {
-                provenant_config::ResolvedAdmissionClass::resolve(
-                    "build",
-                    state,
-                    Some(project),
-                    project_key.as_deref(),
-                )
-            });
-            let slots = class_config.slots;
-            for (class_name, cfg) in &all_classes {
-                if let Err(error) =
-                    provenant_os::admission::AdmissionSlots::provision(state, class_name, cfg.slots)
-                {
-                    eprintln!(
-                        "provenant: admission slots for '{class_name}' unavailable for this lane, proceeding without them: {error}"
-                    );
+            None
+        });
+    let gate = provenant_providers::BuildSlotGate {
+        project,
+        build_context: &build_context,
+        provenant: runtime,
+        state,
+        slots,
+        class_config: Some(class_config),
+        disk_gate,
+        cargo: &cargo,
+        nextest: nextest.as_deref(),
+        cargo_nextest: cargo_nextest.as_deref(),
+        local_cargo: local_cargo(knobs),
+    };
+    match spec.configure_build_slots(scratch, &gate) {
+        Ok(provenant_providers::BuildSlotSetupOutcome::Configured) => {
+            // Register on the host before confinement. The shim only writes
+            // its existing scratch grant, never another lane's state.
+            if let Some(attempt) = spec
+                .env
+                .iter()
+                .find(|(key, _)| key == provenant_core::consumer_env::PARENT_ATTEMPT_ID)
+                .and_then(|(_, value)| value.to_str())
+                .and_then(|value| value.parse::<provenant_core::AttemptId>().ok())
+            {
+                for class in all_classes.keys() {
+                    if let Err(error) = provenant_os::admission::register_lane(
+                        state,
+                        class,
+                        scratch,
+                        attempt,
+                        provenant_os::admission::LaneIdentity {
+                            project: project.to_path_buf(),
+                            name: lane_name.to_owned(),
+                        },
+                    ) {
+                        eprintln!(
+                            "provenant: host admission attribution unavailable for {class}: {error}; proceeding without it"
+                        );
+                    }
                 }
             }
-            let disk_gate = provenant_config::GcSettings::read(state)
-                .and_then(|gc| gc.disk_limits(state))
-                .map(|limits| Some(provenant_config::DiskGate::new(limits, policy)))
-                .unwrap_or_else(|error| {
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "provenant: build disk limits unavailable; critical limit could not be resolved, so the build may proceed without the disk gate: {error}"
-                    );
-                    None
+            let mut grants = Vec::new();
+            let admission_root = state.join("admission");
+            grants.push(PathGrant {
+                path: admission_root.clone(),
+                scope: PathScope::Exact,
+            });
+            for (class_name, cfg) in &all_classes {
+                let directory = admission_root.join(class_name);
+                grants.push(PathGrant {
+                    path: directory.clone(),
+                    scope: PathScope::Exact,
                 });
-            let gate = provenant_providers::BuildSlotGate {
-                project,
-                backend: port.backend.clone(),
-                source: port.source,
-                provenant: runtime,
-                state,
-                slots,
-                class_config: Some(class_config),
-                disk_gate,
-                cargo: &cargo,
-                nextest: nextest.as_deref(),
-                cargo_nextest: cargo_nextest.as_deref(),
-                local_cargo: local_cargo(knobs),
-            };
-            let setup = spec.borrow_mut().configure_build_slots(scratch, &gate);
-            match setup {
-                Ok(provenant_providers::BuildSlotSetupOutcome::Configured) => {
-                    // Register on the host before confinement. The shim only
-                    // writes its existing scratch grant, never another lane's state.
-                    if let Some(attempt) = spec
-                        .borrow()
-                        .env
-                        .iter()
-                        .find(|(key, _)| key == provenant_core::consumer_env::PARENT_ATTEMPT_ID)
-                        .and_then(|(_, value)| value.to_str())
-                        .and_then(|value| value.parse::<provenant_core::AttemptId>().ok())
-                    {
-                        for class in all_classes.keys() {
-                            if let Err(error) = provenant_os::admission::register_lane(
-                                state,
-                                class,
-                                scratch,
-                                attempt,
-                                provenant_os::admission::LaneIdentity {
-                                    project: project.to_path_buf(),
-                                    name: lane_name.to_owned(),
-                                },
-                            ) {
-                                eprintln!(
-                                    "provenant: host admission attribution unavailable for {class}: {error}; proceeding without it"
-                                );
-                            }
-                        }
-                    }
-                    let mut grants = Vec::new();
-                    let admission_root = state.join("admission");
+                for index in 0..cfg.slots {
                     grants.push(PathGrant {
-                        path: admission_root.clone(),
+                        path: directory.join(format!("slot-{index}.lock")),
                         scope: PathScope::Exact,
                     });
-                    for (class_name, cfg) in &all_classes {
-                        let directory = admission_root.join(class_name);
-                        grants.push(PathGrant {
-                            path: directory.clone(),
-                            scope: PathScope::Exact,
-                        });
-                        for index in 0..cfg.slots {
-                            grants.push(PathGrant {
-                                path: directory.join(format!("slot-{index}.lock")),
-                                scope: PathScope::Exact,
-                            });
-                        }
-                    }
-                    Ok(grants)
-                }
-                Ok(provenant_providers::BuildSlotSetupOutcome::Skipped) => Ok(Vec::new()),
-                Err(error) => {
-                    eprintln!(
-                        "provenant: build slot shim unavailable for this lane, building without it: {error}"
-                    );
-                    Ok(Vec::new())
                 }
             }
-        },
-        |_| {
-            let gate = provenant_providers::BuildSlotGate {
-                project,
-                backend: port.backend.clone(),
-                source: port.source,
-                provenant: runtime,
-                state,
-                slots: 1,
-                class_config: None,
-                disk_gate: None,
-                cargo: &cargo,
-                nextest: nextest.as_deref(),
-                cargo_nextest: cargo_nextest.as_deref(),
-                local_cargo: local_cargo(knobs),
-            };
-            match spec.borrow_mut().configure_build_slots(scratch, &gate) {
-                Ok(_) => Ok(Vec::new()),
-                Err(error) => {
-                    eprintln!(
-                        "provenant: repository build wrapper unavailable for this lane: {error}"
-                    );
-                    Ok(Vec::new())
-                }
-            }
-        },
-        || {
-            if local_cargo(knobs) == "all" {
-                return Ok(Vec::new());
-            }
-            // Keep the separate local Cargo advisory when admission is disabled.
-            let gate = provenant_providers::BuildSlotGate {
-                project,
-                backend: port.backend.clone(),
-                source: port.source,
-                provenant: runtime,
-                state,
-                slots: 1,
-                class_config: None,
-                disk_gate: None,
-                cargo: &cargo,
-                nextest: nextest.as_deref(),
-                cargo_nextest: cargo_nextest.as_deref(),
-                local_cargo: local_cargo(knobs),
-            };
-            spec.borrow_mut()
-                .configure_build_slots(scratch, &gate)
-                .map_err(|error| format!("cannot configure local cargo policy: {error}"))?;
+            Ok(grants)
+        }
+        Ok(provenant_providers::BuildSlotSetupOutcome::Skipped) => Ok(Vec::new()),
+        Err(error) => {
+            eprintln!(
+                "provenant: build slot shim unavailable for this lane, building without it: {error}"
+            );
             Ok(Vec::new())
-        },
-    )
+        }
+    }
+}
+
+fn build_context_for_launch(
+    table: &provenant_config::PortTable,
+    project: &Path,
+    worktree: &Path,
+    git: &Path,
+    home: &Path,
+    scratch: &Path,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Result<String, String> {
+    let host_home = host_path_value("HOME", env)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.to_path_buf());
+    let cargo_home = host_path_value("CARGO_HOME", env)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| host_home.join(".cargo"));
+    let rustup_home = Some(
+        host_path_value("RUSTUP_HOME", env)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| host_home.join(".rustup")),
+    );
+    let path = env
+        .iter()
+        .find(|(name, _)| name == "PATH")
+        .map(|(_, path)| path.clone())
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default();
+    let host_path = path_without_build_shims(&path, scratch)?;
+    let project_key = provenant_config::project_key_for(project)
+        .ok_or_else(|| "cannot derive build project key from the checkout".to_owned())?;
+    let git_common = scratch.join("git-common");
+    let strategy_source = table
+        .provenance()
+        .get("build.strategy")
+        .copied()
+        .unwrap_or(provenant_config::PortSource::Builtin);
+    let verify_base = resolve_build_verify_base(project, git, &table.verify.base);
+    let attempt = env
+        .iter()
+        .find(|(name, _)| name == provenant_core::consumer_env::PARENT_ATTEMPT_ID)
+        .and_then(|(_, value)| value.to_str())
+        .map(str::to_owned);
+    let sandboxed = env
+        .iter()
+        .any(|(name, value)| name == provenant_core::consumer_env::SANDBOX && value == "on");
+    let context = provenant_run::build::BuildContext {
+        schema: 1,
+        project: project.to_path_buf(),
+        project_key,
+        worktree: worktree.to_path_buf(),
+        attempt,
+        sandboxed,
+        git: Some(provenant_run::build::GitBinding {
+            git: git.to_path_buf(),
+            git_dir: git_common.clone(),
+            common_dir: git_common.clone(),
+            object_dir: Some(scratch.join("git-objects")),
+            index_file: git_common.join("index"),
+            config_global: Some(scratch.join("gitconfig")),
+        }),
+        port: table.build.clone(),
+        strategy_source,
+        host_home,
+        rustup_home,
+        cargo_home,
+        host_path,
+        verify_base,
+    };
+    serde_json::to_string(&context).map_err(|error| format!("cannot encode build context: {error}"))
+}
+
+fn host_path_value(
+    name: &str,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Option<std::ffi::OsString> {
+    std::env::var_os(name).or_else(|| {
+        env.iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+    })
+}
+
+fn path_without_build_shims(
+    path: &std::ffi::OsStr,
+    scratch: &Path,
+) -> Result<std::ffi::OsString, String> {
+    let shim_dir = scratch.join(provenant_os::admission::SHIM_DIRECTORY);
+    std::env::join_paths(std::env::split_paths(path).filter(|directory| {
+        directory.as_path() != shim_dir.as_path()
+            && !["cargo", "nextest", "cargo-nextest"]
+                .into_iter()
+                .any(|name| is_generated_build_shim(&directory.join(name)))
+    }))
+    .map_err(|error| format!("cannot resolve host PATH for build jobs: {error}"))
+}
+
+fn is_generated_build_shim(path: &Path) -> bool {
+    use std::io::Read;
+    let mut prefix = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(8192).read_to_end(&mut prefix))
+        .is_ok()
+        && prefix.starts_with(b"#!/bin/sh\n")
+        && prefix
+            .windows(b"PROVENANT_ADMISSION_WAIT_DIR=".len())
+            .any(|part| part == b"PROVENANT_ADMISSION_WAIT_DIR=")
+        && prefix
+            .windows(b" admit build -- ".len())
+            .any(|part| part == b" admit build -- ")
+}
+
+fn resolve_build_verify_base(
+    project: &Path,
+    git: &Path,
+    remote_ref: &str,
+) -> Option<provenant_run::build::BaseRef> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    use std::{ffi::OsString, time::Duration};
+
+    let remote_ref = remote_ref.trim();
+    if remote_ref.is_empty() {
+        return None;
+    }
+    let commit_expression = format!("{remote_ref}^{{commit}}");
+    let argv = [
+        git.as_os_str().to_owned(),
+        OsString::from("--no-pager"),
+        OsString::from("rev-parse"),
+        OsString::from("--verify"),
+        OsString::from("--end-of-options"),
+        OsString::from(commit_expression),
+    ];
+    let executor = SystemExecutor::new(1).ok()?;
+    let mut options = ExecOptions::new(&argv, project, Duration::from_secs(5));
+    options.env = Some(&[]);
+    options.process_group = true;
+    options.stdout = StreamPolicy::Capture { limit: 4096 };
+    options.stderr = StreamPolicy::Capture { limit: 4096 };
+    let output = executor.execute(options).ok()?;
+    if output.termination != Termination::Exit(0)
+        || output.timed_out
+        || output.stdout.truncated
+        || output.stdout.read_failed
+    {
+        return None;
+    }
+    let commit = std::str::from_utf8(&output.stdout.bytes).ok()?.trim();
+    if commit.is_empty() {
+        return None;
+    }
+    Some(provenant_run::build::BaseRef {
+        remote_ref: remote_ref.to_owned(),
+        commit: commit.to_owned(),
+    })
 }
 
 fn check_sandbox_off_build_disk(

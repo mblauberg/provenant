@@ -1249,10 +1249,13 @@ printf 'agy 1.0.0\n'
     // A writer may receive its target later; admission must not depend on it.
     let target = codex.env.iter().find(|(key, _)| key == "CARGO_TARGET_DIR").cloned().unwrap();
     codex.env.retain(|(key, _)| key != "CARGO_TARGET_DIR");
+    let writer_worktree = project.join(".worktrees/writer");
     let coordination_reads = configure_build_slots(
         &mut codex,
         &provenant_config::LaneBuildSettings::default(),
         &project,
+        &writer_worktree,
+        &git,
         &home,
         &confinement.plan.permissions().scratch.path,
         &codex_runtime,
@@ -1261,7 +1264,17 @@ printf 'agy 1.0.0\n'
         &provenant_records::policy::Policy::default(),
         "test-lane",
     )
-    .expect("sandboxed lanes receive their optional build-slot shim");
+    .expect("sandboxed lanes receive their build context and admission shim");
+    let context_json = codex
+        .env
+        .iter()
+        .find(|(key, _)| key == provenant_core::consumer_env::BUILD_CONTEXT)
+        .and_then(|(_, value)| value.to_str())
+        .ok_or("lane build context")?;
+    let build_context = provenant_run::build::BuildContext::from_json(context_json)?;
+    assert_eq!(build_context.project, project);
+    assert_eq!(build_context.worktree, writer_worktree);
+    assert!(build_context.git.is_some(), "writer Git binding is frozen at launch");
     assert!(
         coordination_reads
             .iter()
@@ -1281,6 +1294,8 @@ printf 'agy 1.0.0\n'
         &mut codex,
         &provenant_config::LaneBuildSettings::default(),
         &project,
+        &writer_worktree,
+        &git,
         &home,
         &confinement.plan.permissions().scratch.path,
         Path::new("relative-runtime"),
