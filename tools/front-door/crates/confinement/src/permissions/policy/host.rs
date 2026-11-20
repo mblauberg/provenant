@@ -855,6 +855,7 @@ mod tests {
                 extra: Default::default(),
             },
         )?;
+        assert!(host.is_host_access());
         #[cfg(target_os = "macos")]
         host.revalidate_paths()?;
 

@@ -227,7 +227,7 @@ pub(super) fn validate_profile_spec_with_home(
     validate_profile_spec_impl(spec, Some(home), credentials, grant_limit)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 pub(crate) fn validate_profile_spec_with_home_for_access(
     spec: &ProviderProfileSpec,
     home: &Path,
@@ -530,6 +530,7 @@ pub(crate) fn validate_noncredential_grant_for_access(
     validate_noncredential_grant(grant, credentials)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn validate_noncredential_grant_for_profile(
     grant: &PathGrant,
     credentials: &CredentialRoots,
@@ -667,6 +668,7 @@ pub(crate) fn validate_read_exec_grant_for_access(
     validate_read_exec_grant(grant, credentials)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn validate_read_exec_grant_for_profile(
     grant: &PathGrant,
     credentials: &CredentialRoots,
