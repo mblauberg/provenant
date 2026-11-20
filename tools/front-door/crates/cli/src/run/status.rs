@@ -176,28 +176,15 @@ pub fn active_lane_admission(
     Ok((holders, waiters))
 }
 
-/// Ids of every live (non-terminal) lane, paged with the same bounded query as
-/// [`active_lane_admission`]. A read-only caller uses this before a release
-/// swap to name attempts that may still settle under the new format.
+/// Ids of every live (non-terminal) lane in the store, across all projects.
+/// A read-only caller uses this before a release swap to name attempts that may
+/// still settle under the new format. An install replaces the shared binary for
+/// every project under the state root, not only the current checkout.
 pub fn live_attempt_ids(
     store: &run::RunStore,
     call: &run::Request<'_>,
 ) -> run::Result<Vec<String>> {
-    let mut query = lane_query(false, 100, 0);
-    let mut ids = Vec::new();
-    loop {
-        let page = store.lanes(&query, call)?;
-        ids.extend(
-            page.lanes
-                .into_iter()
-                .map(|lane| lane.attempt_id.to_string()),
-        );
-        match page.next {
-            Some(next) => query.after = next,
-            None => break,
-        }
-    }
-    Ok(ids)
+    store.live_attempt_ids_all_projects(call)
 }
 
 /// Project a status row using one bounded process census shared by the caller.

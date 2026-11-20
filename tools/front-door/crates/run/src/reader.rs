@@ -1139,6 +1139,25 @@ impl RunStore {
         self.lanes_streaming(query, call, |_, _, _| {})
     }
 
+    /// Ids of every live (non-terminal, non-refused) attempt in this store,
+    /// across all projects. Read-only inspection that must not depend on the
+    /// caller's checkout uses this: an install replaces the shared binary for
+    /// attempts in every project under the state root, not just one of them.
+    pub fn live_attempt_ids_all_projects(&self, call: &Request<'_>) -> Result<Vec<String>> {
+        call.check()?;
+        let ids: Vec<String> = {
+            let mut statement = self.db.prepare(
+                "SELECT id FROM attempts WHERE refused=0 AND terminal=0 ORDER BY sequence",
+            )?;
+            let rows = statement.query_map([], |row| row.get(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for id in &ids {
+            AttemptId::parse(id).map_err(|_| RunError::Validation("attempt index ID"))?;
+        }
+        Ok(ids)
+    }
+
     /// Report the selected page before loading its records and then report
     /// each completed record. The cursor identifies the last inspected row.
     pub fn lanes_streaming(
