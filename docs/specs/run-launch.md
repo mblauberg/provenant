@@ -268,7 +268,11 @@ credential root warns with its paths, effective access and source, then
 preparation proceeds; isolated retains the existing refusals.
 Credential-overlapping grants and discovered tool paths follow the choice as
 well: isolated keeps its refusals and omissions; host accepts the grant and
-keeps the discovered path.
+keeps the discovered path. The same rule applies at delivery and continuation:
+host access warns and proceeds with ordinary host Git transport and linked
+retained files, and with an unavailable sandbox backend (recording the reason
+in the receipt); isolated keeps its refusals. Each warning names the effective
+access and its source.
 
 For host access, `lane_provider_var` passes the captured `SSH_AUTH_SOCK` to
 `finalise_provider_env`, which grants the exact resolved agent socket to a
@@ -282,9 +286,9 @@ An explicitly selected account keeps its account-specific home to select that
 login. Claude uses native authentication there; isolated launches retain the
 managed token pipe and private configuration. `PrepareInput::stage_user_skills`
 copies and filters skills for isolated launches; native discovery reads the
-user's own skills and linked references directly. Until the separate OpenCode
-native-profile change is integrated, its private home still requires a skill
-copy under host access, without credential-classification filtering.
+user's own skills and linked references directly. OpenCode keeps a private
+home linked to the host auth file, so it stages skills under host access too,
+without credential-classification filtering.
 
 `resolve_lane_access` gives an explicit launch, template or tier knob priority
 over route policy, then uses the host or project knob, then the default. The

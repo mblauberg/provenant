@@ -18,7 +18,8 @@ value and its source are recorded and shown at launch.
 
 ## Consequences
 
-Later enforcement changes can share one resolved choice instead of introducing
-independent switches. Other lanes' work, data integrity, merge, release and
-ruleset authority, and credentials crossing hosts or ungranted providers remain
-boundaries. The plumbing slice records intent before those changes take effect.
+All access enforcement shares that one resolved choice instead of introducing
+independent switches. Doubtful same-host states warn and proceed, naming the
+effective access and its source, rather than refusing. Other lanes' work, data
+integrity, merge, release and ruleset authority, and credentials crossing hosts
+or ungranted providers remain boundaries.

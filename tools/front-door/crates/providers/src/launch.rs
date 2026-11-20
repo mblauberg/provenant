@@ -528,8 +528,6 @@ impl PrepareInput<'_> {
     }
 
     /// Whether the lane's view of the host is isolated: today's sandboxed behaviour (private environment, provider home, Git configuration and credential denies). Under the default host access a sandboxed lane still sees the host environment, provider home and Git configuration; the sandbox confines writes, network and explicit denies only.
-    // consumed by #3712 slices
-    #[allow(dead_code)]
     pub(crate) fn isolated(&self) -> bool {
         self.sandboxed() && self.access().is_isolated()
     }
@@ -539,8 +537,8 @@ impl PrepareInput<'_> {
     }
 
     pub(crate) fn stage_user_skills(&self) -> crate::StagedUserSkills {
-        // The base OpenCode adapter still uses a private home; #3703 supplies
-        // its native profile separately, so it needs staging until integration.
+        // OpenCode keeps a private home linked to the host login, so it needs
+        // staging under host access too; other adapters discover skills natively.
         if !self.isolated() && !(self.sandboxed() && self.route.adapter == "opencode") {
             return crate::StagedUserSkills::default();
         }

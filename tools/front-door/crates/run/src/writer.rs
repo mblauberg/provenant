@@ -2137,6 +2137,7 @@ fn isolated_lane_access_receipt() -> provenant_records::LaneAccessReceipt {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Writer custody, access and policy stay explicit at this boundary.
 fn prepare_writer_git(
     writer: &mut WriterLaunch,
     state: &Path,
