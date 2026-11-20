@@ -160,9 +160,9 @@ where
             })?;
     edit(&mut document, current.as_ref())?;
     let updated = document.to_string();
-    // Reads recover invalid optional values; a write must refuse instead of
-    // publishing a document whose effective value differs from the edit.
-    crate::loader::validate_edit(&updated, sections)?;
+    // Validate changes strictly while retaining the tolerant read policy for
+    // pre-existing findings, including those in a changed section.
+    crate::loader::validate_edit(text.as_deref(), &updated, sections)?;
     let config =
         crate::loader::load_with_domains(roots, Some(Cursor::new(updated.as_bytes())), sections)?;
     let changes = crate::history::changes(text.as_deref().unwrap_or(MINIMAL), &updated);

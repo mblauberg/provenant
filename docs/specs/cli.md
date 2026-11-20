@@ -179,7 +179,11 @@ Status includes all active graph work; omitted settled work is counted. A
 settled graph is still listed when its digests report a live attempt: only
 settled graphs without a live lane are hidden and counted as omitted. The
 headline and human output lead with the number of live lanes read from those
-same digests, and `--json` exposes that count as `live_lanes`. Human and
+same digests, and `--json` exposes that count as `live_lanes`. The compact
+summary, the listing rows and the `status NAME` detail share one state
+vocabulary derived from the node or attempt itself: a live attempt reads as
+`running`, a node waiting for admission or launch reads as `pending`, and an
+observed but non-live writer keeps its own presence label. Human and
 structured output share the selection. `status --mine` reads active custody
 across projects, or one explicit `--project`, including attempts nested under
 the current chair and unattended items available for adoption. It is short by

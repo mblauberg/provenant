@@ -8,6 +8,14 @@ use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
+/// Cadence allowance for a full census followed by durable tracking publication.
+/// Native census acquisition is entry-bounded, not time-bounded.
+pub fn census_publication_cadence() -> std::time::Duration {
+    std::time::Duration::from_millis(
+        crate::guardian::FULL_CENSUS_INTERVAL_MS + crate::guardian::TRACKING_INTERVAL_MS,
+    )
+}
+
 /// Inject native boot observation for reboot recovery tests only.
 pub fn after_reboot_with(
     recovery: crate::custody::Recovery,

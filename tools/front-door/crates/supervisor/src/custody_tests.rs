@@ -2421,9 +2421,9 @@ fn never_spawned_resource_fact_survives_exit_storage() -> TestResult {
         origin: PortSettingSource::Configuration,
     };
     let mut exit = ProcessExit::never_spawned(scope(), None, vec![]);
-    exit.launch_refusal = Some(fact);
+    exit.launch_refusal = Some(fact.clone());
     let stored: StoredExit = serde_json::from_slice(&serde_json::to_vec(&exit)?)?;
-    assert_eq!(stored.launch_refusal, Some(fact));
+    assert_eq!(stored.launch_refusal, Some(fact.clone()));
     assert_eq!(exit.durable_observation().launch_refusal, Some(fact));
     Ok(())
 }

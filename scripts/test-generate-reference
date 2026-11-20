@@ -58,6 +58,20 @@ class ReferenceTests(unittest.TestCase):
         for text in files.values():
             self.assertIn('scripts/generate-reference', text.splitlines()[0])
 
+    def test_configuration_source_gap_includes_the_underlying_error(self):
+        source = self.root / GEN['KNOBS']
+        source.parent.mkdir(parents=True)
+        source.write_text('{"knobs": {}}')
+
+        def reject_configuration(*args, **kwargs):
+            raise ValueError('fixture contract is missing')
+
+        with patch.dict(GLOBALS, config_reference=reject_configuration):
+            files, gaps = GEN['generate'](self.root)
+        for name in ('config-keys.md', 'config-keys-all.md'):
+            self.assertIn('fixture contract is missing', files[name])
+        self.assertEqual(sum('fixture contract is missing' in gap for gap in gaps), 2)
+
     def test_policy_effects_follow_declared_thresholds(self):
         for strength in ('off', 'warn', 'refuse'):
             with self.subTest(strength=strength):

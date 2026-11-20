@@ -242,6 +242,12 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             warning.requested, warning.model, warning.source
         ));
     }
+    for exclusion in &route.diagnostics.account_exclusions {
+        text.push_str(&format!(
+            "account exclusion: {}\n",
+            provenant_records::diagnostic::safe_text(exclusion)
+        ));
+    }
     for warning in &route.diagnostics.launch_warnings {
         text.push_str(&format!("{warning}\n"));
     }

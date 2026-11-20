@@ -917,6 +917,7 @@ fn register_opencode_plans(rig: &TestRig) -> Result {
         .create(true)
         .append(true)
         .open(rig.state.join("config.toml"))?;
+    writeln!(config, "[providers.opencode]\nprofile='lane'")?;
     for plan in ["go", "zen"] {
         writeln!(
             config,
@@ -4323,6 +4324,28 @@ fn opencode_free_pool_cools_second_model() -> Result {
     Ok(())
 }
 
+fn opencode_free_limit_records_provider_retry_after() -> Result {
+    let stdout = br#"{"type":"error","error":{"type":"provider.free-limit","status":429,"retryAfterMs":5624100}}"#;
+    let record = persisted_refusal(
+        "opencode",
+        "opencode/opencode/deepseek-v4.1-flash-free",
+        ("open-code-free", "keyless-free"),
+        stdout,
+    )?;
+    let refusal = &record.refusals[0];
+    assert_eq!(refusal.pool.as_deref(), Some("opencode-free"));
+    // Refusals have whole-second timestamps, so milliseconds round up.
+    assert_eq!(
+        refusal.resets_unix_seconds,
+        Some(refusal.observed_unix_seconds + 5625)
+    );
+    assert_eq!(
+        refusal.expires_unix_seconds()?,
+        refusal.observed_unix_seconds + 5625
+    );
+    Ok(())
+}
+
 fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
     use provenant_records::{
         ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
@@ -4399,12 +4422,12 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
     admit(&first, resets + 10)?;
     admit(&second, resets + 10)?;
 
-    // Missing, null, negative and huge values fall back or clamp.
+    // Missing, null and negative values fall back; long provider waits are retained.
     for (retry_ms, expected_offset) in [
         (None, None),
         (Some(serde_json::Value::Null), None),
         (Some(serde_json::json!(-5000)), None),
-        (Some(serde_json::json!(999_999_999)), Some(86_400)),
+        (Some(serde_json::json!(999_999_999)), Some(1_000_000)),
     ] {
         let mut err = serde_json::json!({
             "type": "provider.quota",
@@ -6064,7 +6087,9 @@ fn provider_checks_preserve_routes_and_settlement_causes() -> Result {
     ])?;
     assert_eq!(code(&out), 1, "{out:?}");
     let data: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(data["data"]["live"], true);
     let rows = data["data"]["rows"].as_array().ok_or("live rows")?;
+    assert_eq!(rows.len(), 2);
     let passed = rows
         .iter()
         .find(|row| row["route"] == pass)
@@ -6077,7 +6102,11 @@ fn provider_checks_preserve_routes_and_settlement_causes() -> Result {
     assert_eq!(passed["cause"], "completed");
     assert_eq!(failed["status"], "fail");
     assert_eq!(failed["cause"], "auth_required");
-    assert!(rows.iter().all(|row| row["attempt_id"].is_string()));
+    // Both routes are probed in one invocation, each with its own attempt and
+    // its own settlement cause: neither may report the other's custody refusal.
+    let passed_attempt = passed["attempt_id"].as_str().ok_or("passing attempt")?;
+    let failed_attempt = failed["attempt_id"].as_str().ok_or("failing attempt")?;
+    assert_ne!(passed_attempt, failed_attempt);
     let out = rig.command(&[
         "check",
         "providers",
@@ -6406,6 +6435,10 @@ fn main() -> ExitCode {
             (
                 "opencode_free_pool_cools_second_model",
                 opencode_free_pool_cools_second_model,
+            ),
+            (
+                "opencode_free_limit_records_provider_retry_after",
+                opencode_free_limit_records_provider_retry_after,
             ),
             (
                 "opencode_free_reset_cools_pool_until_reset_and_restores",

@@ -224,20 +224,17 @@ impl GuardianReactor {
             },
         )?;
         #[cfg(feature = "fixture")]
-        let watches = {
-            let mut watches = watches;
-            if let Some(state) =
-                std::env::var_os("PROVENANT_STATE_DIR").map(std::path::PathBuf::from)
-                && state.join("s2-fail-process-watch").exists()
-            {
-                watches.failures += 1;
-                self.injected_watch_failures += 1;
-                if self.injected_watch_failures >= 2 {
-                    let _ = std::fs::write(state.join("s2-process-watch-failed"), b"failed");
-                }
+        let mut watches = watches;
+        #[cfg(feature = "fixture")]
+        if let Some(state) = std::env::var_os("PROVENANT_STATE_DIR").map(std::path::PathBuf::from)
+            && state.join("s2-fail-process-watch").exists()
+        {
+            watches.failures += 1;
+            self.injected_watch_failures += 1;
+            if self.injected_watch_failures >= 2 {
+                let _ = std::fs::write(state.join("s2-process-watch-failed"), b"failed");
             }
-            watches
-        };
+        }
         Ok(watches)
     }
 

@@ -36,6 +36,46 @@ fn text(value: &Value, limit: usize) -> Option<String> {
         .map(|s| provenant_fabric_runtime::hosts::plain_text(s, limit))
 }
 
+/// The one state vocabulary shared by the status listing and the detail view.
+/// A live attempt is running; only work before admission or launch is pending.
+/// An observed but non-live writer keeps its own presence label, so neither
+/// view claims a live lane it cannot prove.
+pub(crate) fn lane_state<'a>(
+    state: &'a str,
+    attempt_state: Option<&'a str>,
+    presence: Option<&'a str>,
+) -> &'a str {
+    match presence {
+        Some("live") => "running",
+        Some(presence @ ("unattended" | "settling" | "unknown")) => presence,
+        Some(_) => state,
+        None => match attempt_state {
+            // `starting` precedes admission and the provider; it has not
+            // launched, so it is pending rather than running.
+            Some("queued" | "starting") => "pending",
+            Some(attempt_state) => attempt_state,
+            None => match state {
+                // A node held before admission reports `waiting` instead of
+                // `pending`; both mean it has not been launched yet.
+                "waiting" | "pending" => "pending",
+                state => state,
+            },
+        },
+    }
+}
+
+impl NodeDigest {
+    /// The label this node carries in both the compact summary and the detail
+    /// line, derived from the same node and attempt facts as its fields.
+    pub(crate) fn display_state(&self) -> &str {
+        lane_state(
+            &self.state,
+            self.attempt_state.as_deref(),
+            self.attempt_presence.as_deref(),
+        )
+    }
+}
+
 pub(super) fn path_text(value: &Value) -> Option<String> {
     value.as_str().map(str::to_owned).or_else(|| {
         let path: provenant_records::StructuredPathWire =
@@ -136,17 +176,18 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             };
             let open_asks = node["open_asks"].as_array().cloned().unwrap_or_default();
             let evidence_error = text(&attempt["evidence_error"], 200);
-            let current_state = attempt_presence
-                .as_deref()
-                .or(attempt_state.as_deref())
-                .unwrap_or(&state);
+            let current_state = lane_state(
+                &state,
+                attempt_state.as_deref(),
+                attempt_presence.as_deref(),
+            );
             let mut line = if attempt_state.is_some() {
                 format!(
                     "{key} {current_state} node_state={state} attempt_state={} outcome={outcome}",
                     attempt_state.as_deref().unwrap_or("unknown")
                 )
             } else {
-                format!("{key} {state} outcome={outcome}")
+                format!("{key} {current_state} outcome={outcome}")
             };
             line.push_str(&format!(
                 " cause={} branch={} pr={} ci={} result_path={}",
@@ -325,6 +366,30 @@ pub(super) fn graph_snapshot(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn lane_state_uses_one_vocabulary_for_live_attempts_and_prelaunch_work() {
+        // Spec: docs/specs/cli.md#status-selection
+        use super::lane_state;
+
+        assert_eq!(
+            lane_state("running", Some("running"), Some("live")),
+            "running"
+        );
+        for presence in ["unattended", "settling", "unknown"] {
+            assert_eq!(
+                lane_state("running", Some("running"), Some(presence)),
+                presence
+            );
+        }
+        assert_eq!(lane_state("running", Some("running"), None), "running");
+        for attempt_state in ["queued", "starting"] {
+            assert_eq!(lane_state("waiting", Some(attempt_state), None), "pending");
+        }
+        assert_eq!(lane_state("waiting", None, None), "pending");
+        assert_eq!(lane_state("pending", None, None), "pending");
+        assert_eq!(lane_state("failed", None, None), "failed");
+    }
+
+    #[test]
     fn selected_attempt_digest_preserves_graph_state_and_writer_presence() {
         // Spec: docs/specs/cli.md#status-selection
         use super::node_digests;
@@ -361,6 +426,7 @@ mod tests {
         assert_eq!(digest.outcome, "cancelled");
         assert_eq!(digest.attempt_presence, None);
         assert!(!digest.settled, "the graph still requires settlement");
+        assert_eq!(digest.display_state(), "cancelled");
         assert!(digest.line.contains("cancelled node_state=running"));
         assert!(!digest.line.contains("running outcome=running"));
 
@@ -372,12 +438,18 @@ mod tests {
             (None, "unknown"),
         ] {
             let digest = node_digests(&rows("running", recorded_presence)).remove(0);
+            let expected_state = if presence == "live" {
+                "running"
+            } else {
+                presence
+            };
 
             assert_eq!(digest.state, "running");
             assert_eq!(digest.attempt_state.as_deref(), Some("running"));
             assert_eq!(digest.attempt_presence.as_deref(), Some(presence));
+            assert_eq!(digest.display_state(), expected_state);
             assert!(digest.line.contains(&format!(
-                "{presence} node_state=running attempt_state=running"
+                "{expected_state} node_state=running attempt_state=running"
             )));
             assert!(
                 digest

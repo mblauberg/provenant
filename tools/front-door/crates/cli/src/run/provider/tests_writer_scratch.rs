@@ -1205,6 +1205,7 @@ printf 'agy 1.0.0\n'
     let mut codex = provenant_providers::Adapter::prepare(
         &provenant_providers::codex::Codex,
         provenant_providers::PrepareInput {
+            opencode_profile: provenant_config::OpenCodeProfile::Lane,
             credential_roots: confinement.plan.permissions().credential_roots.clone(),
             images: &images,
             policy: &launch_policy,

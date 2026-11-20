@@ -398,6 +398,11 @@ fn prompt_limit_source(
 }
 
 impl Context {
+    /// Directory selected for this project context, which may be a linked checkout.
+    pub fn selected_project(&self) -> &Path {
+        &self.cwd
+    }
+
     pub fn open(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
         // Validate configuration before allocating identities or opening SQLite.
         let resolved = crate::config_reads::read_for(&roots, "fabric context")?;

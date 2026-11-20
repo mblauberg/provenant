@@ -891,6 +891,48 @@ jobs:
           HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
             --state-dir "$RUNNER_TEMP/state" install --source "$RUNNER_TEMP/release" \
             --harness codex --bin-dir "$RUNNER_TEMP/bin"
+          # Launch the installed candidate against retained previous-release custody.
+          export HOME="$RUNNER_TEMP/home"
+          export PROVENANT_DURABILITY=relaxed
+          mkdir -p "$RUNNER_TEMP/smoke-project" "$HOME/Library/pnpm" "$HOME/Library/Caches/pnpm" \
+            "$HOME/.cache/node" "$HOME/.codex" "$HOME/.claude/hooks" \
+            "$HOME/.kiro/settings" "$HOME/.gemini/config" "$HOME/.cursor/extensions" "$HOME/.npm"
+          git -C "$RUNNER_TEMP/smoke-project" init -q
+          git -C "$RUNNER_TEMP/smoke-project" -c user.name=Fixture -c user.email=fixture@example.invalid \
+            commit --allow-empty -qm seed
+          export PROVENANT_ROOT="$RUNNER_TEMP/release"
+          smoke_bin="$RUNNER_TEMP/bin/provenant"
+          smoke_state="$RUNNER_TEMP/smoke-state"
+          mkdir -m 700 "$smoke_state"
+          printf 'schema_version = 1\n[gc]\nfree_floor = "1B"\n' > "$smoke_state/config.toml"
+          cd "$RUNNER_TEMP/smoke-project"
+          project_id="$("$smoke_bin" --state-dir "$smoke_state" fabric identity --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["project"])')"
+          python3 "$GITHUB_WORKSPACE/tools/front-door/tests/upgrade-corpus/v2.4.1/seed.py" "$smoke_state" "$project_id"
+          printf '\n[domains.fabric.commands.upgrade-smoke]\nargv = ["/usr/bin/true"]\n' >> "$smoke_state/config.toml"
+          printf '%s\n' '{"schema_version":2,"graph_id":"upgrade-smoke","nodes":[{"id":"read","use":"task","access":"read_only","prompt":"Run the offline smoke.","route":{"adapter":"command","name":"upgrade-smoke"},"attempt":{"provider_timeout":5}}]}' > "$RUNNER_TEMP/upgrade-smoke.json"
+          "$smoke_bin" --state-dir "$smoke_state" run --file "$RUNNER_TEMP/upgrade-smoke.json" --json
+          if ! "$smoke_bin" --state-dir "$smoke_state" wait upgrade-smoke --timeout 12s --json; then
+            echo "upgrade-smoke did not settle successfully; full status and attempt evidence:" >&2
+            "$smoke_bin" --state-dir "$smoke_state" status upgrade-smoke --full || true
+            python3 - "$smoke_state" <<'PYDIAG'
+          import pathlib, sqlite3, sys
+          state = pathlib.Path(sys.argv[1])
+          try:
+              with sqlite3.connect(f"file:{state / 'run.sqlite3'}?mode=ro", uri=True, timeout=0) as db:
+                  row = db.execute("SELECT record FROM attempts WHERE graph=? AND node=? ORDER BY sequence DESC LIMIT 1", ("upgrade-smoke", "read")).fetchone()
+                  print("last attempt record:", row[0].decode("utf-8", errors="replace") if row else "unavailable", flush=True)
+          except (OSError, sqlite3.Error) as error:
+              print(f"last attempt record unavailable: {error}", flush=True)
+          for attempt in sorted((pathlib.Path(sys.argv[1]) / "attempts").iterdir()):
+              for name in ("process-exit.json", "result.md", "stderr.log"):
+                  path = attempt / name
+                  if path.is_file():
+                      print(f"--- {path} ---", flush=True)
+                      print(path.read_bytes()[:16384].decode("utf-8", errors="replace"), flush=True)
+          PYDIAG
+            exit 1
+          fi
+          cd "$GITHUB_WORKSPACE/tools/front-door"
           HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
             --state-dir "$RUNNER_TEMP/state" uninstall --harness codex
       - name: Check candidate release range

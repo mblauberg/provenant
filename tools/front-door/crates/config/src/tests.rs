@@ -140,6 +140,30 @@ fn explicit_profile_selects_the_compiled_preset() {
 }
 
 #[test]
+fn opencode_profile_reports_default_and_configured_source() {
+    let defaults = load::<&[u8]>(&roots(), None).unwrap();
+    assert_eq!(
+        defaults.providers["opencode"].profile,
+        OpenCodeProfile::Host
+    );
+    assert!(matches!(
+        defaults.origins["providers.opencode.profile"],
+        Origin::Compiled { .. }
+    ));
+    let config = load(
+        &roots(),
+        Some(b"schema_version=1\n[providers.opencode]\nprofile='lane'".as_slice()),
+    )
+    .unwrap();
+    assert_eq!(config.providers["opencode"].profile, OpenCodeProfile::Lane);
+    assert!(matches!(
+        config.origins["providers.opencode.profile"],
+        Origin::User { .. }
+    ));
+    assert!(crate::knobs::documented_field("providers.opencode.profile"));
+}
+
+#[test]
 fn provider_update_settings_defaults_opt_out_commands_and_validation() {
     let defaults = load::<&[u8]>(&roots(), None).unwrap();
     assert_eq!(defaults.providers["codex"], ProviderSettings::default());
