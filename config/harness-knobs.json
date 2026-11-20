@@ -349,7 +349,7 @@
       "limits.node_prompt_bytes": {"type": "int", "allowed": "1 or more", "default": "262144", "effect": "Graph node prompt bytes limit."},
       "limits.graph_prompt_bytes": {"type": "int", "allowed": "1 or more", "default": "4194304", "effect": "Graph graph prompt bytes limit."},
       "limits.fan_out_width": {"type": "int", "allowed": "1 or more", "default": "32", "effect": "Graph fan out width limit."},
-      "limits.concurrency": {"type": "int", "allowed": "0 or more", "default": "unset", "effect": "Graph concurrency limit. Unset or zero uses host lane caps; the bundled configuration sets zero."},
+      "limits.concurrency": {"type": "int", "allowed": "0 or more", "default": "0", "effect": "Graph concurrency limit. Unset or zero uses host lane caps; the bundled configuration sets zero."},
       "decide_timeout_seconds": {"type": "int", "allowed": "1 to 18446744073709 seconds", "min": 1, "default": "300", "effect": "Maximum time a graph decision step may take before it is reported as timed out.", "max": 18446744073709},
       "launch_wait_seconds": {"type": "int", "allowed": "1 to 14400 seconds", "min": 1, "max": 14400, "default": "55", "effect": "General launch and read/wait allowance for a graph node."},
       "writer_provision_seconds": {"type": "int", "allowed": "1 to 14400 seconds", "min": 1, "max": 14400, "default": "55", "effect": "Independent allowance for provisioning each writer in a graph."}
