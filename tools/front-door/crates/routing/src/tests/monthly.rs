@@ -136,6 +136,13 @@ fn monthly_pacing_is_account_eligibility_with_sourced_overrides()
             free: false,
         }],
     );
+    config.launch_policy.overlay(
+        &std::collections::BTreeMap::from([(
+            "PACING_ACCOUNT".into(),
+            provenant_records::policy::Strength::Warn,
+        )]),
+        provenant_records::policy::Source::Dispatch,
+    );
     let accounts = ["a", "b"].map(|key| AvailabilityRecord {
         adapter: "cursor".into(),
         account_key: Some(key.into()),
@@ -147,11 +154,10 @@ fn monthly_pacing_is_account_eligibility_with_sourced_overrides()
         disclosure_ref: "policy",
         confinement_ref: "grant",
     }];
-    let mut observations = [
+    let observations = [
         monthly_quota(model, "a", 3000),
         monthly_quota(model, "b", 0),
     ];
-    observations[0].allowance = AllowanceLedger::default();
     let mut ctx = context(&catalogue, &config, now()?);
     ctx.availability = &accounts;
     ctx.access = &access;
@@ -166,6 +172,43 @@ fn monthly_pacing_is_account_eligibility_with_sourced_overrides()
             ..
         }
     ));
+    // Without cycle evidence, the account remains eligible and the assessment
+    // explains which inferred cycle and usage source underpin pacing.
+    let missing = monthly_allowance_assessment(
+        &catalogue,
+        &config,
+        now()?,
+        &ModelId::parse(model)?,
+        Some("a"),
+        None,
+    )
+    .unwrap();
+    assert!(!missing.constrained);
+    assert!(
+        missing
+            .detail
+            .contains("estimated cycle: calendar month UTC")
+    );
+    assert!(missing.detail.contains("usage source:"));
+    ctx.quota = &[];
+    let uncertain = resolve_for_account(&request(model)?, &ctx, Some("a"))?;
+    assert!(!matches!(
+        uncertain.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::PacingReserve,
+            ..
+        }
+    ));
+    let warnings = &uncertain
+        .diagnostics
+        .account_load
+        .as_ref()
+        .ok_or("account load")?
+        .warnings;
+    assert!(warnings.iter().any(|warning| warning.contains("account=a")
+        && warning.contains("calendar month UTC")
+        && warning.contains("usage source:")
+        && warning.contains("domains.routing.pacing.monthly")));
     ctx.quota = &observations[..1];
     let mut pooled = request(model)?;
     pooled.choice = RouteChoice::NamedRoute(RouteName::parse("monthly-test")?);

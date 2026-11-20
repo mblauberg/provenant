@@ -391,7 +391,10 @@ fn registry_spec_drives_local_provider_preparation_and_quota()
         .expect("Cursor declares a monthly allowance")
     };
     assert!(!assess("local").constrained);
-    assert!(assess("registered").constrained);
+    let registered = assess("registered");
+    assert!(!registered.constrained);
+    assert!(registered.detail.contains("estimated cycle: calendar month UTC"));
+    assert!(registered.detail.contains("usage source:"));
     let scope = provenant_quota::AccountScope {
         extra: Default::default(),
         adapter: "cursor".into(),
@@ -644,12 +647,22 @@ fn local_login_preparation_booking_survives_ordinary_quota_tick()
         serde_json::from_slice(&std::fs::read(&quota_record)?)?;
     assert_eq!(retained.allowance.launches, 1);
     assert!(retained.snapshot.is_none(), "quota observations must be dropped");
-    assert!(
-        prepare([2; 16], "local-pacing-second").is_err(),
-        "the retained local-login booking must constrain another prepared launch"
-    );
-    // Prove the second preparation was constrained by monthly debt, rather
-    // than an unrelated setup or login failure after the tick.
+    let model = provenant_routing::ModelId::parse("cursor/composer-2.5")?;
+    let catalogue = provenant_routing::Catalogue::bundled()?;
+    let pacing = provenant_routing::RoutingConfig::default();
+    let observation = provenant_routing::QuotaObservation::from_record(model.clone(), &retained, 0);
+    let assessment = provenant_routing::monthly_allowance_assessment(
+        &catalogue, &pacing, provenant_os::clock::SystemClock::new().wall_now()?,
+        &model, Some("local"), Some(&observation),
+    ).expect("local monthly assessment");
+    assert!(!assessment.constrained, "an inferred cycle must not hold a launch");
+    assert!(assessment.windows[0].estimated_basis_points >= 5100, "the retained booking must count against headroom");
+    assert!(assessment.detail.contains("estimated cycle:"));
+    let second = prepare([2; 16], "local-pacing-second")?;
+    assert_eq!(second.route.account_key.as_deref(), Some("local"));
+    let booked: provenant_quota::AccountRecord =
+        serde_json::from_slice(&std::fs::read(&quota_record)?)?;
+    assert_eq!(booked.allowance.launches, 2);
     std::fs::write(
         state.join("config.toml"),
         "schema_version=1\n[domains.routing.pacing.accounts.\"cursor/local\".monthly]\nenabled=false\n",
@@ -658,7 +671,7 @@ fn local_login_preparation_booking_survives_ordinary_quota_tick()
     assert_eq!(bypassed.route.account_key.as_deref(), Some("local"));
     let unchanged: provenant_quota::AccountRecord =
         serde_json::from_slice(&std::fs::read(&quota_record)?)?;
-    assert_eq!(unchanged.allowance, retained.allowance);
+    assert_eq!(unchanged.allowance, booked.allowance);
     Ok(())
 }
 

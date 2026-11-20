@@ -863,11 +863,12 @@ mod tests {
                 continue;
             };
             let name = concrete(&name);
-            let value = if field.value.is_null() {
+            let value = if field.value.is_null() || field.kind == "table" {
                 match field.kind {
                     "bool" => json!(false),
                     "int" | "fraction" => json!(field.min.unwrap_or(1).max(1)),
                     "array" | "list" | "string_list" | "census_ignore_list" => json!([]),
+                    "table" => json!({"dependencies": "independent"}),
                     "enum" => json!(field.values.first().cloned().unwrap_or_default()),
                     _ => json!("probe"),
                 }
