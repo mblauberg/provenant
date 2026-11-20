@@ -88,7 +88,9 @@ pub enum Reason {
         /// The changed path.
         path: String,
     },
-    /// Run state was missing or unreadable; the message is the warning.
+    /// No prior selection state exists.
+    NoPriorRun,
+    /// Run state was unreadable; the message is the warning.
     StateUnreadable {
         /// Why the state could not be used.
         message: String,
@@ -111,6 +113,7 @@ impl fmt::Display for Reason {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Changed => formatter.write_str("changed packages and their dependents"),
+            Self::NoPriorRun => formatter.write_str("no prior selection state"),
             Self::GlobalPath { path } => write!(formatter, "global path changed: {path}"),
             Self::InvalidGlobalPath { pattern } => {
                 write!(formatter, "invalid global path pattern: {pattern}")
@@ -146,7 +149,9 @@ pub struct Selection {
 
 /// Selects packages affected by the change between `base` and `head`.
 ///
-/// `workspace` is the repository root containing `Cargo.toml`. `state_dir` is a
+/// `workspace` is the repository root containing `Cargo.toml` and must already
+/// be checked out at `head`; the caller is responsible for this checkout.
+/// `state_dir` is a
 /// caller-supplied root under which `select/<project_key>.json` is maintained.
 /// `now` is the injected wall clock; the function never samples a clock itself.
 pub fn select(
@@ -162,14 +167,14 @@ pub fn select(
     let state_path = state_path(state_dir, project_key)?;
     let loaded = state::load(&state_path);
     let prior = loaded.as_ref().ok().cloned().flatten();
-    // A missing or corrupt state file warns through the reason and forces a full
-    // run; it never panics or refuses the selection.
-    let mut reason = loaded
-        .as_ref()
-        .err()
-        .map(|message| Reason::StateUnreadable {
-            message: (*message).clone(),
-        });
+    // Missing or corrupt state forces a full run without refusing selection.
+    let mut reason = match &loaded {
+        Ok(None) => Some(Reason::NoPriorRun),
+        Ok(Some(_)) => None,
+        Err(message) => Some(Reason::StateUnreadable {
+            message: message.clone(),
+        }),
+    };
 
     // The head graph defines the output package set and is always available.
     let head_graph = git_support::load_metadata(workspace, "head")?;

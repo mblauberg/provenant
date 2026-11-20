@@ -15,6 +15,39 @@ use std::{fs, path::Path, time::Duration};
 const KEY: &str = "fixture";
 
 #[test]
+fn first_selection_is_full_then_later_selection_is_incremental() {
+    let fixture = workspace();
+    let dir = fixture.path();
+    fs::write(
+        dir.join("app/src/main.rs"),
+        "fn main() { leaf::leaf(); let _ = 1; }\n",
+    )
+    .unwrap();
+    let head = commit(dir, "change app");
+    let state = tempfile::tempdir().unwrap();
+    let run = || {
+        select(
+            dir,
+            &fixture.base,
+            &head,
+            &Policy::default(),
+            state.path(),
+            KEY,
+            base_time(),
+        )
+        .unwrap()
+    };
+    let first = run();
+    assert!(first.full);
+    assert_eq!(first.reason, Reason::NoPriorRun);
+    assert_eq!(first.packages, ["app", "leaf"]);
+    let second = run();
+    assert!(!second.full);
+    assert_eq!(second.reason, Reason::Changed);
+    assert_eq!(second.packages, ["app"]);
+}
+
+#[test]
 fn leaf_change_selects_leaf_and_dependents() {
     let fixture = workspace();
     let dir = fixture.path();

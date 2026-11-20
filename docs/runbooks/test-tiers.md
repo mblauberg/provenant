@@ -68,9 +68,11 @@ Stack detection is read-only: `provenant config detect` shows proposed Rust and
 Node commands and their working directories. Rust uses the nearest workspace or
 package manifest within two levels, skipping equal-depth ties. Node uses the
 root `package.json`, its package manager field or lockfile, and only scripts
-that exist. The detected default and commands are below all configured layers and replace
-builtin commands for matching tier keys. Whole argv elements `{packages}`,
+that exist. Rust detection uses Cargo fmt, check and lib/bin tests in tier 0,
+integration tests in tier 1, and workspace tests in tier 2, with no stress tier.
+The detected tier table replaces builtin tiers when a stack is found and is below
+all configured layers; without a detected stack, builtin tiers remain. Whole argv elements `{packages}`,
 `{integration_args}` and `{quarantine_args}` expand to argument lists; no
-shell splitting occurs. Detected Rust-only tiers retain builtin selection; tiers containing non-Rust commands select all and expand selection placeholders to nothing. Use
+shell splitting occurs. Detected Rust tiers 0 and 1 select packages and tier 2 selects all; tiers containing non-Rust commands select all and expand selection placeholders to nothing. Use
 `provenant config show --full` for effective leaves and sources, and
 `provenant config path --project` for the host-project ports file.

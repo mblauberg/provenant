@@ -74,7 +74,8 @@ def select(paths, packages, mappings, package_mappings=()):
     touched = set()
     for path in paths:
         candidates = [(p["manifest_path"], p["name"]) for p in packages
-                      if path == p["manifest_path"] or path.startswith(str(Path(p["manifest_path"]).parent) + "/")]
+                      if path == p["manifest_path"] or Path(p["manifest_path"]).parent == Path(".")
+                      or path.startswith(str(Path(p["manifest_path"]).parent) + "/")]
         if candidates:
             touched.add(max(candidates, key=lambda p: len(p[0]))[1])
     for rule in package_mappings:

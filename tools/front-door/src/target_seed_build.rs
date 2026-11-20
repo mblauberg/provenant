@@ -1211,7 +1211,12 @@ pub fn build(state: &Path, project: &Path) -> Result<String> {
 /// commands, and the checkout supplies only the working directory for them. An
 /// unreadable or invalid table warns and runs nothing; a failing command fails
 /// that build with a typed error carrying its bounded output tail.
-fn run_prepares(state: &Path, project: &Path, checkout_root: &Path) -> Result<()> {
+fn run_prepares(
+    state: &Path,
+    project: &Path,
+    checkout_root: &Path,
+    overrides: &[(OsString, OsString)],
+) -> Result<()> {
     let table = match provenant_config::PortTable::read_for(Some(project), state) {
         Ok(table) => table,
         Err(error) => {
@@ -1228,7 +1233,7 @@ fn run_prepares(state: &Path, project: &Path, checkout_root: &Path) -> Result<()
             argv.join(" ")
         ));
         let argv = argv.iter().map(OsString::from).collect::<Vec<_>>();
-        run_with_tail(checkout_root, &argv, &[]).map_err(|failure| PrepareFailed {
+        run_with_tail(checkout_root, &argv, overrides).map_err(|failure| PrepareFailed {
             index,
             argv: argv
                 .iter()
@@ -1253,35 +1258,8 @@ fn build_into(
     let checkout = stage.join("checkout");
     checkout_commit(project, &checkout, commit)?;
     let checkout_root = checkout.canonicalize()?;
-    run_prepares(state, project, &checkout_root)?;
-    let worktree = checkout.join(workspace_relative).canonicalize()?;
-    if !worktree.starts_with(&checkout_root) || !worktree.join("Cargo.toml").metadata()?.is_file() {
-        return Err(io::Error::other(
-            "verify base has no Cargo manifest at the selected workspace",
-        )
-        .into());
-    }
     let target = stage.join("target");
     fs::create_dir(&target)?;
-    let (rustc_vv, host_triple) = target_seed::rustc_metadata(&worktree)?;
-    // Capture the checkout after preparation, so generated changes cannot be
-    // published under the unchanged commit-tree identity.
-    let source = target_seed::GitSeedSource {
-        checkout: &checkout_root,
-        commit: None,
-    };
-    let identity = target_seed::seed_identity(
-        &source,
-        workspace_relative,
-        &rustc_vv,
-        &host_triple,
-        cargo_profile,
-    )?;
-    fs::write(
-        stage.join("identity.json"),
-        serde_json::to_vec_pretty(&identity)?,
-    )?;
-    make_read_only(&stage.join("identity.json"))?;
     let environment = std::env::vars_os().collect::<Vec<_>>();
     let cargo = target_seed::cargo_tool(&environment, "cargo")?;
     let mut flags = vec![
@@ -1311,6 +1289,33 @@ fn build_into(
         // Provenant's safe value; an inherited non-zero value is cleared.
         ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
     ]);
+    run_prepares(state, project, &checkout_root, &overrides)?;
+    let worktree = checkout.join(workspace_relative).canonicalize()?;
+    if !worktree.starts_with(&checkout_root) || !worktree.join("Cargo.toml").metadata()?.is_file() {
+        return Err(io::Error::other(
+            "verify base has no Cargo manifest at the selected workspace",
+        )
+        .into());
+    }
+    let (rustc_vv, host_triple) = target_seed::rustc_metadata(&worktree)?;
+    // Capture the checkout after preparation, so generated changes cannot be
+    // published under the unchanged commit-tree identity.
+    let source = target_seed::GitSeedSource {
+        checkout: &checkout_root,
+        commit: None,
+    };
+    let identity = target_seed::seed_identity(
+        &source,
+        workspace_relative,
+        &rustc_vv,
+        &host_triple,
+        cargo_profile,
+    )?;
+    fs::write(
+        stage.join("identity.json"),
+        serde_json::to_vec_pretty(&identity)?,
+    )?;
+    make_read_only(&stage.join("identity.json"))?;
     for args in [
         &["build", "--locked", "--all-targets"][..],
         &["test", "--locked", "--no-run"][..],
@@ -2766,8 +2771,8 @@ mod tests {
         fs::write(
             &script,
             format!(
-                "#!/bin/sh\nprintf 'pub fn value() {{}}\\n' > src/generated.rs\nprintf '%s' \"$PWD\" > {}\n",
-                marker.display()
+                "#!/bin/sh\nprintf 'pub fn value() {{}}\\n' > src/generated.rs\nprintf '%s' \"$PWD\" > {}\nprintf '%s\\n' \"$CARGO_TARGET_DIR\" \"$CARGO_BUILD_BUILD_DIR\" \"$RUSTUP_AUTO_INSTALL\" \"$CARGO_INCREMENTAL\" \"$CARGO_PROFILE_DEV_DEBUG\" \"$PATH\" > {}.env\n",
+                marker.display(), marker.display()
             ),
         )
         .unwrap();
@@ -2878,6 +2883,20 @@ mod tests {
             &identity.cargo_profile,
         )
         .unwrap();
+        let observed = fs::read_to_string(marker.with_extension("env")).unwrap();
+        let lines: Vec<_> = observed.lines().collect();
+        assert_eq!(lines[0], stage.join("target").to_string_lossy());
+        assert_eq!(lines[1], lines[0]);
+        assert_eq!(lines[2], "0");
+        for (index, (_, value)) in identity.cargo_profile.environment().iter().enumerate() {
+            assert_eq!(lines[index + 3], value.to_string_lossy());
+        }
+        let cargo =
+            target_seed::cargo_tool(&std::env::vars_os().collect::<Vec<_>>(), "cargo").unwrap();
+        assert_eq!(
+            std::env::split_paths(lines[5]).next().unwrap(),
+            cargo.parent().unwrap()
+        );
         assert!(
             manifest
                 .flags

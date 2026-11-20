@@ -227,8 +227,13 @@ pub fn seed_identity(
     let mut configs = BTreeMap::new();
     let mut dir = workspace;
     loop {
-        let path = dir.join(".cargo/config.toml");
-        if let Some(bytes) = source.read_file(&path)? {
+        let toml_path = dir.join(".cargo/config.toml");
+        let legacy_path = dir.join(".cargo/config");
+        let (path, bytes) = match source.read_file(&legacy_path)? {
+            Some(bytes) => (legacy_path, Some(bytes)),
+            None => (toml_path.clone(), source.read_file(&toml_path)?),
+        };
+        if let Some(bytes) = bytes {
             let config = parse(&bytes)?;
             if let Some(profile) = config.get("profile") {
                 configs.insert(path.to_string_lossy().into_owned(), profile.clone());
@@ -1007,6 +1012,30 @@ mod lane_probe_tests {
         )
         .unwrap();
         assert_ne!(original, identity("rustc one", "host one", &profile));
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[profile.dev]\nopt-level = 1\n",
+        )
+        .unwrap();
+        fs::remove_file(root.join(".cargo/config.toml")).unwrap();
+        fs::write(root.join(".cargo/config"), "[profile.dev]\nopt-level = 1\n").unwrap();
+        let legacy = identity("rustc one", "host one", &profile);
+        fs::write(root.join(".cargo/config"), "[profile.dev]\nopt-level = 2\n").unwrap();
+        assert_ne!(legacy, identity("rustc one", "host one", &profile));
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[profile.dev]\nopt-level = 1\n",
+        )
+        .unwrap();
+        let preferred = identity("rustc one", "host one", &profile);
+        assert_ne!(original, preferred);
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[profile.dev]\nopt-level = 3\n",
+        )
+        .unwrap();
+        assert_eq!(preferred, identity("rustc one", "host one", &profile));
+        fs::remove_file(root.join(".cargo/config")).unwrap();
         fs::write(
             root.join(".cargo/config.toml"),
             "[profile.dev]\nopt-level = 1\n",

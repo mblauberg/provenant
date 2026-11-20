@@ -65,56 +65,13 @@ pub fn detect(project: &Path) -> Detection {
                 ("0", vec!["cargo", "check", "--locked", "{packages}"]),
                 (
                     "0",
-                    vec![
-                        "cargo",
-                        "nextest",
-                        "run",
-                        "--profile",
-                        "lane",
-                        "--locked",
-                        "{packages}",
-                        "--lib",
-                        "--bins",
-                    ],
+                    vec!["cargo", "test", "--locked", "{packages}", "--lib", "--bins"],
                 ),
                 (
                     "1",
-                    vec![
-                        "cargo",
-                        "nextest",
-                        "run",
-                        "--profile",
-                        "lane",
-                        "--locked",
-                        "{integration_args}",
-                    ],
+                    vec!["cargo", "test", "--locked", "{packages}", "--tests"],
                 ),
-                (
-                    "2",
-                    vec![
-                        "cargo",
-                        "nextest",
-                        "run",
-                        "--profile",
-                        "ci",
-                        "--workspace",
-                        "--locked",
-                    ],
-                ),
-                (
-                    "3",
-                    vec![
-                        "cargo",
-                        "nextest",
-                        "run",
-                        "--profile",
-                        "ci",
-                        "--workspace",
-                        "--locked",
-                        "--stress-count",
-                        "20",
-                    ],
-                ),
+                ("2", vec!["cargo", "test", "--workspace", "--locked"]),
             ] {
                 result.add(tier, "rust", cwd, &argv);
             }
@@ -246,6 +203,19 @@ mod tests {
         write(root.path(), "pnpm-lock.yaml", "");
         let state = tempfile::tempdir().unwrap();
         let table = crate::PortTable::read_for(Some(root.path()), state.path()).unwrap();
+        assert!(!table.verify.tiers.contains_key("3"));
+        assert_eq!(
+            table.verify.tiers["0"].commands[2].argv,
+            ["cargo", "test", "--locked", "{packages}", "--lib", "--bins"]
+        );
+        assert_eq!(
+            table.verify.tiers["1"].commands[0].argv,
+            ["cargo", "test", "--locked", "{packages}", "--tests"]
+        );
+        assert_eq!(
+            table.verify.tiers["2"].commands[0].argv,
+            ["cargo", "test", "--workspace", "--locked"]
+        );
         for (name, script) in [("0", "lint"), ("1", "test"), ("2", "build")] {
             let tier = &table.verify.tiers[name];
             assert_eq!(tier.selection, crate::VerifySelection::All);
@@ -303,7 +273,7 @@ mod tests {
         write(
             state.path(),
             "ports.json",
-            r#"{"verify":{"default_tier":"2","tiers":{"1":{"commands":[{"argv":["custom"]}]}}}}"#,
+            r#"{"verify":{"default_tier":"2","tiers":{"1":{"commands":[{"argv":["custom"]}]},"2":{"commands":[{"argv":["full"]}],"selection":"all","warn_for_host_load":false}}}}"#,
         );
         let table = crate::PortTable::read_for(Some(root.path()), state.path()).unwrap();
         assert_eq!(table.verify.default_tier, "2");

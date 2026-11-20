@@ -70,8 +70,8 @@ identity of its dependency inputs. Currentness and lane selection require the
 same project key, identity hash and `deps` contents; the recorded commit is the
 built-from record. The identity hashes Cargo.lock, tracked manifest dependency,
 feature, patch and replace tables, workspace profile tables and applicable
-`.cargo/config.toml` profile tables, rustc version and host triple, contents and
-the effective Cargo build profile. Manifest declarations are canonicalised, so
+`.cargo/config.toml` or extensionless `.cargo/config` profile tables (the extensionless file wins when both exist in one directory), rustc version and host triple, contents and
+the effective Cargo build profile. Cargo-home configuration is host state and is not an identity input; profile settings reach lanes through the effective Cargo build profile. Manifest declarations are canonicalised, so
 formatting and package metadata do not affect the hash. Edits that do not change
 resolved units can still invalidate it. Both sides use Git's tracked file list;
 no Cargo metadata runs during identity calculation, so lanes can calculate it
