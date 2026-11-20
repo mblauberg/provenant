@@ -169,6 +169,15 @@ pub(super) fn lane_access_checked(
             .collect::<Result<Vec<_>, AccessError>>()
     };
     let write_roots = resolve(&access.write_root, "--write-root")?;
+    let mut dispatch_grants: Vec<run::LaneAccessGrant> = write_roots
+        .iter()
+        .zip(&access.write_root)
+        .map(|(path, given)| run::LaneAccessGrant {
+            kind: run::LaneAccessGrantKind::WriteRoot,
+            path: path.clone(),
+            given: given.display().to_string(),
+        })
+        .collect();
     // Worktree-write protects `.git` inside the worktree, so a write root that
     // is, or contains, the worktree overlaps it and the plan is invalid. A read
     // root on the worktree is valid and stays allowed.
@@ -199,17 +208,34 @@ pub(super) fn lane_access_checked(
                 path: path.clone(),
             });
         }
+        dispatch_grants.push(run::LaneAccessGrant {
+            kind: run::LaneAccessGrantKind::Attachment,
+            path: canonical.clone(),
+            given: path.display().to_string(),
+        });
         attachments.push(canonical);
     }
+    let read_roots = resolve(&access.read_root, "--read-root")?;
+    dispatch_grants.extend(
+        read_roots
+            .iter()
+            .zip(&access.read_root)
+            .map(|(path, given)| run::LaneAccessGrant {
+                kind: run::LaneAccessGrantKind::ReadRoot,
+                path: path.clone(),
+                given: given.display().to_string(),
+            }),
+    );
     Ok(run::LaneAccessRequest {
         extra: Default::default(),
         capability_sources: Default::default(),
         shared_worktree: None,
         network,
         database_ipc: postgres,
-        read_roots: resolve(&access.read_root, "--read-root")?,
+        read_roots,
         attachments,
         write_roots,
+        dispatch_grants,
         inputs_root: None,
         source_root: None,
         source_live: false,

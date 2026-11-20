@@ -4,9 +4,12 @@ use super::*;
 fn lane_access_canonicalises_attachment_files() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let image = temp.path().join("shot.png");
+    let nested = temp.path().join("nested");
+    std::fs::create_dir(&nested)?;
     std::fs::write(&image, b"image")?;
+    let given = nested.join("..").join("shot.png");
     let access = crate::Access {
-        attach: vec![image.clone()],
+        attach: vec![given.clone()],
         mode: None,
         worktree: None,
         read_root: vec![],
@@ -16,10 +19,59 @@ fn lane_access_canonicalises_attachment_files() -> Result<(), Box<dyn std::error
         no_capability: vec![],
     };
     let granted = lane_access(&access, &temp.path().join("state")).map_err(|fail| fail.message)?;
-    assert_eq!(granted.attachments, vec![std::fs::canonicalize(image)?]);
+    let canonical = std::fs::canonicalize(image)?;
+    assert_eq!(granted.attachments, vec![canonical.clone()]);
     assert!(granted.read_roots.is_empty());
+    assert_eq!(
+        granted.dispatch_grants,
+        [run::LaneAccessGrant {
+            kind: run::LaneAccessGrantKind::Attachment,
+            path: canonical,
+            given: given.display().to_string(),
+        }]
+    );
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn lane_access_keeps_non_utf8_origin_json_safe() -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let temp = tempfile::tempdir()?;
+    let credential = temp.path().join("credential");
+    let non_utf8 = temp
+        .path()
+        .join(std::ffi::OsString::from_vec(b"alias-\xff".to_vec()));
+    std::fs::create_dir(&credential)?;
+    std::fs::create_dir(&non_utf8)?;
+    let given = non_utf8.join("..").join("credential");
+    let access = crate::Access {
+        attach: Vec::new(),
+        mode: Some(Mode::ReadOnly),
+        worktree: None,
+        read_root: vec![given.clone()],
+        write_root: Vec::new(),
+        network: None,
+        capability: Vec::new(),
+        no_capability: Vec::new(),
+    };
+
+    let granted = lane_access(&access, &temp.path().join("state")).map_err(|fail| fail.message)?;
+    let canonical = std::fs::canonicalize(credential)?;
+    let display = given.display().to_string();
+    assert_eq!(
+        granted.read_roots.as_slice(),
+        std::slice::from_ref(&canonical)
+    );
+    assert_eq!(granted.dispatch_grants[0].path, canonical);
+    assert_eq!(granted.dispatch_grants[0].given, display);
+
+    let encoded = serde_json::to_value(granted)?;
+    assert_eq!(encoded["dispatch_grants"][0]["given"], display);
+    Ok(())
+}
+
 #[test]
 fn lane_access_preserves_credential_overlapping_roots_for_route_validation()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -34,6 +86,8 @@ fn lane_access_preserves_credential_overlapping_roots_for_route_validation()
     let home = std::fs::canonicalize(home)?;
     let project = std::fs::canonicalize(project)?;
     let config = std::fs::canonicalize(config)?;
+    let read_given = team.join("alice/../alice/.config");
+    let write_given = team.join("alice/project/../project");
     let state = temp.path().join("state");
     let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
         attach: Vec::new(),
@@ -63,6 +117,31 @@ fn lane_access_preserves_credential_overlapping_roots_for_route_validation()
             }
         }
     }
+    let granted = lane_access(
+        &access(vec![read_given.clone()], vec![write_given.clone()]),
+        &state,
+    )
+    .map_err(|fail| fail.message)?;
+    assert_eq!(granted.read_roots.as_slice(), std::slice::from_ref(&config));
+    assert_eq!(
+        granted.write_roots.as_slice(),
+        std::slice::from_ref(&project)
+    );
+    assert_eq!(
+        granted.dispatch_grants,
+        [
+            run::LaneAccessGrant {
+                kind: run::LaneAccessGrantKind::WriteRoot,
+                path: project.clone(),
+                given: write_given.display().to_string(),
+            },
+            run::LaneAccessGrant {
+                kind: run::LaneAccessGrantKind::ReadRoot,
+                path: config,
+                given: read_given.display().to_string(),
+            },
+        ]
+    );
     let granted = lane_access(
         &access(vec![project.clone()], vec![project.clone()]),
         &state,

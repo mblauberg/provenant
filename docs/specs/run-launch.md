@@ -243,7 +243,10 @@ profile, credential, keychain/security and process inspection, signal and
 task-port denies are absent. Sandboxing
 continues to enforce its write roots, network policy and explicit denies. The
 isolated profile retains its credential write restrictions, including the
-protection against replacing credential files.
+protection against replacing credential files. `LaneAccessGrant` retains the
+input spelling for a credential-refusal diagnostic; the canonical grant remains
+the only path used for authority checks. Route selection precedes this
+credential decision so a host-access fallback can still proceed.
 - Why: same-host credential classification must not become a launch boundary.
 
 ### Lane access

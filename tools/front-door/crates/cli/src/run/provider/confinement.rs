@@ -1085,26 +1085,45 @@ pub(super) fn credential_access_grant_refusal(
     receipt: &provenant_records::LaneAccessReceipt,
     policy: &provenant_records::policy::Policy,
 ) -> Option<String> {
-    for (flag, paths, read) in [
-        ("--write-root", &access.write_roots, false),
-        ("--read-root", &access.attachments, true),
-        ("--read-root", &access.read_roots, true),
+    use provenant_records::run::LaneAccessGrantKind as Kind;
+    let mut used_provenance = vec![false; access.dispatch_grants.len()];
+    for (kind, paths) in [
+        (Kind::WriteRoot, &access.write_roots),
+        (Kind::Attachment, &access.attachments),
+        (Kind::ReadRoot, &access.read_roots),
     ] {
         for path in paths {
-            if let Some(root) =
-                credentials.refusal(path, provenant_core::CredentialScope::Subtree, read)
-            {
+            let given = access
+                .dispatch_grants
+                .iter()
+                .enumerate()
+                .find_map(|(index, grant)| {
+                    (!used_provenance[index] && grant.kind == kind && grant.path == *path).then(
+                        || {
+                            used_provenance[index] = true;
+                            grant.given.clone()
+                        },
+                    )
+                })
+                .unwrap_or_else(|| path.display().to_string());
+            if let Some(root) = credentials.refusal(
+                path,
+                provenant_core::CredentialScope::Subtree,
+                kind.is_read(),
+            ) {
                 if receipt.access.is_isolated() {
                     return Some(format!(
-                        "{flag} {} overlaps declared credential root {} (source: {})",
-                        path.display(),
+                        "{} {} overlaps declared credential root {} (source: {})",
+                        kind.flag(),
+                        given,
                         root.path.display(),
                         root.source
                     ));
                 }
                 let detail = format!(
-                    "{flag} {} overlaps declared credential root {} (declaration: {}; lanes.access={}, source: {})",
-                    path.display(),
+                    "{} {} overlaps declared credential root {} (declaration: {}; lanes.access={}, source: {})",
+                    kind.flag(),
+                    given,
                     root.path.display(),
                     root.source,
                     receipt.access.as_str(),

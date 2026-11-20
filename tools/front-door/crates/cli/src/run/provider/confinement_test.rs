@@ -710,15 +710,51 @@ fn credential_grant_admission_follows_resolved_access() {
     let roots = provenant_core::CredentialRoots::for_home(home);
     let mut request = run::LaneAccessRequest::default();
     let credential = home.join(".ssh");
+    let given = home.join("project/../.ssh");
+    let given_display = given.display().to_string();
     let mut receipt = provenant_records::LaneAccessReceipt { access: provenant_records::LaneAccess::Isolated, source: provenant_records::LaneAccessSource::Default, key: "lanes.access".into(), extra: Default::default() };
     for (read, attach) in [(true, false), (false, false), (true, true)] {
         request.read_roots.clear(); request.write_roots.clear(); request.attachments.clear();
         if attach { request.attachments.push(credential.clone()); } else if read { request.read_roots.push(credential.clone()); } else { request.write_roots.push(credential.clone()); }
+        let kind = if attach {
+            run::LaneAccessGrantKind::Attachment
+        } else if read {
+            run::LaneAccessGrantKind::ReadRoot
+        } else {
+            run::LaneAccessGrantKind::WriteRoot
+        };
+        request.dispatch_grants = vec![run::LaneAccessGrant {
+            kind,
+            path: credential.clone(),
+            given: given_display.clone(),
+        }];
         receipt.access = provenant_records::LaneAccess::Isolated;
         let error = credential_access_grant_refusal(&request, &roots, &receipt, &provenant_records::policy::Policy::default()).expect("isolated credential grant refused");
         assert!(error.contains(if read { "--read-root" } else { "--write-root" }));
-        assert!(error.contains(credential.to_str().expect("fixture path")) && error.contains("source:"));
+        assert!(error.starts_with(&format!(
+            "{} {} overlaps declared credential root {} (source:",
+            if read { "--read-root" } else { "--write-root" },
+            given_display,
+            credential.display(),
+        )));
         receipt.access = provenant_records::LaneAccess::Host;
         assert!(credential_access_grant_refusal(&request, &roots, &receipt, &provenant_records::policy::Policy::default()).is_none());
     }
+
+    request.read_roots = vec![home.join("project")];
+    request.write_roots.clear();
+    request.attachments.clear();
+    request.dispatch_grants = vec![run::LaneAccessGrant {
+        kind: run::LaneAccessGrantKind::ReadRoot,
+        path: credential,
+        given: given_display,
+    }];
+    receipt.access = provenant_records::LaneAccess::Isolated;
+    assert!(credential_access_grant_refusal(
+        &request,
+        &roots,
+        &receipt,
+        &provenant_records::policy::Policy::default(),
+    )
+    .is_none());
 }

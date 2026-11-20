@@ -270,6 +270,37 @@ pub enum NetworkAccess {
 /// Capability name to the source that enabled it, shared by graph and access records.
 pub type CapabilitySources = std::collections::BTreeMap<String, String>;
 
+/// The kind of explicit access path retained from dispatch input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneAccessGrantKind {
+    ReadRoot,
+    Attachment,
+    WriteRoot,
+}
+
+impl LaneAccessGrantKind {
+    pub fn flag(self) -> &'static str {
+        match self {
+            Self::ReadRoot | Self::Attachment => "--read-root",
+            Self::WriteRoot => "--write-root",
+        }
+    }
+
+    pub fn is_read(self) -> bool {
+        !matches!(self, Self::WriteRoot)
+    }
+}
+
+/// Canonical access path and its display spelling, retained until route
+/// policy resolves whether credential overlap is allowed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneAccessGrant {
+    pub kind: LaneAccessGrantKind,
+    pub path: std::path::PathBuf,
+    pub given: String,
+}
+
 /// Access a dispatch adds to its mode's defaults, sealed in the authority
 /// digest. Paths are canonical directories checked at the submission edge.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,6 +326,11 @@ pub struct LaneAccessRequest {
     pub attachments: Vec<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<std::path::PathBuf>,
+    /// Explicit CLI/Fabric grant spellings retained for route-time refusal
+    /// messages. The canonical path lists above remain the authority used by
+    /// planning and confinement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dispatch_grants: Vec<LaneAccessGrant>,
     /// A graph node's materialised upstream results, read-only. The host
     /// grants it from its own graph-inputs directory under the state root,
     /// where a `--read-root` may not reach; any other path is refused.
@@ -3618,10 +3654,20 @@ mod tests {
         assert!(!defaults.database_ipc);
         let access = LaneAccessRequest {
             database_ipc: true,
+            dispatch_grants: vec![LaneAccessGrant {
+                kind: LaneAccessGrantKind::ReadRoot,
+                path: std::path::PathBuf::from("/Users/alice/.ssh"),
+                given: "/Users/alice/project/../.ssh".into(),
+            }],
             ..Default::default()
         };
         let value = serde_json::to_value(&access).expect("access JSON");
         assert_eq!(value["database_ipc"], true);
+        assert_eq!(
+            value["dispatch_grants"][0]["given"],
+            "/Users/alice/project/../.ssh"
+        );
+        assert_eq!(value["dispatch_grants"][0]["path"], "/Users/alice/.ssh");
         assert_eq!(
             serde_json::from_value::<LaneAccessRequest>(value).expect("access round trip"),
             access
