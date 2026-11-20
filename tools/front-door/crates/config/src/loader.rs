@@ -158,14 +158,19 @@ fn is_pre_tool_hook(args: impl IntoIterator<Item = std::ffi::OsString>) -> bool 
         && words.any(|word| word == "pre-tool-use")
 }
 
-/// Validate a proposed edit strictly through the owning domain validators.
-/// Reads stay tolerant and recover invalid optional values; a write refuses
-/// instead of publishing a document that the effective configuration repairs.
+/// Validate changed domain sections strictly through their owning validators.
+/// Unchanged sections follow the tolerant read policy, so an unrelated edit
+/// does not refuse because of values that the loader already warns about.
 pub(crate) fn validate_edit<T: DeserializeOwned + Serialize>(
+    before: Option<&str>,
     text: &str,
     sections: &DomainSections<T>,
 ) -> Result<(), ConfigError> {
     let origin = Origin::User { path: user_path()? };
+    let mut previous = before.map(|text| parse(text, &origin, "")).transpose()?;
+    if let Some(previous) = &mut previous {
+        normalise_tables(previous);
+    }
     let root = parse(text, &origin, "")?;
     let sites = sites(&root, text, &origin, "");
     let profile = root
@@ -187,6 +192,20 @@ pub(crate) fn validate_edit<T: DeserializeOwned + Serialize>(
         let Some(user) = domains.get(entry.name).and_then(Item::as_table) else {
             continue;
         };
+        let previous_section = previous
+            .as_ref()
+            .and_then(|root| root.get("domains"))
+            .and_then(Item::as_table_like)
+            .and_then(|domains| domains.get(entry.name));
+        if previous_section
+            .and_then(Item::as_table)
+            .is_some_and(|previous| {
+                DocumentMut::from(previous.clone()).to_string()
+                    == DocumentMut::from(user.clone()).to_string()
+            })
+        {
+            continue;
+        }
         // Complete the owner's compiled defaults before validating, so a
         // partial patch is checked as the effective section it would become.
         let mut table = parse((entry.defaults)(profile), &origin, "")?;
