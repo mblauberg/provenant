@@ -1320,9 +1320,12 @@ pub(crate) fn finalise_provider_env(
 }
 
 /// Project the instruction content bound into this product build into each
-/// sandboxed harness's private configuration home, using only its install data.
+/// private harness configuration home, using only its install data. Host access
+/// uses the native home and must not require (or rewrite) a provider config
+/// variable that is no longer set; OpenCode keeps a private home, so it still
+/// receives the projection.
 fn lane_instructions(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<(), ProviderError> {
-    if !input.sandboxed() {
+    if !input.sandboxed() || (!input.isolated() && input.route.adapter != "opencode") {
         return Ok(());
     }
     let Some(install) = provenant_records::AdapterSpec::get(&input.route.adapter)

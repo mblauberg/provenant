@@ -1531,9 +1531,10 @@ fn ssh_agent_follows_lane_access() -> Result<(), Box<dyn std::error::Error>> {
     let canonical = socket.canonicalize()?;
     let host_var = |name: &str| (name == "SSH_AUTH_SOCK").then(|| socket.clone().into_os_string());
     let prompt = Prompt::new("fixture".into());
-    let plan = fixture_access_plan(Access::ReadOnly, None, false);
+    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
     for access in [LaneAccess::Host, LaneAccess::Isolated] {
         let mut route = route("codex", "fixture-model");
+        route.account_key = None;
         route.set_access(access);
         let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
         input.host_var = &host_var;
@@ -1560,10 +1561,11 @@ fn unbounded_reader_git_config_follows_lane_access() -> Result<(), Box<dyn std::
     let home = temp.path().canonicalize()?;
     let config = home.join(".gitconfig");
     std::fs::write(&config, "[alias]\n  fixture = status\n")?;
-    let plan = fixture_access_plan(Access::ReadOnly, None, false);
+    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
     let prompt = Prompt::new("fixture".into());
     for access in [LaneAccess::Host, LaneAccess::Isolated] {
         let mut route = route("codex", "fixture-model");
+        route.account_key = None;
         route.set_access(access);
         let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
         input.home = &home;
