@@ -160,8 +160,8 @@ where
             })?;
     edit(&mut document, current.as_ref())?;
     let updated = document.to_string();
-    // Changed domain sections must validate as a whole; untouched sections
-    // use the same tolerant policy as the load below.
+    // Validate changes strictly while retaining the tolerant read policy for
+    // pre-existing findings, including those in a changed section.
     crate::loader::validate_edit(text.as_deref(), &updated, sections)?;
     let config =
         crate::loader::load_with_domains(roots, Some(Cursor::new(updated.as_bytes())), sections)?;
