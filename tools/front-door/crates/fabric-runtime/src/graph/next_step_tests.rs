@@ -938,3 +938,132 @@ fn on_stop_chair_beats_the_single_route_continuation() {
     assert!(restarts(&run.checkpoint).is_empty());
     assert!(pause_reason(&run.checkpoint).contains("return to the chair"));
 }
+
+fn blocked_handoff(blocked_on: Option<&str>) -> String {
+    let mut handoff = json!({
+        "schema_version": 2, "status": "blocked", "note": "the shared cargo lock",
+        "remaining": ["Finish"], "decisions": [], "verify": []
+    });
+    if let Some(kind) = blocked_on {
+        handoff["blocked_on"] = kind.into();
+    }
+    format!("```handoff\n{handoff}\n```")
+}
+
+fn blocked_round(reference: &str, blocked_on: Option<&str>) -> AttemptObservation {
+    terminal(
+        reference,
+        AttemptOutcome::Succeeded,
+        None,
+        Some(&blocked_handoff(blocked_on)),
+    )
+}
+
+/// Invariant: environment blocks are retried before anyone is paged.
+#[test]
+fn an_environment_block_retries_once_on_the_same_route_then_pauses_as_environment() {
+    let document = document("worktree_write", serde_json::Value::Null);
+    let mut owner = Owner {
+        observations: [
+            blocked_round("a/1", Some("environment")),
+            blocked_round("a/2", Some("environment")),
+            done("a/3"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+    assert_eq!(adapters(&owner), ["first", "first"]);
+    assert_eq!(owner.worktrees[0], owner.worktrees[1]);
+    assert_eq!(
+        restarts(&run.checkpoint),
+        [(
+            StopCause::BlockedEnvironment,
+            NextStep::SameRoute {
+                continuation: provenant_records::Continuation::Fresh
+            }
+        )]
+    );
+    let reason = pause_reason(&run.checkpoint);
+    assert!(
+        reason.contains("environment problem") && reason.contains("the shared cargo lock"),
+        "{reason}"
+    );
+    assert!(reason.contains("retried once"), "{reason}");
+    assert!(!reason.contains("owner decision"), "{reason}");
+}
+
+/// An environment block is not pinned: a node can send it to the chair at once.
+#[test]
+fn on_stop_sends_an_environment_block_straight_to_the_chair() {
+    let document = document("worktree_write", json!({"blocked_environment": "chair"}));
+    let mut owner = Owner {
+        observations: [blocked_round("a/1", Some("environment")), done("a/2")].into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+    assert_eq!(adapters(&owner), ["first"]);
+    assert!(restarts(&run.checkpoint).is_empty());
+    let reason = pause_reason(&run.checkpoint);
+    assert!(reason.contains("environment problem"), "{reason}");
+    assert!(!reason.contains("retried"), "{reason}");
+}
+
+/// Invariant: only owner_decision or capability blocks say "owner decision".
+#[test]
+fn a_dependency_block_pauses_as_a_wait_without_claiming_an_owner_decision() {
+    let document = document("worktree_write", serde_json::Value::Null);
+    let mut owner = Owner {
+        observations: [blocked_round("a/1", Some("dependency")), done("a/2")].into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+    assert_eq!(adapters(&owner), ["first"]);
+    assert!(restarts(&run.checkpoint).is_empty());
+    let reason = pause_reason(&run.checkpoint);
+    assert!(
+        reason.contains("is waiting on the shared cargo lock"),
+        "{reason}"
+    );
+    assert!(!reason.contains("owner decision"), "{reason}");
+}
+
+/// Invariant: an owner boundary stays pinned, whatever the node's `on_stop`.
+#[test]
+fn owner_decision_and_capability_blocks_stay_pinned_to_the_chair() {
+    for (kind, wording) in [
+        ("owner_decision", "owner decision"),
+        ("capability", "missing capability"),
+    ] {
+        let document = document("worktree_write", json!({"blocked": "new_route"}));
+        let mut owner = Owner {
+            observations: [blocked_round("a/1", Some(kind)), done("b/1")].into(),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+        assert_eq!(adapters(&owner), ["first"], "{kind}");
+        assert!(restarts(&run.checkpoint).is_empty(), "{kind}");
+        let reason = pause_reason(&run.checkpoint);
+        assert!(reason.contains(wording), "{kind}: {reason}");
+    }
+}
+
+/// Invariant: no kind given means no claim about the kind.
+#[test]
+fn a_blocked_handoff_without_a_kind_gets_neutral_wording() {
+    let document = document("worktree_write", serde_json::Value::Null);
+    let mut owner = Owner {
+        observations: [blocked_round("a/1", None)].into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+    assert!(restarts(&run.checkpoint).is_empty());
+    let reason = pause_reason(&run.checkpoint);
+    assert!(
+        reason.contains("is blocked: the shared cargo lock")
+            && reason.contains("blocked_on not given"),
+        "{reason}"
+    );
+    assert!(!reason.contains("owner decision"), "{reason}");
+    assert!(!reason.contains("capability the brief"), "{reason}");
+}

@@ -443,6 +443,34 @@ fn a_declared_stop_needs_the_handoff_that_declared_it() {
     assert!(Stop::new(StopCause::StoppedEarly, Some(empty)).is_err());
 }
 
+/// Invariant: the sealed cause follows what the handoff says blocked it.
+#[test]
+fn a_blocked_handoff_seals_the_cause_its_blocked_on_names() {
+    for (kind, cause) in [
+        (Some("environment"), StopCause::BlockedEnvironment),
+        (Some("dependency"), StopCause::BlockedDependency),
+        (Some("owner_decision"), StopCause::Blocked),
+        (Some("capability"), StopCause::Blocked),
+        (Some("weather"), StopCause::Blocked),
+        (None, StopCause::Blocked),
+    ] {
+        let mut blocked = handoff(HandoffStatus::Blocked, "The shared lock.");
+        if let Some(kind) = kind {
+            blocked.extra.insert("blocked_on".into(), json!(kind));
+        }
+        let stop = Stop::declared(blocked.clone()).unwrap().unwrap();
+        assert_eq!(stop.cause(), cause, "{kind:?}");
+        assert!(Stop::new(cause, Some(blocked)).is_ok(), "{kind:?}");
+    }
+    let mut stopped = handoff(HandoffStatus::StoppedEarly, "Out of room.");
+    stopped
+        .extra
+        .insert("blocked_on".into(), json!("environment"));
+    let stop = Stop::declared(stopped.clone()).unwrap().unwrap();
+    assert_eq!(stop.cause(), StopCause::StoppedEarly);
+    assert!(Stop::new(StopCause::BlockedEnvironment, Some(stopped)).is_err());
+}
+
 #[test]
 fn records_refuse_values_outside_their_bounds() {
     let project = ProjectId::from_bytes([7; 16]);

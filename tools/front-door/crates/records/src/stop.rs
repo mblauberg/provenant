@@ -28,10 +28,16 @@ pub enum StopCause {
     /// The handoff says `stopped_early`: work remains and the writer could
     /// not finish it in this attempt.
     StoppedEarly,
-    /// The handoff says `blocked`: an owner decision, a missing capability
-    /// or an external change prevents progress. The stop carries the
+    /// The handoff says `blocked` and names an owner decision or a missing
+    /// capability in `blocked_on`, or names no kind. The stop carries the
     /// handoff, so its note names what blocks it.
     Blocked,
+    /// The handoff says `blocked` with `blocked_on: environment`: a tool,
+    /// lock, build, hook, disk or network problem the writer could not clear.
+    BlockedEnvironment,
+    /// The handoff says `blocked` with `blocked_on: dependency`: the writer
+    /// waits on another lane, CI or a merge.
+    BlockedDependency,
     /// A writer on a model route ended without a final handoff.
     HandoffMissing,
     /// The final handoff was present but could not be decoded or validated.
@@ -260,6 +266,8 @@ pub const STOP_TABLE: &[StopRule] = {
     &[
         rule(StoppedEarly, NEW, crate::run::CauseSource::Provider),
         pinned(Blocked, crate::run::CauseSource::Owner),
+        once(BlockedEnvironment, CHAIR, crate::run::CauseSource::Host),
+        rule(BlockedDependency, CHAIR, crate::run::CauseSource::Host),
         rule(HandoffMissing, CHAIR, crate::run::CauseSource::Provider),
         once(EmptyResult, NEW, crate::run::CauseSource::Provider),
         rule(Uncommitted, CHAIR, crate::run::CauseSource::Provider),
@@ -308,11 +316,13 @@ pub const STOP_TABLE: &[StopRule] = {
 impl StopCause {
     /// Every cause. `ordinal` matches exhaustively, so a new variant fails to
     /// compile there, and the assertion below keeps this list in step.
-    pub const ALL: [StopCause; 44] = {
+    pub const ALL: [StopCause; 46] = {
         use StopCause::*;
         [
             StoppedEarly,
             Blocked,
+            BlockedEnvironment,
+            BlockedDependency,
             HandoffMissing,
             EmptyResult,
             Uncommitted,
@@ -363,48 +373,50 @@ impl StopCause {
         match self {
             StoppedEarly => 0,
             Blocked => 1,
-            HandoffMissing => 2,
-            EmptyResult => 3,
-            Uncommitted => 4,
-            InputRequired => 5,
-            ContextHandoff => 6,
-            TokenBudget => 7,
-            Deadline => 8,
-            Cancelled => 9,
-            ProviderStop => 10,
-            ProcessCrash => 11,
-            AuthRequired => 12,
-            UsageLimited => 13,
-            ModelUnavailable => 14,
-            AdapterUnavailable => 15,
-            PermissionDenied => 16,
-            IdentityMismatch => 17,
-            LaneTokenLost => 18,
-            SourceViewRefused => 19,
-            RouteRefused => 20,
-            AccessPolicyRefused => 21,
-            DiskFloor => 22,
-            DiskUnobserved => 23,
-            PromptUnreadable => 24,
-            CloudPlacementRemoved => 25,
-            WriteGrantsRefused => 26,
-            WorktreeBusy => 27,
-            LaunchHandoffRefused => 28,
-            RetainedWriterImport => 29,
-            UnsupportedPlatform => 30,
-            UnknownPacingAccount => 31,
-            UnregisteredAccount => 32,
-            CredentialHelperFailed => 33,
-            CommandUnavailable => 34,
-            HostNativeUnconfigured => 35,
-            SpawnFailure => 36,
-            SettlementFailed => 37,
-            Lost => 38,
-            Unsettled => 39,
-            Quarantined => 40,
-            HandoffMalformed => 41,
-            Steered => 42,
-            Unclassified => 43,
+            BlockedEnvironment => 2,
+            BlockedDependency => 3,
+            HandoffMissing => 4,
+            EmptyResult => 5,
+            Uncommitted => 6,
+            InputRequired => 7,
+            ContextHandoff => 8,
+            TokenBudget => 9,
+            Deadline => 10,
+            Cancelled => 11,
+            ProviderStop => 12,
+            ProcessCrash => 13,
+            AuthRequired => 14,
+            UsageLimited => 15,
+            ModelUnavailable => 16,
+            AdapterUnavailable => 17,
+            PermissionDenied => 18,
+            IdentityMismatch => 19,
+            LaneTokenLost => 20,
+            SourceViewRefused => 21,
+            RouteRefused => 22,
+            AccessPolicyRefused => 23,
+            DiskFloor => 24,
+            DiskUnobserved => 25,
+            PromptUnreadable => 26,
+            CloudPlacementRemoved => 27,
+            WriteGrantsRefused => 28,
+            WorktreeBusy => 29,
+            LaunchHandoffRefused => 30,
+            RetainedWriterImport => 31,
+            UnsupportedPlatform => 32,
+            UnknownPacingAccount => 33,
+            UnregisteredAccount => 34,
+            CredentialHelperFailed => 35,
+            CommandUnavailable => 36,
+            HostNativeUnconfigured => 37,
+            SpawnFailure => 38,
+            SettlementFailed => 39,
+            Lost => 40,
+            Unsettled => 41,
+            Quarantined => 42,
+            HandoffMalformed => 43,
+            Steered => 44,
+            Unclassified => 45,
         }
     }
 
@@ -485,7 +497,9 @@ impl StopCause {
         }
     }
 
-    /// The cause a handoff declares, when it declares unfinished work.
+    /// The cause a handoff status declares, when it declares unfinished work.
+    /// A blocked status declares [`StopCause::Blocked`]; the handoff's
+    /// `blocked_on` may refine it, see [`StopCause::declared_by`].
     pub const fn declared(status: HandoffStatus) -> Option<Self> {
         match status {
             HandoffStatus::Done => None,
@@ -494,11 +508,44 @@ impl StopCause {
         }
     }
 
+    /// The cause a handoff declares, with a blocked handoff's `blocked_on`
+    /// choosing among the blocked causes.
+    pub fn declared_by(handoff: &Handoff) -> Option<Self> {
+        Self::declared(handoff.status).map(|cause| cause.refined_by(Some(handoff)))
+    }
+
+    /// A `blocked` cause refined by the `blocked_on` its handoff names: an
+    /// environment or dependency block takes its own cause, any other kind or
+    /// none keeps `blocked`. Every other cause is unchanged.
+    pub fn refined_by(self, handoff: Option<&Handoff>) -> Self {
+        use crate::handoff::BlockedOn;
+        match (self, handoff.and_then(Handoff::blocked_on)) {
+            (Self::Blocked, Some(BlockedOn::Environment)) => Self::BlockedEnvironment,
+            (Self::Blocked, Some(BlockedOn::Dependency)) => Self::BlockedDependency,
+            _ => self,
+        }
+    }
+
+    /// The cause a handoff must declare for this cause to be sealed with it:
+    /// a declared stop needs the handoff that declared it. Each blocked cause
+    /// needs a `blocked` handoff.
+    const fn required_declaration(self) -> Option<Self> {
+        match self {
+            Self::StoppedEarly => Some(Self::StoppedEarly),
+            Self::Blocked | Self::BlockedEnvironment | Self::BlockedDependency => {
+                Some(Self::Blocked)
+            }
+            _ => None,
+        }
+    }
+
     pub const fn as_str(self) -> &'static str {
         use StopCause::*;
         match self {
             StoppedEarly => "stopped_early",
             Blocked => "blocked",
+            BlockedEnvironment => "blocked_environment",
+            BlockedDependency => "blocked_dependency",
             HandoffMissing => "handoff_missing",
             HandoffMalformed => "handoff_malformed",
             EmptyResult => "empty_result",
@@ -659,9 +706,10 @@ impl Stop {
             .ok()
             .and_then(Option::as_ref)
             .and_then(|handoff| StopCause::declared(handoff.status));
-        if matches!(cause, StopCause::StoppedEarly | StopCause::Blocked) && declared != Some(cause)
+        if let Some(required) = cause.required_declaration()
+            && declared != Some(required)
         {
-            return Err(StopError::Declared(cause));
+            return Err(StopError::Declared(required));
         }
         Ok(Self {
             cause,
@@ -673,7 +721,7 @@ impl Stop {
     /// The stop a handoff declares: none for a `done` handoff, an error for
     /// one that cannot be sealed.
     pub fn declared(handoff: Handoff) -> Result<Option<Self>, StopError> {
-        let Some(cause) = StopCause::declared(handoff.status) else {
+        let Some(cause) = StopCause::declared_by(&handoff) else {
             return Ok(None);
         };
         Self::new(cause, Some(handoff)).map(Some)
@@ -702,7 +750,8 @@ impl Stop {
         .or_else(|| {
             StopCause::of_outcome(outcome)
                 .filter(|cause| !(declared && *cause == StopCause::Uncommitted))
-        });
+        })
+        .map(|cause| cause.refined_by(handoff.as_ref().ok().and_then(Option::as_ref)));
         match (host, handoff) {
             (Some(cause), handoff) => {
                 Self::with_extra(cause, handoff, Default::default()).map(Some)

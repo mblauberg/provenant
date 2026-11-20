@@ -188,6 +188,17 @@ single string as a one-item array. Handoff status accepts casing differences and
 surrounding whitespace, with the same three spellings. Serialisation always
 writes canonical arrays, lowercase status and concern objects.
 
+A `blocked` handoff may add `blocked_on` with `owner_decision`, `capability`,
+`environment` or `dependency` to say what blocked the writer. The field is
+additive: it rides in the handoff's forward fields, `schema_version` stays 2, and
+it is never required. An unrecognised value, or a value given with another
+status, is kept, ignored and warned about; it never refuses the handoff. Casing
+and surrounding whitespace do not matter. The sealed stop takes its cause from
+it (`blocked_environment`, `blocked_dependency`, otherwise `blocked`); see
+[run](run.md#what-follows-a-stop). The status guidance in the writer preamble
+and in the routing policy's lane guidance is one text, owned by
+`crates/records/src/handoff.rs`.
+
 Adjacent repeated handoff blocks are one declaration: identical copies are
 accepted, and differing copies settle on the last, each with a warning. Prose
 between blocks, or after the last, still fails as not ending the answer.

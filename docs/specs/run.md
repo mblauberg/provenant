@@ -281,12 +281,14 @@ A restart preserves the worktree and archives prior attempts. Bounds may turn a
 restart into a chair decision. See [routing](routing.md) for route selection.
 - Why: one decision keeps stop handling consistent and protects writer custody.
 
-A writer's declared stop settles as `stopped_early`, or as `blocked` when its
-final handoff is blocked. The node's advance code records whether the stop left
+A writer's declared stop settles as `stopped_early`, or as a blocked cause when its
+final handoff is blocked: `blocked_environment` or `blocked_dependency` when its
+`blocked_on` says so, and `blocked` for an owner decision, a missing capability or
+no kind given. The node's advance code records whether the stop left
 committed work: `writer_declared_stop` when the writer's head moved past its
 source commit, and `stopped_no_work` otherwise, whether the worktree is clean or
-holds uncommitted edits. Both codes take the `stopped_early` row below unless
-the node overrides it: a new route, which restarts the writer in a fresh session
+holds uncommitted edits. For a `stopped_early` handoff both codes take the
+`stopped_early` row below unless the node overrides it: a new route, which restarts the writer in a fresh session
 on its retained worktree. A junior route escalates to senior; otherwise the
 restart uses a declared route not yet launched, and an alias route may resolve
 again. A different route is always preferred when one exists.
@@ -302,7 +304,16 @@ for the chair, which keeps a usage-limit stop that a writer wrote up as
 `stopped_early` from looping. A node `on_stop` entry for the cause wins over
 the fallback, so `chair` or `new_route` still pauses or restarts as the node
 says. Any other stop with no route, or with the continuation budget spent,
-pauses for the chair. A `blocked` stop always goes to the chair.
+pauses for the chair.
+
+A `blocked` stop is pinned to the chair, and its pause says which kind of block
+it is: only `owner_decision` and `capability` read as an owner decision or a
+missing capability, and a handoff with no `blocked_on` reads as "blocked" and
+says the kind was not given. A `blocked_environment` stop retries once on the
+same route in a fresh session, then pauses for the chair worded as an
+environment problem; it is not pinned, so a node `on_stop` entry can send it to
+the chair at once. A `blocked_dependency` stop pauses for the chair as a wait,
+and is not pinned either.
 - Why: the chair must see whether a restart resumes committed work, without a
   second stop rule that could treat the two differently; a writer that stops
   early on its only route should continue, not wait for a manual relaunch.
@@ -313,6 +324,8 @@ pauses for the chair. A `blocked` stop always goes to the chair.
 | --- | --- | --- | --- |
 | `stopped_early` | `new_route` | no | 0 |
 | `blocked` | `chair` | yes | 0 |
+| `blocked_environment` | `chair` | no | 1 |
+| `blocked_dependency` | `chair` | no | 0 |
 | `handoff_missing` | `chair` | no | 0 |
 | `handoff_malformed` | `chair` | no | 0 |
 | `empty_result` | `new_route` | no | 1 |

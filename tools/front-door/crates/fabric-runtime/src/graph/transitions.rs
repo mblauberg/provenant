@@ -616,7 +616,14 @@ pub(super) fn apply_attempt_observation(
                             if handoff.status == provenant_records::handoff::HandoffStatus::Blocked)
                     });
                     if progress.blocked {
-                        attempt.stop = Some(provenant_records::StopCause::Blocked);
+                        attempt.stop = Some(
+                            provenant_records::StopCause::Blocked.refined_by(
+                                result
+                                    .as_ref()
+                                    .and_then(|capture| capture.handoff.as_ref().ok())
+                                    .and_then(Option::as_ref),
+                            ),
+                        );
                     }
                     progress.handoff = result
                         .as_ref()

@@ -51,7 +51,7 @@ pub(super) fn stop_cause(
     }
     if declared(progress) {
         return Some(if progress.blocked {
-            StopCause::Blocked
+            StopCause::Blocked.refined_by(progress.handoff.as_ref())
         } else {
             StopCause::StoppedEarly
         });
@@ -377,6 +377,48 @@ enum Settle {
     Chair,
 }
 
+/// What a blocked writer's chair pause says, by the kind of block its handoff
+/// names. Only an owner decision or a missing capability claims the owner is
+/// needed; an environment problem says whether the retry was spent; no kind
+/// makes no claim about the kind.
+fn blocked_reason(
+    node: &PlannedNode,
+    cause: StopCause,
+    progress: &NodeProgress,
+    checkpoint: &GraphCheckpoint,
+) -> Option<String> {
+    use provenant_records::handoff::BlockedOn;
+    let note = progress
+        .advance_error
+        .as_deref()
+        .unwrap_or("inspect its handoff");
+    let id = &node.id;
+    Some(match cause {
+        StopCause::Blocked => match progress.handoff.as_ref().and_then(|h| h.blocked_on()) {
+            Some(BlockedOn::OwnerDecision) => {
+                format!("writer {id} needs an owner decision: {note}")
+            }
+            Some(BlockedOn::Capability) => {
+                format!("writer {id} has a missing capability the brief requires: {note}")
+            }
+            _ => format!(
+                "writer {id} is blocked: {note} (blocked_on not given; the handoff should say owner_decision, capability, environment or dependency)"
+            ),
+        },
+        StopCause::BlockedEnvironment => {
+            let retries = facts(id, cause, checkpoint).retries;
+            let spent = match retries {
+                0 => String::new(),
+                1 => " (retried once)".into(),
+                retries => format!(" (retried {retries} times)"),
+            };
+            format!("writer {id} hit an environment problem: {note}{spent}")
+        }
+        StopCause::BlockedDependency => format!("writer {id} is waiting on {note}"),
+        _ => return None,
+    })
+}
+
 /// What follows this node's stop, or `None` when its failure stands: the
 /// chair reads a plain failure, except after a declared stop, which pauses.
 fn decide(
@@ -401,18 +443,11 @@ fn decide(
     let mut fallback = false;
     let routes = match step {
         NextStep::Chair => {
-            return pause(if cause == StopCause::Blocked {
-                format!(
-                    "writer {} needs an owner decision, capability or external change: {}",
-                    node.id,
-                    progress
-                        .advance_error
-                        .as_deref()
-                        .unwrap_or("inspect its handoff")
-                )
-            } else {
-                format!("node {} stopped ({cause}); return to the chair", node.id)
-            });
+            return pause(
+                blocked_reason(node, cause, progress, checkpoint).unwrap_or_else(|| {
+                    format!("node {} stopped ({cause}); return to the chair", node.id)
+                }),
+            );
         }
         NextStep::SameRoute { .. } => same_route_first(node, attempt),
         NextStep::NewRoute

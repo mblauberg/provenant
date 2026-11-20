@@ -79,6 +79,55 @@ impl<'de> Deserialize<'de> for HandoffStatus {
     }
 }
 
+/// What blocked a writer that declared `status: blocked`. The handoff names
+/// it in the optional `blocked_on` field. The field is additive: it lives in
+/// the handoff's extension fields, so an unknown value is kept and warned
+/// about, never refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockedOn {
+    /// A choice only the owner can make.
+    OwnerDecision,
+    /// A capability, credential, repository or access the brief needs and the
+    /// writer lacks.
+    Capability,
+    /// A tool, lock, build, hook, disk or network failure the writer could not
+    /// clear.
+    Environment,
+    /// Waiting on another lane, CI or a merge.
+    Dependency,
+}
+
+impl BlockedOn {
+    pub const ALL: [BlockedOn; 4] = [
+        Self::OwnerDecision,
+        Self::Capability,
+        Self::Environment,
+        Self::Dependency,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OwnerDecision => "owner_decision",
+            Self::Capability => "capability",
+            Self::Environment => "environment",
+            Self::Dependency => "dependency",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        let text = text.trim().to_ascii_lowercase();
+        Self::ALL.into_iter().find(|kind| kind.as_str() == text)
+    }
+}
+
+/// The handoff extension field that names what blocked the writer.
+pub const BLOCKED_ON: &str = "blocked_on";
+
+/// The one statement of what each handoff status means, for every prompt that
+/// teaches it: the lane preamble and the routing policy's guidance both use it.
+pub const STATUS_GUIDANCE: &str = "Use status done only when the brief is finished. Use stopped_early only when you cannot carry on in this session; a fresh session then continues on this branch from your handoff, so commit and push your work first and list what remains in remaining[]. Never use stopped_early to report work you could do now. Use blocked only when you cannot proceed, and set blocked_on to say what blocked you: owner_decision (a choice only the owner can make), capability (a capability, credential, repository or access the brief needs and you lack), environment (a tool, lock, build, hook, disk or network failure you could not clear; retry or work around it first and note what you tried) or dependency (waiting on another lane, CI or a merge). Use blocked, not stopped_early, in those cases.";
+
 /// A writer's evidenced challenge to a criterion, for the chair to settle.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SpecConcern {
@@ -479,6 +528,35 @@ impl Handoff {
 
     pub fn unfinished(&self) -> bool {
         self.status != HandoffStatus::Done
+    }
+
+    /// What blocked the writer: the recognised `blocked_on` of a `blocked`
+    /// handoff. `None` when the field is absent, unrecognised, or given with
+    /// another status, where it is ignored.
+    pub fn blocked_on(&self) -> Option<BlockedOn> {
+        if self.status != HandoffStatus::Blocked {
+            return None;
+        }
+        BlockedOn::parse(self.extra.get(BLOCKED_ON)?.as_str()?)
+    }
+
+    /// The warning for a `blocked_on` that is ignored: an unrecognised value,
+    /// or a value given with a status other than `blocked`. The handoff is
+    /// accepted either way and keeps the field.
+    pub fn blocked_on_warning(&self) -> Option<String> {
+        let value = self.extra.get(BLOCKED_ON)?;
+        if self.status != HandoffStatus::Blocked {
+            return Some(format!(
+                "handoff {BLOCKED_ON} is only used with status blocked; ignoring it"
+            ));
+        }
+        let known = value.as_str().and_then(BlockedOn::parse).is_some();
+        (!known).then(|| {
+            format!(
+                "handoff {BLOCKED_ON} {value} is not one of {}; ignoring it",
+                BlockedOn::ALL.map(BlockedOn::as_str).join(", ")
+            )
+        })
     }
 
     pub fn fenced(&self) -> String {
@@ -1132,6 +1210,63 @@ mod tests {
                 assert_eq!(error.dropped[0].field, format!("{field}[0]"));
             }
         }
+    }
+
+    fn handoff_with(status: &str, blocked_on: serde_json::Value) -> String {
+        format!(
+            "```handoff\n{}\n```",
+            serde_json::json!({
+                "schema_version": 2, "status": status, "note": "n", "remaining": [],
+                "decisions": [], "verify": [], "blocked_on": blocked_on
+            })
+        )
+    }
+
+    /// A new field never makes a valid v2 handoff invalid.
+    #[test]
+    fn blocked_on_round_trips_and_never_refuses_a_handoff() {
+        for kind in BlockedOn::ALL {
+            let text = handoff_with("blocked", serde_json::json!(kind.as_str()));
+            let handoff = Handoff::from_result(&text).unwrap().unwrap();
+            assert_eq!(handoff.blocked_on(), Some(kind));
+            assert_eq!(handoff.blocked_on_warning(), None);
+            assert_eq!(handoff.extra[BLOCKED_ON], serde_json::json!(kind.as_str()));
+            assert_eq!(Handoff::from_result(&handoff.fenced()), Ok(Some(handoff)));
+        }
+        // Casing and whitespace are tolerated, as for the status.
+        let spaced = handoff_with("blocked", serde_json::json!(" Environment "));
+        let handoff = Handoff::from_result(&spaced).unwrap().unwrap();
+        assert_eq!(handoff.blocked_on(), Some(BlockedOn::Environment));
+        // An unknown value, or a non-text one, is kept and warned about.
+        for unknown in [serde_json::json!("weather"), serde_json::json!(7)] {
+            let handoff = Handoff::from_result(&handoff_with("blocked", unknown.clone()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(handoff.blocked_on(), None);
+            assert_eq!(handoff.extra[BLOCKED_ON], unknown);
+            assert!(handoff.blocked_on_warning().unwrap().contains("ignoring"));
+        }
+        // With any other status it is ignored, with a warning.
+        for status in ["done", "stopped_early"] {
+            let handoff =
+                Handoff::from_result(&handoff_with(status, serde_json::json!("environment")))
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(handoff.blocked_on(), None, "{status}");
+            assert!(
+                handoff
+                    .blocked_on_warning()
+                    .unwrap()
+                    .contains("only used with status blocked"),
+                "{status}"
+            );
+        }
+        // Absent is not a warning.
+        let absent = Handoff::from_result(&STOP.replace("stopped_early", "blocked"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(absent.blocked_on(), None);
+        assert_eq!(absent.blocked_on_warning(), None);
     }
 
     #[test]

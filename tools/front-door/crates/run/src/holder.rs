@@ -2609,7 +2609,7 @@ impl RunStore {
             decoded.complete = true;
             handoff = Some(stopped);
             decoded.reason = Some(if blocked {
-                "token budget crossed; the blocked handoff requires an owner decision before continuing".into()
+                "token budget crossed; the writer's handoff is blocked, so read its blocked_on and note before continuing".into()
             } else {
                 "token budget crossed; continuing this provider session once to commit, push and report within the remaining grace".into()
             });
