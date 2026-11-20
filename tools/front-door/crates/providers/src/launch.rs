@@ -510,7 +510,9 @@ impl PrepareInput<'_> {
     }
 
     pub(crate) fn stage_user_skills(&self) -> crate::StagedUserSkills {
-        if !self.sandboxed() {
+        // The base OpenCode adapter still uses a private home; #3703 supplies
+        // its native profile separately, so it needs staging until integration.
+        if !self.isolated() && !(self.sandboxed() && self.route.adapter == "opencode") {
             return crate::StagedUserSkills::default();
         }
         let Some(source) = self
@@ -533,6 +535,7 @@ impl PrepareInput<'_> {
             self.home,
             &self.credential_roots,
             self.skill_stage_max_bytes,
+            self.isolated(),
         )
     }
 }

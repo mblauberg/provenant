@@ -506,6 +506,14 @@ strength = "refuse"
 justification = "Required anchors must be present and resolvable to enforce the selected grants."
 
 [[rule]]
+code = "LAUNCH_NATIVE_AUTH_NONE"
+site = "cli/src/run/provider/preparation.rs#prepare_candidates_inner"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_NATIVE_AUTH_NONE"
+justification = "Host access uses native provider authentication when managed authentication is unavailable or bypassed."
+
+[[rule]]
 code = "LAUNCH_FILTER_OPTIONAL_GRANTS_NONE"
 site = "providers/src/launch.rs#filter_optional_grants"
 boundary = "none"
