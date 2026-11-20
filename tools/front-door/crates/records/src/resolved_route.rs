@@ -242,6 +242,9 @@ pub enum RouteExclusionReason {
     UnknownAvailability,
     StaleAvailability,
     UnknownAccount,
+    /// The model cannot be matched to any registered account, so readiness is
+    /// not the question: the model name must name its provider first.
+    UnresolvedAccount,
     DisclosureDenied,
     ConfinementUnavailable,
     UnsupportedEffort,
@@ -274,6 +277,7 @@ impl RouteExclusionReason {
         Self::UnknownAvailability,
         Self::StaleAvailability,
         Self::UnknownAccount,
+        Self::UnresolvedAccount,
         Self::DisclosureDenied,
         Self::ConfinementUnavailable,
         Self::UnsupportedEffort,
@@ -330,6 +334,10 @@ impl RouteExclusionReason {
             Self::UnknownAccount => (
                 "the selected account is not registered",
                 "run `provenant accounts list` and select a registered account",
+            ),
+            Self::UnresolvedAccount => (
+                "no registered account can serve the requested model",
+                "name the model in provider/model form or select an eligible account",
             ),
             Self::DisclosureDenied => (
                 "the route cannot receive the requested data",
