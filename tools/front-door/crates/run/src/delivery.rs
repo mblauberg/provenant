@@ -48,7 +48,7 @@ pub struct HostDeliveryContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host_project: Option<PathBuf>,
     /// Consulted while preparing delivery on the host, never by the guardian.
-    /// Serializing the compiled rule table would overflow the handoff's holder
+    /// Serialising the compiled rule table would overflow the handoff's holder
     /// context limit and turn a launched lane into an unconfirmed handoff.
     #[serde(skip)]
     policy: provenant_records::policy::Policy,
@@ -3950,7 +3950,7 @@ mod stored_format_tests {
     #[test]
     fn compiled_policy_stays_off_the_guardian_handoff_wire() {
         // Delivery consults the compiled policy on the host, before the context
-        // is sealed into the holder handoff. Serializing it would repeat the
+        // is sealed into the holder handoff. Serialising it would repeat the
         // whole rule table into every launch message and overflow the guardian's
         // holder-context limit, turning a launched lane into an unknown handoff.
         let host = HostDeliveryContext::new(Vec::new())
