@@ -332,7 +332,7 @@ impl Projector {
             Value::Object(map) => {
                 let entries = std::mem::take(map);
                 for (key, mut item) in entries {
-                    if metadata_field(&key) {
+                    if metadata_field(&key) && !item.is_object() && !item.is_array() {
                         map.insert(key, item);
                         continue;
                     }
@@ -586,7 +586,7 @@ fn collect(value: &Value, secrets: &mut Vec<Vec<u8>>) {
     match value {
         Value::Object(map) => {
             for (key, item) in map {
-                if metadata_field(key) {
+                if metadata_field(key) && !item.is_object() && !item.is_array() {
                     continue;
                 }
                 if secret_field(key) {
@@ -845,6 +845,18 @@ fn mask_assignments(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_metadata_containers_do_not_hide_credentials() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
+        let projector = Projector::new([]).unwrap();
+        let input = br#"{"model":{"token":"fixture-private-value"},"source":[{"message":"fixture-private-value"}],"name":"ghp_abcdefghijklmnopqrstuvwxyz0123456789"}"#;
+        let result = projector.json(Destination::FixtureExport, input).unwrap();
+        let value: Value = serde_json::from_slice(result.bytes()).unwrap();
+        assert_eq!(value["model"]["token"], "[REDACTED]");
+        assert_eq!(value["source"][0]["message"], "[REDACTED]");
+        assert_eq!(value["name"], "ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+    }
 
     #[test]
     fn off_preserves_egress_and_secrets_masks_shapes_only_at_boundary() {

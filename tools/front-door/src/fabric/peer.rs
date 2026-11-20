@@ -435,18 +435,22 @@ fn project_peer_output_with(
             bytes: OutputBytes::Utf8(text),
             reason,
             planner_fallback,
+            extra,
             ..
         } => {
             texts.push(text);
+            provenant_fabric_runtime::hosts::output_lane_texts(extra, &mut texts);
             texts.extend(reason.iter_mut());
             texts.extend(planner_fallback.iter_mut());
         }
         OutputResult::Artifact {
             bytes: OutputBytes::Utf8(text),
             planner_fallback,
+            extra,
             ..
         } => {
             texts.push(text);
+            provenant_fabric_runtime::hosts::output_lane_texts(extra, &mut texts);
             texts.extend(planner_fallback.iter_mut());
         }
         _ => return Err(failure()),
@@ -558,6 +562,52 @@ mod output_projection_tests {
                 *provenant_records::CanonicalV1::file_digest(text.as_bytes()).bytes()
             )
         );
+    }
+
+    #[test]
+    fn output_projects_lane_prose_and_preserves_metadata() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
+        use super::*;
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let projector = provenant_confinement::publication::Projector::new([]).unwrap();
+        let target: AttemptTarget = serde_json::from_value(
+            serde_json::json!({"attempt":"11111111111111111111111111111111"}),
+        )
+        .unwrap();
+        let input = OutputInput::Read {
+            extra: Default::default(),
+            target: target.clone(),
+            part: OutputPart::Result,
+            offset: 0,
+            max_bytes: 4096,
+        };
+        let output = project_peer_output_with(&input, &projector, |_| {
+            serde_json::from_value(serde_json::json!({
+                "kind":"chunk", "target":target, "part":"result", "state":"succeeded", "reason":null,
+                "offset":0, "next_offset":2, "eof":true,
+                "digest":provenant_core::Digest::from_bytes(*provenant_records::CanonicalV1::file_digest(b"ok").bytes()),
+                "bytes":{"encoding":"utf8","data":"ok"}, "length":2,
+                "title":token, "model":token, "skipped_routes":[{"detail":token,"name":token}],
+                "applied_route":{"model":token,"launch_warnings":[token]},
+                "handoff":{"Ok":{"note":token,"spec_concerns":[{"criterion":token,"claim":token,"evidence":token,"proposed_change":token}]}}
+            })).map_err(|_| FacadeError::StateCorrupt)
+        }).unwrap();
+        let row = serde_json::to_value(output).unwrap();
+        assert_eq!(row["model"], token);
+        assert_eq!(row["applied_route"]["model"], token);
+        assert_eq!(row["skipped_routes"][0]["name"], token);
+        for text in [
+            &row["title"],
+            &row["skipped_routes"][0]["detail"],
+            &row["applied_route"]["launch_warnings"][0],
+            &row["handoff"]["Ok"]["note"],
+            &row["handoff"]["Ok"]["spec_concerns"][0]["criterion"],
+            &row["handoff"]["Ok"]["spec_concerns"][0]["claim"],
+            &row["handoff"]["Ok"]["spec_concerns"][0]["evidence"],
+            &row["handoff"]["Ok"]["spec_concerns"][0]["proposed_change"],
+        ] {
+            assert_eq!(text, "[REDACTED]");
+        }
     }
 
     // Spec: docs/specs/fabric.md#publication-boundary
