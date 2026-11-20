@@ -3,13 +3,20 @@
 
 use super::{BuildError, Job, RunContext};
 use provenant_config::{BuildOverflow, ResolvedAdmissionClass};
-use provenant_core::{CancelToken, Clock, DurationMicros};
+use provenant_core::CancelToken;
 use provenant_os::admission::{
     AdmissionSlots, HeldGuard, HostHeldGuard, HostWaitGuard, WaitGuard, mark_held_with_command,
     mark_host_held_with_command, mark_host_waiting_with_command, mark_waiting_with_command,
 };
+use provenant_os::fs::{Directory, FsError, LockGuard, LockMode};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{ffi::OsString, io::Write, path::Path, time::Duration};
+use std::{
+    ffi::{OsStr, OsString},
+    io::Write,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
 /// The future ticket/admission request consumed by the queue implementation.
 pub struct AdmissionRequest<'a> {
@@ -98,8 +105,26 @@ pub fn request_for_job<'a>(job: &'a Job, context: &'a RunContext) -> AdmissionRe
         aging,
         command_digest,
         overflow,
-        affinity: Vec::new(),
-        excluded: Vec::new(),
+        affinity: affinity(job, context, limit),
+        excluded: if context.strategy.name == super::StrategyName::Slots {
+            (0..limit)
+                .filter(|index| {
+                    let path =
+                        super::slots::SlotPaths::new(&context.home, &job.project_key, *index)
+                            .record;
+                    std::fs::read(path)
+                        .ok()
+                        .and_then(|data| {
+                            serde_json::from_slice::<super::slots::SlotRecord>(&data).ok()
+                        })
+                        .is_some_and(|record| {
+                            record.health.state == super::slots::SlotState::Quarantined
+                        })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
         cancel: &context.cancel,
         scratch: env_path(job, "PROVENANT_ADMISSION_WAIT_DIR"),
         attempt_id: env_value(&job.env, "PROVENANT_ATTEMPT_ID")
@@ -109,14 +134,120 @@ pub fn request_for_job<'a>(job: &'a Job, context: &'a RunContext) -> AdmissionRe
     }
 }
 
-/// Try to acquire immediately, then preserve the current bounded polling
-/// behaviour until the priority queue lands in S2. Its 25 ms retry loop mirrors
-/// `AdmissionSlots::acquire_within`, while checking the cancellation token that
-/// the old API does not accept.
-pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
+/// Persisted waiter. The exclusive lock on its inode proves liveness.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Ticket {
+    schema: u32,
+    id: String,
+    owner: String,
+    project_key: String,
+    priority: super::Priority,
+    aging_ms: u64,
+    enqueued_unix_ms: u64,
+    pid: u32,
+    start_time: u64,
+    command_digest: String,
+}
+
+fn affinity(job: &Job, context: &RunContext, limit: u64) -> Vec<u64> {
+    let mut indices: Vec<_> = (0..limit).collect();
+    indices.sort_by_key(|index| {
+        let path = super::slots::SlotPaths::new(&context.home, &job.project_key, *index).record;
+        let record = std::fs::read(path)
+            .ok()
+            .and_then(|data| serde_json::from_slice::<super::slots::SlotRecord>(&data).ok());
+        let mark = record.and_then(|record| record.last_job);
+        let same_owner = mark.as_ref().is_some_and(|mark| mark.owner == job.owner);
+        let same_base = mark
+            .as_ref()
+            .and_then(|mark| mark.base.as_ref())
+            .zip(job.verify_base.as_ref())
+            .is_some_and(|(base, expected)| base == &expected.commit);
+        (
+            !same_owner,
+            !same_base,
+            mark.map_or(0, |mark| mark.finished_unix_ms),
+            *index,
+        )
+    });
+    indices
+}
+
+struct TicketLease {
+    path: PathBuf,
+    _guard: LockGuard,
+}
+impl Drop for TicketLease {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn unavailable(error: impl std::fmt::Display) -> BuildError {
+    BuildError::Unavailable(error.to_string())
+}
+
+fn ticket_key(ticket: &Ticket, now: u64) -> (u64, u64, &str) {
+    let level = match ticket.priority {
+        super::Priority::Interactive => 0u64,
+        super::Priority::Test => 1,
+        super::Priority::Train => 2,
+        super::Priority::Prewarm => 3,
+    };
+    let age = now.saturating_sub(ticket.enqueued_unix_ms) / ticket.aging_ms.max(1);
+    (
+        level.saturating_sub(age),
+        ticket.enqueued_unix_ms,
+        &ticket.id,
+    )
+}
+
+fn live_tickets(dir: &Directory, path: &Path) -> Result<Vec<Ticket>, BuildError> {
+    let mut tickets = Vec::new();
+    for entry in std::fs::read_dir(path).map_err(unavailable)? {
+        let entry = entry.map_err(unavailable)?;
+        let name = entry.file_name();
+        if Path::new(&name).extension() != Some(OsStr::new("json")) {
+            continue;
+        }
+        match dir.try_lock_existing(&name, LockMode::Exclusive) {
+            Ok(_guard) => {
+                let _ = std::fs::remove_file(entry.path());
+            }
+            Err(FsError::LockTimeout { .. }) => match std::fs::read(entry.path()) {
+                Ok(bytes) => {
+                    let ticket: Ticket = serde_json::from_slice(&bytes).map_err(unavailable)?;
+                    tickets.push(ticket);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(unavailable(error)),
+            },
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(unavailable(error)),
+        }
+    }
+    Ok(tickets)
+}
+
+fn check_cancel(
+    request: &AdmissionRequest<'_>,
+    signals: &provenant_os::exec::BuildSignalWait,
+) -> Result<(), BuildError> {
+    if let Some(signal) = signals.signal() {
+        request.cancel.cancel();
+        return Err(BuildError::CancelledSignal(signal));
+    }
     if request.cancel.is_cancelled() {
         return Err(BuildError::Cancelled);
     }
+    Ok(())
+}
+
+/// Admit immediately if possible, otherwise join the host-wide priority queue.
+#[allow(clippy::disallowed_methods)]
+pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
+    let signals = provenant_os::exec::BuildSignalWait::install().map_err(unavailable)?;
+    check_cancel(request, &signals)?;
     if request.limit == 0 {
         return Ok(Admitted::Overflow {
             waited: Duration::ZERO,
@@ -124,31 +255,83 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
     }
     let slots = match AdmissionSlots::open(request.state, request.class) {
         Ok(slots) => slots,
-        Err(_) => {
-            let _ = AdmissionSlots::provision(request.state, request.class, request.limit);
-            AdmissionSlots::open(request.state, request.class).map_err(|error| {
-                BuildError::Unavailable(format!("cannot open admission slots: {error}"))
-            })?
+        Err(provenant_os::admission::AdmissionError::Fs(error)) if error.is_not_found() => {
+            AdmissionSlots::provision(request.state, request.class, request.limit)
+                .map_err(unavailable)?;
+            AdmissionSlots::open(request.state, request.class).map_err(unavailable)?
         }
+        Err(error) => return Err(unavailable(error)),
     };
-    let clock = provenant_os::clock::SystemClock::new();
-    let started_micros = clock.mono_now().as_micros();
-    match slots.try_acquire(request.limit) {
-        Ok(Some(guard)) => {
-            return Ok(Admitted::Held {
-                index: guard.index(),
-                guard,
-                waited: Duration::ZERO,
-            });
-        }
-        Ok(None) => {}
-        Err(error) => {
-            return Err(BuildError::Unavailable(format!(
-                "cannot acquire admission slot: {error}"
-            )));
+    let mut order = Vec::new();
+    for index in request.affinity.iter().copied().chain(0..request.limit) {
+        if index < request.limit && !request.excluded.contains(&index) && !order.contains(&index) {
+            order.push(index);
         }
     }
-
+    if order.is_empty() {
+        return Err(unavailable("no eligible admission slots"));
+    }
+    let started = Instant::now();
+    if let Some(guard) = slots.try_acquire_ordered(&order).map_err(unavailable)? {
+        check_cancel(request, &signals)?;
+        return Ok(Admitted::Held {
+            index: guard.index(),
+            guard,
+            waited: Duration::ZERO,
+        });
+    }
+    if request.job_id.is_empty()
+        || !request
+            .job_id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        || request.class.is_empty()
+        || !request
+            .class
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        return Err(unavailable("invalid queue ticket identity"));
+    }
+    let queue_path = request.state.join("build/queue").join(request.class);
+    std::fs::create_dir_all(&queue_path).map_err(unavailable)?;
+    let dir = Directory::open_anchor(&queue_path).map_err(unavailable)?;
+    let temp_name = format!(".{}.{}.tmp", request.job_id, std::process::id());
+    let guard = dir
+        .try_lock(OsStr::new(&temp_name), LockMode::Exclusive)
+        .map_err(unavailable)?;
+    let ticket = Ticket {
+        schema: 1,
+        id: request.job_id.to_owned(),
+        owner: request.owner.to_owned(),
+        project_key: request.project_key.to_owned(),
+        priority: request.priority,
+        aging_ms: request.aging.as_millis().min(u128::from(u64::MAX)) as u64,
+        enqueued_unix_ms: super::ledger::now_unix_ms(),
+        pid: std::process::id(),
+        start_time: super::process_marker()
+            .and_then(|s| s.split_once(':').and_then(|(_, start)| start.parse().ok()))
+            .unwrap_or(0),
+        command_digest: request.command_digest.clone(),
+    };
+    let temp_path = queue_path.join(&temp_name);
+    let mut lease = TicketLease {
+        path: temp_path.clone(),
+        _guard: guard,
+    };
+    let ticket_name = format!("{}.json", request.job_id);
+    let ticket_path = queue_path.join(&ticket_name);
+    lease
+        ._guard
+        .handoff_file()
+        .set_len(0)
+        .map_err(unavailable)?;
+    let mut file = lease._guard.handoff_file();
+    serde_json::to_writer(&mut file, &ticket).map_err(unavailable)?;
+    file.flush().map_err(unavailable)?;
+    dir.rename_noreplace(OsStr::new(&temp_name), &dir, OsStr::new(&ticket_name))
+        .map_err(unavailable)?;
+    lease.path = ticket_path;
     let _waiting = mark_waiting(request).ok();
     let _ = writeln!(
         std::io::stderr().lock(),
@@ -157,43 +340,54 @@ pub fn admit(request: &AdmissionRequest<'_>) -> Result<Admitted, BuildError> {
         slots.held(request.limit),
         request.limit
     );
-    let timeout = Duration::from_secs(request.wait_seconds);
+    let mut round = 0u64;
     loop {
-        if request.cancel.is_cancelled() {
-            return Err(BuildError::Cancelled);
-        }
-        match slots.try_acquire(request.limit) {
-            Ok(Some(guard)) => {
-                let waited = Duration::from_micros(
-                    clock.mono_now().as_micros().saturating_sub(started_micros),
-                );
-                drop(_waiting);
-                return Ok(Admitted::Held {
-                    index: guard.index(),
-                    guard,
-                    waited,
-                });
-            }
-            Ok(None) => {}
-            Err(error) => {
-                return Err(BuildError::Unavailable(format!(
-                    "cannot acquire admission slot: {error}"
-                )));
-            }
-        }
-        let elapsed =
-            Duration::from_micros(clock.mono_now().as_micros().saturating_sub(started_micros));
-        if elapsed >= timeout {
+        check_cancel(request, &signals)?;
+        let elapsed = started.elapsed();
+        if let OverflowPolicy::Local { after } = request.overflow
+            && elapsed >= after
+        {
             return Ok(Admitted::Overflow { waited: elapsed });
         }
-        let pause = Duration::from_millis(25).min(timeout.saturating_sub(elapsed));
-        let pause_micros = pause.as_micros().min(u128::from(u64::MAX)) as u64;
-        if let Ok(deadline) = clock
-            .mono_now()
-            .checked_add(DurationMicros::from_micros(pause_micros))
-        {
-            let _ = clock.wait_until(deadline);
+        let now = super::ledger::now_unix_ms();
+        let mut tickets = live_tickets(&dir, &queue_path)?;
+        if tickets.iter().any(|other| {
+            other.owner == ticket.owner
+                && other.priority == ticket.priority
+                && other.command_digest == ticket.command_digest
+                && (other.enqueued_unix_ms, &other.id) > (ticket.enqueued_unix_ms, &ticket.id)
+        }) {
+            return Err(BuildError::Superseded);
         }
+        tickets.sort_by(|a, b| ticket_key(a, now).cmp(&ticket_key(b, now)));
+        let rank = tickets
+            .iter()
+            .position(|other| other.id == ticket.id)
+            .ok_or_else(|| unavailable("queue ticket disappeared"))?;
+        let mut free = 0;
+        for index in &order {
+            if slots
+                .try_acquire_ordered(&[*index])
+                .map_err(unavailable)?
+                .is_some()
+            {
+                free += 1;
+            }
+        }
+        if rank < free
+            && let Some(guard) = slots.try_acquire_ordered(&order).map_err(unavailable)?
+        {
+            check_cancel(request, &signals)?;
+            return Ok(Admitted::Held {
+                index: guard.index(),
+                guard,
+                waited: started.elapsed(),
+            });
+        }
+        round = round.wrapping_add(1);
+        let jitter = (u64::from(std::process::id()).wrapping_add(round.wrapping_mul(17))) % 41;
+        #[allow(clippy::disallowed_methods)]
+        std::thread::sleep(Duration::from_millis(80 + jitter));
     }
 }
 
@@ -268,10 +462,10 @@ fn env_path<'a>(job: &'a Job, key: &str) -> Option<&'a Path> {
 fn command_digest(job: &Job) -> String {
     let mut digest = Sha256::new();
     for step in &job.steps {
-        digest.update(step.cwd_rel.as_os_str().to_string_lossy().as_bytes());
+        digest.update(step.cwd_rel.as_os_str().as_encoded_bytes());
         digest.update([0]);
         for argument in &step.argv {
-            digest.update(argument.to_string_lossy().as_bytes());
+            digest.update(argument.as_encoded_bytes());
             digest.update([0]);
         }
         digest.update([0xff]);
@@ -284,4 +478,231 @@ fn command_digest(job: &Job) -> String {
         encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     encoded
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    fn request<'a>(
+        state: &'a Path,
+        id: &'a str,
+        owner: &'a str,
+        digest: &str,
+        cancel: &'a CancelToken,
+    ) -> AdmissionRequest<'a> {
+        AdmissionRequest {
+            state,
+            class: "build",
+            limit: 1,
+            job_id: id,
+            owner,
+            project_key: "project",
+            priority: super::super::Priority::Interactive,
+            aging: Duration::from_secs(120),
+            command_digest: digest.into(),
+            overflow: OverflowPolicy::Queue,
+            affinity: vec![],
+            excluded: vec![],
+            cancel,
+            scratch: None,
+            attempt_id: None,
+            command: None,
+            wait_seconds: 1,
+        }
+    }
+    fn wait_for(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !path.exists() {
+            assert!(Instant::now() < deadline, "ticket was not created");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    fn ticket(id: &str, priority: super::super::Priority, time: u64) -> Ticket {
+        Ticket {
+            schema: 1,
+            id: id.into(),
+            owner: "owner".into(),
+            project_key: "p".into(),
+            priority,
+            aging_ms: 100,
+            enqueued_unix_ms: time,
+            pid: 1,
+            start_time: 1,
+            command_digest: id.into(),
+        }
+    }
+    #[test]
+    fn priority_and_aging_order_tickets() {
+        use super::super::Priority::*;
+        let old = ticket("old", Prewarm, 100);
+        let newer = ticket("new", Interactive, 400);
+        assert!(ticket_key(&newer, 400) < ticket_key(&old, 300));
+        assert!(ticket_key(&old, 400) < ticket_key(&newer, 400));
+        let train = ticket("train", Train, 400);
+        let test = ticket("test", Test, 400);
+        assert!(ticket_key(&test, 400) < ticket_key(&train, 400));
+    }
+    #[test]
+    fn free_slot_is_acquired_without_ticket_and_respects_affinity() {
+        let state = tempfile::tempdir().unwrap();
+        AdmissionSlots::provision(state.path(), "build", 2).unwrap();
+        let cancel = CancelToken::new();
+        let mut req = request(state.path(), "free", "owner", "a", &cancel);
+        req.limit = 2;
+        req.affinity = vec![1];
+        let Admitted::Held { index, waited, .. } = admit(&req).unwrap() else {
+            panic!("overflow")
+        };
+        assert_eq!(index, 1);
+        assert_eq!(waited, Duration::ZERO);
+        assert!(!state.path().join("build/queue/build/free.json").exists());
+    }
+    #[test]
+    fn local_overflow_respects_timeout_and_excluded_slots() {
+        let state = tempfile::tempdir().unwrap();
+        AdmissionSlots::provision(state.path(), "build", 2).unwrap();
+        let held = AdmissionSlots::open(state.path(), "build")
+            .unwrap()
+            .try_acquire_ordered(&[0])
+            .unwrap()
+            .unwrap();
+        let cancel = CancelToken::new();
+        let mut req = request(state.path(), "overflow", "owner", "a", &cancel);
+        req.limit = 2;
+        req.excluded = vec![1];
+        req.overflow = OverflowPolicy::Local {
+            after: Duration::ZERO,
+        };
+        assert!(matches!(admit(&req), Ok(Admitted::Overflow { .. })));
+        assert!(
+            !state
+                .path()
+                .join("build/queue/build/overflow.json")
+                .exists()
+        );
+        drop(held);
+    }
+    #[test]
+    fn queued_higher_priority_acquires_first() {
+        let state = tempfile::tempdir().unwrap();
+        AdmissionSlots::provision(state.path(), "build", 1).unwrap();
+        let held = AdmissionSlots::open(state.path(), "build")
+            .unwrap()
+            .try_acquire(1)
+            .unwrap()
+            .unwrap();
+        let path = state.path().join("build/queue/build");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            for (id, priority) in [
+                ("low", super::super::Priority::Train),
+                ("high", super::super::Priority::Interactive),
+            ] {
+                let tx = tx.clone();
+                let state = state.path();
+                scope.spawn(move || {
+                    let cancel = CancelToken::new();
+                    let mut req = request(state, id, id, id, &cancel);
+                    req.priority = priority;
+                    let guard = admit(&req).unwrap();
+                    tx.send(id).unwrap();
+                    std::thread::sleep(Duration::from_millis(150));
+                    drop(guard);
+                });
+                wait_for(&path.join(format!("{id}.json")));
+            }
+            drop(held);
+            assert_eq!(rx.recv_timeout(Duration::from_secs(10)).unwrap(), "high");
+            assert_eq!(rx.recv_timeout(Duration::from_secs(10)).unwrap(), "low");
+        });
+    }
+    #[test]
+    fn dead_ticket_is_reaped_and_cancel_removes_live_ticket() {
+        let state = tempfile::tempdir().unwrap();
+        AdmissionSlots::provision(state.path(), "build", 1).unwrap();
+        let slots = AdmissionSlots::open(state.path(), "build").unwrap();
+        let held = slots.try_acquire(1).unwrap().unwrap();
+        let path = state.path().join("build/queue/build");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("dead.json"), b"stale").unwrap();
+        let cancel = CancelToken::new();
+        std::thread::scope(|scope| {
+            let handle =
+                scope.spawn(|| admit(&request(state.path(), "live", "owner", "a", &cancel)));
+            wait_for(&path.join("live.json"));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while path.join("dead.json").exists() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            cancel.cancel();
+            assert!(matches!(handle.join().unwrap(), Err(BuildError::Cancelled)));
+        });
+        assert!(!path.join("live.json").exists());
+        drop(held);
+    }
+    #[test]
+    fn only_identical_newer_command_supersedes() {
+        let state = tempfile::tempdir().unwrap();
+        AdmissionSlots::provision(state.path(), "build", 1).unwrap();
+        let slots = AdmissionSlots::open(state.path(), "build").unwrap();
+        let held = slots.try_acquire(1).unwrap().unwrap();
+        let path = state.path().join("build/queue/build");
+        let a = CancelToken::new();
+        let b = CancelToken::new();
+        let c = CancelToken::new();
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| admit(&request(state.path(), "a", "owner", "same", &a)));
+            wait_for(&path.join("a.json"));
+            let different = scope.spawn(|| {
+                matches!(
+                    admit(&request(state.path(), "b", "owner", "different", &b)),
+                    Ok(Admitted::Held { .. })
+                )
+            });
+            wait_for(&path.join("b.json"));
+            let newer = scope.spawn(|| {
+                matches!(
+                    admit(&request(state.path(), "c", "owner", "same", &c)),
+                    Ok(Admitted::Held { .. })
+                )
+            });
+            wait_for(&path.join("c.json"));
+            assert!(matches!(first.join().unwrap(), Err(BuildError::Superseded)));
+            drop(held);
+            assert!(different.join().unwrap());
+            assert!(newer.join().unwrap());
+        });
+    }
+    #[test]
+    fn concurrent_holders_never_exceed_limit() {
+        let state = tempfile::tempdir().unwrap();
+        AdmissionSlots::provision(state.path(), "build", 2).unwrap();
+        let active = Arc::new(AtomicUsize::new(0));
+        std::thread::scope(|scope| {
+            for n in 0..8 {
+                let active = Arc::clone(&active);
+                let state = state.path();
+                scope.spawn(move || {
+                    let id = format!("job-{n}");
+                    let cancel = CancelToken::new();
+                    let mut req = request(state, &id, &id, &id, &cancel);
+                    req.limit = 2;
+                    let hold = admit(&req).unwrap();
+                    assert!(matches!(hold, Admitted::Held { .. }));
+                    assert!(active.fetch_add(1, Ordering::SeqCst) < 2);
+                    std::thread::sleep(Duration::from_millis(30));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    drop(hold);
+                });
+            }
+        });
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
 }

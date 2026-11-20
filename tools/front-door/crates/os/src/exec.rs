@@ -15,6 +15,20 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+/// Scoped signal observation while a build waits for admission.
+pub struct BuildSignalWait(crate::sys::build_group::Forwarder);
+impl BuildSignalWait {
+    pub fn install() -> std::io::Result<Self> {
+        crate::sys::build_group::Forwarder::install().map(Self)
+    }
+    pub fn signal(&self) -> Option<i32> {
+        match self.0.signal() {
+            0 => None,
+            signal => Some(signal),
+        }
+    }
+}
+
 pub const DEFAULT_CAPTURE_LIMIT: usize = 8 * 1024 * 1024;
 pub const MAX_CAPTURE_LIMIT: usize = 64 * 1024 * 1024;
 pub const FRAME_LIMIT: usize = 64 * 1024;
