@@ -6763,6 +6763,7 @@ mod tests {
                 .join(run.attempt_id.to_string())
                 .join("reservation.json"),
             reason: "foreign fixture".into(),
+            kind: provenant_supervisor::custody::ReservationIssueKind::Other,
         };
         assert!(store.writer_issue_candidate(&foreign, &call).is_none());
         assert_eq!(

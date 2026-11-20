@@ -50,9 +50,9 @@ pub(crate) use layout::{
 };
 pub use lifecycle::*;
 pub use owner::{
-    WorktreeOrigin, WorktreeOwner, branch_ownership, load_owner, owned_worktree_paths, prune_owned,
-    refresh_owner_reference_while_held, save_lane_owner_when_free, save_owner,
-    update_owner_when_unchanged,
+    OwnedWorktreeIssue, OwnedWorktreeListing, WorktreeOrigin, WorktreeOwner, branch_ownership,
+    load_owner, owned_worktree_paths, prune_owned, refresh_owner_reference_while_held,
+    save_lane_owner_when_free, save_owner, update_owner_when_unchanged,
 };
 pub use refs::{RefLedger, RefObservation, RefRecord};
 pub use removal::{

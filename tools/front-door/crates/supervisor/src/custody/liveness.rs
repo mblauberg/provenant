@@ -5,8 +5,9 @@ const LOCK: &str = "guardian.lock";
 const RECORD: &str = "guardian-lock.json";
 const HOLDER_LOCK: &str = "holder.lock";
 /// Schema 2 adds the per-attempt holder lock identity. Schema 1 evidence was
-/// written before shared worktree occupancy and is not migrated: drain writers
-/// on the old version before upgrading.
+/// written before shared worktree occupancy and is not migrated: its attempt
+/// stays fenced, while host inventory warns and protects it without blocking
+/// unrelated launches.
 const SCHEMA: u64 = 2;
 
 /// Whether this attempt's guardian record predates the per-attempt holder lock.

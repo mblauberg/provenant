@@ -1730,13 +1730,45 @@ impl SkippedRoute {
     /// Describe a refused route for public output without provider or OS text.
     pub fn describe(&self) -> String {
         let diagnostic = self.diagnostic();
+        // Only this closed combination may expose the separately formatted
+        // AnchorMismatchAt path; arbitrary detail remains hidden.
+        let anchor_detail = (self.plan_error
+            == Some(crate::diagnostic::PlanFailure::AnchorMismatch)
+            && self.guard_boundary.is_some()
+            && self.confinement_guard
+                == Some(crate::diagnostic::ConfinementGuard::PathAnchorChanged)
+            && self.cause == Some(crate::RouteExclusionReason::ConfinementUnavailable))
+        .then_some(self.detail.as_str())
+        .filter(|detail| {
+            let prefix = format!(
+                "{} at ",
+                crate::diagnostic::PlanFailure::AnchorMismatch.detail()
+            );
+            let Some((path, stage)) = detail
+                .strip_prefix(&prefix)
+                .and_then(|suffix| suffix.rsplit_once(" ("))
+            else {
+                return false;
+            };
+            let Some(stage) = stage.strip_suffix(')') else {
+                return false;
+            };
+            (path == "~" || path.starts_with("~/") || path.starts_with('/'))
+                && !path.is_empty()
+                && !stage.is_empty()
+                && stage.len() <= 128
+                && stage
+                    .bytes()
+                    .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+                && !detail.chars().any(char::is_control)
+        });
+        let detail = anchor_detail
+            .or(diagnostic.detail.as_deref())
+            .unwrap_or("the route was refused");
         let mut reason = format!(
             "{}: {}",
             crate::diagnostic::safe_text(&self.route),
-            diagnostic
-                .detail
-                .as_deref()
-                .unwrap_or("the route was refused")
+            crate::diagnostic::safe_text(detail)
         );
         if let Some(next) = diagnostic.next {
             reason.push_str("; ");
