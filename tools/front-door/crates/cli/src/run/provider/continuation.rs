@@ -5,6 +5,12 @@ use provenant_records::diagnostic::{
     ContinuationField as F, ContinuationGuard, ContinuationIssue as I, ContinuationRule as R,
 };
 
+/// Whether the adapter's declared registry facts put its sessions in the host
+/// profile's native store instead of lane-private state.
+fn uses_host_profile(adapter: &str) -> bool {
+    AdapterSpec::get(adapter).is_some_and(|spec| spec.host_profile)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ContinuationRequestError {
     #[error(
@@ -288,6 +294,7 @@ pub(super) fn continuation_for(
             private_state,
         },
         &policy,
+        None,
     )
 }
 
@@ -297,6 +304,7 @@ pub(super) fn continuation_for_policy(
     grant_digest: &str,
     state: ContinuationState<'_>,
     enforcement: &provenant_records::policy::Policy,
+    opencode_data_root: Option<&Path>,
 ) -> Result<provenant_providers::Continuation, ContinuationError> {
     let ContinuationState {
         state_root,
@@ -329,16 +337,56 @@ pub(super) fn continuation_for_policy(
     }
     let continuation =
         provenant_providers::Continuation::retained(&route.adapter, session, route, grant_digest)?;
-    // Native state is selected by the provider during launch preparation.
-    // Validate its recorded root after the `LaunchSpec` exists; never search a
-    // native account tree or copy it into the child's private state.
-    if prior_uses_native_session_state(applied, &route.adapter) {
-        return Ok(continuation);
-    }
     let prior_state = state_root
         .join("attempts")
         .join(prior.attempt_id.to_string())
         .join("provider-state");
+    if let Some(current_root) = opencode_data_root {
+        if !uses_host_profile(&route.adapter) || !current_root.is_absolute() {
+            return Err(ContinuationError::Provider(
+                provenant_providers::ProviderError::UnknownIdentity,
+            ));
+        }
+        let prior_root = super::observation::native_session_location_for_route(
+            &prior_state,
+            &route.adapter,
+            &route.model,
+            route.account_key.as_deref(),
+        )?;
+        if prior_root != current_root {
+            return Err(
+                super::observation::NativeSessionLocationError::Mismatch(F::NativeHome).into(),
+            );
+        }
+        // OpenCode's host service owns this database. Reuse its session id;
+        // copying the database would fork session identity from the service.
+        provenant_providers::opencode::session_exists(current_root, session)?;
+        return Ok(continuation);
+    }
+    if uses_host_profile(&route.adapter) {
+        match super::observation::native_session_location_for_route(
+            &prior_state,
+            &route.adapter,
+            &route.model,
+            route.account_key.as_deref(),
+        ) {
+            // A host-profile session must never be copied into lane-private
+            // state when the successor is using the lane profile.
+            Ok(_) => {
+                return Err(ContinuationError::NativeSessionLocation(
+                    super::observation::NativeSessionLocationError::Mismatch(F::SessionState),
+                ));
+            }
+            Err(super::observation::NativeSessionLocationError::Missing) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    // Native state is selected by the provider during launch preparation.
+    // Validate its recorded root after the `LaunchSpec` exists; never search a
+    // native account tree or copy it into the child's private state.
+    if prior_uses_native_session_state(applied, &route.adapter, Some(&prior_state)) {
+        return Ok(continuation);
+    }
     let mut policy = StateCopyPolicy::read(config_root, enforcement);
     let located = if AdapterSpec::get(&route.adapter)
         .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase)
@@ -408,13 +456,34 @@ fn route_mismatch(applied: &run::RouteRecord, route: &ResolvedRoute) -> Option<F
     .find_map(|(changed, field)| changed.then_some(field))
 }
 
-pub(super) fn prior_uses_native_session_state(applied: &run::RouteRecord, provider: &str) -> bool {
-    applied
-        .sandbox
-        .as_ref()
-        .is_some_and(|sandbox| !sandbox.effective)
-        && !AdapterSpec::get(provider)
-            .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase)
+pub(super) fn prior_uses_native_session_state(
+    applied: &run::RouteRecord,
+    provider: &str,
+    provider_state: Option<&Path>,
+) -> bool {
+    let host_profile_session = uses_host_profile(provider)
+        && provider_state.is_some_and(|provider_state| {
+            applied
+                .model
+                .as_deref()
+                .and_then(|model| model.strip_prefix("opencode/"))
+                .is_some_and(|model| {
+                    super::observation::native_session_location_for_route(
+                        provider_state,
+                        provider,
+                        model,
+                        applied.account_key.as_deref(),
+                    )
+                    .is_ok()
+                })
+        });
+    host_profile_session
+        || applied
+            .sandbox
+            .as_ref()
+            .is_some_and(|sandbox| !sandbox.effective)
+            && !AdapterSpec::get(provider)
+                .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase)
 }
 
 pub(super) fn verify_native_continuation(

@@ -467,6 +467,7 @@ fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
             private_state: &child_state,
         },
         &provenant_records::policy::Policy::default(),
+        None,
     )?;
     assert_eq!(continuation.session(), session);
     verify_native_continuation(&prior, &route, &native_home, &state)?;
@@ -565,6 +566,7 @@ fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
                 private_state: &child_state,
             },
             &Default::default(),
+            None,
         )
         .unwrap_err();
         let guard = error.guard().ok_or("typed route refusal")?;
@@ -1348,6 +1350,7 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
     let prompt = Prompt::new("describe".into());
     let launch_policy = provenant_records::policy::Policy::default();
     let launch = provenant_providers::codex::Codex.prepare(PrepareInput {
+            opencode_profile: provenant_config::OpenCodeProfile::Lane,
         credential_roots: plan.permissions().credential_roots.clone(),
         images: &access.attachments,
         policy: &launch_policy,
