@@ -149,8 +149,12 @@ envelope, including without `--follow`.
 
 ### Status selection
 
-Status includes all active graph work; omitted settled work is counted. Human
-and structured output share the selection. `status --mine` reads active custody
+Status includes all active graph work; omitted settled work is counted. A
+settled graph is still listed when its digests report a live attempt: only
+settled graphs without a live lane are hidden and counted as omitted. The
+headline and human output lead with the number of live lanes read from those
+same digests, and `--json` exposes that count as `live_lanes`. Human and
+structured output share the selection. `status --mine` reads active custody
 across projects, or one explicit `--project`, including attempts nested under
 the current chair and unattended items available for adoption. It is short by
 default, expands with `--full`, and exposes typed records and native presence

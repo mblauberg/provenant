@@ -2265,6 +2265,10 @@ pub(crate) fn graph_listing(
             if listing.rows.is_empty() {
                 human = "no graphs\n".into();
             }
+            let live = live_lanes(&listing);
+            if live > 0 {
+                human.insert_str(0, &format!("{live} live lanes\n"));
+            }
             let admission = admission_lines(&listing, now);
             if !admission.is_empty() {
                 if !listing.rows.is_empty() {
@@ -2308,6 +2312,7 @@ pub(crate) fn graph_listing(
                 "graphs": rows,
                 "omitted": listing.omitted,
                 "next_cursor": listing.next,
+                "live_lanes": live,
             });
             if !listing.admission_holders.is_empty() || !listing.admission_waiters.is_empty() {
                 data["admission"] = json!({
@@ -2377,17 +2382,33 @@ fn admission_lines(listing: &Listing, now_micros: i64) -> Vec<String> {
     lines
 }
 
+/// Live lanes read from the same digests that order the listing. A lane is
+/// live only when its attempt presence is `live`, never from a graph's settled
+/// state or an unknown presence.
+fn live_lanes(listing: &Listing) -> usize {
+    listing
+        .rows
+        .iter()
+        .flat_map(|graph| graph.digests.iter())
+        .filter(|digest| digest.attempt_presence.as_deref() == Some("live"))
+        .count()
+}
+
 fn listing_summary(
     listing: &Listing,
     command_limit: u64,
     now_micros: i64,
 ) -> provenant_cli::Summary {
     let tally = ranked_tally(listing.rows.iter().map(|g| g.state.as_str()));
-    let headline = if tally.is_empty() {
+    let mut headline = if tally.is_empty() {
         "no graphs".to_string()
     } else {
         tally
     };
+    let live = live_lanes(listing);
+    if live > 0 {
+        headline = format!("{live} live lanes; {headline}");
+    }
 
     let mut summary_rows = Vec::new();
     let mut shown_indices = std::collections::BTreeSet::new();
@@ -2470,16 +2491,26 @@ fn graph_age(now_micros: i64, graph: &ListedGraph) -> String {
 }
 
 /// Order a page with live lanes first and, outside `--full`, hide settled rows
-/// behind one count. `select_listing` has already ordered each group by age.
-pub(crate) fn finish_listing(mut listing: Listing, settled_count: usize, full: bool) -> Listing {
-    listing.rows.sort_by_key(|graph| {
-        !graph
+/// behind one count. A settled graph still has its lanes shown when a digest
+/// reports a live attempt: settlement and liveness are separate facts, and a
+/// cancelled graph can leave lanes running. `select_listing` has already
+/// ordered each group by age.
+pub(crate) fn finish_listing(mut listing: Listing, _settled_count: usize, full: bool) -> Listing {
+    let has_live = |graph: &ListedGraph| {
+        graph
             .digests
             .iter()
             .any(|digest| digest.attempt_presence.as_deref() == Some("live"))
-    });
+    };
+    listing.rows.sort_by_key(|graph| !has_live(graph));
     if !full {
-        listing.rows.retain(|graph| !graph.settled);
+        let before = listing.rows.len();
+        listing
+            .rows
+            .retain(|graph| !graph.settled || has_live(graph));
+        // Count only the settled rows actually dropped from this page: a
+        // settled graph kept for a live lane must not be reported as omitted.
+        let settled_count = before - listing.rows.len();
         listing.omitted.clear();
         listing.next = None;
         if settled_count > 0 {
@@ -4235,6 +4266,69 @@ mod tests {
             "--full lists settled graphs after live lanes"
         );
         assert!(full.omitted.is_empty());
+    }
+
+    #[test]
+    fn default_listing_keeps_a_settled_graph_with_a_live_lane() {
+        let now = 1_000_000_000;
+        let mut settled_live = listed("settled-live", true, now - 1);
+        settled_live.digests.push(digest(Some("live")));
+        let settled_idle = listed("settled-idle", true, now - 2);
+        let active = listed("active", false, now - 3);
+        let listing = finish_listing(
+            Listing {
+                rows: vec![active, settled_live, settled_idle],
+                omitted: Default::default(),
+                next: None,
+                admission_holders: Vec::new(),
+                admission_waiters: Vec::new(),
+            },
+            2,
+            false,
+        );
+        assert_eq!(
+            listing
+                .rows
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["settled-live", "active"],
+            "a settled graph with a live lane is never hidden from the default listing"
+        );
+        assert_eq!(
+            listing.omitted.get("settled"),
+            Some(&1),
+            "only the settled graph without a live lane is counted as omitted"
+        );
+    }
+
+    #[test]
+    fn listing_live_lane_count_matches_digest_presence() {
+        let mut first = listed("first", false, 10);
+        first.digests.push(digest(Some("live")));
+        first.digests.push(digest(Some("unattended")));
+        let mut second = listed("second", true, 20);
+        second.digests.push(digest(Some("live")));
+        second.digests.push(digest(Some("live")));
+        let listing = Listing {
+            rows: vec![first, second],
+            omitted: Default::default(),
+            next: None,
+            admission_holders: Vec::new(),
+            admission_waiters: Vec::new(),
+        };
+        assert_eq!(live_lanes(&listing), 3);
+        let summary = listing_summary(&listing, 50, 0);
+        assert!(
+            summary.lines[0].starts_with("3 live lanes"),
+            "headline: {}",
+            summary.lines[0]
+        );
+        assert_eq!(
+            summary.lines[0].matches("live lanes").count(),
+            1,
+            "the live count leads the headline once"
+        );
     }
 
     #[test]
