@@ -307,6 +307,10 @@ pub(crate) struct Outcome {
     /// The effective per-step seed budget when a step ran out of time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     budget: Option<SeedBudgetInfo>,
+    /// `Some(false)` when the seed generation predates recorded sizes and so
+    /// reserves no cache budget; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    size_recorded: Option<bool>,
     #[serde(flatten)]
     extra: provenant_records::ExtraFields,
 }
@@ -416,6 +420,7 @@ impl Outcome {
             differs: None,
             seed_source: None,
             budget: None,
+            size_recorded: None,
             extra: Default::default(),
         }
     }
@@ -428,6 +433,7 @@ impl Outcome {
             differs: None,
             seed_source: None,
             budget: None,
+            size_recorded: None,
             extra: Default::default(),
         }
     }
@@ -448,6 +454,7 @@ impl Outcome {
                 source: display_source(setting.source).into(),
                 step: step_from_detail(detail).label().into(),
             }),
+            size_recorded: None,
             extra: Default::default(),
         }
     }
@@ -493,6 +500,7 @@ impl Outcome {
             differs: refusal.differs,
             seed_source: None,
             budget: None,
+            size_recorded: None,
             extra: Default::default(),
         }
     }
@@ -1016,13 +1024,8 @@ fn seed_target_cancellable_inner(
                 project_match: selected.project_match,
             }),
             budget: None,
-            extra: if size_recorded {
-                Default::default()
-            } else {
-                let mut extra = provenant_records::ExtraFields::new();
-                extra.insert("size_recorded".into(), serde_json::json!(false));
-                extra
-            },
+            size_recorded: (!size_recorded).then_some(false),
+            extra: Default::default(),
         },
         Err(reason) if is_budget_detail(reason) || reason == fallback_reasons::CANCELLED => {
             // The step's own budget or the token is spent; remove the partial
