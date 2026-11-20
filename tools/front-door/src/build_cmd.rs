@@ -1,6 +1,198 @@
 use crate::fail;
 use provenant_cli::{Build, Globals};
+use provenant_config::PortTable;
+use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 use provenant_records::{CommandResult, Outcome};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
+    path::{Path, PathBuf},
+    time::{Duration, UNIX_EPOCH},
+};
+
+/// Cached expected-rebuild set for one `(prev, snapshot)` pair. `None` records
+/// a genuine selection failure so a later report does not retry forever.
+#[derive(Serialize, Deserialize)]
+struct ChurnCache {
+    schema: u32,
+    expected: Option<Vec<String>>,
+}
+
+fn churn_cache_path(state: &Path, prev: &str, snap: &str) -> PathBuf {
+    state
+        .join("build/report-cache")
+        .join(format!("{prev}-{snap}.json"))
+}
+
+fn git_command(args: &[String]) -> bool {
+    let Some(git) = provenant_os::git::git_executable() else {
+        return false;
+    };
+    let mut argv = vec![git.into_os_string()];
+    argv.extend(args.iter().map(OsString::from));
+    let Ok(executor) = SystemExecutor::new(1) else {
+        return false;
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let options = ExecOptions::new(&argv, &cwd, Duration::from_secs(120));
+    executor
+        .execute(options)
+        .is_ok_and(|outcome| outcome.termination == Termination::Exit(0))
+}
+
+/// A temporary detached worktree of the project's bare store, removed on drop.
+struct ReportCheckout {
+    store: PathBuf,
+    temp: PathBuf,
+    work: PathBuf,
+}
+impl Drop for ReportCheckout {
+    fn drop(&mut self) {
+        let store = self.store.to_string_lossy().into_owned();
+        let work = self.work.to_string_lossy().into_owned();
+        let _ = git_command(&[
+            format!("--git-dir={store}"),
+            "worktree".into(),
+            "remove".into(),
+            "--force".into(),
+            work,
+        ]);
+        // Only remove the directory this process created, under the temp root.
+        if self.temp.starts_with(std::env::temp_dir())
+            && self
+                .temp
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("provenant-report-"))
+        {
+            let _ = std::fs::remove_dir_all(&self.temp);
+        }
+    }
+}
+
+fn report_checkout(store: &Path, commit: &str) -> Option<ReportCheckout> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = std::env::temp_dir().join(format!(
+        "provenant-report-{}-{}-{}",
+        std::process::id(),
+        provenant_run::build::ledger::now_unix_ms(),
+        unique
+    ));
+    std::fs::create_dir(&temp).ok()?;
+    let work = temp.join("work");
+    let store_arg = format!("--git-dir={}", store.display());
+    let commit = commit.to_owned();
+    if git_command(&[
+        store_arg,
+        "worktree".into(),
+        "add".into(),
+        "--detach".into(),
+        "--force".into(),
+        work.to_string_lossy().into_owned(),
+        commit,
+    ]) {
+        Some(ReportCheckout {
+            store: store.to_path_buf(),
+            temp,
+            work,
+        })
+    } else {
+        let _ = std::fs::remove_dir_all(&temp);
+        None
+    }
+}
+
+fn package_name(manifest: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(manifest).ok()?;
+    let document: toml_edit::DocumentMut = text.parse().ok()?;
+    document
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(|name| name.as_str())
+        .map(str::to_owned)
+}
+
+/// Packages that are rebuilt regardless of the diff: the configured root
+/// package, packages whose build script declares no rerun-if directive, and
+/// Cargo's build-script fingerprint unit.
+fn always_rebuild(root: &Path, workspace: &Path) -> BTreeSet<String> {
+    let mut set = BTreeSet::from(["build-script-build".to_owned()]);
+    let mut pending = vec![(root.to_path_buf(), 0usize)];
+    while let Some((directory, depth)) = pending.pop() {
+        if depth > 8 {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        let mut manifest = false;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if matches!(name.as_str(), "target" | ".git" | "node_modules") {
+                continue;
+            }
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                pending.push((entry.path(), depth + 1));
+            } else if name == "Cargo.toml" {
+                manifest = true;
+            }
+        }
+        if !manifest {
+            continue;
+        }
+        let Some(name) = package_name(&directory.join("Cargo.toml")) else {
+            continue;
+        };
+        let is_root = directory == workspace;
+        let unbounded = std::fs::read_to_string(directory.join("build.rs"))
+            .map(|script| {
+                !script.contains("cargo:rerun-if-changed")
+                    && !script.contains("cargo:rerun-if-env-changed")
+            })
+            .unwrap_or(false);
+        if is_root || unbounded {
+            set.insert(name);
+        }
+    }
+    set
+}
+
+fn compute_expected(
+    store: &Path,
+    prev: &str,
+    snap: &str,
+    key: &str,
+    ports: &PortTable,
+    state: &Path,
+    now_ms: u64,
+) -> Option<BTreeSet<String>> {
+    let checkout = report_checkout(store, snap)?;
+    let workspace = checkout.work.join(&ports.verify.workspace);
+    let select_state = state.join("build/report-cache/select-state");
+    let state_file = select_state.join("select").join(format!("{key}.json"));
+    if !state_file.exists() {
+        std::fs::create_dir_all(state_file.parent()?).ok()?;
+        let bytes = serde_json::json!({
+            "version": 1,
+            "runs_since_full": 0,
+            "last_full_unix_millis": now_ms,
+        })
+        .to_string();
+        std::fs::write(&state_file, bytes).ok()?;
+    }
+    let policy = provenant_select::Policy {
+        global_paths: ports.verify.affected.global_paths.clone(),
+        full_every: u32::MAX,
+        full_after: Duration::from_secs(100 * 365 * 86_400),
+    };
+    let now = UNIX_EPOCH + Duration::from_millis(now_ms);
+    let selection =
+        provenant_select::select(&workspace, prev, snap, &policy, &select_state, key, now).ok()?;
+    let mut expected: BTreeSet<String> = selection.packages.into_iter().collect();
+    expected.extend(always_rebuild(&checkout.work, &workspace));
+    Some(expected)
+}
 
 /// Build CLI handlers are introduced before their owning report and hygiene slices.
 pub fn run(command: Build, globals: &Globals) -> u8 {
@@ -117,13 +309,59 @@ pub fn run(command: Build, globals: &Globals) -> u8 {
             let ram = provenant_os::sys::resources::memory()
                 .ok()
                 .map(|memory| memory.total_bytes);
-            let mut report =
-                provenant_run::build::report::aggregate(&rows, &table.build, limit, ram, |_, _| {
-                    None
-                });
-            report
-                .warnings
-                .push("churn selection is unavailable; unknown rows cannot pass".into());
+            let now_ms = provenant_run::build::ledger::now_unix_ms();
+            let store = provenant_run::build::paths::store_path(state, &key);
+            let cache_root = state.join("build/report-cache");
+            let _ = std::fs::create_dir_all(&cache_root);
+            let pairs: BTreeSet<(String, String)> = rows
+                .iter()
+                .filter_map(|row| match (&row.prev_snapshot, &row.snapshot) {
+                    (Some(prev), Some(snap)) => Some((prev.clone(), snap.clone())),
+                    _ => None,
+                })
+                .collect();
+            let mut expected_map: BTreeMap<(String, String), Option<BTreeSet<String>>> =
+                BTreeMap::new();
+            let mut unknown = 0;
+            for (prev, snap) in pairs {
+                let cache = churn_cache_path(state, &prev, &snap);
+                let expected = if let Ok(bytes) = std::fs::read(&cache) {
+                    serde_json::from_slice::<ChurnCache>(&bytes)
+                        .ok()
+                        .and_then(|cached| cached.expected.map(|set| set.into_iter().collect()))
+                } else {
+                    let value = compute_expected(&store, &prev, &snap, &key, &table, state, now_ms);
+                    let cached = ChurnCache {
+                        schema: 1,
+                        expected: value.as_ref().map(|set| set.iter().cloned().collect()),
+                    };
+                    if let Ok(bytes) = serde_json::to_vec(&cached) {
+                        let _ = std::fs::write(&cache, bytes);
+                    }
+                    value
+                };
+                if expected.is_none() {
+                    unknown += 1;
+                }
+                expected_map.insert((prev, snap), expected);
+            }
+            let mut report = provenant_run::build::report::aggregate(
+                &rows,
+                &table.build,
+                limit,
+                ram,
+                |prev, snap| {
+                    expected_map
+                        .get(&(prev.to_owned(), snap.to_owned()))
+                        .cloned()
+                        .unwrap_or(None)
+                },
+            );
+            if unknown > 0 {
+                report.warnings.push(format!(
+                    "churn selection unavailable for {unknown} snapshot pair(s); those rows cannot pass"
+                ));
+            }
             let mut human = format!(
                 "build report: {} rows, {} lane rows\n",
                 report.rows, report.lane_rows
@@ -131,7 +369,11 @@ pub fn run(command: Build, globals: &Globals) -> u8 {
             for (name, verdict) in &report.criteria {
                 human.push_str(&format!("{name}: {verdict:?}\n"));
             }
-            human.push_str("churn selection is unavailable; unknown rows cannot pass\n");
+            if unknown > 0 {
+                human.push_str(&format!(
+                    "churn selection unavailable for {unknown} snapshot pair(s); those rows cannot pass\n"
+                ));
+            }
             crate::emit(
                 &CommandResult::new(
                     "build report",
@@ -193,13 +435,34 @@ pub fn run(command: Build, globals: &Globals) -> u8 {
                 true,
             )
         }
-        Build::Maintain => fail(
-            "build maintain",
-            Outcome::Unavailable,
-            "BUILD_NOT_IMPLEMENTED",
-            "build maintenance is not yet integrated",
-            globals,
-        ),
+        Build::Maintain => {
+            let now =
+                UNIX_EPOCH + Duration::from_millis(provenant_run::build::ledger::now_unix_ms());
+            let outcome = provenant_run::build::hygiene::maintain(
+                state,
+                &resolved.home,
+                &resolved.project,
+                now,
+            );
+            let mut human = format!(
+                "build maintenance: {} (canary: {})\n",
+                if outcome.ran { "ran" } else { "skipped" },
+                outcome.canary
+            );
+            if let Some(warning) = &outcome.warning {
+                human.push_str(&format!("warning: {warning}\n"));
+            }
+            crate::emit(
+                &CommandResult::new(
+                    "build maintain",
+                    Outcome::Ok,
+                    serde_json::to_value(&outcome).unwrap_or_default(),
+                ),
+                globals,
+                &human,
+                true,
+            )
+        }
         Build::Status => unreachable!(),
     }
 }
