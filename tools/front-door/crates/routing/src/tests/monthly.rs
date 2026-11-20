@@ -219,7 +219,7 @@ fn monthly_pacing_is_account_eligibility_with_sourced_overrides()
 
 // Spec: docs/specs/routing.md#monthly-allowance-ledger
 #[test]
-fn local_monthly_estimates_pace_missing_stale_and_rolled_cycles()
+fn local_monthly_estimates_preserve_debt_without_holding_on_inferred_cycles()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
@@ -243,12 +243,13 @@ fn local_monthly_estimates_pace_missing_stale_and_rolled_cycles()
     for n in 0..10 {
         q.allowance.record_launch(&format!("local-{n}"), 90, 100)?;
     }
-    assert!(assess(at, Some(&q)).constrained);
-    assert!(assess(at, Some(&q)).detail.contains("estimated_bp=1000"));
+    assert!(!assess(at, Some(&q)).constrained);
+    assert_eq!(assess(at, Some(&q)).windows[0].estimated_basis_points, 1000);
     // A stale snapshot provides a cycle estimate without clearing local debt.
     q.snapshot = monthly_quota(model.as_str(), "local", 0).snapshot;
     let stale = assess(at, Some(&q));
-    assert!(stale.constrained);
+    assert!(!stale.constrained);
+    assert_eq!(stale.windows[0].estimated_basis_points, 1000);
     assert!(
         stale
             .detail
@@ -268,10 +269,18 @@ fn local_monthly_estimates_pace_missing_stale_and_rolled_cycles()
         q.allowance
             .record_launch(&format!("rolled-{n}"), rolled_at.unix_seconds() - 1, 100)?;
     }
-    assert!(assess(rolled_at, Some(&q)).constrained);
+    assert!(!assess(rolled_at, Some(&q)).constrained);
+    assert_eq!(
+        assess(rolled_at, Some(&q)).windows[0].estimated_basis_points,
+        1000
+    );
     // A provider clock error does not erase valid local launch debt.
     q.snapshot.observed_unix_seconds = rolled_at.unix_seconds() + 1;
-    assert!(assess(rolled_at, Some(&q)).constrained);
+    assert!(!assess(rolled_at, Some(&q)).constrained);
+    assert_eq!(
+        assess(rolled_at, Some(&q)).windows[0].estimated_basis_points,
+        1000
+    );
     // Scope mismatches cannot borrow another account's cycle or launches.
     q.snapshot.account.account_key = "other".into();
     let mismatched = assess(at, Some(&q));

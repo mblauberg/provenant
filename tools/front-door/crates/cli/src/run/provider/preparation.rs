@@ -5166,11 +5166,14 @@ pub(super) fn prepare_candidates_inner(
         apply_sandbox_mode(task, sandbox.clone(), &mut spec.env, &mut provider);
         let allowance_policies =
             provenant_providers::scheduling_policies(&config.domains.quota, provider_registry);
+        let mut pacing_config = config.domains.routing.clone();
+        crate::route::resolve_pacing_accounts(&mut pacing_config, &config.domains.accounts)
+            .map_err(|error| error.to_string())?;
         match crate::quota::reserve_allowance_launch(
             roots,
             &route,
             &paths.attempt_id.to_string(),
-            &config.domains.routing,
+            &pacing_config,
             &catalogue,
             &allowance_policies,
             provenant_os::clock::SystemClock::new()
@@ -5179,6 +5182,29 @@ pub(super) fn prepare_candidates_inner(
         ) {
             Ok(Some(warning)) => provider.launch_warnings.push(format!("warning: {warning}")),
             Ok(None) => (),
+            Err(crate::quota::EdgeError::MonthlyPacing(detail)) => {
+                let mut skipped = skip(&label, SkipKind::Unavailable, "monthly pacing reserve");
+                skipped.set_cause(provenant_records::RouteExclusionReason::PacingReserve);
+                skipped.detail = provenant_records::diagnostic::safe_text(&detail);
+                if let Some(key) = route.account_key.as_deref() {
+                    let account = entries
+                        .iter()
+                        .find(|entry| entry.adapter == route.adapter && entry.key == key)
+                        .map_or_else(
+                            || "unregistered account".to_owned(),
+                            |entry| entry.label.clone(),
+                        );
+                    skipped
+                        .skipped_accounts
+                        .push(provenant_records::SkippedAccount {
+                            extra: Default::default(),
+                            account,
+                            reason: provenant_records::RouteExclusionReason::PacingReserve,
+                        });
+                }
+                reasons.push(skipped);
+                continue;
+            }
             Err(error) => {
                 reasons.push(skip(&label, SkipKind::Unavailable, error.to_string()));
                 continue;

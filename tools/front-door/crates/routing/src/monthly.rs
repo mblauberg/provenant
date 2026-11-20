@@ -138,10 +138,6 @@ pub fn monthly_allowance_assessment(
         });
     }
     let now = now.unix_seconds();
-    let unregistered_local = account.is_some_and(|key| {
-        provenant_records::AdapterSpec::get(model.adapter())
-            .is_some_and(|spec| spec.local_login && spec.local_account.1 == key)
-    });
     let scoped = observation.filter(|q| {
         q.model == *model
             && q.snapshot.account.adapter == model.adapter()
@@ -194,8 +190,8 @@ pub fn monthly_allowance_assessment(
         });
         let estimated = estimated.max(recorded);
         let next = estimated.saturating_add(cost);
-        // An inferred cycle cannot establish a registered account hold.
-        let constrained = unregistered_local && estimated > 0 && next > budget;
+        // Inferred cycles rank candidates but cannot establish a reserve hold.
+        let constrained = false;
         Some(MonthlyAllowanceAssessment {
             active: true,
             windows: vec![MonthlyBudget {
@@ -219,7 +215,14 @@ pub fn monthly_allowance_assessment(
             constrained,
             initial_launch_cost_basis_points: settings.initial_launch_cost_basis_points,
             detail: format!(
-                "{prefix}; monthly cycle evidence missing, stale or incomplete; estimated cycle: {cycle_source}; usage source: {}; reset={reset} duration={duration} estimated_bp={estimated} next_launch_bp={next} budget_bp={budget} elapsed_bp={elapsed} cost_bp={cost} ledger_launches={launches}{}",
+                "{prefix}; monthly cycle evidence missing, stale or incomplete; window={}; estimated cycle: {cycle_source}; usage source: {}; reset={reset} duration={duration} estimated_bp={estimated} next_launch_bp={next} budget_bp={budget} elapsed_bp={elapsed} cost_bp={cost} ledger_launches={launches}{}",
+                scoped
+                    .and_then(|q| q
+                        .snapshot
+                        .windows
+                        .iter()
+                        .find(|w| provenant_quota::monthly_window(w) && serves_pool(&w.pool)))
+                    .map_or("monthly", |w| w.pool.as_str()),
                 if scoped
                     .and_then(|q| q.snapshot.details.as_ref())
                     .and_then(|d| d.source.as_deref())

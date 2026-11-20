@@ -257,12 +257,15 @@ the chair.
 ## Monthly allowance ledger
 
 `monthly_allowance_assessment` caps next-launch spend at elapsed cycle fraction
-plus burst, respecting model-pool scope. Missing registered cycles use available
-usage and a remembered or UTC calendar cycle estimate, with a sourced policy
-warning rather than a hold based on uncertainty. Local logins also pace recorded
-launch debt against estimated cycles; these estimates do not grant readiness.
+plus burst, respecting model-pool scope. Missing cycles use available usage and
+a remembered or UTC calendar cycle estimate, with a sourced policy warning rather
+than a hold based on uncertainty. This includes local logins; their recorded launch
+debt remains in the estimate. These estimates do not grant readiness.
 A confirmed reserve hold names the route, account label, window and sourced
-setting in route resolution and refused launch summaries. Unregistered opaque
+setting in route resolution and refused launch summaries. Final reservation resolves
+account labels and keys through the same pacing configuration as route selection.
+An executable-only OpenCode observation has no model offer list; absent readiness
+warns and does not refuse an otherwise eligible observed account. Unregistered opaque
 account keys remain private.
 
 `AllowanceLedger` retains costs across policy and cycle-estimate changes.
