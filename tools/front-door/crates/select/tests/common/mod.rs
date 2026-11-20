@@ -14,9 +14,6 @@ use std::{
 };
 use tempfile::TempDir;
 
-/// A named program keeps the process-creation site explicit and out of the
-/// literal `Command::new("git")` guard in the workspace policy test.
-const GIT_PROGRAM: &str = "git";
 const CARGO_PROGRAM: &str = "cargo";
 
 /// A clock well after the Unix epoch, shared by fixtures and seeded state.
@@ -90,11 +87,8 @@ pub(super) fn commit(dir: &Path, message: &str) -> String {
 
 /// Runs a git command against the fixture, with lane bindings removed.
 pub(super) fn git(dir: &Path, args: &[&str]) -> Vec<u8> {
-    let output = Command::new(GIT_PROGRAM)
+    let output = provenant_os::fixture::git_command()
         .current_dir(dir)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
         .args([
             "-c",
             "user.name=Fixture",

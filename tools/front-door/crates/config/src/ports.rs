@@ -812,7 +812,13 @@ fn apply_layer(
 ) -> io::Result<()> {
     let file = match fs::File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || (source == PortSource::HostProject
+                    && error.kind() == io::ErrorKind::NotADirectory) =>
+        {
+            return Ok(());
+        }
         Err(error) => return Err(layer_error(path, "file", error)),
     };
     let mut bytes = Vec::new();
@@ -2086,6 +2092,10 @@ mod tests {
                 .values()
                 .all(|source| *source != PortSource::HostProject)
         );
+        std::fs::write(host.join("projects"), "not a directory").unwrap();
+        let table = PortTable::read_for(Some(&project), &host).unwrap();
+        assert_eq!(table.build.strategy, "lane");
+        assert_eq!(table.build.source, PortSource::Host);
     }
 
     #[test]

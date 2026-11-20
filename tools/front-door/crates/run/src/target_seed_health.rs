@@ -53,6 +53,7 @@ pub struct SeedHealth {
     pub age: Option<Duration>,
     pub last_refresh: Option<RefreshRecord>,
     pub stale_after: Duration,
+    pub stale_after_text: String,
     pub stale_after_source: String,
 }
 
@@ -71,8 +72,7 @@ impl SeedHealth {
         );
         let knob = format!(
             "build.seed.stale_after = {} (source: {})",
-            format_duration(self.stale_after),
-            self.stale_after_source
+            self.stale_after_text, self.stale_after_source
         );
         let repair = "run provenant worktree seed-build in this repository";
         let mut warnings = Vec::new();
@@ -110,15 +110,17 @@ impl SeedHealth {
 /// warns and falls back to 24h from the default; this never fails a lane.
 pub fn stale_after_policy(
     table: &provenant_config::PortTable,
-) -> (Duration, String, Option<String>) {
+) -> (Duration, String, String, Option<String>) {
     match table.build.seed.stale_after_duration() {
         Ok(duration) => (
             duration,
+            table.build.seed.stale_after.clone(),
             provenant_config::port_source_layer(table.build.source).to_owned(),
             None,
         ),
         Err(error) => (
             DEFAULT_STALE_AFTER,
+            "24h".to_owned(),
             "default".to_owned(),
             Some(format!(
                 "build.seed.stale_after could not be read ({error}); using 24h from default"
@@ -222,7 +224,7 @@ pub fn read_refresh(state: &Path, project_key: &str) -> Option<RefreshRecord> {
 
 /// Find the newest complete generation for `project_key`, using the same
 /// completeness test as the seed builder: a read-only directory carrying a
-/// `complete` marker and a manifest that names the project.
+/// `complete` marker and a deps-only manifest that names the project.
 pub fn newest_generation(state: &Path, project_key: &str) -> Option<GenerationAge> {
     let generations = crate::target_seed::store_path(state).join("generations");
     let entries = fs::read_dir(generations).ok()?;
@@ -248,7 +250,7 @@ pub fn newest_generation(state: &Path, project_key: &str) -> Option<GenerationAg
         else {
             continue;
         };
-        if manifest.project_key != project_key {
+        if manifest.project_key != project_key || manifest.contents != "deps" {
             continue;
         }
         let Some(modified) = fs::metadata(&marker)
@@ -281,6 +283,7 @@ pub fn seed_health(
     state: &Path,
     project_key: &str,
     stale_after: Duration,
+    stale_after_text: &str,
     stale_after_source: &str,
     now: WallTime,
 ) -> SeedHealth {
@@ -296,6 +299,7 @@ pub fn seed_health(
         age,
         last_refresh: read_refresh(state, project_key),
         stale_after,
+        stale_after_text: stale_after_text.to_owned(),
         stale_after_source: stale_after_source.to_owned(),
     }
 }
@@ -417,7 +421,18 @@ mod tests {
     }
 
     fn health(state: &Path, key: &str, stale_after: Duration) -> SeedHealth {
-        seed_health(state, key, stale_after, "project", now())
+        seed_health(state, key, stale_after, "24h", "project", now())
+    }
+
+    #[test]
+    fn health_preserves_configured_staleness_text() {
+        let state = tempfile::tempdir().unwrap();
+        let mut table = provenant_config::PortTable::builtin();
+        table.build.seed.stale_after = "48h".into();
+        let (duration, text, source, warning) = stale_after_policy(&table);
+        assert!(warning.is_none());
+        let health = seed_health(state.path(), "project", duration, &text, &source, now());
+        assert!(health.warnings()[0].contains("stale_after = 48h"));
     }
 
     #[test]
@@ -593,8 +608,15 @@ mod tests {
             "project-a",
             "100",
             at(Duration::from_secs(10 * 3600)),
-            false,
+            true,
         );
+        generation(state.path(), "project-a", "103", now(), false);
+        let full = generation(state.path(), "project-a", "104", now(), true);
+        let manifest_path = full.join("manifest.json");
+        let mut manifest: crate::target_seed::Manifest =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest.contents = "full".into();
+        fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         let newest = generation(
             state.path(),
             "project-a",

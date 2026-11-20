@@ -254,6 +254,7 @@ fn seed_diagnosis(
     state: &Path,
     project_key: &str,
     stale_after: Duration,
+    stale_after_text: &str,
     source: &str,
     policy_warning: Option<String>,
     now: provenant_core::WallTime,
@@ -263,6 +264,7 @@ fn seed_diagnosis(
         state,
         project_key,
         stale_after,
+        stale_after_text,
         source,
         now,
     );
@@ -293,7 +295,7 @@ fn seed_diagnosis(
         newest_age,
         last_refresh_outcome,
         last_refresh_reason,
-        stale_after: provenant_run::target_seed_health::format_duration(stale_after),
+        stale_after: health.stale_after_text.clone(),
         stale_after_source: source.to_owned(),
         warnings,
     }
@@ -418,7 +420,7 @@ fn execute(
                 Worktree::Doctor { path } => {
                     let mut diagnosis = worktrees::doctor(context, &path, cancel)?;
                     if let Ok(now) = SystemClock::new().wall_now() {
-                        let (stale_after, source, policy_warning) =
+                        let (stale_after, stale_after_text, source, policy_warning) =
                             match provenant_config::PortTable::read_for(
                                 Some(project.as_path()),
                                 roots.state.as_path(),
@@ -428,6 +430,7 @@ fn execute(
                                 }
                                 Err(error) => (
                                     provenant_run::target_seed_health::DEFAULT_STALE_AFTER,
+                                    "24h".to_owned(),
                                     "default".to_owned(),
                                     Some(format!(
                                         "build.seed.stale_after could not be read ({error}); using 24h from default"
@@ -440,6 +443,7 @@ fn execute(
                             roots.state.as_path(),
                             &key,
                             stale_after,
+                            &stale_after_text,
                             &source,
                             policy_warning,
                             now,
@@ -5197,6 +5201,7 @@ mod seed_diagnosis_tests {
             state.path(),
             key,
             Duration::from_secs(24 * 3_600),
+            "24h",
             "project",
             None,
             now,
