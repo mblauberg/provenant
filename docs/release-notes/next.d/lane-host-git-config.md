@@ -1,3 +1,0 @@
-## Behaviour changes
-### Git and safety
-- Lanes see the host Git configuration in full. Sandboxed lanes include and receive a read grant on the same host global Git configuration files as unsandboxed lanes, instead of filtering entries through an allowlist. Lanes no longer force `GIT_CONFIG_NOSYSTEM` or drop command-scope Git configuration (`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`, `GIT_CONFIG_VALUE_*`, `GIT_CONFIG_PARAMETERS`); the lane's own token helper entries are appended on top of the host configuration so pushing keeps working. The `domains.lanes.git_config_allow` knob and the launch receipt's `git_config` field are removed.

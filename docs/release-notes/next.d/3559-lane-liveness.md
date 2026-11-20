@@ -1,3 +1,0 @@
-## Fixes
-### Lanes and settlement
-- `status NAME --full` now reports an unsettled lane's last observed event time (naming whether it came from `output`, `started` or `queued`), host-local attempt directory, masked current admission-gated child command and known wait reason; a dead or unobservable writer gets a line too, a settled one does not. `child_command` is the admission-gated command, set only when the child went through the admission shim. Admission shims record a redacted, bounded argv when a lane waits for or holds a heavy-job slot, so the chair can tell a lane blocked in a repository lock from a hung writer. (#3559)
