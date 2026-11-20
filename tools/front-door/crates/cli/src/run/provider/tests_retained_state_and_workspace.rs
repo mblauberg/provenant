@@ -1109,6 +1109,7 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
     let custody_slot = PathBuf::from(provenant_confinement::worktrees::state_dir_name(&unowned));
     assert!(
         provenant_confinement::worktrees::owned_worktree_paths(&foreign_common, &[custody_slot])?
+            .paths
             .contains(&unowned)
     );
     assert!(

@@ -726,12 +726,23 @@ impl MandatoryRoots {
                 Err(error) if error.is_not_found() => Vec::new(),
                 Err(_) => return Err(inventory_error(&project_state, "writer custody inventory")),
             };
+            let listing = crate::worktrees::owned_worktree_paths(common, &slots)
+                .map_err(|_| inventory_error(common, "owned worktree inventory"))?;
             controls.extend(
-                crate::worktrees::owned_worktree_paths(common, &slots)
-                    .map_err(|_| inventory_error(common, "owned worktree inventory"))?
+                listing
+                    .paths
                     .into_iter()
                     .map(|path| (subtree(&path), false)),
             );
+            for issue in listing.issues {
+                warn_inventory(
+                    &mut warnings,
+                    &issue.path,
+                    "owned worktree inventory",
+                    &issue.reason,
+                );
+                controls.push((subtree(&issue.path), false));
+            }
         }
         for (root, git) in controls {
             let alias = resolve_boundary_path(&root.path)?;
@@ -868,6 +879,50 @@ mod tests {
         assert!(inventory.protected().contains(&grant));
         assert!(inventory.validate_extra_write(&grant).is_err());
         assert!(!inventory.host_writes().contains(&grant));
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_sibling_owner_record_is_protected_not_refused()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let roots = fixture_roots(&root)?;
+        let common = root.join("other/.git");
+        let registration = common.join("worktrees/sibling");
+        let sibling = root.join("sibling");
+        std::fs::create_dir_all(&registration)?;
+        std::fs::create_dir_all(&sibling)?;
+        provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(common)?)?;
+        std::fs::write(registration.join("provenant-owner.json"), b"{")?;
+        std::fs::write(
+            registration.join("gitdir"),
+            sibling.join(".git").as_os_str().as_encoded_bytes(),
+        )?;
+
+        let inventory = || {
+            MandatoryRoots::for_host_with_scratch_mode(
+                &roots,
+                &root.join("home"),
+                &root.join("source"),
+                &root.join("scratch"),
+                &provenant_core::CredentialRoots::for_home(&root.join("home")),
+                &[],
+                &[],
+                false,
+            )
+        };
+        let roots = inventory()?;
+        let grant = PathGrant {
+            path: sibling,
+            scope: PathScope::Subtree,
+        };
+        assert!(roots.protected().contains(&grant));
+        assert!(roots.validate_extra_write(&grant).is_err());
+        assert!(!roots.host_writes().contains(&grant));
+
+        std::fs::remove_file(registration.join("gitdir"))?;
+        assert!(inventory().is_err());
         Ok(())
     }
 

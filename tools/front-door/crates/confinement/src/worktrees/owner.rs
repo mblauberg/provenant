@@ -79,6 +79,19 @@ pub fn load_owner(worktree: &VerifiedWorktree) -> Result<Option<WorktreeOwner>, 
     Ok(Some(owner))
 }
 
+/// A checkout whose ownership record could not be read or validated.
+pub struct OwnedWorktreeIssue {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+/// Paths and named issues discovered while inventorying registrations.
+#[derive(Default)]
+pub struct OwnedWorktreeListing {
+    pub paths: Vec<PathBuf>,
+    pub issues: Vec<OwnedWorktreeIssue>,
+}
+
 /// Denial inventory from a host-registered Git common directory only. Read
 /// bounded ownership records and Git backlinks, without opening checkouts or
 /// probing their processes. `custody_slots` comes from the supervisor's validated
@@ -86,18 +99,18 @@ pub fn load_owner(worktree: &VerifiedWorktree) -> Result<Option<WorktreeOwner>, 
 pub fn owned_worktree_paths(
     common: &Path,
     custody_slots: &[PathBuf],
-) -> Result<Vec<PathBuf>, WorktreeError> {
+) -> Result<OwnedWorktreeListing, WorktreeError> {
     let directory = match Directory::open_anchor(common) {
         Ok(directory) => directory,
-        Err(error) if error.is_not_found() => return Ok(Vec::new()),
+        Err(error) if error.is_not_found() => return Ok(OwnedWorktreeListing::default()),
         Err(error) => return Err(error.into()),
     };
     let registrations = match directory.open_verified_directory(OsStr::new("worktrees")) {
         Ok(directory) => directory,
-        Err(error) if error.is_not_found() => return Ok(Vec::new()),
+        Err(error) if error.is_not_found() => return Ok(OwnedWorktreeListing::default()),
         Err(error) => return Err(error.into()),
     };
-    let mut paths = Vec::new();
+    let mut listing = OwnedWorktreeListing::default();
     for (count, name) in registrations.entries()?.enumerate() {
         if count >= MAX_WORKTREES {
             return Err(WorktreeError::InvalidOutput);
@@ -108,17 +121,16 @@ pub fn owned_worktree_paths(
         }
         let registration = registrations.open_verified_directory(&name)?;
         let owner = match read_bounded(&registration, OsStr::new(OWNER), MAX_STATE_RECORD) {
-            Ok(bytes) => Some(
-                serde_json::from_slice::<WorktreeOwner>(&bytes)
-                    .map_err(|_| WorktreeError::InvalidOutput)?,
-            ),
-            Err(error) if error.is_not_found() => None,
-            Err(error) => return Err(error.into()),
+            Ok(bytes) => serde_json::from_slice::<WorktreeOwner>(&bytes)
+                .map_err(|_| WorktreeError::InvalidOutput)
+                .and_then(|owner| {
+                    validate(&owner)?;
+                    Ok(Some(owner))
+                }),
+            Err(error) if error.is_not_found() => Ok(None),
+            Err(error) => Err(error.into()),
         };
-        if let Some(owner) = &owner {
-            validate(owner)?;
-        }
-        if owner.is_none() && custody_slots.is_empty() {
+        if matches!(owner, Ok(None)) && custody_slots.is_empty() {
             continue;
         }
         let bytes = read_bounded(&registration, OsStr::new("gitdir"), 4096)?;
@@ -132,11 +144,21 @@ pub fn owned_worktree_paths(
         let path = marker.parent().ok_or(WorktreeError::InvalidOutput)?;
         let canonical = crate::permissions::resolve_boundary_path(path)
             .map_err(|_| WorktreeError::InvalidOutput)?;
-        if owner.is_some() || custody_slots.contains(&PathBuf::from(state_dir_name(&canonical))) {
-            paths.push(path.to_owned());
+        match owner {
+            Err(error) => listing.issues.push(OwnedWorktreeIssue {
+                path: path.to_owned(),
+                reason: error.to_string(),
+            }),
+            Ok(owner)
+                if owner.is_some()
+                    || custody_slots.contains(&PathBuf::from(state_dir_name(&canonical))) =>
+            {
+                listing.paths.push(path.to_owned());
+            }
+            Ok(_) => {}
         }
     }
-    Ok(paths)
+    Ok(listing)
 }
 
 pub fn save_owner(worktree: &VerifiedWorktree, owner: &WorktreeOwner) -> Result<(), WorktreeError> {
