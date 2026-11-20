@@ -50,6 +50,12 @@ This repository keeps its source at `config/ports.json` and links the optional
 `scripts/verify-nextest` belong in that source (direct CI reads it without
 Provenant); the builtin verify tiers are neutral cargo commands.
 
+Each tier command is an object with `stack` (default empty), `cwd` (default
+`.` and relative to the effective verify workspace, without `..`) and a non-empty `argv`
+array. The whole elements `{packages}`, `{integration_args}` and
+`{quarantine_args}` expand to zero or more arguments; other elements are
+literal and are never shell split. Arrays replace across layers. Detected Rust-only tiers retain builtin selection, while tiers containing non-Rust commands select all and expand selection placeholders to nothing. An invalid tier command warns with its layer and tier, and that tier falls back to the next lower layer.
+
 The `build` port carries the shared seed-build interface. Its compiled defaults
 are `strategy = "lane_seed"`, `prepare = []`, `seed.stale_after = "24h"`,
 `wrapper.argv = []`, `command.argv = []`, `offload = "auto"`,
@@ -298,3 +304,23 @@ execution phases. Nested invocations within an admitted command detect the
 inherited slot lease and pass through without re-acquiring or deadlocking.
 Holders, waiters, elapsed wait durations, and admission classes are visible in
 `provenant status`.
+
+### Stack discovery
+
+`provenant config detect` reports read-only stack discovery, proposed commands and
+warnings. Rust discovery selects the nearest Cargo manifest with a workspace or
+package table, at most two directories below the root; equal-depth candidates
+warn and skip Rust. Node discovery reads only the root `package.json`: its
+`packageManager` takes precedence over pnpm, yarn, npm and bun lockfiles, and
+npm is the warned fallback. Only existing lint, typecheck, test and build scripts
+are proposed: lint and typecheck in tier 0, test in tier 1, and build in tier 2.
+Mixed tiers list Rust commands first, with each command's own
+project-relative working directory.
+
+`provenant config show --full` includes detected commands and effective build and
+verify tier leaves with their sources. `provenant config path --project` prints
+the host-project ports path and whether it exists. Detection never overrides
+configured values. Its default tier fills a gap below host, host-project and
+project layers. Detected commands replace the builtin commands for each detected
+tier; tiers without detected commands retain their builtin values. Host,
+host-project and project declarations override detected leaves.

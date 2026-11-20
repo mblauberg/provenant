@@ -1947,11 +1947,12 @@ impl LaunchConfinement {
         let Ok(now) = provenant_os::clock::SystemClock::new().wall_now() else {
             return;
         };
-        let (stale_after, source, policy_warning) =
+        let (stale_after, stale_after_text, source, policy_warning) =
             match provenant_config::PortTable::read_for(Some(worktree.path()), &self.state_root) {
                 Ok(table) => crate::target_seed_health::stale_after_policy(&table),
                 Err(error) => (
                     crate::target_seed_health::DEFAULT_STALE_AFTER,
+                    "24h".to_owned(),
                     "default".to_owned(),
                     Some(format!(
                         "build.seed.stale_after could not be read ({error}); using 24h from default"
@@ -1962,6 +1963,7 @@ impl LaunchConfinement {
             &self.state_root,
             project_key,
             stale_after,
+            &stale_after_text,
             &source,
             now,
         );
@@ -2544,7 +2546,8 @@ pub(crate) fn seed_both_cargo_targets(
 struct CargoTargetSetup<'a> {
     #[serde(flatten)]
     target: &'a crate::cargo_seed::Outcome,
-    lint_target: &'a crate::cargo_seed::Outcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lint_target: Option<&'a crate::cargo_seed::Outcome>,
 }
 
 pub(crate) fn record_cargo_setup_file(
@@ -2555,7 +2558,7 @@ pub(crate) fn record_cargo_setup_file(
 ) -> std::result::Result<(), String> {
     let bytes = serde_json::to_vec(&CargoTargetSetup {
         target: outcome,
-        lint_target: lint_outcome,
+        lint_target: (!lint_outcome.is_skipped()).then_some(lint_outcome),
     })
     .map_err(|error| error.to_string())?;
     directory
@@ -3765,7 +3768,13 @@ mod cargo_setup_tests {
     fn target_setup_record_reports_seed_outcomes_and_publication_failures() {
         let tmp = tempfile::tempdir().unwrap();
         let directory = Directory::open_anchor(tmp.path()).unwrap();
-        for reason in ["disabled", "read_only_lane"] {
+        for reason in [
+            "disabled",
+            "read_only_lane",
+            "project_target",
+            "custom_target",
+            "non_cargo_project",
+        ] {
             let outcome = crate::cargo_seed::Outcome::skipped(reason);
             record_cargo_setup_file(&directory, "cargo-target-setup.json", &outcome, &outcome)
                 .unwrap();
@@ -3775,8 +3784,7 @@ mod cargo_setup_tests {
             .unwrap();
             assert_eq!(record["status"], "skipped");
             assert_eq!(record["reason"], reason);
-            assert_eq!(record["lint_target"]["status"], "skipped");
-            assert_eq!(record["lint_target"]["reason"], reason);
+            assert!(record.get("lint_target").is_none());
         }
         // A fallback names the specific refusal; other outcomes carry no detail.
         let refusal = crate::cargo_seed::Outcome::fallback_detail(

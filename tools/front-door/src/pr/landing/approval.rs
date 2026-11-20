@@ -660,11 +660,13 @@ fn format_delta_only(
     };
     let kind = formatter_kind(command).unwrap_or_default();
     let mut argv: Vec<String> = command
-        .split_whitespace()
+        .argv
+        .iter()
+        .map(String::as_str)
         .filter(|part| {
             !matches!(
                 *part,
-                "{packages}" | "{integration_args}" | "--check" | "--"
+                "{packages}" | "{integration_args}" | "{quarantine_args}" | "--check" | "--"
             )
         })
         .map(str::to_owned)
@@ -695,7 +697,7 @@ fn format_delta_only(
         }
         _ => return false,
     }
-    let workspace = |root: &std::path::Path| root.join(&ports.verify.workspace);
+    let workspace = |root: &std::path::Path| root.join(&ports.verify.workspace).join(&command.cwd);
     let root = match crate::scratch_dir::ScratchDir::new_in(
         &std::env::temp_dir(),
         "provenant-approval-format-",
@@ -777,8 +779,8 @@ fn format_delta_only(
     same
 }
 
-fn formatter_kind(command: &str) -> Option<&'static str> {
-    let parts: Vec<_> = command.split_whitespace().collect();
+fn formatter_kind(command: &provenant_config::TierCommand) -> Option<&'static str> {
+    let parts: Vec<_> = command.argv.iter().map(String::as_str).collect();
     if parts.contains(&"fmt")
         && parts
             .first()
@@ -1131,23 +1133,36 @@ mod tests {
         run_git(&["init", "-q", "--initial-branch=main"])?;
         run_git(&["config", "user.name", "Fixture"])?;
         run_git(&["config", "user.email", "fixture@example.invalid"])?;
+        let workspace = project.join("workspace");
+        std::fs::create_dir_all(&workspace)
+            .map_err(|error| LandingError::Failed(error.to_string()))?;
         std::fs::write(
-            project.join("Cargo.toml"),
+            workspace.join("Cargo.toml"),
             "[package]\nname='format-fixture'\nversion='0.1.0'\nedition='2021'\n",
         )
         .map_err(|error| LandingError::Failed(error.to_string()))?;
-        std::fs::create_dir_all(project.join("src"))
+        std::fs::create_dir_all(workspace.join("src"))
             .map_err(|error| LandingError::Failed(error.to_string()))?;
-        std::fs::write(project.join("src/lib.rs"), "pub fn value( ){let n=1;n}\n")
+        std::fs::write(workspace.join("src/lib.rs"), "pub fn value( ){let n=1;n}\n")
             .map_err(|error| LandingError::Failed(error.to_string()))?;
         let mut ports = provenant_config::PortTable::builtin();
-        ports.verify.workspace = std::path::PathBuf::from(".");
+        ports.verify.workspace = std::path::PathBuf::from("workspace");
         ports
             .verify
             .tiers
             .get_mut("0")
             .ok_or_else(|| LandingError::Failed("built-in verify tier is missing".into()))?
-            .commands = vec!["cargo fmt --all".into()];
+            .commands = vec![provenant_config::TierCommand {
+            stack: "rust".into(),
+            cwd: ".".into(),
+            argv: vec![
+                "cargo".into(),
+                "fmt".into(),
+                "{packages}".into(),
+                "--".into(),
+                "--check".into(),
+            ],
+        }];
         let ports_dir = project.join(".provenant");
         std::fs::create_dir_all(&ports_dir)
             .and_then(|()| {
@@ -1157,14 +1172,19 @@ mod tests {
                 )
             })
             .map_err(|error| LandingError::Failed(error.to_string()))?;
-        run_git(&["add", "Cargo.toml", "src/lib.rs", ".provenant/ports.json"])?;
+        run_git(&[
+            "add",
+            "workspace/Cargo.toml",
+            "workspace/src/lib.rs",
+            ".provenant/ports.json",
+        ])?;
         run_git(&["commit", "-qm", "approved"])?;
         let approved = run_git(&["rev-parse", "HEAD"])?;
         let cargo = std::env::var_os("CARGO")
             .and_then(|path| path.into_string().ok())
             .unwrap_or_else(|| "cargo".into());
         let formatted = crate::pr::execute_for(
-            &project,
+            &workspace,
             &[&cargo, "fmt", "--all"],
             std::time::Duration::from_secs(300),
             false,
@@ -1173,7 +1193,7 @@ mod tests {
         if formatted.termination != provenant_os::exec::Termination::Exit(0) {
             return Err(LandingError::Failed("fixture cargo fmt failed".into()));
         }
-        run_git(&["add", "src/lib.rs"])?;
+        run_git(&["add", "workspace/src/lib.rs"])?;
         run_git(&["commit", "-qm", "format"])?;
         let current = run_git(&["rev-parse", "HEAD"])?;
         let sources = [ApprovalSource::Forge];
@@ -1218,11 +1238,11 @@ mod tests {
         );
 
         std::fs::write(
-            project.join("src/lib.rs"),
+            workspace.join("src/lib.rs"),
             "pub fn value() { let n = 1; n }\npub fn logic() -> bool { true }\n",
         )
         .map_err(|error| LandingError::Failed(error.to_string()))?;
-        run_git(&["add", "src/lib.rs"])?;
+        run_git(&["add", "workspace/src/lib.rs"])?;
         run_git(&["commit", "-qm", "logic"])?;
         let logic = run_git(&["rev-parse", "HEAD"])?;
         repo.parents.insert(logic.clone(), vec![current.clone()]);
@@ -1257,7 +1277,11 @@ mod tests {
             tier.commands
                 .retain(|command| super::formatter_kind(command).is_none());
             if tier.commands.is_empty() {
-                tier.commands.push("true".into());
+                tier.commands.push(provenant_config::TierCommand {
+                    stack: String::new(),
+                    cwd: ".".into(),
+                    argv: vec!["true".into()],
+                });
             }
         }
         std::fs::write(

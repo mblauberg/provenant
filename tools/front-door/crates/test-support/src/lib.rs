@@ -7,6 +7,41 @@ use std::{
 
 use provenant_core::{PathResolver, RootInputs};
 
+/// Run native Git in an isolated fixture, without inherited lane bindings.
+#[allow(clippy::disallowed_methods)]
+pub fn git_command() -> std::process::Command {
+    let program = [
+        "/opt/homebrew/bin/git",
+        "/usr/local/bin/git",
+        "/opt/local/bin/git",
+        "/Library/Developer/CommandLineTools/usr/bin/git",
+        "/usr/bin/git",
+        "/bin/git",
+    ]
+    .into_iter()
+    .find(|path| Path::new(path).is_file())
+    .unwrap_or("/usr/bin/git");
+    let mut command = std::process::Command::new(program);
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("GIT_")
+            || key == provenant_core::consumer_env::GIT
+            || key == provenant_core::consumer_env::WORKTREE_GITDIR
+        {
+            command.env_remove(key);
+        }
+    }
+    command.envs([
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_COUNT", "2"),
+        ("GIT_CONFIG_KEY_0", "commit.gpgsign"),
+        ("GIT_CONFIG_VALUE_0", "false"),
+        ("GIT_CONFIG_KEY_1", "core.hooksPath"),
+        ("GIT_CONFIG_VALUE_1", "/dev/null"),
+    ]);
+    command
+}
+
 static SKIP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Keep the fixture's state outside both its home and its checkout. A state

@@ -146,7 +146,9 @@ def main():
     selection = tier["selection"]
     touched, integrations = [], []
     if selection in ("packages", "integrations"):
-        metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=workspace, env=child_environment(), text=True))
+        rust_command = next((command for command in templates if command.get("stack") == "rust"), None)
+        metadata_cwd = workspace / rust_command.get("cwd", ".") if rust_command else workspace
+        metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=metadata_cwd, env=child_environment(), text=True))
         packages = [{"name": p["name"], "manifest_path": str(Path(p["manifest_path"]).relative_to(root))} for p in metadata["packages"] if p["id"] in metadata["workspace_members"]]
         paths = changed_paths(root, cfg["base"])
         touched, integrations = select(
@@ -158,7 +160,7 @@ def main():
     if (selection == "packages" and not touched) or (selection == "integrations" and not integrations):
         print(f"No matching tests selected. result: host=local tier={args.tier} commit={commit} exit_status=0")
         return 0
-    packages_arg = " ".join(f"-p {shlex.quote(name)}" for name in touched)
+    packages_arg = [arg for name in touched for arg in ("-p", name)]
     if not templates:
         print(f"{args.tier} has no configured commands", file=sys.stderr)
         return 2
@@ -170,8 +172,11 @@ def main():
             return 2
         env["VERIFY_TIER_TEST_THREADS"] = str(threads)
         env["RUST_TEST_THREADS"] = str(threads)
-    quarantine_args = ""
-    if any("{quarantine_args}" in template for template in templates):
+    whole_non_rust = selection == "all" and any(
+        command.get("stack") and command["stack"] != "rust" for command in templates
+    )
+    quarantine_args = []
+    if not whole_non_rust and any("{quarantine_args}" in template["argv"] for template in templates):
         command = cfg.get("quarantine_command") or ["true"]
         try:
             quarantine = subprocess.check_output(command, cwd=root, env=child_environment(), text=True).strip()
@@ -179,15 +184,15 @@ def main():
             print(f"quarantine command failed: {error}", file=sys.stderr)
             return 2
         if quarantine:
-            quarantine_args = "-E " + shlex.quote(f"not ({quarantine})")
+            quarantine_args = ["-E", f"not ({quarantine})"]
     for template in templates:
-        targets = integrations if "{integration_args}" in template else [None]
+        targets = integrations if "{integration_args}" in template["argv"] and not whole_non_rust else [None]
         for target in targets:
-            target_args = (f"-p {shlex.quote(target[0])} --test {shlex.quote(target[1])}" if target else "")
-            command_text = template.replace("{packages}", packages_arg).replace("{integration_args}", target_args).replace("{quarantine_args}", quarantine_args)
-            command = shlex.split(command_text)
+            target_args = ["-p", target[0], "--test", target[1]] if target else []
+            expansions = {"{packages}": packages_arg, "{integration_args}": target_args, "{quarantine_args}": quarantine_args}
+            command = [part for arg in template["argv"] for part in expansions.get(arg, [arg])]
             print(f"+ {shlex.join(command)}", flush=True)
-            status = subprocess.run(command, cwd=workspace, env=env).returncode
+            status = subprocess.run(command, cwd=workspace / template.get("cwd", "."), env=env).returncode
             if status:
                 print(f"result: host=local tier={args.tier} commit={commit} exit_status={status}", flush=True)
                 return status
