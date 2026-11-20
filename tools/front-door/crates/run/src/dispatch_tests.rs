@@ -265,7 +265,7 @@ impl Providers for Fake {
                 TerminalCause::DiskFloor,
                 "insufficient disk space; run `provenant gc`",
             );
-            refusal.resource = self.policy_resource;
+            refusal.resource = self.policy_resource.clone();
             return Err(refusal);
         }
         Ok(())

@@ -22,8 +22,8 @@ mod schema;
 pub use cache_budget::resolve as cargo_cache_budget;
 pub use cache_budget::{CargoCacheBudget, KNOB as CARGO_CACHE_MAX_KNOB};
 pub use gc::{
-    ByteObservation, CargoBuildProfile, DISK_FLOOR, DiskGate, DiskLevel, DiskLimits,
-    ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold,
+    ByteObservation, CARGO_DEBUG_LEVELS, CargoBuildProfile, DISK_FLOOR, DiskGate, DiskLevel,
+    DiskLimits, ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold,
     PROJECT_WRITER_LANES_CEILING, ProjectGcSettings, RETENTION_CLASSES, RemoteBranches,
     RetentionAdapter, RetentionBytes, RetentionClass, RetentionCollector, RetentionEligibility,
     RetentionIssue, RetentionKind, RetentionMeasurements, RetentionOwner, RetentionTrigger,
@@ -113,8 +113,8 @@ pub use project_binding::{
 };
 pub use provenant_records::Finding;
 pub use schema::{
-    DEDICATED_COMMANDS, DeclaredEnum, Layer, Schema, SchemaField, apply_patch, declared_enums,
-    dedicated_command, probe_field, schema,
+    DEDICATED_COMMANDS, DeclaredEnum, Layer, Schema, SchemaField, apply_edit, apply_patch,
+    declared_enums, dedicated_command, probe_field, schema,
 };
 
 use serde::Serialize;

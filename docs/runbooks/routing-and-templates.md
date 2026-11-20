@@ -25,10 +25,9 @@ and clear the override when it is no longer needed.
 
 Monthly allowance accounts default to a 10 percentage point burst above elapsed
 cycle time. The local launch ledger keeps estimates current while provider
-billing lags. A missing or stale registered-account cycle is constrained. Local
-logins estimate the cycle from a remembered reset and duration rolled forward,
-or the calendar month in UTC. Their local launches still consume the estimated
-budget. Inspect settings, estimates, budgets, sources and knobs with
+billing lags. Missing or stale cycles use a remembered reset and duration rolled
+forward, or the calendar month in UTC. Recorded launches remain in the estimate;
+an inferred cycle warns rather than holding the account. Inspect settings, estimates, budgets, sources and knobs with
 `provenant route list` (or `--json`).
 
 Override the global defaults, or a single account, in the selected config:
@@ -78,8 +77,9 @@ Monthly windows are recognised by billing-cycle/monthly/thirty-day pool names
 or 28–31 day durations. An adapter's monthly-allowance declaration, account
 monthly profile or remembered monthly ledger also requires evidence when a
 snapshot omits its cycle. Missing, stale, future-dated, reset or incomplete
-registered-account cycles are constrained; local login estimates name their
-cycle source and pace the recorded launches. Other windows retain their existing treatment, and
+cycles use available usage and an inferred cycle, with a sourced policy warning
+rather than a hold based on uncertainty. Local login estimates name their cycle
+source and retain recorded launches. Other windows retain their existing treatment, and
 monthly windows respect model-pool scope. Profiles can select other windows
 with `windows`. The launch journal spans one account's models and pools; its
 booked costs estimate usage rather than measure actual individual costs or

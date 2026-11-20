@@ -380,7 +380,7 @@ pub(super) fn resolve_account_reference(
 }
 
 // Resolve configured labels once, so all routing paths use the same account keys.
-pub(super) fn resolve_pacing_accounts(
+pub(crate) fn resolve_pacing_accounts(
     config: &mut provenant_routing::RoutingConfig,
     settings: &provenant_providers::accounts::Settings,
 ) -> Result<(), EdgeError> {

@@ -188,7 +188,7 @@ pub(super) struct ContinuationState<'a> {
 impl ContinuationError {
     pub(crate) fn resource_fact(&self) -> Option<provenant_records::diagnostic::ResourceFact> {
         match self {
-            Self::StateCopy(error) => error.resource,
+            Self::StateCopy(error) => error.resource.clone(),
             _ => None,
         }
     }
@@ -834,7 +834,7 @@ fn copy_state_classified(
                 let typed_error = StateCopyError {
                     message: error.message.clone(),
                     class: error.class,
-                    resource: error.resource,
+                    resource: error.resource.clone(),
                 };
                 return Err(enforcement.boundary_error(
                     code,
@@ -847,7 +847,7 @@ fn copy_state_classified(
             setting,
             available_bytes,
             ..
-        }) = error.resource
+        }) = error.resource.clone()
         else {
             return result;
         };
@@ -962,7 +962,7 @@ fn copy_state_bounded(
         return Err(StateCopyError {
             message: format!("{refusal}; removing its staged copy: {error}"),
             class: refusal.class,
-            resource: refusal.resource,
+            resource: refusal.resource.clone(),
         });
     }
     copied

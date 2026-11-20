@@ -411,8 +411,8 @@ def generate(root, binary=None):
                          for section in data.values()):
                     raise ValueError("policy behaviour and enum declarations are unavailable")
                 files[name] = render(data)
-            except (ValueError, KeyError, TypeError, AttributeError):
-                gap(name, f"{source} has no supported machine-readable schema")
+            except (ValueError, KeyError, TypeError, AttributeError) as error:
+                gap(name, f"{source} has no supported machine-readable schema: {error}")
         else:
             gap(name, f"{source} is missing")
 

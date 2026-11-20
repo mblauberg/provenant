@@ -157,7 +157,7 @@ fn uniform_candidate_resource(
     if count == 0 || resources.len() != count {
         return None;
     }
-    let mut facts = resources.values().copied();
+    let mut facts = resources.values().cloned();
     let first = facts.next()?;
     facts.all(|fact| fact == first).then_some(first)
 }
@@ -171,7 +171,7 @@ fn attach_candidate_guard_facts(
         reason
             .set_guard_facts(
                 boundaries.get(&index).copied(),
-                resources.get(&index).copied(),
+                resources.get(&index).cloned(),
             )
             .map_err(|error| PrepareError::Other(error.to_string()))?;
     }
@@ -179,26 +179,31 @@ fn attach_candidate_guard_facts(
 }
 
 fn resolve_pacing_source(
-    fact: provenant_records::diagnostic::ResourceFact,
+    mut fact: provenant_records::diagnostic::ResourceFact,
     adapter: &str,
     origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
 ) -> provenant_records::diagnostic::ResourceFact {
     use provenant_records::diagnostic::{PacingReserveSetting, PacingSettingSource, ResourceFact};
     let ResourceFact::PacingReserve {
-        percent,
         setting,
-        origin: PacingSettingSource::Unresolved,
-    } = fact
+        origin,
+        hold,
+        ..
+    } = &mut fact
     else {
         return fact;
     };
+    if *origin != PacingSettingSource::Unresolved {
+        return fact;
+    }
     let field = match setting {
         PacingReserveSetting::AdapterFiveHour => "five_hour_percent",
         PacingReserveSetting::AdapterSevenDay => "seven_day_percent",
         _ => return fact,
     };
     let key = format!("domains.routing.pacing_reserve.{adapter}.{field}");
-    let origin = if matches!(
+    debug_assert_eq!(hold.setting_path, key);
+    *origin = if matches!(
         origins.get(&key),
         Some(provenant_config::Origin::User { .. })
     ) {
@@ -206,11 +211,7 @@ fn resolve_pacing_source(
     } else {
         PacingSettingSource::ShippedDefault
     };
-    ResourceFact::PacingReserve {
-        percent,
-        setting,
-        origin,
-    }
+    fact
 }
 
 pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Option<String> {
@@ -980,7 +981,7 @@ impl PrepareError {
                 let policy_code = continuation_rule.or_else(|| {
                     policy_code_for_boundary(boundary_class)
                         .map(str::to_owned)
-                        .or_else(|| policy_code_for_resource(candidate_resource))
+                        .or_else(|| policy_code_for_resource(candidate_resource.clone()))
                 });
                 let host_message = candidate_refusal_message(&skipped_routes, fallback_outcome);
                 let message = host_message.clone().unwrap_or(message);
@@ -1438,7 +1439,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         limit: 3,
         origin: provenant_records::diagnostic::SettingSource::Configuration,
     };
-    resources.insert(0, fact);
+    resources.insert(0, fact.clone());
     assert_eq!(uniform_candidate_resource(1, &resources), Some(fact));
     assert_eq!(uniform_candidate_resource(2, &resources), None);
 }
@@ -1742,7 +1743,7 @@ impl PlanCheckError {
         refusal.boundary_class = boundary;
         refusal.policy_code = self.policy_code().map(str::to_owned);
         refusal.terminal_note = Some(skipped.detail.clone());
-        refusal.resource = skipped.guard_resource;
+        refusal.resource = skipped.guard_resource.clone();
         refusal.skipped_routes.push(skipped);
         if let Self::ReadOnly(ReadOnlyPlanError::ProjectBindingDirectory(diagnostic)) = self {
             refusal.terminal_cause =
@@ -3852,7 +3853,7 @@ pub(super) fn prepare_candidates_inner(
             if matches!(
                 reason,
                 provenant_records::RouteExclusionReason::PacingReserve
-            ) && let Some(fact) = route.diagnostics.pacing_reserve_fact
+            ) && let Some(fact) = route.diagnostics.pacing_reserve_fact.clone()
                 && matches!(
                     fact,
                     provenant_records::diagnostic::ResourceFact::PacingReserve { .. }
@@ -3869,7 +3870,49 @@ pub(super) fn prepare_candidates_inner(
                 provenant_routing::exclusion_detail(reason),
             );
             skipped.set_cause(reason.clone());
-            reasons.push(name_skipped_accounts(skipped, &route, &entries));
+            if reason == &provenant_records::RouteExclusionReason::PacingReserve {
+                skipped = name_skipped_accounts(skipped, &route, &entries);
+                if let Some(account_key) = route.account_key.as_deref() {
+                    let account = entries
+                        .iter()
+                        .find(|entry| entry.adapter == route.adapter && entry.key == account_key)
+                        .map_or_else(
+                            || "unregistered account".to_owned(),
+                            |entry| entry.label.clone(),
+                        );
+                    if !skipped
+                        .skipped_accounts
+                        .iter()
+                        .any(|skipped| skipped.account == account)
+                    {
+                        skipped
+                            .skipped_accounts
+                            .push(provenant_records::SkippedAccount {
+                                extra: Default::default(),
+                                account,
+                                reason: reason.clone(),
+                            });
+                    }
+                }
+                let monthly_details = route
+                    .diagnostics
+                    .account_exclusions
+                    .iter()
+                    .filter_map(|detail| {
+                        detail
+                            .split_once("monthly policy=")
+                            .map(|(_, monthly)| format!("monthly policy={monthly}"))
+                    })
+                    .collect::<Vec<_>>();
+                if !monthly_details.is_empty() {
+                    skipped.detail.push_str("; ");
+                    skipped.detail.push_str(&monthly_details.join("; "));
+                }
+            }
+            if reason != &provenant_records::RouteExclusionReason::PacingReserve {
+                skipped = name_skipped_accounts(skipped, &route, &entries);
+            }
+            reasons.push(skipped);
             continue;
         }
         if let Err(error) =
@@ -5133,11 +5176,14 @@ pub(super) fn prepare_candidates_inner(
         apply_sandbox_mode(task, sandbox.clone(), &mut spec.env, &mut provider);
         let allowance_policies =
             provenant_providers::scheduling_policies(&config.domains.quota, provider_registry);
+        let mut pacing_config = config.domains.routing.clone();
+        crate::route::resolve_pacing_accounts(&mut pacing_config, &config.domains.accounts)
+            .map_err(|error| error.to_string())?;
         match crate::quota::reserve_allowance_launch(
             roots,
             &route,
             &paths.attempt_id.to_string(),
-            &config.domains.routing,
+            &pacing_config,
             &catalogue,
             &allowance_policies,
             provenant_os::clock::SystemClock::new()
@@ -5146,6 +5192,29 @@ pub(super) fn prepare_candidates_inner(
         ) {
             Ok(Some(warning)) => provider.launch_warnings.push(format!("warning: {warning}")),
             Ok(None) => (),
+            Err(crate::quota::EdgeError::MonthlyPacing(detail)) => {
+                let mut skipped = skip(&label, SkipKind::Unavailable, "monthly pacing reserve");
+                skipped.set_cause(provenant_records::RouteExclusionReason::PacingReserve);
+                skipped.detail = provenant_records::diagnostic::safe_text(&detail);
+                if let Some(key) = route.account_key.as_deref() {
+                    let account = entries
+                        .iter()
+                        .find(|entry| entry.adapter == route.adapter && entry.key == key)
+                        .map_or_else(
+                            || "unregistered account".to_owned(),
+                            |entry| entry.label.clone(),
+                        );
+                    skipped
+                        .skipped_accounts
+                        .push(provenant_records::SkippedAccount {
+                            extra: Default::default(),
+                            account,
+                            reason: provenant_records::RouteExclusionReason::PacingReserve,
+                        });
+                }
+                reasons.push(skipped);
+                continue;
+            }
             Err(error) => {
                 reasons.push(skip(&label, SkipKind::Unavailable, error.to_string()));
                 continue;

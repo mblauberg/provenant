@@ -3,7 +3,7 @@ use provenant_quota::AllowanceLedger;
 
 // Spec: docs/specs/routing.md#monthly-allowance-ledger
 #[test]
-fn monthly_admission_caps_next_launch_and_constrains_missing_evidence()
+fn monthly_admission_caps_next_launch_and_warns_on_missing_evidence()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
@@ -27,7 +27,7 @@ fn monthly_admission_caps_next_launch_and_constrains_missing_evidence()
     debt.snapshot.observed_unix_seconds = 90; // A fresh but unchanged provider report.
     debt.allowance.observe(&debt.snapshot);
     assert!(assess(Some(&debt)).constrained);
-    assert!(assess(None).constrained);
+    assert!(!assess(None).constrained);
     for mutate in [
         |q: &mut QuotaObservation| q.expires_unix_seconds = 100,
         |q: &mut QuotaObservation| q.snapshot.observed_unix_seconds = 101,
@@ -42,7 +42,7 @@ fn monthly_admission_caps_next_launch_and_constrains_missing_evidence()
     ] {
         let mut invalid = q.clone();
         mutate(&mut invalid);
-        assert!(assess(Some(&invalid)).constrained);
+        assert!(!assess(Some(&invalid)).constrained);
     }
     // Elapsed time, not probe frequency, releases more budget.
     let mut later = debt.clone();
@@ -74,7 +74,7 @@ fn monthly_admission_caps_next_launch_and_constrains_missing_evidence()
     let cycle_end = provenant_core::WallTime::from_unix_seconds(30 * 86400)?;
     later.expires_unix_seconds = 60 * 86400;
     assert!(
-        monthly_allowance_assessment(
+        !monthly_allowance_assessment(
             &catalogue,
             &config,
             cycle_end,
@@ -136,6 +136,13 @@ fn monthly_pacing_is_account_eligibility_with_sourced_overrides()
             free: false,
         }],
     );
+    config.launch_policy.overlay(
+        &std::collections::BTreeMap::from([(
+            "PACING_ACCOUNT".into(),
+            provenant_records::policy::Strength::Warn,
+        )]),
+        provenant_records::policy::Source::Dispatch,
+    );
     let accounts = ["a", "b"].map(|key| AvailabilityRecord {
         adapter: "cursor".into(),
         account_key: Some(key.into()),
@@ -147,11 +154,10 @@ fn monthly_pacing_is_account_eligibility_with_sourced_overrides()
         disclosure_ref: "policy",
         confinement_ref: "grant",
     }];
-    let mut observations = [
+    let observations = [
         monthly_quota(model, "a", 3000),
         monthly_quota(model, "b", 0),
     ];
-    observations[0].allowance = AllowanceLedger::default();
     let mut ctx = context(&catalogue, &config, now()?);
     ctx.availability = &accounts;
     ctx.access = &access;
@@ -166,11 +172,85 @@ fn monthly_pacing_is_account_eligibility_with_sourced_overrides()
             ..
         }
     ));
+    // Without cycle evidence, the account remains eligible and the assessment
+    // explains which inferred cycle and usage source underpin pacing.
+    let missing = monthly_allowance_assessment(
+        &catalogue,
+        &config,
+        now()?,
+        &ModelId::parse(model)?,
+        Some("a"),
+        None,
+    )
+    .unwrap();
+    assert!(!missing.constrained);
+    assert!(
+        missing
+            .detail
+            .contains("estimated cycle: calendar month UTC")
+    );
+    assert!(missing.detail.contains("usage source:"));
+    ctx.quota = &[];
+    let uncertain = resolve_for_account(&request(model)?, &ctx, Some("a"))?;
+    assert!(!matches!(
+        uncertain.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::PacingReserve,
+            ..
+        }
+    ));
+    let warnings = &uncertain
+        .diagnostics
+        .account_load
+        .as_ref()
+        .ok_or("account load")?
+        .warnings;
+    assert!(warnings.iter().any(|warning| warning.contains("account=a")
+        && warning.contains("calendar month UTC")
+        && warning.contains("usage source:")
+        && warning.contains("domains.routing.pacing.monthly")));
     ctx.quota = &observations[..1];
     let mut pooled = request(model)?;
     pooled.choice = RouteChoice::NamedRoute(RouteName::parse("monthly-test")?);
+    let inferred = resolve(&pooled, &ctx)?;
+    assert_eq!(inferred.account_key.as_deref(), Some("b"));
+    assert!(matches!(inferred.readiness, RouteReadiness::Ready { .. }));
+    assert!(
+        inferred
+            .diagnostics
+            .account_load
+            .as_ref()
+            .ok_or("account load")?
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("account=b")
+                && warning.contains("inferred monthly cycle"))
+    );
+
+    // Both observed cycles have exhausted their pacing budget: no standby escape.
+    let all_held = [
+        monthly_quota(model, "a", 3000),
+        monthly_quota(model, "b", 3000),
+    ];
+    ctx.quota = &all_held;
     let held = resolve(&pooled, &ctx)?;
-    assert!(matches!(held.readiness, RouteReadiness::Unavailable { .. })); // No standby escape.
+    assert!(matches!(
+        held.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::PacingReserve,
+            ..
+        }
+    ));
+    for account in ["a", "b"] {
+        assert!(
+            held.diagnostics
+                .account_exclusions
+                .iter()
+                .any(|detail| detail.contains(account)
+                    && detail.contains("window=billing_cycle")
+                    && detail.contains("knob=domains.routing.pacing.monthly"))
+        );
+    }
     for (value, allowed, origin) in [
         (
             serde_json::json!({"monthly":{"burst_percent":40}}),
@@ -219,7 +299,7 @@ fn monthly_pacing_is_account_eligibility_with_sourced_overrides()
 
 // Spec: docs/specs/routing.md#monthly-allowance-ledger
 #[test]
-fn local_monthly_estimates_pace_missing_stale_and_rolled_cycles()
+fn local_monthly_estimates_preserve_debt_without_holding_on_inferred_cycles()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
@@ -243,12 +323,13 @@ fn local_monthly_estimates_pace_missing_stale_and_rolled_cycles()
     for n in 0..10 {
         q.allowance.record_launch(&format!("local-{n}"), 90, 100)?;
     }
-    assert!(assess(at, Some(&q)).constrained);
-    assert!(assess(at, Some(&q)).detail.contains("estimated_bp=1000"));
+    assert!(!assess(at, Some(&q)).constrained);
+    assert_eq!(assess(at, Some(&q)).windows[0].estimated_basis_points, 1000);
     // A stale snapshot provides a cycle estimate without clearing local debt.
     q.snapshot = monthly_quota(model.as_str(), "local", 0).snapshot;
     let stale = assess(at, Some(&q));
-    assert!(stale.constrained);
+    assert!(!stale.constrained);
+    assert_eq!(stale.windows[0].estimated_basis_points, 1000);
     assert!(
         stale
             .detail
@@ -268,10 +349,18 @@ fn local_monthly_estimates_pace_missing_stale_and_rolled_cycles()
         q.allowance
             .record_launch(&format!("rolled-{n}"), rolled_at.unix_seconds() - 1, 100)?;
     }
-    assert!(assess(rolled_at, Some(&q)).constrained);
+    assert!(!assess(rolled_at, Some(&q)).constrained);
+    assert_eq!(
+        assess(rolled_at, Some(&q)).windows[0].estimated_basis_points,
+        1000
+    );
     // A provider clock error does not erase valid local launch debt.
     q.snapshot.observed_unix_seconds = rolled_at.unix_seconds() + 1;
-    assert!(assess(rolled_at, Some(&q)).constrained);
+    assert!(!assess(rolled_at, Some(&q)).constrained);
+    assert_eq!(
+        assess(rolled_at, Some(&q)).windows[0].estimated_basis_points,
+        1000
+    );
     // Scope mismatches cannot borrow another account's cycle or launches.
     q.snapshot.account.account_key = "other".into();
     let mismatched = assess(at, Some(&q));

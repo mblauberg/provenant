@@ -2077,13 +2077,7 @@ fn verify_smoke(
     )
 }
 
-fn verify_smoke_with(
-    runner: &UpgradeRunner,
-    program: &Path,
-    state_dir: &Path,
-    scratch: &Path,
-    args: &cli::Upgrade,
-) -> Result<String, String> {
+fn smoke_project(runner: &UpgradeRunner, scratch: &Path) -> Result<SmokeProject, String> {
     let project = crate::scratch_dir::ScratchDir::new_in(scratch, "provenant-smoke-project-")
         .map_err(|error| error.to_string())?;
     let project = SmokeProject(project);
@@ -2110,6 +2104,17 @@ fn verify_smoke_with(
         argv.extend(args.iter().map(std::ffi::OsString::from));
         runner.execute_at(&argv, project.path(), None, 65_536, 30)?;
     }
+    Ok(project)
+}
+
+fn verify_smoke_with(
+    runner: &UpgradeRunner,
+    program: &Path,
+    state_dir: &Path,
+    scratch: &Path,
+    args: &cli::Upgrade,
+) -> Result<String, String> {
+    let project = smoke_project(runner, scratch)?;
     let program = program.as_os_str().to_owned();
     let graph = verify_graph_name();
     let mut run = vec![
@@ -2206,8 +2211,11 @@ fn preview_smoke(
     state_dir: &Path,
     args: &cli::Upgrade,
 ) -> Result<Vec<u8>, String> {
+    let project = smoke_project(runner, &std::env::temp_dir())?;
     let mut argv = vec![
         program.as_os_str().to_owned(),
+        "--project".into(),
+        project.path().as_os_str().to_owned(),
         "--state-dir".into(),
         state_dir.as_os_str().to_owned(),
         "--json".into(),
@@ -2965,7 +2973,7 @@ mod tests {
         std::fs::write(
             &launcher,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *'run smoke --explain'*) printf '%s\\n' '{{\"nodes\":[{{\"id\":\"read\"}},{{\"id\":\"review\"}},{{\"id\":\"write\"}}]}}';; *) exit 77;; esac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$1\" = --project ] || exit 78\n[ \"$2\" != \"$PWD\" ] || exit 79\n[ -f \"$2/fixture.txt\" ] || exit 80\ngit -C \"$2\" rev-parse --verify HEAD >/dev/null || exit 81\ncase \"$*\" in *'run smoke --explain'*) printf '%s\\n' '{{\"nodes\":[{{\"id\":\"read\"}},{{\"id\":\"review\"}},{{\"id\":\"write\"}}]}}';; *) exit 77;; esac\n",
                 calls.display()
             ),
         )?;

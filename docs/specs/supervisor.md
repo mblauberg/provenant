@@ -293,6 +293,8 @@ reason; it does not refuse an unrelated launch. If the entry's directory cannot
 be named, inventory refuses with that path and stage. The selected writer's own
 slot remains fail-closed, including legacy guardian evidence, which stays fenced
 until that attempt is reconciled.
+The macOS release smoke launches a read-only lane against the upgrade corpus
+with real confinement, including retained previous-release custody evidence.
 - Why: retained sibling evidence must not become a host-wide launch outage.
 - Owner: `crates/confinement/src/permissions/policy/host.rs`,
   `crates/supervisor/src/custody.rs`
