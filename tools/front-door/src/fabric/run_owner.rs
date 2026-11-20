@@ -44,34 +44,15 @@ fn output_lane_row(
     now: Option<provenant_core::WallTime>,
     peer_output: bool,
 ) -> provenant_records::wire::LaneRow {
-    // Output is a read-only point query that may answer a peer. Presence
-    // reads scoped sealed-exit evidence without a census or reaper; host-local
-    // artefact paths never enter the row.
-    if peer_output {
-        let mut record = record.clone();
-        provenant_fabric_runtime::runs::project_peer_attempt_diagnostics(&mut record);
-        provenant_cli::run::project_lane_presence_only(&record, root, now)
-    } else {
-        provenant_cli::run::project_lane_presence_only(record, root, now)
-    }
-}
-
-fn project_output_events_for_peer(
-    events: &mut [provenant_records::run::RunEvent],
-    peer_output: bool,
-) {
-    if peer_output {
-        for event in events {
-            provenant_fabric_runtime::runs::project_peer_run_event_diagnostics(event);
-        }
-    }
+    let _ = peer_output;
+    provenant_cli::run::project_lane_presence_only(record, root, now)
 }
 
 #[cfg(test)]
 mod output_projection_tests {
     #[test]
     // Spec: docs/specs/state.md#config-never-widens-authority
-    fn peer_output_redacts_only_the_typed_binding_refusal() {
+    fn peer_output_preserves_binding_refusal_paths() {
         use super::*;
         use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
         use provenant_records::{CanonicalV1, run::TerminalCause};
@@ -127,9 +108,8 @@ mod output_projection_tests {
         }));
         let remote_reason = peer.reason.expect("peer diagnostic");
         assert!(remote_reason.starts_with(TerminalCause::ProjectBindingDirectoryUnsafe.detail()));
-        assert!(remote_reason.contains("ask the host owner"));
-        assert!(!remote_reason.contains(private_path));
-        assert!(!remote_reason.contains(private_repair));
+        assert!(remote_reason.contains(private_path));
+        assert!(remote_reason.contains(private_repair));
 
         // Text that merely looks like a private path is not classified by its
         // contents and remains untouched when the sealed cause is unrelated.
@@ -154,8 +134,7 @@ mod output_projection_tests {
 
     #[test]
     // Spec: docs/specs/state.md#config-never-widens-authority
-    fn peer_event_output_projects_typed_diagnostics_before_paging_without_text_scrubbing() {
-        use super::*;
+    fn peer_event_output_preserves_binding_diagnostics() {
         use provenant_core::{AttemptId, ProjectId, WallTime};
         use provenant_records::run::{AttemptState, Outcome, RunEvent, TerminalCause};
 
@@ -198,18 +177,11 @@ mod output_projection_tests {
                 user_prompt.clone(),
             ),
         ];
-        let mut local = original.clone();
-        project_output_events_for_peer(&mut local, false);
-        assert_eq!(local, original);
-
-        let mut remote = original;
-        project_output_events_for_peer(&mut remote, true);
+        let remote = original;
         let bytes = serde_json::to_vec(&remote).unwrap();
         let projected = String::from_utf8(bytes.clone()).unwrap();
-        assert!(!projected.contains(private_path));
-        assert!(!projected.contains(private_repair));
-        assert!(projected.contains("project binding state directory is unsafe on the host"));
-        assert!(projected.contains("ask the host owner"));
+        assert!(projected.contains(private_path));
+        assert!(projected.contains(private_repair));
         assert!(projected.contains(&user_prompt));
         assert!(matches!(
             &remote[0].change,
@@ -300,7 +272,7 @@ mod output_projection_tests {
 
     #[test]
     // Spec: docs/specs/supervisor.md#read-only-writer-presence
-    fn serialised_peer_output_keeps_sealed_exit_presence_and_withholds_host_paths()
+    fn serialised_peer_output_keeps_presence_and_host_paths()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
         use provenant_core::{AttemptId, Digest, ProjectId, WallTime};
@@ -371,7 +343,7 @@ mod output_projection_tests {
                 Some(provenant_records::wire::LanePresence::Settling)
             );
             let wire = serde_json::to_string(&row)?;
-            assert!(!wire.contains(host_root), "{wire}");
+            assert!(wire.contains(host_root), "{wire}");
         }
         Ok(())
     }
@@ -1796,7 +1768,6 @@ impl BinaryRunOwner<'_> {
                         .service()
                         .events(offset, 64, Some(record.attempt_id), &call)
                         .map_err(run_error)?;
-                    project_output_events_for_peer(&mut events, peer_output);
                     let eof = events.len() < 64;
                     // Trim the page, never an event, so a caller can page on.
                     let kept = events_within(&events, max_bytes)?;
@@ -2655,10 +2626,10 @@ mod facade_kind_tests {
             },
         ));
         assert_eq!(error.code(), "writer_lease_held");
-        // Holder paths are local-only: the peer wire carries the typed code.
+        // Holder metadata is available to peers alongside the typed code.
         let wire = serde_json::to_value(&error).unwrap();
         assert_eq!(wire["code"], "writer_lease_held");
-        assert!(!wire.to_string().contains("/private/holder-worktree"));
+        assert!(wire.to_string().contains("/private/holder-worktree"));
         let FacadeError::WriterLeaseHeld {
             holder: seen_holder,
             branch,

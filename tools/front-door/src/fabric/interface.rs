@@ -2546,7 +2546,9 @@ impl Factory {
         document: &GraphDocument,
         checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
     ) -> Result<(), FacadeError> {
-        if let Some(brief) = input.get("brief").and_then(Value::as_str) {
+        if provenant_redact::mode().masks_egress()
+            && let Some(brief) = input.get("brief").and_then(Value::as_str)
+        {
             match provenant_redact::matches_credential_value_for_retry(brief.as_bytes()) {
                 Ok(true) => warn_operator(
                     "declared credential value rule: retry brief holds a value matching a known credential",

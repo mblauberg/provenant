@@ -5491,22 +5491,10 @@ mod receipt_tests {
 /// One warning line for an omitted grant, shown relative to the home directory.
 pub(super) fn omission_warning(
     entry: &provenant_providers::OmittedGrant,
-    home: &Path,
+    _home: &Path,
     credential_roots: &provenant_core::CredentialRoots,
 ) -> String {
-    let display = if entry
-        .path
-        .to_str()
-        .is_none_or(|text| text.chars().any(char::is_control))
-    {
-        "<unrepresentable path; inspect on host>".into()
-    } else {
-        entry
-            .path
-            .strip_prefix(home)
-            .map(|relative| format!("~/{}", relative.display()))
-            .unwrap_or_else(|_| "<external path; inspect on host>".into())
-    };
+    let display = format!("{:?}", entry.path);
     if entry.source == provenant_providers::OmissionSource::ProviderPackage {
         return format!(
             "omitted shared provider package grant {display}; using the executable only"
@@ -5819,7 +5807,7 @@ mod user_skills_tests {
         };
         let roots = provenant_core::CredentialRoots::for_home(Path::new("/fixture/home"));
         let warning = omission_warning(&control, Path::new("/fixture/home"), &roots);
-        assert!(warning.contains("unrepresentable path"));
+        assert!(warning.contains("/fixture/home/tool-\\u{1}"));
         assert!(!warning.contains('\u{1}'));
     }
 

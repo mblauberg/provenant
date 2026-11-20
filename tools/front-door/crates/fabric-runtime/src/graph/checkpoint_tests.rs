@@ -43,6 +43,7 @@ fn deepest_stored_checkpoint_round_trips_on_a_512kib_debug_thread() {
 // Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
 #[test]
 fn deployed_2_0_5_checkpoint_and_external_prompts_still_read() {
+    let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
     const CHECKPOINT: &[u8] = include_bytes!("../fixtures/checkpoint-2.0.5/graph-smoke205-ro.json");
     let value: Value = serde_json::from_slice(CHECKPOINT).unwrap();
     let graph_id = value["checkpoint"]["graph_id"].as_str().unwrap();

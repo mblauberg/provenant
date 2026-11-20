@@ -13,9 +13,13 @@ impl TryFrom<String> for GraphIdentifier {
         if super::valid_node_identifier(&value) {
             // This is a disclosure fact, never the graph's control identity.
             // Keep the typed cause even when its identifier needs masking.
-            let safe = match provenant_redact::publication_text(value.as_bytes(), []) {
-                Ok(bytes) if bytes == value.as_bytes() => Some(value),
-                _ => None,
+            let safe = if !provenant_redact::mode().masks_local() {
+                Some(value)
+            } else {
+                match provenant_redact::known_shapes(value.as_bytes()) {
+                    Ok(bytes) if bytes == value.as_bytes() => Some(value),
+                    _ => None,
+                }
             };
             Ok(Self(safe))
         } else {
@@ -35,6 +39,17 @@ impl From<GraphIdentifier> for Option<String> {
     }
 }
 impl GraphIdentifier {
+    pub(crate) fn project_egress(&mut self) {
+        if let Some(value) = &self.0 {
+            let projected = provenant_redact::publication_text(value.as_bytes(), [])
+                .ok()
+                .and_then(|bytes| provenant_redact::egress_shapes(&bytes).ok());
+            if projected.as_deref() != Some(value.as_bytes()) {
+                self.0 = None;
+            }
+        }
+    }
+
     pub fn as_deref(&self) -> Option<&str> {
         self.0.as_deref()
     }
@@ -447,6 +462,7 @@ mod tests {
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     #[test]
     fn secret_shaped_identifiers_keep_cycle_causes_and_registered_values_are_masked() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
         let example = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
         let graph: super::super::GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":2,"graph_id":"shape-cycle","nodes":[
@@ -489,6 +505,7 @@ mod tests {
 
     #[test]
     fn schema_paths_never_resume_schema_names_inside_caller_maps() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         for value in [
             serde_json::json!({"nodes":[{"CALLER_MARKER":{"brief":"password=fixture-secret-3391"}}]}),
             serde_json::json!({"context":{"brief":{"prompt":"password=fixture-secret-3391"}}}),
@@ -505,6 +522,7 @@ mod tests {
 
     #[test]
     fn secret_shaped_inputs_warn_without_disclosing_values_under_every_policy() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         use provenant_records::policy::{Policy, Source, Strength};
         use std::collections::BTreeMap;
 

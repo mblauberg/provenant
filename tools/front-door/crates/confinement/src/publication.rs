@@ -79,8 +79,35 @@ pub enum ProjectionError {
     Operation,
 }
 
-/// Central declaration for typed credential fields and credential environment
-/// values. Matching a field name is distinct from guessing at a value's shape.
+/// Fields that describe routing or host metadata, even when their values resemble credentials.
+pub fn metadata_field(name: &str) -> bool {
+    matches!(
+        name,
+        "model"
+            | "effort"
+            | "adapter"
+            | "provider"
+            | "alias"
+            | "name"
+            | "tier"
+            | "account"
+            | "account_label"
+            | "account_key"
+            | "source"
+            | "pool"
+            | "pool_selection"
+            | "path"
+            | "paths"
+            | "worktree"
+            | "stage"
+            | "graph"
+            | "graph_id"
+            | "node"
+            | "node_id"
+    )
+}
+
+/// Identify typed credential fields and credential environment values.
 pub fn secret_field(name: &str) -> bool {
     let name: String = name
         .chars()
@@ -142,16 +169,19 @@ impl<'a> CrossHostTransport<'a> {
     /// Project only the caller's declared free-text fields. Typed credentials
     /// found in one field protect copies in the other fields, never wire metadata.
     pub fn texts(&self, texts: &mut [&mut String]) -> Result<(), ProjectionError> {
+        if !provenant_redact::mode().masks_egress() {
+            return Ok(());
+        }
         let mut secrets = self.projector.secrets.clone();
         for text in texts.iter() {
             visit_documents(text, &mut |value| collect(value, &mut secrets));
         }
         let projector = Projector::new(secrets)?;
         for text in texts {
+            let projected = projector.project(Destination::CrossHostTransport, text.as_bytes())?;
             **text = String::from_utf8(
-                projector
-                    .project(Destination::CrossHostTransport, text.as_bytes())?
-                    .into_bytes(),
+                provenant_redact::egress_shapes(projected.bytes())
+                    .map_err(|_| ProjectionError::Bound)?,
             )
             .map_err(|_| ProjectionError::Encoding)?;
         }
@@ -176,11 +206,13 @@ impl Projector {
             .into_iter()
             .filter(|secret| secret.len() >= MIN_EXACT_BYTES && secret != MASK.as_bytes())
             .collect();
-        // Reuse the primitive's bounded secret-set contract, not its heuristic
-        // token detection. Unrelated secret-shaped prose must remain lossless.
+        // Reuse the primitive's bounded secret-set contract.
         secrets.sort();
         secrets.dedup();
-        provenant_redact::Redactor::new(secrets.clone()).map_err(|_| ProjectionError::SecretSet)?;
+        if provenant_redact::mode().masks_egress() {
+            provenant_redact::Redactor::new(secrets.clone())
+                .map_err(|_| ProjectionError::SecretSet)?;
+        }
         secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
         secrets.dedup();
         Ok(Self { secrets })
@@ -210,6 +242,14 @@ impl Projector {
             return Err(ProjectionError::Bound);
         }
         let text = std::str::from_utf8(bytes).map_err(|_| ProjectionError::Encoding)?;
+        if !provenant_redact::mode().masks_egress() {
+            return Ok(Projection {
+                destination,
+                raw: PayloadBinding::of(bytes),
+                published: PayloadBinding::of(bytes),
+                bytes: bytes.to_vec(),
+            });
+        }
         let mut secrets = self.secrets.clone();
         // Discover typed values before masking, including copies elsewhere in
         // the same document. Decode JSON escapes before exact-value matching.
@@ -217,7 +257,8 @@ impl Projector {
         let projector = Self::new(secrets)?;
         let mut out = transform_documents(text, &projector)?;
         out = mask_assignments(&out);
-        let bytes_out = projector.exact(out.as_bytes());
+        let bytes_out = provenant_redact::egress_shapes(&projector.exact(out.as_bytes()))
+            .map_err(|_| ProjectionError::Bound)?;
         Ok(Projection {
             destination,
             raw: PayloadBinding::of(bytes),
@@ -238,6 +279,14 @@ impl Projector {
         }
         let mut value: Value =
             serde_json::from_slice(bytes).map_err(|_| ProjectionError::Document)?;
+        if !provenant_redact::mode().masks_egress() {
+            return Ok(Projection {
+                destination,
+                raw: PayloadBinding::of(bytes),
+                published: PayloadBinding::of(bytes),
+                bytes: bytes.to_vec(),
+            });
+        }
         let mut secrets = self.secrets.clone();
         collect(&value, &mut secrets);
         let projector = Self::new(secrets)?;
@@ -271,8 +320,9 @@ impl Projector {
             Value::String(text) => {
                 let nested = transform_documents(text, self)?;
                 let nested = mask_assignments(&nested);
-                *text = String::from_utf8(self.exact(nested.as_bytes()))
-                    .map_err(|_| ProjectionError::Encoding)?;
+                let bytes = provenant_redact::egress_shapes(&self.exact(nested.as_bytes()))
+                    .map_err(|_| ProjectionError::Bound)?;
+                *text = String::from_utf8(bytes).map_err(|_| ProjectionError::Encoding)?;
             }
             Value::Array(items) => {
                 for item in items {
@@ -282,6 +332,10 @@ impl Projector {
             Value::Object(map) => {
                 let entries = std::mem::take(map);
                 for (key, mut item) in entries {
+                    if metadata_field(&key) {
+                        map.insert(key, item);
+                        continue;
+                    }
                     if secret_field(&key) {
                         item = Value::String(MASK.into());
                     } else {
@@ -446,7 +500,7 @@ impl Projector {
                 "--body-file" | "--template" | "-T" | "--input"
             ) {
                 let projected = self.project(destination, args[index].as_bytes())?;
-                let masked = provenant_redact::known_shapes(projected.bytes())
+                let masked = provenant_redact::egress_shapes(projected.bytes())
                     .map_err(|_| ProjectionError::Bound)?;
                 args[index] = String::from_utf8(masked).map_err(|_| ProjectionError::Encoding)?;
                 index += 1;
@@ -532,6 +586,9 @@ fn collect(value: &Value, secrets: &mut Vec<Vec<u8>>) {
     match value {
         Value::Object(map) => {
             for (key, item) in map {
+                if metadata_field(key) {
+                    continue;
+                }
                 if secret_field(key) {
                     collect_strings(item, secrets);
                 } else {
@@ -789,9 +846,36 @@ fn mask_assignments(text: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn off_preserves_egress_and_secrets_masks_shapes_only_at_boundary() {
+        let projector = Projector::new([b"private-value".to_vec()]).unwrap();
+        let raw = b"private-value ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        for mode in [provenant_redact::Mode::Off, provenant_redact::Mode::Secrets] {
+            let _mode = provenant_redact::scoped(mode);
+            let mut text = String::from_utf8(raw.to_vec()).unwrap();
+            CrossHostTransport::new(&projector)
+                .texts(&mut [&mut text])
+                .unwrap();
+            if mode == provenant_redact::Mode::Off {
+                assert_eq!(text.as_bytes(), raw);
+                assert_eq!(
+                    projector
+                        .json(Destination::FixtureExport, br#"{"token":"private-value"}"#)
+                        .unwrap()
+                        .bytes(),
+                    br#"{"token":"private-value"}"#
+                );
+            } else {
+                assert!(!text.contains("private-value"));
+                assert!(!text.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+            }
+        }
+    }
+
     // Spec: docs/specs/fabric.md#publication-boundary
     #[test]
     fn publication_masks_typed_and_exact_values_and_binds_both_payloads() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         let projector = Projector::new([b"known-secret".to_vec()]).unwrap();
         let raw = br#"{"token":"hidden-value","copy":"hidden-value","message":"known-secret and ordinary text"}"#;
         let mut projection = projector.json(Destination::PeerPublication, raw).unwrap();
@@ -845,6 +929,7 @@ mod tests {
     // Spec: docs/specs/fabric.md#publication-boundary
     #[test]
     fn publication_masks_assignments_only_in_their_spans() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         let projector = Projector::new([b"explicit-value".to_vec()]).unwrap();
         let raw =
             b"password=private-value; copy private-value, explicit-value; ordinary ghp_unrelated";
@@ -989,6 +1074,7 @@ mod tests {
     // Spec: docs/specs/fabric.md#publication-boundary
     #[test]
     fn publication_failure_withholds_invalid_external_payload() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         let projector = Projector::new([]).unwrap();
         assert!(matches!(
             projector.project(Destination::PeerPublication, b"\xff"),
@@ -1013,6 +1099,7 @@ mod tests {
 
     #[test]
     fn unquoted_authorization_header_value_masks_scheme_and_token() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         let projector = Projector::new([]).unwrap();
         let cases = [
             (
@@ -1042,6 +1129,7 @@ mod tests {
 
     #[test]
     fn cli_arguments_are_projected_without_splitting() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         let token = "ghp_abcdefghijklmnopqrst";
         let arguments = [
             "pr",

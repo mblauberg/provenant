@@ -1235,9 +1235,26 @@ mod tests {
         assert_eq!(fallback_reason_for_graph(&checkpoint), None);
     }
 
+    #[test]
+    fn local_provider_errors_are_raw_in_off_and_secrets_modes() {
+        let text = b"failure ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        for mode in [provenant_redact::Mode::Off, provenant_redact::Mode::Secrets] {
+            let _mode = provenant_redact::scoped(mode);
+            assert_eq!(
+                provider_error_from_result(text).unwrap(),
+                String::from_utf8_lossy(text)
+            );
+            assert_eq!(
+                provider_error_from_stderr(text).unwrap(),
+                String::from_utf8_lossy(text)
+            );
+        }
+    }
+
     // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
     #[test]
     fn provider_errors_mask_credential_shapes_and_registered_values() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
         let secret = b"descriptor-credential-3391";
         let _scope = provenant_redact::publication_scope([secret.to_vec()]).unwrap();
         let text = b"provider failed: descriptor-credential-3391 sk-abcdefghijklmnopqrstuvwxyz password=\"printed-value\"";
@@ -1255,6 +1272,7 @@ mod tests {
 
     #[test]
     fn provider_error_keeps_multiline_context_while_masking_assignments() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
         let message = provider_error_from_result(
             b"Model not recognized: gemini-3.8-pro\npass: fix the code\nAvailable models:\nGemini 2.5 Flash\nGPT-OSS 120B (Medium)\n",
         )
@@ -1279,7 +1297,7 @@ mod tests {
     fn provider_error_keeps_non_warning_lines_that_mention_warn() {
         assert_eq!(
             provider_error_from_stderr(b"test-failed WARN: pass: fix the code\n").as_deref(),
-            Some("test-failed WARN: pass: [REDACTED] the code")
+            Some("test-failed WARN: pass: fix the code")
         );
     }
 
