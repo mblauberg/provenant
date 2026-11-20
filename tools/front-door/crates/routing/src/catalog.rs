@@ -1880,7 +1880,7 @@ impl Catalogue {
     /// family for that adapter, as a whole hyphen-delimited segment of its
     /// models' IDs; the latest version of that family is the exact model the
     /// alias resolves to. An unknown or ambiguous alias stays unresolved.
-    pub fn resolve_family_alias(&self, id: &ModelId) -> Option<&ModelId> {
+    pub fn resolve_family_alias<'a>(&'a self, id: &'a ModelId) -> Option<&'a ModelId> {
         if self.model(id).is_some() {
             return Some(id);
         }
@@ -1892,10 +1892,19 @@ impl Catalogue {
             .filter(|row| row.model.adapter() == id.adapter())
         {
             let name = row.model.model();
-            if !name.split('-').any(|part| part == alias) {
-                continue;
+            // The family ends where the first whole hyphen-delimited segment
+            // equal to the alias ends, never at a substring hit inside another
+            // segment.
+            let mut offset = 0;
+            let mut end = None;
+            for part in name.split('-') {
+                if part == alias {
+                    end = Some(offset + part.len());
+                    break;
+                }
+                offset += part.len() + 1;
             }
-            let Some(end) = name.find(alias).map(|start| start + alias.len()) else {
+            let Some(end) = end else {
                 continue;
             };
             let family = name[..end].to_owned();

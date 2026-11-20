@@ -192,15 +192,15 @@ fn apply_provider_identity(
 /// the pinned base. Absent or unchanged evidence is not a commit.
 fn writer_committed_head(
     attempt: &Directory,
-    settlement: Option<&crate::settlement::Guard>,
+    settlement: Option<&crate::settlement::Driver<'_>>,
 ) -> Result<Option<provenant_core::GitOid>> {
     let sealed = match read_sealed(attempt, "writer-terminal.json", RECORD_LIMIT)? {
         Some(raw) => Some(crate::db::decode::<crate::writer::WriterTerminal>(&raw)?.head),
         None => None,
     };
-    let head = sealed.or_else(|| settlement.and_then(crate::settlement::Guard::head));
-    let base = settlement.and_then(crate::settlement::Guard::base);
-    Ok(head.filter(|head| base.is_none_or(|base| *base != *head)))
+    let head = sealed.or_else(|| settlement.and_then(crate::settlement::Driver::head));
+    let base = settlement.and_then(crate::settlement::Driver::base);
+    Ok(head.filter(|head| base.is_none_or(|base| base != *head)))
 }
 
 /// The identities a mismatch warning names, in the route's own terms.
@@ -338,7 +338,7 @@ mod identity_policy_tests {
         };
         let head = provenant_core::GitOid::parse(&"b".repeat(40))?;
         for (committed, expected) in [
-            (Some(head.clone()), Outcome::ReviewRequired),
+            (Some(head), Outcome::ReviewRequired),
             (None, Outcome::Failed),
         ] {
             let mut decoded = Decoded {
