@@ -298,3 +298,22 @@ execution phases. Nested invocations within an admitted command detect the
 inherited slot lease and pass through without re-acquiring or deadlocking.
 Holders, waiters, elapsed wait durations, and admission classes are visible in
 `provenant status`.
+
+### Stack discovery
+
+`provenant config detect` reports read-only stack discovery, proposed commands and
+warnings. Rust discovery selects the nearest Cargo manifest with a workspace or
+package table, at most two directories below the root; equal-depth candidates
+warn and skip Rust. Node discovery reads only the root `package.json`: its
+`packageManager` takes precedence over pnpm, yarn, npm and bun lockfiles, and
+npm is the warned fallback. Only existing lint, typecheck, test and build scripts
+are proposed: lint and typecheck in tier 0, test in tier 1, and build in tier 2.
+Mixed tiers list Rust commands first, with each command's own
+project-relative working directory.
+
+`provenant config show --full` includes detected commands and effective build and
+verify tier leaves with their sources. `provenant config path --project` prints
+the host-project ports path and whether it exists. Detection never overrides
+configured values. Its default tier fills a gap below host, host-project and
+project layers; proposed argv commands are informational until tier commands
+are migrated, and do not alter the current string-command tiers.

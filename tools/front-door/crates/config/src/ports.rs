@@ -1024,6 +1024,12 @@ impl PortTable {
         let mut document = serde_json::to_value(Self::builtin()).map_err(io::Error::other)?;
         let mut provenance = BTreeMap::new();
         record_leaf_sources(&document, PortSource::Builtin, "", &mut provenance);
+        if let Some(default_tier) =
+            project.and_then(|project| crate::detect::detect(project).default_tier)
+        {
+            document["verify"]["default_tier"] = default_tier.into();
+            provenance.insert("verify.default_tier".into(), PortSource::Detected);
+        }
         if let Some(host_state) = host_state {
             apply_layer(
                 &mut document,
