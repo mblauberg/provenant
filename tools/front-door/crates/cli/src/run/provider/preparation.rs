@@ -223,6 +223,21 @@ pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Opt
     })
 }
 
+fn opencode_profile_message(
+    profile: provenant_config::OpenCodeProfile,
+    origin: Option<&provenant_config::Origin>,
+) -> String {
+    let source = match origin {
+        Some(provenant_config::Origin::User { .. }) => "host configuration",
+        _ => "compiled default",
+    };
+    let profile = match profile {
+        provenant_config::OpenCodeProfile::Host => "host",
+        provenant_config::OpenCodeProfile::Lane => "lane",
+    };
+    format!("OpenCode profile={profile} (providers.opencode.profile; source: {source})")
+}
+
 fn push_launch_warning(route: &mut ResolvedRoute, warning: impl Into<String>) {
     let warning = warning.into();
     let warning = if warning.starts_with("warning:") {
@@ -3996,6 +4011,20 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(setup_skip(&label, error));
             continue;
         }
+        let opencode_profile = config
+            .providers
+            .get("opencode")
+            .map_or(provenant_config::OpenCodeProfile::Host, |settings| {
+                settings.profile
+            });
+        let opencode_host = adapter.id() == "opencode"
+            && opencode_profile == provenant_config::OpenCodeProfile::Host;
+        let opencode_homes = provenant_providers::opencode::host_xdg_homes(&home, &|key| {
+            host_provider_var(registry, key)
+        });
+        let opencode_data = opencode_homes[1].join("opencode");
+        let mut effective_resume = resume;
+        let mut continuation_warning = None;
         let continuation = match resume {
             Some(prior) => match continuation_for_policy(
                 prior,
@@ -4007,8 +4036,24 @@ pub(super) fn prepare_candidates_inner(
                     private_state: &private_state,
                 },
                 &launch_policy,
+                opencode_host.then_some(opencode_data.as_path()),
             ) {
                 Ok(continuation) => Some(continuation),
+                Err(error)
+                    if adapter.id() == "opencode"
+                        && matches!(
+                            error,
+                            ContinuationError::Provider(
+                                provenant_providers::ProviderError::UnknownIdentity
+                            ) | ContinuationError::NativeSessionLocation(_)
+                        ) =>
+                {
+                    effective_resume = None;
+                    continuation_warning = Some(format!(
+                        "OpenCode session unavailable in the selected profile ({error}); starting fresh"
+                    ));
+                    None
+                }
                 Err(error) => {
                     let class = error.boundary_class();
                     if class != provenant_records::diagnostic::BoundaryClass::None {
@@ -4063,6 +4108,20 @@ pub(super) fn prepare_candidates_inner(
             format!("{text}\n\nAttached images (open these files if supported):\n{paths}")
         } else {
             text
+        };
+        let credential_roots = if opencode_host {
+            let profile_roots: Vec<_> = opencode_homes
+                .iter()
+                .map(|home| home.join("opencode"))
+                .collect();
+            credential_roots
+                .without_roots_with_aliases(
+                    &profile_roots,
+                    provenant_confinement::permissions::resolve_boundary_path,
+                )
+                .map_err(|error| error.to_string())?
+        } else {
+            credential_roots.clone()
         };
         let mut request = match confinement_request(
             project_id,
@@ -4406,6 +4465,7 @@ pub(super) fn prepare_candidates_inner(
             });
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
+                opencode_profile,
                 credential_roots: credential_roots.clone(),
                 images: &task.access.attachments,
                 policy: &launch_policy,
@@ -4531,7 +4591,12 @@ pub(super) fn prepare_candidates_inner(
         let native_root = match &spec.session_state {
             provenant_providers::SessionStateLocation::AttemptPrivate => None,
             provenant_providers::SessionStateLocation::Native { root }
-                if !sandbox.effective && root.is_absolute() =>
+                if (!sandbox.effective
+                    || (adapter.id() == "opencode"
+                        && config.providers.get("opencode").is_none_or(|settings| {
+                            settings.profile == provenant_config::OpenCodeProfile::Host
+                        })))
+                    && root.is_absolute() =>
             {
                 Some(root.clone())
             }
@@ -4548,11 +4613,14 @@ pub(super) fn prepare_candidates_inner(
                 continue;
             }
         };
-        if let Some(prior) = resume {
-            let prior_native = prior
-                .applied_route
-                .as_ref()
-                .is_some_and(|applied| prior_uses_native_session_state(applied, &route.adapter));
+        if let Some(prior) = effective_resume {
+            let prior_state = state_root
+                .join("attempts")
+                .join(prior.attempt_id.to_string())
+                .join("provider-state");
+            let prior_native = prior.applied_route.as_ref().is_some_and(|applied| {
+                prior_uses_native_session_state(applied, &route.adapter, Some(&prior_state))
+            });
             if prior_native != native_root.is_some() {
                 reasons.push(continuation_skip(
                     &label,
@@ -4568,7 +4636,8 @@ pub(super) fn prepare_candidates_inner(
                 );
                 continue;
             }
-            if let Some(root) = native_root.as_deref()
+            if !opencode_host
+                && let Some(root) = native_root.as_deref()
                 && let Err(error) = verify_native_continuation(prior, &route, root, state_root)
             {
                 let class = error.boundary_class();
@@ -4861,6 +4930,13 @@ pub(super) fn prepare_candidates_inner(
             provenant_records::SetupRoot::Home => setup_roots.push(&home),
             provenant_records::SetupRoot::None => {}
         }
+        if opencode_host {
+            for home in &opencode_homes {
+                if let Some(existing) = home.ancestors().find(|path| path.is_dir()) {
+                    setup_roots.push(existing);
+                }
+            }
+        }
         if let Err(error) = apply_setup(&spec.setup, &setup_roots, transcript_account) {
             reasons.push(setup_skip(&label, format!("setup failed: {error}")));
             continue;
@@ -4976,7 +5052,7 @@ pub(super) fn prepare_candidates_inner(
             }
             None => None,
         };
-        provider.account_source = Some(if resume.is_some() {
+        provider.account_source = Some(if effective_resume.is_some() {
             provenant_records::run::AccountSource::Continuation
         } else if task.account.is_some() {
             provenant_records::run::AccountSource::Pin
@@ -5016,6 +5092,17 @@ pub(super) fn prepare_candidates_inner(
                 .map(|tool| tool.receipt())
                 .collect(),
         ))?);
+        if adapter.id() == "opencode" {
+            let message = opencode_profile_message(
+                opencode_profile,
+                config.origins.get("providers.opencode.profile"),
+            );
+            let _ = writeln!(std::io::stderr().lock(), "{message}");
+            for warning in spec.warnings.iter().chain(continuation_warning.iter()) {
+                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            }
+            provider.launch_warnings.push(message);
+        }
         if adapter_spec.is_some_and(|spec| spec.id == provenant_records::Harness::Codex) {
             let source = if writer.is_none() {
                 "read-only extension authority"
@@ -5033,6 +5120,7 @@ pub(super) fn prepare_candidates_inner(
         provider
             .launch_warnings
             .extend(spec.warnings.iter().cloned());
+        provider.launch_warnings.extend(continuation_warning);
         provider.applied_access = Some(serde_json::from_value(
             spec.applied_access()
                 .receipt(&home, spec.credential_roots()),
@@ -5104,7 +5192,7 @@ pub(super) fn prepare_candidates_inner(
                     scope: PathScope::Subtree,
                 })?;
             }
-            if resume.is_some() {
+            if effective_resume.is_some() {
                 // The selected adapter, not optional lane reads, declares the
                 // exact retained inputs needed to continue its prior session.
                 for root in &spec.profile.spec.continuation_reads {
@@ -5116,7 +5204,10 @@ pub(super) fn prepare_candidates_inner(
         // provider's shared stream decoder. Admission seals it with this
         // candidate route so the live and terminal host decoders can prove
         // that a resumed child stayed in its predecessor session.
-        let continuation_expectation = match (resume.is_some(), spec.stream.expected_session()) {
+        let continuation_expectation = match (
+            effective_resume.is_some(),
+            spec.stream.expected_session(),
+        ) {
             (true, Some(session)) => Some(run::ContinuationExpectation {
                 session: session.to_owned(),
             }),
@@ -5587,6 +5678,22 @@ fn user_skills_exposure(
 }
 
 #[cfg(test)]
+#[test]
+fn opencode_profile_message_reports_value_and_source() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_config::{OpenCodeProfile, Origin};
+    let origin = Origin::User {
+        path: serde_json::from_value(serde_json::json!({"encoding":"utf8", "path":"config.toml"}))?,
+    };
+    let default = opencode_profile_message(OpenCodeProfile::Host, None);
+    assert!(default.contains("profile=host") && default.contains("source: compiled default"));
+    let configured = opencode_profile_message(OpenCodeProfile::Lane, Some(&origin));
+    assert!(
+        configured.contains("profile=lane") && configured.contains("source: host configuration")
+    );
+    Ok(())
+}
+
+#[cfg(test)]
 mod user_skills_tests {
     use super::*;
     #[test]
@@ -5712,6 +5819,7 @@ mod user_skills_tests {
                     route.set_user_skills(state != "off");
                     let launch_policy = provenant_records::policy::Policy::default();
                     let input = PrepareInput {
+                        opencode_profile: provenant_config::OpenCodeProfile::Lane,
                         credential_roots: provenant_core::CredentialRoots::for_home(&home),
                         route: &route,
                         provider_model: None,

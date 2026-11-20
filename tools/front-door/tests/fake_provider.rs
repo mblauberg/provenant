@@ -238,6 +238,7 @@ fn account_placement() -> Result {
         let prompt = Prompt::new(address.to_string());
         let account = accounts.selected(&route)?;
         let spec = Codex.prepare(PrepareInput {
+            opencode_profile: provenant_config::OpenCodeProfile::Lane,
             credential_roots: plan.permissions().credential_roots.clone(),
             images: &[],
             command: None,

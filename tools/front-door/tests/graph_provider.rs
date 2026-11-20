@@ -917,6 +917,7 @@ fn register_opencode_plans(rig: &TestRig) -> Result {
         .create(true)
         .append(true)
         .open(rig.state.join("config.toml"))?;
+    writeln!(config, "[providers.opencode]\nprofile='lane'")?;
     for plan in ["go", "zen"] {
         writeln!(
             config,

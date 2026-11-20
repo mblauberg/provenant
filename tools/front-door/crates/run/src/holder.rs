@@ -560,6 +560,8 @@ impl HostLaunchContext {
             "GIT_CONFIG_SYSTEM",
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
         ]
         .into_iter()
         .filter_map(|name| {

@@ -713,6 +713,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
                 home.join(".codex"),
             )?;
             let launch = Codex.prepare(PrepareInput {
+                opencode_profile: provenant_config::OpenCodeProfile::Lane,
                 credential_roots: plan.permissions().credential_roots.clone(),
                 images: &[],
                 policy: &launch_policy,
@@ -925,6 +926,119 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
             assert!(continuation_for(&prior, &route, "fixture", state, state, state).is_err());
         }
     }
+    Ok(())
+}
+
+#[test]
+fn opencode_host_continuation_uses_the_recorded_host_store_by_session_id()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, Digest, ProjectId};
+    use provenant_records::{
+        FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
+    };
+
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let state = base.join("state");
+    let host_data = base.join("xdg-data/opencode");
+    std::fs::create_dir_all(&host_data)?;
+    let route = ResolvedRoute {
+        selection_context: Default::default(),
+        diagnostics: Default::default(),
+        user_skills: true,
+        extra: Default::default(),
+        adapter: "opencode".into(),
+        model: "fixture-model".into(),
+        effort: None,
+        catalogue_revision: "fixture".into(),
+        account_key: None,
+        host: "fixture".into(),
+        alternatives: RouteAlternatives::default(),
+        exclusions: Vec::new(),
+        eligibility: RouteEligibility::Eligible,
+        readiness: RouteReadiness::Ready {
+            availability_warning: None,
+            extra: Default::default(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 100,
+        },
+        confidentiality: RouteConfidentiality {
+            extra: Default::default(),
+            evidence_ref: "fixture".into(),
+        },
+        pool_selection: None,
+    };
+    let attempt = AttemptId::from_bytes([7; 16]);
+    let project = ProjectId::from_bytes([8; 16]);
+    let prior: run::AttemptRecord = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "attempt_id": attempt,
+        "key": {"project": project, "graph": "fixture", "node": "node", "attempt": 1},
+        "project_id": project,
+        "attempt_number": 1, "revision": 1, "generation": 0,
+        "requested_route": {"kind": "model", "provider": "opencode", "model": "fixture-model"},
+        "applied_route": {"provider": "opencode", "model": "opencode/fixture-model"},
+        "authority_digest": Digest::from_bytes([0; 32]), "read_only_writable": [], "protected_paths": [], "trace": {},
+        "session": "host-session", "queued_at": "2026-10-25T00:00:00.000000Z",
+        "state": {"state": "queued"}, "usage": {},
+        "prompt": {"path": {"encoding": "utf8", "path": "prompt.txt"}, "digest": FileDigest::from_bytes([0; 32]), "bytes": 0, "complete": true, "redacted": false}
+    }))?;
+    let prior_state = state
+        .join("attempts")
+        .join(attempt.to_string())
+        .join("provider-state");
+    std::fs::create_dir_all(&prior_state)?;
+    super::observation::write_native_session_location(&prior_state, &host_data, &route)?;
+    let db = rusqlite::Connection::open(host_data.join("opencode.db"))?;
+    db.execute_batch(
+        "CREATE TABLE session_v2 (id TEXT PRIMARY KEY); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT);",
+    )?;
+    db.execute("INSERT INTO session_v2 VALUES ('host-session')", [])?;
+    db.execute(
+        "INSERT INTO session_message VALUES ('host-session', 'assistant', ?1)",
+        [r#"{"model":{"providerID":"fixture","id":"model"}}"#],
+    )?;
+    drop(db);
+
+    let child = base.join("child/provider-state/candidate-0");
+    std::fs::create_dir_all(&child)?;
+    let continuation = super::continuation::continuation_for_policy(
+        &prior,
+        &route,
+        "fixture",
+        super::continuation::ContinuationState {
+            state_root: &state,
+            config_root: &state,
+            private_state: &child,
+        },
+        &provenant_records::policy::Policy::default(),
+        Some(&host_data),
+    )?;
+    assert_eq!(continuation.session(), "host-session");
+    assert_eq!(std::fs::read_dir(&child)?.count(), 0);
+    assert!(super::continuation::prior_uses_native_session_state(
+        prior.applied_route.as_ref().ok_or("applied route")?,
+        "opencode",
+        Some(&prior_state),
+    ));
+    let route_record = run::RouteRecord::from_resolved(&route, None, "fixture");
+    assert_eq!(
+        super::observation::observe_opencode_session(&prior_state, "host-session", &route_record)?,
+        (host_data.clone(), "opencode/fixture/model".to_owned()),
+    );
+    assert!(super::continuation::continuation_for_policy(
+        &prior,
+        &route,
+        "fixture",
+        super::continuation::ContinuationState {
+            state_root: &state,
+            config_root: &state,
+            private_state: &child,
+        },
+        &provenant_records::policy::Policy::default(),
+        Some(&base.join("different/opencode")),
+    )
+    .is_err());
     Ok(())
 }
 
