@@ -4269,8 +4269,41 @@ pub(super) fn prepare_candidates_inner(
                 continue;
             }
         };
+        let sandbox = sandbox_mode(
+            &host_writes,
+            &format!("{}/{}", route.adapter, route.model),
+            task,
+            &plan,
+        );
+        if !lane_access.access.is_isolated() || !sandbox.effective {
+            let expected = match adapter.id() {
+                "codex" | "cursor" => Some("login"),
+                "agy" => Some("keychain"),
+                "claude" => None,
+                _ => None,
+            };
+            if matches!(adapter.id(), "codex" | "cursor" | "agy" | "claude")
+                && (adapter.id() == "claude"
+                    || plan.permissions().selected_authentication.as_deref() != expected)
+            {
+                let detail = format!(
+                    "{} uses native provider authentication (lanes.access={}, source: {})",
+                    adapter.id(),
+                    lane_access.access.as_str(),
+                    lane_access.source.as_str()
+                );
+                if let provenant_records::policy::Effect::Warn(message) = launch_policy.check(
+                    "LAUNCH_NATIVE_AUTH_NONE",
+                    provenant_records::policy::Facts::violation(detail),
+                ) {
+                    provider.launch_warnings.push(format!("warning: {message}"));
+                }
+            }
+        }
         let credential_roots = plan.permissions().credential_roots.clone();
-        let refresh_token = adapter_spec.is_some_and(|spec| spec.launch_token_refresh);
+        let refresh_token = adapter_spec.is_some_and(|spec| spec.launch_token_refresh)
+            && lane_access.access.is_isolated()
+            && sandbox.env_value() != "off";
         let refreshed = if refresh_token && fixture_token.is_none() {
             let account = account.as_ref().ok_or("Claude account is not registered")?;
             let login = provenant_providers::claude::Login {
@@ -4372,12 +4405,6 @@ pub(super) fn prepare_candidates_inner(
         provider_route.set_user_skills(user_skills_mode.is_discover());
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
-        let sandbox = sandbox_mode(
-            &host_writes,
-            &format!("{}/{}", route.adapter, route.model),
-            task,
-            &plan,
-        );
         let lane_worktree = match &plan.permissions().mode {
             AccessMode::WorktreeWrite(_) => writer.as_ref().map(|w| w.worktree.path()),
             AccessMode::ReadOnly => None,
@@ -4537,7 +4564,8 @@ pub(super) fn prepare_candidates_inner(
         let native_root = match &spec.session_state {
             provenant_providers::SessionStateLocation::AttemptPrivate => None,
             provenant_providers::SessionStateLocation::Native { root }
-                if !sandbox.effective && root.is_absolute() =>
+                if (!sandbox.effective || !lane_access.access.is_isolated())
+                    && root.is_absolute() =>
             {
                 Some(root.clone())
             }

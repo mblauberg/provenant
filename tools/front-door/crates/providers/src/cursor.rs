@@ -169,7 +169,7 @@ fn prepare(
 ) -> Result<LaunchSpec, ProviderError> {
     input.prompt.check_argv(input.policy)?;
     let plan = input.confined.permissions();
-    if plan.selected_authentication.as_deref() != Some("login") {
+    if plan.selected_authentication.as_deref() != Some("login") && input.isolated() {
         return Err(input.boundary_error(
             "CURSOR_PREPARE_CREDENTIALS",
             "Cursor requires its selected login authentication",
@@ -231,48 +231,65 @@ fn prepare(
     )?;
     let path = crate::launch::tool_search_path(input.home, true, input.policy)?;
     let mut env = base_env(input, &plan.scratch.path, path)?;
-    if input.sandboxed() {
+    if input.isolated() {
         env.extend([("GIT_CONFIG_GLOBAL".into(), "/dev/null".into())]);
     }
-    let private = &plan
-        .private_state
-        .as_ref()
-        .ok_or(ProviderError::UnsupportedPolicy)?
-        .path;
-    let chats = private.join(".cursor/chats");
-    let mut setup = vec![SetupStep::CreateDir(chats.clone())];
-    setup.push(SetupStep::CreateDir(private.join(".cursor")));
-    setup.push(SetupStep::CreateDir(private.join(".config")));
-    setup.push(SetupStep::CreateDir(private.join(".config/cursor")));
-    for endpoint in &authentication {
-        if endpoint.path.exists() {
-            let relative = endpoint
-                .path
-                .strip_prefix(input.home)
-                .map_err(|_| ProviderError::UnsupportedPolicy)?;
+    let mut setup = Vec::new();
+    if input.isolated() {
+        let private = &plan
+            .private_state
+            .as_ref()
+            .ok_or(ProviderError::UnsupportedPolicy)?
+            .path;
+        let chats = private.join(".cursor/chats");
+        setup.push(SetupStep::CreateDir(chats.clone()));
+        setup.push(SetupStep::CreateDir(private.join(".cursor")));
+        setup.push(SetupStep::CreateDir(private.join(".config")));
+        setup.push(SetupStep::CreateDir(private.join(".config/cursor")));
+        for endpoint in &authentication {
+            if endpoint.path.exists() {
+                let relative = endpoint
+                    .path
+                    .strip_prefix(input.home)
+                    .map_err(|_| ProviderError::UnsupportedPolicy)?;
+                setup.push(SetupStep::Symlink {
+                    link: private.join(relative),
+                    target: endpoint.path.clone(),
+                });
+            }
+        }
+        if let Some(skills) = &staged_skills.root {
             setup.push(SetupStep::Symlink {
-                link: private.join(relative),
-                target: endpoint.path.clone(),
+                link: private.join(".cursor/skills"),
+                target: skills.clone(),
             });
         }
-    }
-    if let Some(skills) = &staged_skills.root {
-        setup.push(SetupStep::Symlink {
-            link: private.join(".cursor/skills"),
-            target: skills.clone(),
-        });
-    }
-    for (key, value) in &mut env {
-        if input.sandboxed() && key == "HOME" {
-            *value = private.into();
+        for (key, value) in &mut env {
+            if key == "HOME" {
+                *value = private.into();
+            }
         }
     }
-    let session_state = if input.sandboxed() {
+    let session_state = if input.isolated() {
         crate::SessionStateLocation::AttemptPrivate
     } else {
         crate::SessionStateLocation::Native {
             root: input.home.to_owned(),
         }
+    };
+    let native_state = if input.sandboxed() && !input.isolated() {
+        [
+            input.home.join(".cursor"),
+            input.home.join(".config/cursor"),
+        ]
+        .into_iter()
+        .map(|path| {
+            setup.push(SetupStep::CreateDir(path.clone()));
+            subtree(path)
+        })
+        .collect()
+    } else {
+        Vec::new()
     };
     Ok(LaunchSpec {
         argv,
@@ -301,6 +318,7 @@ fn prepare(
                     .chain(skill_reads)
                     .chain(optional_reads)
                     .collect(),
+                state_writes: native_state,
                 authentication: vec![AuthenticationProfile {
                     keychain: None,
                     mechanism: "login".into(),

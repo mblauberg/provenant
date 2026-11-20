@@ -409,12 +409,33 @@ fn route_mismatch(applied: &run::RouteRecord, route: &ResolvedRoute) -> Option<F
 }
 
 pub(super) fn prior_uses_native_session_state(applied: &run::RouteRecord, provider: &str) -> bool {
-    applied
+    (applied
         .sandbox
         .as_ref()
         .is_some_and(|sandbox| !sandbox.effective)
+        || applied
+            .lane_access
+            .as_ref()
+            .is_some_and(|receipt| !receipt.access.is_isolated()))
         && !AdapterSpec::get(provider)
             .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase)
+}
+
+#[test]
+fn native_session_selection_follows_recorded_access_and_legacy_sandbox() {
+    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource};
+    let mut route = run::RouteRecord::default();
+    assert!(!prior_uses_native_session_state(&route, "codex"));
+    route.lane_access = Some(LaneAccessReceipt {
+        access: LaneAccess::Host,
+        source: LaneAccessSource::Default,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    });
+    assert!(prior_uses_native_session_state(&route, "codex"));
+    assert!(!prior_uses_native_session_state(&route, "opencode"));
+    route.lane_access.as_mut().unwrap().access = LaneAccess::Isolated;
+    assert!(!prior_uses_native_session_state(&route, "codex"));
 }
 
 pub(super) fn verify_native_continuation(
@@ -434,11 +455,7 @@ pub(super) fn verify_native_continuation(
     if let Some(field) = route_mismatch(applied, route) {
         return Err(ContinuationError::RouteMismatch(field));
     }
-    if applied
-        .sandbox
-        .as_ref()
-        .is_some_and(|sandbox| sandbox.effective)
-    {
+    if !prior_uses_native_session_state(applied, &route.adapter) {
         return Err(ContinuationError::RouteMismatch(F::SessionState));
     }
     let prior_state = state_root

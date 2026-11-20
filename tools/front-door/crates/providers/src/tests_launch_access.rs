@@ -1012,6 +1012,39 @@ fn cursor_and_claude_keep_sessions_private_with_or_without_skills() -> Result<()
 }
 
 #[test]
+fn sandboxed_host_access_uses_native_homes_and_authentication() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture".into());
+    for id in ["codex", "cursor", "claude", "agy"] {
+        let mut route = route(id, "fixture-model");
+        route.account_key = None;
+        let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
+        let adapter = REGISTRY.iter().find(|entry| entry.adapter.id() == id).unwrap().adapter;
+        assert!(matches!(adapter.prepare(fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None)), Err(ProviderError::UnsupportedPolicy)));
+        route.set_access(provenant_records::LaneAccess::Host);
+        let spec = adapter.prepare(fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None))?;
+        let expected = match id {
+            "codex" => Path::new("/fixture/home/.codex"),
+            "claude" => Path::new("/fixture/home/.claude"),
+            _ => Path::new("/fixture/home"),
+        };
+        assert_eq!(spec.session_state, crate::SessionStateLocation::Native { root: expected.into() });
+        assert!(spec.user_skills.root.is_none());
+        assert!(spec.secret_input.is_none());
+        assert!(!spec.env.iter().any(|(key, value)| key == "GIT_CONFIG_GLOBAL" && value == "/dev/null"));
+        let state_root = if id == "agy" { Path::new("/fixture/home/.gemini") } else if id == "cursor" { Path::new("/fixture/home/.cursor") } else { expected };
+        assert!(spec.profile.spec.state_writes.iter().any(|grant| grant.path == state_root));
+        assert!(!spec.env.iter().any(|(key, value)| (key == "HOME" || key == "CODEX_HOME" || key == "CLAUDE_CONFIG_DIR") && Path::new(value).starts_with("/fixture/state")));
+        if id == "claude" {
+            assert!(!spec.argv.iter().any(|arg| arg == "--strict-mcp-config" || arg == "--setting-sources"));
+        }
+        if id == "codex" {
+            assert!(!spec.argv.iter().any(|arg| arg == "--ignore-user-config"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn native_adapters_preserve_the_host_environment_and_sandbox_tool_preparation()
 -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture".into());
@@ -1397,7 +1430,7 @@ fn codex_configuration_is_a_writer_preference_and_read_only_authority()
                 let launch = codex::Codex.prepare(input)?;
                 assert_eq!(
                     launch.argv.iter().any(|arg| arg == "--ignore-user-config"),
-                    configuration == CodexPolicy::Clean
+                    sandboxed && configuration == CodexPolicy::Clean
                 );
             }
         }

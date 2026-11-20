@@ -377,7 +377,7 @@ Every declaration is kept, whatever its order or kind; each spelling of a
 declared location carries every declaration made at or beneath any spelling of
 it, so a store registered at a Codex home or its alias stays refused.
 
-Skill snapshots use `CredentialRoots::skill_entry_refusal` for each entry and
+Isolated skill snapshots use `CredentialRoots::skill_entry_refusal` for each entry and
 resolved link target. The selected skills directory may sit beneath an enclosing
 provider store; that permits ordinary skills only within the selected source.
 Every independently declared nested store and exact endpoint remains excluded,
@@ -468,7 +468,9 @@ discovery, credential symlink inventory and the build admission shims. Every lan
 binds the host Cargo home and private target/build directories before seed
 validation.
 
-Sandboxed lanes stage skills, discover tool
+Isolated sandboxed lanes stage skills. Host access uses native provider homes
+and skill discovery, including linked references; account-specific homes remain
+when they select a login. Sandboxed lanes discover tool
 dependencies and credential aliases, and report inventory omissions in one
 actionable warning. Cargo registry and Git sources are writable unless
 `domains.fabric.lanes.cargo_source_writes` is turned off. Cargo lock and cache-use

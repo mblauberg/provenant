@@ -395,7 +395,7 @@ impl provenant_os::exec::Executor for GuardedExecutor<'_> {
     }
 }
 
-/// Sandboxed Agy runs with the attempt's private state as `HOME`, hiding the
+/// Isolated Agy runs with the attempt's private state as `HOME`, hiding the
 /// user's Gemini or Antigravity configuration, MCP servers, plugins, hooks,
 /// sidecars or knowledge: its state lives and dies in the private home. Its
 /// sign-in is in a keychain, so the private home links only that one file,
@@ -411,7 +411,7 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    if plan.selected_authentication.as_deref() != Some("keychain") {
+    if plan.selected_authentication.as_deref() != Some("keychain") && input.isolated() {
         return Err(input.boundary_error(
             "AGY_PREPARE_CREDENTIALS",
             "Agy requires its selected keychain authentication",
@@ -419,22 +419,27 @@ fn prepare(
         ));
     }
     input.prompt.check_argv(input.policy)?;
-    let private_home = crate::launch::private_state_or_scratch(
-        plan.private_state
-            .as_ref()
-            .map(|state| state.path.as_path()),
-        &plan.scratch.path,
-        input.policy,
-        "AGY_PREPARE_NONE",
-    )?;
+    let private_home = if input.isolated() {
+        crate::launch::private_state_or_scratch(
+            plan.private_state
+                .as_ref()
+                .map(|state| state.path.as_path()),
+            &plan.scratch.path,
+            input.policy,
+            "AGY_PREPARE_NONE",
+        )?
+    } else {
+        &plan.scratch.path
+    };
     let keychain = match input.account {
-        Some(account) => account_keychain(account.directory(), input.home)?,
+        Some(account) if input.isolated() => account_keychain(account.directory(), input.home)?,
+        Some(account) => Some(account.directory().join(KEYCHAIN)),
         None => None,
     }
     .unwrap_or_else(|| input.home.join(KEYCHAIN));
     // An explicit account's HOME selects its keychain. The ordinary login can
     // use the host HOME and its tool configuration directly.
-    let home = if input.sandboxed() {
+    let home = if input.isolated() {
         private_home
     } else {
         input
@@ -510,7 +515,7 @@ fn prepare(
     let path = crate::launch::tool_search_path(input.home, true, input.policy)?;
     let mut env = base_env(input, &plan.scratch.path, path)?;
     for (key, value) in &mut env {
-        if key == "HOME" && (input.sandboxed() || input.account.is_some()) {
+        if key == "HOME" && (input.isolated() || input.account.is_some()) {
             *value = home.into();
         }
     }
@@ -527,7 +532,7 @@ fn prepare(
         }
     }
     let keychains = home.join("Library/Keychains");
-    let mut setup = if input.sandboxed() {
+    let mut setup = if input.isolated() {
         vec![
             SetupStep::CreateDir(keychains.clone()),
             SetupStep::Symlink {
@@ -545,6 +550,13 @@ fn prepare(
             target: user_skills.clone(),
         });
     }
+    let native_state = if input.sandboxed() && !input.isolated() {
+        let state = home.join(".gemini");
+        setup.push(SetupStep::CreateDir(state.clone()));
+        vec![subtree(state)]
+    } else {
+        Vec::new()
+    };
     // Both lanes run system commands; only writers get the additional tools.
     let runtime_reads = skill_reads;
     let tool_exec_roots = vec![
@@ -552,10 +564,10 @@ fn prepare(
         subtree("/usr/bin"),
         subtree("/usr/libexec"),
     ];
-    if input.sandboxed() {
+    if input.isolated() {
         env.extend([("GIT_CONFIG_GLOBAL".into(), "/dev/null".into())]);
     }
-    let session_state = if input.sandboxed() {
+    let session_state = if input.isolated() {
         crate::SessionStateLocation::AttemptPrivate
     } else {
         crate::SessionStateLocation::Native {
@@ -596,6 +608,7 @@ fn prepare(
                     in_place_writes: Vec::new(),
                 }],
                 runtime_reads,
+                state_writes: native_state,
                 tool_exec_roots,
                 provider_api: vec![NetworkEndpoint {
                     address: "*".into(),

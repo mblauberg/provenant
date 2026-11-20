@@ -91,7 +91,7 @@ fn user_skills_grants_resolve_linked_roots_resources_and_cycles()
         &home.join("staged"),
         &home,
         &roots,
-        4096,
+        4096, true
     );
     assert_eq!(staged.file_count, 1);
     assert!(
@@ -111,7 +111,7 @@ fn user_skills_grants_resolve_linked_roots_resources_and_cycles()
             &home.join("staged"),
             &home,
             &roots,
-            4096,
+            4096, true
         )
         .root
         .is_none()
@@ -428,7 +428,7 @@ fn discovered_skill_links_into_credential_roots_are_omitted()
     std::fs::create_dir_all(&secret)?;
     std::os::unix::fs::symlink(&secret, skills.join("linked"))?;
     let roots = provenant_core::CredentialRoots::for_home(&home);
-    let staged = crate::skill_stage::capture(&skills, &home.join("staged"), &home, &roots, 4096);
+    let staged = crate::skill_stage::capture(&skills, &home.join("staged"), &home, &roots, 4096, true);
     assert!(
         staged
             .warnings
