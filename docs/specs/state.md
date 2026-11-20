@@ -195,6 +195,26 @@ CI observation commands receive `PROVENANT_PORT_REQUEST_PATH` and `PROVENANT_POR
 - Why: errors need visible remedies without expanding authority.
 - Owner: `crates/config/src/`
 
+### Build state has one host root
+
+The build store, queue, ledger and maintenance record share `<state>/build/`:
+`store/<project_key>.git` (bare store, `core.hooksPath=/dev/null`, `gc.auto=0`,
+`receive.denyDeletes=false`) with `refs/snapshots/<owner>/<seq>` and
+`refs/bases/<owner>/<seq>` pins and a `store/<project_key>.lock` (shared for
+fetch, exclusive for GC); `queue/build/<ticket_id>.json` tickets whose liveness
+is an exclusive flock; `jobs.jsonl` with `jobs.lock`; and `maintenance.json`.
+The canonical ledger is host-level so the soak spans lanes, the chair and
+landing and survives attempt GC. When the host ledger is unwritable, a row goes
+to `<attempt scratch>/build-jobs.jsonl` and the report counts it missing.
+Slots live under `~/Library/Caches/provenant-slots/<project_key>/<n>/` with
+`repo/` (a clone of the store, objects hardlinked, never shared alternates),
+`target/` (`CARGO_TARGET_DIR`), `tmp/` (`TMPDIR`), `slot.json` (slot record),
+`job.json` (running job, written after spawn) and `lock` (held for the job).
+`slot.json` lives inside the slot so an OS cache purge removes both together.
+- Why: one root to report, GC and document; a slot record must never disagree
+  with its slot.
+- Owner: `crates/run/src/build/paths.rs`, `crates/run/src/build/ledger.rs`
+
 ### Retention keeps evidence
 
 GC retains evidence and unimported Git work; it expires resumable provider state
