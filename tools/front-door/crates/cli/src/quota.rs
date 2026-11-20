@@ -4828,8 +4828,23 @@ mod tests {
             .iter()
             .find(|r| r.account.account_key == "key")
             .ok_or("account record")?;
-        assert_eq!(found.refusals.len(), 1);
-        assert_eq!(found.refusals[0].observed_unix_seconds, 200);
+        // The paid run clears neither refusal: the fresh free-pool refusal
+        // stays live with its provider reset, and the unrelated model-scoped
+        // refusal from the first half is still held. Only a free-model success
+        // may clear the pool's refusal.
+        let live_pool = found
+            .refusals
+            .iter()
+            .find(|refusal| refusal.pool.as_deref() == Some(pool.as_str()))
+            .ok_or("live free-pool refusal")?;
+        assert_eq!(live_pool.observed_unix_seconds, 200);
+        assert_eq!(live_pool.resets_unix_seconds, Some(1000));
+        assert!(
+            found
+                .refusals
+                .iter()
+                .any(|refusal| refusal.model == "other-model" && refusal.pool.is_none())
+        );
         assert_eq!(found.cleared_refusals.len(), 1);
         Ok(())
     }
