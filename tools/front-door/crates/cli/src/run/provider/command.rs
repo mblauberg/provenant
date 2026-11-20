@@ -202,10 +202,32 @@ pub(super) fn prepare_command(
         .ok_or("current user identity is unavailable")?
         .name;
     let runtime = canonical(&std::env::current_exe().map_err(|error| error.to_string())?)?;
+    let policy_model = provenant_routing::ModelId::parse(&format!("{provider}/{name}"));
+    let now = provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new());
+    let catalogue = provenant_routing::Catalogue::bundled();
+    let mut access_policy_warning = None;
+    let model_policy = match (policy_model, now, catalogue) {
+        (Ok(model), Ok(now), Ok(catalogue)) => {
+            config
+                .domains
+                .routing
+                .model_policy
+                .effective(&catalogue, &model, None, now)
+                .policy
+        }
+        _ => {
+            access_policy_warning = Some(
+                "command route policy unavailable; resolving lanes.access from knobs".to_owned(),
+            );
+            Default::default()
+        }
+    };
+    let lane_access = super::preparation::resolve_lane_access(task, &model_policy);
     let route = ResolvedRoute {
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: lane_access.access,
         extra: Default::default(),
         adapter: provider.into(),
         model: String::new(),
@@ -293,6 +315,8 @@ pub(super) fn prepare_command(
         roots.state.as_path(),
     ));
     launch_warnings.extend(spec.warnings.iter().cloned());
+    launch_warnings.extend(access_policy_warning);
+    launch_warnings.extend(super::preparation::lane_access_warning(task, &lane_access));
     apply_lane_capabilities(&mut spec.profile.spec, &task.access);
     let common_git_path = repository
         .as_ref()
@@ -386,6 +410,7 @@ pub(super) fn prepare_command(
     );
     let mut route = RouteRecord {
         provider: Some(provider.into()),
+        lane_access: Some(lane_access),
         source: Some(format!("domains.fabric.commands.{name}")),
         extra: Default::default(),
         cargo_home: serde_json::from_value(spec.cargo_home_receipt())

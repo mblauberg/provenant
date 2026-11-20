@@ -108,7 +108,7 @@ pub fn lane_access(
     access: &crate::Access,
     state_root: &Path,
     credentials: &provenant_core::CredentialRoots,
-) -> Result<run::LaneAccess, Fail> {
+) -> Result<run::LaneAccessRequest, Fail> {
     lane_access_checked(access, state_root, credentials)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))
 }
@@ -166,7 +166,7 @@ pub(super) fn lane_access_checked(
     access: &crate::Access,
     state_root: &Path,
     credentials: &provenant_core::CredentialRoots,
-) -> Result<run::LaneAccess, AccessError> {
+) -> Result<run::LaneAccessRequest, AccessError> {
     let mut postgres = false;
     for name in &access.capability {
         match name.as_str() {
@@ -238,7 +238,7 @@ pub(super) fn lane_access_checked(
         }
         attachments.push(canonical);
     }
-    Ok(run::LaneAccess {
+    Ok(run::LaneAccessRequest {
         extra: Default::default(),
         capability_sources: Default::default(),
         shared_worktree: None,
@@ -274,7 +274,7 @@ pub struct Submitted {
     pub delivery_id: Option<DeliveryId>,
     pub deliver: Option<run::WriterDeliveryRequest>,
     pub worktree: Option<PathBuf>,
-    pub access: run::LaneAccess,
+    pub access: run::LaneAccessRequest,
 }
 
 pub struct Submission {
@@ -644,6 +644,16 @@ fn submit_with_launcher(
         let task = submission.task;
         {
             let mut task_profile = profile.clone();
+            if task.attempt.sealed_profile.is_none() && task.attempt.lane_access.is_some() {
+                task_profile.knob_sources.insert(
+                    "lanes.access".into(),
+                    task.attempt
+                        .budget_sources
+                        .get("lane_access")
+                        .copied()
+                        .unwrap_or(provenant_records::LimitSource::Template),
+                );
+            }
             task_profile.policy_project = Some(session.context.project_id);
             task_profile.require_skill_location = task.require_skill_location;
             task_profile.settlement_retry_limit = task

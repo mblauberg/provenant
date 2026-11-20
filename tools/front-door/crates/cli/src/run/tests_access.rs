@@ -549,6 +549,7 @@ fn opencode_stderr_quota_settles_and_records_refusal() -> Result<(), Box<dyn std
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: Default::default(),
         extra: Default::default(),
         adapter: "opencode".into(),
         model: "opencode-go/example".into(),

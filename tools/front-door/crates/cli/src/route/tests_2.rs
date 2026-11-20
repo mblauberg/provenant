@@ -872,6 +872,7 @@
             selection_context: Default::default(),
             diagnostics: Default::default(),
             user_skills: true,
+            access: Default::default(),
             extra: Default::default(),
             adapter: adapter.into(),
             model: model.into(),

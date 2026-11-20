@@ -4151,6 +4151,11 @@ pub(super) fn prepare_candidates_inner(
             resume.is_some(),
             current_candidate > 0,
         );
+        let lane_access = resolve_lane_access(task, &model_policy);
+        if let Some(warning) = lane_access_warning(task, &lane_access) {
+            push_launch_warning(&mut route, warning);
+        }
+        provider.lane_access = Some(lane_access.clone());
         apply_resolved_model(&mut provider, &exact_model);
         if let Some(name) = host_native {
             provider.source = Some(format!("domains.fabric.host_native.{name}"));
@@ -4332,6 +4337,7 @@ pub(super) fn prepare_candidates_inner(
             None
         };
         let mut provider_route = adapter_route(&route);
+        provider_route.set_access(lane_access.access);
         let launch_model = catalogue.launch_model(&exact_model, route.effort.as_deref());
         let provider_model = (launch_model != route.model).then_some(launch_model);
         let project_id_str = project_id.to_string();
@@ -5291,6 +5297,179 @@ fn resolved_launch_model(
         .unwrap_or_else(|| requested.clone())
 }
 
+/// Resolve one access decision for each candidate, before preparing its provider.
+pub(super) fn resolve_lane_access(
+    task: &run::TaskRequest,
+    model_policy: &provenant_routing::ModelPolicy,
+) -> provenant_records::LaneAccessReceipt {
+    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource, LimitSource};
+    const KEY: &str = "lanes.access";
+    let source = task
+        .profile
+        .knob_sources
+        .get(KEY)
+        .copied()
+        .unwrap_or_default();
+    let explicit = matches!(
+        source,
+        LimitSource::Launch | LimitSource::Template | LimitSource::Tier
+    );
+    if !explicit && let Some(access) = model_policy.lane.access {
+        return LaneAccessReceipt {
+            access,
+            source: LaneAccessSource::RoutePolicy,
+            key: model_policy
+                .lane
+                .access_key
+                .clone()
+                .unwrap_or_else(|| "defaults.lane.access".into()),
+            extra: Default::default(),
+        };
+    }
+    let receipt_source = match source {
+        LimitSource::Default => LaneAccessSource::Default,
+        LimitSource::Host => LaneAccessSource::Host,
+        LimitSource::Project => LaneAccessSource::Project,
+        LimitSource::Template => LaneAccessSource::Template,
+        LimitSource::Tier => LaneAccessSource::Tier,
+        LimitSource::Launch => LaneAccessSource::Launch,
+    };
+    let access = match task.profile.knobs.get(KEY) {
+        None => LaneAccess::Host,
+        Some(value) => match value.as_str() {
+            Some("host") => LaneAccess::Host,
+            Some("isolated") => LaneAccess::Isolated,
+            _ => LaneAccess::Host,
+        },
+    };
+    LaneAccessReceipt {
+        access,
+        source: receipt_source,
+        key: KEY.into(),
+        extra: Default::default(),
+    }
+}
+
+pub(super) fn lane_access_warning(
+    task: &run::TaskRequest,
+    receipt: &provenant_records::LaneAccessReceipt,
+) -> Option<String> {
+    (receipt.source != provenant_records::LaneAccessSource::RoutePolicy
+        && task
+            .profile
+            .knobs
+            .get("lanes.access")
+            .is_some_and(|value| !matches!(value.as_str(), Some("host" | "isolated"))))
+    .then(|| {
+        format!(
+            "invalid lanes.access value; using host (source: {})",
+            receipt.source.as_str()
+        )
+    })
+}
+
+#[cfg(test)]
+mod lane_access_tests {
+    use super::*;
+    use provenant_records::{LaneAccess, LaneAccessSource, LimitSource};
+
+    #[test]
+    fn precedence_and_invalid_values() {
+        let mut task = run::TaskRequest {
+            context: None,
+            extra: Default::default(),
+            limit_extensions: Default::default(),
+            build_heavy: false,
+            title: None,
+            base: None,
+            head: None,
+            source_head: None,
+            base_ref: None,
+            profile: Default::default(),
+            prompt_digest: provenant_records::CanonicalV1::file_digest(b"test"),
+            route: run::RequestedRoute::Model {
+                required_family: None,
+                extra: Default::default(),
+                provider: "codex".into(),
+                model: "codex/model".into(),
+                effort: None,
+            },
+            account: None,
+            authority_digest: provenant_core::Digest::from_bytes([4; 32]),
+            writer: None,
+            deliver: None,
+            provider_timeout_seconds: 20,
+            delivery_id: None,
+            access: Default::default(),
+        };
+        let mut policy = provenant_routing::ModelPolicy::default();
+        let cases = [
+            (
+                None,
+                None,
+                None,
+                LaneAccess::Host,
+                LaneAccessSource::Default,
+            ),
+            (
+                Some(LimitSource::Host),
+                Some("isolated"),
+                None,
+                LaneAccess::Isolated,
+                LaneAccessSource::Host,
+            ),
+            (
+                Some(LimitSource::Host),
+                Some("isolated"),
+                Some(LaneAccess::Host),
+                LaneAccess::Host,
+                LaneAccessSource::RoutePolicy,
+            ),
+            (
+                Some(LimitSource::Launch),
+                Some("isolated"),
+                Some(LaneAccess::Host),
+                LaneAccess::Isolated,
+                LaneAccessSource::Launch,
+            ),
+            (
+                Some(LimitSource::Template),
+                Some("invalid"),
+                None,
+                LaneAccess::Host,
+                LaneAccessSource::Template,
+            ),
+            (
+                Some(LimitSource::Tier),
+                Some("isolated"),
+                Some(LaneAccess::Host),
+                LaneAccess::Isolated,
+                LaneAccessSource::Tier,
+            ),
+        ];
+        for (source, value, route, expected, expected_source) in cases {
+            task.profile.knob_sources.clear();
+            task.profile.knobs.clear();
+            if let Some(source) = source {
+                task.profile
+                    .knob_sources
+                    .insert("lanes.access".into(), source);
+            }
+            if let Some(value) = value {
+                task.profile
+                    .knobs
+                    .insert("lanes.access".into(), value.into());
+            }
+            policy.lane.access = route;
+            let receipt = resolve_lane_access(&task, &policy);
+            assert_eq!(
+                (receipt.access, receipt.source),
+                (expected, expected_source)
+            );
+        }
+    }
+}
+
 /// Carry the exact model into the launch receipt, so identity comparison sees
 /// the model the provider reports.
 /// Spec: docs/specs/routing.md#provider-model-discovery
@@ -5658,6 +5837,7 @@ mod user_skills_tests {
                 selection_context: Default::default(),
                 diagnostics: Default::default(),
                 user_skills: true,
+                access: Default::default(),
                 extra: Default::default(),
                 adapter: adapter.name.into(),
                 model: "fixture".into(),
@@ -6058,6 +6238,7 @@ mod candidate_walk_regressions {
             selection_context: Default::default(),
             diagnostics: Default::default(),
             user_skills: true,
+            access: Default::default(),
             extra: Default::default(),
             adapter: "cursor".into(),
             model: model.into(),

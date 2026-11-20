@@ -204,6 +204,7 @@ fn codex_resolved_route(
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: Default::default(),
         extra: Default::default(),
         adapter: "codex".into(),
         model: model.into(),
@@ -589,7 +590,7 @@ fn explicit_write_root_keeps_read_only_git_authority() -> Result<(), Box<dyn std
     std::fs::create_dir(&source)?;
     let write = root.join("write");
     std::fs::create_dir(&write)?;
-    let access = run::LaneAccess {
+    let access = run::LaneAccessRequest {
         write_roots: vec![write.clone()],
         ..Default::default()
     };
@@ -663,7 +664,7 @@ fn launch_policy_binds_mandatory_aliases_and_all_network_ceilings()
             NetworkAccess::Local,
             NetworkAccess::Open,
         ] {
-            let access = run::LaneAccess {
+            let access = run::LaneAccessRequest {
                 network: Some(requested),
                 ..Default::default()
             };
@@ -1134,7 +1135,7 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
             prompt_file: None,
         },
         None,
-        &run::LaneAccess::default(),
+        &run::LaneAccessRequest::default(),
         &Default::default(),
         "command",
         false,
@@ -1293,7 +1294,7 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
     inputs.state_dir = Some(state.clone());
     let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     let image = root.join("outside/shot.png");
-    let access = run::LaneAccess {
+    let access = run::LaneAccessRequest {
         attachments: vec![image.clone()],
         ..Default::default()
     };
@@ -1323,6 +1324,7 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: Default::default(),
         extra: Default::default(),
         adapter: "codex".into(),
         model: "fixture".into(),
@@ -1407,7 +1409,7 @@ fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
     inputs.state_dir = Some(state.clone());
     let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     let image = root.join("outside/image.png");
-    let access = run::LaneAccess {
+    let access = run::LaneAccessRequest {
         attachments: vec![image.clone()],
         ..Default::default()
     };
@@ -1483,7 +1485,7 @@ fn lane_plan_reads_the_active_release_root() -> Result<(), Box<dyn std::error::E
                 prompt_file: Some(&prompt),
             },
             None,
-            &run::LaneAccess::default(),
+            &run::LaneAccessRequest::default(),
             &Default::default(),
             entry.adapter.id(),
             true,
@@ -1566,7 +1568,7 @@ fn host_write_paths_reach_writers_only() {
         writer_writes: vec!["/p/.agent-run/locks".into()],
         ..Default::default()
     };
-    let access = run::LaneAccess {
+    let access = run::LaneAccessRequest {
         write_roots: vec!["/p/extra".into()],
         ..Default::default()
     };
@@ -1607,7 +1609,7 @@ fn writer_plan_roots_are_resolved_for_the_selected_project() {
         .into(),
         ..Default::default()
     };
-    let roots = write_roots(&run::LaneAccess::default(), &config, true, "a");
+    let roots = write_roots(&run::LaneAccessRequest::default(), &config, true, "a");
     assert_eq!(
         roots,
         vec![PathGrant {

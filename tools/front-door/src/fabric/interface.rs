@@ -463,7 +463,7 @@ fn launch_input(input: &Value) -> Result<Value, FacadeError> {
         }
     }
     // Retain provenance when these run controls are merged onto a template.
-    for field in ["token_budget", "on_budget", "budget_grace"] {
+    for field in ["token_budget", "on_budget", "budget_grace", "lane_access"] {
         if attempt.get(field).is_some() {
             if !attempt["budget_sources"].is_object() {
                 attempt["budget_sources"] = json!({});

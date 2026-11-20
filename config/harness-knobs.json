@@ -2,6 +2,7 @@
   "schema_version": 1,
   "documented_fields": [
       "profile",
+      "lanes.access",
       "lanes.max_concurrency",
       "lanes.max_concurrency_read_only",
       "lanes.max_depth",
@@ -374,6 +375,7 @@
       "defaults.lane.max_context": {"type": "int", "allowed": "tokens, 1 or more", "default": "unset", "effect": "Enforced largest context for a lane on this model."},
       "defaults.lane.max_turns": {"type": "int", "allowed": "turns, 1 or more", "default": "unset", "effect": "Enforced most turns for a lane on this model."},
       "defaults.lane.stop_early_ok": {"type": "bool", "allowed": "true or false", "default": "false", "effect": "false asks writers to report completion through the shared handoff."},
+      "defaults.lane.access": {"type": "enum", "allowed": "host or isolated", "default": "inherit lanes.access", "effect": "Override host and project lane access for matching routes unless an explicit launch, template or tier knob wins. rules.policy.lane.access uses the same values."},
       "defaults.lane.user_skills": {"type": "enum", "allowed": "discover or off", "default": "inherit domains.lanes.user_skills", "effect": "Override host and project user skill discovery for matching routes. rules.policy.lane.user_skills uses the same values."},
       "defaults.lane.read_only": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "true refuses write lanes on this model."},
       "defaults.result.check": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "Check the result for the required sections before accepting it."},
@@ -775,6 +777,12 @@
       "reader": "tools/front-door/src/chair.rs",
       "effect": "Ordered registered Claude account labels allowed as switch targets; empty allows none.",
       "trade_off": "An explicit list controls which signed-in accounts may receive the chair."
+    },
+    "lanes.access": {
+      "type": "enum", "values": ["host", "isolated"], "default": "host", "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/run/provider/preparation.rs",
+      "effect": "Select the resolved lane access model. host: a same-host lane inherits the host environment, provider native home, profile and login, host Git configuration and credential reads like the host user, whether or not sandboxed. isolated: today's behaviour, where sandboxed lanes get a private environment, provider home, filtered Git configuration and credential denies, and hosted-cloud credential variables are stripped from every lane. Cross-host credential grants are unchanged under both. This slice records the model; enforcement follows in subsequent slices. Set per run with --knob lanes.access=isolated, per node with attempt.lane_access, in host or project knobs, or by route or provider through route policy.",
+      "trade_off": "Host access preserves the native environment; isolated opts into the existing restrictions."
     },
     "lanes.launch_retry_limit": {
       "type": "int", "min": 0, "max": 20, "default": 3, "status": "wired",

@@ -106,7 +106,7 @@ impl CommitSourcePreparation {
             deliver: None,
             provider_timeout_seconds: 20,
             delivery_id: None,
-            access: run::LaneAccess {
+            access: run::LaneAccessRequest {
                 source_root: Some(project.clone()),
                 source_identity: Some(source_identity(&project)?),
                 ..Default::default()

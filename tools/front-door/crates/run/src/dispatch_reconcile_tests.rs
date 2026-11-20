@@ -77,6 +77,7 @@ fn resolved_named_route_survives_launch_admission() -> TestResult {
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: Default::default(),
         extra: Default::default(),
         adapter: "codex".into(),
         model: "gpt-6.1-sol".into(),

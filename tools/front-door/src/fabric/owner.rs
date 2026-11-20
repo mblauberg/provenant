@@ -112,7 +112,7 @@ impl GraphRefusalScope {
 
 /// A selected read-only checkout uses the ordinary launch root policy.
 fn bind_child_directory(
-    grants: &mut provenant_records::run::LaneAccess,
+    grants: &mut provenant_records::run::LaneAccessRequest,
     directory: &str,
     state: &Path,
     credentials: &provenant_core::CredentialRoots,
@@ -178,7 +178,7 @@ fn selected_writer_project(
             selected,
         )));
     }
-    let mut checked = provenant_records::run::LaneAccess::default();
+    let mut checked = provenant_records::run::LaneAccessRequest::default();
     bind_child_directory(
         &mut checked,
         selected
@@ -3642,9 +3642,9 @@ impl BoundGraphOwner<'_> {
         access: provenant_fabric_runtime::graph::AccessMode,
         worktree: Option<&str>,
         accepted: bool,
-        accepted_access: Option<provenant_records::run::LaneAccess>,
+        accepted_access: Option<provenant_records::run::LaneAccessRequest>,
         source_commit: Option<&str>,
-    ) -> Result<provenant_records::run::LaneAccess, FacadeError> {
+    ) -> Result<provenant_records::run::LaneAccessRequest, FacadeError> {
         let mut grants = if accepted {
             accepted_access.ok_or(FacadeError::StateCorrupt)?
         } else {
@@ -4525,7 +4525,7 @@ mod journal_error_tests {
         for path in [&home, &state, &scratch, &credentials] {
             std::fs::create_dir_all(path)?;
         }
-        let mut grants = provenant_records::run::LaneAccess::default();
+        let mut grants = provenant_records::run::LaneAccessRequest::default();
         let declared = provenant_core::CredentialRoots::for_home(&home);
         bind_child_directory(
             &mut grants,

@@ -2803,6 +2803,7 @@ fn resolve_inner(
             writes: request.intent.writes,
         },
         user_skills: true,
+        access: Default::default(),
         diagnostics: primary.diagnostics,
         extra: primary.extra,
         adapter: primary.adapter,

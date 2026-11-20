@@ -169,8 +169,8 @@ fn overview_needs_you() -> Result {
     // Submit a queued lane through its owner, without starting a provider.
     use provenant_core::{ActorId, CancelToken, OperationId, ProjectId};
     use provenant_run::{
-        DispatchRequest, DispatchTask, ExecutionContext, HarnessProfile, LaneAccess, Request,
-        RequestedRoute, RunStore, Service,
+        DispatchRequest, DispatchTask, ExecutionContext, HarnessProfile, LaneAccessRequest,
+        Request, RequestedRoute, RunStore, Service,
     };
     let project = ProjectId::parse(rows[0]["project_id"].as_str().ok_or("project ID")?)?;
     let clock = provenant_os::clock::SystemClock::new();
@@ -218,7 +218,7 @@ fn overview_needs_you() -> Result {
                 delivery_id: None,
                 deliver: None,
                 worktree: None,
-                access: LaneAccess::default(),
+                access: LaneAccessRequest::default(),
             },
             lane_depth: 1,
             parent_attempt: None,

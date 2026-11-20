@@ -3,7 +3,7 @@ use super::*;
 /// Bind declared lane capabilities to the provider's confinement profile.
 pub(in crate::run) fn apply_lane_capabilities(
     profile: &mut provenant_confinement::permissions::ProviderProfileSpec,
-    access: &run::LaneAccess,
+    access: &run::LaneAccessRequest,
 ) {
     profile.allow_database_ipc = access.database_ipc;
 }
@@ -163,7 +163,7 @@ pub(super) fn project_scratch_reads(project: &Path) -> Vec<PathGrant> {
 
 /// Dispatch write roots, plus project-resolved shared run state for writers only.
 pub(super) fn write_roots(
-    access: &run::LaneAccess,
+    access: &run::LaneAccessRequest,
     host_writes: &provenant_confinement::run_config::RunConfig,
     writer: bool,
     project: &str,
@@ -200,7 +200,7 @@ pub(super) fn confinement_request(
     project_id: ProjectId,
     roots: ConfinementRoots<'_>,
     writer: Option<&run::WriterLaunch>,
-    access: &run::LaneAccess,
+    access: &run::LaneAccessRequest,
     host_writes: &provenant_confinement::run_config::RunConfig,
     adapter: &str,
     publishing: bool,

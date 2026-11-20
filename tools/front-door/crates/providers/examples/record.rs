@@ -366,6 +366,7 @@ fn route(args: &Args, account_key: &str) -> ResolvedRoute {
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: Default::default(),
         extra: Default::default(),
         adapter: args.adapter.clone(),
         model: args.model.clone(),

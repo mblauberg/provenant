@@ -494,6 +494,17 @@ impl PrepareInput<'_> {
         (self.host_var)(provenant_core::consumer_env::SANDBOX).is_none_or(|value| value != "off")
     }
 
+    pub fn access(&self) -> provenant_records::LaneAccess {
+        self.route.access()
+    }
+
+    /// Whether the lane's view of the host is isolated: today's sandboxed behaviour (private environment, provider home, Git configuration and credential denies). Under the default host access a sandboxed lane still sees the host environment, provider home and Git configuration; the sandbox confines writes, network and explicit denies only.
+    // consumed by #3712 slices
+    #[allow(dead_code)]
+    pub(crate) fn isolated(&self) -> bool {
+        self.sandboxed() && self.access().is_isolated()
+    }
+
     pub fn user_skills(&self) -> bool {
         self.route.user_skills()
     }

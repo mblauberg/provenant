@@ -1171,6 +1171,7 @@ printf 'agy 1.0.0\n'
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: Default::default(),
         extra: Default::default(),
         adapter: "codex".into(),
         model: "fixture-model".into(),
@@ -2114,7 +2115,7 @@ printf 'agy 1.0.0\n'
             prompt_file: None,
         },
         confinement.writer.as_ref(),
-        &run::LaneAccess::default(),
+        &run::LaneAccessRequest::default(),
         &config,
         "cursor",
         false,
@@ -2216,7 +2217,7 @@ fn host_writer_roots_inside_other_checkouts(
         ..Default::default()
     };
     let request = |writer: Option<&run::WriterLaunch>,
-                   access: &run::LaneAccess,
+                   access: &run::LaneAccessRequest,
                    config: &provenant_confinement::run_config::RunConfig| {
         confinement_request(
             project_id,
@@ -2242,7 +2243,7 @@ fn host_writer_roots_inside_other_checkouts(
         )
     };
     let hosted = config(vec![locks.clone()]);
-    let launched = request(Some(writer), &run::LaneAccess::default(), &hosted)?;
+    let launched = request(Some(writer), &run::LaneAccessRequest::default(), &hosted)?;
     let lock_grant = PathGrant {
         path: locks.clone(),
         scope: PathScope::Subtree,
@@ -2263,7 +2264,7 @@ fn host_writer_roots_inside_other_checkouts(
     assert!(mandatory.host_writes().contains(&lock_grant));
     provenant_confinement::ConfinedPlan::new(launched)?;
     // A read-only lane receives no writer roots and no exception.
-    let read_only = request(None, &run::LaneAccess::default(), &hosted)?;
+    let read_only = request(None, &run::LaneAccessRequest::default(), &hosted)?;
     assert!(read_only.permissions.write_roots.is_empty());
     let mandatory = read_only
         .permissions
@@ -2273,7 +2274,7 @@ fn host_writer_roots_inside_other_checkouts(
         .mandatory();
     assert!(mandatory.host_writes().is_empty());
     // A dispatch root inside the checkout is not host policy.
-    let dispatch = run::LaneAccess {
+    let dispatch = run::LaneAccessRequest {
         write_roots: vec![primary.join("scripts")],
         ..Default::default()
     };
@@ -2291,7 +2292,7 @@ fn host_writer_roots_inside_other_checkouts(
             matches!(
                 request(
                     Some(writer),
-                    &run::LaneAccess::default(),
+                    &run::LaneAccessRequest::default(),
                     &config(vec![path.clone()])
                 ),
                 Err(PermissionError::ProtectedOverlap)

@@ -231,6 +231,26 @@ without depending on the installed asset layout. Native integration differences
 belong to `AdapterSpec`, with a reason and source for an unavailable capability.
 - Why: provider selection must not silently narrow a lane's working surface.
 
+### Lane access
+
+`LaneAccess` resolves `lanes.access` to `host` by default or `isolated`. Host
+access means a same-host lane inherits the host environment, provider home,
+profile and login, Git configuration and credential reads, whether sandboxed
+or not. Isolated reproduces the pre-2.5.3 behaviour: sandboxed lanes get a
+private environment and provider home, filtered Git configuration and
+credential denies, and hosted-cloud credential variables are stripped from
+every lane. Cross-host credential grants are unchanged. This seam records the
+selected model; the enforcement changes are delivered by the remaining #3712
+slices.
+
+`resolve_lane_access` gives an explicit launch, template or tier knob priority
+over route policy, then uses the host or project knob, then the default. The
+applied route receipt records the value, source and deciding key. Invalid knob
+text warns and resolves to host. The real boundaries remain other lanes' refs,
+commits and uncommitted work; data integrity; merge, release and ruleset
+authority; and credentials crossing to another host or an ungranted provider.
+- Why: sandbox selection must not silently select several unrelated restrictions.
+
 ### Lane state stays outside the worktree
 
 `finalise_provider_env` rebinds `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` into the attempt scratch (`scratch/home` and `scratch/xdg/<name>`) whenever the final value is the lane's worktree or lies under it, compared lexically and canonically when the path exists; it creates each rebound directory mode 0700, records one warning naming the variable, old path, new path and reason, and leaves values outside the worktree unchanged.

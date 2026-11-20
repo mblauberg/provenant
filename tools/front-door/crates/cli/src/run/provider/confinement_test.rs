@@ -158,7 +158,7 @@ fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
     for adapter in ["codex", "claude", "cursor", "agy", "opencode", "command"] {
         let mut task_writes = None;
         for kind in ["task", "live", "commit"] {
-            let mut access = run::LaneAccess::default();
+            let mut access = run::LaneAccessRequest::default();
             if kind != "task" {
                 access.source_root = Some(source.clone());
                 access.source_live = kind == "live";

@@ -510,6 +510,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
             selection_context: Default::default(),
             diagnostics: Default::default(),
             user_skills: true,
+            access: Default::default(),
             extra: Default::default(),
             adapter: adapter.into(),
             model: "fixture-model".into(),
