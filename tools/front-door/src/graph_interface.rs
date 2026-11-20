@@ -112,14 +112,7 @@ fn file_error(
     path: &Path,
     reason: &str,
 ) -> Box<provenant_records::diagnostic::Diagnostic> {
-    let path = provenant_records::diagnostic::safe_path(
-        path,
-        provenant_records::diagnostic::Destination::Local,
-    );
-    cli_input_error(&format!(
-        "{flag} {}: {reason}",
-        path.as_deref().unwrap_or("input"),
-    ))
+    cli_input_error(&format!("{flag} {}: {reason}", path.display()))
 }
 
 /// `NAME STATE MODEL WORKTREE`, naming the handle that
