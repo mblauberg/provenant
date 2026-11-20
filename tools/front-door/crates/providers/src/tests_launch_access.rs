@@ -1487,3 +1487,67 @@ fn sandboxed_private_git_config_includes_host_config() -> Result<(), Box<dyn std
     );
     Ok(())
 }
+
+// Spec: docs/specs/run-launch.md#lane-access
+#[test]
+fn ssh_agent_follows_lane_access() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::LaneAccess;
+    let temp = tempfile::tempdir()?;
+    let socket = temp.path().join("agent.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket)?;
+    let canonical = socket.canonicalize()?;
+    let host_var = |name: &str| (name == "SSH_AUTH_SOCK").then(|| socket.clone().into_os_string());
+    let prompt = Prompt::new("fixture".into());
+    let plan = fixture_access_plan(Access::ReadOnly, None, false);
+    for access in [LaneAccess::Host, LaneAccess::Isolated] {
+        let mut route = route("codex", "fixture-model");
+        route.set_access(access);
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.host_var = &host_var;
+        let spec = codex::Codex.prepare(input)?;
+        let agent = spec.env.iter().find(|(key, _)| key == "SSH_AUTH_SOCK");
+        if access == LaneAccess::Host {
+            assert_eq!(agent.map(|(_, value)| value), Some(&socket.clone().into_os_string()));
+            let grant = spec.profile.spec.ssh_agent_socket.as_ref().expect("agent grant");
+            assert_eq!(grant.path, canonical);
+            assert_eq!(grant.scope, provenant_confinement::permissions::PathScope::Exact);
+        } else {
+            assert!(agent.is_none());
+            assert!(spec.profile.spec.ssh_agent_socket.is_none());
+        }
+    }
+    Ok(())
+}
+
+// Spec: docs/specs/run-launch.md#lane-access
+#[test]
+fn unbounded_reader_git_config_follows_lane_access() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::LaneAccess;
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let config = home.join(".gitconfig");
+    std::fs::write(&config, "[alias]\n  fixture = status\n")?;
+    let plan = fixture_access_plan(Access::ReadOnly, None, false);
+    let prompt = Prompt::new("fixture".into());
+    for access in [LaneAccess::Host, LaneAccess::Isolated] {
+        let mut route = route("codex", "fixture-model");
+        route.set_access(access);
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.home = &home;
+        let spec = codex::Codex.prepare(input)?;
+        let global = spec.env.iter().find(|(key, _)| key == "GIT_CONFIG_GLOBAL").map(|(_, value)| value);
+        let includes = spec.setup.iter().any(|step| match step {
+            SetupStep::WriteFile { path, bytes } if path.ends_with("gitconfig") => String::from_utf8_lossy(bytes).contains(config.to_str().unwrap()),
+            _ => false,
+        });
+        if access == LaneAccess::Host {
+            assert!(includes);
+            assert!(global.is_some_and(|value| value != "/dev/null"));
+            assert!(spec.profile.spec.runtime_reads.iter().any(|grant| grant.path == config));
+        } else {
+            assert!(!includes);
+            assert_eq!(global.map(|v| v.as_os_str()), Some(std::ffi::OsStr::new("/dev/null")));
+        }
+    }
+    Ok(())
+}

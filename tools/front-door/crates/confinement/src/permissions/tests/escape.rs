@@ -585,7 +585,20 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
                 .compile(&open_plan, &profile, &open_anchors)?
                 .profile,
         )?;
-        socket_profiles.push((writer, open_sbpl));
+        let mut host_profile = ProviderProfile {
+            spec: profile.spec.clone(),
+            observations: profile.observations.clone(),
+        };
+        host_profile.spec.ssh_agent_socket = Some(PathGrant {
+            path: ssh_agent_socket.clone(),
+            scope: PathScope::Exact,
+        });
+        let host_sbpl = String::from_utf8(
+            backend
+                .compile(&open_plan, &host_profile, &open_anchors)?
+                .profile,
+        )?;
+        socket_profiles.push((writer, open_sbpl, host_sbpl));
     }
     // The named credential socket is absent when both profiles compile.
     let ssh_socket = socket_root.join("synthetic-agent.sock");
@@ -595,7 +608,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     for socket in [&ssh_socket, &ordinary_socket] {
         std::os::unix::net::UnixStream::connect(socket)?;
     }
-    for (writer, open_sbpl) in socket_profiles {
+    for (writer, open_sbpl, host_sbpl) in socket_profiles {
         let ordinary = connect(&open_sbpl, &ordinary_socket);
         assert!(
             successful_probe(&ordinary),
@@ -605,6 +618,11 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         assert!(
             denied_probe(&credential),
             "writer={writer}: exact SSH_AUTH_SOCK credential boundary: {credential:?}"
+        );
+        let host_agent = connect(&host_sbpl, &ssh_socket);
+        assert!(
+            successful_probe(&host_agent),
+            "writer={writer}: host SSH agent grant: {host_agent:?}"
         );
     }
     let clone_helper = super::process_info::compile_native_boundary_helper(&executor, &scratch)?;

@@ -555,6 +555,7 @@ impl HostLaunchContext {
             "CODEX_HOME",
             "CLAUDE_CONFIG_DIR",
             "GH_CONFIG_DIR",
+            "SSH_AUTH_SOCK",
             "GIT_CONFIG_GLOBAL",
             "GIT_CONFIG_NOSYSTEM",
             "GIT_CONFIG_SYSTEM",

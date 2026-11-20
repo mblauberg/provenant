@@ -243,6 +243,12 @@ every lane. Cross-host credential grants are unchanged. `base_env` preserves hos
 for host access, while `strip_hosted_credentials` filters only isolated lanes.
 Other enforcement changes are delivered by the remaining #3712 slices.
 
+For host access, `lane_provider_var` passes the captured `SSH_AUTH_SOCK` to
+`finalise_provider_env`, which grants the exact resolved agent socket to a
+sandboxed lane. The credential inventory retains its exact socket boundary for
+isolated lanes; the host-access grant does not open its parent directory.
+- Why: a same-host lane can authenticate through the user's SSH agent.
+
 `resolve_lane_access` gives an explicit launch, template or tier knob priority
 over route policy, then uses the host or project knob, then the default. The
 applied route receipt records the value, source and deciding key. Invalid knob
@@ -261,7 +267,9 @@ continuations. Unsupported confinement is reported rather than represented as
 sandboxed execution.
 - Why: a retry must not silently weaken the requested boundary.
 
-A lane sees the host's Git configuration as the host does. Its Git wrapper no
+`bind_host_git_config` also supplies the host global files to an unbounded
+read-only lane with host access; isolated read-only lanes keep their existing
+private setting. A lane sees the host's Git configuration as the host does. Its Git wrapper no
 longer forces `GIT_CONFIG_NOSYSTEM`, and launch no longer drops
 `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`, `GIT_CONFIG_VALUE_*` or
 `GIT_CONFIG_PARAMETERS`. The lane's own token helper entries are appended on

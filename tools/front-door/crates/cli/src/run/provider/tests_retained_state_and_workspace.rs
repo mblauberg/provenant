@@ -791,10 +791,10 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
             (name == "CLAUDE_CONFIG_DIR").then(|| skills.join("default-claude").into_os_string())
         }),
     );
-    host.provider_path_environment = [(
-        "XDG_DATA_HOME".into(),
-        root.join("relocated-xdg").into_os_string(),
-    )]
+    host.provider_path_environment = [
+        ("XDG_DATA_HOME".into(), root.join("relocated-xdg").into_os_string()),
+        ("SSH_AUTH_SOCK".into(), root.join("agent/socket").into_os_string()),
+    ]
     .into();
     // Custody encoding retains these host inputs across a cleared guardian
     // environment and through another generation of child launches.
@@ -853,7 +853,14 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         Some(root.join("relocated-xdg").into_os_string())
     );
     assert_eq!(host_provider_var(&registry, "GH_CONFIG_DIR"), None);
-    assert_eq!(host_provider_var(&registry, "SSH_AUTH_SOCK"), None);
+    assert_eq!(
+        lane_provider_var(&registry, "SSH_AUTH_SOCK", provenant_records::LaneAccess::Host),
+        Some(root.join("agent/socket").into_os_string())
+    );
+    assert_eq!(
+        lane_provider_var(&registry, "SSH_AUTH_SOCK", provenant_records::LaneAccess::Isolated),
+        None
+    );
     let mut inputs = provenant_core::RootInputs::new(home.clone(), root.join("source"));
     inputs.state_dir = Some(root.join("state"));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
