@@ -14,8 +14,8 @@ use provenant_core::consumer_env::{
     CARGO_SOURCE_WRITES, CARGO_SOURCE_WRITES_SOURCE, LOCAL_CARGO,
 };
 use provenant_os::admission::{
-    AdmissionSlots, HeldGuard, HostHeldGuard, mark_held, mark_host_held, mark_host_waiting,
-    mark_waiting,
+    AdmissionSlots, HeldGuard, HostHeldGuard, mark_held_with_command, mark_host_held_with_command,
+    mark_host_waiting_with_command, mark_waiting_with_command,
 };
 use provenant_supervisor::census::{ProcessObservation, ProcessObserver, SystemProcessObserver};
 use std::{
@@ -94,6 +94,27 @@ const GATED: &[&str] = &[
     "build", "b", "check", "c", "clippy", "test", "t", "bench", "doc", "d", "run", "r", "rustc",
     "rustdoc", "fix", "install", "package", "publish", "nextest", "llvm-cov", "miri",
 ];
+
+/// How much of the writer's current child command a status reader may see.
+const MAX_CHILD_COMMAND_CHARS: usize = 512;
+
+/// Render the command running under the slot for a live status row. Masking and
+/// bounding happen here, before the argv reaches a record or another process:
+/// readers never handle the raw arguments. A value that cannot be filtered is
+/// replaced wholesale rather than published.
+fn masked_child_command(program: &OsStr, args: &[OsString]) -> String {
+    let joined = std::iter::once(program)
+        .chain(args.iter().map(OsString::as_os_str))
+        .map(|part| {
+            part.to_string_lossy()
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    provenant_redact::bounded_line(&joined, MAX_CHILD_COMMAND_CHARS)
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Holder {
@@ -311,6 +332,7 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
     let Some((program, args)) = command.split_first() else {
         return report("no command to run");
     };
+    let child_command = masked_child_command(program, args);
 
     let mut env: Vec<(OsString, OsString)> = env.to_vec();
     let get_env = |name: &str| {
@@ -457,12 +479,25 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
                             .or_else(|| get_env("PROVENANT_PARENT_ATTEMPT_ID"));
 
                         let _wait_guard = if let Some(scratch) = scratch_wait_dir {
-                            mark_waiting(Path::new(scratch), class, my_pid, attempt_id).ok()
+                            mark_waiting_with_command(
+                                Path::new(scratch),
+                                class,
+                                my_pid,
+                                attempt_id,
+                                Some(child_command.clone()),
+                            )
+                            .ok()
                         } else {
                             None
                         };
                         let _host_wait_guard = if scratch_wait_dir.is_none() {
-                            mark_host_waiting(state_ref, class, my_pid).ok()
+                            mark_host_waiting_with_command(
+                                state_ref,
+                                class,
+                                my_pid,
+                                Some(child_command.clone()),
+                            )
+                            .ok()
                         } else {
                             None
                         };
@@ -506,12 +541,24 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
         let attempt_id =
             get_env("PROVENANT_ATTEMPT_ID").or_else(|| get_env("PROVENANT_PARENT_ATTEMPT_ID"));
         if let Some(scratch) = scratch_wait_dir {
-            if let Ok(hg) = mark_held(Path::new(scratch), class, guard.index(), my_pid, attempt_id)
-            {
+            if let Ok(hg) = mark_held_with_command(
+                Path::new(scratch),
+                class,
+                guard.index(),
+                my_pid,
+                attempt_id,
+                Some(child_command.clone()),
+            ) {
                 _holder_tracking = Some(HeldGuardVariant::Scratch(hg));
             }
         } else if let Some(state_ref) = state_buf.as_ref()
-            && let Ok(hg) = mark_host_held(state_ref, class, guard.index(), my_pid)
+            && let Ok(hg) = mark_host_held_with_command(
+                state_ref,
+                class,
+                guard.index(),
+                my_pid,
+                Some(child_command.clone()),
+            )
         {
             _holder_tracking = Some(HeldGuardVariant::Host(hg));
         }
