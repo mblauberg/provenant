@@ -297,6 +297,12 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
         } else {
             assert_eq!(refusal.boundary_class, boundary);
         }
+        if plan_error == "resolver" {
+            // A route-resolution refusal precedes candidate preparation, so
+            // it carries no candidate-level credential diagnostic.
+            assert!(refusal.skipped_routes.is_empty(), "{refusal:?}");
+            continue;
+        }
         let skipped = refusal
             .skipped_routes
             .iter()

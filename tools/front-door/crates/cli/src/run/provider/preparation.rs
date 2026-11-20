@@ -4170,7 +4170,14 @@ pub(super) fn prepare_candidates_inner(
             &lane_access,
             &launch_policy,
         ) {
-            reasons.push(skip(&label, SkipKind::Refused, error));
+            use provenant_records::diagnostic::{BoundaryClass, ConfinementGuard, PlanFailure};
+            reason_boundaries.insert(reasons.len(), BoundaryClass::Credentials);
+            let mut refused = skip(&label, SkipKind::Refused, error);
+            refused.plan_error = Some(PlanFailure::CredentialRoot);
+            refused.guard_boundary = Some(BoundaryClass::Credentials);
+            refused.confinement_guard = Some(ConfinementGuard::CredentialRootRefused);
+            refused.set_cause(provenant_records::RouteExclusionReason::ConfinementUnavailable);
+            reasons.push(refused);
             continue;
         }
         if opencode_host {

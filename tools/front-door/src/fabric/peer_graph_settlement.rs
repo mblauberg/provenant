@@ -253,14 +253,25 @@ fn child_launch_refuses_credential_and_state_roots_at_the_host()
                     launch_actor: &actor,
                 },
             );
-            assert!(
-                matches!(result, Err(FacadeError::DispatchRefused { .. })),
-                "{name}, write={write}: {result:?}"
-            );
+            // A Provenant state root remains a host admission boundary, while
+            // credential-root overlaps are decided in provider preparation.
+            // Both must refuse the child before it launches.
+            match &result {
+                Err(FacadeError::DispatchRefused { .. }) => assert_eq!(name, "state"),
+                Ok(graph::AttemptObservation::Terminal {
+                    outcome: graph::AttemptOutcome::PreparationRefused(_),
+                    launched: false,
+                    ..
+                }) => assert_eq!(name, "credential"),
+                _ => panic!("{name}, write={write}: {result:?}"),
+            }
             let refusal = store
                 .operation(&graph_operation("graph-attempt-operation", &key)?, &call)?
                 .ok_or("refusal operation missing")?;
-            assert_eq!(refusal.state, provenant_run::OperationState::Refused);
+            assert!(matches!(
+                refusal.state,
+                provenant_run::OperationState::Refused | provenant_run::OperationState::Terminal
+            ));
         }
     }
     Ok(())

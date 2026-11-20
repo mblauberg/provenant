@@ -381,9 +381,16 @@ fn prepare(
     // or skills into the lane. Do not follow unrelated config links.
     let config_dir = config_home.join("opencode");
     let optional_start = runtime_reads.len();
-    if config_isolated
-        && let Ok(config_dir) = std::fs::canonicalize(&config_dir)
-        && !provenant_confinement::refuses_lane_root(&config_dir, true, &input.credential_roots)
+    // Host access reads the native config home, so a directory that overlaps a
+    // credential root stays in its runtime reads with a warning from the
+    // optional-grant filter below. Isolated lanes keep the credential refusal.
+    if let Ok(config_dir) = std::fs::canonicalize(&config_dir)
+        && (!config_isolated
+            || !provenant_confinement::refuses_lane_root(
+                &config_dir,
+                true,
+                &input.credential_roots,
+            ))
         && let Ok(entries) = std::fs::read_dir(&config_dir)
     {
         runtime_reads.push(exact(&config_dir));

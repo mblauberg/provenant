@@ -1751,8 +1751,22 @@ fn opencode_config_overlapping_a_credential_root_follows_lane_access()
             entry.path == canonical && entry.source == crate::launch::OmissionSource::ProviderConfig
         });
         if access == LaneAccess::Host {
+            let config_home = launch
+                .env
+                .iter()
+                .find(|(key, _)| key == "XDG_CONFIG_HOME")
+                .map(|(_, value)| std::path::PathBuf::from(value))
+                .ok_or("host launch has no XDG_CONFIG_HOME")?;
+            assert_eq!(
+                config_home,
+                home.join(".config"),
+                "host lanes use the native XDG config home"
+            );
             assert!(discovered, "host lanes read the overlapping config directory");
-            assert!(mirrored, "host lanes mirror the overlapping config into private state");
+            assert!(
+                !mirrored,
+                "host lanes read the native config home instead of mirroring it into private state"
+            );
             assert!(!omitted, "host lanes do not omit the overlapping config");
         } else {
             assert!(!discovered, "isolated lanes keep the credential refusal");

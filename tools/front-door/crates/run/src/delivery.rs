@@ -2155,7 +2155,12 @@ impl HostDeliveryContext {
         }
         let mut roots = transport::LaneRoots::new(protected);
         if let Some(worktree) = &self.trusted_worktree {
-            roots = roots.except_owned_worktree(worktree);
+            // An unsandboxed host lane uses the host's own Git configuration:
+            // its worktree and the primary checkout it was linked from are
+            // trusted, while other lanes' worktrees stay protected.
+            roots = roots
+                .except_owned_worktree(worktree)
+                .except_owned_worktree(base);
         }
         transport::check_environment(environment, base, &roots).map_err(refuse)?;
         let listing = self.command_with_input(cwd, "git", &transport::LISTING_ARGS, stage, b"")?;
