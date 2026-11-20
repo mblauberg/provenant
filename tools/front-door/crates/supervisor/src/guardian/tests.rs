@@ -22,9 +22,24 @@ fn event_bursts_coalesce_census_walks_and_failures_request_a_full_scan() {
     }
     assert!(walks > 0, "an event burst must eventually be observed");
     assert!(walks < 1_000, "a census walk followed every event");
-    assert!(super::census_full_due(0, Some(u64::MAX), true));
-    assert!(!super::census_full_due(0, Some(u64::MAX), false));
-    assert!(super::census_full_due(u64::MAX, Some(0), false));
+    assert!(super::census_full_due(
+        0,
+        Some(u64::MAX),
+        true,
+        super::FULL_CENSUS_INTERVAL_MS
+    ));
+    assert!(!super::census_full_due(
+        0,
+        Some(u64::MAX),
+        false,
+        super::FULL_CENSUS_INTERVAL_MS
+    ));
+    assert!(super::census_full_due(
+        u64::MAX,
+        Some(0),
+        false,
+        super::FULL_CENSUS_INTERVAL_MS
+    ));
 }
 
 /// An idle lane gets a census eventually, with no repeated walk before its
@@ -35,9 +50,15 @@ fn idle_lane_census_walks_respect_the_full_backstop() {
     let mut last_full = None;
     let mut walks = Vec::new();
     for now in (0..60_000).step_by(100) {
-        if super::census_turn_due(now, last_walk, last_full, false) {
+        if super::census_turn_due(
+            now,
+            last_walk,
+            last_full,
+            false,
+            super::FULL_CENSUS_INTERVAL_MS,
+        ) {
             last_walk = Some(now);
-            if super::census_full_due(now, last_full, false) {
+            if super::census_full_due(now, last_full, false, super::FULL_CENSUS_INTERVAL_MS) {
                 last_full = Some(now);
             }
             walks.push(now);
@@ -54,27 +75,52 @@ fn idle_lane_census_walks_respect_the_full_backstop() {
         super::CENSUS_INTERVAL_MS,
         Some(0),
         Some(u64::MAX),
-        true
+        true,
+        super::FULL_CENSUS_INTERVAL_MS
     ));
     assert!(!super::census_turn_due(
         super::CENSUS_INTERVAL_MS.saturating_sub(1),
         Some(0),
         Some(u64::MAX),
-        true
+        true,
+        super::FULL_CENSUS_INTERVAL_MS
     ));
-    assert!(!super::census_turn_due(0, Some(0), Some(0), false));
-    assert!(super::census_turn_due(0, None, None, false));
+    assert!(!super::census_turn_due(
+        0,
+        Some(0),
+        Some(0),
+        false,
+        super::FULL_CENSUS_INTERVAL_MS
+    ));
+    assert!(super::census_turn_due(
+        0,
+        None,
+        None,
+        false,
+        super::FULL_CENSUS_INTERVAL_MS
+    ));
 }
 
 #[test]
 fn a_failed_journal_retry_can_proceed_without_a_census() {
-    assert!(super::tracking_publication_due(u64::MAX, None, true));
-    assert!(!super::tracking_publication_due(0, Some(u64::MAX), true));
+    assert!(super::tracking_publication_due(
+        u64::MAX,
+        None,
+        true,
+        super::TRACKING_INTERVAL_MS
+    ));
+    assert!(!super::tracking_publication_due(
+        0,
+        Some(u64::MAX),
+        true,
+        super::TRACKING_INTERVAL_MS
+    ));
     assert!(!super::census_turn_due(
         u64::MAX,
         Some(u64::MAX),
         Some(u64::MAX),
-        false
+        false,
+        super::FULL_CENSUS_INTERVAL_MS
     ));
 }
 
@@ -2129,13 +2175,18 @@ fn tracking_batches_fork_churn_but_publishes_initial_state_immediately() {
     let mut last = None;
     let mut publications = Vec::new();
     for now in (0..3_000).step_by(100) {
-        if super::tracking_publication_due(now, last, false) {
+        if super::tracking_publication_due(now, last, false, super::TRACKING_INTERVAL_MS) {
             publications.push(now);
             last = Some(now);
         }
     }
     assert_eq!(publications, [0, 1_000, 2_000]);
-    assert!(super::tracking_publication_due(2_100, last, true));
+    assert!(super::tracking_publication_due(
+        2_100,
+        last,
+        true,
+        super::TRACKING_INTERVAL_MS
+    ));
 }
 
 /// All budget actions obey the same completion and clean-point precedence.
