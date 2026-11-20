@@ -1718,7 +1718,11 @@ pub(super) fn gc_reports_settled_lane_store_error_and_continues() -> Result {
 /// apply. The pin of a missing attempt is eligible for collection.
 pub(super) fn gc_preview_reports_import_pins_and_apply_removes_them() -> Result {
     let rig = repository()?;
-    let _ = writer_context(&rig)?;
+    // A bound project has a utility home and a run store by the time GC runs;
+    // preview opens both read-only and finds nothing in a fresh state.
+    ok(&rig, &["worktree", "create", "gc-pins", "--json"])?;
+    let (_, context) = writer_context(&rig)?;
+    drop(open_writer_store(&context)?);
     let oid = git(&rig, &["rev-parse", "HEAD"])?;
     let missing = provenant_core::AttemptId::from_bytes([0x9a; 16]);
     let reference = format!("refs/provenant/import-extra/{missing}/object");
