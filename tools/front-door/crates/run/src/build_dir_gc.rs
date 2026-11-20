@@ -20,10 +20,19 @@
 //! stops only at the caller's deadline, a preview included, and resumes from
 //! its saved cursor.
 //!
-//! Sizes are allocated bytes (`st_blocks * 512`) throughout. Both target roots
-//! are counted, including payload outside a recognised profile, so incomplete
-//! seeds and first builds cannot escape the budget. Explicit GC and launch
-//! admission share the same collector.
+//! Sizes are the blocks private to each target where the filesystem can report
+//! them (APFS private size), falling back to allocated bytes (`st_blocks * 512`)
+//! elsewhere. Seeded targets are clones: their allocated figure counts blocks
+//! shared with the seed, which deletion does not free. The same walk observes
+//! private size at every entry, so the figure costs no extra pass and resumes
+//! with the census; it feeds both the reclaimable totals and the budget
+//! arithmetic. Eviction stays least-recently-used, and the private sum can
+//! understate volume occupancy where clones share blocks. The report names
+//! which figure it carries, and never reports zero when private size is
+//! unavailable. Both
+//! target roots are counted, including payload outside a recognised profile,
+//! so incomplete seeds and first builds cannot escape the budget. Explicit GC
+//! and launch admission share the same collector.
 use provenant_confinement::cache::{
     CACHE_ACTIVITY_MARKER, CARGO_TARGET_NAMES, CargoLockProbe, LastUseRecheck, OwnerStatus,
     TARGET_LAST_USED, is_cache_digest, read_last_use_stamp,
@@ -60,7 +69,7 @@ const PREVIEW_ENTRIES: usize = 4096;
 const PREVIEW_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
 const SURVEY_SNAPSHOT_LIMIT: u64 = 16 * 1024 * 1024;
 const SURVEY_SNAPSHOT_PREFIX: &str = "gc-cache-survey-";
-const SURVEY_SNAPSHOT_VERSION: u8 = 6;
+const SURVEY_SNAPSHOT_VERSION: u8 = 7;
 const MAX_SNAPSHOT_FILES_PER_SWEEP: usize = 128;
 /// How far ahead of now a modification time may be and still count as a
 /// recent write.
@@ -119,6 +128,66 @@ impl LastUse {
     }
 }
 
+/// Which byte figure a target census reports. Private bytes are the blocks no
+/// other clone shares; where the filesystem cannot report them, allocated
+/// bytes are used instead and the report says so.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ByteMethod {
+    /// No target was measured. The identity when combining reports: a neutral
+    /// report contributes no figure and no fallback warning.
+    #[default]
+    Unmeasured,
+    /// Every observation reported a clone-private size.
+    Private,
+    /// At least one observation had no private size, so allocated bytes are
+    /// reported instead.
+    AllocatedFallback,
+}
+
+impl ByteMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unmeasured => "unmeasured bytes",
+            Self::Private => "private bytes",
+            Self::AllocatedFallback => "allocated bytes",
+        }
+    }
+
+    /// Combine two censuses: a fallback anywhere wins, private survives only
+    /// when every contribution is private, and an unmeasured contribution is
+    /// the identity.
+    pub fn combine(self, next: Self) -> Self {
+        match (self, next) {
+            (Self::AllocatedFallback, _) | (_, Self::AllocatedFallback) => Self::AllocatedFallback,
+            (Self::Private, Self::Private) => Self::Private,
+            (Self::Unmeasured, other) | (other, Self::Unmeasured) => other,
+        }
+    }
+}
+
+/// The byte figure for one observation and whether it came from a private
+/// size. A missing private size falls back to allocated bytes, never zero.
+fn observed_bytes(private: Option<u64>, allocated: u64) -> (u64, bool) {
+    (private.unwrap_or(allocated), private.is_some())
+}
+
+/// The census reports private bytes only when every measured target reported a
+/// private size. One fallback target makes the whole figure allocated bytes;
+/// no targets at all leave it unmeasured rather than claiming a fallback.
+fn census_byte_method(candidates: &[Candidate]) -> ByteMethod {
+    if candidates.is_empty() {
+        ByteMethod::Unmeasured
+    } else if candidates
+        .iter()
+        .all(|candidate| candidate.private_available)
+    {
+        ByteMethod::Private
+    } else {
+        ByteMethod::AllocatedFallback
+    }
+}
+
 impl TargetReason {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -145,16 +214,20 @@ pub struct TargetRemoval {
     /// an incremental session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_use: Option<LastUse>,
-    /// Allocated bytes, which include blocks shared with APFS clones.
+    /// Reclaimable bytes: private bytes where the filesystem reports them,
+    /// otherwise allocated bytes. `Report::byte_method` names the figure.
     pub bytes: u64,
 }
 
 #[derive(Debug, Default, serde::Serialize)]
 pub struct Report {
     pub removed: Vec<TargetRemoval>,
-    /// Bytes reclaimed, or reclaimable on a dry run.
+    /// Bytes reclaimed, or reclaimable on a dry run, in `byte_method` units.
     pub bytes: u64,
-    /// Allocated bytes under managed target roots after the sweep.
+    /// Which byte figure `bytes` and `cache_bytes` carry. A fallback means the
+    /// filesystem could not report private bytes for every observation.
+    pub byte_method: ByteMethod,
+    /// Bytes under managed target roots after the sweep, in `byte_method` units.
     pub cache_bytes: u64,
     pub budget_bytes: u64,
     pub budget_setting: String,
@@ -207,7 +280,10 @@ struct Candidate {
     cache: String,
     target: String,
     display: PathBuf,
+    /// Private bytes where available, else allocated bytes.
     bytes: u64,
+    /// Whether every observation of this target reported a private size.
+    private_available: bool,
     /// Last use: the newer of the stamp and the newest file time.
     newest: i128,
     target_modified_ns: i128,
@@ -235,11 +311,12 @@ impl serde::Serialize for Candidate {
     {
         use serde::ser::SerializeTuple;
 
-        let mut tuple = serializer.serialize_tuple(9)?;
+        let mut tuple = serializer.serialize_tuple(10)?;
         tuple.serialize_element(&self.kind)?;
         tuple.serialize_element(&self.cache)?;
         tuple.serialize_element(&self.target)?;
         tuple.serialize_element(&self.bytes)?;
+        tuple.serialize_element(&self.private_available)?;
         tuple.serialize_element(&self.newest)?;
         tuple.serialize_element(&self.target_modified_ns)?;
         tuple.serialize_element(&self.identity)?;
@@ -283,18 +360,21 @@ impl<'de> serde::Deserialize<'de> for Candidate {
                 let bytes = sequence
                     .next_element()?
                     .ok_or_else(|| A::Error::invalid_length(3, &self))?;
-                let newest = sequence
+                let private_available = sequence
                     .next_element()?
                     .ok_or_else(|| A::Error::invalid_length(4, &self))?;
-                let target_modified_ns = sequence
+                let newest = sequence
                     .next_element()?
                     .ok_or_else(|| A::Error::invalid_length(5, &self))?;
-                let identity = sequence
+                let target_modified_ns = sequence
                     .next_element()?
                     .ok_or_else(|| A::Error::invalid_length(6, &self))?;
+                let identity = sequence
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(7, &self))?;
                 let owner = sequence
                     .next_element::<u8>()?
-                    .ok_or_else(|| A::Error::invalid_length(7, &self))
+                    .ok_or_else(|| A::Error::invalid_length(8, &self))
                     .and_then(|code| {
                         owner_from_code(code).ok_or_else(|| {
                             A::Error::invalid_value(
@@ -305,7 +385,7 @@ impl<'de> serde::Deserialize<'de> for Candidate {
                     })?;
                 let last_use = sequence
                     .next_element::<u8>()?
-                    .ok_or_else(|| A::Error::invalid_length(8, &self))
+                    .ok_or_else(|| A::Error::invalid_length(9, &self))
                     .and_then(|code| {
                         last_use_from_code(code).ok_or_else(|| {
                             A::Error::invalid_value(
@@ -320,6 +400,7 @@ impl<'de> serde::Deserialize<'de> for Candidate {
                     target,
                     display: PathBuf::new(),
                     bytes,
+                    private_available,
                     newest,
                     target_modified_ns,
                     identity,
@@ -329,7 +410,7 @@ impl<'de> serde::Deserialize<'de> for Candidate {
             }
         }
 
-        deserializer.deserialize_tuple(9, CandidateVisitor)
+        deserializer.deserialize_tuple(10, CandidateVisitor)
     }
 }
 
@@ -411,6 +492,10 @@ struct MeasureProgress {
     cache: String,
     target: String,
     identity: (u64, u64),
+    /// Whether every observation so far reported a private size. Persisted so
+    /// a resumed walk keeps the fallback decision across sweeps.
+    #[serde(default)]
+    private_available: bool,
     stack: Vec<MeasureFrame>,
 }
 
@@ -1460,6 +1545,7 @@ pub fn collect_with_progress(
     }
     let mut snapshot = load_survey_snapshot(host, home, resume_detail, epoch, &mut report);
     let mut survey = survey_with_progress(home, &mut free, &mut snapshot, should_stop);
+    let initial_byte_method = survey.report.byte_method;
     survey.report.budget_bytes = budget.bytes;
     survey.report.budget_setting = budget.setting.clone();
     survey.report.budget_source = budget.source.as_str().to_owned();
@@ -1560,6 +1646,7 @@ pub fn collect_with_progress(
                 budget_bytes: budget.bytes,
                 budget_setting: budget.setting.clone(),
                 budget_source: budget.source.as_str().to_owned(),
+                byte_method: initial_byte_method,
                 ..Report::default()
             };
             if protection.unobserved || current_protection.unobserved {
@@ -1620,6 +1707,7 @@ pub fn collect_with_progress(
                 let next_report = std::mem::take(&mut next.report);
                 aggregate.warnings.extend(next_report.warnings);
                 aggregate.errors.extend(next_report.errors);
+                aggregate.byte_method = aggregate.byte_method.combine(next_report.byte_method);
                 if !next.complete {
                     aggregate.cache_bytes = next.total;
                     aggregate.measurement_skipped = true;
@@ -1650,6 +1738,7 @@ pub fn collect_with_progress(
 
 fn merge_report(into: &mut Report, mut next: Report) {
     into.bytes = into.bytes.saturating_add(next.bytes);
+    into.byte_method = into.byte_method.combine(next.byte_method);
     into.cache_bytes = next.cache_bytes;
     into.removed.append(&mut next.removed);
     into.busy.append(&mut next.busy);
@@ -2208,9 +2297,13 @@ pub(crate) fn trim_stale_incremental_sessions_at(
                         report.busy.push(session_display);
                         continue;
                     }
-                    let bytes = disk_report.entries.iter().fold(0_u64, |sum, entry| {
-                        sum.saturating_add(entry.allocated_bytes)
-                    });
+                    if !disk_report.uses_private_size() {
+                        report.byte_method = ByteMethod::AllocatedFallback;
+                    }
+                    let bytes = disk_report
+                        .entries
+                        .iter()
+                        .fold(0_u64, |sum, entry| sum.saturating_add(entry.unshared_bytes));
 
                     if dry_run {
                         if !report.removed_contains(&session_display) {
@@ -2280,8 +2373,11 @@ pub(crate) fn trim_stale_incremental_sessions_at(
                                     &removal_name,
                                     &removal_path,
                                 );
+                                if !rest.uses_private_size() {
+                                    report.byte_method = ByteMethod::AllocatedFallback;
+                                }
                                 let left = rest.entries.iter().fold(0_u64, |sum, entry| {
-                                    sum.saturating_add(entry.allocated_bytes)
+                                    sum.saturating_add(entry.unshared_bytes)
                                 });
                                 let reclaimed = bytes.saturating_sub(left);
                                 report.bytes = report.bytes.saturating_add(reclaimed);
@@ -2379,6 +2475,7 @@ fn survey(home: &Path, free_space: &mut dyn FnMut() -> io::Result<u64>, preview:
         ));
     }
     report.measurement_skipped = budget.limited;
+    report.byte_method = census_byte_method(&candidates);
     let total = candidates
         .iter()
         .fold(0_u64, |sum, item| sum.saturating_add(item.bytes));
@@ -2448,6 +2545,7 @@ fn survey_with_progress(
     if snapshot.census_complete {
         snapshot.completed.sort_by(compare_candidates);
         let candidates = snapshot.completed.clone();
+        report.byte_method = census_byte_method(&candidates);
         let free = free_space().unwrap_or_else(|error| {
             report.errors.push(format!("free space: {error}"));
             u64::MAX
@@ -2507,6 +2605,7 @@ fn survey_with_progress(
         u64::MAX
     });
     candidates.sort_by(compare_candidates);
+    report.byte_method = census_byte_method(&candidates);
     if complete {
         if snapshot.rechecking.as_ref().is_some_and(|state| {
             !candidates
@@ -2710,6 +2809,7 @@ fn discover_with_progress(
                 target: target_name.to_owned(),
                 display: cache_root.join(digest).join(logical_name),
                 bytes: 0,
+                private_available: false,
                 newest: if target_name == logical_name {
                     target_metadata.modified_ns
                 } else {
@@ -2725,10 +2825,15 @@ fn discover_with_progress(
                 .take()
                 .filter(|state| state_matches(state, &candidate));
             match measure_resumable(&cache, &candidate, &target_metadata, resumed, should_stop) {
-                Ok(MeasureOutcome::Complete { bytes, newest }) => {
+                Ok(MeasureOutcome::Complete {
+                    bytes,
+                    newest,
+                    private_available,
+                }) => {
                     let (newest, last_use) = last_use(&cache, &candidate.target, newest);
                     let measured = Candidate {
                         bytes,
+                        private_available,
                         newest,
                         last_use,
                         ..candidate
@@ -2863,7 +2968,11 @@ fn state_matches(state: &MeasureProgress, candidate: &Candidate) -> bool {
 }
 
 enum MeasureOutcome {
-    Complete { bytes: u64, newest: i128 },
+    Complete {
+        bytes: u64,
+        newest: i128,
+        private_available: bool,
+    },
     Interrupted(MeasureProgress),
     Changed,
 }
@@ -2875,25 +2984,33 @@ fn measure_resumable(
     resumed: Option<MeasureProgress>,
     should_stop: &mut dyn FnMut() -> bool,
 ) -> io::Result<MeasureOutcome> {
+    let root_private = cache
+        .directory()
+        .private_size_at(OsStr::new(&candidate.target))
+        .ok()
+        .flatten();
     let mut progress = resumed.unwrap_or_else(|| MeasureProgress {
         kind: candidate.kind,
         cache: candidate.cache.clone(),
         target: candidate.target.clone(),
         identity: candidate.identity,
+        private_available: root_private.is_some(),
         stack: vec![MeasureFrame {
             path: Vec::new(),
             device: target_metadata.device,
             inode: target_metadata.inode,
             modified_ns: target_metadata.modified_ns,
             offset: Default::default(),
-            bytes: target_metadata.allocated,
+            bytes: root_private.unwrap_or(target_metadata.allocated),
             // The root's own time moves whenever the stamp is replaced, so
             // only its entries date the target; an empty root dates itself.
             newest: i128::MIN,
         }],
     });
+    let mut private_available = progress.private_available;
     while !progress.stack.is_empty() {
         if should_stop() {
+            progress.private_available = private_available;
             return Ok(MeasureOutcome::Interrupted(progress));
         }
         if progress.stack.len() > MAX_DEPTH {
@@ -2939,6 +3056,7 @@ fn measure_resumable(
                 return Ok(MeasureOutcome::Complete {
                     bytes: completed.bytes,
                     newest,
+                    private_available,
                 });
             }
             continue;
@@ -2950,9 +3068,14 @@ fn measure_resumable(
             Err(error) if error.is_not_found() => return Ok(MeasureOutcome::Changed),
             Err(error) => return Err(io::Error::other(error)),
         };
+        let (bytes, has_private) = observed_bytes(
+            directory.directory().private_size_at(&name).ok().flatten(),
+            child_metadata.allocated,
+        );
+        private_available &= has_private;
         let current = &mut progress.stack[frame_index];
         current.offset = next_offset;
-        current.bytes = current.bytes.saturating_add(child_metadata.allocated);
+        current.bytes = current.bytes.saturating_add(bytes);
         // The stamp dates the target through its content, not its file time.
         if !(frame_path.is_empty() && name == OsStr::new(TARGET_LAST_USED)) {
             current.newest = current.newest.max(child_metadata.modified_ns);
@@ -3387,8 +3510,9 @@ fn discover(
                 continue;
             };
             let display = cache_root.join(digest).join(logical_name);
-            match measure(&target_tree, 0, budget) {
-                Ok((bytes, newest)) => {
+            let root_private = cache.directory().private_size_at(target).ok().flatten();
+            match measure(&target_tree, 0, budget, root_private) {
+                Ok((bytes, newest, own_private)) => {
                     let (newest, last_use) = last_use(&cache, target_name, newest);
                     candidates.push(Candidate {
                         kind,
@@ -3396,6 +3520,7 @@ fn discover(
                         target: target_name.to_owned(),
                         display,
                         bytes,
+                        private_available: own_private,
                         newest: if target_name == logical_name {
                             newest
                         } else {
@@ -3437,17 +3562,27 @@ fn directory_names(
     Ok(names)
 }
 
-/// Allocated bytes and the newest modification time below `directory`.
+/// Private bytes (allocated where private size is unavailable) and the newest
+/// modification time below `directory`, plus whether every observation had a
+/// private size. `root_private` is the root's own private size, read by the
+/// caller from its parent, so the walk needs no extra directory handle.
 fn measure(
     directory: &PayloadTree,
     depth: usize,
     budget: &mut MeasureBudget,
-) -> io::Result<(u64, i128)> {
+    root_private: Option<u64>,
+) -> io::Result<(u64, i128, bool)> {
     if depth >= MAX_DEPTH {
         return Err(io::Error::other("directory nesting too deep"));
     }
     let metadata = directory.metadata().map_err(io::Error::other)?;
-    let mut bytes = if depth == 0 { metadata.allocated } else { 0 };
+    // A child directory's own private size was observed by its parent's loop.
+    let mut private_available = depth != 0 || root_private.is_some();
+    let mut bytes = if depth == 0 {
+        root_private.unwrap_or(metadata.allocated)
+    } else {
+        0
+    };
     // As in `measure_resumable`: the root's own time and the stamp's file time
     // do not date the target.
     let mut newest = if depth == 0 {
@@ -3457,14 +3592,19 @@ fn measure(
     };
     for name in directory_names(directory, budget)? {
         if budget.preview_limited() {
-            return Ok((bytes, i128::MAX));
+            return Ok((bytes, i128::MAX, private_available));
         }
         let metadata = match directory.metadata_at(&name) {
             Ok(metadata) => metadata,
             Err(error) if error.is_not_found() => continue,
             Err(error) => return Err(io::Error::other(error)),
         };
-        bytes = bytes.saturating_add(metadata.allocated);
+        let (entry_bytes, has_private) = observed_bytes(
+            directory.directory().private_size_at(&name).ok().flatten(),
+            metadata.allocated,
+        );
+        private_available &= has_private;
+        bytes = bytes.saturating_add(entry_bytes);
         if !(depth == 0 && name == OsStr::new(TARGET_LAST_USED)) {
             newest = newest.max(metadata.modified_ns);
         }
@@ -3474,15 +3614,17 @@ fn measure(
                 Err(error) if error.is_not_found() => continue,
                 Err(error) => return Err(io::Error::other(error)),
             };
-            let (child_bytes, child_newest) = measure(&child, depth + 1, budget)?;
+            let (child_bytes, child_newest, child_private_available) =
+                measure(&child, depth + 1, budget, None)?;
             bytes = bytes.saturating_add(child_bytes);
             newest = newest.max(child_newest);
+            private_available &= child_private_available;
         }
     }
     if depth == 0 && newest == i128::MIN {
         newest = metadata.modified_ns;
     }
-    Ok((bytes, newest))
+    Ok((bytes, newest, private_available))
 }
 
 /// Re-check target identity and recency, then remove the whole target only if
@@ -3586,7 +3728,7 @@ fn remove(
 
     let (bytes, recheck) =
         match measure_resumable(&cache, candidate, &target_metadata, resumed, should_stop)? {
-            MeasureOutcome::Complete { bytes, newest } => (
+            MeasureOutcome::Complete { bytes, newest, .. } => (
                 bytes,
                 LastUseRecheck::read(root, cache.directory(), &[&candidate.target], newest)
                     .map_err(io::Error::other)?,
@@ -3714,6 +3856,257 @@ mod tests {
     };
 
     const TEST_NOW_SECONDS: u64 = 100_000;
+
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody
+    #[test]
+    fn private_bytes_fall_back_to_allocated_and_never_report_zero() {
+        assert_eq!(observed_bytes(Some(4096), 8192), (4096, true));
+        assert_eq!(observed_bytes(None, 8192), (8192, false));
+        assert_eq!(observed_bytes(None, 0), (0, false));
+    }
+
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody
+    #[test]
+    fn census_byte_method_is_private_only_when_every_target_reports_private() {
+        let candidate = |private_available| Candidate {
+            kind: CacheKind::Lane,
+            cache: "cache".into(),
+            target: "target".into(),
+            display: PathBuf::new(),
+            bytes: 1,
+            private_available,
+            newest: 0,
+            target_modified_ns: 0,
+            identity: (1, 1),
+            owner: None,
+            last_use: LastUse::FileTimes,
+        };
+        assert_eq!(census_byte_method(&[]), ByteMethod::Unmeasured);
+        assert_eq!(
+            census_byte_method(&[candidate(true), candidate(true)]),
+            ByteMethod::Private
+        );
+        assert_eq!(
+            census_byte_method(&[candidate(true), candidate(false)]),
+            ByteMethod::AllocatedFallback
+        );
+        assert_eq!(ByteMethod::Private.as_str(), "private bytes");
+        assert_eq!(ByteMethod::AllocatedFallback.as_str(), "allocated bytes");
+        assert_eq!(ByteMethod::Unmeasured.as_str(), "unmeasured bytes");
+    }
+
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody
+    #[test]
+    fn merge_report_combines_byte_methods_with_unmeasured_identity() {
+        let report = |byte_method| Report {
+            byte_method,
+            ..Report::default()
+        };
+        for (into, next, expected) in [
+            (
+                ByteMethod::Unmeasured,
+                ByteMethod::Unmeasured,
+                ByteMethod::Unmeasured,
+            ),
+            (
+                ByteMethod::Unmeasured,
+                ByteMethod::Private,
+                ByteMethod::Private,
+            ),
+            (
+                ByteMethod::Private,
+                ByteMethod::Unmeasured,
+                ByteMethod::Private,
+            ),
+            (
+                ByteMethod::Private,
+                ByteMethod::Private,
+                ByteMethod::Private,
+            ),
+            (
+                ByteMethod::Private,
+                ByteMethod::AllocatedFallback,
+                ByteMethod::AllocatedFallback,
+            ),
+            (
+                ByteMethod::AllocatedFallback,
+                ByteMethod::Private,
+                ByteMethod::AllocatedFallback,
+            ),
+            (
+                ByteMethod::Unmeasured,
+                ByteMethod::AllocatedFallback,
+                ByteMethod::AllocatedFallback,
+            ),
+        ] {
+            let mut aggregate = report(into);
+            merge_report(&mut aggregate, report(next));
+            assert_eq!(aggregate.byte_method, expected, "{into:?} + {next:?}");
+        }
+    }
+
+    fn collect_empty_budget_report(
+        fixture: &Fixture,
+        state: &tempfile::TempDir,
+        dry_run: bool,
+        epoch: &str,
+    ) -> Report {
+        let budget = provenant_config::CargoCacheBudget {
+            bytes: 0,
+            setting: "0".into(),
+            source: provenant_records::LimitSource::Default,
+        };
+        let mut stop = || false;
+        let mut refresh = TargetProtection::default;
+        collect_with_progress(
+            state.path(),
+            fixture.home.path(),
+            limits(0, 0),
+            dry_run,
+            &budget,
+            &TargetProtection::default(),
+            None,
+            epoch,
+            &mut stop,
+            &mut refresh,
+        )
+        .unwrap()
+    }
+
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody
+    #[test]
+    fn apply_report_keeps_the_survey_byte_method() {
+        let preview_fixture = Fixture::new();
+        preview_fixture.profile('a', "debug", 4096, 100);
+        let preview_state =
+            provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        fs::set_permissions(preview_state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let preview =
+            collect_empty_budget_report(&preview_fixture, &preview_state, true, "0000000000000001");
+        assert_eq!(preview.removed.len(), 1);
+        assert!(preview.bytes > 0);
+
+        let apply_fixture = Fixture::new();
+        apply_fixture.profile('a', "debug", 4096, 100);
+        let apply_state =
+            provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
+        fs::set_permissions(apply_state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let applied =
+            collect_empty_budget_report(&apply_fixture, &apply_state, false, "0000000000000002");
+        assert_eq!(applied.removed.len(), 1);
+        assert_eq!(applied.bytes, preview.bytes);
+        assert_eq!(applied.byte_method, preview.byte_method);
+    }
+
+    /// A claimed digest cache holding one target with two flat files.
+    fn claimed_target(fixture: &Fixture) -> (PayloadTree, Candidate, Metadata) {
+        let digest = "a".repeat(64);
+        let cache_path = fixture.cache('a');
+        let target_path = cache_path.join("target");
+        fs::create_dir_all(&target_path).unwrap();
+        fs::write(target_path.join("file-0"), vec![1_u8; 512]).unwrap();
+        fs::write(target_path.join("file-1"), vec![2_u8; 1024]).unwrap();
+        let root = Directory::open_anchor(&cache_root(fixture.home.path())).unwrap();
+        let cache_metadata = root.metadata_at(OsStr::new(&digest), false).unwrap();
+        let tree = PayloadTree::claim(&root, OsStr::new(&digest), &cache_metadata).unwrap();
+        let target_metadata = tree.metadata_at(OsStr::new("target")).unwrap();
+        let candidate = Candidate {
+            kind: CacheKind::Lane,
+            cache: digest,
+            target: "target".into(),
+            display: target_path.clone(),
+            bytes: 0,
+            private_available: false,
+            newest: target_metadata.modified_ns,
+            target_modified_ns: target_metadata.modified_ns,
+            identity: (target_metadata.device, target_metadata.inode),
+            owner: None,
+            last_use: LastUse::FileTimes,
+        };
+        (tree, candidate, target_metadata)
+    }
+
+    /// The figure an independent walk of the same flat tree observes: each
+    /// entry's private size where the filesystem reports one, else allocated.
+    fn expected_flat_bytes(tree: &PayloadTree, target_metadata: &Metadata) -> (u64, bool) {
+        let root_private = tree
+            .directory()
+            .private_size_at(OsStr::new("target"))
+            .ok()
+            .flatten();
+        let mut bytes = root_private.unwrap_or(target_metadata.allocated);
+        let mut private_available = root_private.is_some();
+        let target = tree.child(OsStr::new("target")).unwrap();
+        for name in target.entries().unwrap().map(|name| name.unwrap()) {
+            let (entry_bytes, has_private) = observed_bytes(
+                target.directory().private_size_at(&name).ok().flatten(),
+                target.metadata_at(&name).unwrap().allocated,
+            );
+            bytes = bytes.saturating_add(entry_bytes);
+            private_available &= has_private;
+        }
+        (bytes, private_available)
+    }
+
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody
+    #[test]
+    fn private_available_survives_measure_interrupt_and_resume() {
+        let fixture = Fixture::new();
+        let (tree, candidate, target_metadata) = claimed_target(&fixture);
+        let mut stops = [false, false, true].into_iter();
+        let mut stop = || stops.next().unwrap_or(true);
+        let MeasureOutcome::Interrupted(progress) =
+            measure_resumable(&tree, &candidate, &target_metadata, None, &mut stop).unwrap()
+        else {
+            panic!("measurement did not interrupt");
+        };
+        let encoded = serde_json::to_vec(&progress).unwrap();
+        let restored: MeasureProgress = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(restored.private_available, progress.private_available);
+        let mut never = || false;
+        let MeasureOutcome::Complete {
+            bytes,
+            private_available,
+            ..
+        } = measure_resumable(
+            &tree,
+            &candidate,
+            &target_metadata,
+            Some(restored),
+            &mut never,
+        )
+        .unwrap()
+        else {
+            panic!("resumed measurement did not complete");
+        };
+        let (expected_bytes, expected_private) = expected_flat_bytes(&tree, &target_metadata);
+        assert_eq!(bytes, expected_bytes);
+        assert_eq!(private_available, expected_private);
+        assert_eq!(private_available, progress.private_available);
+    }
+
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody
+    #[test]
+    fn measure_accumulates_private_size_when_available() {
+        let fixture = Fixture::new();
+        let (tree, _candidate, target_metadata) = claimed_target(&fixture);
+        let root_private = tree
+            .directory()
+            .private_size_at(OsStr::new("target"))
+            .ok()
+            .flatten();
+        let target_tree = tree.child(OsStr::new("target")).unwrap();
+        let (bytes, _newest, private_available) = measure(
+            &target_tree,
+            0,
+            &mut MeasureBudget::new(false),
+            root_private,
+        )
+        .unwrap();
+        let (expected_bytes, expected_private) = expected_flat_bytes(&tree, &target_metadata);
+        assert_eq!(bytes, expected_bytes);
+        assert_eq!(private_available, expected_private);
+    }
 
     fn fixed_time() -> std::time::SystemTime {
         std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(TEST_NOW_SECONDS)
@@ -4235,6 +4628,7 @@ mod tests {
                 },
                 display: PathBuf::new(),
                 bytes: index as u64,
+                private_available: true,
                 newest: 1_700_000_000_000_000_000,
                 target_modified_ns: 1_700_000_000_000_000_000,
                 identity: (1_234_567, index as u64),
@@ -4266,6 +4660,7 @@ mod tests {
                 let decoded: Candidate =
                     serde_json::from_slice(&serde_json::to_vec(&candidate).unwrap()).unwrap();
                 assert_eq!((decoded.owner, decoded.last_use), (owner, last_use));
+                assert_eq!(decoded.private_available, candidate.private_available);
             }
         }
     }

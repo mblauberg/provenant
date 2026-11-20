@@ -1054,11 +1054,12 @@ fn gc_data_summary(data: &GcData) -> String {
             data.build_dirs.target_idle_setting, data.build_dirs.target_idle_source
         )
     };
+    let cargo_bytes_label = data.build_dirs.byte_method.as_str();
     if not_run(provenant_config::RetentionKind::BuildDirectories) {
         human.push_str("Cargo targets: not run in this pass\n");
     } else if data.build_dirs.measurement_skipped {
         human.push_str(&format!(
-            "Cargo target census partial: {} known allocated bytes / {} byte budget (setting {}; source: {}{idle}); resumes at {}\n",
+            "Cargo target census partial: {} known {cargo_bytes_label} / {} byte budget (setting {}; source: {}{idle}); resumes at {}\n",
             data.build_dirs.cache_bytes,
             data.build_dirs.budget_bytes,
             data.build_dirs.budget_setting,
@@ -1071,7 +1072,7 @@ fn gc_data_summary(data: &GcData) -> String {
         ));
     } else {
         human.push_str(&format!(
-        "{} Cargo target(s), {} allocated bytes {}; {} / {} allocated bytes remain (budget setting {}; source: {}{idle}), {} busy, {} recent\n",
+        "{} Cargo target(s), {} {cargo_bytes_label} {}; {} / {} {cargo_bytes_label} remain (budget setting {}; source: {}{idle}), {} busy, {} recent\n",
         data.build_dirs.removed.len(),
         data.build_dirs.bytes,
         if data.report.dry_run {
@@ -1087,9 +1088,15 @@ fn gc_data_summary(data: &GcData) -> String {
         data.build_dirs.recent.len(),
     ));
     }
+    if !not_run(provenant_config::RetentionKind::BuildDirectories)
+        && data.build_dirs.byte_method == provenant_run::build_dir_gc::ByteMethod::AllocatedFallback
+    {
+        human
+            .push_str("Cargo target sizes: private bytes unavailable; reporting allocated bytes\n");
+    }
     for removal in &data.build_dirs.removed {
         human.push_str(&format!(
-            "{} Cargo target {} ({}{}; {} allocated bytes{})\n",
+            "{} Cargo target {} ({}{}; {} {cargo_bytes_label}{})\n",
             if data.report.dry_run {
                 "would remove"
             } else {
@@ -1389,6 +1396,7 @@ enum GcOutput<'a> {
         provider_state_removed: usize,
         build_dirs_removed: usize,
         build_dir_bytes_reclaimed: u64,
+        build_dir_byte_method: &'a provenant_run::build_dir_gc::ByteMethod,
         build_dir_bytes: u64,
         build_dir_budget_bytes: u64,
         build_dir_budget_setting: &'a str,
@@ -1465,6 +1473,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         provider_state_removed: data.provider_state.removed.len(),
         build_dirs_removed: data.build_dirs.removed.len(),
         build_dir_bytes_reclaimed: data.build_dirs.bytes,
+        build_dir_byte_method: &data.build_dirs.byte_method,
         build_dir_bytes: data.build_dirs.cache_bytes,
         build_dir_budget_bytes: data.build_dirs.budget_bytes,
         build_dir_budget_setting: &data.build_dirs.budget_setting,
@@ -4414,6 +4423,7 @@ mod gc_preview_tests {
         data.build_dirs.budget_source = "host".into();
         data.build_dirs.target_idle_setting = "30d".into();
         data.build_dirs.target_idle_source = "compiled default".into();
+        data.build_dirs.byte_method = provenant_run::build_dir_gc::ByteMethod::AllocatedFallback;
         data.build_dirs.busy.push("/cache/b/target".into());
         data.build_dirs.recent.push("/cache/c/target".into());
         for (dry_run, expected, verb) in [
@@ -4457,6 +4467,49 @@ mod gc_preview_tests {
             "/repo/.worktrees/gone"
         );
     }
+    #[test]
+    fn gc_summary_names_the_cargo_target_byte_figure() {
+        let mut data = GcData::default();
+        data.report.dry_run = true;
+        data.build_dirs.bytes = 4096;
+        data.build_dirs.cache_bytes = 8192;
+        data.build_dirs.budget_bytes = 16384;
+        for (method, label, warns, json_name) in [
+            (
+                provenant_run::build_dir_gc::ByteMethod::AllocatedFallback,
+                "allocated bytes",
+                true,
+                "allocated_fallback",
+            ),
+            (
+                provenant_run::build_dir_gc::ByteMethod::Private,
+                "private bytes",
+                false,
+                "private",
+            ),
+            (
+                provenant_run::build_dir_gc::ByteMethod::Unmeasured,
+                "unmeasured bytes",
+                false,
+                "unmeasured",
+            ),
+        ] {
+            data.build_dirs.byte_method = method;
+            let summary = gc_data_summary(&data);
+            assert!(
+                summary.contains(&format!("4096 {label} reclaimable")),
+                "{summary}"
+            );
+            assert_eq!(
+                summary.contains("private bytes unavailable; reporting allocated bytes"),
+                warns,
+                "{summary}"
+            );
+            let json = serde_json::to_value(gc_result_data(&data, false)).unwrap_or_default();
+            assert_eq!(json["build_dir_byte_method"], json_name);
+        }
+    }
+
     #[test]
     fn gc_summary_reports_event_expiry_in_preview_and_applied_mode() {
         let mut data = GcData::default();
