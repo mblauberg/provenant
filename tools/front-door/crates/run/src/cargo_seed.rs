@@ -272,6 +272,7 @@ fallback_reasons! {
     STORE_UNAVAILABLE = "store_unavailable",
     NO_GENERATIONS = "no_generations",
     MANIFEST_INVALID = "manifest_invalid",
+    FULL_GENERATION = "full_generation",
     TOOLCHAIN_MISMATCH = "toolchain_mismatch",
     TRIPLE_MISMATCH = "triple_mismatch",
     CARGO_PROFILE_MISMATCH = "cargo_profile_mismatch",
@@ -552,6 +553,7 @@ fn seed_repair(reason: &str) -> Option<&'static str> {
         fallback_reasons::NO_GENERATIONS
         | fallback_reasons::STORE_UNAVAILABLE
         | fallback_reasons::MANIFEST_INVALID
+        | fallback_reasons::FULL_GENERATION
         | fallback_reasons::TOOLCHAIN_MISMATCH
         | fallback_reasons::TRIPLE_MISMATCH
         | fallback_reasons::CARGO_PROFILE_MISMATCH => Some(
@@ -866,6 +868,7 @@ fn seed_target_cancellable_inner(
     let mut saw_triple = false;
     let mut saw_cargo_profile = false;
     let mut saw_manifest = false;
+    let mut saw_full_generation = false;
     let mut saw_entry = false;
     // What the complete generations held, for a refusal that names it.
     let mut found_versions = std::collections::BTreeSet::new();
@@ -903,6 +906,12 @@ fn seed_target_cancellable_inner(
             continue;
         };
         saw_manifest = true;
+        // A generation that still holds the checkout's own units can go stale
+        // against this worktree. It is never a candidate, whatever else matches.
+        if manifest.contents != "deps" {
+            saw_full_generation = true;
+            continue;
+        }
         if manifest.rustc_vv != compatibility.version {
             found_versions.insert(compiler_line(&manifest.rustc_vv).to_owned());
             continue;
@@ -939,6 +948,10 @@ fn seed_target_cancellable_inner(
             Outcome::fallback(fallback_reasons::NO_GENERATIONS)
         } else if !saw_manifest {
             Outcome::fallback(fallback_reasons::MANIFEST_INVALID)
+        } else if saw_full_generation {
+            // Only obsolete full generations were found; a deps generation is
+            // needed, and refresh will build one.
+            Outcome::fallback(fallback_reasons::FULL_GENERATION)
         } else if !saw_version {
             Outcome::fallback_differs(
                 fallback_reasons::TOOLCHAIN_MISMATCH,
@@ -1081,6 +1094,10 @@ const MAX_TREE_DEPTH: usize = 128;
 /// dep-info that is missing or lies outside the target, or a non-empty seed in
 /// which none is named is `seed_layout_unrecognised`: publishing it would
 /// silently skip the protection for some units. Returns how many files were aged.
+///
+/// Kept for generations that still hold a full build. This pass is removed once
+/// the real-Cargo `older_sources_rebuild_after_deps_only_seed` invariant passes
+/// in CI: a deps-only seed has no member units to protect, so no ageing is needed.
 #[cfg(any(unix, test))]
 fn age_dep_info(
     target: &Path,
@@ -1404,6 +1421,7 @@ mod tests {
                     features: vec![],
                     flags: vec![],
                     allocated_bytes: recorded,
+                    contents: "deps".into(),
                 },
                 None,
             );
@@ -1577,6 +1595,7 @@ mod tests {
             features: vec![],
             flags: vec![],
             allocated_bytes: Some(1),
+            contents: "deps".into(),
         })
         .unwrap();
         old.as_object_mut().unwrap().remove("allocated_bytes");
@@ -1702,6 +1721,7 @@ mod tests {
                 features: vec![],
                 flags: vec![],
                 allocated_bytes: None,
+                contents: "deps".into(),
             },
             None,
         );
@@ -2058,6 +2078,64 @@ mod tests {
         );
         assert_eq!(run("v1", "host").status, "seeded");
         assert_eq!(run("v1", "host"), Outcome::skipped("existing_target"));
+    }
+
+    /// A full generation is obsolete: selection skips it with a stable reason
+    /// rather than cloning member units that a lane's own sources can outdate.
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn full_generation_is_skipped_by_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        let profile = provenant_config::LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .expect("default Cargo profile is UTF-8");
+        let mut manifest = crate::target_seed::Manifest {
+            project_key: String::new(),
+            rustc_vv: "v1".into(),
+            host_triple: "host".into(),
+            commit: "abc".into(),
+            profile: "dev".into(),
+            cargo_profile: profile.clone(),
+            features: vec![],
+            flags: vec![],
+            allocated_bytes: None,
+            contents: String::new(),
+        };
+        publish_generation(&state, "001", &manifest, None);
+        let compatibility = || SeedCompatibility {
+            version: "v1",
+            triple: "host",
+            cargo_profile: &profile,
+            project_key: "",
+        };
+        let outcome = seed_target_cancellable(
+            &state,
+            &cache,
+            compatibility(),
+            None,
+            |_| {},
+            |_, _, _| panic!("a full generation must never be cloned"),
+        );
+        assert_eq!(outcome.reason, fallback_reasons::FULL_GENERATION);
+
+        // A deps generation in the store remains selectable.
+        manifest.contents = "deps".into();
+        publish_generation(&state, "002", &manifest, None);
+        let outcome = seed_target_cancellable(
+            &state,
+            &cache,
+            compatibility(),
+            None,
+            |_| {},
+            |_, _, _| Ok(()),
+        );
+        assert_eq!(
+            (outcome.status.as_str(), outcome.reason.as_str()),
+            ("seeded", "cloned")
+        );
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed
@@ -2810,6 +2888,9 @@ mod tests {
                 features: vec![],
                 flags: vec![],
                 allocated_bytes: None,
+                // This fixture still carries a full target; its manifest is
+                // marked deps so selection reaches the dep-info ageing check.
+                contents: "deps".into(),
             },
             Some(&built),
         );
