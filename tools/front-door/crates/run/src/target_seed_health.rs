@@ -396,6 +396,7 @@ mod tests {
             features: Vec::new(),
             flags: Vec::new(),
             allocated_bytes: None,
+            contents: "deps".into(),
         };
         fs::write(
             directory.join("manifest.json"),
@@ -509,13 +510,17 @@ mod tests {
             at(Duration::from_secs(60)),
         )
         .unwrap();
-        let snapshot = health(state.path(), key, Duration::from_secs(24 * 3600));
+        let seed_health = health(state.path(), key, Duration::from_secs(24 * 3600));
         assert!(
-            snapshot
+            seed_health
                 .age
                 .is_some_and(|age| age == Duration::from_secs(60))
         );
-        assert!(snapshot.warnings().is_empty(), "{:?}", snapshot.warnings());
+        assert!(
+            seed_health.warnings().is_empty(),
+            "{:?}",
+            seed_health.warnings()
+        );
         record_refresh(state.path(), key, "current", None, now()).unwrap();
         assert!(
             health(state.path(), key, Duration::from_secs(24 * 3600))
@@ -569,7 +574,7 @@ mod tests {
         record_refresh(state.path(), key, "failed", Some(&"x".repeat(4096)), now()).unwrap();
         let record = read_refresh(state.path(), key).unwrap();
         assert_eq!(
-            record.reason.as_ref().map(|reason| reason.len()),
+            record.reason.as_ref().map(String::len),
             Some(MAX_REASON_BYTES)
         );
         assert!(

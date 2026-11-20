@@ -1043,7 +1043,10 @@ fn has_generation(state: &Path, identity: &GenerationIdentity) -> bool {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
             .is_some_and(|manifest| {
-                manifest.project_key == identity.project_key
+                // A full generation holds the checkout's own units and can go
+                // stale against a lane's sources; it is never current.
+                manifest.contents == "deps"
+                    && manifest.project_key == identity.project_key
                     && manifest.commit == identity.commit
                     && manifest.rustc_vv == identity.rustc_vv
                     && manifest.host_triple == identity.host_triple
@@ -1160,6 +1163,27 @@ fn build_into(
         "cargo test --locked --no-run".to_owned(),
     ];
     flags.extend(seed_build_flags(&environment));
+    let mut overrides = cargo_profile.environment().to_vec();
+    let mut paths = vec![
+        cargo
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
+    ];
+    if let Some(path) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&path));
+    }
+    overrides.push((
+        "PATH".into(),
+        std::env::join_paths(paths)
+            .map_err(|error| io::Error::other(format!("cargo PATH unresolved: {error}")))?,
+    ));
+    overrides.extend([
+        ("CARGO_TARGET_DIR".into(), target.as_os_str().into()),
+        ("CARGO_BUILD_BUILD_DIR".into(), target.as_os_str().into()),
+        // Provenant's safe value; an inherited non-zero value is cleared.
+        ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
+    ]);
     for args in [
         &["build", "--locked", "--all-targets"][..],
         &["test", "--locked", "--no-run"][..],
@@ -1167,29 +1191,12 @@ fn build_into(
         let argv: Vec<OsString> = std::iter::once(cargo.as_os_str().to_owned())
             .chain(args.iter().map(OsString::from))
             .collect();
-        let mut overrides = cargo_profile.environment().to_vec();
-        let mut paths = vec![
-            cargo
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf(),
-        ];
-        if let Some(path) = std::env::var_os("PATH") {
-            paths.extend(std::env::split_paths(&path));
-        }
-        overrides.push((
-            "PATH".into(),
-            std::env::join_paths(paths)
-                .map_err(|error| io::Error::other(format!("cargo PATH unresolved: {error}")))?,
-        ));
-        overrides.extend([
-            ("CARGO_TARGET_DIR".into(), target.as_os_str().into()),
-            ("CARGO_BUILD_BUILD_DIR".into(), target.as_os_str().into()),
-            // Provenant's safe value; an inherited non-zero value is cleared.
-            ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
-        ]);
         run(&worktree, &argv, &overrides)?;
     }
+    // The checkout's own units are never reusable by a lane: their sources move
+    // with the lane, and a stale artifact would be trusted by mtime. Clean every
+    // path package, leaving only dependency units in the seed.
+    clean_path_packages(&cargo, &worktree, &overrides)?;
     // Record the size once, while building the host seed is already walking the
     // tree; a lane clone must not walk a multi-gigabyte seed before starting.
     let allocated_bytes = target_seed::allocated_tree_bytes(&target);
@@ -1204,7 +1211,54 @@ fn build_into(
         features: vec!["default".into()],
         flags,
         allocated_bytes,
+        contents: "deps".into(),
     })
+}
+
+/// Remove the units of every path package from a built seed target. `cargo
+/// metadata` lists workspace members and path dependencies alike with a null
+/// `source`; registry and other non-path dependencies are left untouched. The
+/// enumeration and the clean use the same child environment and target overrides
+/// as the build, through the process helper that applies `seed_build_child_environment`.
+fn clean_path_packages(
+    cargo: &Path,
+    worktree: &Path,
+    overrides: &[(OsString, OsString)],
+) -> Result<()> {
+    let metadata = [
+        OsString::from("metadata"),
+        "--format-version".into(),
+        "1".into(),
+        "--locked".into(),
+    ];
+    let argv: Vec<OsString> = std::iter::once(cargo.as_os_str().to_owned())
+        .chain(metadata)
+        .collect();
+    let output = run(worktree, &argv, overrides)?;
+    let metadata: serde_json::Value = serde_json::from_slice(&output)
+        .map_err(|error| io::Error::other(format!("cargo metadata: {error}")))?;
+    let packages = metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| io::Error::other("cargo metadata has no package list"))?;
+    let mut specs = Vec::new();
+    for package in packages {
+        if package.get("source").is_none_or(serde_json::Value::is_null)
+            && let Some(id) = package.get("id").and_then(serde_json::Value::as_str)
+        {
+            specs.push(id.to_owned());
+        }
+    }
+    for spec in specs {
+        let argv: Vec<OsString> = vec![
+            cargo.as_os_str().to_owned(),
+            "clean".into(),
+            "-p".into(),
+            spec.into(),
+        ];
+        run(worktree, &argv, overrides)?;
+    }
+    Ok(())
 }
 
 fn publish(state: &Path, build: impl FnOnce(&Path) -> Result<Manifest>) -> Result<String> {
@@ -1572,6 +1626,7 @@ mod checkout_tests {
                 features: vec![],
                 flags: vec![],
                 allocated_bytes: None,
+                contents: "deps".into(),
             })
         })
         .unwrap();
@@ -1725,6 +1780,7 @@ mod tests {
             features: vec![],
             flags: vec![],
             allocated_bytes: None,
+            contents: "deps".into(),
         }
     }
     #[allow(dead_code)] // The harness-free target includes this module without its tests.
@@ -1868,6 +1924,167 @@ mod tests {
         );
     }
 
+    /// A deps-only seed holds no units of the checkout, so a lane must rebuild
+    /// its own members even when their sources are older than the seed's
+    /// artifacts, while dependency units stay fresh. The fixture uses real
+    /// Cargo with a build script, a member-to-member dependency and a non-member
+    /// path package, so every local unit kind is covered.
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Runs the pinned Cargo and reads the real file clock.
+    fn older_sources_rebuild_after_deps_only_seed() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let write = |path: &str, text: &str| {
+            let path = workspace.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write(
+            "rust-toolchain.toml",
+            include_str!("../rust-toolchain.toml"),
+        );
+        write(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"member\", \"inner\"]\nexclude = [\"dep-path\"]\nresolver = \"2\"\n",
+        );
+        write(
+            "member/Cargo.toml",
+            "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ninner = { path = \"../inner\" }\ndep-path = { path = \"../dep-path\" }\nvendored = \"1\"\n",
+        );
+        write(
+            "member/src/lib.rs",
+            "pub fn value() -> u32 { inner::value() + dep_path::value() + vendored::value() }\n",
+        );
+        write(
+            "inner/Cargo.toml",
+            "[package]\nname = \"inner\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n\n[dependencies]\nvendored = \"1\"\n",
+        );
+        write(
+            "inner/build.rs",
+            "fn main() { println!(\"cargo:rerun-if-changed=build.rs\"); }\n",
+        );
+        write(
+            "inner/src/lib.rs",
+            "pub fn value() -> u32 { vendored::value() }\n",
+        );
+        write(
+            "dep-path/Cargo.toml",
+            "[package]\nname = \"dep-path\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nvendored = \"1\"\n",
+        );
+        write(
+            "dep-path/src/lib.rs",
+            "pub fn value() -> u32 { vendored::value() }\n",
+        );
+        // A directory source stands in for a registry offline: its units are
+        // dependency units and must stay fresh in the deps-only seed.
+        write(
+            ".cargo/config.toml",
+            "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"vendor\"\n",
+        );
+        write(
+            "vendor/vendored/Cargo.toml",
+            "[package]\nname = \"vendored\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            "vendor/vendored/src/lib.rs",
+            "pub fn value() -> u32 { 1 }\n",
+        );
+        write(
+            "vendor/vendored/.cargo-checksum.json",
+            &format!("{{\"files\":{{}},\"package\":\"{}\"}}", "0".repeat(64)),
+        );
+
+        let profile = LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .expect("default Cargo profile is UTF-8");
+        let mut base_env = profile.environment().to_vec();
+        base_env.push(("CARGO_NET_OFFLINE".into(), "true".into()));
+        let generate_lock = [
+            OsString::from("cargo"),
+            "generate-lockfile".into(),
+            "--offline".into(),
+        ];
+        run(&workspace, &generate_lock, &base_env).unwrap();
+
+        let seed_target = temp.path().join("seed-target");
+        let mut seed_env = base_env.clone();
+        seed_env.extend([
+            ("CARGO_TARGET_DIR".into(), seed_target.as_os_str().into()),
+            (
+                "CARGO_BUILD_BUILD_DIR".into(),
+                seed_target.as_os_str().into(),
+            ),
+        ]);
+        let build_seed = [
+            OsString::from("cargo"),
+            "build".into(),
+            "--locked".into(),
+            "--all-targets".into(),
+            "--offline".into(),
+        ];
+        run(&workspace, &build_seed, &seed_env).unwrap();
+        let environment = std::env::vars_os().collect::<Vec<_>>();
+        let cargo = target_seed::cargo_tool(&environment, "cargo").unwrap();
+        clean_path_packages(&cargo, &workspace, &seed_env).unwrap();
+
+        // Clone the seed as a lane target, then backdate the checkout's own
+        // sources so mtime alone would call their units fresh.
+        let lane_target = temp.path().join("lane-target");
+        copy_tree(&seed_target, &lane_target).unwrap();
+        let older = fs::metadata(workspace.join("member/src/lib.rs"))
+            .unwrap()
+            .modified()
+            .unwrap()
+            - Duration::from_secs(3600);
+        for path in [
+            "member/Cargo.toml",
+            "member/src/lib.rs",
+            "inner/Cargo.toml",
+            "inner/build.rs",
+            "inner/src/lib.rs",
+            "dep-path/Cargo.toml",
+            "dep-path/src/lib.rs",
+        ] {
+            fs::File::open(workspace.join(path))
+                .unwrap()
+                .set_modified(older)
+                .unwrap();
+        }
+
+        let mut lane_env = base_env;
+        lane_env.extend([
+            ("CARGO_TARGET_DIR".into(), lane_target.as_os_str().into()),
+            (
+                "CARGO_BUILD_BUILD_DIR".into(),
+                lane_target.as_os_str().into(),
+            ),
+        ]);
+        let build_lane = [
+            OsString::from("cargo"),
+            "build".into(),
+            "--locked".into(),
+            "--offline".into(),
+            "--message-format=json".into(),
+        ];
+        let output = run_cargo_output(&workspace, &build_lane, &lane_env).unwrap();
+        let mut freshness = std::collections::BTreeMap::new();
+        for line in output.lines() {
+            let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if message["reason"] == "compiler-artifact" {
+                let name = message["target"]["name"].as_str().unwrap().to_owned();
+                freshness.insert(name, message["fresh"].as_bool().unwrap());
+            }
+        }
+        for name in ["member", "inner", "dep_path", "build-script-build"] {
+            assert_eq!(freshness.get(name), Some(&false), "{name}: {freshness:?}");
+        }
+        assert_eq!(freshness.get("vendored"), Some(&true), "{freshness:?}");
+    }
+
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
     fn refresh_checks_all_generations_for_this_repository() {
@@ -1891,6 +2108,44 @@ mod tests {
         assert!(matches!(run("bbb"), Refresh::Built(_)));
         assert_eq!(run("bbb"), Refresh::Current);
         assert_eq!(builds.get(), 2);
+        freeze(state.path());
+    }
+
+    /// A full generation predates the deps-only contract. Even when every other
+    /// identity field matches, it is not current: refresh must build a
+    /// replacement that holds dependency units only.
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn current_full_generation_triggers_replacement() {
+        let state = tempfile::tempdir().unwrap();
+        let identity = identity("repo", "aaa");
+        publish(state.path(), |stage| {
+            fs::create_dir(stage.join("target"))?;
+            let mut full = manifest(&identity);
+            full.contents.clear();
+            Ok(full)
+        })
+        .unwrap();
+        assert!(!has_generation(state.path(), &identity));
+
+        let builds = std::cell::Cell::new(0);
+        assert!(matches!(
+            refresh_with(state.path(), &identity, |stage| {
+                builds.set(builds.get() + 1);
+                built(stage, &identity)
+            })
+            .unwrap(),
+            Refresh::Built(_)
+        ));
+        assert_eq!(builds.get(), 1);
+        assert!(has_generation(state.path(), &identity));
+        assert_eq!(
+            refresh_with(state.path(), &identity, |_| {
+                panic!("the replacement deps generation is current")
+            })
+            .unwrap(),
+            Refresh::Current
+        );
         freeze(state.path());
     }
 
@@ -2184,6 +2439,7 @@ mod tests {
                 features: vec![],
                 flags: vec![],
                 allocated_bytes: None,
+                contents: "deps".into(),
             })
         })
         .unwrap();

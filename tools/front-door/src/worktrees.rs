@@ -5130,9 +5130,13 @@ mod gc_subpass_removal_tests {
 #[cfg(test)]
 #[allow(unused_imports)] // The harness-free target includes this module without its tests.
 mod seed_diagnosis_tests {
+    #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
     use super::*;
+    #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
     use provenant_core::WallTime;
+    #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
     use provenant_run::target_seed_health as health;
+    #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
     use std::fs;
 
     #[test]
@@ -5158,6 +5162,7 @@ mod seed_diagnosis_tests {
             features: Vec::new(),
             flags: Vec::new(),
             allocated_bytes: None,
+            contents: "deps".into(),
         };
         fs::write(
             generation.join("manifest.json"),

@@ -19,6 +19,19 @@ pub struct Report {
     pub busy: Vec<PathBuf>,
     pub interrupted_at: Option<PathBuf>,
     pub continuation: Option<String>,
+    /// Full generations collected because they predate the deps-only contract.
+    /// They are removed outside the keep-count and carry a reason that
+    /// distinguishes them from ordinary retention evictions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub obsolete_full: Vec<RemovedGeneration>,
+}
+
+/// A generation removed for a named reason, so a report can tell an obsolete
+/// full generation from one collected under the keep-count or byte target.
+#[derive(Debug, serde::Serialize)]
+pub struct RemovedGeneration {
+    pub path: PathBuf,
+    pub reason: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -72,6 +85,11 @@ struct Cursor {
     candidate_bytes: u64,
     partial_bytes: u64,
     resurvey_after_remove: bool,
+    /// The current candidate is an obsolete full generation, collected
+    /// regardless of the keep-count. Defaults to false for cursors saved by
+    /// releases that predate the deps-only contract.
+    #[serde(default)]
+    obsolete_full: bool,
 }
 
 impl Cursor {
@@ -91,6 +109,7 @@ impl Cursor {
             candidate_bytes: 0,
             partial_bytes: 0,
             resurvey_after_remove: false,
+            obsolete_full: false,
         })
     }
 }
@@ -547,7 +566,7 @@ fn measure_generations(
         let Some(id) = cursor.candidate.as_deref().and_then(decode_name) else {
             return Ok(None);
         };
-        if let Some((directory, _)) = generation(generations, &id) {
+        if let Some((directory, _, _)) = generation(generations, &id) {
             let path = generations_path.join(&id);
             let keep_going = || control.should_continue();
             match provenant_confinement::cache::measure_tree_with_progress(
@@ -594,7 +613,7 @@ fn measure_generations(
         let Some(name) = entries.next() else { break };
         let name = name?;
         let offset_after = entries.position()?;
-        let Some((directory, _project_key)) = generation(generations, &name) else {
+        let Some((directory, _project_key, _)) = generation(generations, &name) else {
             cursor.offset = offset_after;
             continue;
         };
@@ -665,6 +684,12 @@ fn evict_generations(
                 stop(report, path, cursor);
                 return Ok(());
             }
+            if cursor.obsolete_full {
+                report.obsolete_full.push(RemovedGeneration {
+                    path: path.clone(),
+                    reason: "obsolete_full_generation",
+                });
+            }
             report.removed.push(path);
             cursor.total = cursor.total.saturating_sub(cursor.candidate_bytes);
             cursor.last = cursor.candidate.take();
@@ -672,6 +697,7 @@ fn evict_generations(
             cursor.partial_bytes = 0;
             cursor.project_key = None;
             cursor.tree_detail = None;
+            cursor.obsolete_full = false;
             cursor.phase = Phase::Select;
             cursor.offset = DirectoryPosition::default();
             cursor.best = None;
@@ -701,11 +727,12 @@ fn evict_generations(
                 stop(report, path, cursor);
                 return Ok(());
             }
-            let Some((directory, _)) = generation(generations, &id) else {
+            let Some((directory, _, _)) = generation(generations, &id) else {
                 cursor.last = cursor.candidate.take();
                 cursor.phase = Phase::Select;
                 cursor.offset = DirectoryPosition::default();
                 cursor.best = None;
+                cursor.obsolete_full = false;
                 continue;
             };
             let keep_going = || control.should_continue();
@@ -722,12 +749,19 @@ fn evict_generations(
                     cursor.tree_detail = None;
                     if dry_run {
                         report.bytes = report.bytes.saturating_add(cursor.candidate_bytes);
+                        if cursor.obsolete_full {
+                            report.obsolete_full.push(RemovedGeneration {
+                                path: path.clone(),
+                                reason: "obsolete_full_generation",
+                            });
+                        }
                         report.removed.push(path);
                         cursor.total = cursor.total.saturating_sub(cursor.candidate_bytes);
                         cursor.last = cursor.candidate.take();
                         cursor.phase = Phase::Select;
                         cursor.offset = DirectoryPosition::default();
                         cursor.best = None;
+                        cursor.obsolete_full = false;
                         cursor.root = DirectoryStamp::from(generations.metadata()?);
                     } else {
                         cursor.phase = Phase::RemoveCandidate;
@@ -774,7 +808,11 @@ fn evict_generations(
                 if name.as_os_str() <= id.as_os_str() {
                     continue;
                 }
-                if generation(generations, &name).is_some_and(|(_, key)| key == project_key) {
+                // Full generations are collected outside the keep-count: they
+                // must not displace a deps generation from its retained slot.
+                if generation(generations, &name)
+                    .is_some_and(|(_, key, deps_only)| deps_only && key == project_key)
+                {
                     cursor.newer += 1;
                 }
             }
@@ -791,6 +829,7 @@ fn evict_generations(
                 cursor.best = None;
                 cursor.project_key = None;
                 cursor.newer = 0;
+                cursor.obsolete_full = false;
             }
             continue;
         }
@@ -837,7 +876,7 @@ fn evict_generations(
         let Some(id) = cursor.best.take().and_then(|best| decode_name(&best)) else {
             return Ok(());
         };
-        let Some((_, project_key)) = generation(generations, &id) else {
+        let Some((_, project_key, deps_only)) = generation(generations, &id) else {
             cursor.last = Some(encode_name(&id));
             continue;
         };
@@ -845,12 +884,23 @@ fn evict_generations(
         cursor.project_key = Some(project_key);
         cursor.newer = 0;
         cursor.offset = DirectoryPosition::default();
-        cursor.phase = Phase::CountNewer;
+        cursor.obsolete_full = !deps_only;
+        // An obsolete full generation is always collected, whatever the
+        // keep-count is, and never counts toward one. Go straight to measuring
+        // it instead of asking CountNewer whether it fits.
+        cursor.phase = if deps_only {
+            Phase::CountNewer
+        } else {
+            Phase::CandidateTree
+        };
         cursor.root = DirectoryStamp::from(generations.metadata()?);
     }
 }
 
-fn generation(root: &Directory, name: &std::ffi::OsStr) -> Option<(Directory, String)> {
+/// A complete, immutable generation with its project key and whether it holds
+/// only dependency units. A manifest that cannot be read has no `contents`
+/// `"deps"`, so it is classified as an obsolete full generation.
+fn generation(root: &Directory, name: &std::ffi::OsStr) -> Option<(Directory, String, bool)> {
     let metadata = root.metadata_at(name, false).ok()?;
     if metadata.kind != FileKind::Directory
         || metadata.mode & 0o222 != 0
@@ -865,12 +915,15 @@ fn generation(root: &Directory, name: &std::ffi::OsStr) -> Option<(Directory, St
         return None;
     }
     let directory = root.open_verified_directory(name).ok()?;
-    let project_key = directory
+    let manifest = directory
         .read_bounded(std::ffi::OsStr::new("manifest.json"), 64 * 1024)
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<crate::target_seed::Manifest>(&bytes).ok())
-        .map_or_else(String::new, |manifest| manifest.project_key);
-    Some((directory, project_key))
+        .and_then(|bytes| serde_json::from_slice::<crate::target_seed::Manifest>(&bytes).ok());
+    let project_key = manifest
+        .as_ref()
+        .map_or_else(String::new, |manifest| manifest.project_key.clone());
+    let deps_only = manifest.is_some_and(|manifest| manifest.contents == "deps");
+    Some((directory, project_key, deps_only))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -979,7 +1032,13 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    fn generation_for_project(state: &Path, id: &str, bytes: usize, project_key: &str) -> PathBuf {
+    fn generation_with_contents(
+        state: &Path,
+        id: &str,
+        bytes: usize,
+        project_key: &str,
+        contents: &str,
+    ) -> PathBuf {
         let dir = crate::target_seed::store_path(state)
             .join("generations")
             .join(id);
@@ -998,6 +1057,7 @@ mod tests {
             features: vec![],
             flags: vec![],
             allocated_bytes: None,
+            contents: contents.into(),
         };
         fs::write(
             dir.join("manifest.json"),
@@ -1006,6 +1066,10 @@ mod tests {
         .unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
         dir
+    }
+
+    fn generation_for_project(state: &Path, id: &str, bytes: usize, project_key: &str) -> PathBuf {
+        generation_with_contents(state, id, bytes, project_key, "deps")
     }
 
     fn generation(state: &Path, id: &str, bytes: usize) -> PathBuf {
@@ -1050,6 +1114,45 @@ mod tests {
             older.exists() && newer.exists(),
             "each project's newest seed stays warm even over the global cap"
         );
+    }
+
+    /// Full generations predate the deps-only contract: they are collected
+    /// outside the keep-count, whatever it is, and never take a deps generation's
+    /// retained slot.
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn obsolete_full_generation_collected() {
+        let state = tempfile::tempdir().unwrap();
+        let old_deps = generation_for_project(state.path(), "001", 3, "project");
+        let full = generation_with_contents(state.path(), "002", 4, "project", "");
+        let new_deps = generation_for_project(state.path(), "003", 5, "project");
+
+        let report = collect(state.path(), 2, u64::MAX, false, &SweepControl::default()).unwrap();
+        assert_eq!(report.removed, vec![full.clone()]);
+        assert_eq!(report.obsolete_full.len(), 1);
+        assert_eq!(report.obsolete_full[0].path, full);
+        assert_eq!(report.obsolete_full[0].reason, "obsolete_full_generation");
+        assert!(
+            old_deps.exists() && new_deps.exists(),
+            "both deps generations fit keep-count=2 and survive"
+        );
+
+        // Even with no count pressure, a full generation is collected.
+        let another = tempfile::tempdir().unwrap();
+        let lone_deps = generation_for_project(another.path(), "001", 3, "project");
+        let lone_full = generation_with_contents(another.path(), "002", 4, "project", "other");
+        let report = collect(
+            another.path(),
+            10,
+            u64::MAX,
+            false,
+            &SweepControl::default(),
+        )
+        .unwrap();
+        assert_eq!(report.removed, vec![lone_full.clone()]);
+        assert_eq!(report.obsolete_full.len(), 1);
+        assert_eq!(report.obsolete_full[0].path, lone_full);
+        assert!(lone_deps.exists());
     }
 
     #[test]

@@ -25,6 +25,12 @@ pub struct Manifest {
     /// Older generations leave this unset; a clone then reserves nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allocated_bytes: Option<u64>,
+    /// What the generation's target holds. `"deps"` means the seed keeps only
+    /// dependency units: every path package of the checkout was cleaned after
+    /// the build. An older full generation leaves this unset (or records another
+    /// value); it is not current and is collected as obsolete rather than kept.
+    #[serde(default)]
+    pub contents: String,
 }
 
 /// Allocated bytes of a seed target, measured at seed-build time. A clone of a
