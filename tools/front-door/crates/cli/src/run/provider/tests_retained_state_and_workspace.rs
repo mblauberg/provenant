@@ -85,7 +85,7 @@ fn retained_state_copy_refuses_a_filesystem_boundary() -> Result<(), Box<dyn std
     let opened = std::rc::Rc::new(std::cell::Cell::new(false));
     let seen = std::rc::Rc::clone(&opened);
     BEFORE_OPEN.set(Some(Box::new(move |_| seen.set(true))));
-    let result = copy_tree(&from, &to, RETAINED_STATE.depth, &mut budget, true);
+    let result = copy_tree(&from, &to, RETAINED_STATE.depth, &mut budget, true, false);
     BEFORE_OPEN.set(None);
     assert!(matches!(result, Err(CopyRefusal::CrossDevice)));
     assert!(!opened.get(), "a mount point is refused before its open");
@@ -2635,5 +2635,90 @@ fn write_grant_limit_reports_configured_value_and_origin() -> Result<(), Box<dyn
         configured.origin,
         provenant_records::diagnostic::SettingSource::Configuration
     );
+    Ok(())
+}
+
+#[test]
+fn opencode_continuation_copies_a_linked_host_config_directory()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, Digest};
+    let temp = tempfile::tempdir()?;
+    let base = std::fs::canonicalize(temp.path())?;
+    let state_root = base.join("state");
+    let attempt_id = AttemptId::from_bytes([11; 16]);
+    let candidate = state_root
+        .join("attempts")
+        .join(attempt_id.to_string())
+        .join("provider-state")
+        .join("candidate-0");
+    std::fs::create_dir_all(candidate.join("data/opencode"))?;
+    let session = "fixture-session";
+    let db = rusqlite::Connection::open(candidate.join("data/opencode/opencode.db"))?;
+    db.execute("CREATE TABLE session_v2 (id TEXT PRIMARY KEY)", [])?;
+    db.execute("INSERT INTO session_v2 (id) VALUES (?1)", [session])?;
+    drop(db);
+    // An ordinary host config directory mirrored into the private config as a
+    // link, carrying a regular setting and a nested link of its own.
+    let host_config = base.join("host-config/theme");
+    std::fs::create_dir_all(&host_config)?;
+    std::fs::write(host_config.join("config.json"), "{\"theme\":\"fixture\"}")?;
+    let shared = base.join("host-config/shared.json");
+    std::fs::write(&shared, "shared")?;
+    std::os::unix::fs::symlink(&shared, host_config.join("shared.json"))?;
+    let private_config = candidate.join("config/opencode");
+    std::fs::create_dir_all(&private_config)?;
+    std::os::unix::fs::symlink(&host_config, private_config.join("theme"))?;
+
+    let prior: run::AttemptRecord = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "attempt_id": attempt_id,
+        "key": {"project": "0123456789abcdef0123456789abcdef", "graph": "fixture", "node": "node", "attempt": 1},
+        "project_id": "0123456789abcdef0123456789abcdef",
+        "attempt_number": 1, "revision": 1, "generation": 0,
+        "requested_route": {"kind": "model", "provider": "opencode", "model": "fixture-model"},
+        "applied_route": {"provider": "opencode", "model": "opencode/fixture-model", "account_key": "fixture-account", "sandbox": {"effective": false}},
+        "authority_digest": Digest::from_bytes([0; 32]), "read_only_writable": [], "protected_paths": [], "trace": {},
+        "session": session, "queued_at": "2026-10-25T00:00:00.000000Z",
+        "state": {"state": "queued"}, "usage": {},
+        "prompt": {"path": {"encoding": "utf8", "path": "prompt.txt"}, "digest": provenant_records::FileDigest::from_bytes([0; 32]), "bytes": 0, "complete": true, "redacted": false}
+    }))?;
+    let mut route = codex_resolved_route("fixture-model", Some("fixture-account"));
+    route.adapter = "opencode".into();
+    let child_state = base.join("child/provider-state/candidate-0");
+    std::fs::create_dir_all(&child_state)?;
+    let access = provenant_records::LaneAccessReceipt {
+        access: provenant_records::LaneAccess::Host,
+        source: provenant_records::LaneAccessSource::Default,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    };
+    let continuation = continuation_for_policy(
+        &prior,
+        &route,
+        "fixture",
+        ContinuationState {
+            state_root: &state_root,
+            config_root: &state_root,
+            private_state: &child_state,
+            lane_access: Some(&access),
+        },
+        &Default::default(),
+    )?;
+    assert_eq!(continuation.session(), session);
+    let copied = child_state.join("config/opencode/theme");
+    assert!(
+        copied.is_dir(),
+        "the linked config directory is copied as a directory"
+    );
+    assert_eq!(
+        std::fs::read_to_string(copied.join("config.json"))?,
+        "{\"theme\":\"fixture\"}"
+    );
+    let nested = std::fs::symlink_metadata(copied.join("shared.json"))?;
+    assert!(
+        nested.file_type().is_symlink(),
+        "links inside the copied directory are kept as links"
+    );
+    assert_eq!(std::fs::read_to_string(copied.join("shared.json"))?, "shared");
     Ok(())
 }

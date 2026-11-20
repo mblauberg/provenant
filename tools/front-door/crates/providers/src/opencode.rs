@@ -155,6 +155,14 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
+    // Resolve the lane access once. An isolated lane refuses a provider config
+    // directory that overlaps a credential root; a host lane includes it and
+    // reports the overlap through the optional-grant filter below.
+    let lane_access = plan
+        .policy
+        .as_ref()
+        .map(|policy| policy.mandatory().lane_access());
+    let config_isolated = lane_access.is_none_or(|receipt| receipt.access.is_isolated());
     if plan.selected_authentication.as_deref() != Some("login") {
         return Err(input.boundary_error(
             "OPENCODE_PREPARE_CREDENTIALS",
@@ -294,12 +302,7 @@ fn prepare(
             &mut runtime_reads,
             start,
             &input.credential_roots,
-            input
-                .confined
-                .permissions()
-                .policy
-                .as_ref()
-                .map(|policy| policy.mandatory().lane_access()),
+            lane_access,
             input.policy,
             crate::launch::OmissionSource::Toolchain,
             &mut omitted_discovery,
@@ -310,7 +313,12 @@ fn prepare(
     let config_dir = config_home.join("opencode");
     let optional_start = runtime_reads.len();
     if let Ok(config_dir) = std::fs::canonicalize(&config_dir)
-        && !provenant_confinement::refuses_lane_root(&config_dir, true, &input.credential_roots)
+        && (!config_isolated
+            || !provenant_confinement::refuses_lane_root(
+                &config_dir,
+                true,
+                &input.credential_roots,
+            ))
         && let Ok(entries) = std::fs::read_dir(&config_dir)
     {
         runtime_reads.push(exact(&config_dir));
@@ -327,7 +335,8 @@ fn prepare(
             }
         }
     }
-    if let Ok(config_dir) = std::fs::canonicalize(&config_dir)
+    if config_isolated
+        && let Ok(config_dir) = std::fs::canonicalize(&config_dir)
         && provenant_confinement::refuses_lane_root(&config_dir, true, &input.credential_roots)
         && !omitted_discovery.iter().any(|entry| {
             entry.path == config_dir
@@ -343,12 +352,7 @@ fn prepare(
         &mut runtime_reads,
         optional_start,
         &input.credential_roots,
-        input
-            .confined
-            .permissions()
-            .policy
-            .as_ref()
-            .map(|policy| policy.mandatory().lane_access()),
+        lane_access,
         input.policy,
         crate::launch::OmissionSource::ProviderConfig,
         &mut omitted_discovery,
@@ -369,7 +373,12 @@ fn prepare(
         let private_opencode = private_config.join("opencode");
         setup.push(SetupStep::CreateDir(private_opencode.clone()));
         if let Ok(canonical) = std::fs::canonicalize(&config_dir)
-            && !provenant_confinement::refuses_lane_root(&canonical, true, &input.credential_roots)
+            && (!config_isolated
+                || !provenant_confinement::refuses_lane_root(
+                    &canonical,
+                    true,
+                    &input.credential_roots,
+                ))
             && let Ok(entries) = std::fs::read_dir(&config_dir)
         {
             for entry in entries.flatten() {

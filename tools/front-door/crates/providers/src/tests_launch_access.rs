@@ -1586,3 +1586,81 @@ fn unbounded_reader_git_config_follows_lane_access() -> Result<(), Box<dyn std::
     }
     Ok(())
 }
+
+// Spec: docs/specs/run-launch.md#lane-access
+#[test]
+fn opencode_config_overlapping_a_credential_root_follows_lane_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{CredentialKind, CredentialScope};
+    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource};
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let config = home.join(".config/opencode");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(config.join("opencode.json"), "{\"model\":\"fixture\"}")?;
+    let state = home.join("state");
+    let repo = home.join("repo");
+    let base = read_only_plan(home.to_str().ok_or("home path")?, Some("login"));
+    let mut roots = provenant_core::CredentialRoots::for_home(&home);
+    roots.add(
+        config.clone(),
+        CredentialScope::Subtree,
+        "fixture declared opencode config",
+        CredentialKind::Store,
+    );
+    let mut permissions = base.permissions().clone();
+    permissions.credential_roots = roots.clone();
+    let prompt = Prompt::new("fixture".into());
+    let canonical = config.canonicalize()?;
+    for access in [LaneAccess::Host, LaneAccess::Isolated] {
+        let mut policy = provenant_confinement::run_config::RunConfig::default().policy_for_launch(
+            &state,
+            provenant_confinement::permissions::MandatoryRoots::new(&home, &state, &repo)?,
+        );
+        policy.mandatory_mut().set_lane_access(LaneAccessReceipt {
+            access,
+            source: LaneAccessSource::Default,
+            key: "lanes.access".into(),
+            extra: Default::default(),
+        });
+        permissions.policy = Some(policy);
+        let plan = provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
+            scope: base.scope(),
+            permissions: permissions.clone(),
+            codex: provenant_confinement::CodexPolicy::Clean,
+            extensions: provenant_confinement::ExtensionPolicy::Deny,
+            agy_state: None,
+        })?;
+        let mut route = route("opencode", "fixture-model");
+        route.account_key = None;
+        route.set_access(access);
+        let mut input = fixture_input(&route, &plan, &prompt, &repo, None);
+        input.home = &home;
+        input.credential_roots = roots.clone();
+        let launch = opencode::OpenCode.prepare(input)?;
+        let discovered = launch
+            .profile
+            .spec
+            .runtime_reads
+            .iter()
+            .any(|grant| grant.path == canonical);
+        let mirrored = launch.setup.iter().any(|step| {
+            matches!(step, SetupStep::Symlink { link, target }
+                if link.file_name() == Some(std::ffi::OsStr::new("opencode.json"))
+                    && target == &config.join("opencode.json"))
+        });
+        let omitted = launch.omitted_discovery.iter().any(|entry| {
+            entry.path == canonical && entry.source == crate::launch::OmissionSource::ProviderConfig
+        });
+        if access == LaneAccess::Host {
+            assert!(discovered, "host lanes read the overlapping config directory");
+            assert!(mirrored, "host lanes mirror the overlapping config into private state");
+            assert!(!omitted, "host lanes do not omit the overlapping config");
+        } else {
+            assert!(!discovered, "isolated lanes keep the credential refusal");
+            assert!(!mirrored, "isolated lanes do not mirror credential material");
+            assert!(omitted, "isolated lanes record the omitted config directory");
+        }
+    }
+    Ok(())
+}

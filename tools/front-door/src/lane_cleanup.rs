@@ -2021,6 +2021,82 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_keeps_a_distinct_ssh_destination_principal() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use provenant_os::fixture::run_git;
+        let fixture = CleanupFixture::new()?;
+        let path = fixture.remote.to_string_lossy();
+        // Two SSH principals at one host and path that can select different
+        // repositories, both advertising the same branch and tip.
+        let alice = format!("ssh://alice@example.invalid{path}");
+        let bob = format!("ssh://bob@example.invalid{path}");
+        let alice_identity = provenant_records::custody::endpoint_identity(&alice);
+        let bob_identity = provenant_records::custody::endpoint_identity(&bob);
+        assert_ne!(alice_identity, bob_identity);
+        // Delivery bound the lane to alice; the named remote is later changed
+        // to bob, where a branch of the same name and tip is available.
+        run_git(&fixture.project, &["remote", "set-url", "bound", &alice])?;
+        fixture.with_context(|context, _cancel| {
+            assert_eq!(
+                resolved_endpoint(context, "bound", &alice_identity).unwrap(),
+                alice
+            );
+            Ok(())
+        })?;
+        run_git(&fixture.project, &["remote", "set-url", "bound", &bob])?;
+        fixture.with_context(|context, cancel| {
+            // The recorded identity no longer matches the resolved principal.
+            assert!(resolved_endpoint(context, "bound", &alice_identity).is_err());
+            assert_eq!(
+                resolved_endpoint(context, "bound", &bob_identity).unwrap(),
+                bob
+            );
+            let ledger = RefLedger::for_context(context)?;
+            let record = record_old_ref(
+                context,
+                &ledger,
+                RefEndpoint::Remote {
+                    remote: "bound".into(),
+                    push_url: alice_identity,
+                },
+                "lane/old",
+                fixture.unlanded,
+                cancel,
+            )?;
+            let target = LandingTarget {
+                reference: Some(GitRefName::branch("main").unwrap()),
+                tip: fixture.landed,
+            };
+            let outcomes = fixture.with_retirement(context, cancel, &record, |retirement| {
+                Ok(sweep_remote(
+                    context,
+                    &ledger,
+                    &record,
+                    Some(&target),
+                    &[],
+                    &remote_fixture_sweep(),
+                    retirement,
+                    cancel,
+                ))
+            })?;
+            let primary = outcomes
+                .iter()
+                .find(|outcome| outcome.artefact == Artefact::RemoteBranch)
+                .unwrap();
+            assert_eq!(primary.outcome, ArtefactState::Failed);
+            assert!(
+                primary
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("remote endpoint changed since delivery")),
+                "{primary:?}"
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
     fn ancient_unlanded_local_and_remote_refs_survive_automatic_cleanup()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_os::fixture::run_git;

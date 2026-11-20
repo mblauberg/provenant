@@ -976,7 +976,16 @@ fn copy_state_bounded(
     let copied = parent
         .open_directory(&staging)
         .map_err(CopyRefusal::from)
-        .and_then(|target| copy_tree(&source, &target, limits.depth, &mut budget, sessions_only))
+        .and_then(|target| {
+            copy_tree(
+                &source,
+                &target,
+                limits.depth,
+                &mut budget,
+                sessions_only,
+                false,
+            )
+        })
         .and_then(|()| Ok(parent.replace(&staging, &parent, name)?));
     let copied = copied.map_err(|refusal| {
         let class = refusal.boundary_class();
@@ -1212,6 +1221,7 @@ pub(super) fn copy_tree(
     depth: u32,
     budget: &mut Budget,
     sessions_only: bool,
+    keep_links: bool,
 ) -> Result<(), CopyRefusal> {
     for name in listed(from, &mut budget.entries)?
         .ok_or(CopyRefusal::Limit(ContinuationCopyLimit::Entries))?
@@ -1235,6 +1245,17 @@ pub(super) fn copy_tree(
         }
         before_open(&name);
         match metadata.kind {
+            // Inside a copied linked directory, keep nested links as links:
+            // they belong to that configuration tree and must not redirect
+            // the copy into unrelated host paths.
+            FileKind::Symlink if keep_links => {
+                let target = match from.read_link(&name) {
+                    Ok(target) => target,
+                    Err(error) if changed_entry(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                to.symlink(&target, &name)?;
+            }
             FileKind::Directory => {
                 let depth = depth
                     .checked_sub(1)
@@ -1252,7 +1273,14 @@ pub(super) fn copy_tree(
                     Err(error) if error.is_exists() => {}
                     Err(error) => return Err(error.into()),
                 }
-                copy_tree(&child, &to.open_directory(&name)?, depth, budget, false)?;
+                copy_tree(
+                    &child,
+                    &to.open_directory(&name)?,
+                    depth,
+                    budget,
+                    false,
+                    keep_links,
+                )?;
             }
             FileKind::Regular => {
                 let mut file = match from.open_read(&name) {
@@ -1302,32 +1330,71 @@ pub(super) fn copy_tree(
                     .lane_access
                     .is_some_and(|receipt| !receipt.access.is_isolated()) =>
             {
-                let mut file = match from.open_read_follow(&name) {
-                    Ok(file) => file,
+                let followed = match from.metadata_at(&name, true) {
+                    Ok(followed) => followed,
                     Err(error) if changed_entry(&error) => continue,
                     Err(error) => return Err(error.into()),
                 };
-                let opened = file.metadata()?;
-                if opened.device != budget.device {
+                if followed.device != budget.device {
                     return Err(CopyRefusal::CrossDevice);
                 }
-                warn_link(budget, "symlinked file");
-                let mut copy = to.create_new(&name)?;
-                let copied = std::io::copy(
-                    &mut std::io::Read::take(&mut file, budget.bytes.saturating_add(1)),
-                    &mut copy,
-                )
-                .map_err(|source| FsError::Io {
-                    operation: "copy linked file",
-                    path: name.clone().into(),
-                    source,
-                })?;
-                if copied > budget.bytes {
-                    return Err(CopyRefusal::Limit(ContinuationCopyLimit::Bytes));
-                }
-                budget.bytes -= copied;
-                if opened.mode & 0o100 != 0 {
-                    copy.make_owner_executable()?;
+                if followed.kind == FileKind::Directory {
+                    // OpenCode mirrors ordinary configuration directories as
+                    // links. Reading one as a file fails; walk its contents as
+                    // a bounded directory instead, preserving nested links.
+                    warn_link(budget, "linked directory");
+                    let depth = depth
+                        .checked_sub(1)
+                        .ok_or(CopyRefusal::Limit(ContinuationCopyLimit::Depth))?;
+                    let child = match from.open_directory_with_links(&name, true) {
+                        Ok(child) => child,
+                        Err(error) if changed_entry(&error) => continue,
+                        Err(error) => return Err(error.into()),
+                    };
+                    if child.metadata()?.device != budget.device {
+                        return Err(CopyRefusal::CrossDevice);
+                    }
+                    match to.mkdir(&name, 0o700) {
+                        Ok(()) => {}
+                        Err(error) if error.is_exists() => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                    copy_tree(
+                        &child,
+                        &to.open_directory(&name)?,
+                        depth,
+                        budget,
+                        false,
+                        true,
+                    )?;
+                } else {
+                    let mut file = match from.open_read_follow(&name) {
+                        Ok(file) => file,
+                        Err(error) if changed_entry(&error) => continue,
+                        Err(error) => return Err(error.into()),
+                    };
+                    let opened = file.metadata()?;
+                    if opened.device != budget.device {
+                        return Err(CopyRefusal::CrossDevice);
+                    }
+                    warn_link(budget, "symlinked file");
+                    let mut copy = to.create_new(&name)?;
+                    let copied = std::io::copy(
+                        &mut std::io::Read::take(&mut file, budget.bytes.saturating_add(1)),
+                        &mut copy,
+                    )
+                    .map_err(|source| FsError::Io {
+                        operation: "copy linked file",
+                        path: name.clone().into(),
+                        source,
+                    })?;
+                    if copied > budget.bytes {
+                        return Err(CopyRefusal::Limit(ContinuationCopyLimit::Bytes));
+                    }
+                    budget.bytes -= copied;
+                    if opened.mode & 0o100 != 0 {
+                        copy.make_owner_executable()?;
+                    }
                 }
             }
             FileKind::Symlink | FileKind::Other => {}

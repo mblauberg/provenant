@@ -247,16 +247,31 @@ pub enum RemovalEvidence {
 }
 
 /// Credential-free identity for a URL endpoint. Transport keeps the original URL private.
+///
+/// The SSH username is a destination principal: different users at the same
+/// host and path can reach different repositories, so it must survive the
+/// credential-free projection to keep delivery and cleanup bound to the
+/// destination that was actually selected. Any password or token after the
+/// username is a secret and is dropped. For other transports (http(s), file,
+/// ...) a username can itself be a token, so all userinfo is removed.
+///
+/// scp-like `user@host:path` URLs carry no `://`, have no password form, and
+/// retain their username as written.
 pub fn endpoint_identity(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_owned();
     };
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..end];
-    let host = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
-    format!("{scheme}://{host}{}", &rest[end..])
+    let (principal, host) = match authority.rsplit_once('@') {
+        Some((userinfo, host)) if scheme == "ssh" || scheme == "git+ssh" => {
+            let user = userinfo.split_once(':').map_or(userinfo, |(user, _)| user);
+            (format!("{user}@"), host)
+        }
+        Some((_, host)) => (String::new(), host),
+        None => (String::new(), authority),
+    };
+    format!("{scheme}://{principal}{host}{}", &rest[end..])
 }
 
 /// Where a reference lives. Remote delivery is pinned to the push URL bound by
@@ -1097,6 +1112,45 @@ pub struct CustodyStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn endpoint_identity_keeps_ssh_principals_and_drops_secrets() {
+        // Distinct SSH users at one host and path are distinct destinations.
+        let alice = endpoint_identity("ssh://alice@example.invalid/team/repo.git");
+        let bob = endpoint_identity("ssh://bob@example.invalid/team/repo.git");
+        assert_ne!(alice, bob);
+        assert_eq!(alice, "ssh://alice@example.invalid/team/repo.git");
+        assert_eq!(bob, "ssh://bob@example.invalid/team/repo.git");
+        // A password or token on the SSH user is a secret, never retained.
+        assert_eq!(
+            endpoint_identity("ssh://alice:token@example.invalid/team/repo.git"),
+            alice
+        );
+        assert_eq!(
+            endpoint_identity("git+ssh://alice@example.invalid/team/repo.git"),
+            "git+ssh://alice@example.invalid/team/repo.git"
+        );
+        // scp-like URLs have no password form; keep the principal as written.
+        assert_ne!(
+            endpoint_identity("alice@example.invalid:team/repo.git"),
+            endpoint_identity("bob@example.invalid:team/repo.git")
+        );
+        // For other transports the username can itself be a token: strip all
+        // userinfo so two HTTP destinations at one host and path stay equal.
+        assert_eq!(
+            endpoint_identity("https://alice@example.invalid/team/repo.git"),
+            endpoint_identity("https://bob:token@example.invalid/team/repo.git")
+        );
+        assert_eq!(
+            endpoint_identity("https://alice@example.invalid/team/repo.git"),
+            "https://example.invalid/team/repo.git"
+        );
+        assert_eq!(
+            endpoint_identity("file://user:secret@localhost/tmp/repo.git"),
+            "file://localhost/tmp/repo.git"
+        );
+        assert!(!alice.contains("token"));
+    }
+
     #[test]
 
     fn ref_custody_subject_binds_endpoint_reference_and_generation_without_exposing_url() {
