@@ -787,6 +787,7 @@ fn verify_lane_profile(
             authority,
             &confinement.home,
             &confinement.plan.permissions().credential_roots,
+            &writer_access_receipt_for_plan(&confinement.plan),
         )?;
     }
     if let Some(writer) = confinement.writer.as_ref() {

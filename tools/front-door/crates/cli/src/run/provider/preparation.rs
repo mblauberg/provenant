@@ -3055,6 +3055,7 @@ pub(super) fn prepare_candidates_inner(
             .map_err(|error| error.to_string())?;
     let eligible = |name: &str| provider_leases.contains_key(name);
     let settings = config.domains.accounts.unique_accounts();
+    let credential_settings = settings.clone();
     let cargo_cache = writer
         .as_ref()
         .map(|writer| {
@@ -3063,11 +3064,18 @@ pub(super) fn prepare_candidates_inner(
         .transpose()?;
     let mut lane_roots = vec![source.as_path(), cwd.as_path(), paths.scratch.as_path()];
     lane_roots.extend(cargo_cache.as_deref());
-    let credential_roots = credential_roots(registry, &home, &settings, &lane_roots)?;
+    let credential_roots = credential_roots(
+        registry,
+        &home,
+        &settings,
+        &lane_roots,
+        None,
+        &launch_policy,
+    )?;
     let github_roots = github_roots(registry);
     let protected_worktrees = protected_worktrees(registry, &source, &git)?;
     let host_writes = config.domains.run;
-    let mut entries: Vec<_> = settings.entries.into_values().collect();
+    let mut entries: Vec<_> = settings.entries.clone().into_values().collect();
     let mut default_failures = std::collections::BTreeMap::new();
     for spec in ADAPTER_SPECS.iter().filter(|spec| eligible(spec.name)) {
         let Some((environment, fallback)) = spec.default_account_directory else {
@@ -3604,6 +3612,7 @@ pub(super) fn prepare_candidates_inner(
         );
         let fallback_dropped = effective.dropped_fallback;
         let model_policy = effective.policy;
+        let lane_access = resolve_lane_access(task, &model_policy);
         if !model_policy.permits(request.intent) {
             reason_boundaries.insert(
                 reasons.len(),
@@ -4064,6 +4073,29 @@ pub(super) fn prepare_candidates_inner(
         } else {
             text
         };
+        let credential_roots = match super::confinement::credential_roots(
+            registry,
+            &home,
+            &credential_settings,
+            &lane_roots,
+            Some(&lane_access),
+            &launch_policy,
+        ) {
+            Ok(roots) => roots,
+            Err(error) => {
+                reasons.push(skip(&label, SkipKind::Refused, error));
+                continue;
+            }
+        };
+        if let Some(error) = super::confinement::credential_access_grant_refusal(
+            &task.access,
+            &credential_roots,
+            &lane_access,
+            &launch_policy,
+        ) {
+            reasons.push(skip(&label, SkipKind::Refused, error));
+            continue;
+        }
         let mut request = match confinement_request(
             project_id,
             ConfinementRoots {
@@ -4084,7 +4116,11 @@ pub(super) fn prepare_candidates_inner(
             &host_writes,
             adapter.id(),
             publishing_gh.is_some(),
-            InventoryContext::Launch(task, &format!("{}/{}", route.adapter, route.model)),
+            InventoryContext::Launch(
+                task,
+                &format!("{}/{}", route.adapter, route.model),
+                &lane_access,
+            ),
         )
         .map_err(PlanCheckError::from)
         {
@@ -4151,7 +4187,6 @@ pub(super) fn prepare_candidates_inner(
             resume.is_some(),
             current_candidate > 0,
         );
-        let lane_access = resolve_lane_access(task, &model_policy);
         if let Some(warning) = lane_access_warning(task, &lane_access) {
             push_launch_warning(&mut route, warning);
         }
@@ -4627,6 +4662,7 @@ pub(super) fn prepare_candidates_inner(
                 cwd: &cwd,
                 home: &home,
                 credential_roots: &credential_roots,
+                lane_access: &lane_access,
                 common_git: common_git_path.as_deref(),
                 state_root: roots.state.as_path(),
                 worktree_gitdir: worktree_gitdir.as_deref(),
@@ -4861,6 +4897,12 @@ pub(super) fn prepare_candidates_inner(
             super::command::scratch_cargo_output(&mut spec.env, scratch);
         }
         spec.complete_tool_requirements(&plan, &cwd)?;
+        super::confinement::warn_profile_credential_grants(
+            &spec.profile.spec,
+            &credential_roots,
+            &lane_access,
+            &launch_policy,
+        );
         if isolated {
             super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)
                 .map_err(PrepareError::SourceProfileIsolated)?;
@@ -6510,7 +6552,19 @@ mod route_launch_boundary_regressions {
 
         let mut settings = provenant_providers::accounts::Settings::default();
         settings.entries.insert("work".into(), registered.clone());
-        let roots = credential_roots(&Registry::default(), &home, &settings, &[])?;
+        let roots = credential_roots(
+            &Registry::default(),
+            &home,
+            &settings,
+            &[],
+            Some(&provenant_records::LaneAccessReceipt {
+                access: provenant_records::LaneAccess::Isolated,
+                source: provenant_records::LaneAccessSource::Default,
+                key: "lanes.access".into(),
+                extra: Default::default(),
+            }),
+            &provenant_records::policy::Policy::default(),
+        )?;
         // HOME-rooted accounts protect client state and declared credentials,
         // while ordinary HOME children remain available to independent lanes.
         for relative in [
@@ -6536,6 +6590,13 @@ mod route_launch_boundary_regressions {
                 &home,
                 &settings,
                 &[&registered.directory.join("workspace")],
+                Some(&provenant_records::LaneAccessReceipt {
+                    access: provenant_records::LaneAccess::Isolated,
+                    source: provenant_records::LaneAccessSource::Default,
+                    key: "lanes.access".into(),
+                    extra: Default::default()
+                }),
+                &provenant_records::policy::Policy::default(),
             )
             .is_ok()
         );

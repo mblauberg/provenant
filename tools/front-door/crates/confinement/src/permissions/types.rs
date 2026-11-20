@@ -423,8 +423,16 @@ impl WorktreeWriteAuthority {
         selected_ref: &GitRefName,
         home: &Path,
         credentials: &provenant_core::CredentialRoots,
+        lane_access: &provenant_records::LaneAccessReceipt,
     ) -> Result<Self, PermissionError> {
         worktree.repo().revalidate()?;
+        let host_credentials;
+        let credentials = if lane_access.access == provenant_records::LaneAccess::Host {
+            host_credentials = provenant_core::CredentialRoots::default();
+            &host_credentials
+        } else {
+            credentials
+        };
         let grants = WorktreeWriteGrants::derive(worktree, selected_ref);
         grants.validate(credentials)?;
         let cargo_cache = worktree_cargo_cache(home, worktree, credentials)?;

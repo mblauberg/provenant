@@ -163,6 +163,7 @@ pub(crate) fn filter_optional_grants(
     grants: &mut Vec<PathGrant>,
     start: usize,
     credential_roots: &provenant_core::CredentialRoots,
+    access: Option<&provenant_records::LaneAccessReceipt>,
     policy: &Policy,
     source: OmissionSource,
     omitted: &mut Vec<OmittedGrant>,
@@ -179,7 +180,35 @@ pub(crate) fn filter_optional_grants(
                 provenant_confinement::refuses_lane_root(candidate, true, credential_roots)
                     .then_some(candidate)
             });
+        if let (Some(path), Some(receipt)) = (credential_path, access)
+            && !receipt.access.is_isolated()
+        {
+            let root = credential_roots.refusal(
+                path,
+                if path.is_dir() {
+                    provenant_core::CredentialScope::Subtree
+                } else {
+                    provenant_core::CredentialScope::Exact
+                },
+                true,
+            );
+            let root_description = root
+                .map(|root| format!("{} ({})", root.path.display(), root.source))
+                .unwrap_or_else(|| path.display().to_string());
+            policy_warning(
+                policy,
+                "LAUNCH_FILTER_OPTIONAL_GRANTS_NONE",
+                format!(
+                    "discovered path {} overlaps credential root {} (lanes.access={}, source: {})",
+                    candidate.display(),
+                    root_description,
+                    receipt.access.as_str(),
+                    receipt.source.as_str()
+                ),
+            )?;
+        }
         let omitted_path = credential_path
+            .filter(|_| access.is_none_or(|receipt| receipt.access.is_isolated()))
             .or_else(|| {
                 (!provenant_confinement::permissions::profile_path_representable(candidate))
                     .then_some(candidate)
@@ -1499,6 +1528,12 @@ impl LaunchSpec {
         if self.native_environment() {
             return Ok(());
         }
+        let access = plan
+            .permissions()
+            .policy
+            .as_ref()
+            .map(|policy| policy.mandatory().lane_access());
+        let isolated = access.is_none_or(|receipt| receipt.access.is_isolated());
         let spec = self;
         use provenant_confinement::permissions::PathScope;
 
@@ -1511,6 +1546,7 @@ impl LaunchSpec {
                 &mut reads,
                 0,
                 &spec.credential_roots,
+                access,
                 &spec.policy,
                 OmissionSource::Toolchain,
                 &mut spec.omitted_discovery,
@@ -1523,6 +1559,7 @@ impl LaunchSpec {
                         &mut one,
                         0,
                         &spec.credential_roots,
+                        access,
                         &spec.policy,
                         OmissionSource::Toolchain,
                         &mut spec.omitted_discovery,
@@ -1532,13 +1569,37 @@ impl LaunchSpec {
             }
             let omitted_before_writes = spec.omitted_discovery.len();
             for candidate in &spec.tool_requirements.writes {
-                match std::fs::canonicalize(&candidate.path) {
+                let resolved = std::fs::canonicalize(&candidate.path);
+                let classified_path = resolved.as_deref().unwrap_or(&candidate.path);
+                if !isolated
+                    && let Some(root) = spec.credential_roots.refusal(
+                        classified_path,
+                        provenant_core::CredentialScope::Subtree,
+                        false,
+                    )
+                    && let Some(receipt) = access
+                {
+                    policy_warning(
+                        &spec.policy,
+                        "LAUNCH_FILTER_OPTIONAL_GRANTS_NONE",
+                        format!(
+                            "discovered path {} overlaps credential root {} ({}) (lanes.access={}, source: {})",
+                            candidate.path.display(),
+                            root.path.display(),
+                            root.source,
+                            receipt.access.as_str(),
+                            receipt.source.as_str()
+                        ),
+                    )?;
+                }
+                match resolved {
                     Ok(path)
-                        if provenant_confinement::refuses_lane_root(
-                            &path,
-                            false,
-                            &spec.credential_roots,
-                        ) =>
+                        if isolated
+                            && provenant_confinement::refuses_lane_root(
+                                &path,
+                                false,
+                                &spec.credential_roots,
+                            ) =>
                     {
                         if !spec.omitted_discovery.iter().any(|entry| {
                             entry.path == path && entry.source == OmissionSource::Toolchain
@@ -1550,11 +1611,12 @@ impl LaunchSpec {
                         }
                     }
                     Err(_)
-                        if provenant_confinement::refuses_lane_root(
-                            &candidate.path,
-                            false,
-                            &spec.credential_roots,
-                        ) =>
+                        if isolated
+                            && provenant_confinement::refuses_lane_root(
+                                &candidate.path,
+                                false,
+                                &spec.credential_roots,
+                            ) =>
                     {
                         if !spec.omitted_discovery.iter().any(|entry| {
                             entry.path == candidate.path
@@ -1661,7 +1723,9 @@ impl LaunchSpec {
             }
             let closure = crate::dylib::dependency_closure(&executable, |path| {
                 use crate::dylib::LibraryAccess;
-                if provenant_confinement::refuses_lane_root(path, true, &spec.credential_roots) {
+                if isolated
+                    && provenant_confinement::refuses_lane_root(path, true, &spec.credential_roots)
+                {
                     LibraryAccess::OmitCredential
                 } else if plan
                     .permissions()

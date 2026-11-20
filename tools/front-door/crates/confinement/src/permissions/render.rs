@@ -100,6 +100,37 @@ pub(super) const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
 (allow file-read* (subpath "/usr/share") (subpath "/private/var/db/timezone") (literal "/private/etc/localtime"))
 "#;
 
+/// Host access keeps process inspection and control inherited from the user.
+/// Credential rules remain in profile-specific rendering only for isolated lanes.
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+pub(super) const RUNTIME_HOST_BASELINE_RULES: &str = r#"(allow sysctl-read)
+(deny mach-lookup (global-name-prefix "dev.provenant.attempt."))
+(allow file-read-metadata)
+(allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
+(allow process-info*)
+(allow signal)
+(allow mach-priv-task-port mach-task-read)
+(allow process-info-setcontrol process-info-dirtycontrol)
+(allow mach-lookup
+  (global-name "com.apple.cfprefsd.agent")
+  (global-name "com.apple.cfprefsd.daemon")
+  (global-name "com.apple.SecurityServer")
+  (global-name "com.apple.trustd")
+  (global-name "com.apple.trustd.agent")
+  (global-name "com.apple.ocspd")
+  (global-name "com.apple.SystemConfiguration.configd")
+  (global-name "com.apple.SystemConfiguration.DNSConfiguration")
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.networkd"))
+(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
+(allow file-read* file-write-data (literal "/dev/null"))
+(allow file-read-metadata file-write-data (literal "/private/var/tmp"))
+(allow file-read* file-write* (regex #"^/private/var/tmp/sh-thd[^/]*$"))
+(allow file-read* (literal "/dev/urandom") (literal "/dev/random") (literal "/dev/zero"))
+(allow file-read* (literal "/dev/fd"))
+(allow file-read* (subpath "/usr/share") (subpath "/private/var/db/timezone") (literal "/private/etc/localtime"))
+"#;
+
 /// Localhost services a build or test run talks to: any loopback TCP port,
 /// its own listeners, and a local Postgres server's Unix socket.
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
@@ -285,22 +316,32 @@ fn compile_sbpl_inner(
             );
         }
     }
-    validate_profile_spec_with_home(&profile.spec, anchors.home, &credentials, usize::MAX)?;
+    let lane_access = mandatory.lane_access();
+    validate_profile_spec_with_home_for_access(
+        &profile.spec,
+        anchors.home,
+        &credentials,
+        usize::MAX,
+        lane_access,
+    )?;
     for grant in &plan.read_roots {
-        validate_read_exec_grant(grant, &credentials)
+        validate_read_exec_grant_for_access(grant, &credentials, lane_access)
             .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
     }
     // Every lexical credential check runs before any filesystem anchor check,
     // so a refused root names the declared store rather than a missing anchor.
     for grant in plan.protected_roots.iter().chain(&plan.write_roots) {
-        validate_noncredential_grant(grant, &credentials)
+        validate_noncredential_grant_for_access(grant, &credentials, lane_access)
             .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
     }
     let worktree_grants = match &plan.mode {
         AccessMode::ReadOnly => None,
-        AccessMode::WorktreeWrite(authority) => {
-            Some(verify_worktree_authority(authority, anchors, &credentials)?)
-        }
+        AccessMode::WorktreeWrite(authority) => Some(verify_worktree_authority(
+            authority,
+            anchors,
+            &credentials,
+            lane_access,
+        )?),
     };
     if let Some(read_only) = &plan.read_only {
         if !matches!(plan.mode, AccessMode::ReadOnly) {
@@ -308,7 +349,7 @@ fn compile_sbpl_inner(
         }
         read_only.revalidate().map_err(compile_authority_error)?;
         for grant in &read_only.writes {
-            validate_noncredential_grant(grant, &credentials)
+            validate_noncredential_grant_for_access(grant, &credentials, lane_access)
                 .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
             if plan
                 .protected_roots
@@ -495,7 +536,7 @@ fn compile_sbpl_inner(
     // SBPL grants pathnames, so rebind them to their held identities after
     // rendering, immediately before returning the launch profile.
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        verify_worktree_authority(authority, anchors, &credentials)?;
+        verify_worktree_authority(authority, anchors, &credentials, lane_access)?;
     }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
     if let Some(state) = &plan.private_state {
@@ -712,8 +753,13 @@ pub(super) fn verify_shared_writes(
     anchors: &Anchors<'_>,
 ) -> Result<(), PermissionError> {
     for grant in writes {
-        validate_noncredential_grant(grant, &plan.credential_roots)
-            .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
+        let mandatory = mandatory_for_plan(plan, anchors.home, None)?;
+        validate_noncredential_grant_for_access(
+            grant,
+            &plan.credential_roots,
+            mandatory.lane_access(),
+        )
+        .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
         if plan
             .secret_roots
             .iter()
@@ -722,10 +768,11 @@ pub(super) fn verify_shared_writes(
             .chain(&plan.private_state)
             .chain(plan.read_only.iter().flat_map(|grants| &grants.git_reads))
             .any(|root| grant.overlaps(root))
-            || mandatory_for_plan(plan, anchors.home, None)?
-                .credentials()
-                .iter()
-                .any(|root| root.overlaps(grant))
+            || (!mandatory.is_host_access()
+                && mandatory
+                    .credentials()
+                    .iter()
+                    .any(|root| root.overlaps(grant)))
         {
             return Err(PermissionError::ProtectedOverlap);
         }
@@ -823,7 +870,15 @@ fn render_profile_with_policy(
     // Apple dyld bootstrap rules are shared with the backend probe to keep
     // launch prerequisites and provider profiles aligned.
     source.push_str(DYLD_BOOTSTRAP_RULES);
-    source.push_str(RUNTIME_BASELINE_RULES);
+    let host_access = plan
+        .policy
+        .as_ref()
+        .is_some_and(|policy| policy.mandatory().is_host_access());
+    if host_access {
+        source.push_str(RUNTIME_HOST_BASELINE_RULES);
+    } else {
+        source.push_str(RUNTIME_BASELINE_RULES);
+    }
     let writer = matches!(plan.mode, AccessMode::WorktreeWrite(_));
     if profile.spec.allow_database_ipc {
         source.push_str("(allow ipc-sysv-shm)\n(allow ipc-sysv-sem)\n");
@@ -876,7 +931,7 @@ fn render_profile_with_policy(
     // grant alone does not select the native keychain mechanism.
     let mandatory_keychains = mandatory_for_plan(plan, home, worktree_grants)?;
     let keychain = selected_keychain(plan, profile, home, &mandatory_keychains).is_some();
-    if !keychain {
+    if !mandatory_keychains.is_host_access() && !keychain {
         source.push_str(concat!(
             "(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.securityd.xpc\"))\n",
             "(deny mach-lookup (global-name-prefix \"com.apple.securityd\") (global-name-prefix \"com.apple.security.cloudkeychain\") (global-name-prefix \"com.apple.keychainsharing\"))\n",
@@ -884,13 +939,13 @@ fn render_profile_with_policy(
     }
     // TLS root lookup on macOS needs this one service: denying it stops every
     // provider reaching its API. Keychain files keep their own denials.
-    if !confinement.keychain_permitted() {
+    if !mandatory_keychains.is_host_access() && !confinement.keychain_permitted() {
         source.push_str("(deny mach-lookup (global-name-prefix \"com.apple.SecurityServer\"))\n");
         source.push_str("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))\n");
-    } else {
+    } else if !mandatory_keychains.is_host_access() {
         source.push_str("(deny mach-lookup (require-all (global-name-prefix \"com.apple.SecurityServer\") (require-not (global-name \"com.apple.SecurityServer\"))))\n");
     }
-    if !keychain {
+    if !mandatory_keychains.is_host_access() && !keychain {
         source.push_str("(deny process-exec (literal \"/usr/bin/security\"))\n");
     }
     for grant in &profile.spec.state_writes {
@@ -1380,14 +1435,21 @@ fn push_boundaries(
         .chain(&profile.spec.process_executables)
         .chain(&profile.spec.runtime_reads)
         .chain(&profile.spec.tool_exec_roots)
-        .filter(|grant| validate_read_exec_grant(grant, mandatory.credential_roots()).is_ok())
+        .filter(|grant| {
+            validate_read_exec_grant_for_access(
+                grant,
+                mandatory.credential_roots(),
+                mandatory.lane_access(),
+            )
+            .is_ok()
+        })
         .cloned()
         .collect();
     let keychain = selected_keychain(plan, profile, home, &mandatory).cloned();
     let selected = selected_authentication(plan, profile);
     let gh = network == NetworkPolicy::Open && confinement.github_permitted();
     let mut credential_reads = Vec::new();
-    if confinement.credentials_permitted() {
+    if !mandatory.is_host_access() && confinement.credentials_permitted() {
         if let Some(selected) =
             selected.filter(|auth| confinement.keychain_permitted() || auth.keychain.is_none())
         {
@@ -1426,7 +1488,12 @@ fn push_boundaries(
         .chain(&profile.spec.tool_exec_roots)
         .filter(|grant| {
             is_codex_standalone_package(&grant.path, mandatory.credential_roots())
-                && validate_read_exec_grant(grant, mandatory.credential_roots()).is_ok()
+                && validate_read_exec_grant_for_access(
+                    grant,
+                    mandatory.credential_roots(),
+                    mandatory.lane_access(),
+                )
+                .is_ok()
         })
         .cloned()
         .collect();
@@ -1436,106 +1503,108 @@ fn push_boundaries(
             push_rule(source, "allow", "file-read*", &root.path, root.scope)?;
         }
     }
-    let empty = Vec::new();
-    for root in mandatory.credentials() {
-        let lane_exceptions = mandatory.lane_exceptions(root);
-        // This separate exact store stays hidden even from Claude itself.
-        let exceptions = if root.path == home.join(".claude.json") {
-            &empty
-        } else {
-            &credential_reads
-        };
-        // A shared store must not be reopened by a broad authentication or
-        // GitHub configuration grant. Exact selected credentials still work.
-        let reads: Vec<_> = exceptions
-            .iter()
-            .filter(|grant| lane_exceptions.is_empty() || grant.scope == PathScope::Exact)
-            .chain(&lane_exceptions)
-            .chain(profile.spec.ssh_agent_socket.iter())
-            .cloned()
-            .collect();
-        let runtime_exceptions: Vec<_> = runtime
-            .iter()
-            .filter(|grant| {
-                mandatory
-                    .credential_roots()
-                    .entries()
-                    .iter()
-                    .any(|declaration| {
-                        declaration.path == root.path
-                            && super::validation::SandboxReadAdmission::new(
-                                mandatory.credential_roots(),
-                            )
-                            .permits_carve_out(declaration, grant)
-                    })
-            })
-            .cloned()
-            .collect();
-        let reads: Vec<_> = reads
-            .into_iter()
-            .chain(runtime_exceptions.iter().cloned())
-            .collect();
-        let exec: Vec<_> = packages
-            .iter()
-            .chain(&lane_exceptions)
-            .chain(&runtime_exceptions)
-            .cloned()
-            .collect();
-        push_read_denial(source, root, &reads)?;
-        push_denial(source, "file-clone", root, &reads)?;
-        push_denial(source, "process-exec", root, &exec)?;
-        push_denial(source, "file-map-executable", root, &exec)?;
-        push_rule(source, "deny", "file-link", &root.path, root.scope)?;
-        if !confinement.credentials_permitted()
-            || credential_writes.is_empty()
-            || root.path == home.join(".claude.json")
-        {
-            push_denial(source, "file-write*", root, &lane_exceptions)?;
-        } else {
-            let writes: Vec<_> = credential_writes
+    if !mandatory.is_host_access() {
+        let empty = Vec::new();
+        for root in mandatory.credentials() {
+            let lane_exceptions = mandatory.lane_exceptions(root);
+            // This separate exact store stays hidden even from Claude itself.
+            let exceptions = if root.path == home.join(".claude.json") {
+                &empty
+            } else {
+                &credential_reads
+            };
+            // A shared store must not be reopened by a broad authentication or
+            // GitHub configuration grant. Exact selected credentials still work.
+            let reads: Vec<_> = exceptions
                 .iter()
                 .filter(|grant| lane_exceptions.is_empty() || grant.scope == PathScope::Exact)
                 .chain(&lane_exceptions)
+                .chain(profile.spec.ssh_agent_socket.iter())
                 .cloned()
                 .collect();
-            push_denial(source, "file-write*", root, &writes)?;
-            // A refresh can modify bytes only. Creating, replacing, renaming,
-            // changing ownership/mode or relinking the credential stays denied.
-            push_denial(
-                source,
-                "file-write-create file-write-unlink file-write-mode file-write-owner file-write-flags file-write-acl file-write-xattr file-write-setugid file-write-mount file-write-umount",
-                root,
-                &lane_exceptions,
-            )?;
-        }
-        let mut socket_exceptions = lane_exceptions.clone();
-        socket_exceptions.extend(profile.spec.ssh_agent_socket.iter().cloned());
-        push_socket_denial(source, root, &socket_exceptions)?;
-        push_ancestor_guards(source, root, &mut ancestors)?;
-    }
-    // Only the typed native keychain mechanism can read the exact login
-    // keychain. Other mandatory stores and aliases retain their denials.
-    for root in mandatory.non_exempt() {
-        let lanes = mandatory.lane_exceptions(&root.clone().into());
-        for operation in [
-            "file-read*",
-            "file-clone",
-            "file-link",
-            "file-write*",
-            "process-exec",
-            "file-map-executable",
-        ] {
-            let mut exceptions = lanes.clone();
-            if operation == "file-read*" && root.path == home.join("Library/Keychains") {
-                exceptions.extend(keychain.iter().cloned());
+            let runtime_exceptions: Vec<_> = runtime
+                .iter()
+                .filter(|grant| {
+                    mandatory
+                        .credential_roots()
+                        .entries()
+                        .iter()
+                        .any(|declaration| {
+                            declaration.path == root.path
+                                && super::validation::SandboxReadAdmission::new(
+                                    mandatory.credential_roots(),
+                                )
+                                .permits_carve_out(declaration, grant)
+                        })
+                })
+                .cloned()
+                .collect();
+            let reads: Vec<_> = reads
+                .into_iter()
+                .chain(runtime_exceptions.iter().cloned())
+                .collect();
+            let exec: Vec<_> = packages
+                .iter()
+                .chain(&lane_exceptions)
+                .chain(&runtime_exceptions)
+                .cloned()
+                .collect();
+            push_read_denial(source, root, &reads)?;
+            push_denial(source, "file-clone", root, &reads)?;
+            push_denial(source, "process-exec", root, &exec)?;
+            push_denial(source, "file-map-executable", root, &exec)?;
+            push_rule(source, "deny", "file-link", &root.path, root.scope)?;
+            if !confinement.credentials_permitted()
+                || credential_writes.is_empty()
+                || root.path == home.join(".claude.json")
+            {
+                push_denial(source, "file-write*", root, &lane_exceptions)?;
+            } else {
+                let writes: Vec<_> = credential_writes
+                    .iter()
+                    .filter(|grant| lane_exceptions.is_empty() || grant.scope == PathScope::Exact)
+                    .chain(&lane_exceptions)
+                    .cloned()
+                    .collect();
+                push_denial(source, "file-write*", root, &writes)?;
+                // A refresh can modify bytes only. Creating, replacing, renaming,
+                // changing ownership/mode or relinking the credential stays denied.
+                push_denial(
+                    source,
+                    "file-write-create file-write-unlink file-write-mode file-write-owner file-write-flags file-write-acl file-write-xattr file-write-setugid file-write-mount file-write-umount",
+                    root,
+                    &lane_exceptions,
+                )?;
             }
-            push_denial(source, operation, root, &exceptions)?;
+            let mut socket_exceptions = lane_exceptions.clone();
+            socket_exceptions.extend(profile.spec.ssh_agent_socket.iter().cloned());
+            push_socket_denial(source, root, &socket_exceptions)?;
+            push_ancestor_guards(source, root, &mut ancestors)?;
         }
-        push_socket_denial(source, root, &lanes)?;
-    }
-    for root in mandatory.github() {
-        let lanes = mandatory.lane_exceptions(&root.clone().into());
-        push_denial(source, "file-write*", root, &lanes)?;
+        // Only the typed native keychain mechanism can read the exact login
+        // keychain. Other mandatory stores and aliases retain their denials.
+        for root in mandatory.non_exempt() {
+            let lanes = mandatory.lane_exceptions(&root.clone().into());
+            for operation in [
+                "file-read*",
+                "file-clone",
+                "file-link",
+                "file-write*",
+                "process-exec",
+                "file-map-executable",
+            ] {
+                let mut exceptions = lanes.clone();
+                if operation == "file-read*" && root.path == home.join("Library/Keychains") {
+                    exceptions.extend(keychain.iter().cloned());
+                }
+                push_denial(source, operation, root, &exceptions)?;
+            }
+            push_socket_denial(source, root, &lanes)?;
+        }
+        for root in mandatory.github() {
+            let lanes = mandatory.lane_exceptions(&root.clone().into());
+            push_denial(source, "file-write*", root, &lanes)?;
+        }
     }
     let private: Vec<_> = std::iter::once(&plan.scratch)
         .chain(&plan.private_state)

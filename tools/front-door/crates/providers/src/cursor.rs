@@ -225,6 +225,12 @@ fn prepare(
         &mut optional_reads,
         0,
         &input.credential_roots,
+        input
+            .confined
+            .permissions()
+            .policy
+            .as_ref()
+            .map(|policy| policy.mandatory().lane_access()),
         input.policy,
         crate::launch::OmissionSource::Toolchain,
         &mut omitted_discovery,

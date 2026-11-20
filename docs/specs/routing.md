@@ -361,7 +361,8 @@ the attempt-bound host relay.
 A child launch is journalled and launched by the host, bound to the calling
 attempt rather than a lane-written record. Children share the graph's budget
 and cancellation and may use another adapter and account within the user's
-authority; ordinary launch policy still refuses credential and state roots.
+authority; ordinary launch policy still refuses state roots, while
+credential-root overlap follows the resolved lane access.
 Parent settlement closes attached children, never detached ones.
 - Why: cross-family delegation must not make lane-controlled identity
   authoritative.

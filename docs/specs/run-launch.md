@@ -221,8 +221,8 @@ The `policy.<CODE>` knobs are documented in `config/harness-knobs.json`.
 Every provider lane has its native tool and shell surface. Read-only mode
 constrains filesystem writes; it does not remove shell, editing or web tools
 from the provider. The common confinement planner owns worktree writes, reads
-of the primary and sibling checkouts, explicit read roots, credential denials
-and network reach. Network defaults to open, and explicit network reach is
+of the primary and sibling checkouts, explicit read roots, isolated-mode
+credential denials and network reach. Network defaults to open, and explicit network reach is
 applied by that same planner for every adapter. Every launch finalises the
 host Cargo home and lane target binding through the common environment path.
 Private harness instruction files receive the canonical global rules compiled
@@ -230,6 +230,24 @@ into the binary, so source checkouts and packaged releases use identical content
 without depending on the installed asset layout. Native integration differences
 belong to `AdapterSpec`, with a reason and source for an unavailable capability.
 - Why: provider selection must not silently narrow a lane's working surface.
+
+Credential-root classification identifies the most specific declared store
+and its source. Under `lanes.access=isolated`, a declared store or exact
+credential file that overlaps a lane root, and a store that cannot be resolved
+precisely, keeps its existing preparation refusal. Under `host`, the same
+overlap or unresolved store warns with the paths, effective access and source,
+then preparation continues. Credential-overlapping grants and discovered
+tool paths follow that access choice as well: isolated keeps its refusals and
+omissions; host accepts the grant and keeps the discovered path. In a host
+profile, credential, keychain/security and process inspection, signal and
+task-port denies are absent. Sandboxing
+continues to enforce its write roots, network policy and explicit denies. The
+isolated profile retains its credential write restrictions, including the
+protection against replacing credential files. `LaneAccessGrant` retains the
+input spelling for a credential-refusal diagnostic; the canonical grant remains
+the only path used for authority checks. Route selection precedes this
+credential decision so a host-access fallback can still proceed.
+- Why: same-host credential classification must not become a launch boundary.
 
 ### Lane access
 
@@ -241,7 +259,16 @@ private environment and provider home, filtered Git configuration and
 credential denies, and hosted-cloud credential variables are stripped from
 every lane. Cross-host credential grants are unchanged. `base_env` preserves host variables
 for host access, while `strip_hosted_credentials` filters only isolated lanes.
-Other enforcement changes are delivered by the remaining #3712 slices.
+
+The same access choice governs credential roots, keychain/security and
+host-process access: host-mode sandboxing still confines writes, network and
+explicit denies, while credential, keychain/security and process inspection,
+signal and task-port denials are lifted. An overlapping or unresolved
+credential root warns with its paths, effective access and source, then
+preparation proceeds; isolated retains the existing refusals.
+Credential-overlapping grants and discovered tool paths follow the choice as
+well: isolated keeps its refusals and omissions; host accepts the grant and
+keeps the discovered path.
 
 For host access, `lane_provider_var` passes the captured `SSH_AUTH_SOCK` to
 `finalise_provider_env`, which grants the exact resolved agent socket to a

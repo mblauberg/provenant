@@ -1424,3 +1424,19 @@ strength = "warn"
 refusable = true
 knob = "policy.PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE"
 justification = "Incomplete provider identity evidence with no conflict warns and settles on the observed exit and result; a conflict still refuses."
+
+[[rule]]
+code = "CREDENTIAL_ROOTS_OVERLAP_NONE"
+site = "cli/src/run/provider/confinement.rs#credential_roots"
+boundary = "none"
+strength = "warn"
+knob = "policy.CREDENTIAL_ROOTS_OVERLAP_NONE"
+justification = "Host access permits credential roots that overlap lane roots or cannot be resolved precisely, with a warning."
+
+[[rule]]
+code = "PROJECT_PATHS_CREDENTIAL_NONE"
+site = "cli/src/run/provider/project_paths.rs#apply"
+boundary = "none"
+strength = "warn"
+knob = "policy.PROJECT_PATHS_CREDENTIAL_NONE"
+justification = "Host access permits project grants overlapping credential roots, with a warning."

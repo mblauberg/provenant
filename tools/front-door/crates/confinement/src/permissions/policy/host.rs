@@ -8,11 +8,21 @@ use provenant_core::{
     Roots,
 };
 use provenant_os::fs::Directory;
+use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource};
 use std::{
     ffi::{OsStr, OsString},
     io::Write,
     path::{Path, PathBuf},
 };
+
+fn isolated_lane_access_receipt() -> LaneAccessReceipt {
+    LaneAccessReceipt {
+        access: LaneAccess::Isolated,
+        source: LaneAccessSource::Default,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    }
+}
 
 /// Concrete dedicated roots for host callers that do not narrow shared stores.
 pub fn host_credential_roots(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<CredentialRoot> {
@@ -502,6 +512,7 @@ impl MandatoryRoots {
             github,
             protected,
             true,
+            isolated_lane_access_receipt(),
         )
     }
 
@@ -517,12 +528,14 @@ impl MandatoryRoots {
         github: &[PathGrant],
         protected: &[PathGrant],
         sandboxed: bool,
+        lane_access: LaneAccessReceipt,
     ) -> Result<Self, PermissionError> {
         let subtree = |path: &Path| PathGrant {
             path: path.to_owned(),
             scope: PathScope::Subtree,
         };
         let mut mandatory = Self::new(home, roots.state.as_path(), source)?;
+        mandatory.set_lane_access(lane_access);
         mandatory.set_credential_roots(credentials.clone())?;
         for path in SYSTEM_SHELL_STARTUP
             .iter()
@@ -546,19 +559,21 @@ impl MandatoryRoots {
         let resolved_source = resolve_boundary_path(source)?;
         // Freeze each declared credential root in both launch modes. Sandbox
         // mode controls recursive inventory, not mandatory alias validation.
-        for root in mandatory.credentials().to_vec() {
-            let alias = resolve_boundary_path(&root.path)?;
-            if alias != root.path {
-                mandatory.add_credentials_alias(
-                    &root,
-                    PathGrant {
-                        path: alias,
-                        scope: root.scope,
-                    },
-                )?;
+        if !mandatory.is_host_access() {
+            for root in mandatory.credentials().to_vec() {
+                let alias = resolve_boundary_path(&root.path)?;
+                if alias != root.path {
+                    mandatory.add_credentials_alias(
+                        &root,
+                        PathGrant {
+                            path: alias,
+                            scope: root.scope,
+                        },
+                    )?;
+                }
             }
         }
-        if sandboxed {
+        if sandboxed && !mandatory.is_host_access() {
             let endpoints: std::collections::BTreeSet<_> = provenant_records::ADAPTER_SPECS
                 .iter()
                 .flat_map(|spec| spec.credential_files.iter().copied())
@@ -808,6 +823,58 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn dangling_credential_store_is_revalidated_only_when_isolated()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let roots = fixture_roots(&root)?;
+        let home = root.join("home");
+        let store = home.join(".credential-store");
+        std::os::unix::fs::symlink(root.join("missing-target"), &store)?;
+        let mut credentials = provenant_core::CredentialRoots::default();
+        credentials.add(
+            &store,
+            CredentialScope::Subtree,
+            "fixture declared store",
+            CredentialKind::Store,
+        );
+        let host = MandatoryRoots::for_host_with_scratch_mode(
+            &roots,
+            &home,
+            &root.join("source"),
+            &root.join("scratch"),
+            &credentials,
+            &[],
+            &[],
+            true,
+            LaneAccessReceipt {
+                access: LaneAccess::Host,
+                source: LaneAccessSource::Default,
+                key: "lanes.access".into(),
+                extra: Default::default(),
+            },
+        )?;
+        #[cfg(target_os = "macos")]
+        host.revalidate_paths()?;
+
+        assert!(
+            MandatoryRoots::for_host_with_scratch_mode(
+                &roots,
+                &home,
+                &root.join("source"),
+                &root.join("scratch"),
+                &credentials,
+                &[],
+                &[],
+                true,
+                isolated_lane_access_receipt(),
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
     fn fixture_roots(root: &Path) -> Result<Roots, Box<dyn std::error::Error>> {
         for name in ["home", "state", "source"] {
             std::fs::create_dir_all(root.join(name))?;
@@ -871,6 +938,7 @@ mod tests {
             &[],
             &[],
             false,
+            isolated_lane_access_receipt(),
         )?;
         let grant = PathGrant {
             path: slot,
@@ -910,6 +978,7 @@ mod tests {
                 &[],
                 &[],
                 false,
+                isolated_lane_access_receipt(),
             )
         };
         let roots = inventory()?;
@@ -966,6 +1035,7 @@ mod tests {
                 &[],
                 &[],
                 sandboxed,
+                isolated_lane_access_receipt(),
             )?;
             assert_eq!(
                 inventory.credentials().contains(&alias.clone().into()),

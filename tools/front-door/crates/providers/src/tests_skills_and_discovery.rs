@@ -140,11 +140,18 @@ fn optional_discovered_grants_are_filtered_without_touching_required_grants()
         &mut grants,
         1,
         &roots,
+        None,
         crate::tests::fixture_policy(),
         crate::launch::OmissionSource::Toolchain,
         &mut omitted,
     )?;
-    assert_eq!(grants, vec![required]);
+    assert_eq!(grants, vec![required.clone()]);
+    let receipt = provenant_records::LaneAccessReceipt { access: provenant_records::LaneAccess::Host, source: provenant_records::LaneAccessSource::Default, key: "lanes.access".into(), extra: Default::default() };
+    let mut host_grants = vec![required.clone(), crate::launch::subtree(&optional)];
+    let mut host_omitted = Vec::new();
+    crate::launch::filter_optional_grants(&mut host_grants, 1, &roots, Some(&receipt), crate::tests::fixture_policy(), crate::launch::OmissionSource::Toolchain, &mut host_omitted)?;
+    assert_eq!(host_grants, vec![required, crate::launch::subtree(&optional)]);
+    assert!(host_omitted.is_empty());
     for source in [
         crate::launch::OmissionSource::UserSkill,
         crate::launch::OmissionSource::Toolchain,
@@ -185,6 +192,7 @@ fn optional_unrepresentable_discovery_is_omitted_with_evidence()
         &mut grants,
         1,
         &roots,
+        None,
         crate::tests::fixture_policy(),
         crate::OmissionSource::Toolchain,
         &mut omitted,

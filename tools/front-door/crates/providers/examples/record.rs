@@ -448,12 +448,24 @@ fn compile(
     if let (AccessMode::WorktreeWrite(authority), Some((worktree, selected_ref))) =
         (&plan.permissions().mode, context.worktree)
     {
+        let lane_access = plan
+            .permissions()
+            .policy
+            .as_ref()
+            .map(|policy| policy.mandatory().lane_access().clone())
+            .unwrap_or_else(|| provenant_records::LaneAccessReceipt {
+                access: provenant_records::LaneAccess::Isolated,
+                source: provenant_records::LaneAccessSource::Default,
+                key: "lanes.access".into(),
+                extra: Default::default(),
+            });
         provenant_confinement::permissions::prepare_writer_directories(
             worktree,
             selected_ref,
             authority,
             context.home,
             &plan.permissions().credential_roots,
+            &lane_access,
         )?;
     }
     let directories = required_anchors(plan.permissions(), profile, context.worktree)
@@ -927,6 +939,7 @@ fn main() -> Result<()> {
                     &selected_ref,
                     &home,
                     mandatory.credential_roots(),
+                    mandatory.lane_access(),
                 )?))
             }
             None => AccessMode::ReadOnly,

@@ -33,6 +33,22 @@ pub mod snapshot;
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn isolated_access_receipt() -> provenant_records::LaneAccessReceipt {
+        provenant_records::LaneAccessReceipt {
+            access: provenant_records::LaneAccess::Isolated,
+            source: provenant_records::LaneAccessSource::Default,
+            key: "lanes.access".into(),
+            extra: Default::default(),
+        }
+    }
+    fn host_access_receipt() -> provenant_records::LaneAccessReceipt {
+        provenant_records::LaneAccessReceipt {
+            access: provenant_records::LaneAccess::Host,
+            source: provenant_records::LaneAccessSource::Default,
+            key: "lanes.access".into(),
+            extra: Default::default(),
+        }
+    }
     // Shared by the native-only test modules below.
     #[cfg(target_os = "macos")]
     use self::grants::{worktree_grants_fixture, write_grants_fixture};

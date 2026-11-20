@@ -55,9 +55,21 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     crate::worktrees::acquire_worktree_subject(linked.repo())?;
     let home = provenant_os::fs::canonicalize(&fixture.home)?;
     let credentials = provenant_core::CredentialRoots::for_home(&home);
-    let authority =
-        WorktreeWriteAuthority::for_worktree(&linked, &selected_ref, &home, &credentials)?;
-    prepare_writer_directories(&linked, &selected_ref, &authority, &home, &credentials)?;
+    let authority = WorktreeWriteAuthority::for_worktree(
+        &linked,
+        &selected_ref,
+        &home,
+        &credentials,
+        &isolated_access_receipt(),
+    )?;
+    prepare_writer_directories(
+        &linked,
+        &selected_ref,
+        &authority,
+        &home,
+        &credentials,
+        &isolated_access_receipt(),
+    )?;
     let scratch = state.join("attempts/a/tmp/candidate-0");
     std::fs::create_dir_all(&scratch)?;
     #[cfg(unix)]
