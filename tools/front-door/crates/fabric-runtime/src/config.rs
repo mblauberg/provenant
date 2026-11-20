@@ -37,20 +37,10 @@ pub struct FabricConfig {
 }
 
 /// Defaults for implementation templates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ImplementConfig {
     pub plan: bool,
-    pub warn_unbounded_junior: bool,
-}
-
-impl Default for ImplementConfig {
-    fn default() -> Self {
-        Self {
-            plan: false,
-            warn_unbounded_junior: true,
-        }
-    }
 }
 
 /// Defaults for batch templates.
