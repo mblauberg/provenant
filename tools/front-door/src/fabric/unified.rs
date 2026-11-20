@@ -1,5 +1,6 @@
 //! Read and control graph targets through the public command surface.
 use super::*;
+use crate::stranded_work::{StrandedWork, human_lines, summary_lines};
 use provenant_cli::target::{ResolveError, Resolved, Want};
 use provenant_fabric_runtime::graph::{
     AttemptState, FileJournal, GraphJournal, GraphRun, JournalError, NodeState,
@@ -2072,6 +2073,8 @@ pub(crate) struct Listing {
     pub next: Option<u64>,
     pub admission_holders: Vec<provenant_os::admission::HeldInfo>,
     pub admission_waiters: Vec<provenant_os::admission::WaitInfo>,
+    /// Uncommitted work in worktrees no live lane holds. Advisory only.
+    pub stranded_work: Vec<StrandedWork>,
 }
 
 /// Every graph with work still running is shown: active graphs and settled
@@ -2147,6 +2150,7 @@ pub(crate) fn select_listing(
         next,
         admission_holders: Vec::new(),
         admission_waiters: Vec::new(),
+        stranded_work: Vec::new(),
     }
 }
 
@@ -2167,6 +2171,7 @@ pub(crate) fn graph_listing(
                     next: None,
                     admission_holders: Vec::new(),
                     admission_waiters: Vec::new(),
+                    stranded_work: Vec::new(),
                 });
             }
             Err(error) => return Err(error),
@@ -2250,6 +2255,17 @@ pub(crate) fn graph_listing(
         }
         let now = factory.clock.wall_now()?.as_micros();
         let cancel = CancelToken::new();
+        // One bounded, advisory reading: uncommitted work in worktrees with no
+        // live lane. It never changes graph selection or refuses the command.
+        let stranded_work = crate::stranded_work::survey(
+            &factory.context.roots,
+            &factory.home,
+            &factory.cwd,
+            workers,
+            &factory.clock,
+            &cancel,
+            now,
+        );
         let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
         // Unavailable attempt/peer evidence must not hide a graph: the retained
         // projection still explicitly marks external facts stale.
@@ -2287,6 +2303,7 @@ pub(crate) fn graph_listing(
             graph.digests = super::graph_status::node_digests(rows);
         }
         let mut finished = finish_listing(listing, settled_count, command.all || globals.full);
+        finished.stranded_work = stranded_work;
         if root.as_path().exists() {
             finished.admission_holders = provenant_os::admission::all_holders(root.as_path());
             finished.admission_waiters = provenant_os::admission::all_waiters(root.as_path());
@@ -2368,6 +2385,16 @@ pub(crate) fn graph_listing(
                     human.push('\n');
                 }
             }
+            let stranded = human_lines(&listing.stranded_work);
+            if !stranded.is_empty() {
+                if !human.is_empty() && !human.ends_with('\n') {
+                    human.push('\n');
+                }
+                for line in stranded {
+                    human.push_str(&line);
+                    human.push('\n');
+                }
+            }
             let more = if command.all || globals.full {
                 "--cursor"
             } else {
@@ -2408,6 +2435,9 @@ pub(crate) fn graph_listing(
                     "holders": listing.admission_holders,
                     "waiters": listing.admission_waiters,
                 });
+            }
+            if !listing.stranded_work.is_empty() {
+                data["stranded_work"] = json!(listing.stranded_work);
             }
             crate::emit_summarised(
                 &provenant_records::CommandResult::new(
@@ -2647,6 +2677,7 @@ fn listing_summary(
         lines: std::iter::once(headline)
             .chain(summary_rows)
             .chain(admission_lines(listing, now_micros))
+            .chain(summary_lines(&listing.stranded_work))
             .collect(),
         next,
         omitted,
@@ -4554,6 +4585,7 @@ mod tests {
                 next: None,
                 admission_holders: Vec::new(),
                 admission_waiters: Vec::new(),
+                stranded_work: Vec::new(),
             },
             1,
             false,
@@ -4576,6 +4608,7 @@ mod tests {
                 next: None,
                 admission_holders: Vec::new(),
                 admission_waiters: Vec::new(),
+                stranded_work: Vec::new(),
             },
             1,
             true,
@@ -4605,6 +4638,7 @@ mod tests {
                 next: None,
                 admission_holders: Vec::new(),
                 admission_waiters: Vec::new(),
+                stranded_work: Vec::new(),
             },
             2,
             false,
@@ -4799,6 +4833,7 @@ mod tests {
             next: None,
             admission_holders: Vec::new(),
             admission_waiters: Vec::new(),
+            stranded_work: Vec::new(),
         };
         assert_eq!(live_lanes(&listing), 3);
         let summary = listing_summary(&listing, 50, 0);
@@ -6082,6 +6117,7 @@ mod tests {
             omitted: Default::default(),
             admission_holders: Vec::new(),
             admission_waiters: Vec::new(),
+            stranded_work: Vec::new(),
         };
         let list_sum = listing_summary(&listing, 50, 0);
         let list_res =

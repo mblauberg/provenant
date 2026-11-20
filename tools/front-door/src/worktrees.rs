@@ -188,6 +188,11 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
                 let human = match &data {
                     // Only the path on stdout, for `CARGO_TARGET_DIR=$(...)`.
                     Data::SeedTarget(seed) => seed_target_human(seed),
+                    Data::Listed(_) => {
+                        let mut text = human(value);
+                        text.push_str(&worktree_list_stranded_human(globals, workers));
+                        text
+                    }
                     _ => human(value),
                 };
                 emit(
@@ -305,6 +310,35 @@ fn seed_diagnosis(
 fn human(mut value: serde_json::Value) -> String {
     plain_paths(&mut value);
     provenant_cli::terse(&value)
+}
+
+/// The human-only stranded-work section appended to `worktree list`. Its
+/// JSON stays the worktree array so consumers of that shape are unchanged.
+fn worktree_list_stranded_human(globals: &Globals, workers: &dyn WorkerObserver) -> String {
+    let Ok(resolved) = roots::resolve(
+        globals,
+        roots::Workspace::Checkout,
+        roots::Product::Required,
+    ) else {
+        return String::new();
+    };
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let rows = crate::stranded_work::survey(
+        &resolved.roots,
+        &resolved.home,
+        &resolved.project,
+        workers,
+        &clock,
+        &cancel,
+        crate::stranded_work::now_micros(&clock),
+    );
+    let mut text = String::new();
+    for line in crate::stranded_work::human_lines(&rows) {
+        text.push_str(&line);
+        text.push('\n');
+    }
+    text
 }
 
 fn plain_paths(value: &mut serde_json::Value) {
@@ -639,6 +673,10 @@ struct GcData {
     /// bounded census this pass. Never a signal target.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     held_processes: Vec<worktrees::HeldProcess>,
+    /// Uncommitted work in worktrees with no live lane. Kept, never removed,
+    /// and named here so cleanup cannot lose it silently.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    stranded_work: Vec<crate::stranded_work::StrandedWork>,
     /// The bounded dweller census did not finish, so held rows may be missing.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     held_incomplete: bool,
@@ -1058,6 +1096,10 @@ fn gc_compact_summary(data: &GcData) -> String {
         summary.push_str(&process.advisory());
         summary.push('\n');
     }
+    for line in crate::stranded_work::summary_lines(&data.stranded_work) {
+        summary.push_str(&line);
+        summary.push('\n');
+    }
     if data.held_incomplete {
         summary.push_str(worktrees::HELD_CENSUS_INCOMPLETE_WARNING);
         summary.push('\n');
@@ -1464,6 +1506,10 @@ fn gc_data_summary(data: &GcData) -> String {
     for process in &data.held_processes {
         human.push_str(&format!("{}\n", process.advisory()));
     }
+    for line in crate::stranded_work::human_lines(&data.stranded_work) {
+        human.push_str(&line);
+        human.push('\n');
+    }
     if data.held_incomplete {
         human.push_str(&format!("{}\n", worktrees::HELD_CENSUS_INCOMPLETE_WARNING));
     }
@@ -1541,6 +1587,8 @@ enum GcOutput<'a> {
         alerts: &'a [String],
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
         held_processes: &'a [worktrees::HeldProcess],
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        stranded_work: &'a [crate::stranded_work::StrandedWork],
         held_incomplete: bool,
         notice: &'a Option<String>,
     },
@@ -1623,6 +1671,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         unobserved_projects: &data.unobserved_projects,
         alerts: &data.alerts,
         held_processes: &data.held_processes,
+        stranded_work: &data.stranded_work,
         held_incomplete: data.held_incomplete,
         notice: &data.notice,
     }
@@ -1649,6 +1698,8 @@ struct GcProject {
     /// Advisory dwellers found by one census over terminal worktrees and
     /// settled attempt directories. Never used to signal a process.
     held_processes: Vec<worktrees::HeldProcess>,
+    /// Uncommitted work in worktrees no lane holds. Kept and named only.
+    stranded_work: Vec<crate::stranded_work::StrandedWork>,
     held_incomplete: bool,
 }
 
@@ -1764,6 +1815,9 @@ fn gc_project(
             } else {
                 worktrees::list_for_gc(context, cancel)?
             };
+            let now_micros = crate::stranded_work::now_micros(context.clock);
+            let stranded_work =
+                crate::stranded_work::survey_in_context(context, cancel, now_micros);
             let report = settled_held_processes(roots, context, &lanes, cancel);
             // Settlement clears these pins on every outcome. GC is the
             // backstop for pins left by an earlier version or an attempt
@@ -1813,6 +1867,7 @@ fn gc_project(
                 )?,
                 lanes,
                 held_processes: report.processes,
+                stranded_work,
                 held_incomplete: report.incomplete,
             })
         },
@@ -2753,6 +2808,11 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .iter()
         .flat_map(|project| project.held_processes.iter().cloned())
         .collect();
+    let mut stranded_work: Vec<_> = projects
+        .iter()
+        .flat_map(|project| project.stranded_work.iter().cloned())
+        .collect();
+    stranded_work.sort_by(|left, right| left.path.cmp(&right.path));
     let held_incomplete = projects.iter().any(|project| project.held_incomplete);
     let import_pins = projects.iter().map(|project| project.import_pins).sum();
     let mut adapters = GcAdapters {
@@ -2786,6 +2846,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             sweep_budget_source: sweep_budget_source.clone(),
             sweep_warning,
             held_processes,
+            stranded_work,
             held_incomplete,
             unobserved_projects,
             skipped_transient,

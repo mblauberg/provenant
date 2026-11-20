@@ -120,6 +120,12 @@ custody, not a configured path. A verified primary checkout and managed linked
 worktrees are eligible regardless of foreign cleanup policy. A bound bare Git
 owner may collect its linked worktrees; an unbound bare repository cannot.
 Every output mutation holds writer exclusion and requires a fresh free census.
+`gc` names stranded work in its report: a registered or project worktree with
+uncommitted edits and no live holder is kept and listed with its branch, linked
+issue or PR, changed file and line counts and newest-edit age, so a lane that
+stopped or died cannot lose its edits silently during cleanup. This is
+reporting only; the ordinary dirty-work and custody guards still decide whether
+a checkout may be removed, and an unknown holder is never called stranded.
 - Why: space recovery must retain evidence and live data while collecting idle
   read-only scratch and both forms of Cargo output.
 
