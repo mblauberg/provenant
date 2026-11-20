@@ -294,9 +294,11 @@ groups. Nor is a spawned tree whose guardian never completed a census of it,
 unless the attempt's sandbox mark was in effect: a daemon that double-forks and
 calls setsid after the guardian's last complete census is recorded nowhere and
 matches no pid, session or group, and only the inherited mark finds it. The
-guardian clears the incomplete flag at its first full census, which a running
-guardian takes at least every 5 s, so a guardian lost mid-run normally has a
-complete record; an unsandboxed lane lost before that is refused, and
+guardian attempts a full census on its first loop and uses a 5 s backstop for
+subsequent full censuses. Only a complete full census clears the incomplete
+flag, and tracking publication persists it separately; failed or incomplete
+observations, scheduling and publication can delay a complete record. An
+unsandboxed lane lost before that record is durable is refused, and
 `reconcile --abandon` is the explicit escape. Recorded roots, descendants,
 identities an unresolved exit named, and their sessions or groups must have no
 surviving member, and no live process may carry the attempt's sandbox mark. The trusted host must also
