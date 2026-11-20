@@ -1685,15 +1685,14 @@ impl LaunchConfinement {
         self.enforce_cargo_cache_budget_reserving(crate::build_dir_gc::SeedReservation::default());
     }
 
-    /// `reservation` is in the census's byte unit, owned by `build_dir_gc`. A
-    /// seed clone reflinks shared blocks and reserves almost no private bytes;
-    /// reserving the seed's allocated size here would evict unrelated warm
-    /// targets for blocks the clone never privately consumes.
+    /// `reservation` carries the incoming seed's recorded allocated size. The
+    /// collector resolves it against the byte unit its census used: near zero
+    /// for a private-byte census, the full allocated size for an allocated-byte
+    /// census. The caller never picks the unit.
     fn enforce_cargo_cache_budget_reserving(
         &self,
         reservation: crate::build_dir_gc::SeedReservation,
     ) {
-        let projected_bytes = reservation.private_bytes();
         let Some(budget) = &self.cargo_cache_budget else {
             return;
         };
@@ -1721,7 +1720,7 @@ impl LaunchConfinement {
             &self.state_root,
             &self.home,
             crate::build_dir_gc::Limits {
-                max_bytes: crate::build_dir_gc::budget_limit_reserving(budget.bytes, reservation),
+                max_bytes: budget.bytes,
                 free_floor: 0,
                 grace_seconds: 0,
                 idle_seconds: 0,
@@ -1731,6 +1730,7 @@ impl LaunchConfinement {
             budget,
             &self.cargo_target_protection,
             &mut refresh_protection,
+            reservation,
         );
         let report = match result {
             Ok(report) => report,
@@ -1754,6 +1754,10 @@ impl LaunchConfinement {
                 "warning: Cargo cache collection: {error}"
             );
         }
+        // The census named its unit; project the incoming clone in that same
+        // unit so the over-budget warning cannot disagree with the reservation
+        // the collector just applied.
+        let projected_bytes = reservation.resolved(report.byte_method);
         if report.cache_bytes.saturating_add(projected_bytes) > budget.bytes {
             let _ = writeln!(
                 std::io::stderr().lock(),
@@ -1978,13 +1982,14 @@ impl LaunchConfinement {
                 // warning every launch; accounting resumes once the seed is
                 // refreshed with a recorded size.
                 //
-                // A lane clone is always a reflink (`clone_file_from`), so the
-                // private-byte figure is owned by the GC module and is near
-                // zero: the seed's allocated size is not reserved against a
-                // private-byte census. No copy fallback exists here.
-                if allocated_bytes.is_some() {
+                // Carry the seed's recorded allocated size to the collector.
+                // It resolves the reservation against the byte unit its census
+                // used: near zero for a private-byte census, the full allocated
+                // size where private size is unavailable. The caller never
+                // chooses the unit.
+                if let Some(allocated_bytes) = allocated_bytes {
                     self.enforce_cargo_cache_budget_reserving(
-                        crate::build_dir_gc::SeedReservation::shared_clone(),
+                        crate::build_dir_gc::SeedReservation::clone_of(allocated_bytes),
                     );
                 }
             },
