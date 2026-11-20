@@ -462,8 +462,13 @@ mod tests {
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     #[test]
     fn secret_shaped_identifiers_keep_cycle_causes_and_registered_values_are_masked() {
-        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
         let example = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        {
+            let _mode = provenant_redact::scoped(provenant_redact::Mode::Off);
+            let identifier = GraphIdentifier::try_from(example.to_owned()).unwrap();
+            assert_eq!(identifier.to_string(), example);
+        }
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
         let graph: super::super::GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":2,"graph_id":"shape-cycle","nodes":[
                 {"id":example,"prompt":"work","access":"read_only","route":{"alias":"senior"},"depends_on":["other"]},
@@ -481,7 +486,7 @@ mod tests {
         .err()
         .expect("cycle must still refuse");
         assert!(
-            matches!(error, super::super::CandidateError::Cycle { ref node } if node.to_string() == example)
+            matches!(error, super::super::CandidateError::Cycle { ref node } if node.to_string() == "[masked]")
         );
         for value in [example, "redacted"] {
             let _scope = provenant_redact::publication_scope([value.as_bytes().to_vec()]).unwrap();

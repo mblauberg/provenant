@@ -175,10 +175,7 @@ fn scanner_shape_keeps_local_brief_without_refusal() -> Result {
     assert!(output.status.success(), "{value}");
     assert_eq!(value["data"]["document"]["nodes"][0]["prompt"], shaped);
     let warning = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        warning.contains("field=graph.") && warning.contains("rule=known_secret_shape"),
-        "{warning}"
-    );
+    assert!(!warning.contains("rule=known_secret_shape"), "{warning}");
     assert!(!warning.contains(shaped), "warning disclosed matched value");
     assert!(graph_records(&rig.state())?.is_empty());
     Ok(())

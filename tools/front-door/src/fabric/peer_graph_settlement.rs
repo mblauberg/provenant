@@ -790,9 +790,8 @@ fn run_list_is_compact_and_pages_newest_first() -> Result<(), Box<dyn std::error
     })?;
     assert!(status["attempt"].get("usage").is_some());
     assert!(status["attempt"].get("prompt").is_some());
-    // Pool routing carries an audit receipt in full records. It must not
-    // enlarge the compact route returned by list.
-    attempt.applied_route = Some(serde_json::from_value(serde_json::json!({
+    // The compact list preserves the complete applied route, including its receipt.
+    let route = serde_json::json!({
         "provider":"fixture", "model":"fixture/model", "effort":"high",
         "account_label":"fixture", "account_key":"private-key", "source":"pool",
         "pool_selection": {
@@ -802,16 +801,11 @@ fn run_list_is_compact_and_pages_newest_first() -> Result<(), Box<dyn std::error
             "pool":"senior", "candidates":[], "roll":0, "total_weight":1,
             "pick":"fixture/model"
         }
-    }))?);
+    });
+    attempt.applied_route = Some(serde_json::from_value(route.clone())?);
     let summary = provenant_fabric_runtime::runs::AttemptSummary::from(attempt);
     let summary = serde_json::to_value(summary)?;
-    assert_eq!(
-        summary["applied_route"],
-        serde_json::json!({
-            "provider":"fixture", "model":"fixture/model", "effort":"high",
-            "account_label":"fixture"
-        })
-    );
+    assert_eq!(summary["applied_route"], route);
     Ok(())
 }
 

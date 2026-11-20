@@ -1298,6 +1298,17 @@ mod tests {
     #[test]
     fn compact_run_prints_field_only_policy_warnings() {
         let input = json!({"brief":"password=example-compact-3391"});
+        {
+            let _mode = provenant_redact::scoped(provenant_redact::Mode::Off);
+            assert!(
+                provenant_fabric_runtime::graph::refusal::input_warnings(
+                    &input,
+                    &Default::default()
+                )
+                .is_empty()
+            );
+        }
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         let warnings =
             provenant_fabric_runtime::graph::refusal::input_warnings(&input, &Default::default());
         let data = json!({"checkpoint":{"graph_id":"example","nodes":[]},"status":"pending","warnings":warnings});
