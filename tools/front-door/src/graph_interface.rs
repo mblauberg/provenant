@@ -607,6 +607,7 @@ fn run_input(
             ("name", request.name),
             ("template", request.template),
             ("route", request.route),
+            ("source", request.source),
         ] {
             if let Some(value) = value {
                 input[field] = json!(value);
@@ -953,6 +954,7 @@ mod tests {
             template: None,
             route: None,
             mode: None,
+            source: None,
             worktree: None,
             branch: None,
             base: None,
