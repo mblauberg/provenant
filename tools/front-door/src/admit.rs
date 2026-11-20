@@ -13,8 +13,7 @@ use provenant_core::consumer_env::{
     ADMISSION_WAIT_DIR, CARGO_SOURCE_WRITES, CARGO_SOURCE_WRITES_SOURCE, LOCAL_CARGO,
 };
 use provenant_os::admission::{
-    AdmissionSlots, HeldGuard, HostHeldGuard, mark_held_with_command, mark_host_held_with_command,
-    mark_host_waiting_with_command, mark_waiting_with_command,
+    HeldGuard, HostHeldGuard, mark_held_with_command, mark_host_held_with_command,
 };
 use provenant_supervisor::census::{ProcessObservation, ProcessObserver, SystemProcessObserver};
 use std::{
@@ -470,81 +469,72 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
             warn_slot_unavailable(&"state directory is unavailable");
             return execute_and_forward(program, args, &env);
         };
-        let slots = match AdmissionSlots::open(state_ref, class) {
-            Ok(s) => s,
-            Err(_) => {
-                let _ = AdmissionSlots::provision(state_ref, class, slots_count);
-                match AdmissionSlots::open(state_ref, class) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn_slot_unavailable(&e);
-                        return execute_and_forward(program, args, &env);
-                    }
-                }
-            }
+        use provenant_run::build::{
+            BuildError, Priority,
+            queue::{self, AdmissionRequest, Admitted, OverflowPolicy},
         };
-
-        match slots.try_acquire(slots_count) {
-            Ok(Some(guard)) => {
-                held_guard = Some(guard);
+        use sha2::{Digest, Sha256};
+        let cancel = provenant_core::CancelToken::new();
+        let id = format!(
+            "{:032x}",
+            (u128::from(std::process::id()) << 96)
+                | u128::from(provenant_run::build::ledger::now_unix_ms())
+        );
+        let owner = get_env("PROVENANT_ATTEMPT_ID")
+            .or_else(|| get_env("PROVENANT_PARENT_ATTEMPT_ID"))
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("chair-{}", std::process::id()));
+        let mut digest = Sha256::new();
+        if let Ok(cwd) = std::env::current_dir() {
+            let bytes = cwd.as_os_str().as_encoded_bytes();
+            digest.update((bytes.len() as u64).to_le_bytes());
+            digest.update(bytes);
+        }
+        for argument in
+            std::iter::once(program.as_os_str()).chain(args.iter().map(OsString::as_os_str))
+        {
+            let bytes = argument.as_encoded_bytes();
+            digest.update((bytes.len() as u64).to_le_bytes());
+            digest.update(bytes);
+        }
+        let request = AdmissionRequest {
+            state: state_ref,
+            class,
+            limit: slots_count,
+            job_id: &id,
+            owner: &owner,
+            project_key: "",
+            priority: Priority::Interactive,
+            aging: Duration::from_secs(120),
+            command_digest: digest
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            overflow: OverflowPolicy::Local {
+                after: wait_duration,
+            },
+            affinity: vec![],
+            excluded: vec![],
+            cancel: &cancel,
+            scratch: scratch_wait_dir.map(Path::new),
+            attempt_id: get_env("PROVENANT_ATTEMPT_ID")
+                .or_else(|| get_env("PROVENANT_PARENT_ATTEMPT_ID")),
+            command: Some(child_command.clone()),
+            wait_seconds,
+        };
+        match queue::admit(&request) {
+            Ok(Admitted::Held { guard, .. }) => held_guard = Some(guard),
+            Ok(Admitted::Overflow { .. }) => warn_slot_unavailable(
+                &"bounded wait ended with every slot busy; proceeding without one",
+            ),
+            Err(BuildError::Cancelled) => return 130,
+            Err(BuildError::CancelledSignal(signal)) => return 128 + signal,
+            Err(BuildError::Superseded) => {
+                say("admission request superseded by a newer identical request");
+                return 75;
             }
-            Ok(None) => {
-                // Busy: wait up to wait_duration
-                let status_msg = format!(
-                    "waiting for a host {class} slot ({} held of {})",
-                    slots.held(slots_count),
-                    slots_count
-                );
-                let my_pid = i64::from(std::process::id());
-                let attempt_id = get_env("PROVENANT_ATTEMPT_ID")
-                    .or_else(|| get_env("PROVENANT_PARENT_ATTEMPT_ID"));
-
-                let _wait_guard = if let Some(scratch) = scratch_wait_dir {
-                    mark_waiting_with_command(
-                        Path::new(scratch),
-                        class,
-                        my_pid,
-                        attempt_id,
-                        Some(child_command.clone()),
-                    )
-                    .ok()
-                } else {
-                    None
-                };
-                let _host_wait_guard = if scratch_wait_dir.is_none() {
-                    mark_host_waiting_with_command(
-                        state_ref,
-                        class,
-                        my_pid,
-                        Some(child_command.clone()),
-                    )
-                    .ok()
-                } else {
-                    None
-                };
-
-                say(&status_msg);
-
-                match slots.acquire_within(slots_count, wait_duration) {
-                    Ok(Some(guard)) => {
-                        held_guard = Some(guard);
-                    }
-                    Ok(None) => {
-                        let msg = if class == "build" {
-                            "bounded wait ended with every build slot busy; building without one. Cargo manages its own build locks"
-                        } else {
-                            "bounded wait ended with every slot busy; proceeding without one"
-                        };
-                        warn_slot_unavailable(&msg);
-                    }
-                    Err(e) => {
-                        warn_slot_unavailable(&e);
-                    }
-                }
-            }
-            Err(e) => {
-                warn_slot_unavailable(&e);
-            }
+            Err(error) => warn_slot_unavailable(&error),
         }
     }
 
@@ -759,6 +749,11 @@ fn run_build_job(
             }
         }
         Err(provenant_run::build::BuildError::Cancelled) => 130,
+        Err(provenant_run::build::BuildError::CancelledSignal(signal)) => 128 + signal,
+        Err(provenant_run::build::BuildError::Superseded) => {
+            say("build request superseded by a newer identical request");
+            75
+        }
         Err(error) => {
             say(&format!("build job could not run: {error}"));
             1

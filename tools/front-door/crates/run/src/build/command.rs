@@ -75,8 +75,10 @@ pub(super) fn execute(
             std::mem::replace(&mut step.argv, argv)
         })
         .collect();
-    let result =
-        super::local::execute_with_env(job, ctx, outcome, ExecPlace::Local, None, 0, Some(env));
+    let waited_ms = outcome.waited_ms;
+    let result = super::local::execute_with_env(
+        job, ctx, outcome, ExecPlace::Local, None, waited_ms, Some(env),
+    );
     for (step, original) in job.steps.iter_mut().zip(originals) {
         step.argv = original;
     }
