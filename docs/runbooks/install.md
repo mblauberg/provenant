@@ -56,9 +56,12 @@ and its provider keep their own binary. Two things cross the swap: later
 re-executions through the link (settlement resume, tick, the peer agent) run
 the new release against the live attempt's records, and install restarts the
 peer and tick agents. When the candidate's live-attempt record format differs
-from the installed one, install warns on stderr and names the live attempts;
-drain them first or expect them to settle under the new release. Install never
-refuses on this warning. Drain as well for a multi-host upgrade that would
+from the installed one, install warns on stderr and names every live attempt
+under the installed state root, in any project and whatever the current
+directory; if those attempts cannot be inspected, it warns that it could not
+inspect them instead of staying silent. Drain them first or expect them to
+settle under the new release. Install never refuses on this warning. Drain as
+well for a multi-host upgrade that would
 leave peers on mixed versions for longer.
 
 If installation fails after stopping agents, the output names the stopped

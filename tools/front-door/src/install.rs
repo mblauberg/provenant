@@ -816,15 +816,10 @@ fn read_receipt_at(
 
 /// The advisory text when this release changes live-attempt records while
 /// attempts are still live. Silent unless both conditions hold; never refuses.
-fn live_record_warning(
-    installed: Option<u32>,
-    store: &provenant_run::RunStore,
-    call: &provenant_run::Request<'_>,
-) -> Option<String> {
+fn live_record_warning(installed: Option<u32>, live: &[String]) -> Option<String> {
     if installed == Some(provenant_records::LIVE_RECORD_FORMAT) {
         return None;
     }
-    let live = provenant_cli::run::live_attempt_ids(store, call).ok()?;
     if live.is_empty() {
         return None;
     }
@@ -838,41 +833,60 @@ fn live_record_warning(
     ))
 }
 
+/// Enumerate live attempts under the installed state root without resolving a
+/// checkout. The cross-project query ignores the store's calling identity, so
+/// no project registration or current directory is needed; a missing store is
+/// an empty read, not an inspection failure.
+fn inspect_live_attempts(
+    destination: &provenant_core::Roots,
+    call: &provenant_run::Request<'_>,
+) -> provenant_run::Result<Vec<String>> {
+    let execution = provenant_run::ExecutionContext {
+        state_root: destination.state.clone(),
+        project_id: provenant_core::ProjectId::from_bytes([0; 16]),
+        actor_id: provenant_core::ActorId::from_bytes([0; 16]),
+        read_prompts: false,
+    };
+    let Some(store) = provenant_run::RunStore::open_read_only(&execution, call)? else {
+        return Ok(Vec::new());
+    };
+    provenant_cli::run::live_attempt_ids(&store, call)
+}
+
 /// Best-effort preflight advisory: compare the installed receipt's live-record
-/// format with this release's and name live attempts on stderr. Any failure to
-/// inspect the store stays silent; this never blocks an install.
+/// format with this release's and name live attempts on stderr. Live attempts
+/// are enumerated across the whole installed state root, independent of the
+/// current checkout. When they cannot be inspected the failure is itself a
+/// visible warning rather than silence; this never blocks an install.
 fn warn_live_record_change(
     destination: &provenant_core::Roots,
-    environment: &Resolved,
     context: &InstallContext<'_>,
 ) -> Option<String> {
     let receipt = read_receipt_at(destination.state.as_path())
         .ok()
         .flatten()?;
-    if receipt.live_record_format == Some(provenant_records::LIVE_RECORD_FORMAT) {
+    let installed = receipt.live_record_format;
+    if installed == Some(provenant_records::LIVE_RECORD_FORMAT) {
         return None;
     }
     let call = provenant_run::Request {
         clock: context.clock,
         cancel: context.cancel,
     };
-    let Ok(fabric) = provenant_cli::fabric::Context::open_read_only(
-        destination.clone(),
-        &environment.home,
-        &environment.project,
-    ) else {
-        return None;
+    let message = match inspect_live_attempts(destination, &call) {
+        Ok(live) => match live_record_warning(installed, &live) {
+            Some(message) => message,
+            None => return None,
+        },
+        Err(reason) => format!(
+            "release changes live-attempt records (format {} → {}); could not inspect live attempts under {}: {reason}",
+            installed
+                .map(|format| format.to_string())
+                .unwrap_or_else(|| "unknown".to_owned()),
+            provenant_records::LIVE_RECORD_FORMAT,
+            destination.state.as_path().display()
+        ),
     };
-    let execution = provenant_run::ExecutionContext {
-        state_root: destination.state.clone(),
-        project_id: fabric.identity.project,
-        actor_id: fabric.identity.inbox.actor,
-        read_prompts: false,
-    };
-    let Ok(Some(store)) = provenant_run::RunStore::open_read_only(&execution, &call) else {
-        return None;
-    };
-    let message = live_record_warning(receipt.live_record_format, &store, &call)?;
     let _ = writeln!(io::stderr().lock(), "{message}");
     Some(message)
 }
@@ -1266,7 +1280,7 @@ fn preflight_install(
     }
     // Smoke the source before the handoff may stop 1.x or publish the new root.
     verify_release(&args.source, smoke, context.cancel)?;
-    let live_record_warning = warn_live_record_change(destination, environment, context);
+    let live_record_warning = warn_live_record_change(destination, context);
     Ok(PreparedInstall {
         batches,
         summaries,
@@ -2554,25 +2568,14 @@ mod tests {
         assert!(error.repair.unwrap().contains("provenant install"));
     }
 
-    /// A run store owned by one project, optionally holding a live attempt.
+    /// An installed state root whose receipt records the given live-record format.
     #[allow(dead_code)]
-    fn store_with_optional_lane(
+    fn roots_with_receipt(
         root: &std::path::Path,
-        live: bool,
-    ) -> Result<
-        (
-            provenant_run::ExecutionContext,
-            provenant_run::RunStore,
-            provenant_core::CancelToken,
-        ),
-        Box<dyn std::error::Error>,
-    > {
-        use provenant_core::{
-            ActorId, AttemptId, CancelToken, Digest, OperationId, ProjectId, RootInputs, WallTime,
-        };
-        use provenant_os::clock::SystemClock;
-        use provenant_records::CanonicalV1;
-        use provenant_run::{ExecutionContext, PreparedRun, Request, RunStore};
+        live_record_format: Option<u32>,
+    ) -> Result<provenant_core::Roots, Box<dyn std::error::Error>> {
+        use provenant_core::RootInputs;
+        use provenant_records::{AbsolutePath, FileDigest, InstallReceipt, SourceDigest};
 
         let home = root.join("home");
         let assets = root.join("assets");
@@ -2581,9 +2584,52 @@ mod tests {
         let mut inputs = RootInputs::new(home, assets);
         inputs.state_dir = Some(root.join("state"));
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+
+        // The run store only opens a private state directory.
+        let install = roots.state.as_path().join("install");
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = std::fs::DirBuilder::new();
+            builder.mode(0o700).recursive(true);
+            builder.create(&install)?;
+        }
+        let receipt = InstallReceipt {
+            extra: Default::default(),
+            schema_version: provenant_records::INSTALL_RECEIPT_SCHEMA_VERSION,
+            state_format_version: provenant_records::STATE_FORMAT_VERSION,
+            live_record_format,
+            source_digest: SourceDigest::from_bytes([1; 32]),
+            manifest_digest: FileDigest::from_bytes([2; 32]),
+            asset_digest: SourceDigest::from_bytes([3; 32]),
+            target: "fixture".into(),
+            toolchain: "fixture".into(),
+            bin_dir: AbsolutePath::new(&root.join("bin"))?,
+            harnesses: Vec::new(),
+            harness_targets: Vec::new(),
+            entries: Vec::new(),
+        };
+        std::fs::write(
+            install.join("receipt.json"),
+            provenant_records::encode(&receipt)?,
+        )?;
+        Ok(roots)
+    }
+
+    /// Create one live attempt in `project` under the given installed state root.
+    #[allow(dead_code)]
+    fn create_live_attempt(
+        roots: &provenant_core::Roots,
+        project: provenant_core::ProjectId,
+        attempt: provenant_core::AttemptId,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::{ActorId, CancelToken, Digest, OperationId, WallTime};
+        use provenant_os::clock::SystemClock;
+        use provenant_records::CanonicalV1;
+        use provenant_run::{ExecutionContext, PreparedRun, Request, RunStore};
+
         let context = ExecutionContext {
             state_root: roots.state.clone(),
-            project_id: ProjectId::from_bytes([1; 16]),
+            project_id: project,
             actor_id: ActorId::from_bytes([2; 16]),
             read_prompts: false,
         };
@@ -2593,79 +2639,143 @@ mod tests {
             clock: &clock,
             cancel: &cancel,
         };
-        let store = RunStore::open(&context, &call)?;
-        if live {
-            store.create(
-                &PreparedRun {
-                    attempt_id: AttemptId::from_bytes([4; 16]),
-                    operation_id: OperationId::parse("live-record-warning")?,
-                    created_at: WallTime::from_micros(100)?,
-                    prompt: String::new(),
-                    request: serde_json::from_value(serde_json::json!({
-                        "schema_version": 1,
-                        "parent": null,
-                        "task": {
-                            "context": {"graph_id": "live-record", "node_id": "lane", "attempt": 1},
-                            "prompt_digest": CanonicalV1::file_digest(b""),
-                            "route": {"kind": "model", "provider": "codex", "model": "codex/fixture"},
-                            "authority_digest": Digest::from_bytes([0; 32]),
-                            "provider_timeout_seconds": 20,
-                            "delivery_id": null
-                        }
-                    }))?,
-                },
-                &call,
-            )?;
-        }
-        Ok((context, store, cancel))
+        RunStore::open(&context, &call)?.create(
+            &PreparedRun {
+                attempt_id: attempt,
+                operation_id: OperationId::parse("live-record-warning")?,
+                created_at: WallTime::from_micros(100)?,
+                prompt: String::new(),
+                request: serde_json::from_value(serde_json::json!({
+                    "schema_version": 1,
+                    "parent": null,
+                    "task": {
+                        "context": {"graph_id": "live-record", "node_id": "lane", "attempt": 1},
+                        "prompt_digest": CanonicalV1::file_digest(b""),
+                        "route": {"kind": "model", "provider": "codex", "model": "codex/fixture"},
+                        "authority_digest": Digest::from_bytes([0; 32]),
+                        "provider_timeout_seconds": 20,
+                        "delivery_id": null
+                    }
+                }))?,
+            },
+            &call,
+        )?;
+        Ok(())
     }
 
     #[test]
     fn preflight_warns_and_names_live_attempts_when_record_format_changes()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
-        use provenant_core::AttemptId;
+        use provenant_core::{AttemptId, ProjectId};
         use provenant_os::clock::SystemClock;
 
         let tmp = tempfile::tempdir()?;
-        let (_context, store, cancel) = store_with_optional_lane(tmp.path(), true)?;
+        let roots =
+            roots_with_receipt(tmp.path(), Some(provenant_records::LIVE_RECORD_FORMAT - 1))?;
+        let attempt = AttemptId::from_bytes([4; 16]);
+        create_live_attempt(&roots, ProjectId::from_bytes([1; 16]), attempt)?;
+
         let clock = SystemClock::new();
-        let call = provenant_run::Request {
+        let cancel = CancelToken::new();
+        let context = InstallContext {
             clock: &clock,
+            budget: WaitBudget::cli(clock.mono_now(), 30)?,
             cancel: &cancel,
         };
-        let warning = live_record_warning(
-            Some(provenant_records::LIVE_RECORD_FORMAT - 1),
-            &store,
-            &call,
-        )
-        .expect("a format change with live attempts warns");
+        let warning = warn_live_record_change(&roots, &context)
+            .expect("a format change with live attempts warns");
         assert!(warning.contains("format 0 → 1"), "{warning}");
         assert!(warning.contains("live attempts:"), "{warning}");
+        assert!(warning.contains(&attempt.to_string()), "{warning}");
+        assert!(warning.contains("drain them"), "{warning}");
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_warning_names_live_attempts_in_every_project()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_core::{AttemptId, ProjectId};
+        use provenant_os::clock::SystemClock;
+
+        let tmp = tempfile::tempdir()?;
+        let roots =
+            roots_with_receipt(tmp.path(), Some(provenant_records::LIVE_RECORD_FORMAT - 1))?;
+        let here = AttemptId::from_bytes([4; 16]);
+        let elsewhere = AttemptId::from_bytes([5; 16]);
+        create_live_attempt(&roots, ProjectId::from_bytes([1; 16]), here)?;
+        create_live_attempt(&roots, ProjectId::from_bytes([9; 16]), elsewhere)?;
+
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let context = InstallContext {
+            clock: &clock,
+            budget: WaitBudget::cli(clock.mono_now(), 30)?,
+            cancel: &cancel,
+        };
+        let warning = warn_live_record_change(&roots, &context)
+            .expect("a format change with live lanes in any project warns");
+        assert!(warning.contains(&here.to_string()), "{warning}");
+        assert!(warning.contains(&elsewhere.to_string()), "{warning}");
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_warning_reports_inspection_failure_instead_of_silence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_os::clock::SystemClock;
+
+        let tmp = tempfile::tempdir()?;
+        let roots =
+            roots_with_receipt(tmp.path(), Some(provenant_records::LIVE_RECORD_FORMAT - 1))?;
+        // A present but unreadable run database makes store inspection fail.
+        let database = roots.state.as_path().join("run.sqlite3");
+        std::fs::write(&database, b"not a database")?;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600))?;
+        }
+
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let context = InstallContext {
+            clock: &clock,
+            budget: WaitBudget::cli(clock.mono_now(), 30)?,
+            cancel: &cancel,
+        };
+        let warning = warn_live_record_change(&roots, &context)
+            .expect("an inspection failure must be a visible warning, not silence");
         assert!(
-            warning.contains(&AttemptId::from_bytes([4; 16]).to_string()),
+            warning.contains("could not inspect live attempts"),
             "{warning}"
         );
-        assert!(warning.contains("drain them"), "{warning}");
         Ok(())
     }
 
     #[test]
     fn preflight_is_silent_when_format_matches() -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
+        use provenant_core::{AttemptId, ProjectId};
         use provenant_os::clock::SystemClock;
 
         let tmp = tempfile::tempdir()?;
-        let (_context, store, cancel) = store_with_optional_lane(tmp.path(), true)?;
+        let roots = roots_with_receipt(tmp.path(), Some(provenant_records::LIVE_RECORD_FORMAT))?;
+        create_live_attempt(
+            &roots,
+            ProjectId::from_bytes([1; 16]),
+            AttemptId::from_bytes([4; 16]),
+        )?;
+
         let clock = SystemClock::new();
-        let call = provenant_run::Request {
+        let cancel = CancelToken::new();
+        let context = InstallContext {
             clock: &clock,
+            budget: WaitBudget::cli(clock.mono_now(), 30)?,
             cancel: &cancel,
         };
-        assert!(
-            live_record_warning(Some(provenant_records::LIVE_RECORD_FORMAT), &store, &call)
-                .is_none()
-        );
+        assert!(warn_live_record_change(&roots, &context).is_none());
         Ok(())
     }
 
@@ -2675,20 +2785,37 @@ mod tests {
         use provenant_os::clock::SystemClock;
 
         let tmp = tempfile::tempdir()?;
-        let (_context, store, cancel) = store_with_optional_lane(tmp.path(), false)?;
+        let roots =
+            roots_with_receipt(tmp.path(), Some(provenant_records::LIVE_RECORD_FORMAT - 1))?;
+        {
+            use provenant_core::{ActorId, ProjectId};
+            use provenant_run::{ExecutionContext, RunStore};
+
+            let run_clock = SystemClock::new();
+            let run_cancel = CancelToken::new();
+            let run_call = provenant_run::Request {
+                clock: &run_clock,
+                cancel: &run_cancel,
+            };
+            RunStore::open(
+                &ExecutionContext {
+                    state_root: roots.state.clone(),
+                    project_id: ProjectId::from_bytes([1; 16]),
+                    actor_id: ActorId::from_bytes([2; 16]),
+                    read_prompts: false,
+                },
+                &run_call,
+            )?;
+        }
+
         let clock = SystemClock::new();
-        let call = provenant_run::Request {
+        let cancel = CancelToken::new();
+        let context = InstallContext {
             clock: &clock,
+            budget: WaitBudget::cli(clock.mono_now(), 30)?,
             cancel: &cancel,
         };
-        assert!(
-            live_record_warning(
-                Some(provenant_records::LIVE_RECORD_FORMAT - 1),
-                &store,
-                &call
-            )
-            .is_none()
-        );
+        assert!(warn_live_record_change(&roots, &context).is_none());
         Ok(())
     }
 
