@@ -81,8 +81,7 @@ pub const ADMISSION_SLOT: &str = "PROVENANT_ADMISSION_SLOT";
 pub const ADMISSION_SLOT_STATE: &str = "PROVENANT_ADMISSION_SLOT_STATE";
 pub const ADMISSION_SLOTS: &str = "PROVENANT_ADMISSION_SLOTS";
 pub const ADMISSION_WAIT_DIR: &str = "PROVENANT_ADMISSION_WAIT_DIR";
-pub const ADMISSION_BACKEND: &str = "PROVENANT_ADMISSION_BACKEND";
-pub const ADMISSION_SOURCE: &str = "PROVENANT_ADMISSION_SOURCE";
+pub const BUILD_CONTEXT: &str = "PROVENANT_BUILD_CONTEXT";
 pub const ADMISSION_DISK_LIMITS: &str = "PROVENANT_ADMISSION_DISK_LIMITS";
 pub const ADMISSION_MEMORY_LIMIT: &str = "PROVENANT_ADMISSION_MEMORY_LIMIT";
 pub const ADMISSION_TRIM_ACTION: &str = "PROVENANT_ADMISSION_TRIM_ACTION";
@@ -96,6 +95,7 @@ pub const ADMISSION_OWNER_PID: &str = "PROVENANT_ADMISSION_OWNER_PID";
 pub const ADMISSION_EPOCH: &str = "PROVENANT_ADMISSION_EPOCH";
 pub const PORT_REQUEST_PATH: &str = "PROVENANT_PORT_REQUEST_PATH";
 pub const PORT_IF_NONE_MATCH: &str = "PROVENANT_PORT_IF_NONE_MATCH";
+pub const VERIFY_SELECTION: &str = "PROVENANT_VERIFY_SELECTION";
 pub const VERIFY_TIER: &str = "PROVENANT_VERIFY_TIER";
 pub const VERIFY_PROJECT_ROOT: &str = "PROVENANT_VERIFY_PROJECT_ROOT";
 pub const VERIFY_EFFECTIVE_CONFIG_JSON: &str = "PROVENANT_VERIFY_EFFECTIVE_CONFIG_JSON";
@@ -338,6 +338,13 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         "CI observation and repository discovery port commands",
     ),
     var(
+        VERIFY_SELECTION,
+        PortCommand,
+        Internal,
+        "The affected package selection for the verify engine.",
+        "verify port commands",
+    ),
+    var(
         VERIFY_TIER,
         PortCommand,
         Evolving,
@@ -429,18 +436,11 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         ADMITTED_COMMAND,
     ),
     var(
-        ADMISSION_BACKEND,
+        BUILD_CONTEXT,
         Lane,
         Internal,
-        "Encoded admission backend selected by the host.",
-        ADMITTED_COMMAND,
-    ),
-    var(
-        ADMISSION_SOURCE,
-        Lane,
-        Internal,
-        "Source of the selected admission backend.",
-        ADMITTED_COMMAND,
+        "Frozen host-side build strategy, repository and toolchain context.",
+        "every lane and its build shim",
     ),
     var(
         ADMISSION_DISK_LIMITS,

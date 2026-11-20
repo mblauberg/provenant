@@ -1250,10 +1250,13 @@ printf 'agy 1.0.0\n'
     // A writer may receive its target later; admission must not depend on it.
     let target = codex.env.iter().find(|(key, _)| key == "CARGO_TARGET_DIR").cloned().unwrap();
     codex.env.retain(|(key, _)| key != "CARGO_TARGET_DIR");
+    let writer_worktree = project.join(".worktrees/writer");
     let coordination_reads = configure_build_slots(
         &mut codex,
         &provenant_config::LaneBuildSettings::default(),
         &project,
+        &writer_worktree,
+        &git,
         &home,
         &confinement.plan.permissions().scratch.path,
         &codex_runtime,
@@ -1262,7 +1265,17 @@ printf 'agy 1.0.0\n'
         &provenant_records::policy::Policy::default(),
         "test-lane",
     )
-    .expect("sandboxed lanes receive their optional build-slot shim");
+    .expect("sandboxed lanes receive their build context and admission shim");
+    let context_json = codex
+        .env
+        .iter()
+        .find(|(key, _)| key == provenant_core::consumer_env::BUILD_CONTEXT)
+        .and_then(|(_, value)| value.to_str())
+        .ok_or("lane build context")?;
+    let build_context = provenant_run::build::BuildContext::from_json(context_json)?;
+    assert_eq!(build_context.project, project);
+    assert_eq!(build_context.worktree, writer_worktree);
+    assert!(build_context.git.is_some(), "writer Git binding is frozen at launch");
     assert!(
         coordination_reads
             .iter()
@@ -1274,14 +1287,28 @@ printf 'agy 1.0.0\n'
             .any(|root| root.path.ends_with("slot-0.lock"))
     );
     codex.env.push(target);
-    // An unrepresentable shim input warns and leaves preparation intact without new grants.
-    let env_before = codex.env.clone();
+    // An unrepresentable shim input warns and leaves preparation intact without
+    // new grants. The frozen build context is still republished for verify.
+    let context_before = codex
+        .env
+        .iter()
+        .find(|(name, _)| name == provenant_core::consumer_env::BUILD_CONTEXT)
+        .cloned()
+        .ok_or("lane build context before skipped shim")?;
+    let env_before: Vec<_> = codex
+        .env
+        .iter()
+        .filter(|(name, _)| name != provenant_core::consumer_env::BUILD_CONTEXT)
+        .cloned()
+        .collect();
     let profile_before = codex.profile.spec.clone();
     let setup_count = codex.setup.len();
     let skipped_coordination_reads = configure_build_slots(
         &mut codex,
         &provenant_config::LaneBuildSettings::default(),
         &project,
+        &writer_worktree,
+        &git,
         &home,
         &confinement.plan.permissions().scratch.path,
         Path::new("relative-runtime"),
@@ -1292,7 +1319,23 @@ printf 'agy 1.0.0\n'
     )
     .expect("an unrepresentable shim leaves launch preparation intact");
     assert!(skipped_coordination_reads.is_empty());
-    assert_eq!(codex.env, env_before);
+    let skipped_context = codex
+        .env
+        .iter()
+        .find(|(name, _)| name == provenant_core::consumer_env::BUILD_CONTEXT)
+        .cloned()
+        .ok_or("lane build context after skipped shim")?;
+    assert_eq!(
+        skipped_context, context_before,
+        "the frozen build context survives a skipped shim"
+    );
+    let env_after: Vec<_> = codex
+        .env
+        .iter()
+        .filter(|(name, _)| name != provenant_core::consumer_env::BUILD_CONTEXT)
+        .cloned()
+        .collect();
+    assert_eq!(env_after, env_before);
     assert_eq!(codex.profile.spec, profile_before);
     assert_eq!(codex.setup.len(), setup_count);
     let slots = state.join("admission");

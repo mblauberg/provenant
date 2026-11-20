@@ -260,38 +260,54 @@ pub(super) fn child_exited(pid: u32) -> io::Result<bool> {
 }
 
 impl OwnedPid {
+    /// PID/PGID of the direct child while it is still owned and unreaped.
+    pub(crate) fn id(&self) -> Option<u32> {
+        self.child.as_ref().map(std::process::Child::id)
+    }
+
     pub fn spawn(permit: Permit, spec: SpawnSpec<'_>) -> io::Result<Self> {
-        Self::spawn_with_watchdog(permit, spec, None)
+        Self::spawn_with_watchdog(permit, spec, None, false, false)
     }
     pub(crate) fn spawn_with_watchdog(
         permit: Permit,
         spec: SpawnSpec<'_>,
         watchdog: Option<std::time::Duration>,
+        inherit_stdout: bool,
+        inherit_stderr: bool,
     ) -> io::Result<Self> {
-        Self::spawn_with_setup_inner(permit, spec, watchdog, |result| {
-            if let Some(pipe) = &result.stdin {
-                nonblocking(pipe)?;
-            }
-            if let Some(pipe) = &result.stdout {
-                nonblocking(pipe)?;
-            }
-            if let Some(pipe) = &result.stderr {
-                nonblocking(pipe)?;
-            }
-            Ok(())
-        })
+        Self::spawn_with_setup_inner(
+            permit,
+            spec,
+            watchdog,
+            inherit_stdout,
+            inherit_stderr,
+            |result| {
+                if let Some(pipe) = &result.stdin {
+                    nonblocking(pipe)?;
+                }
+                if let Some(pipe) = &result.stdout {
+                    nonblocking(pipe)?;
+                }
+                if let Some(pipe) = &result.stderr {
+                    nonblocking(pipe)?;
+                }
+                Ok(())
+            },
+        )
     }
     pub fn spawn_with_setup(
         permit: Permit,
         spec: SpawnSpec<'_>,
         setup: impl FnOnce(&mut Self) -> io::Result<()>,
     ) -> io::Result<Self> {
-        Self::spawn_with_setup_inner(permit, spec, None, setup)
+        Self::spawn_with_setup_inner(permit, spec, None, false, false, setup)
     }
     fn spawn_with_setup_inner(
         permit: Permit,
         spec: SpawnSpec<'_>,
         watchdog: Option<std::time::Duration>,
+        inherit_stdout: bool,
+        inherit_stderr: bool,
         setup: impl FnOnce(&mut Self) -> io::Result<()>,
     ) -> io::Result<Self> {
         let profile = spec
@@ -313,11 +329,15 @@ impl OwnedPid {
             })
             .stdout(if spec.capture_stdout {
                 Stdio::piped()
+            } else if inherit_stdout {
+                Stdio::inherit()
             } else {
                 Stdio::null()
             })
             .stderr(if spec.capture_stderr {
                 Stdio::piped()
+            } else if inherit_stderr {
+                Stdio::inherit()
             } else {
                 Stdio::null()
             });

@@ -248,17 +248,16 @@ replayable authority.
   leave the old or new file whole.
 - Owner: `crates/os/src/fs.rs`
 
-### Build admission is a sourced port
+### Build strategy context
 
-Lane Cargo shims, including native launches, use `PortTable.build_admission`, independently of attempt
-admission: builtin uses host slots and the effective disk policy, command runs
-the repository wrapper around Cargo, and none omits admission. The host freezes
-the backend/source in `PROVENANT_ADMISSION_BACKEND` and
-`PROVENANT_ADMISSION_SOURCE`. Native launches retain their host toolchain
-behind the shim. Local-Cargo policy still applies to every shim
-backend. Wrapper execution streams Cargo output without a host-state receipt.
+Lane Cargo shims carry the host-resolved build port in
+`PROVENANT_BUILD_CONTEXT`. The frozen context includes the strategy and its
+source, host toolchain paths and the lane's private Git binding. Build strategy
+selects local lane execution, a repository command wrapper, or slot execution;
+slot provisioning remains available for every strategy. The separate local
+Cargo advisory still applies to shim invocations.
 - Why: build coordination varies by repository without changing attempt custody.
-- Owner: `crates/providers/src/lane.rs`; `src/admit.rs`
+- Owner: `crates/providers/src/lane.rs`; `src/admit.rs`; `crates/run/src/build/`
 
 ### Bounded execution
 
@@ -471,8 +470,9 @@ Provider preparation may select an account-specific home or redirect state and
 cache paths in either confinement mode; account selectors choose the registered
 account and its required credentials. Credential values stay in the live launch,
 never in prompts or receipts. Native launches skip skill copies, tool dependency
-discovery, credential symlink inventory and the build admission shims. Every lane still
-binds the host Cargo home and private target/build directories before seed
+discovery and credential symlink inventory. Every lane gets the cargo, nextest
+and cargo-nextest PATH shims, which run `provenant admit build -- <real> "$@"`,
+and binds the host Cargo home and private target/build directories before seed
 validation.
 
 Sandboxed lanes use the minimal environment and staged skills, discover tool

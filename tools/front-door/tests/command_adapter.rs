@@ -1068,6 +1068,66 @@ printf 'private-output\n'
 }
 
 #[test]
+fn verify_command_strategy_records_one_job_and_commit_uses_its_tree() -> Result {
+    let rig = TestRig::new()?;
+    let mut ports = verify_fixture_port(
+        json!({"kind":"command","command":serde_json::to_value(fixture_verify_command())?}),
+    )?;
+    ports["build"]["strategy"] = json!("command");
+    ports["build"]["command"] = json!({"argv":["/usr/bin/env"],"exit_codes":{"success":[0],"unknown":[],"other":"refused"}});
+    write_project_verify_port(&rig, &ports)?;
+    fs::write(
+        rig.project.join("verify-port.sh"),
+        "#!/bin/sh\ntest \"$(cat version)\" = committed\n",
+    )?;
+    fs::write(rig.project.join("version"), "committed")?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    assert_eq!(code(&rig.execute(&git, &["add", "."], None)?), 0);
+    assert_eq!(
+        code(&rig.execute(&git, &["commit", "-qm", "verify fixture"], None)?),
+        0
+    );
+    fs::write(rig.project.join("version"), "modified")?;
+    let output = rig.command(&["verify", "security/linux", "--commit", "HEAD", "--json"])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let rows = fs::read_to_string(rig.state.join("build/jobs.jsonl"))?;
+    let rows: Vec<Value> = rows
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["strategy"], "command");
+    assert_eq!(rows[0]["kind"]["tier"]["name"], "security/linux");
+    assert_eq!(fs::read_to_string(rig.project.join("version"))?, "modified");
+
+    fs::write(
+        rig.project.join("verify-port.sh"),
+        "#!/bin/sh\ntest \"$(cat version)\" = modified\n",
+    )?;
+    let index_before = fs::read(rig.project.join(".git/index"))?;
+    let output = rig.command(&["verify", "security/linux", "--json"])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let rows = fs::read_to_string(rig.state.join("build/jobs.jsonl"))?;
+    let latest: Value = serde_json::from_str(rows.lines().last().ok_or("missing row")?)?;
+    let snapshot = latest["snapshot"].as_str().ok_or("missing snapshot")?;
+    let show = rig.execute(&git, &["show", &format!("{snapshot}:version")], None)?;
+    assert_eq!(code(&show), 0);
+    assert_eq!(show.stdout.bytes, b"modified");
+    assert_eq!(fs::read(rig.project.join(".git/index"))?, index_before);
+    Ok(())
+}
+
+#[test]
 fn project_none_verify_port_overrides_host_command_without_executing_it() -> Result {
     let rig = TestRig::new()?;
     let marker = rig.project.join("verify-call.txt");

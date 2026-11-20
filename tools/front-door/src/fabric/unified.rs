@@ -2411,6 +2411,24 @@ pub(crate) fn graph_listing(
                     command.limit
                 ));
             }
+            if let Ok(roots) = crate::roots::resolve(
+                globals,
+                crate::roots::Workspace::Home,
+                crate::roots::Product::Optional,
+            ) {
+                let slots =
+                    provenant_run::build::hygiene::status(&roots.home, roots.roots.state.as_path());
+                let ok = slots.iter().filter(|slot| slot.health == "ok").count();
+                let quarantined = slots
+                    .iter()
+                    .filter(|slot| slot.health == "quarantined")
+                    .count();
+                let bytes: u64 = slots.iter().map(|slot| slot.allocated_bytes).sum();
+                human.push_str(&format!(
+                    "build slots: {ok} ok, {quarantined} quarantined, {:.2} GiB\n",
+                    bytes as f64 / 1_073_741_824.0
+                ));
+            }
             let rows: Vec<_> = listing
                 .rows
                 .iter()

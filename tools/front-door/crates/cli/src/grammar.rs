@@ -237,7 +237,16 @@ pub enum Command {
     Verify {
         /// Free-form tier name from the effective verify port
         tier: Option<String>,
+        /// Verify this exact commit instead of the current checkout
+        #[arg(long, value_name = "REV")]
+        commit: Option<String>,
+        /// Apply the configured affected-package selection policy
+        #[arg(long)]
+        affected: bool,
     },
+    /// Inspect and maintain build slots and their report
+    #[command(subcommand)]
+    Build(Build),
     /// Run fast repository checks
     #[command(subcommand)]
     Check(Check),
@@ -254,6 +263,29 @@ pub enum Command {
     },
     #[command(subcommand, hide = true)]
     Internal(Internal),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Build {
+    /// Show build slot status
+    Status,
+    /// Report build outcomes since an optional duration
+    Report {
+        /// Include outcomes from this duration, for example 7d
+        #[arg(long, value_name = "DUR", value_parser = positive_span_seconds)]
+        since: Option<u64>,
+    },
+    /// Reset a project's build slots
+    Reset {
+        /// Reset only this slot index
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64))]
+        slot: Option<u64>,
+        /// Recreate the checkout and target cache
+        #[arg(long)]
+        full: bool,
+    },
+    /// Run build slot maintenance for a project
+    Maintain,
 }
 
 fn landing_strategy_parser()

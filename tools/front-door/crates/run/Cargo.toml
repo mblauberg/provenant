@@ -24,6 +24,7 @@ fixture = [
 workspace = true
 
 [dependencies]
+libc = { workspace = true }
 provenant-test-support = { path = "../test-support", optional = true }
 provenant-os = { workspace = true }
 provenant-confinement = { workspace = true }

@@ -4721,10 +4721,16 @@ pub(super) fn prepare_candidates_inner(
             build_settings.cargo_source_writes,
             plan.permissions().network,
         );
+        let build_project = writer
+            .as_ref()
+            .and_then(|writer| writer.project_root())
+            .unwrap_or(registry.cwd.unwrap_or(&source));
         let coordination_reads = configure_build_slots(
             &mut spec,
             &build_settings,
-            &source,
+            build_project,
+            &cwd,
+            &git,
             &home,
             scratch,
             &provenant_executable,
