@@ -2,7 +2,7 @@
 
 use super::{
     BuildError, InfraKind, JobOutcome, Reset,
-    slots::{SlotPaths, SlotRecord, SlotState},
+    slots::{SlotCustody, SlotPaths, SlotRecord, SlotState},
 };
 use provenant_config::{PortTable, ResolvedAdmissionClass};
 use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
@@ -66,8 +66,9 @@ pub fn after_job(record: &mut SlotRecord, outcome: &JobOutcome, now_unix_ms: u64
     }
 }
 
-/// Remove untracked and ignored changes from a slot checkout.
-pub fn light_reset(slot: &SlotPaths) -> Result<(), BuildError> {
+/// Remove untracked and ignored changes from a slot checkout. The guard proves
+/// the caller owns the slot; an unlocked call cannot compile.
+pub fn light_reset(slot: &SlotPaths, _custody: &SlotCustody) -> Result<(), BuildError> {
     for args in [
         &[
             "-c",
@@ -88,8 +89,9 @@ pub fn light_reset(slot: &SlotPaths) -> Result<(), BuildError> {
 }
 
 /// Remove fixed children of a verified slot; the slot executor recreates repo.
-/// Caller must hold the slot lock for the duration.
-pub fn full_reset(slot: &SlotPaths) -> Result<(), BuildError> {
+/// The guard proves the caller holds both the slot lock and the inherited
+/// custody lease for the duration.
+pub fn full_reset(slot: &SlotPaths, _custody: &SlotCustody) -> Result<(), BuildError> {
     use provenant_os::fs::{Directory, FileKind, PayloadTree};
     use std::ffi::OsStr;
     let parent = slot
@@ -182,6 +184,23 @@ pub fn full_reset(slot: &SlotPaths) -> Result<(), BuildError> {
     Ok(())
 }
 
+/// Unlink a collected slot's record only under custody. Collection rereads the
+/// record under the same guard it uses for the reset, so a build admitted in
+/// between cannot observe or write a half-collected slot.
+pub(super) fn unlink_record(
+    slot: &SlotPaths,
+    _custody: &SlotCustody,
+) -> Result<(), provenant_os::fs::FsError> {
+    Directory::open_anchor(&slot.root)?.unlink(OsStr::new("slot.json"))
+}
+
+/// Stamp a slot fresh after a canary found no freshness failure. The guard
+/// proves the stamp is applied to the exact slot the canary exercised, while
+/// its lock and custody lease are still held.
+pub(super) fn mark_fresh(record: &mut SlotRecord, at: u64, _custody: &SlotCustody) {
+    record.last_canary_unix_ms = Some(at);
+}
+
 fn remove_contents(tree: &provenant_os::fs::PayloadTree, depth: usize) -> Result<(), String> {
     use provenant_os::fs::FileKind;
     if depth >= 128 {
@@ -267,15 +286,14 @@ where
             let paths = SlotPaths::new(home, project_key, row.index);
             // Collection is a destructive slot operation: hold the slot lock
             // and its custody lease together, and refuse a slot whose live
-            // build child still holds that lease. The guard stays alive through
-            // the full reset and the record unlink below.
-            if super::slots::SlotCustody::acquire(&paths).is_err() {
-                continue;
-            }
-            let Ok(dir) = Directory::open_anchor(&paths.root) else {
-                continue;
+            // build child still holds that lease. Bind the guard so it stays
+            // alive through the reread, the full reset and the record unlink.
+            let custody = match SlotCustody::acquire(&paths) {
+                Ok(custody) => custody,
+                Err(_) => continue,
             };
-            // Re-read under the lock: status is deliberately an unlocked observation.
+            // Re-read under the custody guard: status is deliberately an
+            // unlocked observation.
             let record = match SlotRecord::read(&paths.record) {
                 Ok(Some(record)) => record,
                 Ok(None) => continue,
@@ -293,11 +311,11 @@ where
             if row.index < limit && (last > now_ms || now_ms - last <= millis(idle)) {
                 continue;
             }
-            match full_reset(&paths) {
+            match full_reset(&paths, &custody) {
                 Ok(()) => {
                     // Retain the slot directory and lock inode; unlinking it while a waiter
                     // has the inode open would let a new holder acquire a different lock.
-                    if let Err(error) = dir.unlink(OsStr::new("slot.json")) {
+                    if let Err(error) = unlink_record(&paths, &custody) {
                         report
                             .warnings
                             .push(format!("cannot remove slot record: {error}"));
@@ -438,8 +456,10 @@ pub struct MaintenanceState {
     pub last_prewarm: BTreeMap<String, u64>,
     #[serde(default)]
     pub hour_budget_used: HourBudget,
-    /// In-flight budget claims, so a worker that dies before finishing can be
-    /// refunded by the next claimant instead of consuming the hour forever.
+    /// In-flight budget claims. A crashed claimant's reservation is removed by
+    /// the next claimant without a refund; only the claiming process returns a
+    /// unit, through `cancel_maintenance_reservation`, when its job never
+    /// launched.
     #[serde(default)]
     pub reservations: BTreeMap<String, MaintenanceReservation>,
 }
@@ -540,7 +560,11 @@ fn current_process_reservation(now_ms: u64) -> MaintenanceReservation {
 
 /// Claim one unit of the hour's prewarm budget under the maintenance lock.
 /// Checking and consuming are one critical section, so parallel maintainers
-/// cannot all observe the same remaining budget. Dead claims are refunded.
+/// cannot all observe the same remaining budget. A dead claim's reservation is
+/// removed without refunding its unit: a unit is refunded only by the claiming
+/// process itself, through `cancel_maintenance_reservation`, when the job never
+/// launched. Losing a claimant to a crash therefore costs that hour one unit,
+/// which is the safe direction.
 fn claim_maintenance_budget(
     state: &Path,
     hour: u64,
@@ -564,8 +588,11 @@ fn claim_maintenance_budget(
             .map(|(owner, _)| owner.clone())
             .collect();
         for owner in stale {
+            // The owner is gone, so drop its reservation but keep the unit
+            // spent. Its job may already have started; only the claiming
+            // process may refund a unit, and only through cancellation of a
+            // reservation whose job never launched.
             record.reservations.remove(&owner);
-            record.hour_budget_used.count = record.hour_budget_used.count.saturating_sub(1);
         }
         if record.hour_budget_used.count >= budget {
             return Ok(None);
@@ -1014,13 +1041,53 @@ mod tests {
     }
 
     #[test]
+    fn stale_recovery_keeps_the_dead_owners_unit_spent() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let now = 7 * 3_600_000;
+        let dead_pid = u32::MAX;
+        with_maintenance_state(&state, |record| {
+            record.hour_budget_used = HourBudget { hour: 7, count: 1 };
+            record.reservations.insert(
+                format!("{dead_pid}:12345"),
+                MaintenanceReservation {
+                    pid: dead_pid,
+                    start_time: 12_345,
+                    reserved_unix_ms: now,
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        // A new claimant finds the dead owner. Recovery drops the reservation
+        // but must not refund a unit whose job may already have started.
+        assert!(
+            claim_maintenance_budget(&state, 7, 1, now)
+                .unwrap()
+                .is_none(),
+            "a crashed claimant's unit stays spent for the hour"
+        );
+        let (count, remaining) = with_maintenance_state(&state, |record| {
+            Ok((record.hour_budget_used.count, record.reservations.clone()))
+        })
+        .unwrap();
+        assert_eq!(count, 1, "stale recovery must not refund the dead unit");
+        assert!(
+            remaining.values().all(|claim| claim.pid != dead_pid),
+            "the dead owner's reservation must be removed"
+        );
+    }
+
+    #[test]
     fn full_reset_removes_the_tmp_payload() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         let paths = SlotPaths::new(&home, "project", 0);
         std::fs::create_dir_all(&paths.tmp).unwrap();
         std::fs::write(paths.tmp.join("index-copy"), b"scratch").unwrap();
-        full_reset(&paths).unwrap();
+        let custody = SlotCustody::acquire(&paths).unwrap();
+        full_reset(&paths, &custody).unwrap();
         assert!(!paths.tmp.exists());
     }
 
@@ -1147,5 +1214,37 @@ mod tests {
         std::fs::remove_file(&paths.job).unwrap();
         assert_eq!(gc(&home, &state, 1, now).removed_slots, 1);
         assert!(!paths.target.exists());
+    }
+
+    #[test]
+    fn gc_skips_a_slot_held_by_live_custody() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let state = temp.path().join("state");
+        let paths = SlotPaths::new(&home, "project", 0);
+        std::fs::create_dir_all(&paths.target).unwrap();
+        std::fs::write(paths.target.join("artifact"), b"cached").unwrap();
+        SlotRecord {
+            schema: 1,
+            project_key: "project".into(),
+            index: 0,
+            created_unix_ms: 1,
+            ..SlotRecord::default()
+        }
+        .write(&paths.record)
+        .unwrap();
+        let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(900_000);
+
+        // A live holder of the slot's custody blocks the reset and the record
+        // unlink, even though the record itself looks idle to `status`.
+        let custody = SlotCustody::acquire(&paths).unwrap();
+        assert_eq!(gc(&home, &state, 1, now).removed_slots, 0);
+        assert!(paths.target.join("artifact").exists());
+        assert!(paths.record.exists());
+
+        drop(custody);
+        assert_eq!(gc(&home, &state, 1, now).removed_slots, 1);
+        assert!(!paths.target.exists());
+        assert!(!paths.record.exists());
     }
 }

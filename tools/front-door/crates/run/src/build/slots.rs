@@ -195,10 +195,10 @@ impl From<Exception> for StageFailure {
 pub struct PreparedSlot {
     pub site: super::ExecSite,
     paths: SlotPaths,
-    _slot_lock: provenant_os::fs::LockGuard,
-    /// Held by this process and inherited by the build's children, so a slot
-    /// with an intent marker stays occupied until every child is gone.
-    intent_lease: LockGuard,
+    /// Slot lock plus the lease inherited by the build's children, held from
+    /// staging through the post-job reset and record write. Every destructive
+    /// slot operation borrows this guard.
+    custody: SlotCustody,
     _port_lease: Option<provenant_os::lane_ports::Lease>,
     record: SlotRecord,
     snapshot: super::snapshot::SnapshotRef,
@@ -239,7 +239,12 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
         reset: super::Reset::None,
         detail,
     })?;
-    let orphan_killed = reap_orphan(&paths.job).map_err(|_| Exception::PoolUnavailable)?;
+    // Staging adopts the guards it just took. Unlike collection it must first
+    // reap an orphaned build group, so the live-child probe is not repeated
+    // here; the guards are held through every reset below.
+    let custody = SlotCustody::from_guards(slot_lock, intent_lease);
+    let orphan_killed =
+        reap_orphan(&paths.job, &custody).map_err(|_| Exception::PoolUnavailable)?;
     let mut record = SlotRecord::read(&paths.record)
         .map_err(|_| Exception::PoolUnavailable)?
         .unwrap_or_else(|| SlotRecord {
@@ -254,11 +259,11 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
     match super::hygiene::before_job(&mut record, super::ledger::now_unix_ms()) {
         super::hygiene::PreJob::Proceed => {}
         super::hygiene::PreJob::LightReset => {
-            super::hygiene::light_reset(&paths).map_err(|_| Exception::PoolUnavailable)?
+            super::hygiene::light_reset(&paths, &custody).map_err(|_| Exception::PoolUnavailable)?
         }
         super::hygiene::PreJob::FullReset => {
             clock_reset = true;
-            super::hygiene::full_reset(&paths).map_err(|_| Exception::PoolUnavailable)?;
+            super::hygiene::full_reset(&paths, &custody).map_err(|_| Exception::PoolUnavailable)?;
             record.prepare_digest = None;
             ensure_slot_repo(&paths, &store)?;
         }
@@ -330,11 +335,11 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
                 });
             }
             super::Reset::Light | super::Reset::None => {
-                super::hygiene::light_reset(&paths)
+                super::hygiene::light_reset(&paths, &custody)
                     .map_err(|error| stage_reset_failure(error, reset))?;
             }
             super::Reset::Full => {
-                super::hygiene::full_reset(&paths)
+                super::hygiene::full_reset(&paths, &custody)
                     .map_err(|error| stage_reset_failure(error, reset))?;
                 record.prepare_digest = None;
                 ensure_slot_repo(&paths, &store)?;
@@ -440,8 +445,7 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
             slot: Some(index),
         },
         paths,
-        _slot_lock: slot_lock,
-        intent_lease,
+        custody,
         _port_lease: port_lease,
         record,
         snapshot,
@@ -558,7 +562,7 @@ pub fn execute_staged(
             env: staged.env.clone(),
             worktree: &staged.source_root,
             on_spawn: &mut on_spawn,
-            intent_lease: Some(&staged.intent_lease),
+            intent_lease: Some(staged.custody.intent_lease()),
         },
     );
     drop(on_spawn);
@@ -596,7 +600,7 @@ pub fn execute_staged(
             detail: format!("job.json persistence failed after spawn: {error}"),
         });
     }
-    match reap_orphan(&staged.paths.job) {
+    match reap_orphan(&staged.paths.job, &staged.custody) {
         Ok(true) => {
             outcome.infra = Some(super::InfraKind::SlotLayout);
             outcome
@@ -657,16 +661,18 @@ pub fn execute_staged(
     match canary_slot_effect(canary, super::ExecPlace::Slot, &outcome, finished) {
         CanarySlotEffect::None => {}
         CanarySlotEffect::Reset => post_reset = super::Reset::Full,
-        CanarySlotEffect::Stamp(at) => staged.record.last_canary_unix_ms = Some(at),
+        CanarySlotEffect::Stamp(at) => {
+            super::hygiene::mark_fresh(&mut staged.record, at, &staged.custody)
+        }
     }
     if post_reset != super::Reset::None {
         outcome.reset = post_reset;
     }
     let reset_result = match post_reset {
-        super::Reset::Light => super::hygiene::light_reset(&staged.paths),
+        super::Reset::Light => super::hygiene::light_reset(&staged.paths, &staged.custody),
         super::Reset::Full => {
             staged.record.prepare_digest = None;
-            super::hygiene::full_reset(&staged.paths)
+            super::hygiene::full_reset(&staged.paths, &staged.custody)
         }
         _ => Ok(()),
     };
@@ -979,20 +985,38 @@ fn live_build_child(path: &Path) -> bool {
 /// Holding this means the slot lock is ours and no live build child holds the
 /// inherited custody lease or a running marker. Staging, reset and collection
 /// all use the same lock pair, so a slot cannot be reset or reused underneath a
-/// process that can still write to it.
-pub(super) struct SlotCustody {
+/// process that can still write to it. Every destructive slot operation borrows
+/// this guard, so an unlocked reset, delete, record unlink or freshness stamp
+/// cannot compile.
+pub struct SlotCustody {
     _slot_lock: LockGuard,
     _lease: LockGuard,
 }
 
 impl SlotCustody {
-    pub(super) fn acquire(paths: &SlotPaths) -> Result<Self, String> {
-        let _slot_lock = slot_lock(&paths.lock).map_err(|error| error.to_string())?;
-        let _lease = acquire_intent_lease(&paths.root)?;
+    /// Acquire custody for collection or an explicit reset: both guards plus a
+    /// live-child probe, so a slot with a surviving build is left alone.
+    pub fn acquire(paths: &SlotPaths) -> Result<Self, String> {
+        let slot_lock = slot_lock(&paths.lock).map_err(|error| error.to_string())?;
+        let lease = acquire_intent_lease(&paths.root)?;
         if live_build_child(&paths.job) {
             return Err("slot still has a live build child".into());
         }
-        Ok(Self { _slot_lock, _lease })
+        Ok(Self::from_guards(slot_lock, lease))
+    }
+
+    /// Adopt the guards taken by staging. Staging reaps an orphaned group
+    /// before publishing its own marker, so it does not re-probe liveness.
+    fn from_guards(slot_lock: LockGuard, lease: LockGuard) -> Self {
+        Self {
+            _slot_lock: slot_lock,
+            _lease: lease,
+        }
+    }
+
+    /// The lease inherited by the build's process tree.
+    fn intent_lease(&self) -> &LockGuard {
+        &self._lease
     }
 }
 
@@ -1158,7 +1182,10 @@ fn mark_job(
     write_marker(path, &marker)?;
     Ok(identity)
 }
-fn reap_orphan(path: &Path) -> std::io::Result<bool> {
+/// Delete a stale job marker. Only a holder of the slot's custody may clear a
+/// running marker (and signal its recorded group), so a live build cannot lose
+/// its marker underneath it.
+fn reap_orphan(path: &Path, _custody: &SlotCustody) -> std::io::Result<bool> {
     let marker: JobMarker = match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(std::io::Error::other)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -1637,16 +1664,23 @@ mod tests {
     fn stale_job_marker_terminates_its_recorded_process_group() {
         use std::os::unix::process::CommandExt;
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("job.json");
+        let paths = SlotPaths::new(&tmp.path().join("home"), "project", 0);
+        std::fs::create_dir_all(&paths.root).unwrap();
+        // Staging adopts the guards before it reaps a recorded group, so the
+        // live-child probe must not stand in the way of this cleanup.
+        let custody = SlotCustody::from_guards(
+            slot_lock(&paths.lock).unwrap(),
+            acquire_intent_lease(&paths.root).unwrap(),
+        );
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .process_group(0)
             .spawn()
             .unwrap();
-        mark_job(&path, child.id(), "test-owner").unwrap();
-        reap_orphan(&path).unwrap();
+        mark_job(&paths.job, child.id(), "test-owner").unwrap();
+        reap_orphan(&paths.job, &custody).unwrap();
         let status = child.wait().unwrap();
         assert!(!status.success());
-        assert!(!path.exists());
+        assert!(!paths.job.exists());
     }
 }

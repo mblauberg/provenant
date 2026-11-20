@@ -395,23 +395,20 @@ pub fn run(command: Build, globals: &Globals) -> u8 {
                 let paths =
                     provenant_run::build::slots::SlotPaths::new(&resolved.home, &key, row.index);
                 let result = (|| -> Result<(), String> {
-                    let dir = provenant_os::fs::Directory::open_anchor(&paths.root)
-                        .map_err(|e| e.to_string())?;
-                    let _lock = dir
-                        .try_lock(
-                            std::ffi::OsStr::new("slot.lock"),
-                            provenant_os::fs::LockMode::Exclusive,
-                        )
+                    // An explicit reset is destructive too: take the same
+                    // custody guard collection uses and hold it through the
+                    // reset and the record write.
+                    let custody = provenant_run::build::slots::SlotCustody::acquire(&paths)
                         .map_err(|e| e.to_string())?;
                     let mut record = provenant_run::build::slots::SlotRecord::read(&paths.record)
                         .map_err(|e| e.to_string())?
                         .ok_or("missing slot record")?;
                     if full {
-                        provenant_run::build::hygiene::full_reset(&paths)
+                        provenant_run::build::hygiene::full_reset(&paths, &custody)
                             .map_err(|e| e.to_string())?;
                         record.prepare_digest = None;
                     } else {
-                        provenant_run::build::hygiene::light_reset(&paths)
+                        provenant_run::build::hygiene::light_reset(&paths, &custody)
                             .map_err(|e| e.to_string())?;
                     }
                     record.health = Default::default();
