@@ -1,12 +1,16 @@
 //! Recovery of an attempt whose guardian is gone but whose published exit still
 //! names unresolved descendants.
 //!
-//! Nothing here signals by bare PID. A named process is ended only when it is
-//! proven to belong to the attempt: its recorded identity (boot, PID and native
-//! start time) still matches the live process, or, for a PID recorded without
-//! a start time, the platform reports it inside the attempt's own sandbox. A
-//! PID that is gone, or now names an unrelated process, needs nothing. A PID
-//! that cannot be proven is left alone and named in the settled exit.
+//! Nothing here signals by bare PID. Candidates are only what the attempt
+//! recorded or marked: the PIDs and identities its exit named, the descendants
+//! its reservation recorded, and live processes carrying the attempt's own
+//! sandbox mark. A candidate is ended only when it is proven to belong to the
+//! attempt: its recorded identity (boot, PID and native start time) still
+//! matches the live process, or the platform reports it inside the attempt's
+//! sandbox. Process group, session, ancestry and working directory grant
+//! nothing. A PID that is gone, or now names an unrelated process, needs
+//! nothing. A named PID that cannot be proven is left alone and named in the
+//! settled exit.
 use super::*;
 
 /// What recovery did with each process the unresolved exit named.
@@ -30,7 +34,7 @@ pub(crate) trait OrphanProbe {
     fn signal(&self, identity: &ProcessIdentity, escalation: bool) -> bool;
 }
 
-struct SystemProbe;
+pub(super) struct SystemProbe;
 impl OrphanProbe for SystemProbe {
     #[cfg(target_os = "macos")]
     fn in_attempt_sandbox(&self, pid: i64, scope: &Scope) -> bool {
@@ -116,20 +120,12 @@ impl Recovery {
         }
 
         let mut report = OrphanReport::default();
-        let mut proven = Vec::new();
-        for &pid in &exit.unresolved_pids {
-            // A new boot ended every process of the old one.
-            let standing = if same_boot {
-                self.stand(pid, &exit, observer, probe)
-            } else {
-                Standing::Gone
-            };
-            match standing {
-                Standing::Gone => {}
-                Standing::Proven(identity) => proven.push(identity),
-                Standing::Unproven => report.unproven.push(pid),
-            }
-        }
+        // A new boot ended every process of the old one.
+        let mut proven = if same_boot {
+            self.candidates(&exit, observer, probe, &mut report.unproven)
+        } else {
+            Vec::new()
+        };
         let mut live = proven.clone();
         for escalation in [false, true] {
             live.retain(|identity| alive(observer, identity));
@@ -148,10 +144,8 @@ impl Recovery {
                 provenant_os::sys::wait_pause(Duration::from_millis(20));
             }
         }
-        report.stopped = proven
-            .into_iter()
-            .filter(|identity| !live.contains(identity))
-            .collect();
+        proven.retain(|identity| !live.contains(identity));
+        report.stopped = proven;
         report.survivors = live;
         if !report.survivors.is_empty() {
             return Ok(report);
@@ -188,7 +182,7 @@ impl Recovery {
             "settlement_evidence".into(),
             serde_json::to_value(evidence).map_err(|_| CustodyError::InvalidRecord)?,
         );
-        let settled = serde_json::to_vec(&document).map_err(|_| CustodyError::InvalidRecord)?;
+        let settled = bounded_exit(document, report.stopped.len())?;
         Publication::require_durable(attempt.atomic_write(
             OsStr::new("process-exit.json"),
             ".exit-",
@@ -207,6 +201,51 @@ impl Recovery {
             ProcessObservation::Absent => Ok(false),
             ProcessObservation::Unknown(_) => Err(CustodyError::Fenced),
         }
+    }
+
+    /// Proven attempt processes among the recorded and sandbox-marked
+    /// candidates. Named PIDs that cannot be proven go to `unproven`. The
+    /// census and sandbox probe run only here, so only for an unresolved exit.
+    fn candidates(
+        &self,
+        exit: &UnresolvedExit,
+        observer: &dyn ProcessObserver,
+        probe: &dyn OrphanProbe,
+        unproven: &mut Vec<i64>,
+    ) -> Vec<ProcessIdentity> {
+        let mut named = std::collections::BTreeSet::new();
+        named.extend(exit.unresolved_pids.iter().copied());
+        named.extend(
+            exit.unresolved_identities
+                .iter()
+                .chain(self.reservation.descendants.iter())
+                .filter(|identity| identity.boot == self.reservation.boot)
+                .map(|identity| identity.pid),
+        );
+        let mut proven = Vec::new();
+        for &pid in &named {
+            match self.stand(pid, exit, observer, probe) {
+                Standing::Gone => {}
+                Standing::Proven(identity) => proven.push(identity),
+                Standing::Unproven if exit.unresolved_pids.contains(&pid) => unproven.push(pid),
+                Standing::Unproven => {}
+            }
+        }
+        // Escapees the guardian never recorded still carry the sandbox mark.
+        if let Ok(census) = observer.census(crate::census::MAX_CENSUS_ENTRIES) {
+            for fact in census.facts() {
+                if fact.zombie
+                    || named.contains(&fact.identity.pid)
+                    || self.reservation.guardian.as_ref() == Some(&fact.identity)
+                {
+                    continue;
+                }
+                if probe.in_attempt_sandbox(fact.identity.pid, &self.reservation.scope) {
+                    proven.push(fact.identity.clone());
+                }
+            }
+        }
+        proven
     }
 
     fn stand(
@@ -244,6 +283,57 @@ impl Recovery {
     }
 }
 
+/// The settled exit with one summary warning for `stopped` processes, kept
+/// within the warning cap and `EXIT_LIMIT` the guardian's `bounded_bytes`
+/// applies; an entry that does not fit is counted in `omitted_warnings`.
+fn bounded_exit(mut document: serde_json::Value, stopped: usize) -> Result<Vec<u8>> {
+    let fields = document
+        .as_object_mut()
+        .ok_or(CustodyError::InvalidRecord)?;
+    let omit = |fields: &mut serde_json::Map<String, serde_json::Value>| {
+        let omitted = fields
+            .get("omitted_warnings")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        fields.insert("omitted_warnings".into(), omitted.saturating_add(1).into());
+    };
+    let mut added = false;
+    if stopped > 0 {
+        let warnings = fields
+            .entry("warnings")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or(CustodyError::InvalidRecord)?;
+        if warnings.len() < 24 {
+            warnings.push(format!("killed {stopped} surviving descendants").into());
+            added = true;
+        } else {
+            omit(fields);
+        }
+    }
+    let bytes = serde_json::to_vec(&document).map_err(|_| CustodyError::InvalidRecord)?;
+    if bytes.len() as u64 <= EXIT_LIMIT {
+        return Ok(bytes);
+    }
+    if added {
+        let fields = document
+            .as_object_mut()
+            .ok_or(CustodyError::InvalidRecord)?;
+        if let Some(warnings) = fields
+            .get_mut("warnings")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            warnings.pop();
+        }
+        omit(fields);
+        let bytes = serde_json::to_vec(&document).map_err(|_| CustodyError::InvalidRecord)?;
+        if bytes.len() as u64 <= EXIT_LIMIT {
+            return Ok(bytes);
+        }
+    }
+    Err(CustodyError::InvalidRecord)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,12 +363,24 @@ mod tests {
     }
 
     /// A fake host. TERM ends every process except those marked stubborn.
+    /// `continuing` processes carry another attempt's sandbox mark; `in_worktree`
+    /// processes merely have their working directory in the lane worktree,
+    /// which recovery never reads.
     #[derive(Default)]
     struct World {
         live: RefCell<BTreeMap<i64, ProcessIdentity>>,
         sandboxed: Vec<i64>,
+        continuing: Vec<i64>,
+        in_worktree: Vec<i64>,
         stubborn: Vec<i64>,
         signals: RefCell<Vec<(i64, bool)>>,
+    }
+
+    fn successor() -> Scope {
+        Scope {
+            attempt: provenant_core::AttemptId::from_bytes([3; 16]),
+            generation: 1,
+        }
     }
     impl ProcessObserver for World {
         fn boot_identity(&self) -> std::result::Result<String, CensusError> {
@@ -296,13 +398,28 @@ mod tests {
                 None => ProcessObservation::Absent,
             }
         }
-        fn census(&self, _: usize) -> std::result::Result<Census, CensusError> {
-            Census::from_observations([], [], [], true, false, 1)
+        fn census(&self, bound: usize) -> std::result::Result<Census, CensusError> {
+            let facts: Vec<_> = self
+                .live
+                .borrow()
+                .values()
+                .map(|identity| ProcessFact {
+                    identity: identity.clone(),
+                    parent_pid: 1,
+                    zombie: false,
+                    cpu_micros: None,
+                    command: None,
+                })
+                .collect();
+            Census::from_observations(facts, [], [], true, false, bound)
         }
     }
     impl OrphanProbe for World {
-        fn in_attempt_sandbox(&self, pid: i64, _: &Scope) -> bool {
-            self.sandboxed.contains(&pid)
+        fn in_attempt_sandbox(&self, pid: i64, asked: &Scope) -> bool {
+            if *asked == successor() {
+                return self.continuing.contains(&pid);
+            }
+            *asked == scope() && self.sandboxed.contains(&pid)
         }
         fn signal(&self, target: &ProcessIdentity, escalation: bool) -> bool {
             if self.live.borrow().get(&target.pid) != Some(target) {
@@ -493,6 +610,107 @@ mod tests {
         assert_eq!(report.survivors, vec![tail]);
         assert_eq!(settled(&f)?["unresolved_cleanup"], true);
         assert!(f.recovery.reservation.unresolved_cleanup);
+        Ok(())
+    }
+
+    #[test]
+    fn a_recorded_descendant_the_exit_did_not_name_is_reaped() -> TestResult {
+        // The exit names 16 identities; the reservation records more.
+        let tail = identity(84400, 7);
+        let mut f = fixture(&[], std::slice::from_ref(&tail))?;
+        let world = World::default();
+        world.live.borrow_mut().insert(84400, tail.clone());
+        let report = run(&mut f, &world)?;
+        assert_eq!(report.stopped, vec![tail]);
+        assert_eq!(world.signals.borrow().as_slice(), [(84400, false)]);
+        let exit = settled(&f)?;
+        assert_eq!(exit["settlement_evidence"], "orphans_ended");
+        assert_eq!(
+            exit["warnings"],
+            serde_json::json!(["kept", "killed 1 surviving descendants"])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_sandboxed_escapee_found_only_by_census_is_reaped() -> TestResult {
+        let mut f = fixture(&[], &[])?;
+        let world = World {
+            sandboxed: vec![5150],
+            ..World::default()
+        };
+        world.live.borrow_mut().insert(5150, identity(5150, 4));
+        assert_eq!(run(&mut f, &world)?.stopped, vec![identity(5150, 4)]);
+        assert_eq!(world.signals.borrow().as_slice(), [(5150, false)]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_reused_recorded_pid_is_left_alone() -> TestResult {
+        let mut f = fixture(&[], &[identity(84401, 7)])?;
+        let world = World::default();
+        world.live.borrow_mut().insert(84401, identity(84401, 8));
+        assert_eq!(run(&mut f, &world)?, OrphanReport::default());
+        assert!(world.signals.borrow().is_empty());
+        assert_eq!(settled(&f)?["warnings"], serde_json::json!(["kept"]));
+        Ok(())
+    }
+
+    #[test]
+    fn an_unrecorded_process_in_the_worktree_is_untouched() -> TestResult {
+        let mut f = fixture(&[], &[])?;
+        // Same group and session as the provider, cwd in the worktree: none of
+        // it grants signal authority.
+        let shell = ProcessIdentity {
+            group_id: 101,
+            session_id: 100,
+            ..identity(6000, 1)
+        };
+        let world = World {
+            in_worktree: vec![6000],
+            ..World::default()
+        };
+        world.live.borrow_mut().insert(6000, shell);
+        assert!(world.in_worktree.contains(&6000));
+        assert_eq!(run(&mut f, &world)?, OrphanReport::default());
+        assert!(world.signals.borrow().is_empty());
+        assert_eq!(settled(&f)?["settlement_evidence"], "orphans_ended");
+        Ok(())
+    }
+
+    #[test]
+    fn a_continuing_attempt_is_untouched() -> TestResult {
+        let mut f = fixture(&[], &[])?;
+        let world = World {
+            continuing: vec![7000],
+            ..World::default()
+        };
+        world.live.borrow_mut().insert(7000, identity(7000, 1));
+        assert!(world.in_attempt_sandbox(7000, &successor()));
+        assert_eq!(run(&mut f, &world)?, OrphanReport::default());
+        assert!(world.signals.borrow().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn many_reaped_processes_leave_one_bounded_warning() -> TestResult {
+        let mut f = fixture(&[], &[])?;
+        let pids: Vec<i64> = (20_000..20_200).collect();
+        let world = World {
+            sandboxed: pids.clone(),
+            ..World::default()
+        };
+        for &pid in &pids {
+            world.live.borrow_mut().insert(pid, identity(pid, 1));
+        }
+        assert_eq!(run(&mut f, &world)?.stopped.len(), 200);
+        let bytes = std::fs::read(f.path.join("process-exit.json"))?;
+        assert!(bytes.len() as u64 <= EXIT_LIMIT);
+        let exit: serde_json::Value = serde_json::from_slice(&bytes)?;
+        assert_eq!(
+            exit["warnings"],
+            serde_json::json!(["kept", "killed 200 surviving descendants"])
+        );
         Ok(())
     }
 

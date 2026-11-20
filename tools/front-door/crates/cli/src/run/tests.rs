@@ -826,11 +826,8 @@ fn reconcile_reports_orphan_reservation_issues() -> Result<(), Box<dyn std::erro
                 },
                 edge,
             );
-            assert_eq!(reply.result.status, Status::Failed, "{}", reply.human);
-            assert_eq!(
-                reply.result.error.as_ref().ok_or("missing error")?.code,
-                "RECONCILE_INCOMPLETE"
-            );
+            assert_eq!(reply.result.status, Status::Ok, "{}", reply.human);
+            assert!(reply.human.contains("warning:"), "{}", reply.human);
             assert_eq!(reply.result.data["runs"], json!([]));
             assert_eq!(
                 reply.result.data["writer_reservation_errors"][0]["reservation"],
@@ -1085,9 +1082,25 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                         .atomic_write(
                             OsStr::new("writer-objects.json"),
                             ".test-",
-                            &serde_json::to_vec(
-                                &json!({"schema_version":1,"candidate":"candidate-0"}),
-                            )?,
+                            &serde_json::to_vec(&{
+                                use std::os::unix::fs::MetadataExt as _;
+                                let identity = |name: &str| -> Result<_, Box<dyn std::error::Error>> {
+                                    let metadata = std::fs::metadata(
+                                        attempt_path.join("tmp/candidate-0").join(name),
+                                    )?;
+                                    Ok(json!({"device": metadata.dev(), "inode": metadata.ino()}))
+                                };
+                                let scratch = std::fs::metadata(attempt_path.join("tmp/candidate-0"))?;
+                                json!({
+                                    "schema_version": 4,
+                                    "candidate": "candidate-0",
+                                    "identities": {
+                                        "scratch": {"device": scratch.dev(), "inode": scratch.ino()},
+                                        "refs": identity("git-common")?,
+                                        "objects": identity("git-objects")?,
+                                    },
+                                })
+                            })?,
                             PublishMode::NoReplace,
                         )?
                         .require_durable()?;
@@ -1210,9 +1223,10 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                         json["data"]["runs"][0]["attempts"][0]["found"]["phase"],
                         "publish"
                     );
+                    // An unstamped journal reason is still past evidence.
                     assert_eq!(
                         json["data"]["runs"][0]["attempts"][0]["found"]["blocking_reason"],
-                        "lane Git import failed"
+                        "recorded earlier: lane Git import failed"
                     );
                     assert!(reported.human.contains("lane Git import failed"));
                 }
@@ -1308,9 +1322,14 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                 let state = Directory::open_anchor(edge.roots.state.as_path())?;
                 let later =
                     WallTime::from_micros(clock.wall_now()?.as_micros() + 90 * 86_400_000_000)?;
-                let collected = session
-                    .store
-                    .gc_provider_state(&state, 7, later, false, &call)?;
+                let collected = session.store.gc_provider_state(
+                    &state,
+                    7,
+                    later,
+                    false,
+                    &call,
+                    &provenant_run::RetentionScan::default(),
+                )?;
                 assert!(collected.attempt_tmp.is_empty());
                 assert!(
                     attempt_path
@@ -1340,3 +1359,24 @@ mod provider_tests;
 mod reporting_tests;
 #[path = "tests_submission.rs"]
 mod submission_tests;
+
+#[test]
+fn one_config_deprecation_notice_gives_one_warning_across_channels() {
+    let notice = "[features].multi_agent is deprecated. Use [agents].enabled=false instead.";
+    let events = [ProviderEvent::Warning {
+        message: notice.into(),
+        source: Some("config.toml".into()),
+    }];
+    let stderr = format!(
+        "2026-11-19T01:02:03Z  WARN codex_core::config: /home/u/.codex/config.toml: {notice}\nunrelated\n"
+    );
+    let warnings = config_notice_warnings(&events, stderr.as_bytes(), true);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains(notice) && warnings[0].contains("config.toml"));
+    // The adapter decides whether stderr is read at all.
+    assert!(config_notice_warnings(&[], stderr.as_bytes(), false).is_empty());
+    // Stderr alone still gives one warning, without the log prefix.
+    let alone = config_notice_warnings(&[], stderr.as_bytes(), true);
+    assert_eq!(alone.len(), 1);
+    assert!(!alone[0].contains("WARN codex_core"), "{alone:?}");
+}

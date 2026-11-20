@@ -1270,7 +1270,7 @@ fn missing_output_is_not_found_only_after_terminal() -> TestResult {
     )?;
     assert_eq!(
         String::from_utf8(result.bytes)?,
-        Outcome::Rejected.diagnostic_reason()
+        TerminalCause::Unrecorded.detail()
     );
     Ok(())
 }
@@ -1775,22 +1775,13 @@ fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
 }
 
 #[test]
-fn invalid_or_stale_process_checkpoint_has_unknown_silence() -> TestResult {
+fn process_checkpoint_for_another_scope_is_refused() -> TestResult {
     for checkpoint in [
         serde_json::json!({
             "schema_version": 1,
-            "scope": {"run": AttemptId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 9},
-            "silent": true,
-            "silent_for_ms": 1_800_000
+            "scope": {"run": AttemptId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 9}
         }),
-        serde_json::json!({"schema_version": 1, "scope": "invalid", "silent": true}),
-        serde_json::json!({
-            "schema_version": 1,
-            "scope": {"run": AttemptId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 0},
-            "observed_at": WallTime::from_micros(1_000_000)?,
-            "silent": true,
-            "silent_for_ms": 1_800_000
-        }),
+        serde_json::json!({"schema_version": 1, "scope": "invalid"}),
     ] {
         let temp = tempfile::tempdir()?;
         let context = context(temp.path())?;
@@ -1809,39 +1800,14 @@ fn invalid_or_stale_process_checkpoint_has_unknown_silence() -> TestResult {
         )?;
         let id = input.attempt_id;
         assert!(
-            store
+            !store
                 .record_observed(id, &call)?
-                .provider_silent_for_ms
+                .process_observation_valid
                 .0
-                .is_none()
         );
-        // Recovery and mutation reads still refuse a checkpoint for another scope.
-        if checkpoint["observed_at"].is_null() {
-            assert!(store.record(id, &call).is_err());
-        }
+        // Recovery and mutation reads refuse a checkpoint for another scope.
+        assert!(store.record(id, &call).is_err());
     }
-    Ok(())
-}
-
-#[test]
-fn process_checkpoint_freshness_allows_one_second_of_clock_skew() -> TestResult {
-    let now = WallTime::from_micros(10_000_000)?;
-    assert!(crate::reader::process_observation_fresh(
-        WallTime::from_micros(11_000_000)?,
-        now
-    ));
-    assert!(!crate::reader::process_observation_fresh(
-        WallTime::from_micros(11_000_001)?,
-        now
-    ));
-    assert!(crate::reader::process_observation_fresh(
-        WallTime::from_micros(5_000_000)?,
-        now
-    ));
-    assert!(!crate::reader::process_observation_fresh(
-        WallTime::from_micros(4_999_999)?,
-        now
-    ));
     Ok(())
 }
 
@@ -3111,7 +3077,11 @@ fn done_rows_are_pruned_and_pending_rows_are_kept() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let input = settle_one(&store, &call)?;
     let id = input.attempt_id;
-    store.prune_reactions(i64::MAX, &call)?;
+    assert!(
+        store
+            .prune_reactions(i64::MAX, &call, &crate::RetentionScan::default())?
+            .is_none()
+    );
     assert!(store.reaction(id, &call)?.is_some());
     store.drain_reactions(input.attempt_id, &clock, &cancel, &mut |reaction, _| {
         reaction.graph_done = true;
@@ -3121,7 +3091,11 @@ fn done_rows_are_pruned_and_pending_rows_are_kept() -> TestResult {
         reaction.observation_done = true;
         Ok(())
     })?;
-    store.prune_reactions(i64::MAX, &call)?;
+    assert!(
+        store
+            .prune_reactions(i64::MAX, &call, &crate::RetentionScan::default())?
+            .is_none()
+    );
     assert!(store.reaction(id, &call)?.is_none());
     Ok(())
 }
@@ -3475,9 +3449,25 @@ fn provider_state_collection_uses_configured_logs_age() -> TestResult {
         .execute("UPDATE reactions SET settled_at=100", [])?;
     let directory = provenant_os::fs::Directory::open_anchor(context.state_root.as_path())?;
     let now = provenant_core::WallTime::from_micros((100 + 10 * 86_400) * 1_000_000)?;
-    store.gc_provider_state_with_logs(&directory, 7, 20, now, false, &call)?;
+    store.gc_provider_state_with_logs(
+        &directory,
+        7,
+        20,
+        now,
+        false,
+        &call,
+        &crate::RetentionScan::default(),
+    )?;
     assert!(store.reaction(id, &call)?.is_some());
-    store.gc_provider_state_with_logs(&directory, 7, 5, now, false, &call)?;
+    store.gc_provider_state_with_logs(
+        &directory,
+        7,
+        5,
+        now,
+        false,
+        &call,
+        &crate::RetentionScan::default(),
+    )?;
     assert!(store.reaction(id, &call)?.is_none());
     Ok(())
 }

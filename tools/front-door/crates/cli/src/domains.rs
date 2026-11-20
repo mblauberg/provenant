@@ -54,6 +54,8 @@ pub struct LandSettings {
     pub batch_wait_seconds: u64,
     pub approval_sources: Vec<ApprovalSource>,
     pub approval_tier: ApprovalTier,
+    /// Independent approvals may cross these narrowly classified deltas.
+    pub approval_carry: Vec<ApprovalCarry>,
     pub candidate_ref_prefix: String,
     pub max_rebuilds: u64,
     pub publish_settle_seconds: u64,
@@ -93,6 +95,8 @@ pub struct LandOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_tier: Option<ApprovalTier>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_carry: Option<Vec<ApprovalCarry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub candidate_ref_prefix: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_rebuilds: Option<u64>,
@@ -114,6 +118,22 @@ pub struct LandOverride {
     pub budget: Option<BudgetOverride>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_gate: Option<LocalGateOverride>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalCarry {
+    CleanMerge,
+    Format,
+}
+
+impl std::fmt::Display for ApprovalCarry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CleanMerge => write!(f, "clean_merge"),
+            Self::Format => write!(f, "format"),
+        }
+    }
 }
 
 /// Last matching target pattern wins, after project and before tier overrides.
@@ -315,6 +335,7 @@ impl Default for LandSettings {
             batch_wait_seconds: 0,
             approval_sources: vec![ApprovalSource::ProvenantReview, ApprovalSource::Forge],
             approval_tier: ApprovalTier::Auto,
+            approval_carry: vec![ApprovalCarry::CleanMerge, ApprovalCarry::Format],
             candidate_ref_prefix: "land/".into(),
             max_rebuilds: 3,
             publish_settle_seconds: 30,
@@ -471,6 +492,7 @@ batch_size = 8
 batch_wait_seconds = 0
 approval_sources = ["provenant_review", "forge"]
 approval_tier = "auto"
+approval_carry = ["clean_merge", "format"]
 candidate_ref_prefix = "land/"
 max_rebuilds = 3
 publish_settle_seconds = 30
@@ -524,6 +546,9 @@ timeout_seconds = 60
     FieldMetadata::new("land.batch_wait_seconds", "int"),
     FieldMetadata::new("land.approval_sources", "array"),
     FieldMetadata::enumeration("land.approval_tier", TIERS),
+    FieldMetadata::new("land.approval_carry", "string_list"),
+    FieldMetadata::new("land.projects.{project}.approval_carry", "string_list"),
+    FieldMetadata::new("land.tiers.{tier}.approval_carry", "string_list"),
     FieldMetadata::new("land.candidate_ref_prefix", "string"),
     FieldMetadata::new("land.max_rebuilds", "int"),
     FieldMetadata::new("land.publish_settle_seconds", "int"),
@@ -931,10 +956,20 @@ mod tests {
             (max_targets.min, max_targets.max, &max_targets.default),
             (Some(1), Some(1024), &json!(64))
         );
+        let pr_complete = field("domains.wait.pr_complete_timeout_seconds");
+        assert_eq!(
+            (pr_complete.min, pr_complete.max, &pr_complete.default),
+            (Some(1), Some(u32::MAX as i64), &json!(3600))
+        );
         let pr_read = field("domains.wait.pr_read_timeout_seconds");
         assert_eq!(
             (pr_read.min, pr_read.max, &pr_read.default),
             (Some(1), Some(600), &json!(60))
+        );
+        let grace = field("domains.wait.actions_grace_seconds");
+        assert_eq!(
+            (grace.min, grace.max, &grace.default),
+            (Some(0), Some(600), &json!(60))
         );
         let markers = field("domains.run.push_conflict_markers");
         assert_eq!((markers.kind, &markers.default), ("bool", &json!(true)));

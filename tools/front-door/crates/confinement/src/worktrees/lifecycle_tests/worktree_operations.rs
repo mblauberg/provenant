@@ -202,6 +202,16 @@ fn prune_treats_a_prunable_branch_as_not_checked_out() -> Result<(), Box<dyn Err
         &branch,
         Some(&fixture.root)
     )?);
+    // Even an absent checkout cannot justify deleting its branch while an
+    // occupant still holds its worktree slot.
+    let tip = ref_tip(&context, &branch, &cancel())?.ok_or("stale branch tip")?;
+    let held = cache_writer_guard(context.project_state, &stale.path)
+        .map_err(|occupancy| format!("writer slot unavailable: {occupancy:?}"))?;
+    assert_eq!(
+        delete_ref_leased(&context, &branch, tip, &cancel())?,
+        RefDeletion::CheckedOut
+    );
+    drop(held);
     let integration = common_integration(&context, &cancel())?.0;
     let result = remove_with_port(
         &test_context,
@@ -411,7 +421,7 @@ fn create_refuses_aliases_of_local_and_remote_branches() -> Result<(), Box<dyn E
 
 #[test]
 fn create_list_remove_deletes_landed_branch_and_refuses_primary() -> Result<(), Box<dyn Error>> {
-    // Spec: docs/specs/supervisor.md#one-writer-removal-never-forces
+    // Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
     let fixture = Fixture::new()?;
     fixture.run(&["branch", "-M", "main"])?;
     let test_context = TestContext::new(&fixture)?;
@@ -481,7 +491,7 @@ fn create_list_remove_deletes_landed_branch_and_refuses_primary() -> Result<(), 
 #[test]
 fn named_removal_reports_unproven_landing_without_claiming_identity_changed()
 -> Result<(), Box<dyn Error>> {
-    // Spec: docs/specs/supervisor.md#one-writer-removal-never-forces
+    // Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
@@ -978,6 +988,35 @@ fn explicit_discard_publishes_recoverable_data_before_removing_work() -> Result<
         &["commit", "--allow-empty", "-m", "unique work"],
     )?;
     fs::write(created.path.join("private-note"), b"untracked evidence")?;
+    fs::write(
+        created.path.join(".gitignore"),
+        b"target/\nignored-parent/\n",
+    )?;
+    fs::create_dir_all(created.path.join("ignored-parent/target"))?;
+    fs::write(
+        created.path.join("ignored-parent/target/hidden"),
+        b"nested build artifact",
+    )?;
+    fs::create_dir_all(created.path.join("link-cache"))?;
+    std::os::unix::fs::symlink("missing", created.path.join("link-cache/CACHEDIR.TAG"))?;
+    fs::write(
+        created.path.join("link-cache/hidden"),
+        b"linked tag artifact",
+    )?;
+    fs::create_dir_all(created.path.join("target"))?;
+    fs::write(
+        created.path.join("target/build.bin"),
+        b"build artifact to exclude",
+    )?;
+    fs::create_dir_all(created.path.join("cachedir"))?;
+    fs::write(
+        created.path.join("cachedir/CACHEDIR.TAG"),
+        b"Signature: 8a477f597d28d172789f06886806bc55\n",
+    )?;
+    fs::write(
+        created.path.join("cachedir/cached.bin"),
+        b"cached artifact to exclude",
+    )?;
     let result = remove_with_retirement(
         &context,
         WorktreeRemove::Name {
@@ -993,11 +1032,30 @@ fn explicit_discard_publishes_recoverable_data_before_removing_work() -> Result<
     )?;
     let archive = result.archives.first().ok_or("discard had no archive")?;
     assert!(archive.path.join("tip.bundle").is_file());
+    assert!(archive.path.join("worktree.patch").is_file());
+    assert!(archive.path.join("index.patch").is_file());
+    assert!(archive.path.join("status.porcelain-v2.z").is_file());
     assert!(archive.path.join("manifest.json").is_file());
     let tar = fs::read(archive.path.join("untracked.tar"))?;
     assert!(
         tar.windows(b"untracked evidence".len())
             .any(|bytes| bytes == b"untracked evidence")
+    );
+    assert!(
+        !tar.windows(b"build artifact to exclude".len())
+            .any(|bytes| bytes == b"build artifact to exclude")
+    );
+    assert!(
+        !tar.windows(b"cached artifact to exclude".len())
+            .any(|bytes| bytes == b"cached artifact to exclude")
+    );
+    assert!(
+        !tar.windows(b"nested build artifact".len())
+            .any(|bytes| bytes == b"nested build artifact")
+    );
+    assert!(
+        !tar.windows(b"linked tag artifact".len())
+            .any(|bytes| bytes == b"linked tag artifact")
     );
     let record = retirement
         .retirement_for_subject(owner.binding.project_id(), &worktree_subject)?

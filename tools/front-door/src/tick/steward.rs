@@ -396,7 +396,7 @@ mod tests {
         });
         assert_eq!(result.state, "failed");
         assert_eq!(result.error.as_deref(), Some("receipt unavailable"));
-        let saved: GcResult = serde_json::from_slice(
+        let saved: TaskResult = serde_json::from_slice(
             &directory
                 .read_bounded("result.json".as_ref(), 64 * 1024)
                 .unwrap(),
@@ -528,7 +528,7 @@ mod tests {
             .is_err()
         );
         assert!(queue(&directory, "project", 60, &clock, |_| Ok(false), launch).is_err());
-        let saved: GcResult = serde_json::from_slice(
+        let saved: TaskResult = serde_json::from_slice(
             &directory
                 .read_bounded("result.json".as_ref(), 65536)
                 .unwrap(),

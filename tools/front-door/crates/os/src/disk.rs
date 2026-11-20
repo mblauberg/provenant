@@ -11,6 +11,7 @@ use std::{
 };
 
 struct WalkBudget {
+    cancel: Option<provenant_core::CancelToken>,
     remaining: usize,
     started: MonoTime,
     reported: bool,
@@ -33,6 +34,7 @@ impl WalkBudget {
     fn new(remaining: usize, duration: Duration, clock: Arc<dyn Clock + Send + Sync>) -> Self {
         let started = clock.mono_now();
         Self {
+            cancel: None,
             remaining,
             started,
             reported: false,
@@ -42,7 +44,10 @@ impl WalkBudget {
     }
 
     fn exhausted(&self) -> bool {
-        self.remaining == 0
+        self.cancel
+            .as_ref()
+            .is_some_and(provenant_core::CancelToken::is_cancelled)
+            || self.remaining == 0
             || self
                 .clock
                 .mono_now()
@@ -51,7 +56,18 @@ impl WalkBudget {
                 >= self.duration_micros
     }
 
-    fn reached_limit(&mut self, report: &mut DiskReport, path: &Path) -> bool {
+    fn reached_limit(
+        &mut self,
+        report: &mut DiskReport,
+        path: &Path,
+        keep_going: &dyn Fn() -> bool,
+    ) -> bool {
+        if !keep_going() {
+            self.remaining = 0;
+            if let Some(cancel) = &self.cancel {
+                cancel.cancel();
+            }
+        }
         if !self.exhausted() {
             return false;
         }
@@ -243,6 +259,11 @@ pub struct DiskReport {
 }
 
 impl DiskReport {
+    /// Share an enclosing operation's cancellation across recursive measurements.
+    pub fn with_cancellation(mut self, cancel: provenant_core::CancelToken) -> Self {
+        self.walk_budget.cancel = Some(cancel);
+        self
+    }
     pub fn new(path: PathBuf, available_bytes: u64) -> Self {
         Self {
             schema_version: 1,
@@ -318,7 +339,19 @@ impl DiskReport {
         name: &OsStr,
         path: &Path,
     ) -> Option<usize> {
-        self.measure_node(class, parent, name, path, false)
+        self.measure_node(class, parent, name, path, false, &|| true)
+    }
+
+    /// Measure with an enclosing cooperative deadline checked at every entry.
+    pub fn measure_at_while(
+        &mut self,
+        class: &str,
+        parent: &Directory,
+        name: &OsStr,
+        path: &Path,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<usize> {
+        self.measure_node(class, parent, name, path, false, keep_going)
     }
 
     /// Add a disjoint inventory part to a caller-owned aggregate. Tagged caches
@@ -343,6 +376,7 @@ impl DiskReport {
             false,
             0,
             &mut budget,
+            &|| true,
         );
         self.walk_budget = budget;
     }
@@ -366,7 +400,7 @@ impl DiskReport {
         name: &OsStr,
         path: &Path,
     ) -> Option<usize> {
-        self.measure_node("lane_cache", parent, name, path, true)
+        self.measure_node("lane_cache", parent, name, path, true, &|| true)
     }
 
     fn measure_with(&mut self, class: &str, path: &Path, lane: bool) -> Option<usize> {
@@ -381,7 +415,7 @@ impl DiskReport {
                 return None;
             }
         };
-        self.measure_node(class, &parent, name, path, lane)
+        self.measure_node(class, &parent, name, path, lane, &|| true)
     }
 
     fn measure_node(
@@ -391,6 +425,7 @@ impl DiskReport {
         name: &OsStr,
         path: &Path,
         lane: bool,
+        keep_going: &dyn Fn() -> bool,
     ) -> Option<usize> {
         let comparison = self.comparison_path(path)?;
         let mut entry = DiskEntry {
@@ -411,6 +446,7 @@ impl DiskReport {
             lane,
             0,
             &mut budget,
+            keep_going,
         );
         self.walk_budget = budget;
         if !observed {
@@ -478,6 +514,7 @@ impl DiskReport {
         lane: bool,
         depth: usize,
         budget: &mut WalkBudget,
+        keep_going: &dyn Fn() -> bool,
     ) -> bool {
         if let Some((newest, complete)) = comparison
             .ancestors()
@@ -490,7 +527,7 @@ impl DiskReport {
             }
             return true;
         }
-        if budget.reached_limit(self, path) {
+        if budget.reached_limit(self, path, keep_going) {
             return false;
         }
         budget.remaining -= 1;
@@ -538,6 +575,7 @@ impl DiskReport {
                 false,
                 depth,
                 budget,
+                keep_going,
             );
             self.entries.push(cache);
         } else {
@@ -552,6 +590,7 @@ impl DiskReport {
                 lane,
                 depth,
                 budget,
+                keep_going,
             );
         }
         true
@@ -570,6 +609,7 @@ impl DiskReport {
         lane: bool,
         depth: usize,
         budget: &mut WalkBudget,
+        keep_going: &dyn Fn() -> bool,
     ) {
         let private = match parent.private_size_at(name) {
             Ok(private) => private,
@@ -606,7 +646,7 @@ impl DiskReport {
                     break;
                 }
             };
-            if budget.reached_limit(self, path) {
+            if budget.reached_limit(self, path, keep_going) {
                 break;
             }
             let before = entry.unshared_bytes;
@@ -619,6 +659,7 @@ impl DiskReport {
                 lane,
                 depth + 1,
                 budget,
+                keep_going,
             );
             if lane && depth == 0 {
                 let bytes = entry.unshared_bytes.saturating_sub(before);
@@ -682,6 +723,66 @@ impl DiskReport {
 
 #[cfg(test)]
 mod tests {
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn enclosing_cancellation_stops_all_later_measurements()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = tempfile::tempdir()?;
+        let first = fixture.path().join("first");
+        let second = fixture.path().join("second");
+        std::fs::write(&first, vec![1; 8192])?;
+        std::fs::write(&second, vec![2; 8192])?;
+        let cancel = provenant_core::CancelToken::new();
+        let mut report =
+            super::DiskReport::new(fixture.path().into(), 0).with_cancellation(cancel.clone());
+        assert!(report.measure("sample", &first).is_some());
+        let observed = report.entries[0].allocated_bytes;
+        cancel.cancel();
+        assert!(report.measure("sample", &second).is_none());
+        assert!(report.traversal_exhausted());
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].allocated_bytes, observed);
+        assert!(!report.errors.is_empty());
+        assert_eq!(std::fs::read(second)?, vec![2; 8192]);
+        Ok(())
+    }
+
+    // Spec: docs/specs/disk.md#bounded-sweeps
+    #[test]
+    fn callback_budget_reaches_recursive_measurement_without_a_timer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = tempfile::tempdir()?;
+        let tree = fixture.path().join("tree");
+        std::fs::create_dir(&tree)?;
+        for n in 0..256 {
+            std::fs::write(tree.join(format!("file-{n}")), vec![1; 8192])?;
+        }
+        let clock = super::ManualClock::default();
+        let keep_going = || {
+            clock.advance(1);
+            provenant_core::Clock::mono_now(&clock).as_micros() < 16
+        };
+        let mut report = super::DiskReport::new(fixture.path().into(), 0);
+        let parent = crate::fs::Directory::open_anchor(fixture.path())?;
+        let index = report
+            .measure_at_while(
+                "sample",
+                &parent,
+                std::ffi::OsStr::new("tree"),
+                &tree,
+                &keep_going,
+            )
+            .ok_or("root observation")?;
+        assert!(report.traversal_exhausted());
+        assert!(!report.errors.is_empty());
+        assert!(
+            report.entries[index].allocated_bytes > 0
+                && report.entries[index].allocated_bytes < 256 * 8192
+        );
+        assert_eq!(std::fs::read_dir(tree)?.count(), 256);
+        Ok(())
+    }
+
     #[test]
     fn measurement_budget_is_shared_across_paths() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = tempfile::tempdir()?;
@@ -753,6 +854,7 @@ mod tests {
             false,
             0,
             &mut budget,
+            &|| true,
         ));
         let partial_bytes = entry.allocated_bytes;
         assert!(partial_bytes > 0);
@@ -765,7 +867,8 @@ mod tests {
             &mut entry,
             false,
             0,
-            &mut budget
+            &mut budget,
+            &|| true,
         ));
         assert!(entry.allocated_bytes >= partial_bytes);
         assert!(
@@ -819,6 +922,7 @@ mod tests {
             false,
             0,
             &mut WalkBudget::default(),
+            &|| true,
         );
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(entry.allocated_bytes, 0);

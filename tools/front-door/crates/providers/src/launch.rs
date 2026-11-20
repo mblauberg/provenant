@@ -898,13 +898,11 @@ pub(crate) fn private_git_objects(
         return Ok(());
     }
     let scratch = &input.confined.permissions().scratch.path;
-    let private = scratch.join("git-common");
+    // Every provider writes to its attempt's Git metadata. Settlement imports
+    // and compare-and-swaps that private history into the host worktree.
+    let git_common = scratch.join("git-common");
+    let git_objects = scratch.join("git-objects");
     let config = scratch.join("gitconfig");
-    let identity = provenant_os::sys::git_global_identity(input.provenant.git);
-    let identity = identity
-        .iter()
-        .filter(|(key, _)| matches!(key.to_str(), Some("GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL")))
-        .collect::<Vec<_>>();
     // Git normally reads the XDG file before ~/.gitconfig. An explicit host
     // override replaces both, just as it does for Git itself.
     let globals = if let Some(path) = (input.host_var)("GIT_CONFIG_GLOBAL") {
@@ -917,6 +915,9 @@ pub(crate) fn private_git_objects(
         vec![xdg.join("git/config"), input.home.join(".gitconfig")]
     };
     let mut config_text = String::new();
+    // Every lane, sandboxed or not, reads the host global configuration in
+    // full, as Git run by hand would. The lane's token helper is added on top
+    // below; the host files themselves are not copied or rewritten.
     for path in globals.iter().filter(|path| path.is_file()) {
         // Both Git's include and the exact sandbox grant must name the same
         // physical file: anchor validation rejects symlink spellings.
@@ -948,34 +949,14 @@ pub(crate) fn private_git_objects(
         spec.profile.spec.runtime_reads.push(exact(&path));
     }
     config_text.push_str("[user]\n\tuseConfigOnly = true\n");
-    for (key, value) in &identity {
-        let name = match key.to_str() {
-            Some("GIT_AUTHOR_NAME") => "name",
-            Some("GIT_AUTHOR_EMAIL") => "email",
-            _ => continue,
-        };
-        let value = value.to_str().ok_or_else(|| {
-            input.policy.boundary_error(
-                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
-                Facts::violation("the selected Git identity cannot be represented in the private writer Git view"),
-                ProviderError::InvalidPath,
-            )
-        })?;
-        if value.chars().any(char::is_control) {
-            return Err(input.policy.boundary_error(
-                "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
-                Facts::violation("the selected Git identity contains control characters"),
-                ProviderError::InvalidPath,
-            ));
-        }
-        config_text.push_str(&format!("\t{name} = {}\n", git_config_quote(value)));
-    }
     spec.setup.push(SetupStep::WriteFile {
         path: config.clone(),
         bytes: config_text.into_bytes(),
     });
+    // Only a sandboxed lane gets the lane's own token helper; a host-native
+    // lane keeps the host's own Git environment. The entries are appended on
+    // top of the host configuration so pushing keeps working.
     if input.sandboxed() {
-        spec.env.retain(|(key, _)| key != "GIT_CONFIG_NOSYSTEM");
         crate::lane::install_token_config(&mut spec.env).map_err(|error| {
             input.policy.boundary_error(
                 "LAUNCH_PRIVATE_GIT_OBJECTS_GIT_ISOLATION",
@@ -1010,13 +991,11 @@ pub(crate) fn private_git_objects(
         .filter(|root| input.cwd.starts_with(root))
         .unwrap_or(input.cwd);
     let mut bound = vec![
-        ("GIT_DIR".into(), private.clone().into()),
-        ("GIT_COMMON_DIR".into(), private.into()),
+        ("GIT_DIR".into(), git_common.clone().into()),
+        ("GIT_COMMON_DIR".into(), git_common.clone().into()),
         ("GIT_WORK_TREE".into(), worktree.into()),
-        (
-            "GIT_OBJECT_DIRECTORY".into(),
-            scratch.join("git-objects").into(),
-        ),
+        ("GIT_OBJECT_DIRECTORY".into(), git_objects.into()),
+        ("GIT_INDEX_FILE".into(), git_common.join("index").into()),
     ];
     spec.git_wrapper.identity_config = Some(config);
     spec.env.retain(|(key, value)| {
@@ -1849,7 +1828,10 @@ fn rust_toolchain(
     for name in ["cargo", "rustc", "rustfmt", "clippy-driver"] {
         add_existing_tool(&cargo.join("bin").join(name), tool_exec_roots);
     }
-    if access == Access::ReadOnly {
+    // A shared or configured target lies outside run-owned state, which setup
+    // may not create in. The host creates it before launch (preparation), so
+    // setup only anchors a target inside the lane cache.
+    if access == Access::ReadOnly && target.starts_with(cache) {
         setup.push(SetupStep::CreateDir(target));
     }
 }
@@ -1867,9 +1849,11 @@ fn lane_targets(input: &PrepareInput<'_>) -> (PathBuf, PathBuf) {
     (target, lint)
 }
 
-/// A shared or configured target lies outside the lane cache, so its grants
-/// are not covered by the cache's. The host creates it before launch; the lane
-/// reads, writes and runs what it builds there.
+/// A configured target lies outside the lane cache, so its grants are not
+/// covered by the cache's. The host creates it before launch; the lane reads,
+/// writes and runs what it builds there. A writer's project target lies in its
+/// worktree, already writable and executable, and a grant derived from a
+/// writer-controlled path could be redirected by a symlink, so it gets none.
 fn external_target_grants(
     input: &PrepareInput<'_>,
     access: Access,
@@ -1878,8 +1862,19 @@ fn external_target_grants(
     let cache = lane_cache(input);
     let (target, lint) = lane_targets(input);
     let lint = (access == Access::WorktreeWrite).then_some(lint);
+    // The project target is resolved from the canonical workspace; compare
+    // both spellings of the worktree.
+    let worktree = (access == Access::WorktreeWrite).then(|| {
+        let canonical = input.cwd.canonicalize().ok();
+        (input.cwd, canonical)
+    });
+    let in_worktree = |path: &Path| {
+        worktree.as_ref().is_some_and(|(cwd, canonical)| {
+            path.starts_with(cwd) || canonical.as_ref().is_some_and(|c| path.starts_with(c))
+        })
+    };
     for path in std::iter::once(target).chain(lint) {
-        if path.starts_with(cache) {
+        if path.starts_with(cache) || in_worktree(&path) {
             continue;
         }
         requirements.reads.push(subtree(&path));
@@ -2291,6 +2286,13 @@ mod selected_node_prefix_tests {
         (opt.join("node@22/bin"), cellar_bin)
     }
 
+    /// The product reports the canonical installation prefix for nvm and npm-cli
+    /// layouts, so fixtures must live under a canonical root: the macOS temp
+    /// directory is reached through the `/var` -> `/private/var` symlink.
+    fn canonical_root(root: &tempfile::TempDir) -> PathBuf {
+        std::fs::canonicalize(root.path()).unwrap()
+    }
+
     fn nvm_node(prefix: &Path) -> PathBuf {
         let bin = prefix.join("bin");
         executable(&bin.join("node"));
@@ -2338,9 +2340,8 @@ mod selected_node_prefix_tests {
 
     #[test]
     fn canonical_npm_cli_package_layout_is_a_supported_node_prefix() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(temp.path()).unwrap();
-        let prefix = root.join("node-install");
+        let root = tempfile::tempdir().unwrap();
+        let prefix = canonical_root(&root).join("node-install");
         let bin = prefix.join("bin");
         let npm_cli = prefix.join("lib/node_modules/npm/bin/npm-cli.js");
         executable(&bin.join("node"));
@@ -2354,8 +2355,8 @@ mod selected_node_prefix_tests {
 
     #[test]
     fn first_nvm_installation_wins_over_a_later_homebrew_opt_installation() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let root = canonical_root(&root);
         let nvm_prefix = root.join("nvm/versions/node/v24.0.1");
         let nvm_bin = nvm_node(&nvm_prefix);
         let homebrew_prefix = root.join("homebrew");

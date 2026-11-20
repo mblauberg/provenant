@@ -320,6 +320,11 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             .to_owned();
         let mut host =
             provenant_run::HostLaunchContext::from_environment(&rig.state, &rig.project, host_git);
+        // The fixture home owns the Rust toolchain. A host directory with its
+        // own `cargo` would shadow it, and the host rustup proxy fails under
+        // the fixture HOME, which has no default toolchain.
+        host.executable_search_path
+            .retain(|directory| !directory.join("cargo").exists());
         host.default_account_directories = [
             ("codex".into(), home.join(".codex")),
             ("claude".into(), home.join(".claude-fixture")),
@@ -610,6 +615,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 request_digest: prepared.request.digest()?,
                 effective_network: task.access.network(task.writer.is_some()),
                 effective_database_ipc: task.access.database_ipc,
+                writer_worktree: None,
             }),
         };
         verify_lane_profile(
@@ -956,7 +962,7 @@ fn verify_lane_profile(
         let argv = [
             "/bin/sh",
             "-c",
-            "set -eu; tmp=$(cd \"$TMPDIR\" && pwd -P); test \"$CARGO_TARGET_DIR\" = \"$tmp/target\"; cd .cargo-probe; PATH=\"$HOME/.cargo/bin:$PATH\" cargo test -p lane-probe --offline; cmp Cargo.lock \"$TMPDIR/cargo-probe.lock\"; test ! -e target; printf 'lane-cargo-read-only: PASS\\n'",
+            "set -eu; tmp=$(cd \"$TMPDIR\" && pwd -P); test -d \"$CARGO_TARGET_DIR\" && test -w \"$CARGO_TARGET_DIR\"; cd .cargo-probe; PATH=\"$HOME/.cargo/bin:$PATH\" cargo test -p lane-probe --offline; cmp Cargo.lock \"$TMPDIR/cargo-probe.lock\"; test ! -e target; printf 'lane-cargo-read-only: PASS\\n'",
         ]
         .map(OsString::from);
         let command = compiled.command(

@@ -13,6 +13,18 @@ relative to `tools/front-door/`.
 
 ## Custody
 
+### Custody, not activity
+
+The guardian does only what a provider cannot do for itself: start it with its
+environment, wait for its exit on events, end the lane's own process tree,
+record exit and settlement durably, and hold the writer, credential and
+authority boundaries. It does not judge activity (CPU, output silence or
+progress), sample disk, or match command names; provider permission modes and
+command admission cover those. Process-tree sampling is opt-in.
+- Why: one guardian runs per lane, so every periodic read multiplies across
+  parallel lanes on a loaded host.
+- Owner: `crates/supervisor/src/guardian.rs`
+
 ### Closed stop reasons; natural exit wins
 
 Only `ProviderGroup::stop(StopReason)` signals a provider: cancellation, the
@@ -31,20 +43,35 @@ The PID stays reserved until the handle is reaped last. Only the unreaped
 provider, its group while the leader is unreaped, descendants with retained
 proof of provider ancestry, and proven attempt-sandbox escapees may be signalled.
 Descendant proof survives session changes and reparenting, but every signal
-revalidates the full native identity. Native descendants may be stopped only for
-a recorded provider stop (cancellation, deadline, budget, context handoff, protocol
-rejection or supervisor signal); an ordinary provider exit leaves them under
-conservative custody. Registry and host child checks must permit cleanup. When
-there is no native child registry, a present host holder must affirm that no graph
-child remains. Spared and protected owners and their possible descendants stay excluded.
-A census listing or cwd observation alone never grants signal authority, and
-recovery signals only a PID whose recorded identity matches.
+revalidates the full native identity. On macOS, however the provider ends,
+natural exit included, cleanup ends the lane's own tree: recorded descendants and
+sandbox-marked escapees get TERM, then KILL after the descendant grace. The
+child registry must permit cleanup. With no native child registry, a present
+host holder permits the lane's own descendant stops; an absent holder does not.
+A live graph child spares only its own
+process tree: it is a separate attempt, never a recorded descendant of this
+lane's provider and never carrying this lane's sandbox mark, so it is never a
+cleanup candidate and cannot withhold a lane's signals or its custody release.
+Spared and protected owners and their possible descendants stay excluded. The exit
+records one summary warning ("killed N surviving descendants") and at most 16
+unresolved identities; the reservation journal records up to 128. Background
+services an unsandboxed lane starts (for example a compiler-cache server) are
+its descendants, so they now end with the lane. Under retained custody the
+repeated stop takes at most three censuses: TERM, a wait on exit watches for the
+signalled processes, KILL, another wait, and one last look; with nothing to
+signal it stops after the first. The signal-free settlement look runs only on
+macOS, the one platform where it can settle.
+A census listing or cwd observation alone never grants signal authority.
+Recovery after guardian loss signals only recorded descendants whose identity
+still matches and live processes carrying the attempt's sandbox mark; it runs
+its census and sandbox probe only for an unresolved exit.
 
 A launch is named by its attempt's `WorkKey`: the guardian's launch summary
 records the key, and a stop request is identified by attempt and generation.
 A supervisor restart finds a live writer by the key through the attempt row,
 then reads that attempt's custody records.
-- Why: signalling a recycled PID or a sibling's group kills unrelated work.
+- Why: signalling a recycled PID or a sibling's group kills unrelated work, and
+  a lane's backgrounded loops must not outlive it (#3545).
 - Owner: `crates/supervisor/src/process_os/`, `crates/supervisor/src/custody.rs`
 
 ### Read-only writer presence
@@ -70,7 +97,7 @@ project, using one bounded host process census for the pass. Failed project
 recovery does not prevent other projects or scheduled tasks from running.
 A sealed exit remains settlement evidence when the census is unavailable;
 live attempts retain their automatic fence. Unknown attempts are queued for
-proof-only recovery: the original guardian and custody locks, writer lease and
+proof-only recovery: the original guardian, custody and attempt holder locks and
 a fresh empty worktree census must prove absence before same-boot settlement.
 Unknown evidence itself never clears custody.
 Repeated ticks reuse the recovery driver's backoff, queued-worker marker and
@@ -115,7 +142,7 @@ launch again.
 ### Quiescence before release
 
 A writer stays fenced until the provider is reaped, two complete censuses show
-no surviving member or escapee, and a fresh lock on the original lease inode
+no surviving member or escapee, and a fresh lock on the original holder inode
 succeeds. Failed, racing or incomplete reads keep the fence; only a recorded
 decision with matching authority clears one, and that decision permits no signal.
 - Why: a leftover descendant could still write the worktree.
@@ -129,13 +156,64 @@ service detached by an unsandboxed provider therefore cannot retain the lane's
 inherited writer lease. Guardian loss still leaves the durable unresolved
 reservation fenced against every new attempt, even if the kernel lease is free.
 
-Cleanup has a bounded stop budget. At its deadline a separate, cooperatively
-bounded diagnostic census names observable PIDs, short native command names and
+Cleanup has a bounded stop budget. At the first deadline a separate, cooperatively
+bounded diagnostic census (once per guardian) names observable PIDs, short native command names and
 open writer-lock paths, with a reconcile action. An open path is not proof of
 flock ownership and grants no signal authority. Unknown or unreadable holders
 remain explicit uncertainty. The guardian continues retaining unresolved
 custody; a timeout alone never authorises settlement or an unrelated signal.
+
+While retaining, the guardian blocks on process, cancellation and signal
+events. It runs a signal-free settlement check after a process event (at most
+every 100 ms) or at a backstop (5 s with process watches, else 1 s). It repeats
+the bounded stop only on cancellation or every 30 s, and reads host graph
+evidence only when a stop has signal candidates. Idle retention therefore costs
+no CPU between events.
 - Why: detached services must not hold a lease or cause unsafe release.
+- Why: retained custody can last hours, and one guardian runs per lane (#3560).
+
+The guardian's reactor latches every kqueue edge it drains (supervisor signal,
+cancellation change, process event) until the loop that acts on it takes it,
+and a supervisor signal stays visible to every later loop. A pacing or retry
+pause therefore cannot drop one. A supervisor signal during cleanup or
+retention gets one more bounded stop (TERM, the descendant grace, KILL); then
+the guardian ends retention and exits.
+- Why: kqueue reports each edge once. A v2.2.0 guardian discarded a SIGTERM
+  this way and held a lane's writer lock for 2h43m (#3572, #3585).
+
+Retention is bounded by `domains.run.retained_custody_seconds` (1..=604800 s,
+default 3600). The launcher resolves it, because the guardian cannot read
+config. `provenant config show --full` shows the value and its source, and
+unreadable run settings warn and keep the default
+(`LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT`). The unresolved exit carries
+a `retention` record: the holding guardian's identity, when retention began
+and the limit. `provenant status` names that guardian's PID and age only while
+its census shows that exact identity alive; otherwise it says the guardian is
+gone and points to `provenant reconcile`. A settled exit drops the record. When
+retention ends with the exit still unresolved, whether by signal or by limit,
+the guardian adds `retention.ended` to the record. This records the reason, the
+time retained and the blocker (`stop_refused`, `protected_owner`,
+`census_incomplete`, `survived_stop` or `settlement_unproven`) beside the
+unresolved PIDs. `stop_refused` means a live candidate this pass was not
+allowed to be signalled; a withheld permission with nothing to stop refuses
+nothing. Past the limit it then exits with the typed `RetentionLimit`
+failure: status `timeout` (exit 124), error code `RETENTION_LIMIT`, where
+other guardian faults exit `error` (3) with `SUPERVISOR`. Ending retention signals nothing and removes nothing.
+The unresolved exit and reservation keep the writer fenced. Once the guardian
+is gone, `provenant reconcile` ends only proven orphans, through the orphan
+recovery path.
+- Why: an orphaned guardian must not hold a lane indefinitely, and the fence,
+  not the guardian, is what protects the worktree.
+
+Reaping the leader under the fenced lease backs off from 25 ms to 1 s and stops
+at a 5 s monotonic deadline, since a pause ends early on any reactor edge. The
+provider group is then dropped unsignalled, and its bounded reaper permit
+takes over. Retrying an undurable cleanup reservation or exit publication
+continues while the disk may recover, but once a supervisor signal has
+latched it stops after 5 s and the guardian exits with an error. The previous
+reservation, or the exit's `publication_pending` marker, stays the durable
+fence for reconcile, as after a crash.
+- Why: a retry loop with no bound or backoff could keep a guardian alive.
 
 ### Durable exit publication
 
@@ -199,8 +277,9 @@ configured stop remains distinct from a mandatory boundary refusal.
 Every credential declaration is enforced independently. An exception for an
 enclosing runtime, package or selected authentication root cannot open a nested
 declared store. Selected authentication and its exact aliases retain only their
-declared access. Link operations remain subject to credential, state, source
-and Git boundaries without a blanket denial of ordinary hard links.
+declared access. A lane cannot create a hard link to a file in a credential root, the shared
+Git control directory or another lane's worktree; every other hard link is
+allowed.
 
 ### Plans refuse unsafe roots
 
@@ -323,12 +402,18 @@ inventory; the common Git directory's parent does not establish that owner.
 
 ### Shared Git metadata is read-only
 
-A writer owns a private Git directory with the shared object store as a
-read-only alternate; shared refs, config, hooks and admin metadata stay
-read-only, and the host imports the result and moves the branch by
-compare-and-swap.
-- Why: ordinary Git works in the lane while one host boundary guards shared
-  metadata.
+Each writer owns an attempt-private Git view with separate refs, index,
+objects, configuration and credentials, using the repository object store as a
+read-only alternate. The repository's refs, config, alternates, hooks and admin
+metadata stay read-only to lanes. The host imports verified objects and moves
+the branch by compare-and-swap. See [launch custody](run-launch.md#admission-and-custody).
+The lane Git wrapper binds commands implicitly targeting its
+worktree; commands for other repositories, commands with explicit repository
+selectors and Git transport endpoints pass through with their arguments and
+environment intact. Fixture commands remove inherited lane Git selectors and
+use native Git while retaining the surrounding tool PATH.
+- Why: ordinary Git works in the lane while other lanes' refs and the host's Git
+  behaviour stay protected; sharing objects and caches is intended.
 
 ### Native environment and sandbox tool stores
 
@@ -385,8 +470,14 @@ The process-tree interface reads a host-sampled snapshot of the lane's own
 descendants without process-listing authority. A missing, stale, incomplete or
 unsupported sample is unavailable, never a partial tree or zero memory.
 The sample is periodic observation, not an atomic census or a memory limit.
-`domains.run.resource_sample_interval_ms` controls CPU and process-tree sampling
-(1..=60000 ms, compiled default 5000 ms). Each private snapshot records a
+Sampling runs only when something needs it:
+`domains.run.resource_sample_interval_ms` (1..=60000 ms) sets an interval, and
+when it is 0 (the default) a host or project admission class with
+`memory_per_slot` turns sampling on every 5000 ms. Otherwise sampling is off
+and `PROVENANT_PROCESS_TREE` is unset. The launcher resolves the interval and
+hands it to the guardian, which starts with an empty environment and reads no
+config; unreadable run settings warn and launch without a sampler
+(`LAUNCH_PROCESS_TREE_INTERVAL_OR_WARN_NONE`). Each private snapshot records a
 freshness allowance derived from that interval plus the bounded sample budget;
 the CLI output and public sample schema do not change. The setting source is
 available from `provenant config show --full`.
@@ -433,16 +524,30 @@ refuses credential-bearing URLs.
 - Why: roots differ.
 - Owner: `Context::open`, `bind_launch_controls`, `worktrees::open_primary_repo`
 
-### One writer; removal never forces
+### Shared occupancy; removal never forces
 
-Git's own inventory is the worktree registry. One writer holds each linked
-worktree, and custody outlives the requesting call. `worktree remove` refuses
-the primary, a live writer or observed process, and has no force. Dirty work
-requires explicit discard, with its recoverable archive captured before removal;
-it deletes a branch only with current landing evidence or explicit discard.
+Git's own inventory is the worktree registry. A worktree's owning lane decides
+who else writes in it. Worktree occupancy is a shared lease: any number of lanes
+may hold one worktree simultaneously. By maintainer decision (#3451), path claims
+are advisory and overlapping claims refuse nothing; a live conflicting writer is
+not excluded by Provenant. Attempts own separate Git refs, indexes and object
+stores; ordinary commits cannot take a sibling's staged snapshot. Host publication
+uses expected-old-tip compare-and-swap after verification, retaining divergent
+private commits for recovery. Custody outlives the requesting call. Each attempt
+also holds its own holder lease; proof that a sibling has settled cannot release
+another attempt's custody. An unscoped budget commit requires durable proof that
+no sibling shared the worktree during that attempt, and holds the admission gate
+through the commit. Shared attempts instead report typed leftover paths.
+Removal requires exclusive occupancy with zero live holders and no unresolved
+reservation. Terminal outcome publication alone does not release custody. Under
+exclusion, removal checks native cleanliness and every recorded attempt index;
+staged work or uncertain index identity retains the checkout. `worktree remove`
+refuses the primary, a live writer or observed process, and has no force. Dirty
+work requires explicit discard, with its recoverable archive captured before
+removal; it deletes a branch only with current landing evidence or explicit discard.
 A persisted writer reservation remains a custody fence when its kernel lock is
-absent: read-only occupancy is unknown until run-owned reconciliation settles
-the attempt, and cache guards refuse the slot without clearing its evidence.
+absent until run-owned reconciliation settles the attempt; cache guards and
+actual removal both refuse without clearing its evidence.
 Named removal without current landing or subsumption proof returns
 `WorktreeError::UnprovenLanding`, naming the branch and missing proof, with an
 explicit-discard recovery command. `IdentityChanged` remains a changed-identity

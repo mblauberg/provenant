@@ -607,9 +607,10 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
             }
             Some(DiagnosticFact::PromptLimit { limit }) => {
                 let field = "prompt".to_owned();
-                return usize::try_from(*limit).map_or(FacadeError::InvalidInput { detail: None }, |limit| {
-                    FacadeError::invalid(provenant_fabric_runtime::coordination::facade::InvalidInputDetail::FieldTooLarge { field, limit })
-                });
+                return match usize::try_from(*limit) {
+                    Ok(limit) => FacadeError::invalid(provenant_fabric_runtime::coordination::facade::InvalidInputDetail::FieldTooLarge { field, limit }),
+                    Err(_) => FacadeError::field(field),
+                };
             }
             Some(DiagnosticFact::Resource(fact)) => {
                 if matches!(
@@ -1218,9 +1219,7 @@ impl BinaryRunOwner<'_> {
             if !self.allow_remote {
                 return Err(FacadeError::ConfinementRefused { resource: None });
             }
-            let host = target
-                .host
-                .ok_or(FacadeError::InvalidInput { detail: None })?;
+            let host = target.host.ok_or_else(|| FacadeError::field("host"))?;
             let attempt_id = target.attempt;
             return match self.peer(
                 host,
@@ -1264,7 +1263,7 @@ impl BinaryRunOwner<'_> {
             .iter()
             .any(|target| target.host.is_some_and(|target_host| target_host != host))
         {
-            return Err(FacadeError::InvalidInput { detail: None });
+            return Err(FacadeError::field("host"));
         }
         let session = self.read_session(cancel)?;
         let call = self.call(cancel);
@@ -1288,7 +1287,7 @@ impl BinaryRunOwner<'_> {
         cancel: &CancelToken,
     ) -> Result<Vec<provenant_records::run::AttemptRecord>, FacadeError> {
         if !(1..=100).contains(&limit) {
-            return Err(FacadeError::InvalidInput { detail: None });
+            return Err(FacadeError::field("limit"));
         }
         let store = self.read_session(cancel)?.store;
         let page = provenant_run::Service::new(&store)
@@ -1611,7 +1610,9 @@ impl BinaryRunOwner<'_> {
                     .map(PathBuf::from)
             })
             .unwrap_or_else(|| self.factory.cwd.clone());
-        let submitted = {
+        // Keep the assembled task off the launch frame: a debug build copies
+        // this large value into every temporary on the submit path (#3542).
+        let submitted = Box::new({
             worktree_access(
                 task.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite,
                 false,
@@ -1646,7 +1647,7 @@ impl BinaryRunOwner<'_> {
                 worktree: task.worktree.map(PathBuf::from),
                 access: access.clone(),
             }
-        };
+        });
         let session = self.session_with_facts(cancel, facts)?;
         let call = self.call(cancel);
         let mut host_launch = match &self.factory.host_launch {
@@ -1679,7 +1680,7 @@ impl BinaryRunOwner<'_> {
                 Submission {
                     chair: self.chair.clone(),
                     operation_id: operation_id.clone(),
-                    task: submitted,
+                    task: *submitted,
                     knobs,
                 },
                 &call,
@@ -1832,7 +1833,7 @@ impl BinaryRunOwner<'_> {
                     OutputPart::Result => provenant_run::ArtifactPart::Result,
                     OutputPart::Prompt => provenant_run::ArtifactPart::Prompt,
                     OutputPart::Stderr => provenant_run::ArtifactPart::Stderr,
-                    OutputPart::Events => return Err(FacadeError::InvalidInput { detail: None }),
+                    OutputPart::Events => return Err(FacadeError::field("part")),
                 };
                 let mut chunk = session
                     .service()
@@ -1973,11 +1974,11 @@ impl BinaryRunOwner<'_> {
                     provenant_core::DurationMicros::from_micros(
                         wait_seconds
                             .checked_mul(1_000_000)
-                            .ok_or(FacadeError::InvalidInput { detail: None })?,
+                            .ok_or_else(|| FacadeError::field("wait_seconds"))?,
                     ),
                     provenant_core::WaitTransport::Cli,
                 )
-                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                .map_err(|_| FacadeError::field("wait_seconds"))?;
                 let budget =
                     if requested.deadline().as_mono_time() < budget.deadline().as_mono_time() {
                         requested
@@ -1985,7 +1986,7 @@ impl BinaryRunOwner<'_> {
                         budget
                     };
                 if !(1..=100).contains(&targets.len()) {
-                    return Err(FacadeError::InvalidInput { detail: None });
+                    return Err(FacadeError::field("targets"));
                 }
                 let local_host = self.factory.context.identity.host;
                 let mut local_indices = Vec::new();
@@ -2308,7 +2309,7 @@ impl BinaryRunOwner<'_> {
             ))),
             RunInput::List { after, limit, .. } => {
                 if !(1..=100).contains(&limit) {
-                    return Err(FacadeError::InvalidInput { detail: None });
+                    return Err(FacadeError::field("limit"));
                 }
                 let host = self.factory.context.identity.host;
                 if after
@@ -2391,7 +2392,7 @@ impl BinaryRunOwner<'_> {
         cancel: &CancelToken,
     ) -> Result<RunEventsPage, FacadeError> {
         if !(1..=64).contains(&limit) {
-            return Err(FacadeError::InvalidInput { detail: None });
+            return Err(FacadeError::field("limit"));
         }
         let store = match self.read_session(cancel) {
             Ok(session) => session.store,

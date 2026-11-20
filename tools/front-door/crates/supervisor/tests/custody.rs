@@ -31,29 +31,15 @@ const S2_PRODUCTION_SHAPE: &str = "s2-production-shape";
 const S2_REFUSE_ADMISSION: &str = "s2-refuse-admission";
 const S2_IGNORE_CHILD_REGISTRY: &str = "s2-ignore-child-registry";
 const S2_SUPPRESSED_REGISTRY_READ: &str = "s2-registry-suppressed-read";
+/// Make the child registry unreadable so settlement refuses escapee signals
+/// and retains custody. This replaces the old live-graph-child refusal (#3568).
+const S2_UNREADABLE_CHILD_REGISTRY: &str = "s2-unreadable-child-registry";
 
-const S2_DISK_PRESSURE: &str = "s2-disk-pressure";
 /// Seconds the guardian's wall clock jumps forward after launch, as a sleeping
 /// host's does while its monotonic clock stands still.
 const S2_WALL_JUMP: &str = "s2-wall-jump-seconds";
 /// Present once the jump has happened.
 const S2_WALL_JUMP_NOW: &str = "s2-wall-jump-now";
-const S2_DISK_SAMPLED: &str = "s2-disk-sampled";
-
-struct MarkerDiskPressure {
-    state: PathBuf,
-}
-impl provenant_supervisor::DiskPressure for MarkerDiskPressure {
-    fn below_floor(&self, _: &[u8]) -> io::Result<bool> {
-        let decision = std::fs::read(self.state.join(S2_DISK_PRESSURE))?;
-        std::fs::write(self.state.join(S2_DISK_SAMPLED), &decision)?;
-        match decision.as_slice() {
-            b"low" => Ok(true),
-            b"high" => Ok(false),
-            _ => Err(io::Error::other("injected disk sample failure")),
-        }
-    }
-}
 
 struct CensusGateObserver;
 
@@ -425,8 +411,11 @@ impl provenant_os::capture::FrameDecoder for Decoder {
     }
 }
 fn budget(clock: &SystemClock) -> Result<WaitBudget> {
+    budget_seconds(clock, 5)
+}
+fn budget_seconds(clock: &SystemClock, seconds: u64) -> Result<WaitBudget> {
     use provenant_core::Clock;
-    Ok(WaitBudget::cli(clock.mono_now(), 5)?)
+    Ok(WaitBudget::cli(clock.mono_now(), seconds)?)
 }
 fn start(
     root: &Path,
@@ -507,6 +496,7 @@ fn start_with_profile(
     )?;
     let identity = publication.custody_metadata()?;
     let mut command = ProviderCommand {
+        resource_sample_interval: None,
         publication_values: Default::default(),
         policy: Default::default(),
         profile_file: None,
@@ -516,7 +506,6 @@ fn start_with_profile(
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
         key: provenant_supervisor::custody::fixture_key(3),
-        protected_commands: fixture::protected_commands(),
         config_environment: fixture::config_environment(),
         argv: fixture::argv_with_args(scenario, extra)?,
         environment: fixture::environment(root),
@@ -814,7 +803,7 @@ fn idle_supervisor(root: &Path) -> Result<()> {
     capture_idle_cpu(&attempt)?;
     assert!(
         !home.join("graph-children-read").exists(),
-        "live census must not read host graph checkpoints"
+        "live census and cleanup must not read host graph checkpoints"
     );
     // A valid atomic cancel still wakes and stops the sleeping driver.
     stop(&handle, StopReason::ExplicitCancellation)?;
@@ -1358,6 +1347,7 @@ fn never_spawned_cancel_is_published(root: &Path) -> Result<()> {
         &clock,
     )?;
     let command = ProviderCommand {
+        resource_sample_interval: None,
         publication_values: Default::default(),
         policy: Default::default(),
         profile_file: None,
@@ -1367,7 +1357,6 @@ fn never_spawned_cancel_is_published(root: &Path) -> Result<()> {
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
         key: provenant_supervisor::custody::fixture_key(3),
-        protected_commands: fixture::protected_commands(),
         config_environment: fixture::config_environment(),
         argv: fixture::argv("exit")?,
         environment: fixture::environment(root),
@@ -1418,6 +1407,7 @@ fn terminal_frame_closes_provider_stdin(root: &Path) -> Result<()> {
         &clock,
     )?;
     let command = ProviderCommand {
+        resource_sample_interval: None,
         publication_values: Default::default(),
         policy: Default::default(),
         profile_file: None,
@@ -1427,7 +1417,6 @@ fn terminal_frame_closes_provider_stdin(root: &Path) -> Result<()> {
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
         key: provenant_supervisor::custody::fixture_key(3),
-        protected_commands: fixture::protected_commands(),
         config_environment: fixture::config_environment(),
         argv: fixture::argv("terminal-stdin")?,
         environment: fixture::environment(root),
@@ -1500,7 +1489,7 @@ fn owner_with_descendant(root: &Path) -> Result<()> {
     drop(writer);
     Ok(())
 }
-fn setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root: &Path) -> Result<()> {
+fn setsid_descendant_is_tracked_before_exit_and_reaped_after_it(root: &Path) -> Result<()> {
     let ready_path = root.join("setsid-ready.sock");
     let gate_path = root.join("setsid-gate.sock");
     let ready_listener = UnixListener::bind(&ready_path)?;
@@ -1533,6 +1522,13 @@ fn setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root: &P
     )?;
     drop(gate);
     let exit = exited(&handle)?;
+    // The lane's recorded tree ends with the provider (#3545).
+    #[cfg(target_os = "macos")]
+    {
+        assert!(!exit.unresolved_cleanup, "{exit:?}");
+        wait_for_identity_absence(&descendant)?;
+    }
+    #[cfg(not(target_os = "macos"))]
     assert!(
         exit.unresolved_cleanup,
         "a live setsid descendant still holds custody"
@@ -1619,8 +1615,17 @@ fn descendant_session_after_parent(root: &Path, timed: bool) -> Result<()> {
     assert_eq!(escaped.group_id, descendant.pid);
     drop(provider_stream);
     let exit = exited(&handle)?;
-    assert!(exit.unresolved_cleanup, "{exit:?}");
-    assert!(exit.unresolved_pids.contains(&descendant.pid), "{exit:?}");
+    // Retained ancestry proof lets cleanup end it after the provider exits.
+    #[cfg(target_os = "macos")]
+    {
+        assert!(!exit.unresolved_cleanup, "{exit:?}");
+        wait_for_identity_absence(&descendant)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert!(exit.unresolved_cleanup, "{exit:?}");
+        assert!(exit.unresolved_pids.contains(&descendant.pid), "{exit:?}");
+    }
     drop(descendant_stream);
     wait_for_identity_absence(&descendant)?;
     Ok(())
@@ -1680,15 +1685,13 @@ fn escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures(
     wait_for_identity_absence(&owner_identity)?;
     Ok(())
 }
-/// Host graph-child evidence at the production custody seam.
-struct GraphChildrenHolder(PathBuf);
-impl provenant_supervisor::Holder for GraphChildrenHolder {
+/// The production custody seam: a holder with no child registry. It never
+/// reports graph state, because a live graph child is a separate attempt and
+/// cannot be one of this lane's cleanup candidates (#3568).
+struct ProductionHolder;
+impl provenant_supervisor::Holder for ProductionHolder {
     fn admit(&self, _: &[u8], _: &Directory) -> std::result::Result<(), CustodyError> {
         Ok(())
-    }
-    fn has_live_children(&self, _: &[u8]) -> std::result::Result<bool, CustodyError> {
-        std::fs::write(self.0.join("graph-children-read"), b"read")?;
-        Ok(self.0.join("live-graph-children").try_exists()?)
     }
     fn terminal(
         &self,
@@ -1766,10 +1769,12 @@ fn the_guardian_names_an_unreadable_host_clock_in_its_admission_refusal(root: &P
     }
     Ok(())
 }
-/// The production shape queries the host for live graph children before
-/// ending an escapee. Live children keep cleanup unresolved.
+/// With no native child registry, a present host holder permits the lane's
+/// own descendant and escapee stops (#3568). Graph children are separate
+/// attempts, so nothing about them gates this: the escapee is ended at
+/// settlement, cleanup resolves and custody is released.
 #[cfg(target_os = "macos")]
-fn escapee_is_ended_only_when_the_host_reports_no_nested_runs(root: &Path) -> Result<()> {
+fn escapee_is_ended_with_no_child_registry_and_a_present_holder(root: &Path) -> Result<()> {
     let home = root.join("HOME");
     std::fs::create_dir_all(&home)?;
     std::fs::write(home.join(S2_PRODUCTION_SHAPE), b"no registry")?;
@@ -1796,18 +1801,282 @@ fn escapee_is_ended_only_when_the_host_reports_no_nested_runs(root: &Path) -> Re
         let exit = exited(&handle)?;
         Ok((exit, escapee, stream))
     };
-    // The host initially reports no live graph children.
-    let (exit, escapee, _stream) = case("empty")?;
+    let (exit, escapee, stream) = case("empty")?;
     assert!(!exit.unresolved_cleanup, "{exit:?}");
+    assert!(exit.unresolved_pids.is_empty(), "{exit:?}");
     wait_for_identity_absence(&escapee)?;
-    std::fs::write(home.join("live-graph-children"), b"pending")?;
-    let (exit, escapee, stream) = case("live-graph-children")?;
+    drop(stream);
+    Ok(())
+}
+/// Half the five-second full-census backstop: a retained guardian that
+/// misses the last blocker's exit wakes only on that backstop.
+#[cfg(target_os = "macos")]
+const RELEASE_AFTER_LAST_BLOCKER: Duration = Duration::from_millis(2_500);
+/// Start a lane whose sandbox escapee outlives cleanup and may not be stopped,
+/// so its guardian retains custody. Returns the escapee's socket, which ends
+/// it when dropped, and its identity, once the unresolved exit is published.
+#[cfg(target_os = "macos")]
+fn retain_unstoppable_escapee(
+    root: &Path,
+    name: &str,
+    plan: CapturePlan,
+) -> Result<(UnixStream, ProcessIdentity)> {
+    let (stream, escapee, handle) = launch_unstoppable_escapee(
+        root,
+        name,
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..plan
+        },
+    )?;
+    let exit = exited(&handle)?;
     assert!(exit.unresolved_cleanup, "{exit:?}");
     assert_eq!(exit.unresolved_pids, vec![escapee.pid], "{exit:?}");
-    process_identity(escapee.pid)?;
-    // Only the process this test started: it exits when its socket closes.
+    Ok((stream, escapee))
+}
+/// Start that lane with `plan` as given and return once the escapee reports,
+/// before the guardian's cleanup has published an exit.
+#[cfg(target_os = "macos")]
+fn launch_unstoppable_escapee(
+    root: &Path,
+    name: &str,
+    plan: CapturePlan,
+) -> Result<(UnixStream, ProcessIdentity, CustodyHandle)> {
+    let home = root.join("HOME");
+    std::fs::create_dir_all(&home)?;
+    std::fs::write(home.join(S2_PRODUCTION_SHAPE), b"no registry")?;
+    // An unreadable child registry forbids the escapee stop: only its own exit
+    // settles. Graph children are separate attempts and no longer gate it.
+    std::fs::write(home.join(S2_UNREADABLE_CHILD_REGISTRY), b"unavailable")?;
+    let ready_path = root.join(format!("{name}.sock"));
+    let ready_listener = UnixListener::bind(&ready_path)?;
+    let (writer, handle) = start(
+        root,
+        name,
+        "s2-detach-provider",
+        &[
+            ready_path.into_os_string(),
+            scope().attempt.sandbox_lookup_name().into(),
+        ],
+        plan,
+    )?;
+    drop(writer);
+    let mut stream = fixture::fixture_accept(&ready_listener, Duration::from_secs(5))?;
+    byte(&mut stream, b'R')?;
+    let escapee = process_identity(read_pid_line(&mut stream)?)?;
+    Ok((stream, escapee, handle))
+}
+/// The retention record the guardian last published on the unresolved exit.
+#[cfg(target_os = "macos")]
+fn published_retention(root: &Path, name: &str) -> Result<serde_json::Value> {
+    let exit: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        root.join(format!("{name}-attempt/process-exit.json")),
+    )?)?;
+    assert_eq!(exit["unresolved_cleanup"], true, "{exit}");
+    Ok(exit["retention"].clone())
+}
+/// A supervisor signal that arrives while the guardian retains custody, and so
+/// after or during its cleanup, ends the guardian within a bound: the reactor
+/// keeps the signal even when a pacing wait drains it (#3585). The exit stays
+/// unresolved, names why and keeps the escapee for reconcile.
+#[cfg(target_os = "macos")]
+fn sigterm_during_retained_custody_ends_the_guardian_and_releases_the_writer(
+    root: &Path,
+) -> Result<()> {
+    let (stream, escapee) = retain_unstoppable_escapee(root, "sigterm", CapturePlan::default())?;
+    let writer = root.join("sigterm-writer");
+    let guardian = reservation_identity(&writer, "guardian")?;
+    let signalled = Instant::now();
+    fixture::signal_recorded_process(&guardian, libc::SIGTERM)?;
+    let clock = SystemClock::new();
+    let released = Directory::open_anchor(&writer)?.lock(
+        OsStr::new("writer.lock"),
+        LockMode::Exclusive,
+        budget_seconds(&clock, GUARDIAN_SIGNAL_RELEASE.as_secs() + 5)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+    let waited = signalled.elapsed();
+    assert!(
+        waited < GUARDIAN_SIGNAL_RELEASE,
+        "writer released {waited:?} after SIGTERM"
+    );
+    drop(released);
+    let status =
+        fixture::guardian_exit_status(u32::try_from(guardian.pid)?, Duration::from_secs(5))?;
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "guardian exited abnormally: {status}"
+    );
+    wait_for_identity_absence(&guardian)?;
+    let retention = published_retention(root, "sigterm")?;
+    assert_eq!(retention["guardian"]["pid"], guardian.pid, "{retention}");
+    assert_eq!(
+        retention["ended"]["reason"], "supervisor_signal",
+        "{retention}"
+    );
+    assert_eq!(retention["ended"]["blocker"], "stop_refused", "{retention}");
+    // Ending retention signals nothing: the escapee is left for reconcile.
+    assert_eq!(process_identity(escapee.pid)?, escapee);
     drop(stream);
     wait_for_identity_absence(&escapee)?;
+    Ok(())
+}
+/// A SIGTERM that lands during cleanup, after the provider exits and before
+/// the exit is published, still ends the guardian within the bound: cleanup's
+/// pacing pauses drain the signal edge, and the reactor keeps it (#3585).
+#[cfg(target_os = "macos")]
+fn sigterm_during_cleanup_ends_the_guardian_and_releases_the_writer(root: &Path) -> Result<()> {
+    let (stream, escapee, handle) = launch_unstoppable_escapee(
+        root,
+        "midclean",
+        CapturePlan {
+            root_flush_ms: 30,
+            descendant_grace_ms: MID_CLEANUP_GRACE_MS,
+            ..CapturePlan::default()
+        },
+    )?;
+    let writer = root.join("midclean-writer");
+    let guardian = reservation_identity(&writer, "guardian")?;
+    let provider = reservation_identity(&writer, "provider")?;
+    // The guardian reaps the provider only after cleanup, so its zombie marks
+    // the cleanup window; the exit is not yet published.
+    wait_for_zombie(&provider)?;
+    assert!(
+        !root.join("midclean-attempt/process-exit.json").exists(),
+        "the exit was published before the signal"
+    );
+    let signalled = Instant::now();
+    fixture::signal_recorded_process(&guardian, libc::SIGTERM)?;
+    let clock = SystemClock::new();
+    let released = Directory::open_anchor(&writer)?.lock(
+        OsStr::new("writer.lock"),
+        LockMode::Exclusive,
+        budget_seconds(&clock, GUARDIAN_SIGNAL_RELEASE.as_secs() + 5)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+    let waited = signalled.elapsed();
+    assert!(
+        waited < GUARDIAN_SIGNAL_RELEASE,
+        "writer released {waited:?} after a mid-cleanup SIGTERM"
+    );
+    drop(released);
+    let status =
+        fixture::guardian_exit_status(u32::try_from(guardian.pid)?, Duration::from_secs(5))?;
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "guardian exited abnormally: {status}"
+    );
+    wait_for_identity_absence(&guardian)?;
+    let exit = exited(&handle)?;
+    assert!(exit.unresolved_cleanup, "{exit:?}");
+    let retention = published_retention(root, "midclean")?;
+    assert_eq!(
+        retention["ended"]["reason"], "supervisor_signal",
+        "{retention}"
+    );
+    assert_eq!(retention["ended"]["blocker"], "stop_refused", "{retention}");
+    assert_eq!(process_identity(escapee.pid)?, escapee);
+    drop(stream);
+    wait_for_identity_absence(&escapee)?;
+    Ok(())
+}
+/// Retention past its configured limit records the unresolved processes and
+/// the blocker on the exit, then the guardian exits with the typed failure and
+/// its writer lock falls. Nothing is signalled or removed (#3585).
+#[cfg(target_os = "macos")]
+fn retention_past_its_limit_exits_with_the_typed_outcome(root: &Path) -> Result<()> {
+    let (stream, escapee) = retain_unstoppable_escapee(
+        root,
+        "limit",
+        CapturePlan {
+            retained_custody_ms: RETENTION_LIMIT_MS,
+            ..CapturePlan::default()
+        },
+    )?;
+    let writer = root.join("limit-writer");
+    let guardian = reservation_identity(&writer, "guardian")?;
+    let status =
+        fixture::guardian_exit_status(u32::try_from(guardian.pid)?, Duration::from_secs(10))?;
+    assert_eq!(
+        status.code(),
+        Some(i32::from(provenant_records::Outcome::Timeout.exit_code())),
+        "a retention limit exits as a timeout, not a supervisor fault: {status}"
+    );
+    wait_for_identity_absence(&guardian)?;
+    let clock = SystemClock::new();
+    let _released = Directory::open_anchor(&writer)?.lock(
+        OsStr::new("writer.lock"),
+        LockMode::Exclusive,
+        budget(&clock)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+    let retention = published_retention(root, "limit")?;
+    assert_eq!(retention["guardian"]["pid"], guardian.pid, "{retention}");
+    assert_eq!(retention["limit_ms"], RETENTION_LIMIT_MS, "{retention}");
+    assert_eq!(retention["ended"]["reason"], "limit_reached", "{retention}");
+    assert_eq!(retention["ended"]["blocker"], "stop_refused", "{retention}");
+    assert!(
+        retention["ended"]["retained_ms"]
+            .as_u64()
+            .is_some_and(|retained| retained >= RETENTION_LIMIT_MS),
+        "{retention}"
+    );
+    let exit: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        root.join("limit-attempt/process-exit.json"),
+    )?)?;
+    assert_eq!(
+        exit["unresolved_pids"],
+        serde_json::json!([escapee.pid]),
+        "{exit}"
+    );
+    // The escapee is left for reconcile, unsignalled.
+    assert_eq!(process_identity(escapee.pid)?, escapee);
+    drop(stream);
+    wait_for_identity_absence(&escapee)?;
+    Ok(())
+}
+/// A signalled guardian runs one bounded stop, publishes and exits. Loaded CI
+/// hosts stretch the stop's census passes, so the bound is generous; the
+/// defect it guards against held the lock for hours.
+#[cfg(target_os = "macos")]
+const GUARDIAN_SIGNAL_RELEASE: Duration = Duration::from_millis(10_000);
+/// The descendant grace for the mid-cleanup signal test: long enough that a
+/// SIGTERM sent once the provider has exited lands inside cleanup.
+#[cfg(target_os = "macos")]
+const MID_CLEANUP_GRACE_MS: u64 = 2_000;
+#[cfg(target_os = "macos")]
+const RETENTION_LIMIT_MS: u64 = 300;
+/// Retained custody releases the writer soon after the last process blocking
+/// settlement exits. Its exit must wake the guardian whether it lands in a
+/// stop's exit wait, between a census and its watch, or in the idle wait.
+#[cfg(target_os = "macos")]
+fn retained_custody_releases_the_writer_soon_after_the_last_blocker_exits(
+    root: &Path,
+) -> Result<()> {
+    let (stream, escapee) = retain_unstoppable_escapee(root, "release", CapturePlan::default())?;
+    // Its socket closing ends the escapee, at once and with no signal.
+    drop(stream);
+    wait_for_identity_absence(&escapee)?;
+    let last_blocker_gone = Instant::now();
+    let clock = SystemClock::new();
+    let _released = Directory::open_anchor(&root.join("release-writer"))?.lock(
+        OsStr::new("writer.lock"),
+        LockMode::Exclusive,
+        budget(&clock)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+    let waited = last_blocker_gone.elapsed();
+    assert!(
+        waited < RELEASE_AFTER_LAST_BLOCKER,
+        "writer released {waited:?} after the last blocker exited"
+    );
     Ok(())
 }
 #[cfg(target_os = "macos")]
@@ -1988,6 +2257,9 @@ struct FileChildRegistry {
 }
 impl ChildRegistry for FileChildRegistry {
     fn registered_children(&self) -> io::Result<Vec<RegisteredChild>> {
+        if self.home.join(S2_UNREADABLE_CHILD_REGISTRY).is_file() {
+            return Err(io::Error::other("child registry unavailable"));
+        }
         if let Some(state_dir) = std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from)
             && state_dir.join(S2_IGNORE_CHILD_REGISTRY).is_file()
         {
@@ -2277,82 +2549,6 @@ fn checkpoint_enospc_while_provider_lives_never_signals_it(root: &Path) -> Resul
     Ok(())
 }
 
-struct DiskBuild {
-    _writer: CustodyLease,
-    handle: CustodyHandle,
-    channel: UnixStream,
-    gate: UnixStream,
-    state: PathBuf,
-}
-
-fn disk_build(root: &Path) -> Result<DiskBuild> {
-    let state = root.join("PROVENANT_STATE_DIR");
-    std::fs::create_dir_all(&state)?;
-    std::fs::write(state.join(S2_DISK_PRESSURE), b"high")?;
-    let build_socket = root.join("disk-build.sock");
-    let gate_socket = root.join("disk-gate.sock");
-    let build_listener = UnixListener::bind(&build_socket).map_err(|error| {
-        io::Error::new(error.kind(), format!("bind disk build socket: {error}"))
-    })?;
-    let gate_listener = UnixListener::bind(&gate_socket)
-        .map_err(|error| io::Error::new(error.kind(), format!("bind disk gate socket: {error}")))?;
-    let (writer, handle) = start(
-        root,
-        "disk",
-        "s2-disk-build-provider",
-        &[build_socket.into_os_string(), gate_socket.into_os_string()],
-        CapturePlan {
-            descendant_grace_ms: 500,
-            ..CapturePlan::default()
-        },
-    )?;
-    let mut channel = fixture::fixture_accept(&build_listener, Duration::from_secs(5))?;
-    byte(&mut channel, b'R')?;
-    process_identity(read_pid_line(&mut channel)?)?;
-    let mut gate = fixture::fixture_accept(&gate_listener, Duration::from_secs(5))?;
-    byte(&mut gate, b'R')?;
-    channel.write_all(b"I")?;
-    byte(&mut channel, b'I')?;
-    set_disk_sample(&state, b"low")?;
-    channel.write_all(b"A")?;
-    byte(&mut channel, b'A')?;
-    Ok(DiskBuild {
-        _writer: writer,
-        handle,
-        channel,
-        gate,
-        state,
-    })
-}
-
-fn set_disk_sample(state: &Path, sample: &[u8]) -> Result<()> {
-    std::fs::write(state.join(S2_DISK_PRESSURE), sample)?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if std::fs::read(state.join(S2_DISK_SAMPLED)).is_ok_and(|seen| seen == sample) {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::other("guardian did not sample disk decision").into());
-        }
-        std::thread::park_timeout(Duration::from_millis(10));
-    }
-}
-
-fn disk_floor_never_stops_a_running_build(root: &Path) -> Result<()> {
-    let mut fixture = disk_build(root)?;
-
-    set_disk_sample(&fixture.state, b"low")?;
-    fixture.channel.write_all(b"B")?;
-    byte(&mut fixture.channel, b'B')?;
-    drop(fixture.gate);
-    // The build lives in its own session, so cleanup may not signal it; EOF
-    // lets it exit so the census can settle.
-    drop(fixture.channel);
-    assert!(!exited(&fixture.handle)?.unresolved_cleanup);
-    Ok(())
-}
-
 fn guardian_signal_requests_provider_stop(root: &Path, signal: i32, label: &str) -> Result<()> {
     let socket = root.join(format!("guardian-{label}.sock"));
     let listener = UnixListener::bind(&socket)?;
@@ -2544,8 +2740,9 @@ fn guardian_exits_after_owner_and_tracked_descendant_are_gone(root: &Path) -> Re
         Directory::open_anchor(&root.join("orphan-tree-attempt"))?,
         scope(),
     )?;
-    let exit = exited(&handle)?;
-    assert!(exit.unresolved_cleanup, "{exit:?}");
+    // Whether cleanup ended the descendant first is platform policy; the
+    // guardian outlives neither it nor the owner.
+    let _first = exited(&handle)?;
     drop(descendant_stream);
     wait_for_identity_absence(&descendant)?;
     wait_for_identity_absence(&guardian)?;
@@ -2724,6 +2921,24 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
     let clock = SystemClock::new();
     // Guardian loss frees the kernel lease, but never clears the durable fence.
     let writer_path = root.join("crash-writer");
+    // An unsandboxed lane is proven gone only after its guardian completed a
+    // census of the tree, which a running guardian does within seconds. Wait
+    // for that record, so the loss below is the ordinary mid-run one.
+    let reservation = writer_path
+        .join(scope().attempt.to_string())
+        .join("reservation.json");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !std::fs::read(&reservation)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|value| value["census_incomplete"] == false)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the guardian never completed a census"
+        );
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
     let provider = process_identity(read_pid_line(&mut held)?)?;
     let locked = acquire_recovery(
         Directory::open_anchor(&writer_path)?,
@@ -2744,7 +2959,7 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
                 &fixture::RecordedBootObserver,
                 || Ok(true),
             )?
-            .is_none(),
+            .is_err(),
         "a surviving provider prevents same-boot loss proof"
     );
     assert!(!root.join("crash-attempt/process-exit.json").exists());
@@ -2774,7 +2989,7 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
         || Ok(true),
     )?;
     assert!(
-        proof.is_some(),
+        proof.is_ok(),
         "the kernel releases the guardian life lock after its death"
     );
     drop(proof);
@@ -2892,7 +3107,7 @@ fn a_host_sleep_cannot_extend_the_wall_deadline(root: &Path) -> Result<()> {
     Ok(())
 }
 
-// Medium: intentionally omit the sixth descriptor at the real first exec.
+// Medium: intentionally omit the profile descriptor at the real first exec.
 // This does not require Seatbelt; refusal happens before the native backend.
 fn profile_transport_pass_failure_never_launches_provider(root: &Path) -> Result<()> {
     let state = root.join("PROVENANT_STATE_DIR");
@@ -3044,10 +3259,6 @@ const CASES: &[Case] = &[
         process_watch_failure_records_one_fallback,
     ),
     (
-        "disk_floor_never_stops_a_running_build",
-        disk_floor_never_stops_a_running_build,
-    ),
-    (
         "live_provider_publishes_initial_checkpoint",
         live_provider_publishes_initial_checkpoint,
     ),
@@ -3124,8 +3335,8 @@ const CASES: &[Case] = &[
         wall_deadline_is_the_execution_bound,
     ),
     (
-        "setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative",
-        setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative,
+        "setsid_descendant_is_tracked_before_exit_and_reaped_after_it",
+        setsid_descendant_is_tracked_before_exit_and_reaped_after_it,
     ),
     (
         "descendant_stays_attributed_after_parent_exit_and_session_change",
@@ -3147,8 +3358,28 @@ const CASES: &[Case] = &[
     ),
     #[cfg(target_os = "macos")]
     (
-        "escapee_is_ended_only_when_the_host_reports_no_nested_runs",
-        escapee_is_ended_only_when_the_host_reports_no_nested_runs,
+        "escapee_is_ended_with_no_child_registry_and_a_present_holder",
+        escapee_is_ended_with_no_child_registry_and_a_present_holder,
+    ),
+    #[cfg(target_os = "macos")]
+    (
+        "retained_custody_releases_the_writer_soon_after_the_last_blocker_exits",
+        retained_custody_releases_the_writer_soon_after_the_last_blocker_exits,
+    ),
+    #[cfg(target_os = "macos")]
+    (
+        "sigterm_during_retained_custody_ends_the_guardian_and_releases_the_writer",
+        sigterm_during_retained_custody_ends_the_guardian_and_releases_the_writer,
+    ),
+    #[cfg(target_os = "macos")]
+    (
+        "sigterm_during_cleanup_ends_the_guardian_and_releases_the_writer",
+        sigterm_during_cleanup_ends_the_guardian_and_releases_the_writer,
+    ),
+    #[cfg(target_os = "macos")]
+    (
+        "retention_past_its_limit_exits_with_the_typed_outcome",
+        retention_past_its_limit_exits_with_the_typed_outcome,
     ),
     #[cfg(target_os = "macos")]
     (
@@ -3236,7 +3467,7 @@ fn run_case(name: &str) -> Result<()> {
     let escape = matches!(
         name,
         "escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures"
-            | "escapee_is_ended_only_when_the_host_reports_no_nested_runs"
+            | "escapee_is_ended_with_no_child_registry_and_a_present_holder"
             | "detached_descendant_in_the_attempt_sandbox_is_found_and_ended"
     );
     for scoped in [false, true].into_iter().take(if escape { 2 } else { 1 }) {
@@ -3303,8 +3534,11 @@ fn main() -> Result<()> {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-        // The production shape wires no child registry.
+        // The production shape wires no child registry. An unreadable registry
+        // is wired explicitly to keep a blocker for retention tests; graph
+        // children no longer withhold a lane's own signals (#3568).
         let production_shape = home.join(S2_PRODUCTION_SHAPE).is_file();
+        let unreadable_registry = home.join(S2_UNREADABLE_CHILD_REGISTRY).is_file();
         let refusal_marker = home.join(S2_REFUSE_ADMISSION);
         let jump_marker = home.join(S2_WALL_JUMP);
         let jump = std::fs::read_to_string(&jump_marker)
@@ -3317,13 +3551,9 @@ fn main() -> Result<()> {
             sleeping,
             jump: jump.unwrap_or(0),
         };
-        let graph_children = GraphChildrenHolder(home.clone());
+        let production_holder = ProductionHolder;
         let registry = FileChildRegistry { home };
         let observer = CensusGateObserver;
-        let disk = std::env::var_os("PROVENANT_STATE_DIR")
-            .map(PathBuf::from)
-            .filter(|state| state.join(S2_DISK_PRESSURE).is_file())
-            .map(|state| MarkerDiskPressure { state });
         let publisher = match std::env::var_os("PROVENANT_STATE_DIR") {
             Some(path) => fixture::ExitPublicationFaults::from_state_dir(&PathBuf::from(path))?,
             None => None,
@@ -3342,7 +3572,7 @@ fn main() -> Result<()> {
             }),
             Err(_) => None,
         };
-        provenant_supervisor::supervise(
+        let supervised = provenant_supervisor::supervise(
             &args[2..],
             GuardianHooks {
                 holder: refusal
@@ -3350,16 +3580,14 @@ fn main() -> Result<()> {
                     .map(|holder| holder as &dyn provenant_supervisor::Holder)
                     .or_else(|| {
                         production_shape
-                            .then_some(&graph_children as &dyn provenant_supervisor::Holder)
+                            .then_some(&production_holder as &dyn provenant_supervisor::Holder)
                     }),
-                children: (!production_shape).then_some(&registry as &dyn ChildRegistry),
+                children: (!production_shape || unreadable_registry)
+                    .then_some(&registry as &dyn ChildRegistry),
                 observer: Some(&observer),
                 wall_clock: jump
                     .is_some()
                     .then_some(&jumping as &dyn provenant_core::Clock),
-                disk: disk
-                    .as_ref()
-                    .map(|disk| disk as &dyn provenant_supervisor::DiskPressure),
                 exit_publisher: tracking_publisher
                     .as_ref()
                     .map(|item| item as &dyn ExitPublisher)
@@ -3367,7 +3595,12 @@ fn main() -> Result<()> {
                 stdout_decoder: Some(&Decoder),
                 ..Default::default()
             },
-        )?;
+        );
+        // Exit as `internal supervise` does: by the typed error's status.
+        if let Err(error) = supervised {
+            let _ = writeln!(io::stderr(), "supervise: {error}");
+            std::process::exit(i32::from(error.outcome().0.exit_code()));
+        }
         return Ok(());
     }
     if args.first().is_some_and(|a| a == "--fixture")

@@ -407,7 +407,6 @@ fn prepare(
     env.retain(|(key, _)| {
         ![
             "GIT_CONFIG_GLOBAL",
-            "GIT_CONFIG_NOSYSTEM",
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
             "XDG_CACHE_HOME",
@@ -418,7 +417,6 @@ fn prepare(
     });
     env.extend([
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         ("XDG_CONFIG_HOME".into(), private_config.into_os_string()),
         ("XDG_DATA_HOME".into(), private_data.into_os_string()),
         (
@@ -2126,11 +2124,13 @@ if /bin/mv "$1/handoff.json" "$2/handoff.json" 2>/dev/null; then exit 93; fi
                 global.map(|(_, value)| value.as_os_str()),
                 Some(expected.as_ref())
             );
-            assert_eq!(
+            // The lane does not force system Git configuration off, whatever
+            // the access.
+            assert!(
                 spec.env
                     .iter()
-                    .any(|(name, _)| name == "GIT_CONFIG_NOSYSTEM"),
-                access == Access::ReadOnly
+                    .all(|(name, _)| name != "GIT_CONFIG_NOSYSTEM"),
+                "{access:?}"
             );
         }
     }

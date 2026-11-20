@@ -394,9 +394,6 @@ pub struct AttemptSpec {
     /// keep their one worktree, so `shared` is refused on a writer node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolation: Option<String>,
-    /// `standard` (default) or `minimal` supervision of the lane.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supervision: Option<String>,
     /// `delivery` (default) keeps the delivery receipt; `none` withholds it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipts: Option<String>,
@@ -429,8 +426,7 @@ pub struct AttemptSpec {
     pub sealed_profile: Option<provenant_records::run::HarnessProfile>,
 }
 
-/// The `light` preset: no private source view, minimal supervision and no
-/// delivery receipt. Secret redaction and object integrity are not settings,
+/// The `light` preset: no private source view and no delivery receipt. Secret redaction and object integrity are not settings,
 /// so no preset can lower them.
 pub const LIGHT_PRESET: &str = "light";
 
@@ -452,14 +448,6 @@ impl AttemptSpec {
             .as_deref()
             .or(self.preset_default("shared"))
             .unwrap_or("private")
-    }
-
-    /// Effective supervision after the preset: `standard` or `minimal`.
-    pub fn effective_supervision(&self) -> &str {
-        self.supervision
-            .as_deref()
-            .or(self.preset_default("minimal"))
-            .unwrap_or("standard")
     }
 
     /// Effective receipts after the preset: `delivery` or `none`.
@@ -490,12 +478,6 @@ impl AttemptSpec {
         }
         if self.effective_isolation() != "private" {
             knobs.push(format!("lanes.isolation={}", self.effective_isolation()));
-        }
-        if self.effective_supervision() != "standard" {
-            knobs.push(format!(
-                "lanes.supervision={}",
-                self.effective_supervision()
-            ));
         }
         if self.effective_receipts() != "delivery" {
             knobs.push(format!("lanes.receipts={}", self.effective_receipts()));
@@ -537,7 +519,6 @@ impl AttemptSpec {
             && self.ci_scope.is_none()
             && self.preset.is_none()
             && self.isolation.is_none()
-            && self.supervision.is_none()
             && self.receipts.is_none()
             && self.sandbox.is_none()
             && self.admitted_by.is_none()
@@ -1549,6 +1530,10 @@ pub enum AccessMode {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingWriterProvisioning {
+    /// The host's graph/node owner. Present for nested provisioning; a
+    /// recovery may reuse only a checkout bearing this exact creation receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<provenant_core::Digest>,
     pub path: String,
     pub source: String,
 }
@@ -1914,6 +1899,10 @@ pub struct NodeProgress {
     pub review_verdict_correction_refused: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisioned_source: Option<String>,
+    /// Nested creation authority survives clearing the pending effect fence
+    /// and follows runtime fallback/recovery through the same provisioner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisioned_owner: Option<provenant_core::Digest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2022,6 +2011,10 @@ pub struct WriterWorktreeBinding {
     pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_directory_identity: Option<provenant_records::run::SourceIdentity>,
+    /// Host-granted sharing of the owning lane's exact checkout incarnation.
+    /// Shared writers observe its live branch; they never reset/advance it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_worktree: Option<provenant_records::custody::Subject>,
     pub worktree: String,
     pub head: String,
 }

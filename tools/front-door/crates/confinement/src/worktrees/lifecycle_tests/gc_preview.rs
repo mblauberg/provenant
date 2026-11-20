@@ -1,5 +1,106 @@
 use super::*;
 
+// Spec: docs/specs/disk.md#bounded-sweeps
+#[test]
+fn archive_candidate_resumes_after_parent_root_change() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let root = test.project_state.current_path()?.join("discard-archives");
+    fs::create_dir(&root)?;
+    let archive = root.join("archive-old");
+    fs::create_dir(&archive)?;
+    fs::set_permissions(&archive, fs::Permissions::from_mode(0o700))?;
+    for index in 0..128 {
+        fs::write(archive.join(format!("payload-{index:03}")), b"data")?;
+    }
+    fs::File::open(&archive)?.set_modified(std::time::UNIX_EPOCH)?;
+    let before = 1_000_000_000_000_i128;
+    let mut checked = 0;
+    let partial = super::super::archive::collect_archives(
+        &context,
+        before,
+        false,
+        &cancel(),
+        None,
+        None,
+        &mut || {
+            checked += 1;
+            checked > 12
+        },
+    );
+    assert_eq!(partial.interrupted_at.as_deref(), Some(archive.as_path()));
+    assert!(partial.continuation.is_some());
+    let remaining = fs::read_dir(&archive)?.count();
+    assert!(remaining > 0 && remaining < 128);
+
+    fs::write(root.join("root-noise"), b"changed parent stamp")?;
+    let deferred = super::super::archive::collect_archives(
+        &context,
+        before,
+        false,
+        &cancel(),
+        partial.interrupted_at.as_deref(),
+        partial.continuation.as_deref(),
+        &mut || true,
+    );
+    assert_eq!(deferred.interrupted_at.as_deref(), Some(archive.as_path()));
+    let resumed = super::super::archive::collect_archives(
+        &context,
+        before,
+        false,
+        &cancel(),
+        deferred.interrupted_at.as_deref(),
+        deferred.continuation.as_deref(),
+        &mut || false,
+    );
+    assert!(resumed.interrupted_at.is_none());
+    assert_eq!(resumed.removed, vec![archive]);
+    Ok(())
+}
+
+#[test]
+fn archive_expiry_preview_matches_sweep_at_retention_cutoff() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let root = test.project_state.current_path()?.join("discard-archives");
+    fs::create_dir(&root)?;
+    let old = root.join("archive-old");
+    let recent = root.join("archive-recent");
+    for path in [&old, &recent] {
+        fs::create_dir(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        fs::write(path.join("tip.bundle"), b"recovery")?;
+    }
+    fs::File::open(&old)?.set_modified(std::time::UNIX_EPOCH)?;
+    let cutoff = 1_000_000_000_000_i128;
+    let preview = super::super::archive::collect_archives(
+        &context,
+        cutoff,
+        true,
+        &cancel(),
+        None,
+        None,
+        &mut || false,
+    );
+    assert!(preview.would_remove.contains(&old));
+    assert!(!preview.would_remove.contains(&recent));
+    let applied = super::super::archive::collect_archives(
+        &context,
+        cutoff,
+        false,
+        &cancel(),
+        None,
+        None,
+        &mut || false,
+    );
+    assert_eq!(preview.would_remove, applied.removed);
+    assert_eq!(preview.bytes, applied.bytes);
+    assert!(recent.exists());
+    Ok(())
+}
+
 #[test]
 fn gc_preview_keeps_custody_unknown_when_census_times_out() -> Result<(), Box<dyn Error>> {
     struct TimedOut;
@@ -558,7 +659,7 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
 
 #[test]
 fn unsettled_reservation_fences_a_slot_after_its_lock_disappears() -> Result<(), Box<dyn Error>> {
-    // Spec: docs/specs/supervisor.md#one-writer-removal-never-forces
+    // Spec: docs/specs/supervisor.md#shared-occupancy-removal-never-forces
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();

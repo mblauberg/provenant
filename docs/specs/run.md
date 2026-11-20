@@ -7,6 +7,12 @@ Run admits attempts and records their outcomes. [Launch](run-launch.md),
 [settlement](run-settlement.md), [Git and delivery](run-git.md) and
 [attribution](run-attribution.md) specify their boundaries. Paths are relative
 to `tools/front-door/`.
+The handoff parsing rule lives in [settlement](run-settlement.md): a closed
+`handoff` fence wins, a final `json` fence is accepted with a warning, and
+adjacent repeated blocks settle as one declaration (identical, or the last of
+differing copies), each with a warning. A writer that exits without a handoff
+keeps its uncommitted paths and pinned head in the reason and sealed terminal,
+so the `handoff_missing` stop routes to the chair as a continuable stop.
 
 ## Operation IDs
 
@@ -35,9 +41,9 @@ shim names the knob, its source and suggests fetching on the host. Cargo credent
 `credentials.toml`) remain mandatory read/write denials, including relocated homes.
 Host `config` and `config.toml` are read-only data; target seeding checks them with
 the same compiler-selection validation as checked-in Cargo configuration.
-Build directories and lane-specific tool configuration default to a shared host
-cache target (`lanes.cargo_target = "shared"`), or remain private to the lane
-cache (or attempt scratch for read-only lanes) when `private` is configured.
+Build directories default to the worktree's own target in its lane cache
+(`lanes.cargo_target = "private"`; attempt scratch for read-only lanes), or the
+writer worktree's own `target/` when `project` is configured.
 No separate lane download store, Cargo home or symlink setup exists.
 The host's own build output supplies target seed generations.
 - Why: Cargo fingerprints dependency source paths; changing the home path defeats reuse even when symlinks reach the same content.
@@ -45,13 +51,16 @@ The host's own build output supplies target seed generations.
 ## Cargo target directory
 
 The `lanes.cargo_target` knob configures how lanes acquire their Cargo target:
-- `shared` (default): one target directory per project under the host cache (`~/Library/Caches/provenant-shared-cargo/<project_key>/target`), avoiding cold builds and skipping seed cloning. Lanes for the same repository share the warm target and Cargo serialises concurrent access with its build lock.
-- `private`: preserves the per-worktree copy-on-write seed clone under `~/Library/Caches/provenant-lane-cargo/<digest>/target`.
-- Absolute path: uses the path directly. It comes only from host or project configuration or the launch knob; a `Cargo target:` line in a brief can pick `shared` or `private` but never a path, because a path grants the lane read, write and exec there and a brief is requester text.
+- `private` (default): the worktree's own target in its lane cache, `~/Library/Caches/provenant-lane-cargo/<digest>/target` (lint-only runs in `target-lint`), seeded warm from the project's host seed generation (below). A clone shares blocks with the seed on APFS. Where the filesystem cannot clone, the target stays unseeded: the outcome is a `clone_failed` fallback, the host warns once and the first build is cold. A copy is never made, because it cannot finish inside the seed budget. Settlement starts a detached lane cleanup that removes the target once writer custody is free (`src/fabric/settlement.rs` → `gc_cleanup::release_settled_cache`); one it misses, worktree removal and lane-cache GC remove later. A continuation reuses a target still present and seeds a new one otherwise. `provenant worktree seed-target PATH` seeds the same directory for a checkout outside a lane and prints it for `CARGO_TARGET_DIR`; an existing target is kept. Outside a lane the command resolves the toolchain as cargo and rustup do, treating an unset or empty `RUSTUP_HOME` as `$HOME/.rustup` and `CARGO_HOME` as `$HOME/.cargo`, then verifies it and the Cargo configuration with the lane rules. An explicit `RUSTUP_HOME` elsewhere is refused. The command reports the source of the Cargo home it verified (`host CARGO_HOME` or `host HOME/.cargo`), because a shell's `CARGO_HOME` can differ from the host a lane runs under; it uses the same resolution as lanes. Every fallback outcome carries `expected` and `found` text for a mismatch (toolchain, host triple, Cargo profile, pin, environment class), free of paths and environment values, and the command prints a repair step.
+- `project`: the writer worktree's own target, `target/` beside the Cargo workspace the verify port selects, with lint-only runs in `target/provenant-lint`. Builds by a person or chair in that checkout share it, and it goes with the worktree, but a new worktree starts cold. The host neither creates it nor grants it separately: it lies in the writer-controlled worktree, which the lane may already write and execute. Read-only lanes and projects without a Cargo manifest use the lane cache.
+- Absolute path: uses the path directly. It comes only from host or project configuration or the launch knob; a `Cargo target:` line in a brief can pick `project` or `private` but never a path, because a path grants the lane read, write and exec there and a brief is requester text.
+
+No mode shares one target between worktrees of a repository. The `shared` value, which gave every worktree one host target, is removed: `provenant config check` reports it and the default applies, and `provenant gc` retires its old directories under `~/Library/Caches/provenant-shared-cargo/` (a preview lists them; `--apply` removes each whose Cargo locks are free and that has no write within the build-directory grace).
+- Why: Cargo hashes a workspace member's units by its workspace-relative path, so every worktree maps to the same units, and it decides their freshness by comparing source mtimes with the last build's dep-info. A worktree whose sources are older than another worktree's build reuses that build's artifacts and reports symbols missing that exist in its source (#3561). Content-hash freshness (`-Zchecksum-freshness`) would remove the mtime dependence but is nightly-only.
+- Why the seed is the host generation, not a settled lane's target: generations already exist per project, are built by the host from the verify base (landed code) rather than from writer-controlled output, and record the compiler, host triple and Cargo profile a clone must match. A lane's target carries none of those guarantees and would need a second store and retention.
 
 The preamble and `provenant config show` report the resolved target directory and its source, e.g. `(source: default; lanes.cargo_target)` or `(source: host; lanes.cargo_target)`.
-Target seeding and clone machinery are skipped when `shared` or an absolute target is selected; seeding is used only for `private`.
-- Why: lanes run as the same user, so a per-lane target guards no real boundary while it costs a cold build and its own disk per lane.
+Target seeding and clone machinery are used only for `private`. A lane's seed outcome is in `cargo-target-setup.json`; a fallback also warns once on the host's stderr.
 
 ## Cargo target seed
 
@@ -70,20 +79,40 @@ project if no own generation exists. The seed builder and writer preparation
 use the same lane profile defaults and preserve explicit environment values;
 incompatible profile generations are skipped. Refresh currentness requires the
 recorded verify-base commit to match; writer selection uses compatible
-generations and Cargo's normal per-unit freshness checks before reusing artifacts. Published generations are
+generations and Cargo's normal per-unit freshness checks before reusing artifacts. A clone ages every
+dep-info file to the epoch before it is published, so each unit that lists source files (workspace
+members) rebuilds once against the worktree's sources while registry packages, which list none, stay
+fresh. Cargo does not promise a build-directory layout (`.fingerprint/<unit>/` before Cargo 1.100,
+`build/<package>/<hash>/fingerprint/` after) or which units keep dep-info, so the pass is driven by the
+fingerprints themselves. Within the clone's depth limit, the seed budget and cancellation, it finds the
+`*.json` fingerprints in `fingerprint` and `.fingerprint` directories, reads each one's `local` entries
+(ignoring unknown fields) and ages exactly the files its `CheckDepInfo` entries name, relative to the target
+root. A fingerprint that cannot be read, a named dep-info that is missing or not a path inside the target, or
+a non-empty clone in which none is named is not published: the outcome is the `seed_layout_unrecognised`
+fallback and the lane builds cold. A unit left un-aged would reintroduce #3561. A test builds with the pinned
+Cargo and checks from its JSON output that a member recompiles and a registry-style dependency stays fresh. Published generations are
 immutable, and collection cannot race an active clone. `max_generations` keeps
 history per project; `max_bytes` is a host-wide allocated-byte collection target.
 Collection always keeps each project's newest complete generation, even when
 that generation alone exceeds the target; busy stores and active clones remain
-protected. Failed refreshes
-retry at the next scheduled collection, while busy projects retry on the next
-tick without rebuilding other failed projects. Full requests supersede queued
-busy retries and reevaluate prior failures. Detached pending and active scopes
-survive process interruption and are retried after a minute.
-When a scheduled refresh fails, `provenant tick` reports a bounded cause category
-and a next step from the saved result. This note does not expose persisted
-command output, repository paths or environment values, and does not change the
-tick outcome or retry schedule.
+protected. Seeding is per project. Each project
+resolves its own verify base and gets its own outcome in `seed-result.json`: `built`, `current`,
+`busy`, `not_cargo`, `failed` with its cause, or `skipped` with a typed reason
+(`verify_base_unset`, `verify_base_unresolved`, `workspace_absent_at_base`) and a repair step.
+A skipped or failed project never stops or hides another project's seed, and a skip is
+not a failed pass. Failed projects retry at the next scheduled collection, while busy
+projects retry on the next tick without rebuilding the others: a busy retry replaces
+only its own projects' outcomes and keeps every other record. Full requests supersede
+queued busy retries and reevaluate every project. Detached pending and active scopes
+survive process interruption and are retried after a minute. Pass-level failures
+(an unreadable registry) are recorded beside the projects, and the number of project
+records is bounded, with the omitted count kept.
+`provenant tick` summarises the saved result as counts, for example `seed=ok:1 skipped:1`,
+and adds a bounded note with the cause category and the repair step. The note does not
+expose persisted command output, repository paths or environment values, and does not
+change the tick outcome or retry schedule. Because seeding follows a complete or partial
+collection and never a failed one, an interrupted collection is retried promptly (see
+[scheduled collection](state.md#retention-keeps-evidence)) and seeding resumes with it.
 - Why: reuse must not introduce incompatible or partially collected build output.
 
 ## Publication order
@@ -107,15 +136,27 @@ The host pushes the lane's own branch only when the persisted `lanes.publish`
 grant is enabled and the launch-bound host transport is available. A failed or
 unavailable push leaves the committed head and unpushed count visible.
 
+`status` and `result` report the budget's unit beside the provider's totals: the
+unit name (`fresh_tokens`: uncached input, cache writes and output/reasoning,
+with cache reads excluded because each call rereads the context), the limit's
+value and the layer that set it, the fresh tokens counted for the attempt and
+the provider's cumulative input including cache reads for comparison. Codex
+totals are session-wide unless an attempt marks them per-attempt, so a counted
+or reported figure can be absent; absence is never a guessed zero. An adapter
+that cannot interrupt a turn names that caveat in the same receipt, and the
+receipt is projected from the same limit and usage record enforcement reads,
+so the two outputs cannot disagree about the unit.
+
 | Record field | Reader compatibility |
 | --- | --- |
 | `AttemptRecord.stop_work` | Optional; older records read as absent, and older readers retain it as an unknown field. |
+| `status.budget_usage`, `result.budget_usage` | Optional; older readers retain them as unknown fields. |
 
-- Why: budget enforcement must preserve completed work and report its evidence.
+- Why: budget enforcement must preserve completed work and report its evidence; a budget that excludes cache reads must not look unenforced beside a larger provider-reported input.
 
 ## Lane verification and build admission
 
-A writer preamble's verification paragraph is `lanes.verification` (`check`, `targeted` or `full`). Unset, the sourced default is targeted: use a shared warm target, run cargo check, clippy on touched crates and targeted tests, and leave the workspace suite to CI. A brief line `Verification scope: targeted` (or `check` or `full`) overrides the knob and the paragraph names source `brief`. When the knob and that line disagree, the paragraph follows the brief and the stop cause names both scopes. Lane Cargo commands share the `build` admission class, configured through `[admission.build].slots`; unset, its count is derived from cores and memory (source `default`), and a configured value names its host or project source. Set it to `0` to disable the cap. Lane Cargo commands, including aliases and nextest, use a PATH shim to acquire a slot. A command that finds every slot busy waits a bounded time, then warns and proceeds; status shows the wait. Direct paths bypass this cooperative throttle.
+A writer preamble's verification paragraph is `lanes.verification` (`check`, `targeted` or `full`). Unset, the sourced default is targeted: build in the worktree's own warm target (`lanes.cargo_target`), run cargo check, clippy on touched crates and targeted tests, and leave the workspace suite to CI. A brief line `Verification scope: targeted` (or `check` or `full`) overrides the knob and the paragraph names source `brief`. When the knob and that line disagree, the paragraph follows the brief and the stop cause names both scopes. Lane Cargo commands share the `build` admission class, configured through `[admission.build].slots`; unset, its count is derived from cores and memory (source `default`), and a configured value names its host or project source. Set it to `0` to disable the cap. Lane Cargo commands, including aliases and nextest, use a PATH shim to acquire a slot. A command that finds every slot busy waits a bounded time, then warns and proceeds; status shows the wait. Direct paths bypass this cooperative throttle.
 
 Admission attribution has the same host scope as slot occupancy. Before confinement,
 `configure_build_slots` registers each lane under `<state>/admission/<class>/lanes/`,
@@ -128,7 +169,6 @@ name the holding project and lane; JSON retains their attribution. Registry
 publication failures warn and allow the build to proceed. Lanes keep their existing
 scratch write grant and read-only slot access; registration does not grant writes
 to host state or other lanes' records.
-
 - Why: a chair brief must be able to widen what a lane verifies, and parallel lanes must share one host cap instead of each taking the machine.
 
 ## Every limit names the layer that set it
@@ -142,15 +182,71 @@ layer.
 - Why: a value reported under the wrong source sends the operator to the wrong
   place to change it.
 
+## Provider config notices are warnings
+
+A provider's own configuration-deprecation notice (a deprecated key in the
+config the account home inherits, such as Codex's `[features].multi_agent`)
+is advice for the user, not a failed provider turn. The adapter classifies it
+at the decode site as a warning carrying the provider's text and the config
+file it names; it never sets the stream's error flag or fails the lane. The
+same notice on stderr is likewise held out of the attempt's provider-error
+headline. Each distinct notice is shown once per attempt beside the applied
+route, names `config.toml` when the message gives no fuller path and points at
+`providers.codex.clean_config` as the way to stop inheriting stale keys.
+- Why: a stale inherited key must be actionable for the user without being
+  reported as a provider failure, and two copies of the same notice must not
+  read as two errors.
+- Owner: `crates/providers/src/codex.rs`, `crates/providers/src/stream.rs`,
+  `crates/cli/src/run.rs`, `crates/cli/src/run/output.rs`
+
 ## Lane Git and import
 
-Writers use private Git state; the host does not execute with lane-mutable Git
-configuration. For sandboxed lanes, confinement protects shared Git state.
-Import uses Git's quarantined receive and verification; publication compares
-against the pinned base. The base remains pinned until publication.
+Writers of one verified worktree incarnation share its files and hold
+occupancy together. Each attempt has its own private Git state (HEAD, index,
+refs, objects, configuration and credential setup) in its attempt directory,
+so siblings never see each other's staging or unpublished commits. Contexts
+outlive attempt scratch, and later admissions never reset live Git state.
+The host does not execute with lane-mutable Git configuration. For sandboxed
+lanes, confinement protects the repository's shared Git state.
+Import uses Git's quarantined receive and verification; publication
+compare-and-swaps the host branch against the tip it observed. A lane whose
+history forked from the branch is refused at once and its private Git is
+retained for recovery. The base remains pinned until publication.
+The worktree's native index follows the branch from a recorded commit and the
+digest of the index Provenant left, advanced under a per-worktree native-index
+lock (never the admission gate) after each publication and repeated on every
+settlement or resume until it matches the tip. The advance is advisory and
+never fails settlement. If Git refuses it, the index changed since the record,
+or the record or index cannot be read, the index and record are left unchanged
+and status reports `index_out_of_sync` with the reason, the paths and one
+command that resets the index and the record together.
+Import retention refs belong to each attempt, even for an identical commit;
+publication and cleanup remove only that attempt's pins. Settlement clears an
+attempt's import pins on every terminal outcome, not just successful
+publication, and GC removes the pins of any settled or missing attempt so ref
+listings stay small. Bulk pin removal is one batched ref transaction, never one
+Git process per pin. The same condition gates the import pin and the
+import-extra refs: when no writer slot is available or the fence listing has
+issues, cleanup keeps both as recovery evidence. GC counts the import pins a
+preview would remove and deletes them only when applied. An unreadable run
+store leaves the pins untouched: GC warns on stderr and carries on with the
+settled-lane and path-based passes instead of skipping the project.
+Lane Git import runs with `-c advice.graftFileDeprecated=false`, and raw git advice
+(such as `hint:` lines) is filtered from stderr before warning so advice lines
+never surface as Provenant warnings.
+
 The GitHub credential receipt governs token delivery even when sandboxing is
 off: `none` withholds host token environment variables, `injected` passes only
 the selected token, and `ambient` preserves the native host environment.
+`ambient` also pins `GH_CONFIG_DIR` to the host's gh configuration directory,
+resolved as gh does on the host (the host's `GH_CONFIG_DIR`, else its
+`XDG_CONFIG_HOME/gh`, else `~/.config/gh`), in the lane environment and in the
+lane's `gh` shim, because an adapter may re-point the lane's own
+`XDG_CONFIG_HOME` at private state. The receipt's `detail` names the directory
+and which host setting chose it. The shim directory leads the lane's `PATH` as
+set by the host; a shell profile that reorders `PATH` does not unpin gh, since
+the pin lives in the environment. A lane opens its own pull request with
+`gh pr create --body-file`; `provenant pr open` needs a settled attempt.
 - Why: untrusted lane state must not alter shared Git or publish over another writer.
 
 ## Writer pin and re-pin

@@ -71,6 +71,30 @@ project `shared_paths` and `exec_roots` for writer access, or
 `provenant fabric identity` to find the project ID and `provenant config schema`
 to inspect the settings.
 
+## Lane Cargo target
+
+`lanes.cargo_target` picks each writer lane's `CARGO_TARGET_DIR`. The default,
+`private`, is the worktree's own target in its lane cache, cloned warm from the
+project's host seed (unseeded and cold, with a warning, where the filesystem
+cannot clone). `project` uses the worktree's own `target/` and starts cold. An
+absolute path is used as given: never point several worktrees of one repository
+at it, because Cargo then serves one branch's artifacts to another
+([run spec](../specs/run.md#cargo-target-directory)). The lane preamble names
+the value and its source. A `shared` value from an older release is reported by
+`provenant config check` and the default applies; `provenant gc --apply`
+removes its old directories.
+
+To build warm in a checkout outside a lane, seed its private target and use it:
+
+```sh
+export CARGO_TARGET_DIR="$(provenant worktree seed-target .worktrees/my-branch)"
+```
+
+The command needs no lane environment: unset `RUSTUP_HOME` and `CARGO_HOME` mean
+the defaults under `$HOME`. It prints where the Cargo home it verified came from,
+since your shell's `CARGO_HOME` can differ from the host a lane runs under. When it cannot seed, it names what differed (for
+example the pinned and the seeded compiler) and what to run next.
+
 ## Git pre-push hook and local gate
 
 Connect the Git pre-push hook to Provenant so it checks pushes, including its
@@ -187,7 +211,9 @@ wait_seconds = 30
   defaults to host hardware capacity derived from CPU cores and RAM. Set it to
   `0` to disable the cap.
 - `memory_per_slot`: Optional memory per slot. Admission samples RSS through the
-  process-tree sampler.
+  process-tree sampler. Setting it turns sampling on every 5000 ms unless
+  `domains.run.resource_sample_interval_ms` sets another interval; if no sample
+  is available the limit is skipped with a warning.
 - `disk_floor`: Optional minimum free disk floor required before running.
 - `trim_action`: Optional shell command executed to free resources if limits are
   exceeded before re-sampling.

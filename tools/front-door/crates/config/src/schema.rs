@@ -46,12 +46,13 @@ pub struct Schema {
 const GC_FIELDS: &[FieldMetadata] = &[
     FieldMetadata::new("schedule", "bool"),
     FieldMetadata::new("idle", "string"),
+    FieldMetadata::new("sweep_budget", "string"),
     FieldMetadata::new("stale_graph_age", "string"),
     FieldMetadata::int("graph_checkpoint_days", 1, 3650),
-    FieldMetadata::int("discard_archive_days", 1, 3650),
+    FieldMetadata::new("discard_archive_retention", "string"),
+    FieldMetadata::new("cargo_target_idle", "string"),
     FieldMetadata::new("free_floor", "string"),
     FieldMetadata::new("critical_free", "string"),
-    FieldMetadata::new("lane_cargo_cache_max", "string"),
     FieldMetadata::new("alert_below", "string"),
     FieldMetadata::new("projects.{project}.regenerable", "array"),
     FieldMetadata::new("projects.{project}.keep", "array"),
@@ -396,6 +397,7 @@ pub fn schema<T: Serialize>(
                 Kind::Int => "int",
                 Kind::Fraction => "fraction",
                 Kind::CargoTarget => "cargo_target",
+                Kind::Size => "size",
             },
             min: spec.min,
             max: spec.max,
@@ -476,6 +478,28 @@ pub fn schema<T: Serialize>(
     Ok(Schema { revision, fields })
 }
 
+/// Key prefix to dedicated command hints.
+pub const DEDICATED_COMMANDS: &[(&str, &str)] = &[
+    ("routing.model_exclusions", "provenant route exclude add"),
+    (
+        "domains.routing.model_exclusions",
+        "provenant route exclude add",
+    ),
+];
+
+/// Dedicated command to use instead of editing a key directly through `config apply`.
+pub fn dedicated_command(path: &str) -> Option<&'static str> {
+    for &(prefix, command) in DEDICATED_COMMANDS {
+        if path == prefix
+            || path.starts_with(&format!("{prefix}."))
+            || path.starts_with(&format!("{prefix}["))
+        {
+            return Some(command);
+        }
+    }
+    None
+}
+
 /// Apply a flat patch of `{"field": value}` to the document; a null value
 /// clears the field. Profile and knobs go through the knob editor; any other
 /// field must be one the schema lists, and the owning domain validates it when
@@ -508,6 +532,11 @@ pub fn apply_patch<T: Serialize>(
     let registry = registry()?;
     for (path, value) in patch {
         if !editable_path(path) {
+            if let Some(cmd) = dedicated_command(path) {
+                return Err(ConfigError::Refused(format!(
+                    "{path} is not an editable field; use {cmd}"
+                )));
+            }
             let near = crate::knobs::nearest(path, known.keys().copied());
             return Err(ConfigError::Refused(if near.is_empty() {
                 format!("{path} is not an editable field")

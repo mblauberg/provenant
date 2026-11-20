@@ -27,18 +27,9 @@ pub fn enforces(provider: &str) -> bool {
 /// prematurely exhaust the budget. `None` when it reported none, which is
 /// not the same as zero.
 pub fn used(usage: &UsageRecord) -> Option<u64> {
-    [
-        usage.uncached_input,
-        usage.cache_write,
-        usage.output_excluding_reasoning,
-        usage.reasoning,
-    ]
-    .into_iter()
-    .try_fold(None, |sum: Option<u64>, part| match part {
-        Some(n) => Some(Some(sum.unwrap_or(0).saturating_add(n))),
-        None => Some(sum),
-    })
-    .flatten()
+    // One definition of the budget's unit: `status` and `result` report the
+    // same figure through `UsageRecord::fresh_tokens`.
+    usage.fresh_tokens()
 }
 
 /// Judge `usage` against `budget` tokens. Cache reads do not count:

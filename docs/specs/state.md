@@ -62,6 +62,19 @@ A value that can normalise two ways is rejected at the wire boundary.
 - Why: two spellings let one record alias another.
 - Owner: `crates/core/src/`
 
+### Wall time has one stated bound
+
+`WallTime::MAX` is the single greatest instant the wire accepts:
+`253_402_207_200_000_000` microseconds (`9999-12-30T22:00:00.000000Z`).
+Jiff's `Timestamp::MAX` carries nanoseconds past that whole second, so the
+bound comes from the constant and not a documented spelling; anything above it
+is out of range. A consumer that needs the latest representable instant,
+including the graph checkpoint envelope, derives it from `WallTime::MAX` and
+has no epoch fallback.
+- Why: a bound naming a value the constructor rejects invites silent fallbacks
+  that hide the mismatch.
+- Owner: `crates/core/src/time.rs`, `crates/fabric-runtime/src/graph/envelope.rs`
+
 ### Graph names retain one identity
 
 A graph name identifies one graph generation for its project's lifetime.
@@ -81,10 +94,14 @@ checkpoint and execution, externalises text without changing its bytes, and
 validates the reconstructed result before atomic publication. Landing review queries retain valid settlements while reporting
 unreadable graph sources by graph ID. Readers of an atomic checkpoint see one
 complete published record. Every corrupt checkpoint stays visible as unreadable
-through status and each tick, with its graph ID. Pending-index recovery never
-uses unverified lifecycle fields to classify a corrupt record as settled.
+through status, with its graph ID and typed reason. The first tick read reports
+a corrupt checkpoint and records its file digest and typed reason in a quarantine
+marker; later ticks over identical bytes skip it, changed bytes are reported
+again, and `provenant stop -- NAME` retires the record. Pending-index recovery
+never uses unverified lifecycle fields to classify a corrupt record as settled.
 - Why: stored text must verify on reload, and one damaged graph must not hide
-  independent review evidence in another.
+  independent review evidence in another or flood every tick with the same
+  unresolvable retry.
 - Owner: `crates/fabric-runtime/src/graph/journal.rs`, `src/pr/landing/adapters.rs`
 
 ## SQLite stores
@@ -184,15 +201,22 @@ and continuations, and uses identity-checked deletion without following links.
 Usage retention belongs to [telemetry](telemetry.md#the-usage-ledger-outlives-the-run-store).
 `RETENTION_CLASSES` is the executable declaration of every retention class: a typed owner and adapter, triggers, eligibility and effective schema settings. Required collection and measurement methods are generated from that declaration; there is no wildcard adapter. Scheduled tick and explicit GC execute the same registry path. Each scheduled class runs its own adapter, including payload cap, attempt scratch, graph checkpoints and port receipts; byte rows come from adapter measurements, with complete, partial or unavailable observations and visible collection failures.
 `gc.idle` defaults to `6h` for artifacts with no finished-work owner state.
-Attempt `tmp` survives release for resume, steering and follow-up. It becomes
-immediately collectable when its branch is merged or PR closed, its graph is
-cancelled or superseded, or its worktree is removed. Collection retains durable
+Released read-only attempt `tmp` and candidate targets become collectable after
+`gc.idle`, regardless of branch, PR, graph or worktree state. Writer scratch
+becomes immediately collectable when its branch is merged or PR closed, its
+graph is cancelled or superseded, or its worktree is removed. Collection retains durable
 results, handoffs, logs and process records, and never removes files from busy
 or unreleased attempts. After merge, cleanup targets only the merged branch's
 worktree and attempt scratch. At lane launch, space below `gc.free_floor`
 triggers a best-effort single-flight full sweep; full sweeps preserve busy or
-recently used shared caches and the newest seed generation.
-Admission command receipts become eligible only after their attempt is terminal and release is proven. Naming and post-create command receipts carry a declared age lifetime, defaulting to 30 days and stored on each receipt. GC resumes interrupted checkpoint collection under the graph lock when a reserved graph name has no checkpoint; remaining prompt blobs, sidecars and pending markers are collected while the name reservation survives.
+recently used shared caches and the newest seed generation. Managed Cargo
+targets unused for `gc.cargo_target_idle` (default 30 days), or whose worktree
+is gone or replaced, are collected whatever the cache budget allows.
+The [disk spec](disk.md#bounded-sweeps) owns sweep budgets and resumption;
+[cache custody](disk.md#scratch-and-cache-custody) covers private and shared
+Cargo targets under `lanes.cargo_cache_max`.
+Admission command receipts become eligible only after their attempt is terminal and release is proven. Naming and post-create command receipts carry a declared age lifetime, defaulting to 30 days and stored on each receipt. Approval carry receipts (`state/landing/approval-carry/`) retain approval provenance across clean merges and formatting deltas; they become collectable after 30 days or when the pull request is closed or merged. GC resumes interrupted checkpoint collection under the graph lock when a reserved graph name has no checkpoint; remaining prompt blobs, sidecars and pending markers are collected while the name reservation survives.
+Scheduled collection runs once a day from `provenant tick`, and the daily deadline advances only when a collection completes: launching a detached worker moves nothing. A worker that fails, cannot be launched, or is interrupted (its result still says `queued` or `running` while no process holds the worker lock) leaves the day due and is retried with a bounded backoff of 15 minutes, 1 hour, 4 hours and 16 hours, then at the daily cadence, counted by the `failures` field of `gc-result.json`. A `queued` result younger than a minute is a worker that has not yet taken its lock and is left alone. A stale failure is reported once per tick as `gc=retry_pending` with its age, attempt and next retry; only the finding of an interruption, or a failed launch, is an error. A collection that stops at its sweep budget and saved a cursor ends as `partial`: it is progress, not a failure, so it advances the deadline, resets the count and is resumed by the next sweep. A completed or partial collection resets the count, and only those queue the seed pass. A deadline that cannot be advanced (the cadence lock stayed busy through a few attempts) is noted on the completed result, never recorded as a failure. A result that cannot be read (corrupt, over its cap or from a newer writer) is treated as absent, reported once, and replaced by the next queued result, so it cannot block collection; a result dated in the future, from a clock that moved back, is stale and is retried at once. Saved causes are bounded. `gc-result.json` and `seed-result.json` are rewritten whole by their writer rather than updated in place, so they do not round-trip fields they do not know; `failures`, `projects` and `omitted_projects` are optional, a skip reason a newer writer adds reads as unrecognised, and no older shape has a reader.
 Removal records preserve subject, tip, subsumed or landed predicate and evidence source; shallow history, conflicted merge trees, offline forge and rewritten default branches remain typed kept outcomes.
 - Why: freeing space must not destroy evidence or a session in use.
 - Owner: `crates/config/src/gc.rs`; `worktrees.rs`; `crates/run/src/retention.rs`

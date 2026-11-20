@@ -55,8 +55,27 @@ Diagnostics go to bounded, redacted stderr, never result bytes.
 
 Tests isolate user state and use controlled time and synchronisation.
 - Why: tests must not alter a real installation or depend on timing races.
-- Owner: `crates/test-support/src/lib.rs` (`root_inputs`, `wait_for`),
+- Owner: `crates/test-support/src/lib.rs` (`root_inputs`, `wait_for`, `process_is_gone`, `assert_process_gone`),
   `crates/core/src/time.rs::Clock`
+
+## Bounded debug stack frames
+
+Graph executor frames stay small and the threads that run graph execution share
+one stack size. Large executor locals and futures are boxed and the largest
+phases (the scheduling pass, gate evaluation, attempt admission, observation
+recording, the launch preparation) are separate functions, so no debug-build
+frame pools a whole phase's temporaries. The nesting of one launch still exceeds
+the 2 MiB default of a spawned debug-build thread, so every thread that runs
+graph execution takes `GRAPH_STACK_BYTES`; no thread sets its own number.
+- Why: a launch overflowed default-stack threads in debug builds. Small frames
+  keep the headroom wide; one named size keeps production workers and test
+  harness threads from drifting apart.
+- Test harness: `.cargo/config.toml` repeats the size as `RUST_MIN_STACK`
+  (the only way to size libtest threads) and a test pins it to the constant.
+- Owner: `tools/front-door/crates/fabric-runtime/src/graph.rs`
+  (`GRAPH_STACK_BYTES`), `tools/front-door/src/fabric/owner.rs`,
+  `tools/front-door/crates/cli/src/run/launch.rs`,
+  `tools/front-door/src/check_providers.rs`, `tools/front-door/.cargo/config.toml`
 
 ## One owner per mechanism
 
@@ -67,6 +86,5 @@ Each mechanism has one implementation; callers supply the policy that varies.
 
 Build modular mechanisms around a declared core and make variable behaviour
 configurable. Design for foreseeable cases when it makes change easier. Prefer
-warnings or retries to hard holds except at real boundaries of credentials, Git
-isolation, data integrity and authority.
+warnings or retries to hard holds except at the [hard boundaries](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md).
 - Why: extensible ownership reduces the cost of change without losing custody.

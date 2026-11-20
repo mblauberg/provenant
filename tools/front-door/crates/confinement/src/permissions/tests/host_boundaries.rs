@@ -60,6 +60,10 @@ fn native_host_inventory_protects_aliases_and_later_worktrees()
         git_grants_digest: [0; 32],
         publishing: false,
         common_git_dir: primary.join(".git"),
+        git_state: PathGrant {
+            path: "/fixture/home/Library/Application Support/provenant/worktree-git/fixture".into(),
+            scope: PathScope::Subtree,
+        },
         cargo_cache: PathGrant {
             path: root.join("cache"),
             scope: PathScope::Subtree,

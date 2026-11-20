@@ -1,8 +1,9 @@
 # Maintaining Provenant
 
 Read [AGENTS.md](AGENTS.md), [GLOBAL-AGENTS.md](GLOBAL-AGENTS.md) and the
-[architecture](docs/ARCHITECTURE.md). The global rules own authority and
-boundaries; [worktrees](docs/worktrees.md) owns Git isolation and operations.
+[architecture](docs/ARCHITECTURE.md). [ADR 0035](docs/adr/0035-three-hard-boundaries-and-flexible-everything-else.md) defines
+the hard boundaries; [worktrees](docs/worktrees.md) owns worktree layout,
+merge and cleanup.
 Preserve unrelated work and follow the repository process below.
 
 ## Repository process
@@ -35,7 +36,11 @@ decisions and invariants.
 
 Edit living docs in place. Each user-visible change adds a fragment under
 [release notes](docs/release-notes/next.d/), following the
-[fragment rules](docs/release-notes/README.md#writing-a-fragment). Before a
+[fragment rules](docs/release-notes/README.md#writing-a-fragment): one section
+per fragment (Breaking changes, Behaviour changes, Additions or Fixes; use two
+fragments for two sections) and one area from the README list. `--check` fails
+on a later section heading or content before the first heading and warns on an
+unknown section or area. Before a
 release, read the collated preview, merge related entries, align terms and
 write `_intro.md` last. Run `scripts/collate-release-notes vX.Y.Z`, then reset
 `_intro.md` for the next release. GitHub Releases holds published history.
@@ -65,8 +70,8 @@ The [deliver skill](skills/deliver/SKILL.md) owns the engineering stance.
 - Build extensible, configurable, modular mechanisms with one declared core
   and one owner per concern. Generalise where it makes change easier.
 - Use explicit typed failures and catch mistakes before runtime. Checks allow or
-  warn by default; hard holds protect credentials, Git isolation, data integrity
-  and authority. When busy, skip and retry.
+  warn by default; hard holds protect only the
+  [three boundaries](docs/adr/0035-three-hard-boundaries-and-flexible-everything-else.md). When busy, skip and retry.
 - Move callers to the new shape and remove compatibility code. For tests, see
   [test-design](skills/test-design/SKILL.md).
 
@@ -91,8 +96,8 @@ must be explicit. Changes to ambient rules apply to new sessions.
 When cutting a version, start with `scripts/prepare-release vX.Y.Z`. It bumps
 each workspace member's own `[package] version` under `tools/front-door`,
 refreshes `Cargo.lock` offline, updates the bug template placeholder from
-`rust-toolchain.toml`, warns about merged changes that have no next.d fragment,
-and collates the notes. Review and commit its changes, then run the gates
+`rust-toolchain.toml`, checks the fragments first and stops on a malformed one, warns about merged
+changes that have no next.d fragment, and collates the notes. Review and commit its changes, then run the gates
 below; the script prints the remaining steps (pull request and tag).
 
 Use the [CI runbook](docs/runbooks/ci.md), [test tiers](docs/runbooks/test-tiers.md)

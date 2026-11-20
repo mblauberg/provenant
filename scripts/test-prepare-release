@@ -114,6 +114,21 @@ grep -F 'gh is unavailable; skipping the fragment check' "$tmp/err2" > /dev/null
 grep -F 'version = "2.3.1"' tools/front-door/Cargo.toml > /dev/null
 [ -f docs/release-notes/v2.3.1.md ]
 
+# A malformed fragment stops the release before any version, lock or template
+# change, and before collation.
+printf '## Additions\n\n- One.\n## Fixes\n- Two.\n' > docs/release-notes/next.d/bad.md
+: > "$CARGO_LOG"
+if "$script" v2.3.3 > "$tmp/out4" 2> "$tmp/err4"; then
+  echo 'prepare-release accepted a malformed fragment' >&2
+  exit 1
+fi
+grep -F 'docs/release-notes/next.d/bad.md:4:' "$tmp/err4" > /dev/null
+grep -F 'version = "2.3.1"' tools/front-door/Cargo.toml > /dev/null
+[ ! -s "$CARGO_LOG" ]
+[ ! -e docs/release-notes/v2.3.3.md ]
+[ -f docs/release-notes/next.d/bad.md ]
+rm -f docs/release-notes/next.d/bad.md
+
 if "$script" 2.3.2 > "$tmp/out3" 2> "$tmp/err3"; then
   echo 'prepare-release accepted a version without a v prefix' >&2
   exit 1

@@ -135,7 +135,7 @@ fn validate_graph_steer(
         ..
     } = input
     else {
-        return Err(FacadeError::InvalidInput { detail: None });
+        return Err(FacadeError::field("graph_context"));
     };
     let actor = graph_context.launch_actor;
     if request.agent != format!("graph-{actor}")
@@ -1033,7 +1033,7 @@ pub fn peer(
                     PeerResult::Error {
                         data: provenant_fabric_runtime::hosts::PeerResultError {
                             extra: Default::default(),
-                            error: FacadeError::InvalidInput { detail: None },
+                            error: FacadeError::field("limit"),
                         },
                         extra: Default::default(),
                     }
@@ -1071,7 +1071,7 @@ pub fn peer(
                     PeerResult::Error {
                         data: provenant_fabric_runtime::hosts::PeerResultError {
                             extra: Default::default(),
-                            error: FacadeError::InvalidInput { detail: None },
+                            error: FacadeError::field("max_nodes"),
                         },
                         extra: Default::default(),
                     }
@@ -1104,7 +1104,7 @@ pub fn peer(
                     extra: Default::default(),
                 };
                 if *limit > context.config.limits.page_rows {
-                    error(FacadeError::InvalidInput { detail: None })
+                    error(FacadeError::field("limit"))
                 } else {
                     match provenant_cli::inbox::console_inbox_page(&context.roots, *state, *limit) {
                         Ok(data) => PeerResult::Console {
@@ -1124,7 +1124,7 @@ pub fn peer(
                     Err(_) => PeerResult::Error {
                         data: provenant_fabric_runtime::hosts::PeerResultError {
                             extra: Default::default(),
-                            error: FacadeError::InvalidInput { detail: None },
+                            error: FacadeError::field("id"),
                         },
                         extra: Default::default(),
                     },
@@ -1135,7 +1135,7 @@ pub fn peer(
                     PeerResult::Error {
                         data: provenant_fabric_runtime::hosts::PeerResultError {
                             extra: Default::default(),
-                            error: FacadeError::InvalidInput { detail: None },
+                            error: FacadeError::field("targets"),
                         },
                         extra: Default::default(),
                     }
@@ -1353,7 +1353,7 @@ pub fn peer(
                     PeerResult::Error {
                         data: provenant_fabric_runtime::hosts::PeerResultError {
                             extra: Default::default(),
-                            error: FacadeError::InvalidInput { detail: None },
+                            error: FacadeError::field("targets"),
                         },
                         extra: Default::default(),
                     }
@@ -1700,11 +1700,11 @@ pub(crate) fn peer_submit_graph(
     let origin = task
         .context
         .clone()
-        .ok_or(FacadeError::InvalidInput { detail: None })?;
+        .ok_or_else(|| FacadeError::field("context"))?;
     let node = origin
         .node_id
         .clone()
-        .ok_or(FacadeError::InvalidInput { detail: None })?;
+        .ok_or_else(|| FacadeError::field("context.node_id"))?;
     if origin.graph_id.as_deref() != Some(origin_work_key.graph())
         || node != origin_work_key.node()
         || origin
@@ -1721,10 +1721,10 @@ pub(crate) fn peer_submit_graph(
         .iter()
         .map(|knob| {
             knob.strip_prefix("routing.graph_exclude=")
-                .ok_or(FacadeError::InvalidInput { detail: None })
+                .ok_or_else(|| FacadeError::field("knobs"))
                 .and_then(|value| {
                     serde_json::from_str::<Vec<String>>(value)
-                        .map_err(|_| FacadeError::InvalidInput { detail: None })
+                        .map_err(|_| FacadeError::field("knobs"))
                 })
         })
         .collect::<Result<Vec<_>, _>>()?
@@ -1767,7 +1767,7 @@ pub(crate) fn peer_submit_graph(
         &factory.context.config.graph.limits,
         factory.context.port_table.worktree_layout.clone(),
     )
-    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+    .map_err(|_| FacadeError::field("document"))?;
     let mut journal = FileJournal::open(
         &factory.context.roots.state,
         factory.context.identity.project,
@@ -2140,7 +2140,7 @@ pub(crate) fn peer_graph_fields_page(
     let mut rows = Vec::new();
     let mut bytes = 0;
     if after > checkpoint.nodes.len() {
-        return Err(FacadeError::InvalidInput { detail: None });
+        return Err(FacadeError::field("after"));
     }
     let mut next_node = None;
     for (index, node) in checkpoint.nodes.iter().enumerate().skip(after) {
@@ -2185,7 +2185,12 @@ pub(crate) fn peer_graph_fields_page(
             .len();
         if bytes + size > MAX_FRAME / 4 {
             if rows.is_empty() {
-                return Err(FacadeError::InvalidInput { detail: None });
+                return Err(FacadeError::invalid(
+                    provenant_fabric_runtime::coordination::facade::InvalidInputDetail::FieldTooLarge {
+                        field: "nodes".into(),
+                        limit: MAX_FRAME / 4,
+                    },
+                ));
             }
             next_node = Some(index);
             break;
@@ -2270,7 +2275,7 @@ pub(crate) fn peer_cancel_submission_request(
         ..
     } = &request.action
     else {
-        return Err(FacadeError::InvalidInput { detail: None });
+        return Err(FacadeError::field("action"));
     };
     // Use the same authenticated launch namespace as Submit. request.actor()
     // names the transport agent, rather than the retained graph launch actor.

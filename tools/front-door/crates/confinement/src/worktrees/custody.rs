@@ -60,14 +60,14 @@ pub fn acquire_worktree_subject(
     worktree_subject(repo)
 }
 
-/// A writer must pass this check before its terminal result is accepted.
-/// Index and working-tree cleanliness do not prove a Git operation has ended.
+/// Native worktree mutations and removal require completed Git operations.
+/// Index and working-tree cleanliness alone do not prove completion.
 pub fn check_writer_terminal(repo: &VerifiedRepo) -> Result<(), WorktreeError> {
     check_writer_terminal_with_expected_merge(repo, None)
 }
 
-/// Accept only the merge metadata restored from a verified private writer
-/// view. Other Git operations remain terminal refusals.
+/// Accept only the explicitly expected merge marker. Other Git operations
+/// remain unfinished.
 pub fn check_writer_terminal_with_merge(
     repo: &VerifiedRepo,
     merge_head: &[u8],
@@ -80,6 +80,16 @@ fn check_writer_terminal_with_expected_merge(
     expected_merge: Option<&[u8]>,
 ) -> Result<(), WorktreeError> {
     repo.revalidate()?;
+    check_git_operation_terminal(repo.private_dir(), expected_merge)?;
+    repo.revalidate()?;
+    Ok(())
+}
+
+/// Inspect the Git state owned by a writer, including an attempt-private view.
+pub fn check_git_operation_terminal(
+    private: &Directory,
+    expected_merge: Option<&[u8]>,
+) -> Result<(), WorktreeError> {
     for marker in [
         "CHERRY_PICK_HEAD",
         "REVERT_HEAD",
@@ -92,21 +102,18 @@ fn check_writer_terminal_with_expected_merge(
         if marker == "MERGE_HEAD"
             && let Some(expected) = expected_merge
         {
-            let actual = repo
-                .private_dir()
-                .read_stable(OsStr::new(marker), 1024 * 1024)?;
+            let actual = private.read_stable(OsStr::new(marker), 1024 * 1024)?;
             if actual != expected {
                 return Err(WorktreeError::GitOperationInProgress);
             }
             continue;
         }
-        match repo.private_dir().metadata_at(OsStr::new(marker), false) {
+        match private.metadata_at(OsStr::new(marker), false) {
             Ok(_) => return Err(WorktreeError::GitOperationInProgress),
             Err(error) if error.is_not_found() => {}
             Err(error) => return Err(error.into()),
         }
     }
-    repo.revalidate()?;
     Ok(())
 }
 
@@ -134,20 +141,17 @@ pub fn submodule_evidence(
         repo.root_path(),
         repo.private_git_dir(),
         0,
-        false,
-        &mut Vec::new(),
         &mut evidence,
         cancel,
     )?;
     Ok(evidence)
 }
 
-pub(super) fn hold_submodules(
+pub(super) fn verify_removal_submodules(
     context: &WorktreeContext<'_>,
     repo: &VerifiedRepo,
     cancel: &CancelToken,
-) -> Result<(Vec<LockGuard>, Vec<SubmoduleEvidence>), WorktreeError> {
-    let mut guards = Vec::new();
+) -> Result<Vec<SubmoduleEvidence>, WorktreeError> {
     let mut evidence = Vec::new();
     inspect_submodules(
         context,
@@ -155,12 +159,10 @@ pub(super) fn hold_submodules(
         repo.root_path(),
         repo.private_git_dir(),
         0,
-        true,
-        &mut guards,
         &mut evidence,
         cancel,
     )?;
-    Ok((guards, evidence))
+    Ok(evidence)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -170,8 +172,6 @@ fn inspect_submodules(
     removed_root: &Path,
     removed_admin: &Path,
     depth: usize,
-    hold: bool,
-    guards: &mut Vec<LockGuard>,
     evidence: &mut Vec<SubmoduleEvidence>,
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
@@ -257,20 +257,6 @@ fn inspect_submodules(
                 "submodule Git custody is outside the current project's retained store",
             ));
         }
-        if hold {
-            let guard = lock_repository(
-                child.common_dir(),
-                LockMode::Shared,
-                WaitBudget::nonblocking(context.clock.mono_now()),
-                cancel,
-                context.clock,
-            )
-            .map_err(|error| match error {
-                FsError::LockTimeout { .. } => WorktreeError::LockBusy,
-                error => error.into(),
-            })?;
-            guards.push(guard);
-        }
         check_writer_terminal(child)?;
         inspect_submodules(
             context,
@@ -278,8 +264,6 @@ fn inspect_submodules(
             removed_root,
             removed_admin,
             depth + 1,
-            hold,
-            guards,
             evidence,
             cancel,
         )?;
@@ -301,11 +285,14 @@ fn inspect_submodules(
         let head = parse_oid(trim_ascii(&head.stdout.bytes))?;
         let mut references = BTreeMap::new();
         for read in [GitRead::BranchTips, GitRead::RemoteBranchTips] {
+            let command = read.command_label();
             let refs = run_git(context, child, read, cancel)?;
             if exit_code(&refs)? != 0 {
                 return Err(unknown("submodule retained refs are unavailable"));
             }
-            references.extend(parse_branch_tips(&refs.stdout.bytes)?);
+            references.extend(parse_branch_tips(&refs.stdout.bytes).map_err(|detail| {
+                git_read_failure(&command, &refs, format!("output: {detail}"))
+            })?);
         }
         let references: Vec<_> = references
             .into_iter()
@@ -426,6 +413,16 @@ pub(super) fn worktree_cleanliness_at(
     repo: &VerifiedRepo,
     cancel: &CancelToken,
 ) -> Result<WorktreeCleanliness, WorktreeError> {
+    let cleanliness = native_worktree_cleanliness_at(context, repo, cancel)?;
+    require_attempt_indexes_clean(context, repo, cancel)?;
+    Ok(cleanliness)
+}
+
+fn native_worktree_cleanliness_at(
+    context: &WorktreeContext<'_>,
+    repo: &VerifiedRepo,
+    cancel: &CancelToken,
+) -> Result<WorktreeCleanliness, WorktreeError> {
     match check_writer_terminal(repo) {
         Ok(()) => {}
         Err(WorktreeError::GitOperationInProgress) => {
@@ -462,6 +459,99 @@ pub(super) fn worktree_cleanliness_at(
     }
 }
 
+/// Run only after the caller has exclusive worktree occupancy. A native index
+/// can be clean while a crashed or unreconciled attempt still has staged paths
+/// in its private index, so removal must account for every durable record.
+fn require_attempt_indexes_clean(
+    context: &WorktreeContext<'_>,
+    repo: &VerifiedRepo,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    let path = repo.root_path().to_path_buf();
+    let slot_name = state_dir_name(repo.root_path());
+    let slot = match context.project_state.open_verified_directory(&slot_name) {
+        Ok(slot) => slot,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(_) => {
+            return Err(private_attempt_index_unknown(
+                &path,
+                "private attempt index custody could not be opened",
+            ));
+        }
+    };
+    let records = provenant_supervisor::custody::recorded_attempt_indexes(&slot).map_err(|_| {
+        private_attempt_index_unknown(&path, "private attempt index custody could not be verified")
+    })?;
+    for record in records {
+        if let Err(error) = check_git_operation_terminal(&record.refs, None) {
+            return match error {
+                WorktreeError::GitOperationInProgress => Err(WorktreeError::Dirty(format!(
+                    "attempt {} has an unfinished Git operation",
+                    record.scope.attempt
+                ))),
+                error => Err(error),
+            };
+        }
+
+        let head =
+            provenant_os::git::private_branch_tip(&record.refs, &record.branch).map_err(|_| {
+                private_attempt_index_unknown(
+                    &path,
+                    "private attempt branch tip could not be verified",
+                )
+            })?;
+        record
+            .refs
+            .read_stable(OsStr::new("index"), 64 * 1024 * 1024)
+            .map_err(|_| {
+                private_attempt_index_unknown(&path, "private attempt index could not be read")
+            })?;
+        let index = record
+            .refs
+            .current_path()
+            .map_err(|_| {
+                private_attempt_index_unknown(&path, "private attempt index path changed")
+            })?
+            .join("index");
+        let outcome = run_git(context, repo, GitRead::AttemptIndex { index, head }, cancel)
+            .map_err(|_| {
+                private_attempt_index_unknown(&path, "private attempt index could not be compared")
+            })?;
+        match exit_code(&outcome).map_err(|_| {
+            private_attempt_index_unknown(&path, "private attempt index result was incomplete")
+        })? {
+            0 | 1 => {}
+            _ => {
+                return Err(private_attempt_index_unknown(
+                    &path,
+                    "private attempt branch objects are unavailable",
+                ));
+            }
+        }
+        let staged: Vec<_> = outcome
+            .stdout
+            .bytes
+            .split(|byte| *byte == 0)
+            .filter(|name| !name.is_empty())
+            .collect();
+        if !staged.is_empty() {
+            let summary = dirty_paths_summary_bytes(&staged).text;
+            return Err(WorktreeError::Dirty(format!(
+                "attempt {} staged paths: {summary}",
+                record.scope.attempt
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn private_attempt_index_unknown(path: &Path, detail: &str) -> WorktreeError {
+    WorktreeError::UnknownOccupancy {
+        path: path.to_path_buf(),
+        detail: detail.to_owned(),
+    }
+}
+
 /// Recheck that a verified worktree is clean while the caller holds writer
 /// custody. This probes the worktree's Git configuration before running status.
 pub fn require_clean_worktree(
@@ -489,13 +579,17 @@ pub(super) fn worktree_dirty_at(
     repo: &VerifiedRepo,
     cancel: &CancelToken,
 ) -> Result<WorktreeCondition, WorktreeError> {
-    Ok(match worktree_cleanliness_at(context, repo, cancel)? {
-        WorktreeCleanliness::Clean => WorktreeCondition::Clean,
-        WorktreeCleanliness::Ignored => WorktreeCondition::Ignored,
-        WorktreeCleanliness::Dirty(..) => WorktreeCondition::Dirty,
-        WorktreeCleanliness::GitOperationInProgress => WorktreeCondition::GitOperationInProgress,
-        WorktreeCleanliness::Unknown => WorktreeCondition::Unknown,
-    })
+    Ok(
+        match native_worktree_cleanliness_at(context, repo, cancel)? {
+            WorktreeCleanliness::Clean => WorktreeCondition::Clean,
+            WorktreeCleanliness::Ignored => WorktreeCondition::Ignored,
+            WorktreeCleanliness::Dirty(..) => WorktreeCondition::Dirty,
+            WorktreeCleanliness::GitOperationInProgress => {
+                WorktreeCondition::GitOperationInProgress
+            }
+            WorktreeCleanliness::Unknown => WorktreeCondition::Unknown,
+        },
+    )
 }
 
 pub(super) struct LockedWorktree {
@@ -629,6 +723,10 @@ pub fn writer_custody(
     if entry.branch.as_ref() != Some(branch) {
         return Err(WorktreeError::IdentityChanged);
     }
+    // A registered checkout may have been created directly by Git. Give it
+    // the same durable incarnation identity as a Provenant-created tree
+    // before deriving the writer's shared Git-state authority.
+    acquire_worktree_subject(worktree.repo())?;
     let state = writer_directory(project_state, &canonical)?;
     let binding = WriterBinding::from_verified(
         worktree.repo().root_dir(),
@@ -657,7 +755,7 @@ pub(super) fn lock_worktree(
     lock_worktree_impl(context, entry, cancel, preview, false)
 }
 
-/// Launch admission runs before taking the repository registry lock.
+/// Launch admission reobserves occupancy after taking worktree custody.
 pub(super) fn lock_worktree_for_launch(
     context: &WorktreeContext<'_>,
     entry: &GitWorktree,
@@ -707,6 +805,11 @@ fn lock_worktree_impl(
                 path: verified.path().to_path_buf(),
                 detail,
             })?;
+            // Observation probes already treat reservations as durable
+            // recovery evidence. Repeat that fence after taking exclusive
+            // custody so a crashed writer cannot be mistaken for a clean tree
+            // by a mutating operation such as worktree removal.
+            outstanding_reservation(&state, verified.path()).map_err(custody_refusal)?;
             Some(writer)
         };
     let canonical = canonicalize(verified.path())?;
@@ -781,24 +884,6 @@ fn lock_worktree_impl(
         }
         None => Ok(LockedWorktree { verified, writer }),
     }
-}
-
-pub(super) fn repository_lock<'a>(
-    context: &WorktreeContext<'a>,
-    mode: LockMode,
-    cancel: &CancelToken,
-) -> Result<LockGuard, WorktreeError> {
-    lock_repository(
-        context.repo.common_dir(),
-        mode,
-        context.lock_budget,
-        cancel,
-        context.clock,
-    )
-    .map_err(|error| match error {
-        FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout,
-        other => other.into(),
-    })
 }
 
 pub(super) fn validate_binding(context: &WorktreeContext<'_>) -> Result<(), WorktreeError> {

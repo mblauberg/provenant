@@ -177,11 +177,10 @@ fn collect_resolved(
             i128::from(clock.wall_now()?.as_micros()) * 1000 - 7 * 86_400 * 1_000_000_000_i128,
         ),
         dry_run: true,
-        free_floor_bytes: None,
-        max_total_bytes: None,
         protected_owners: Default::default(),
         project_owners: Default::default(),
         selected_only: false,
+        foreign_idle_before_ns: None,
     };
     let inventory = (|| -> Result<_, Box<dyn std::error::Error>> {
         let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;

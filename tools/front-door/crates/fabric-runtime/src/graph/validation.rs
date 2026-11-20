@@ -573,8 +573,13 @@ pub(super) fn validate_flat_plan(
                 "execution bindings require an agent node",
             ));
         }
-        validate_access(node.access, node.worktree.as_deref())
-            .map_err(|reason| node_plan_error(node, reason))?;
+        // Skipped rows remain in the document for status and explain output,
+        // but they do not need launch-time access bindings such as a writer
+        // worktree. Active nodes still pass the full access check.
+        if when::holds(&node.when) {
+            validate_access(node.access, node.worktree.as_deref())
+                .map_err(|reason| node_plan_error(node, reason))?;
+        }
         if node.access == AccessMode::ReadOnly
             && !matches!(node.delivery, None | Some(DeliveryMode::None))
         {
@@ -974,11 +979,10 @@ fn attempt_error(node: &GraphNode, spec: &AttemptSpec) -> Option<&'static str> {
     }
     for (value, allowed) in [
         (&spec.isolation, ["private", "shared"]),
-        (&spec.supervision, ["standard", "minimal"]),
         (&spec.receipts, ["delivery", "none"]),
     ] {
         if value.as_deref().is_some_and(|v| !allowed.contains(&v)) {
-            return Some("invalid attempt isolation, supervision or receipts");
+            return Some("invalid attempt isolation or receipts");
         }
     }
     if node.access == AccessMode::WorktreeWrite && spec.effective_isolation() == "shared" {
@@ -1601,6 +1605,12 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 || !std::path::Path::new(&binding.worktree).is_absolute()
                 || binding.worktree.len() > 4096
                 || binding.head.parse::<provenant_core::GitOid>().is_err()
+                || binding.shared_worktree.as_ref().is_some_and(|subject| {
+                    subject
+                        .worktree_identity()
+                        .is_none_or(|identity| identity.path != binding.worktree)
+                        || binding.source_directory_identity.is_none()
+                })
                 || (node.source.is_none()
                     && node.continues.is_none()
                     && progress.source_commit.as_ref() != Some(&binding.head))

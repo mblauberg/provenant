@@ -157,11 +157,7 @@ fn until_exit(child: &mut Child, timeout: Duration) -> Result<std::process::Exit
 }
 
 fn alive(pid: &str) -> bool {
-    Command::new("/bin/kill")
-        .args(["-0", pid])
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    provenant_test_support::process_is_gone(pid).is_ok_and(|gone| !gone)
 }
 
 #[test]

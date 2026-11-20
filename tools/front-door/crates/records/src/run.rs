@@ -278,6 +278,10 @@ pub struct LaneAccess {
     pub extra: crate::ExtraFields,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub capability_sources: CapabilitySources,
+    /// Host-granted shared writer incarnation, retained through preparation
+    /// and checked again after acquiring worktree occupancy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_worktree: Option<crate::custody::Subject>,
     /// Explicit network reach; absent defaults to open network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkAccess>,
@@ -1071,6 +1075,42 @@ impl From<RouteRecord> for crate::RouteFact {
         }
     }
 }
+impl UsageRecord {
+    /// Fresh tokens the writer token budget counts: uncached input, cache
+    /// writes and output (including reasoning). Cache reads are excluded
+    /// because each call re-reads the whole context, so counting them would
+    /// exhaust the budget on rereads instead of new work. `None` means the
+    /// provider reported none of these categories, which is not zero.
+    pub fn fresh_tokens(&self) -> Option<u64> {
+        [
+            self.uncached_input,
+            self.cache_write,
+            self.output_excluding_reasoning,
+            self.reasoning,
+        ]
+        .into_iter()
+        .try_fold(None, |sum: Option<u64>, part| match part {
+            Some(n) => Some(Some(sum.unwrap_or(0).saturating_add(n))),
+            None => Some(sum),
+        })
+        .flatten()
+    }
+
+    /// Input the provider reported, including cached reads and writes. This
+    /// is the provider's own cumulative input figure, not the budget's unit;
+    /// it is reported beside the counted figure so the units cannot be
+    /// confused. `None` when the provider reported no input categories.
+    pub fn input_including_cache(&self) -> Option<u64> {
+        [self.uncached_input, self.cache_read, self.cache_write]
+            .into_iter()
+            .try_fold(None, |sum: Option<u64>, part| match part {
+                Some(n) => Some(Some(sum.unwrap_or(0).saturating_add(n))),
+                None => Some(sum),
+            })
+            .flatten()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageRecord {
     #[serde(flatten)]
@@ -1328,6 +1368,9 @@ pub enum TerminalCause {
     LaneTokenLost,
     /// The host interrupted this attempt to deliver a queued steering turn.
     Steered,
+    /// A refused attempt whose record names no cause. The host states that
+    /// the cause is unknown rather than naming one it did not observe.
+    Unrecorded,
 }
 
 impl TerminalCause {
@@ -1374,6 +1417,7 @@ impl TerminalCause {
             Self::Blocked => "blocked; provenant output ID",
             Self::LaneTokenLost => "lane token lost; provenant output ID",
             Self::Steered => "steering interruption; provenant output ID",
+            Self::Unrecorded => "refused, cause not recorded; provenant output ID",
         }
     }
 
@@ -1397,10 +1441,10 @@ impl TerminalCause {
                 crate::diagnostic::ProviderFailureFact::AuthRequired.reason()
             }
             Self::SourceViewRefused => {
-                "the pinned source view of the lane could not be built; the step and cause follow. Retry, or raise domains.run.source_view_seconds, source_view_entries or source_view_bytes when the cause names a limit"
+                "the pinned source view of the lane could not be built; the step and cause follow. Run `provenant retry` or raise domains.run.source_view_seconds, source_view_entries or source_view_bytes when the cause names a limit"
             }
             Self::ProjectBindingDirectoryUnsafe => {
-                "the project binding state directory is unsafe; ask the host owner to check its ownership and private permissions before retrying"
+                "the project binding state directory is unsafe; ask the host owner to check its ownership and private permissions, then run `provenant retry`"
             }
             Self::RouteResolutionRefused => {
                 "route resolution refused the lane; check the model, effort, exclusions and availability with `provenant route resolve` and `provenant quota tick`"
@@ -1412,31 +1456,31 @@ impl TerminalCause {
                 "the host writer disk precheck could not observe free space; restore the host disk observation before retrying"
             }
             Self::AccessPolicyRefused => {
-                "launch access policy refused the lane; correct the request and declared access grants before retrying"
+                "launch access policy refused the lane; correct the request and declared access grants with `provenant retry` before retrying"
             }
             Self::StoredPromptUnreadable => {
-                "launch preparation could not read the stored prompt; inspect the run's local files and resubmit the request"
+                "launch preparation could not read the stored prompt; inspect local files and run `provenant retry`"
             }
             Self::CloudPlacementRemoved => {
                 "this attempt was stored with cloud placement, which was removed, so it never runs locally; relaunch the brief with `provenant cloud launch --file BRIEF`"
             }
             Self::WriteGrantsRefused => {
-                "launch preparation refused the write grants; check grant paths and domains.run.write_grant_limit_bytes before retrying"
+                "launch preparation refused the write grants; check grant paths and run `provenant retry` before retrying"
             }
             Self::WorktreeBusy => {
-                "the worktree is busy; wait for its writer to finish or select another worktree"
+                "the worktree is busy; wait for its writer to finish or run `provenant reconcile`"
             }
             Self::HandoffRefused => {
-                "the host refused the launch handoff; inspect local launch evidence and host configuration before retrying"
+                "the host refused the launch handoff; run `provenant reconcile` before retrying"
             }
             Self::WriterPinMismatch { .. } => {
                 "the writer worktree head does not match the commit pinned for this continuation; retry re-pins when the head descends from the pinned commit, otherwise restore that lineage"
             }
             Self::RetainedWriterImport => {
-                "a retained writer import blocks launch; reconcile the earlier writer's import before retrying"
+                "a retained writer import blocks launch; run `provenant reconcile` before retrying"
             }
             Self::UnsupportedPlatform => {
-                "sandbox backend is unavailable: UnsupportedPlatform; select a host with a supported sandbox backend before retrying"
+                "sandbox backend is unavailable: UnsupportedPlatform; select a host with a supported sandbox backend, then run `provenant retry`"
             }
             Self::UnknownPacingAccount => {
                 "pacing configuration references an unregistered account; correct the pacing profile"
@@ -1490,6 +1534,9 @@ impl TerminalCause {
             }
             Self::Steered => {
                 "the host interrupted this attempt for a queued steering turn; continuation requires the retained session for this provider, model and account"
+            }
+            Self::Unrecorded => {
+                "the lane was refused and its record names no cause; inspect the attempt's local launch evidence and request before retrying"
             }
         }
     }
@@ -1834,6 +1881,7 @@ pub enum WriteSource {
     PrivateState,
     ReadOnlyException,
     LaneCache,
+    GitState,
 }
 
 /// Evidence on which a terminal decision was based.
@@ -1963,6 +2011,9 @@ settlement_reasons! {
     ProviderStop { source: Provider, node: Failed, outcome: ReviewRequired, stop: Some(crate::stop::StopCause::ProviderStop) },
     /// A writer left edits it did not commit.
     UncommittedWork { source: Provider, node: Failed, outcome: Uncommitted, stop: None },
+    /// The bound branch gained no commits while the primary checkout moved: the
+    /// lane's work went to the wrong checkout (#3611).
+    StrayWork { source: Host, node: Failed, outcome: ReviewRequired, stop: None },
     /// Refused before any process started.
     PreLaunchRefusal { source: Host, node: Failed, outcome: Preserve, stop: None },
     Cancelled { source: Owner, node: Failed, outcome: Preserve, stop: Some(crate::stop::StopCause::Cancelled) },
@@ -2001,6 +2052,7 @@ impl SettlementReason {
                 Some(TerminalCause::EmptyWriterResult) => Self::EmptyResult,
                 Some(TerminalCause::Blocked | TerminalCause::StoppedNoWork) => Self::DeclaredStop,
                 Some(TerminalCause::ProviderEarlyStop) => Self::ProviderStop,
+                _ if partial.contains(&PartialSignal::StrayWork) => Self::StrayWork,
                 _ if handoff
                     .is_ok_and(|handoff| handoff.is_some_and(|handoff| handoff.unfinished())) =>
                 {
@@ -2439,10 +2491,6 @@ pub struct AttemptRecord {
     /// Most recent supervisor-observed stdout/stderr activity while running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_at: Option<WallTime>,
-    /// Transient guardian observation. It is carried over live peer reads but
-    /// is never stored in the durable attempt record.
-    #[serde(skip)]
-    pub provider_silent_for_ms: Transient<Option<u64>>,
     /// Whether the observation checkpoint was absent or could be read and
     /// identity-checked. Used only for live coverage reporting.
     #[serde(skip)]
@@ -2659,11 +2707,6 @@ impl<T> PartialEq for Transient<T> {
 }
 impl<T> Eq for Transient<T> {}
 
-/// Human-readable, transient explanation for a guardian silence observation.
-pub fn provider_silence_reason(silent_for_ms: u64) -> String {
-    let seconds = silent_for_ms / 1_000;
-    format!("provider silent for {seconds}s; provider still running")
-}
 /// Why a settled attempt is flagged as a partial finish. A flag is advice for
 /// the chair, who decides whether to resume; it never changes the outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -2682,6 +2725,9 @@ pub enum PartialSignal {
     ProviderStop,
     /// A writer left edits it did not commit.
     UncommittedWork,
+    /// The primary checkout moved during the attempt while the bound branch
+    /// gained no commits: the work was made outside the bound worktree.
+    StrayWork,
 }
 impl PartialSignal {
     pub const fn as_str(self) -> &'static str {
@@ -2692,6 +2738,7 @@ impl PartialSignal {
             Self::DeclaredStop => "declared_stop",
             Self::ProviderStop => "provider_stop",
             Self::UncommittedWork => "uncommitted_work",
+            Self::StrayWork => "stray_work",
         }
     }
 }
@@ -2730,7 +2777,6 @@ pub enum LaneWaitReason {
     HostStalled,
     Children,
     Admission,
-    ProviderSilence { silent_for_ms: u64 },
     LaunchPreparation,
     RecoveryWorkerRefused { used: u64, limit: u64 },
 }
@@ -2741,7 +2787,6 @@ impl LaneWaitReason {
             Self::HostStalled => "host_stalled: supervisor is in uninterruptible sleep".into(),
             Self::Children => "children: host and project admission yielded".into(),
             Self::Admission => "admission: waiting for host or project capacity".into(),
-            Self::ProviderSilence { silent_for_ms } => provider_silence_reason(*silent_for_ms),
             Self::LaunchPreparation => "launch preparation".into(),
             Self::RecoveryWorkerRefused { used, limit } => format!(
                 "launch: last recovery worker refused: user process count {used} of {limit}"
@@ -3499,9 +3544,6 @@ mod tests {
             LaneWaitReason::HostStalled,
             LaneWaitReason::Children,
             LaneWaitReason::Admission,
-            LaneWaitReason::ProviderSilence {
-                silent_for_ms: 5_000,
-            },
             LaneWaitReason::LaunchPreparation,
             LaneWaitReason::RecoveryWorkerRefused { used: 5, limit: 10 },
         ] {
@@ -3518,7 +3560,7 @@ mod tests {
         }
         let malformed = serde_json::to_vec(&serde_json::json!({
             "attempt_id":AttemptId::from_bytes([1; 16]), "lane_class":"writer",
-            "waiting_for":{"kind":"provider_silence", "silent_for_ms":"many"}
+            "waiting_for":{"kind":"recovery_worker_refused", "used":"many", "limit":10}
         }))?;
         assert!(matches!(
             crate::json::decode::<LaneWait, _>(

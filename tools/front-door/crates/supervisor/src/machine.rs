@@ -147,7 +147,6 @@ pub struct State {
     never_spawned_reason: Option<StopReason>,
     stop_attempts: Vec<StopAttempt>,
     publication: Option<PublicationOutcome>,
-    last_progress_ms: Option<u64>,
 }
 impl State {
     pub fn prepared(budgets: Budgets) -> Self {
@@ -160,7 +159,6 @@ impl State {
             never_spawned_reason: None,
             stop_attempts: Vec::new(),
             publication: None,
-            last_progress_ms: None,
         }
     }
 
@@ -189,10 +187,6 @@ impl State {
 
     pub const fn publication(&self) -> Option<PublicationOutcome> {
         self.publication
-    }
-
-    pub const fn last_progress_ms(&self) -> Option<u64> {
-        self.last_progress_ms
     }
 
     /// Time until a lifecycle deadline that can change the next decision.
@@ -225,7 +219,6 @@ impl State {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     Started,
-    Progress,
     Terminal,
     Cancel,
     /// The current provider turn was interrupted for a queued steering turn.
@@ -353,8 +346,7 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
                 });
                 effects.push(Effect::PublishExit);
             }
-            Event::Progress
-            | Event::Terminal
+            Event::Terminal
             | Event::Steer
             | Event::ProtocolRejected
             | Event::TokenBudget
@@ -365,7 +357,6 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
             | Event::ObservationFailure => {}
         },
         Phase::Running => match event {
-            Event::Progress => state.last_progress_ms = Some(tick.now_ms),
             Event::Terminal => {
                 state.phase = Phase::TerminalGrace;
                 state.root_flush_deadline_ms = tick.now_ms.checked_add(state.budgets.root_flush_ms);
@@ -395,9 +386,6 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
             | Event::Started => {}
         },
         Phase::TerminalGrace => {
-            if event == Event::Progress {
-                state.last_progress_ms = Some(tick.now_ms);
-            }
             if let Some(deadline) = state.root_flush_deadline_ms
                 && tick.now_ms >= deadline
             {
@@ -415,8 +403,7 @@ pub fn step(mut state: State, event: Event, tick: Tick) -> (State, Vec<Effect>) 
                         request_stop(&mut state, StopReason::SupervisorSignal, &mut effects)
                     }
                     Event::RetryStop(reason) => retry_stop(&mut state, reason, &mut effects),
-                    Event::Progress
-                    | Event::Terminal
+                    Event::Terminal
                     | Event::TokenBudget
                     | Event::ContextHandoff
                     | Event::Silence

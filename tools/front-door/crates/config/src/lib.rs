@@ -11,6 +11,7 @@ pub use admission::{
     ResolvedAdmissionClass,
 };
 mod account_sync;
+mod cache_budget;
 mod domains;
 mod edit;
 mod gc;
@@ -18,6 +19,8 @@ mod github_policy;
 mod history;
 mod install_artifacts;
 mod schema;
+pub use cache_budget::resolve as cargo_cache_budget;
+pub use cache_budget::{CargoCacheBudget, KNOB as CARGO_CACHE_MAX_KNOB};
 pub use gc::{
     ByteObservation, CargoBuildProfile, DISK_FLOOR, DiskGate, DiskLevel, DiskLimits,
     ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold,
@@ -97,13 +100,15 @@ pub use loader::{
 };
 pub use presets::Profile;
 pub use project_binding::{
-    GcProjectSelection, ProjectBinding, ProjectLocation, bind_host, bind_project, lookup_host,
-    lookup_project, lookup_project_at_state, registered_gc_project_selection,
+    GcProjectSelection, GcProjectStatus, ProjectBinding, ProjectLocation, bind_host, bind_project,
+    lookup_gc_project, lookup_host, lookup_project, lookup_project_at_state,
+    registered_gc_project_selection, registered_gc_project_selection_with_progress,
     registered_gc_projects, registered_projects, transient_location,
 };
 pub use provenant_records::Finding;
 pub use schema::{
-    DeclaredEnum, Layer, Schema, SchemaField, apply_patch, declared_enums, probe_field, schema,
+    DEDICATED_COMMANDS, DeclaredEnum, Layer, Schema, SchemaField, apply_patch, declared_enums,
+    dedicated_command, probe_field, schema,
 };
 
 use serde::{Deserialize, Serialize, Serializer};

@@ -356,7 +356,7 @@ pub fn required_anchors(
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
         grants.push(&authority.cargo_cache);
     }
-    grants
+    let mut required = grants
         .into_iter()
         .filter_map(|grant| match grant.scope {
             PathScope::Subtree => Some(grant.path.clone()),
@@ -367,5 +367,17 @@ pub fn required_anchors(
                 .filter(|parent| std::fs::symlink_metadata(parent).is_ok())
                 .map(Path::to_owned),
         })
-        .collect()
+        .collect::<BTreeSet<_>>();
+    if let AccessMode::WorktreeWrite(authority) = &plan.mode {
+        if let Some(parent) = authority.git_state.path.parent() {
+            required.insert(parent.to_owned());
+        }
+        required.insert(authority.git_state.path.clone());
+        required.extend(
+            super::grants::worktree_git_state_writes(&authority.git_state)
+                .into_iter()
+                .map(|grant| grant.path),
+        );
+    }
+    required
 }

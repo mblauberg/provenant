@@ -1892,7 +1892,7 @@ mod tests {
         review.floors.clear();
         assert_eq!(
             resolved_names(&review, "standard", None, &[], false, &[]),
-            ["correctness-spec", "tests", "reliability"]
+            ["correctness-spec", "flexibility", "tests"]
         );
         assert_eq!(
             resolved_names(&review, "quick", Some("refactor"), &[], false, &[]),
@@ -2013,9 +2013,19 @@ mod tests {
             synthesis: ReviewSynthesis::Model,
         };
         review.shapes.insert("custom".into(), shape);
+        // The explicit lens leads; the remaining slots fill from the configured
+        // order without repeating it.
+        let fill: Vec<&str> = review
+            .lenses
+            .order
+            .iter()
+            .map(String::as_str)
+            .filter(|name| *name != "tests")
+            .take(2)
+            .collect();
         assert_eq!(
             resolved_names(&review, "custom", None, &[], false, &[]),
-            ["tests", "correctness-spec", "reliability"]
+            [&["tests"][..], &fill[..]].concat()
         );
     }
 

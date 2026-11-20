@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -26,10 +27,11 @@ const MAX_GIT_LOG: u64 = 1000;
 const MAX_LANE_CONFIG_FILES: usize = 32;
 /// The longest bounded Git stderr excerpt, in characters.
 const MAX_FETCH_STDERR: usize = 1024;
-/// The most attempts for one lane upstream key write. Worktrees share the
-/// repository's `.git/config`, so concurrent writers contend for its lock.
-const CONFIG_LOCK_RETRIES: usize = 5;
-const CONFIG_LOCK_BACKOFF_START: Duration = Duration::from_millis(50);
+/// Bound retries for Git's own lock files. Each attempt shares one operation
+/// deadline, so a contending process never turns a short mutation into a queue.
+const GIT_LOCK_MAX_ATTEMPTS: usize = 5;
+const GIT_LOCK_BACKOFF_START: Duration = Duration::from_millis(50);
+static GIT_LOCK_JITTER: AtomicU64 = AtomicU64::new(0);
 const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
 const GIT_COMMON: &[&str] = &[
@@ -95,6 +97,8 @@ pub enum UtilityError {
         "setting branch configuration timed out after {attempts} attempts waiting out lock contention"
     )]
     ConfigLockTimedOut { attempts: usize },
+    #[error("Git lock contention timed out after {attempts} attempts")]
+    GitLockTimedOut { attempts: usize },
     #[error(transparent)]
     Transport(#[from] TransportError),
     #[error(transparent)]
@@ -277,6 +281,13 @@ pub enum GitRead {
     },
     /// Staged changes against HEAD with their modes.
     StagedModes,
+    /// Staged paths in a separately recorded attempt index, compared with its
+    /// private branch tip while using this repository's verified Git config and
+    /// object database.
+    AttemptIndex {
+        index: PathBuf,
+        head: GitOid,
+    },
     /// Changed paths with their old and new modes (`diff --raw`).
     ChangedModes {
         base: GitOid,
@@ -354,6 +365,29 @@ pub enum GitRead {
         oid: GitOid,
         path: RepoPath,
     },
+}
+
+/// Longest command label a refusal quotes; path lists are cut, not omitted.
+const COMMAND_LABEL_LIMIT: usize = 160;
+
+impl GitRead {
+    /// The Git subcommand and arguments this read runs, without the repository
+    /// and hardening options every read shares, for naming a failed read.
+    pub fn command_label(&self) -> String {
+        let label = git_read_tail(self.clone()).map_or_else(
+            |_| format!("{self:?}"),
+            |tail| {
+                tail.iter()
+                    .map(|part| part.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            },
+        );
+        match label.char_indices().nth(COMMAND_LABEL_LIMIT) {
+            Some((end, _)) => format!("{}...", &label[..end]),
+            None => label,
+        }
+    }
 }
 
 /// A closed mutation set. It is crate-private: callers receive only the
@@ -516,7 +550,24 @@ impl UtilityRuntime {
         budget: UtilityBudget,
         cancel: &CancelToken,
     ) -> Result<crate::worktrees::ProjectLayout, UtilityError> {
-        if repo.private_git_dir() == repo.common_git_dir() {
+        if repo.is_bare() {
+            let location = provenant_config::ProjectLocation::new(repo.common_git_dir())
+                .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+            let binding = match bound {
+                Some(binding) => binding.clone(),
+                None if self.host_state_available => {
+                    provenant_config::lookup_project_at_state(&self.host_state, &location)
+                        .map_err(|_| UtilityError::UnreadableGitConfiguration)?
+                        .ok_or(UtilityError::UnreadableGitConfiguration)?
+                }
+                None => return Err(UtilityError::UnreadableGitConfiguration),
+            };
+            if binding.common_dir() != repo.common_git_dir() {
+                return Err(UtilityError::UnreadableGitConfiguration);
+            }
+            return self.project_layout_for_binding(executor, &binding, budget, cancel);
+        }
+        if repo.is_primary_checkout() {
             return crate::worktrees::ProjectLayout::from_repo(repo, true)
                 .map_err(|_| UtilityError::UnreadableGitConfiguration);
         }
@@ -760,8 +811,10 @@ impl UtilityRuntime {
         // A verified checkout whose private directory is the common directory
         // is the primary itself. Linked worktrees need the shared resolver so
         // their own root never becomes the project-configuration owner.
-        let project_root = if repo.private_git_dir() == repo.common_git_dir() {
+        let project_root = if repo.is_primary_checkout() {
             Some(repo.root_path().to_path_buf())
+        } else if repo.is_bare() {
+            None
         } else {
             let layout = self.project_layout_for_repository(executor, repo, budget, cancel)?;
             layout.project().map(Path::to_path_buf)
@@ -818,6 +871,31 @@ impl UtilityRuntime {
         }
         self.revalidate()?;
         VerifiedRepo::open(path, |repo| {
+            probe_repository(executor, repo, self, None, budget, cancel)
+        })
+    }
+
+    /// Open a bare common directory only through an existing host project
+    /// binding whose trusted inventory confirms that it is bare.
+    pub fn open_bound_bare_repo(
+        &self,
+        executor: &dyn Executor,
+        binding: &provenant_config::ProjectBinding,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<VerifiedRepo, UtilityError> {
+        if cancel.is_cancelled() {
+            return Err(UtilityError::Cancelled);
+        }
+        self.revalidate()?;
+        let layout = self.project_layout_for_binding(executor, binding, budget, cancel)?;
+        let common = canonicalize(binding.common_dir())
+            .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+        if layout.project().is_some() || layout.root() != common {
+            return Err(UtilityError::UnreadableGitConfiguration);
+        }
+        let identity = layout.directory().metadata()?;
+        VerifiedRepo::open_bound_bare(&common, identity, |repo| {
             probe_repository(executor, repo, self, None, budget, cancel)
         })
     }
@@ -895,7 +973,7 @@ impl UtilityRuntime {
             match directory.metadata_at(OsStr::new(".git"), false) {
                 Ok(_) => {
                     let repo = self.open_repo(executor, ancestor, budget, cancel)?;
-                    let location = if repo.private_git_dir() == repo.common_git_dir() {
+                    let location = if repo.is_primary_checkout() {
                         provenant_config::ProjectLocation::from_verified_primary_checkout(
                             repo.common_git_dir(),
                             repo.root_path(),
@@ -1052,6 +1130,30 @@ impl ExecutablePin {
             result => Ok(result?),
         }
     }
+
+    fn execute_prepared_ref_transaction<'a>(
+        &self,
+        executor: &dyn Executor,
+        options: impl Fn() -> ExecOptions<'a>,
+        commands_through_prepare: &[u8],
+        commit_after_prepare: &mut dyn FnMut() -> bool,
+    ) -> Result<ExecOutcome, UtilityError> {
+        match executor.execute_prepared_ref_transaction(
+            options(),
+            commands_through_prepare,
+            commit_after_prepare,
+        ) {
+            Err(ExecError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                self.revalidate()?;
+                Ok(executor.execute_prepared_ref_transaction(
+                    options(),
+                    commands_through_prepare,
+                    commit_after_prepare,
+                )?)
+            }
+            result => Ok(result?),
+        }
+    }
 }
 
 struct PrivateHome {
@@ -1109,15 +1211,27 @@ pub fn run_utility(
     cancel: &CancelToken,
 ) -> Result<ExecOutcome, UtilityError> {
     let stdin = git_stdin(&operation);
+    let index_file = attempt_index_file(&operation)?;
     execute_git(
         executor,
         repo,
         runtime,
         budget,
         cancel,
-        false,
+        GitEnvironment {
+            release_scan: false,
+            index_file: index_file.as_deref(),
+        },
         |attribute_source| Ok((git_args(operation, repo, attribute_source)?, stdin)),
     )
+}
+
+fn attempt_index_file(operation: &GitRead) -> Result<Option<PathBuf>, UtilityError> {
+    match operation {
+        GitRead::AttemptIndex { index, .. } if index.is_absolute() => Ok(Some(index.clone())),
+        GitRead::AttemptIndex { .. } => Err(UtilityError::InvalidOperationValue),
+        _ => Ok(None),
+    }
 }
 
 /// The one hardened way host code runs Git against a remote: no hooks, no
@@ -1219,13 +1333,8 @@ impl<'a> HostGit<'a> {
         if self.cancel.is_cancelled() {
             return Err(UtilityError::Cancelled);
         }
-        let mut argv = vec![
-            self.runtime.git.program()?.into_os_string(),
-            "--git-dir".into(),
-            self.repo.private_git_dir().as_os_str().to_owned(),
-            "--work-tree".into(),
-            self.repo.root_path().as_os_str().to_owned(),
-        ];
+        let mut argv = vec![self.runtime.git.program()?.into_os_string()];
+        argv.extend(repository_args(self.repo));
         argv.extend(transport::config_args());
         argv.extend_from_slice(args);
         validate_outcome(self.runtime.git.execute(self.executor, || {
@@ -1401,13 +1510,17 @@ pub fn run_release_read_utility(
     cancel: &CancelToken,
 ) -> Result<ExecOutcome, UtilityError> {
     let stdin = git_stdin(&operation);
+    let index_file = attempt_index_file(&operation)?;
     execute_git(
         executor,
         &repo.0,
         runtime,
         budget,
         cancel,
-        true,
+        GitEnvironment {
+            release_scan: true,
+            index_file: index_file.as_deref(),
+        },
         |attribute_source| Ok((git_args(operation, &repo.0, attribute_source)?, stdin)),
     )
 }
@@ -1523,13 +1636,19 @@ pub fn run_read_utility(
 
 /// Keep the authority checks, attribute source and bounded execution identical
 /// for reads and the separately typed custody mutations.
+#[derive(Default)]
+struct GitEnvironment<'a> {
+    release_scan: bool,
+    index_file: Option<&'a Path>,
+}
+
 fn execute_git(
     executor: &dyn Executor,
     repo: &VerifiedRepo,
     runtime: &UtilityRuntime,
     budget: UtilityBudget,
     cancel: &CancelToken,
-    release_scan: bool,
+    selected: GitEnvironment<'_>,
     command: impl FnOnce(&str) -> Result<(Vec<OsString>, Option<Vec<u8>>), UtilityError>,
 ) -> Result<ExecOutcome, UtilityError> {
     if cancel.is_cancelled() {
@@ -1548,7 +1667,10 @@ fn execute_git(
     argv.push(runtime.git.program()?.into_os_string());
     argv.extend(args);
     let mut env = environment(runtime, repo);
-    if release_scan {
+    if let Some(index_file) = selected.index_file {
+        env.push(("GIT_INDEX_FILE".into(), index_file.as_os_str().to_owned()));
+    }
+    if selected.release_scan {
         env.push(("GIT_SHALLOW_FILE".into(), "/dev/null".into()));
     }
     env.push(("GIT_ATTR_SOURCE".into(), attribute_source.into()));
@@ -1626,20 +1748,36 @@ pub(crate) fn exec_options<'a>(
     options
 }
 
+fn repository_args(repo: &VerifiedRepo) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("--git-dir"),
+        repo.private_git_dir().as_os_str().to_owned(),
+    ];
+    if !repo.is_bare() {
+        args.extend([
+            OsString::from("--work-tree"),
+            repo.root_path().as_os_str().to_owned(),
+        ]);
+    }
+    args
+}
+
 fn git_args(
     operation: GitRead,
     repo: &VerifiedRepo,
     attribute_source: &str,
 ) -> Result<Vec<OsString>, UtilityError> {
-    let mut args = vec![
-        OsString::from("--git-dir"),
-        repo.private_git_dir().as_os_str().to_owned(),
-        OsString::from("--work-tree"),
-        repo.root_path().as_os_str().to_owned(),
-    ];
+    let mut args = repository_args(repo);
     args.extend(GIT_COMMON.iter().map(OsString::from));
     args.push(format!("--attr-source={attribute_source}").into());
-    let tail = match operation {
+    args.extend(git_read_tail(operation)?);
+    Ok(args)
+}
+
+/// The subcommand and arguments of a read, after the repository and hardening
+/// options every read shares.
+fn git_read_tail(operation: GitRead) -> Result<Vec<OsString>, UtilityError> {
+    Ok(match operation {
         GitRead::DirtyPatch => vec![
             "diff".into(),
             "--binary".into(),
@@ -1655,6 +1793,17 @@ fn git_args(
             "--no-ext-diff".into(),
             "--no-textconv".into(),
             "HEAD".into(),
+            "--".into(),
+        ],
+        GitRead::AttemptIndex { head, .. } => vec![
+            "diff-index".into(),
+            "--cached".into(),
+            "--name-only".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            "--no-renames".into(),
+            "-z".into(),
+            head.to_string().into(),
             "--".into(),
         ],
         GitRead::Untracked => vec![
@@ -1961,9 +2110,7 @@ fn git_args(
             path.append_to(&mut object);
             vec!["cat-file".into(), "blob".into(), object]
         }
-    };
-    args.extend(tail);
-    Ok(args)
+    })
 }
 
 fn append_paths(args: &mut Vec<OsString>, paths: &[RepoPath]) {
@@ -2014,22 +2161,34 @@ fn environment_with(
             repo.private_git_dir().as_os_str().to_owned(),
         ),
         (
-            "GIT_WORK_TREE".into(),
-            repo.root_path().as_os_str().to_owned(),
-        ),
-        (
             "GIT_COMMON_DIR".into(),
             repo.common_git_dir().as_os_str().to_owned(),
         ),
     ];
+    if !repo.is_bare() {
+        env.push((
+            "GIT_WORK_TREE".into(),
+            repo.root_path().as_os_str().to_owned(),
+        ));
+    }
     let overrides = GIT_CONFIG_OVERRIDES
         .iter()
-        .map(|(key, value)| (*key, *value))
+        .map(|(key, value)| {
+            if repo.is_bare() && *key == "core.bare" {
+                (*key, "true")
+            } else {
+                (*key, *value)
+            }
+        })
         .chain(
             repo_overrides
                 .iter()
+                .filter(|(key, _)| !repo.is_bare() || key != "core.bare")
                 .map(|(key, value)| (key.as_str(), value.as_str())),
-        );
+        )
+        // Keep a scanned local core.bare=false from undoing the bare Git
+        // context established by the binding and worktree inventory.
+        .chain(repo.is_bare().then_some(("core.bare", "true")));
     let mut count = 0;
     for (index, (key, value)) in overrides.enumerate() {
         env.push((format!("GIT_CONFIG_KEY_{index}").into(), key.into()));
@@ -2065,42 +2224,224 @@ pub(crate) fn execute_git_mutation(
     if runtime.home.identity.is_none() {
         return Err(UtilityError::InvalidHome);
     }
-    execute_git(
-        executor,
-        repo,
-        runtime,
+    retry_git_lock_contention(
         budget,
         cancel,
-        false,
-        |attribute_source| {
-            let (mut args, stdin) = mutation_args(mutation)?;
-            args.insert(0, format!("--attr-source={attribute_source}").into());
-            Ok((args, stdin))
+        || true,
+        |attempt_budget| {
+            execute_git(
+                executor,
+                repo,
+                runtime,
+                attempt_budget,
+                cancel,
+                GitEnvironment::default(),
+                |attribute_source| {
+                    let (mut args, stdin) = mutation_args(mutation.clone())?;
+                    args.insert(0, format!("--attr-source={attribute_source}").into());
+                    Ok((args, stdin))
+                },
+            )
         },
     )
 }
 
-/// Real time sets one upstream-key write's deadline: every retry share is
+/// Run host-controlled Git with the same bounded lock retry as typed mutations.
+/// The callback receives its share of one deadline. Callers retain their own
+/// capture checks and must disable hooks and interactive input before replay.
+pub fn execute_with_git_lock_retry(
+    timeout: Duration,
+    cancel: &CancelToken,
+    mut execute: impl FnMut(Duration) -> Result<ExecOutcome, UtilityError>,
+) -> Result<ExecOutcome, UtilityError> {
+    retry_git_lock_contention(
+        UtilityBudget::bounded(timeout)?,
+        cancel,
+        || true,
+        |budget| execute(budget.timeout),
+    )
+}
+
+/// Retry only Git's explicit lock-file collision diagnostic. Git remains the
+/// atomicity owner; these attempts only give a sibling operation a short
+/// chance to finish publishing its lock before the caller's budget expires.
+fn retry_git_lock_contention(
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+    mut retry_allowed: impl FnMut() -> bool,
+    mut execute: impl FnMut(UtilityBudget) -> Result<ExecOutcome, UtilityError>,
+) -> Result<ExecOutcome, UtilityError> {
+    let Some(deadline) = git_lock_deadline(budget.timeout) else {
+        return Err(UtilityError::InvalidBudget);
+    };
+    let mut backoff = GIT_LOCK_BACKOFF_START;
+    let mut attempt = 0;
+    loop {
+        if cancel.is_cancelled() {
+            return Err(UtilityError::Cancelled);
+        }
+        attempt += 1;
+        let remaining = git_lock_remaining(deadline);
+        let Some(attempt_budget) = budget.attempt_share(remaining) else {
+            return Err(UtilityError::GitLockTimedOut {
+                attempts: attempt - 1,
+            });
+        };
+        let outcome = match execute(attempt_budget) {
+            Err(UtilityError::TimedOut) if attempt > 1 => {
+                return Err(UtilityError::GitLockTimedOut { attempts: attempt });
+            }
+            result => result?,
+        };
+        if !git_lock_retry_capture_complete(&outcome)
+            || !matches!(outcome.termination, Termination::Exit(status) if status != 0)
+            || !git_lock_contention(&outcome.stderr.bytes)
+            || attempt == GIT_LOCK_MAX_ATTEMPTS
+            || !retry_allowed()
+        {
+            return Ok(outcome);
+        }
+        if cancel.is_cancelled() {
+            return Err(UtilityError::Cancelled);
+        }
+        let sample = GIT_LOCK_JITTER.fetch_add(0x9e3779b97f4a7c15, Ordering::Relaxed)
+            ^ u64::from(std::process::id());
+        let delay = git_lock_retry_delay(backoff, sample);
+        if git_lock_remaining(deadline) <= delay {
+            return Err(UtilityError::GitLockTimedOut { attempts: attempt });
+        }
+        Pause::wait(
+            &ThreadPause,
+            DurationMicros::from_micros(delay.as_micros() as u64),
+            cancel,
+        );
+        backoff = backoff.saturating_mul(2);
+    }
+}
+
+fn git_lock_retry_capture_complete(outcome: &ExecOutcome) -> bool {
+    !outcome.cancelled
+        && !outcome.timed_out
+        && !outcome.drain_truncated
+        && !outcome.overflow_stopped
+        && [&outcome.stdout, &outcome.stderr].iter().all(|stream| {
+            !stream.truncated
+                && !stream.read_failed
+                && !stream.sink_failed
+                && stream.sink_lost_bytes == 0
+                && stream.oversized_frames == 0
+                && stream.decoder_lost_frames == 0
+                && !stream.filter_failed
+        })
+}
+
+/// Git has a few stable forms for lock collisions. The config diagnostic omits
+/// the `.lock` suffix in the path, but names the config lock explicitly. Other
+/// mutation diagnostics must identify a `.lock` path and `File exists`; a CAS
+/// mismatch, generic `File exists`, or lock error without an extant file is
+/// never retried.
+fn git_lock_contention(stderr: &[u8]) -> bool {
+    let stderr = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    stderr.lines().any(|line| {
+        line.contains("file exists")
+            && (line.contains("could not lock config file")
+                || ((line.contains("unable to create") || line.contains("cannot lock"))
+                    && line.contains(".lock")))
+    })
+}
+
+/// Delete one ref under a prepared `update-ref --stdin` transaction. The
+/// decision callback runs after Git has locked the ref and acknowledged
+/// `prepare`; false aborts the transaction without changing the ref.
+pub(crate) fn execute_git_prepared_ref_delete(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    expected_ref: (&GitRefName, GitOid),
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+    commit_after_prepare: &mut dyn FnMut() -> bool,
+) -> Result<ExecOutcome, UtilityError> {
+    let (name, expected_old_oid) = expected_ref;
+    if runtime.home.identity.is_none() {
+        return Err(UtilityError::InvalidHome);
+    }
+    if cancel.is_cancelled() {
+        return Err(UtilityError::Cancelled);
+    }
+    runtime.home.verify()?;
+    repo.revalidate()?;
+    verify_repo_binding(repo)?;
+    let attribute_source = repo
+        .probe_data()
+        .ok_or(UtilityError::UnprobedRepository)?
+        .attribute_source
+        .as_str();
+    let mut args = GIT_COMMON.iter().map(OsString::from).collect::<Vec<_>>();
+    args.insert(0, format!("--attr-source={attribute_source}").into());
+    args.extend(["update-ref".into(), "--stdin".into()]);
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push(runtime.git.program()?.into_os_string());
+    argv.extend(args);
+    let mut env = environment(runtime, repo);
+    env.push(("GIT_ATTR_SOURCE".into(), attribute_source.into()));
+    let commands = format!(
+        "option no-deref\nstart\ndelete {} {}\nprepare\n",
+        name.as_str(),
+        expected_old_oid
+    );
+    let callback_executed = std::cell::Cell::new(false);
+    let outcome = retry_git_lock_contention(
+        budget,
+        cancel,
+        || !callback_executed.get(),
+        |attempt_budget| {
+            let options = || {
+                exec_options(
+                    &argv,
+                    repo.root_path(),
+                    attempt_budget,
+                    &env,
+                    None,
+                    Some(cancel),
+                )
+            };
+            let mut decide = || {
+                callback_executed.set(true);
+                commit_after_prepare()
+            };
+            runtime.git.execute_prepared_ref_transaction(
+                executor,
+                options,
+                commands.as_bytes(),
+                &mut decide,
+            )
+        },
+    )?;
+    validate_outcome(outcome)
+}
+
+/// Real time sets one Git mutation's deadline: every retry share is
 /// measured against it at this single boundary.
 #[allow(clippy::disallowed_methods)]
-fn config_lock_deadline(timeout: Duration) -> Option<Instant> {
+fn git_lock_deadline(timeout: Duration) -> Option<Instant> {
     Instant::now().checked_add(timeout)
 }
 
 /// The time the shared deadline still leaves, sampled at that same boundary.
 #[allow(clippy::disallowed_methods)]
-fn config_lock_remaining(deadline: Instant) -> Duration {
+fn git_lock_remaining(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
 }
 
-/// Set one lane upstream key. Reopen the repository after each call because
-/// Git replaces the common config file. Every worktree shares the common
-/// `.git/config`, so concurrent writers contend for its lock file; that
-/// specific failure is retried briefly with a bounded backoff. The budget
-/// bounds the whole operation, not one attempt: the deadline is computed once,
-/// each attempt only gets the time still left, retries stop when that time
-/// cannot cover another backoff and attempt, and a timeout names the attempts
-/// it counted.
+fn git_lock_retry_delay(backoff: Duration, sample: u64) -> Duration {
+    let window = (backoff.as_micros() as u64 / 2).max(1);
+    backoff.saturating_add(Duration::from_micros(sample % window))
+}
+
+/// Set one lane upstream key. Reopen the repository after the call because
+/// Git replaces the common config file. Git's explicit config lock collision
+/// gets the same bounded retry used by other typed mutations.
 pub fn set_lane_upstream_key(
     executor: &dyn Executor,
     repo: &VerifiedRepo,
@@ -2123,63 +2464,21 @@ pub fn set_lane_upstream_key(
         key,
         value,
     };
-    let Some(deadline) = config_lock_deadline(budget.timeout) else {
-        return Err(UtilityError::InvalidBudget);
-    };
-    let mut backoff = CONFIG_LOCK_BACKOFF_START;
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let remaining = config_lock_remaining(deadline);
-        let attempt_budget =
-            budget
-                .attempt_share(remaining)
-                .ok_or(UtilityError::ConfigLockTimedOut {
-                    attempts: attempt - 1,
-                })?;
-        let result = execute_git_mutation(
-            executor,
-            repo,
-            runtime,
-            mutation.clone(),
-            attempt_budget,
-            cancel,
-        )
-        // An attempt spent its own share of the shared deadline; that
-        // exhaustion is the operation's, and it must name the attempts.
-        .map_err(|error| match error {
-            UtilityError::TimedOut => UtilityError::ConfigLockTimedOut { attempts: attempt },
+    let result = execute_git_mutation(executor, repo, runtime, mutation, budget, cancel).map_err(
+        |error| match error {
+            UtilityError::GitLockTimedOut { attempts } => {
+                UtilityError::ConfigLockTimedOut { attempts }
+            }
             error => error,
-        })?;
-        // Anything unexpected is already rejected by `validate_outcome`.
-        let status = match result.termination {
-            Termination::Exit(0) => return Ok(()),
-            Termination::Exit(status) => status,
-            Termination::Signal(signal) => return Err(UtilityError::Signalled { signal }),
-        };
-        let stderr = git_stderr_excerpt(&result.stderr.bytes);
-        // Any failure other than config lock contention is permanent.
-        if attempt == CONFIG_LOCK_RETRIES
-            || !stderr
-                .to_ascii_lowercase()
-                .contains("could not lock config file")
-        {
-            return Err(UtilityError::ConfigFailed { status, stderr });
-        }
-        if cancel.is_cancelled() {
-            return Err(UtilityError::Cancelled);
-        }
-        // Another attempt must fit in the deadline with room for its backoff;
-        // otherwise the operation's budget is spent, not just this attempt's.
-        if config_lock_remaining(deadline) <= backoff {
-            return Err(UtilityError::ConfigLockTimedOut { attempts: attempt });
-        }
-        Pause::wait(
-            &ThreadPause,
-            DurationMicros::from_micros(backoff.as_micros() as u64),
-            cancel,
-        );
-        backoff = backoff.saturating_mul(2);
+        },
+    )?;
+    match result.termination {
+        Termination::Exit(0) => Ok(()),
+        Termination::Exit(status) => Err(UtilityError::ConfigFailed {
+            status,
+            stderr: git_stderr_excerpt(&result.stderr.bytes),
+        }),
+        Termination::Signal(signal) => Err(UtilityError::Signalled { signal }),
     }
 }
 
@@ -2653,7 +2952,8 @@ fn probe_repository(
 
 /// Resolve the repository object format once without writing an object, then
 /// preflight the global attribute-source option on a submodule-safe status
-/// read. The canonical empty tree need not exist in the object database.
+/// read, or a bare-safe rev-parse. The canonical empty tree need not exist in
+/// the object database.
 fn empty_attribute_source(
     executor: &dyn Executor,
     repo: &VerifiedRepo,
@@ -2679,14 +2979,22 @@ fn empty_attribute_source(
         _ => return Err(UtilityError::AttributeSourceUnsupported),
     };
     let source_option: OsString = format!("--attr-source={source}").into();
-    let preflight_args = [
-        source_option,
-        OsString::from("status"),
-        OsString::from("--porcelain=v2"),
-        OsString::from("-z"),
-        OsString::from("--ignore-submodules=all"),
-        OsString::from("--untracked-files=no"),
-    ];
+    let preflight_args = if repo.is_bare() {
+        vec![
+            source_option,
+            OsString::from("rev-parse"),
+            OsString::from("--show-object-format"),
+        ]
+    } else {
+        vec![
+            source_option,
+            OsString::from("status"),
+            OsString::from("--porcelain=v2"),
+            OsString::from("-z"),
+            OsString::from("--ignore-submodules=all"),
+            OsString::from("--untracked-files=no"),
+        ]
+    };
     let preflight = run_git_probe(
         executor,
         repo,
@@ -2711,13 +3019,8 @@ fn run_git_probe(
     overrides: &[(String, String)],
     command: &[OsString],
 ) -> Result<ExecOutcome, UtilityError> {
-    let mut argv = vec![
-        runtime.git.program()?.into_os_string(),
-        OsString::from("--git-dir"),
-        repo.private_git_dir().as_os_str().to_owned(),
-        OsString::from("--work-tree"),
-        repo.root_path().as_os_str().to_owned(),
-    ];
+    let mut argv = vec![runtime.git.program()?.into_os_string()];
+    argv.extend(repository_args(repo));
     argv.extend(GIT_COMMON.iter().map(OsString::from));
     argv.extend(command.iter().cloned());
     let env = environment_with(runtime, repo, overrides);
@@ -3013,6 +3316,185 @@ pub(crate) mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn bound_bare_repo_is_verified_without_worktree_context() -> Result<(), Box<dyn Error>> {
+        use crate::repo::verify_worktree;
+        use crate::test_support::{fixture_env, run_fixture_git};
+        use provenant_core::RootInputs;
+
+        let fixture = Fixture::new()?;
+        let temp = fixture._temp.path();
+        let bare = temp.join("bound-bare.git");
+        let bare_text = bare.to_str().ok_or("non-UTF8 bare repository")?;
+        let source_text = fixture.root.to_str().ok_or("non-UTF8 source repository")?;
+        let env = fixture_env(&fixture.home, temp);
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            temp,
+            &env,
+            &["clone", "--quiet", "--bare", source_text, bare_text],
+        )?;
+        let linked = temp.join("bound-bare-linked");
+        let linked_text = linked.to_str().ok_or("non-UTF8 linked checkout")?;
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            &bare,
+            &env,
+            &["worktree", "add", "--quiet", "-b", "lane", linked_text],
+        )?;
+
+        let state = temp.join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let mut inputs = RootInputs::new(fixture.home.clone(), bare.clone());
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let binding =
+            provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(&bare)?)?;
+        let runtime = UtilityRuntime::new(&fixture.git, &fixture.home, &state)?;
+        let recorder = RecordsGit {
+            executor: &fixture.executor,
+            calls: Default::default(),
+        };
+        let budget = UtilityBudget::bounded(Duration::from_secs(10))?;
+        let cancel = CancelToken::new();
+        let repo = runtime.open_bound_bare_repo(&recorder, &binding, budget, &cancel)?;
+        assert!(repo.is_bare());
+        assert!(!repo.is_primary_checkout());
+        assert_eq!(repo.root_path(), bare.canonicalize()?);
+        assert_eq!(repo.common_git_dir(), repo.root_path());
+        let bare_environment = environment_with(
+            &runtime,
+            &repo,
+            &[("core.bare".to_owned(), "false".to_owned())],
+        );
+        let config_count = bare_environment
+            .iter()
+            .find(|(key, _)| key == OsStr::new("GIT_CONFIG_COUNT"))
+            .and_then(|(_, value)| value.to_str())
+            .ok_or("missing Git config override count")?
+            .parse::<usize>()?;
+        let mut effective_core_bare = None;
+        for index in 0..config_count {
+            let key_name = format!("GIT_CONFIG_KEY_{index}");
+            let value_name = format!("GIT_CONFIG_VALUE_{index}");
+            let key = bare_environment
+                .iter()
+                .find(|(name, _)| name == OsStr::new(&key_name))
+                .and_then(|(_, value)| value.to_str());
+            if key == Some("core.bare") {
+                effective_core_bare = bare_environment
+                    .iter()
+                    .find(|(name, _)| name == OsStr::new(&value_name))
+                    .and_then(|(_, value)| value.to_str());
+            }
+        }
+        assert_eq!(effective_core_bare, Some("true"));
+
+        let layout = runtime
+            .project_layout_for_bound_repository(&recorder, &repo, &binding, budget, &cancel)?;
+        assert!(layout.project().is_none());
+        assert_eq!(layout.root(), repo.common_git_dir());
+        let linked = verify_worktree(&repo, &linked)?;
+        assert_eq!(linked.project_root(), None);
+
+        let listing = run_utility(
+            &recorder,
+            GitRead::WorktreeListBare,
+            &repo,
+            &runtime,
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(listing.termination, Termination::Exit(0));
+        let calls = recorder.calls.lock().map_err(|_| "Git call log poisoned")?;
+        let bare_calls = calls.iter().filter(|(argv, _)| {
+            argv.windows(2).any(|pair| {
+                pair[0] == OsStr::new("--git-dir") && pair[1] == repo.common_git_dir().as_os_str()
+            })
+        });
+        let mut saw_bare_call = false;
+        for (argv, environment) in bare_calls {
+            saw_bare_call = true;
+            assert!(!argv.iter().any(|arg| arg == OsStr::new("--work-tree")));
+            assert!(
+                !environment
+                    .iter()
+                    .any(|(key, _)| key == OsStr::new("GIT_WORK_TREE"))
+            );
+        }
+        assert!(
+            saw_bare_call,
+            "the bare repository must be probed through its common dir"
+        );
+        drop(calls);
+        assert!(
+            runtime
+                .open_repo(&recorder, &bare, budget, &cancel)
+                .is_err()
+        );
+
+        let primary_binding = fixture.binding()?;
+        assert!(
+            runtime
+                .open_bound_bare_repo(&recorder, &primary_binding, budget, &cancel)
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bound_bare_repo_revalidation_refuses_a_replaced_common_directory()
+    -> Result<(), Box<dyn Error>> {
+        use crate::test_support::{fixture_env, run_fixture_git};
+        use provenant_core::RootInputs;
+
+        let fixture = Fixture::new()?;
+        let temp = fixture._temp.path();
+        let bare = temp.join("replaceable-bare.git");
+        let bare_text = bare.to_str().ok_or("non-UTF8 bare repository")?;
+        let source_text = fixture.root.to_str().ok_or("non-UTF8 source repository")?;
+        let env = fixture_env(&fixture.home, temp);
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            temp,
+            &env,
+            &["clone", "--quiet", "--bare", source_text, bare_text],
+        )?;
+
+        let state = temp.join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let mut inputs = RootInputs::new(fixture.home.clone(), bare.clone());
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let binding =
+            provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(&bare)?)?;
+        let runtime = UtilityRuntime::new(&fixture.git, &fixture.home, &state)?;
+        let repo = runtime.open_bound_bare_repo(
+            &fixture.executor,
+            &binding,
+            UtilityBudget::bounded(Duration::from_secs(10))?,
+            &CancelToken::new(),
+        )?;
+
+        fs::rename(&bare, temp.join("previous-bare.git"))?;
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            temp,
+            &env,
+            &["init", "--quiet", "--bare", bare_text],
+        )?;
+        assert!(matches!(repo.revalidate(), Err(RepoError::IdentityChanged)));
+        assert!(matches!(
+            repo.revalidate_identity(),
+            Err(RepoError::IdentityChanged)
+        ));
         Ok(())
     }
 
@@ -3739,6 +4221,48 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
     }
 
     #[test]
+    fn git_lock_retries_require_complete_diagnostics() -> Result<(), Box<dyn Error>> {
+        for loss in ["stderr_tail", "stdout_read", "sink", "decoder", "drain"] {
+            let mut output = exit_outcome(
+                128,
+                "fatal: Unable to create '/fixture/index.lock': File exists.",
+            );
+            match loss {
+                "stderr_tail" => output.stderr.truncated = true,
+                "stdout_read" => output.stdout.read_failed = true,
+                "sink" => output.stderr.sink_lost_bytes = 1,
+                "decoder" => output.stdout.decoder_lost_frames = 1,
+                "drain" => output.drain_truncated = true,
+                _ => unreachable!(),
+            }
+            let mut calls = 0;
+            let observed =
+                execute_with_git_lock_retry(Duration::from_secs(1), &CancelToken::new(), |_| {
+                    calls += 1;
+                    Ok(output.clone())
+                })?;
+            assert_eq!(
+                calls, 1,
+                "incomplete {loss} evidence cannot authorise replay"
+            );
+            assert_eq!(
+                observed, output,
+                "the caller keeps the original capture outcome"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn git_lock_retry_jitter_stays_bounded_and_varies() {
+        let base = Duration::from_millis(50);
+        let low = git_lock_retry_delay(base, 0);
+        let high = git_lock_retry_delay(base, 24_999);
+        assert_eq!(low, base);
+        assert!(high > low && high < base + base / 2);
+    }
+
+    #[test]
     fn lane_upstream_config_lock_contention_retries_until_success() -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
         let outcomes = vec![
@@ -3759,11 +4283,290 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
         Ok(())
     }
 
+    // Spec: docs/specs/run-git.md#worktrees-and-refs
+    #[test]
+    fn git_mutations_retry_index_and_ref_lock_file_collisions() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let head = fixture.head()?;
+        for stderr in [
+            "fatal: Unable to create '/repo/.git/index.lock': File exists.\n",
+            "fatal: cannot lock ref 'refs/heads/topic': Unable to create '/repo/.git/refs/heads/topic.lock': File exists.\n",
+        ] {
+            let fake = ScriptedMutation::new(vec![exit_outcome(255, stderr), exit_outcome(0, "")]);
+            let outcome = execute_git_mutation(
+                &fake,
+                &fixture.repo,
+                &fixture.runtime,
+                GitMutation::FastForward { head },
+                fixture.budget()?,
+                &CancelToken::new(),
+            )?;
+            assert_eq!(outcome.termination, Termination::Exit(0));
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 2, "{stderr}");
+        }
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-git.md#worktrees-and-refs
+    #[test]
+    fn git_mutations_do_not_retry_cas_mismatch_or_unrelated_file_exists()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let head = fixture.head()?;
+        for stderr in [
+            "fatal: cannot lock ref 'refs/heads/topic': is at abc but expected def\n",
+            "fatal: unable to create index: File exists\n",
+            "fatal: Unable to create '/repo/.git/index.lock': Permission denied\n",
+        ] {
+            let fake = ScriptedMutation::new(vec![exit_outcome(255, stderr)]);
+            let outcome = execute_git_mutation(
+                &fake,
+                &fixture.repo,
+                &fixture.runtime,
+                GitMutation::FastForward { head },
+                fixture.budget()?,
+                &CancelToken::new(),
+            )?;
+            assert_eq!(outcome.termination, Termination::Exit(255), "{stderr}");
+            assert_eq!(fake.calls.load(Ordering::SeqCst), 1, "{stderr}");
+        }
+        Ok(())
+    }
+
+    // Spec: docs/specs/run-git.md#worktrees-and-refs
+    #[test]
+    fn prepared_ref_lock_collision_retries_only_before_prepare_callback()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let branch = GitRefName::branch("lane/writer")?;
+        let head = fixture.head()?;
+        let lock_collision = exit_outcome(
+            255,
+            "fatal: cannot lock ref 'refs/heads/lane/writer': Unable to create '/repo/.git/refs/heads/lane/writer.lock': File exists.\n",
+        );
+        let fake = ScriptedPreparedRef::new(vec![
+            (lock_collision.clone(), false),
+            (exit_outcome(0, ""), true),
+        ]);
+        let decisions = AtomicUsize::new(0);
+        let mut decide = || {
+            decisions.fetch_add(1, Ordering::SeqCst);
+            true
+        };
+        let outcome = execute_git_prepared_ref_delete(
+            &fake,
+            &fixture.repo,
+            &fixture.runtime,
+            (&branch, head),
+            fixture.budget()?,
+            &CancelToken::new(),
+            &mut decide,
+        )?;
+        assert_eq!(outcome.termination, Termination::Exit(0));
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(decisions.load(Ordering::SeqCst), 1);
+
+        let fake = ScriptedPreparedRef::new(vec![(lock_collision, true)]);
+        let decisions = AtomicUsize::new(0);
+        let mut decide = || {
+            decisions.fetch_add(1, Ordering::SeqCst);
+            true
+        };
+        let outcome = execute_git_prepared_ref_delete(
+            &fake,
+            &fixture.repo,
+            &fixture.runtime,
+            (&branch, head),
+            fixture.budget()?,
+            &CancelToken::new(),
+            &mut decide,
+        )?;
+        assert_eq!(outcome.termination, Termination::Exit(255));
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(decisions.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn sibling_branch_config_reads_remain_complete_during_git_lock_retry()
+    -> Result<(), Box<dyn Error>> {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Condvar};
+
+        struct Progress {
+            counts: Mutex<(usize, usize)>,
+            changed: Condvar,
+        }
+        impl Progress {
+            fn write_attempt(&self) {
+                self.counts.lock().unwrap().0 += 1;
+                self.changed.notify_all();
+            }
+            fn read(&self) {
+                self.counts.lock().unwrap().1 += 1;
+                self.changed.notify_all();
+            }
+            fn wait_for(&self, attempts: usize, reads: usize) -> bool {
+                let deadline = git_lock_deadline(Duration::from_secs(5)).unwrap();
+                let mut counts = self.counts.lock().unwrap();
+                while counts.0 < attempts || counts.1 < reads {
+                    let remaining = git_lock_remaining(deadline);
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    let (next, timeout) = self.changed.wait_timeout(counts, remaining).unwrap();
+                    counts = next;
+                    if timeout.timed_out() {
+                        break;
+                    }
+                }
+                counts.0 >= attempts && counts.1 >= reads
+            }
+        }
+        struct AttemptProbe<'a> {
+            inner: &'a dyn Executor,
+            progress: Arc<Progress>,
+        }
+        impl Executor for AttemptProbe<'_> {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                if options.argv.iter().any(|arg| arg == "config")
+                    && options.argv.iter().any(|arg| arg == "--replace-all")
+                {
+                    self.progress.write_attempt();
+                }
+                self.inner.execute(options)
+            }
+        }
+
+        fn remote(fixture: &Fixture) -> Result<String, String> {
+            let output = fixture
+                .run(&["config", "--local", "--get", "branch.sibling-a.remote"])
+                .map_err(|error| error.to_string())?;
+            if output.termination != Termination::Exit(0) {
+                return Err(format!("config read failed: {output:?}"));
+            }
+            String::from_utf8(output.stdout.bytes)
+                .map(|value| value.trim().to_owned())
+                .map_err(|error| error.to_string())
+        }
+
+        let fixture = Fixture::new()?;
+        let worktrees = fixture.root.join(".worktrees");
+        fs::create_dir_all(&worktrees)?;
+        let head = fixture.head()?.to_string();
+        for (branch, path) in [
+            ("sibling-a", ".worktrees/sibling-a"),
+            ("sibling-b", ".worktrees/sibling-b"),
+        ] {
+            let output = fixture.run(&["worktree", "add", "-b", branch, path, &head])?;
+            assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
+        }
+        fixture.run(&[
+            "config",
+            "--local",
+            "--replace-all",
+            "branch.sibling-a.remote",
+            "old",
+        ])?;
+        let lock_path = fixture.repo.common_git_dir().join("config.lock");
+        let _held = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)?;
+
+        let progress = Arc::new(Progress {
+            counts: Mutex::new((0, 0)),
+            changed: Condvar::new(),
+        });
+        let finished = Arc::new(AtomicBool::new(false));
+        let branch = GitRefName::branch("sibling-a")?;
+        let fixture_ref = &fixture;
+        let snapshots = std::thread::scope(|scope| -> Result<Vec<String>, Box<dyn Error>> {
+            let writer_progress = Arc::clone(&progress);
+            let writer_finished = Arc::clone(&finished);
+            let writer = scope.spawn(move || {
+                let probe = AttemptProbe {
+                    inner: &fixture_ref.executor,
+                    progress: writer_progress,
+                };
+                let result = fixture_ref
+                    .budget()
+                    .map_err(|error| error.to_string())
+                    .and_then(|budget| {
+                        set_lane_upstream_key(
+                            &probe,
+                            &fixture_ref.repo,
+                            &fixture_ref.runtime,
+                            &branch,
+                            false,
+                            budget,
+                            &CancelToken::new(),
+                        )
+                        .map_err(|error| error.to_string())
+                    });
+                writer_finished.store(true, std::sync::atomic::Ordering::Release);
+                result
+            });
+
+            let reader_progress = Arc::clone(&progress);
+            let reader_finished = Arc::clone(&finished);
+            let reader = scope.spawn(move || -> Result<Vec<String>, String> {
+                let mut values = Vec::new();
+                while !reader_finished.load(std::sync::atomic::Ordering::Acquire) {
+                    let value = remote(fixture_ref)?;
+                    if !matches!(value.as_str(), "old" | "origin") {
+                        return Err(format!("partial or unexpected config snapshot: {value:?}"));
+                    }
+                    values.push(value);
+                    reader_progress.read();
+                }
+                let value = remote(fixture_ref)?;
+                if !matches!(value.as_str(), "old" | "origin") {
+                    return Err(format!("partial or unexpected final snapshot: {value:?}"));
+                }
+                values.push(value);
+                Ok(values)
+            });
+
+            let observed_retry_and_reads = progress.wait_for(2, 4);
+            drop(_held);
+            fs::remove_file(&lock_path)?;
+            writer
+                .join()
+                .map_err(|_| "config writer panicked")?
+                .map_err(std::io::Error::other)?;
+            let values = reader
+                .join()
+                .map_err(|_| "config reader panicked")?
+                .map_err(std::io::Error::other)?;
+            assert!(
+                observed_retry_and_reads,
+                "readers must observe the old snapshot while Git retries its real config.lock write"
+            );
+            Ok(values)
+        })?;
+        assert!(snapshots.len() >= 5, "{snapshots:?}");
+        assert!(
+            snapshots.iter().any(|value| value == "old"),
+            "{snapshots:?}"
+        );
+        assert!(
+            snapshots.iter().any(|value| value == "origin"),
+            "the complete new snapshot must be visible after Git's atomic rename: {snapshots:?}"
+        );
+        assert!(
+            snapshots
+                .iter()
+                .all(|value| matches!(value.as_str(), "old" | "origin"))
+        );
+        Ok(())
+    }
+
     #[test]
     fn lane_upstream_config_lock_contention_fails_after_the_retry_limit()
     -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
-        let outcomes = (0..CONFIG_LOCK_RETRIES)
+        let outcomes = (0..GIT_LOCK_MAX_ATTEMPTS)
             .map(|_| exit_outcome(255, LOCK_CONTENTION_STDERR))
             .collect();
         let fake = ScriptedConfig::new(outcomes, None);
@@ -3785,8 +4588,8 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
         assert!(stderr.chars().count() <= MAX_FETCH_STDERR);
         assert_eq!(
             fake.calls(),
-            CONFIG_LOCK_RETRIES,
-            "retries must be bounded by CONFIG_LOCK_RETRIES"
+            GIT_LOCK_MAX_ATTEMPTS,
+            "attempts must be bounded by GIT_LOCK_MAX_ATTEMPTS"
         );
         Ok(())
     }
@@ -3831,6 +4634,91 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
         }
     }
 
+    /// Script Git mutation failures without launching Git, while recording the
+    /// per-attempt timeout supplied by the shared operation deadline.
+    #[derive(Default)]
+    struct ScriptedMutation {
+        outcomes: Mutex<VecDeque<ExecOutcome>>,
+        calls: AtomicUsize,
+        timeouts: Mutex<Vec<Duration>>,
+    }
+
+    impl ScriptedMutation {
+        fn new(outcomes: Vec<ExecOutcome>) -> Self {
+            Self {
+                outcomes: Mutex::new(outcomes.into()),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl Executor for ScriptedMutation {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            assert!(
+                options.argv.iter().any(|arg| arg == "merge")
+                    || options.argv.iter().any(|arg| arg == "update-ref"),
+                "unexpected mutation spawn: {:?}",
+                options.argv
+            );
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.timeouts
+                .lock()
+                .map_err(|_| ExecError::Busy)?
+                .push(options.timeout);
+            self.outcomes
+                .lock()
+                .map_err(|_| ExecError::Busy)?
+                .pop_front()
+                .ok_or_else(|| ExecError::Io {
+                    operation: "scripted mutation",
+                    source: std::io::Error::other("mutation script exhausted"),
+                })
+        }
+    }
+
+    #[derive(Default)]
+    struct ScriptedPreparedRef {
+        outcomes: Mutex<VecDeque<(ExecOutcome, bool)>>,
+        calls: AtomicUsize,
+    }
+
+    impl ScriptedPreparedRef {
+        fn new(outcomes: Vec<(ExecOutcome, bool)>) -> Self {
+            Self {
+                outcomes: Mutex::new(outcomes.into()),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl Executor for ScriptedPreparedRef {
+        fn execute(&self, _options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            Err(ExecError::Busy)
+        }
+
+        fn execute_prepared_ref_transaction(
+            &self,
+            _options: ExecOptions<'_>,
+            _commands_through_prepare: &[u8],
+            commit_after_prepare: &mut dyn FnMut() -> bool,
+        ) -> Result<ExecOutcome, ExecError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let (outcome, prepared) = self
+                .outcomes
+                .lock()
+                .map_err(|_| ExecError::Busy)?
+                .pop_front()
+                .ok_or_else(|| ExecError::Io {
+                    operation: "scripted prepared ref",
+                    source: std::io::Error::other("prepared ref script exhausted"),
+                })?;
+            if prepared {
+                let _ = commit_after_prepare();
+            }
+            Ok(outcome)
+        }
+    }
+
     #[test]
     #[allow(clippy::disallowed_methods)] // The elapsed span is the assertion.
     fn lane_upstream_config_lock_contention_stays_within_the_budget() -> Result<(), Box<dyn Error>>
@@ -3866,8 +4754,8 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
             "the timeout error must name the attempts it counted"
         );
         assert!(
-            (1..=CONFIG_LOCK_RETRIES).contains(&attempts),
-            "attempts must be bounded by CONFIG_LOCK_RETRIES: {attempts}"
+            (1..=GIT_LOCK_MAX_ATTEMPTS).contains(&attempts),
+            "attempts must be bounded by GIT_LOCK_MAX_ATTEMPTS: {attempts}"
         );
         // Shrinking shares prove the shared deadline without asserting wall
         // time, which a descheduled CI runner can exceed.

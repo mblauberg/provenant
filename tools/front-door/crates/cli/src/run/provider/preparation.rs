@@ -1058,21 +1058,6 @@ impl PrepareError {
                 PlanCheckError::Permission(error).into_refusal()
             }
             Self::Run(run::RunError::Plan(error)) => PlanCheckError::Plan(error).into_refusal(),
-            Self::Run(run::RunError::Filesystem(provenant_os::fs::FsError::LockTimeout {
-                ref path,
-                ..
-            })) if path.file_name()
-                == Some(std::ffi::OsStr::new(
-                    provenant_confinement::worktrees::REPOSITORY_LOCK,
-                )) =>
-            {
-                let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::HandoffRefused,
-                    "repository lock busy; retry after the current repository operation finishes",
-                );
-                refusal.terminal_note = Some("repository lock busy; run `provenant retry TARGET` after the current repository operation finishes".into());
-                refusal
-            }
             Self::Run(error) => {
                 let boundary_class = error.boundary_class();
                 let cause = match error {
@@ -1213,22 +1198,6 @@ fn dirty_predecessor_suffix(paths: &[String]) -> String {
     } else {
         format!("; uncommitted predecessor edits: {}", paths.join(", "))
     }
-}
-
-#[cfg(test)]
-#[test]
-// Spec: docs/specs/cli.md#each-refusal-has-a-stable-code
-fn repository_lock_refusal_identifies_cause_and_retry() {
-    let error = run::RunError::Filesystem(provenant_os::fs::FsError::LockTimeout {
-        path: std::path::PathBuf::from("/private/repo")
-            .join(provenant_confinement::worktrees::REPOSITORY_LOCK),
-        timeout: std::time::Duration::ZERO,
-    });
-    let refusal = PrepareError::Run(error).into_refusal();
-    let note = refusal.terminal_note.as_deref().unwrap_or_default();
-    assert!(note.contains("repository lock busy"));
-    assert!(note.contains("provenant retry"));
-    assert!(!note.contains("/private"));
 }
 
 #[cfg(test)]
@@ -4071,13 +4040,33 @@ pub(super) fn prepare_candidates_inner(
         let build_class =
             provenant_config::ResolvedAdmissionClass::resolve("build", state_root, Some(&source));
         let cargo_target = run::ResolvedCargoTarget::resolve_with_brief(&task.profile, prompt_text);
+        let (cargo_cache_budget, cargo_cache_budget_warning) =
+            match provenant_config::cargo_cache_budget(
+                &task.profile,
+                &run::build_dir_gc::shared_cache_root(&home),
+            ) {
+                Ok(budget) => (Some(budget), None),
+                Err(error) => (
+                    None,
+                    Some(format!(
+                        "Cargo cache budget could not be resolved ({error}); launch continues without eviction"
+                    )),
+                ),
+            };
         let extras = run::PreambleExtras {
+            location: writer.as_ref().map(|writer| run::LaneLocation {
+                worktree: writer.worktree.path().to_owned(),
+                branch: writer.branch.as_str().to_owned(),
+                base: writer.source_commit().to_string(),
+                primary_checkout: writer.project_root().map(ToOwned::to_owned),
+            }),
             verification: Some(run::VerificationResolution::resolve(
                 &task.profile,
                 prompt_text,
             )),
             build_cap: Some(run::BuildCap::from(&build_class)),
             cargo_target: Some(cargo_target.clone()),
+            cargo_cache_budget: cargo_cache_budget.clone(),
         };
         let text = format!(
             "{}\n{text}",
@@ -4281,22 +4270,33 @@ pub(super) fn prepare_candidates_inner(
             task,
             &plan,
         );
-        let common_git_dir = match &plan.permissions().mode {
-            AccessMode::WorktreeWrite(authority) => Some(authority.common_git_dir()),
+        let lane_worktree = match &plan.permissions().mode {
+            AccessMode::WorktreeWrite(_) => writer.as_ref().map(|w| w.worktree.path()),
             AccessMode::ReadOnly => None,
+        };
+        let common_git_path = repository
+            .as_ref()
+            .map(|path| path.to_path_buf())
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let common_git_dir = match &plan.permissions().mode {
+            AccessMode::WorktreeWrite(authority) => Some(authority.common_git_dir().to_path_buf()),
+            AccessMode::ReadOnly => common_git_path.clone(),
         };
         let private_cache = match &plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
             AccessMode::ReadOnly => &plan.permissions().scratch.path,
         };
+        let cargo_workspace = cargo_target.project_workspace(lane_worktree, state_root);
         let (cargo_target_dir, cargo_target_lint) =
-            cargo_target.target_paths(&home, common_git_dir, private_cache);
-        // A shared or configured target lies outside the lane cache. Create it
-        // here so a sandboxed lane's grants can anchor to it; Cargo would
-        // create it itself only after the profile is fixed.
+            cargo_target.target_paths(cargo_workspace.as_deref(), private_cache);
+        // A configured target lies outside the lane cache. Create it here so a
+        // sandboxed lane's grants can anchor to it; Cargo would create it
+        // itself only after the profile is fixed. A project target lies in the
+        // writer-controlled worktree, where the host never creates anything.
         let cargo_target_warning = [&cargo_target_dir, &cargo_target_lint]
             .into_iter()
-            .filter(|path| !path.starts_with(private_cache))
+            .filter(|path| !path.starts_with(private_cache) && cargo_workspace.is_none())
             .find_map(|path| {
                 std::fs::create_dir_all(path)
                     .err()
@@ -4484,11 +4484,6 @@ pub(super) fn prepare_candidates_inner(
             alias_temporary_env(&mut spec.env, scratch, &alias.join(&scratch_name));
         }
         apply_lane_capabilities(&mut spec.profile.spec, &task.access);
-        let common_git_path = repository
-            .as_ref()
-            .map(|path| path.to_path_buf())
-            .transpose()
-            .map_err(|error| error.to_string())?;
         let project_paths = super::project_paths::apply(
             &mut spec,
             &plan,
@@ -4609,7 +4604,10 @@ pub(super) fn prepare_candidates_inner(
                 } else {
                     // Nothing is injected, but an unsandboxed lane can still
                     // read the user's login stores itself.
-                    super::gh_auth::Delivery::Ambient
+                    super::gh_auth::Delivery::Ambient(super::gh_auth::HostConfig::resolve(
+                        &home,
+                        &|key| host_provider_var(registry, key),
+                    ))
                 },
                 false,
             );
@@ -4686,8 +4684,14 @@ pub(super) fn prepare_candidates_inner(
         } else if let Some(gh) = publishing_gh.as_ref().filter(|_| !sandbox.effective) {
             // An unsandboxed lane keeps the user's own gh login; the counting
             // wrapper still fronts gh on its PATH. A wrapper that cannot be
-            // installed leaves gh unmediated, which the receipt says.
-            let mediated = match spec.configure_gh_shim(scratch, gh, &gh_shim) {
+            // installed leaves gh unmediated, which the receipt says. Adapters
+            // may re-point XDG_CONFIG_HOME at private state, so gh is pinned to
+            // the host's own configuration directory in the lane environment
+            // (surviving a PATH that a shell profile reorders) and in the shim.
+            let host_config =
+                super::gh_auth::HostConfig::resolve(&home, &|key| host_provider_var(registry, key));
+            host_config.pin(&mut spec.env);
+            let mediated = match spec.configure_gh_shim(scratch, gh, &host_config.path, &gh_shim) {
                 Ok(()) => true,
                 Err(error) => {
                     if let Some(message) = launch_policy
@@ -4704,8 +4708,10 @@ pub(super) fn prepare_candidates_inner(
                     false
                 }
             };
-            gh_selection =
-                super::gh_auth::Selection::new(super::gh_auth::Delivery::Ambient, mediated);
+            gh_selection = super::gh_auth::Selection::new(
+                super::gh_auth::Delivery::Ambient(host_config),
+                mediated,
+            );
         }
         if git_context.is_some()
             && let Some(argument) = adapter_spec.and_then(|spec| spec.context_directory_arg)
@@ -4771,6 +4777,28 @@ pub(super) fn prepare_candidates_inner(
         }
         if let Some(warning) = &cargo_target_warning {
             push_launch_warning(&mut route, warning.clone());
+        }
+        if let Some(warning) = &cargo_cache_budget_warning {
+            push_launch_warning(&mut route, warning.clone());
+        }
+        // A read-only lane builds in its scratch by design; a writer's target
+        // lies in its lane cache or a configured path, never in attempt tmp.
+        if let Some((_, target_val)) = spec
+            .env
+            .iter()
+            .find(|(k, _)| k == "CARGO_TARGET_DIR")
+            .filter(|_| writer.is_some())
+        {
+            let target_path = Path::new(target_val);
+            if target_path.starts_with(scratch) || target_path.starts_with(&paths.temporary) {
+                push_launch_warning(
+                    &mut route,
+                    format!(
+                        "CARGO_TARGET_DIR is set under the attempt's tmp directory ({}); build output bypasses the lane's warm target",
+                        target_path.display()
+                    ),
+                );
+            }
         }
         for warning in ignore_file_warnings(&route.adapter, task, roots.state.as_path()) {
             push_launch_warning(&mut route, warning);
@@ -5031,6 +5059,18 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(setup_skip(&label, error));
             continue;
         }
+        // Only a writer's launch enforces the cache budget (a read-only lane
+        // returns before reading this snapshot), and the snapshot costs a
+        // registered-project and process census, so a read-only launch skips it.
+        let cargo_target_protection = if writer.is_some() {
+            run::build_dir_gc::target_protection_for_launch(
+                roots,
+                writer.as_ref().map(|writer| writer.worktree.path()),
+                common_git_dir.as_deref(),
+            )
+        } else {
+            Default::default()
+        };
         return Ok(run::PreparedLaunch {
             limits,
             continuation_expectation,
@@ -5051,9 +5091,12 @@ pub(super) fn prepare_candidates_inner(
                 cargo_home,
                 cargo_target_seed: config.domains.fabric.lanes.cargo_seed.enabled,
                 state_root: roots.state.as_path().to_path_buf(),
+                roots: Some(roots.clone()),
                 sandbox,
                 backend: None,
                 cargo_target: cargo_target.clone(),
+                cargo_cache_budget,
+                cargo_target_protection,
             }),
         });
     }
@@ -5513,6 +5556,7 @@ mod user_skills_tests {
                         serde_json::json!({
                             "git_grants_digest": vec![0; 32], "publishing": false,
                             "common_git_dir": root.join("repo/.git"),
+                            "git_state": {"path": root.join("git-state"), "scope": "subtree"},
                             "cargo_cache": {"path": root.join("cache"), "scope": "subtree"}
                         }),
                     )?));

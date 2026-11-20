@@ -152,6 +152,18 @@ pub(super) fn rehydrate<'a>(
     }
     let mut value: Value = serde_json::from_slice(bytes)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    rehydrate_value(directory, id, &mut value)?;
+    serde_json::to_vec(&value)
+        .map(Cow::Owned)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error).into())
+}
+
+/// Restore and verify references in an already parsed checkpoint.
+pub(super) fn rehydrate_value(
+    directory: &Directory,
+    id: &str,
+    value: &mut Value,
+) -> Result<(), JournalError> {
     if let Some(references) = value
         .as_object_mut()
         .and_then(|root| root.remove(STORED_TEXT))
@@ -169,9 +181,7 @@ pub(super) fn rehydrate<'a>(
             )?);
         }
     }
-    serde_json::to_vec(&value)
-        .map(Cow::Owned)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error).into())
+    Ok(())
 }
 
 fn read_text(directory: &Directory, id: &str, digest: &str) -> Result<String, JournalError> {
@@ -194,27 +204,71 @@ fn read_text(directory: &Directory, id: &str, digest: &str) -> Result<String, Jo
     String::from_utf8(prompt).map_err(|_| JournalError::BadEnvelope)
 }
 
-/// Remove the graph's prompt blobs. Returns whether any were removed.
-pub(super) fn collect(directory: &Directory, id: &str) -> Result<bool, JournalError> {
+/// Remove prompt blobs incrementally so a caller's sweep budget also bounds
+/// enumeration and each unlink. An interrupted pass is safely retried: blobs
+/// already removed are absent on the next directory stream.
+pub(super) struct PromptCollection {
+    pub removed: bool,
+    pub interrupted_at: Option<std::path::PathBuf>,
+    pub continuation: Option<provenant_os::fs::DirectoryPosition>,
+}
+
+pub(super) fn collect(
+    directory: &Directory,
+    id: &str,
+    control: &provenant_core::SweepControl<'_>,
+    resume: Option<provenant_os::fs::DirectoryPosition>,
+) -> Result<PromptCollection, JournalError> {
     let prefix = prefix(id);
-    let mut names = Vec::new();
-    for entry in directory.entries()? {
+    let mut report = PromptCollection {
+        removed: false,
+        interrupted_at: None,
+        continuation: None,
+    };
+    let mut entries = directory.entries()?;
+    if let Some(position) = resume
+        && entries.seek(position).is_err()
+    {
+        entries = directory.entries()?;
+    }
+    loop {
+        let before = entries.position()?;
+        let Some(entry) = entries.next() else { break };
         let name = entry?;
+        let path = directory.anchored_path().join(&name);
+        if !control.should_continue() {
+            if report.removed {
+                directory
+                    .sync()
+                    .map_err(JournalError::DurabilityUnconfirmed)?;
+            }
+            report.interrupted_at = Some(path);
+            report.continuation = Some(before);
+            return Ok(report);
+        }
         if name.to_str().is_some_and(|name| {
-            name.strip_prefix(&prefix)
-                .is_some_and(|rest| rest.len() == 64)
+            name.strip_prefix(&prefix).is_some_and(|rest| {
+                rest.len() == 64 && rest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
         }) {
-            names.push(name);
+            if !control.should_continue() {
+                if report.removed {
+                    directory
+                        .sync()
+                        .map_err(JournalError::DurabilityUnconfirmed)?;
+                }
+                report.interrupted_at = Some(path);
+                report.continuation = Some(before);
+                return Ok(report);
+            }
+            match directory.unlink(&name) {
+                Ok(()) => report.removed = true,
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
         }
     }
-    for name in &names {
-        match directory.unlink(name) {
-            Ok(()) => {}
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(!names.is_empty())
+    Ok(report)
 }
 
 #[cfg(test)]

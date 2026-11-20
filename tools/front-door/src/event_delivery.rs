@@ -24,6 +24,24 @@ pub(crate) fn warn(message: &str) {
     use std::io::Write;
     let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
 }
+/// Warn once per process for each distinct message. A wait is one process, so a
+/// condition that repeats on every poll is reported once per wait.
+pub(crate) fn warn_once(message: &str) {
+    static SEEN: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    if SEEN
+        .lock()
+        .is_ok_and(|mut seen| remember(&mut seen, message))
+    {
+        warn(message);
+    }
+}
+/// Whether `message` is new. A bounded set keeps a stream of distinct errors
+/// from growing without limit; a full set reports nothing further.
+fn remember(seen: &mut std::collections::BTreeSet<String>, message: &str) -> bool {
+    const MAX_REMEMBERED: usize = 64;
+    seen.len() < MAX_REMEMBERED && seen.insert(message.to_owned())
+}
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const LIMIT: u64 = 4 * 1024 * 1024;
 const REPLAY_PAGE: u64 = 100;
@@ -670,8 +688,14 @@ fn continue_after_index<T>(
     forge: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     if let Err(error) = graphs() {
+        let quarantined = error.is::<provenant_fabric_runtime::graph::UnreadableCheckpointNotice>();
         warn(&format!(
-            "graph observation indexing failed for {project}: {error}; will retry"
+            "graph observation indexing failed for {project}: {error}{}",
+            if quarantined {
+                "; quarantined, skipped on later ticks"
+            } else {
+                "; will retry"
+            }
         ));
     }
     if let Err(error) = notes() {
@@ -728,7 +752,15 @@ fn poll_detail(
         projected_checks.push(json!({"bucket":bucket}));
     }
     let mut projected_status = serde_json::to_value(status)?;
-    if let Some(names) = projected_status["failing_checks"].as_array_mut() {
+    // Full failure details are read from the observer at completion; do not
+    // let an unbounded check matrix overflow the event journal.
+    if let Some(status) = projected_status.as_object_mut() {
+        status.remove("failed_check_details");
+    }
+    if let Some(names) = projected_status
+        .get_mut("failing_checks")
+        .and_then(Value::as_array_mut)
+    {
         names.truncate(16);
         for name in names {
             if let Some(text) = name.as_str() {
@@ -1181,6 +1213,22 @@ fn index_notes(roots: &Roots, project: ProjectId) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_repeated_warning_is_reported_once_and_the_memory_is_bounded() {
+        let mut seen = std::collections::BTreeSet::new();
+        assert!(remember(&mut seen, "Actions runs unavailable"));
+        assert!(!remember(&mut seen, "Actions runs unavailable"));
+        assert!(remember(&mut seen, "another condition"));
+        for n in 0..200 {
+            remember(&mut seen, &format!("distinct {n}"));
+        }
+        assert!(seen.len() <= 64, "{}", seen.len());
+        assert!(!remember(
+            &mut seen,
+            "never seen before, but the set is full"
+        ));
+    }
+
     #[allow(dead_code)] // The custom worktree driver compiles without a test harness.
     fn fixture() -> (tempfile::TempDir, Roots, ProjectId) {
         let temp = tempfile::tempdir().unwrap();
@@ -1477,6 +1525,71 @@ mod tests {
         assert!(
             serde_json::to_vec(&detail).unwrap().len() < provenant_fabric_store::MAX_BODY_BYTES
         );
+    }
+
+    #[test]
+    fn pr_status_journal_round_trip_settles_for_empty_and_large_matrices() {
+        for count in [0, 512] {
+            let (_temp, roots, project) = fixture();
+            let mut journal = Journal::for_project(roots.clone(), project).unwrap();
+            let subscription = Subscription {
+                repository: "owner/repo".into(),
+                number: 7,
+                head: None,
+            };
+            let checks = vec![
+                crate::pr::observer::Check {
+                    head: "abc".into(),
+                    name: "x".repeat(700),
+                    bucket: "fail".into(),
+                    app: None,
+                    app_slug: None,
+                    conclusion: None,
+                    registered: None,
+                    url: None,
+                    excerpt: String::new(),
+                };
+                count
+            ];
+            let status: crate::pr::status::Line = serde_json::from_value(json!({
+                "number":7, "state":"OPEN", "head":"abc", "draft":false,
+                "checks_passed":0, "checks_total":count, "checks_failed":count, "checks_pending":0,
+                "failing_checks":vec!["x".repeat(700); count], "merge":"CLEAN", "review":"APPROVED"
+            }))
+            .unwrap();
+            let detail = poll_detail(&subscription, &status, &checks).unwrap();
+            let projected = detail["status"].clone();
+            append(
+                &roots,
+                project,
+                format!("matrix-{count}"),
+                ObservationKind::CheckRun,
+                detail,
+            )
+            .unwrap();
+            let recovered = journal
+                .next_pr("owner/repo", 7, Duration::ZERO, &CancelToken::new())
+                .unwrap()
+                .unwrap();
+            let round_trip: crate::pr::status::Line =
+                serde_json::from_value(recovered["status"].clone()).unwrap();
+            assert_eq!(serde_json::to_value(round_trip).unwrap(), projected);
+            let reading = crate::status_wait::reading_pr_event(7, None, false, recovered);
+            assert_eq!(
+                reading.settle,
+                if count == 0 {
+                    crate::status_wait::Settle::Succeeded
+                } else {
+                    crate::status_wait::Settle::Unsuccessful
+                }
+            );
+            assert!(
+                reading
+                    .line
+                    .contains(if count == 0 { "ready" } else { "failing" })
+            );
+            assert!(!reading.line.contains("warning"));
+        }
     }
 
     // Spec: docs/specs/lane-contracts.md#observation-events

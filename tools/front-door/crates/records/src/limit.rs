@@ -336,7 +336,66 @@ pub struct LaneLimits {
     pub extra: crate::ExtraFields,
 }
 
+/// The unit a writer token budget counts, the figure it counted for one
+/// attempt and the provider's own totals beside it. `status` and `result`
+/// both project this from the same limit and usage record, so the unit named
+/// to the chair is the one enforcement used.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenBudgetUsage {
+    /// Stable unit name: fresh tokens (cache reads excluded).
+    pub unit: String,
+    /// Plain-language definition of what the unit counts and excludes.
+    pub unit_detail: String,
+    /// The budget's value in that unit.
+    pub limit: u64,
+    /// The layer that set the budget.
+    pub source: LimitSource,
+    /// Fresh tokens counted for this attempt; absent when the provider
+    /// reported no usage, never a guessed zero.
+    pub counted: Option<u64>,
+    /// The provider's cumulative input including cache reads, for comparison
+    /// with `counted`. A different number is expected, not an inconsistency.
+    pub reported_input: Option<u64>,
+    /// Whether the reported totals cover this attempt or the provider's whole
+    /// session. Codex session totals cannot be attributed to one attempt.
+    pub basis: String,
+    /// Provider-specific caveat, such as turn-boundary enforcement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
 impl LaneLimits {
+    /// Project the budget's unit and counted usage for one attempt. Absent
+    /// when no writer token budget was set; `provider` adds an adapter's
+    /// caveat when it declares one.
+    pub fn budget_usage(
+        &self,
+        usage: &crate::run::UsageRecord,
+        provider: Option<&str>,
+    ) -> Option<TokenBudgetUsage> {
+        let budget = self.token_budget.as_ref()?;
+        let spec = provider.and_then(crate::AdapterSpec::get);
+        Some(TokenBudgetUsage {
+            unit: "fresh_tokens".into(),
+            unit_detail:
+                "uncached input + cache writes + output and reasoning; cache reads excluded".into(),
+            limit: budget.value,
+            source: budget.source,
+            counted: usage.fresh_tokens(),
+            reported_input: usage.input_including_cache(),
+            basis: if spec.is_some_and(|spec| spec.session_wide_usage)
+                && usage.per_attempt != Some(true)
+            {
+                "session".into()
+            } else {
+                "attempt".into()
+            },
+            notice: spec
+                .and_then(|spec| spec.token_budget_notice)
+                .map(str::to_owned),
+        })
+    }
+
     /// The limits that are set, by name.
     pub fn named(&self) -> impl Iterator<Item = (&'static str, &Limit)> {
         [
@@ -493,6 +552,43 @@ mod tests {
         assert_eq!(limit.extend(10).unwrap().value, 800);
         let ceiling = Limit::new(60, LimitSource::Host, LimitStrength::Ceiling);
         assert_eq!(ceiling.extend(120), Err(CeilingError { value: 60 }));
+    }
+
+    #[test]
+    fn budget_usage_names_the_unit_beside_the_provider_totals() {
+        let limits = LaneLimits {
+            token_budget: Some(Limit::new(1_000, LimitSource::Host, LimitStrength::Default)),
+            ..LaneLimits::default()
+        };
+        let usage = crate::run::UsageRecord {
+            uncached_input: Some(100),
+            cache_read: Some(5_000),
+            cache_write: Some(20),
+            output_excluding_reasoning: Some(30),
+            reasoning: Some(10),
+            ..Default::default()
+        };
+        let codex = limits.budget_usage(&usage, Some("codex")).unwrap();
+        assert_eq!(codex.unit, "fresh_tokens");
+        assert_eq!((codex.limit, codex.source), (1_000, LimitSource::Host));
+        // Cache reads are in the provider's figure and out of the budget's.
+        assert_eq!(codex.counted, Some(160));
+        assert_eq!(codex.reported_input, Some(5_120));
+        assert_eq!(codex.basis, "session");
+        assert!(codex.notice.is_some());
+
+        let marked = crate::run::UsageRecord {
+            per_attempt: Some(true),
+            ..usage.clone()
+        };
+        let marked = limits.budget_usage(&marked, Some("codex")).unwrap();
+        assert_eq!(marked.basis, "attempt");
+
+        let absent = limits
+            .budget_usage(&crate::run::UsageRecord::default(), Some("codex"))
+            .unwrap();
+        assert_eq!((absent.counted, absent.reported_input), (None, None));
+        assert!(LaneLimits::default().budget_usage(&usage, None).is_none());
     }
 
     #[test]

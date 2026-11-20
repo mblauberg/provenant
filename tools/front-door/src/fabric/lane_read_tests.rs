@@ -380,28 +380,6 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     std::fs::create_dir_all(&foreign)?;
     let mut foreign_holder = holder.clone();
     foreign_holder.launch.as_mut().ok_or("host launch")?.cwd = foreign;
-    struct InertHolder;
-    impl provenant_supervisor::Holder for InertHolder {
-        fn admit(
-            &self,
-            _: &[u8],
-            _: &provenant_os::fs::Directory,
-        ) -> provenant_supervisor::custody::Result<()> {
-            Ok(())
-        }
-        fn terminal(
-            &self,
-            _: &[u8],
-            _: &provenant_os::fs::Directory,
-            _: &provenant_supervisor::custody::ExitObservation,
-            _: &provenant_supervisor::custody::Recovery,
-        ) -> provenant_supervisor::custody::Result<()> {
-            Ok(())
-        }
-    }
-    use provenant_supervisor::Holder;
-    let host_holder = provenant_cli::run::HostHolder::new(&InertHolder);
-    assert!(!host_holder.has_live_children(&serde_json::to_vec(&foreign_holder)?)?);
     let foreign_read = super::read_lane_graph(
         &foreign_holder,
         json!({"op":"output","id":"lane-read-children/parent--success"}),

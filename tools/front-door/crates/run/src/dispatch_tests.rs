@@ -128,6 +128,8 @@ impl Providers for Confined {
             let authority: WorktreeWriteAuthority = serde_json::from_value(serde_json::json!({
                 "git_grants_digest": vec![7; 32],
                 "publishing": true,
+                "common_git_dir": "/fixture/repo/.git",
+                "git_state": {"path": "/fixture/git-state", "scope": "subtree"},
                 "cargo_cache": {"path": "/fixture/cache", "scope": "subtree"}
             }))
             .map_err(|e| crate::fixture_refusal(e.to_string()))?;
@@ -182,6 +184,7 @@ impl Providers for Confined {
             .unwrap(),
             cargo_target_seed: false,
             state_root: std::path::PathBuf::from("/fixture/state"),
+            roots: None,
             // This fixture tests grant recording and stops at a fake handoff;
             // it never launches a provider, so native sandbox availability is
             // outside the invariant under test.
@@ -193,6 +196,8 @@ impl Providers for Confined {
             ),
             backend: None,
             cargo_target: Default::default(),
+            cargo_cache_budget: None,
+            cargo_target_protection: Default::default(),
         });
         Ok(launch)
     }

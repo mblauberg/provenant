@@ -59,6 +59,152 @@ const JOURNAL_RETRY_INTERVAL_MS: u64 = 100;
 const TRACKING_INTERVAL_MS: u64 = 1_000;
 const CANCEL_WATCH_POLL_MS: u64 = 1_000;
 const CANCEL_FALLBACK_POLL_MS: u64 = 100;
+// Retained custody: cleanup stayed unresolved after exit, typically because a
+// detached service outlives the lane. See `RetainedSchedule`.
+const RETAINED_OBSERVE_MS: u64 = 1_000;
+const RETAINED_ESCALATION_MS: u64 = 30_000;
+// Reaping the leader under the fenced lease backs off from 25 ms to 1 s and
+// gives up after about 5 s; the lease then falls with the guardian.
+const FINISH_FENCED_FIRST_MS: u64 = 25;
+const FINISH_FENCED_CAP_MS: u64 = 1_000;
+const FINISH_FENCED_BUDGET_MS: u64 = 5_000;
+// Durable-publication retries are unbounded while the disk may recover, but a
+// supervisor signal gives them this long before the guardian exits, leaving
+// the durable fence for reconcile as a crash would.
+const SIGNALLED_RETRY_BUDGET_MS: u64 = 5_000;
+
+/// Bounds an otherwise unbounded retry loop once a supervisor signal latches.
+/// The deadline starts at the first retry that sees the signal and is
+/// monotonic, because reactor pauses end early on any edge.
+#[derive(Default)]
+struct SignalledRetry {
+    deadline: Option<Instant>,
+}
+impl SignalledRetry {
+    #[allow(clippy::disallowed_methods)]
+    fn exhausted(&mut self, signalled: bool) -> bool {
+        if !signalled {
+            return false;
+        }
+        let now = Instant::now();
+        now >= *self
+            .deadline
+            .get_or_insert(now + Duration::from_millis(SIGNALLED_RETRY_BUDGET_MS))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetainedStep {
+    /// Repeat the bounded stop: TERM, the descendant grace, then KILL.
+    Escalate,
+    /// One signal-free census and settlement proof.
+    Observe,
+    Wait,
+}
+
+/// When a guardian retaining unresolved custody looks and when it signals.
+/// The first turn repeats the bounded stop at once, as does a newly observed
+/// cancellation. Otherwise the stop repeats only at the escalation backstop,
+/// for authority that changes without an event (graph children settling).
+/// Between stops a signal-free check runs after a process event, at most at
+/// the census walk rate, or at the observation backstop: one second, or the
+/// five-second full-census backstop while every blocking identity is watched.
+/// Repeating the whole stop every 100 ms kept a census, a sandbox probe per
+/// host process and a decode of every pending graph checkpoint running at
+/// 50 Hz for as long as a detached service lived (#3560).
+#[derive(Debug, Default)]
+struct RetainedSchedule {
+    last_escalation_ms: Option<u64>,
+    last_observation_ms: Option<u64>,
+    /// A watched process forked or exited since the last look.
+    process_event: bool,
+    escalation_requested: bool,
+    /// Every identity that can block settlement carries exit and fork filters.
+    watched: bool,
+    /// Only the repeated stop runs: the signal-free look cannot settle on
+    /// this platform, so it would be wasted work.
+    escalate_only: bool,
+}
+/// How the retained loop ended.
+enum RetainedEnd {
+    /// The group is gone; the settled exit replaces the unresolved one.
+    Settled,
+    /// The writer lock inode was retired; the durable fence stays.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Retired,
+    /// Retention stopped with the exit unresolved.
+    Ended(RetentionEndReason),
+}
+impl RetainedSchedule {
+    /// Fold reactor edges into the schedule.
+    fn absorb(&mut self, event: &crate::process_os::provider::ReactorEvent) {
+        self.process_event |= event.process_changed && !self.escalate_only;
+        self.watched &= !event.process_overflow;
+    }
+
+    fn for_platform() -> Self {
+        Self {
+            escalate_only: !cfg!(target_os = "macos"),
+            ..Self::default()
+        }
+    }
+
+    fn observation_interval(&self) -> u64 {
+        if self.watched {
+            FULL_CENSUS_INTERVAL_MS
+        } else {
+            RETAINED_OBSERVE_MS
+        }
+    }
+
+    fn next(&mut self, now: u64) -> RetainedStep {
+        let escalate = self.escalation_requested
+            || self
+                .last_escalation_ms
+                .is_none_or(|last| now.saturating_sub(last) >= RETAINED_ESCALATION_MS);
+        let step = if escalate {
+            self.last_escalation_ms = Some(now);
+            self.escalation_requested = false;
+            RetainedStep::Escalate
+        } else if !self.escalate_only
+            && self.last_observation_ms.is_none_or(|last| {
+                let since = now.saturating_sub(last);
+                since >= self.observation_interval()
+                    || (self.process_event && since >= CENSUS_INTERVAL_MS)
+            })
+        {
+            RetainedStep::Observe
+        } else {
+            return RetainedStep::Wait;
+        };
+        // A stop pass also observes; either way the pending event is consumed.
+        self.last_observation_ms = Some(now);
+        self.process_event = false;
+        step
+    }
+
+    fn wait_ms(&self, now: u64) -> u64 {
+        if self.escalation_requested {
+            return 0;
+        }
+        let escalation = self.last_escalation_ms.map_or(0, |last| {
+            last.saturating_add(RETAINED_ESCALATION_MS)
+                .saturating_sub(now)
+        });
+        if self.escalate_only {
+            return escalation;
+        }
+        let interval = if self.process_event {
+            CENSUS_INTERVAL_MS
+        } else {
+            self.observation_interval()
+        };
+        let observation = self
+            .last_observation_ms
+            .map_or(0, |last| last.saturating_add(interval).saturating_sub(now));
+        escalation.min(observation)
+    }
+}
 
 fn tracking_publication_due(now: u64, last_attempt: Option<u64>, failed: bool) -> bool {
     last_attempt.is_none_or(|last| {
@@ -124,9 +270,11 @@ fn cancel_poll_interval(watched: bool) -> u64 {
     }
 }
 
-/// Clone failure must leave the driver's writer lease available for recovery.
+/// Clone failure must leave the driver's occupancy and holder locks available
+/// for recovery.
 fn settlement_recovery(
     writer: &mut Option<provenant_os::fs::LockGuard>,
+    holder: &mut Option<provenant_os::fs::LockGuard>,
     directory: Directory,
     lock_directory: provenant_os::fs::Result<Directory>,
     reservation: &Reservation,
@@ -141,21 +289,11 @@ fn settlement_recovery(
         directory,
         lock_directory,
         lease: Some(writer.take().ok_or(CustodyError::Fenced)?),
+        holder: Some(holder.take().ok_or(CustodyError::Fenced)?),
         reservation: reservation.clone(),
         guardian_quiescent: true,
         loss_locks: None,
     })
-}
-
-/// Advisory identity snapshot only; confinement does not yet supply an executable pin.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExecutableSnapshot {
-    device: u64,
-    inode: u64,
-    length: u64,
-    modified_seconds: i64,
-    modified_nanoseconds: i64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -170,12 +308,11 @@ struct LaunchMessage {
     key: provenant_records::WorkKey,
     requester: provenant_core::ActorId,
     binding: StoredWriterBinding,
-    executable_snapshot: ExecutableSnapshot,
-    protected_commands: Vec<String>,
     profile: Option<crate::ProfileIdentity>,
     argv: Vec<Vec<u8>>,
     environment: Vec<(Vec<u8>, Vec<u8>)>,
     lane_ports: Option<provenant_os::lane_ports::Plan>,
+    resource_sample_interval_ms: Option<u64>,
     cwd: Vec<u8>,
     stdin: Vec<u8>,
     secret_input: Option<provenant_os::exec::SecretInput>,
@@ -193,27 +330,21 @@ pub(crate) fn handoff(
     capture: CapturePlan,
     publication: &PublicationReservation,
 ) -> Result<()> {
-    if owned.command.protected_commands.len() > 128
-        || owned
-            .command
-            .protected_commands
-            .iter()
-            .any(|name| name.is_empty() || name.len() > 512)
-        || owned.command.config_environment.len() > 128
+    if owned.command.config_environment.len() > 128
         || owned.command.holder_context.len() > HOLDER_CONTEXT_LIMIT
         || !valid_resolved_route(&owned.command.resolved_route)
     {
         return Err(CustodyError::InvalidRecord);
     }
     validate_profile_command(owned.command.profile_file.as_ref(), &owned.command.argv)?;
-    let executable_snapshot = snapshot_executable(
-        owned
-            .command
-            .argv
-            .first()
-            .ok_or(CustodyError::InvalidRecord)?
-            .as_os_str(),
-    )?;
+    if !owned
+        .command
+        .argv
+        .first()
+        .is_some_and(|executable| Path::new(executable).is_absolute())
+    {
+        return Err(CustodyError::InvalidRecord);
+    }
     let message = LaunchMessage {
         policy: owned.command.policy,
         schema_version: 1,
@@ -229,8 +360,6 @@ pub(crate) fn handoff(
         key: owned.command.key,
         requester: owned.command.requester,
         binding: owned.lease.reservation.binding.clone(),
-        executable_snapshot,
-        protected_commands: owned.command.protected_commands,
         argv: owned
             .command
             .argv
@@ -244,6 +373,11 @@ pub(crate) fn handoff(
             .map(|(name, value)| (name.as_bytes().to_vec(), value.as_bytes().to_vec()))
             .collect(),
         lane_ports: owned.command.lane_ports,
+        resource_sample_interval_ms: owned.command.resource_sample_interval.map(|interval| {
+            u64::try_from(interval.as_millis())
+                .unwrap_or(u64::MAX)
+                .max(1)
+        }),
         cwd: owned.command.cwd.as_os_str().as_bytes().to_vec(),
         stdin: owned.command.stdin,
         secret_input: owned.command.secret_input,
@@ -261,8 +395,10 @@ pub(crate) fn handoff(
     crate::process_os::handoff::spawn(
         &owned.lease.lock_directory,
         &publication.directory,
+        &owned.lease.directory,
         owned.lease.lease.as_ref().ok_or(CustodyError::Fenced)?,
         &publication.custody,
+        owned.lease.holder.as_ref().ok_or(CustodyError::Fenced)?,
         owned
             .command
             .profile_file
@@ -298,10 +434,6 @@ pub type PublicationScopeBinder =
 pub struct GuardianHooks<'a> {
     /// Memory-only scope retained through capture and holder settlement.
     pub publication_scope: Option<&'a PublicationScopeBinder>,
-    /// Host disk policy, sampled only while this attempt has a live provider.
-    pub disk: Option<&'a dyn DiskPressure>,
-    /// Resource sampling cadence selected from `[domains.run]`; `None` uses the compiled default.
-    pub resource_sample_interval: Option<Duration>,
     pub children: Option<&'a dyn ChildRegistry>,
     /// Run's terminal transaction. Without one, custody stays fenced after
     /// exit until an explicit recovery verifies Run's release attestations.
@@ -323,10 +455,6 @@ pub struct GuardianHooks<'a> {
 }
 /// The host resolves the same free-space floor used by admission and GC.
 /// Samples are advisory and never authorise signalling a running build.
-pub trait DiskPressure {
-    fn below_floor(&self, context: &[u8]) -> io::Result<bool>;
-}
-
 /// The holder role: the composed terminal publisher runs inside the guardian,
 /// after durable exit and completed cleanup. The writer reservation remains,
 /// but its kernel lock is released before external settlement commands run.
@@ -342,10 +470,6 @@ pub trait DiskPressure {
 /// except when the attempt directory is provably removed: there is nowhere to
 /// publish the exit or settle, so only the writer reservation remains.
 pub trait Holder {
-    /// Host graph evidence: unknown or live nested work must prevent escapee stops.
-    fn has_live_children(&self, _context: &[u8]) -> Result<bool> {
-        Ok(false)
-    }
     fn admit(&self, context: &[u8], attempt: &Directory) -> Result<()>;
     /// Stop host-side submission services before descendant cleanup begins.
     /// Failure is bookkeeping evidence, never a provider stop reason.
@@ -531,6 +655,12 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     };
     message.capture.validate()?;
     let evidence = crate::custody::attempt_evidence(&inherited.writer_directory, message.scope)?;
+    if !evidence
+        .metadata()?
+        .same_identity(&inherited.evidence_directory.metadata()?)
+    {
+        return Err(CustodyError::Fenced);
+    }
     let mut reservation: Reservation = read_record(&evidence, "reservation.json", RECORD_LIMIT)?;
     reservation.validate()?;
     if message.priority > 19 || !valid_resolved_route(&message.resolved_route) {
@@ -577,6 +707,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         &guardian,
         &inherited.writer,
         &inherited.custody,
+        &inherited.holder,
     )?;
     Publication::require_durable(write_record(
         &evidence,
@@ -603,7 +734,6 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         permission_plan_digest: &'a provenant_core::Digest,
         requester: provenant_core::ActorId,
         binding: &'a StoredWriterBinding,
-        executable_snapshot: ExecutableSnapshot,
         profile: Option<&'a crate::ProfileIdentity>,
         executable_native_bytes: &'a [u8],
         environment_names_native_bytes: Vec<&'a [u8]>,
@@ -618,7 +748,6 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         permission_plan_digest: &message.permission_plan_digest,
         requester: message.requester,
         binding: &message.binding,
-        executable_snapshot: message.executable_snapshot,
         profile: profile_file.as_ref().map(crate::ProfileFile::identity),
         executable_native_bytes: argv
             .first()
@@ -669,7 +798,8 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         history_complete: true,
         last_tracking: None,
         journal_warning_active: false,
-        protected_commands: message.protected_commands,
+        cleanup_holders_warned: false,
+        stopped_descendants: std::collections::BTreeSet::new(),
         settlement_evidence: SettlementEvidence::Unresolved,
         reaped: Vec::new(),
         omitted_reaped: 0,
@@ -680,6 +810,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         registry: hooks.children,
         descendant_stop_allowed: false,
         escapee_stop_allowed: false,
+        stop_refused: false,
         attempt: inherited.attempt_directory,
         writer_dir: evidence,
         lock_dir: inherited.writer_directory,
@@ -690,15 +821,18 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         #[cfg(target_os = "macos")]
         writer_retirement_probe,
         _custody: Some(inherited.custody),
+        _holder: Some(inherited.holder),
         guardian,
         requester: message.requester,
-        executable_snapshot: message.executable_snapshot,
         reactor,
         observer,
         exit_publisher,
         holder: hooks.holder,
         holder_context: message.holder_context,
         lane_ports: message.lane_ports,
+        resource_sample_interval: message
+            .resource_sample_interval_ms
+            .map(Duration::from_millis),
         secret_input: message.secret_input,
         profile_file,
         priority: message.priority,
@@ -722,15 +856,16 @@ struct Driver<'a> {
     #[cfg(target_os = "macos")]
     writer_retirement_probe: Option<provenant_os::fs::FileHandle>,
     _custody: Option<provenant_os::fs::LockGuard>,
+    _holder: Option<provenant_os::fs::LockGuard>,
     guardian: ProcessIdentity,
     requester: provenant_core::ActorId,
-    executable_snapshot: ExecutableSnapshot,
     reactor: crate::process_os::provider::GuardianReactor,
     observer: &'a dyn ProcessObserver,
     exit_publisher: Option<&'a dyn ExitPublisher>,
     holder: Option<&'a dyn Holder>,
     holder_context: Vec<u8>,
     lane_ports: Option<provenant_os::lane_ports::Plan>,
+    resource_sample_interval: Option<Duration>,
     secret_input: Option<provenant_os::exec::SecretInput>,
     priority: u8,
     profile_file: Option<crate::ProfileFile>,
@@ -742,7 +877,11 @@ struct Driver<'a> {
     history_complete: bool,
     last_tracking: Option<Vec<u8>>,
     journal_warning_active: bool,
-    protected_commands: Vec<String>,
+    /// The diagnostic holder scan has run; it runs once per guardian.
+    cleanup_holders_warned: bool,
+    /// Descendants this guardian signalled, for the one summary warning.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    stopped_descendants: std::collections::BTreeSet<ProcessIdentity>,
     settlement_evidence: SettlementEvidence,
     reaped: Vec<ProcessIdentity>,
     omitted_reaped: u64,
@@ -753,10 +892,13 @@ struct Driver<'a> {
     registry: Option<&'a dyn ChildRegistry>,
     descendant_stop_allowed: bool,
     /// The registry permits an exact sandbox escapee stop this tick.
-    /// The host graph-child check is deferred until a control action needs it.
     /// Unproven registered owners stay protected. Independent of
-    /// `descendant_stop_allowed`.
+    /// `descendant_stop_allowed`. Live graph children are separate attempts
+    /// and never among this lane's candidates (#3568).
     escapee_stop_allowed: bool,
+    /// The last stop pass had live candidates it was not allowed to signal:
+    /// withheld descendant or escapee permission.
+    stop_refused: bool,
 }
 /// Whether a writer's latest reported context has reached its context handoff
 /// threshold (`lanes.context_handoff_tokens`). 0 turns the threshold off, and a provider with no context figure
@@ -962,12 +1104,6 @@ impl Driver<'_> {
     ) -> Result<()> {
         let mut warnings = Vec::new();
         let mut omitted_warnings = 0_u64;
-        let resource_sample_interval = hooks
-            .resource_sample_interval
-            .unwrap_or(crate::process_tree::DEFAULT_SAMPLE_INTERVAL)
-            .max(Duration::from_millis(1));
-        let resource_sample_interval_ms =
-            u64::try_from(resource_sample_interval.as_millis()).unwrap_or(u64::MAX);
         // Keep the original inode and path even if the caller later removes
         // its state. A rename alone must not end a publication retry.
         let writer_evidence_identity = DirectoryIdentity::of(&self.writer_dir).ok();
@@ -1008,7 +1144,12 @@ impl Driver<'_> {
             env
         };
         // Replace any caller value with this guardian's own held attempt path.
-        let memory_path = crate::process_tree::snapshot_path(&self.attempt).ok();
+        // Process-tree sampling is opt-in; without an interval no path is set.
+        let sample_interval = self
+            .resource_sample_interval
+            .map(|interval| interval.max(Duration::from_millis(1)));
+        let memory_path =
+            sample_interval.and_then(|_| crate::process_tree::snapshot_path(&self.attempt).ok());
         let env = with_process_tree_path(env, memory_path.as_deref());
         if memory_path.is_some() {
             let _ = crate::process_tree::publish(&self.attempt, None);
@@ -1045,8 +1186,6 @@ impl Driver<'_> {
                 return self.never_spawned(
                     if crate::process_os::profile::is_transport_error(&error) {
                         "sandbox profile transport refused before provider launch"
-                    } else if error.kind() == io::ErrorKind::InvalidData {
-                        "provider executable snapshot changed"
                     } else {
                         "provider spawn failed"
                     },
@@ -1068,18 +1207,21 @@ impl Driver<'_> {
             );
         }
         self.reservation.launch_state = LaunchState::Spawned;
+        // Without a profile the lane has no sandbox mark for a later scan.
+        self.reservation.sandboxed = self.profile_file.is_some();
         self.reservation.provider = child.identity().cloned();
         let mut memory = memory_path
             .as_ref()
             .and(self.reservation.provider.as_ref())
-            .and_then(|root| {
+            .zip(sample_interval)
+            .and_then(|(root, interval)| {
                 crate::process_tree::Sampler::start(
                     &self.attempt,
                     root,
                     self.reservation.scope.attempt,
                     // Without a profile the lane has no sandbox mark to test.
                     self.profile_file.is_some(),
-                    resource_sample_interval,
+                    interval,
                 )
             });
         if write_record(
@@ -1152,24 +1294,15 @@ impl Driver<'_> {
         let mut capture_drain_truncated = false;
         let mut last_checkpoint = None;
         let mut last_observation_ms: Option<u64> = None;
-        let mut last_cpu_observation_ms = 0;
-        let mut last_disk_sample_ms = None;
-        let mut disk_warning_active = false;
         let mut last_cancel_ms = None;
         let mut cancel_pending = false;
         let mut cancel_watched = self
             .reactor
             .watch_cancellation_directory(&self.attempt)
             .is_ok();
-        let mut signal_pending = false;
-        let mut last_stdout_bytes = 0_u64;
-        let mut last_stderr_bytes = 0_u64;
-        let mut last_output_ms = None;
+        let mut last_output_bytes = 0_u64;
         let mut last_output_checkpoint_ms = None;
         let mut last_output_at: Option<WallTime> = None;
-        let mut provider_cpu_micros = None;
-        let mut previous_cpu_micros = None;
-        let mut last_cpu_progress_ms = None;
         let mut census_warning_active = false;
         let mut last_full_census_ms: Option<u64> = None;
         let mut last_census_ms: Option<u64> = None;
@@ -1223,37 +1356,18 @@ impl Driver<'_> {
                 out.read(&mut child.stdout);
                 err.read(&mut child.stderr);
             }
-            let stdout_bytes = out.outcome().total_bytes;
-            let stderr_bytes = err.outcome().total_bytes;
-            let output_progress =
-                stdout_bytes > last_stdout_bytes || stderr_bytes > last_stderr_bytes;
-            if output_progress {
-                last_output_ms = Some(now);
-                if last_output_checkpoint_ms.is_none_or(|last| now.saturating_sub(last) >= 5_000) {
-                    last_output_at = wall_now();
-                    last_output_checkpoint_ms = Some(now);
-                }
+            // The board shows when a lane last wrote output, at 5 s granularity.
+            let output_bytes = out
+                .outcome()
+                .total_bytes
+                .saturating_add(err.outcome().total_bytes);
+            if output_bytes != last_output_bytes
+                && last_output_checkpoint_ms.is_none_or(|last| now.saturating_sub(last) >= 5_000)
+            {
+                last_output_bytes = output_bytes;
+                last_output_at = wall_now();
+                last_output_checkpoint_ms = Some(now);
             }
-            last_stdout_bytes = stdout_bytes;
-            last_stderr_bytes = stderr_bytes;
-            let cpu_sample_due =
-                now.saturating_sub(last_cpu_observation_ms) >= resource_sample_interval_ms;
-            let cpu_progress = if cpu_sample_due {
-                last_cpu_observation_ms = now;
-                provider_cpu_micros = self.provider_cpu_micros();
-                let progressed = provider_cpu_micros
-                    .zip(previous_cpu_micros)
-                    .is_some_and(|(current, previous)| current > previous);
-                if let Some(current) = provider_cpu_micros {
-                    previous_cpu_micros = Some(current);
-                    if progressed {
-                        last_cpu_progress_ms = Some(now);
-                    }
-                }
-                progressed
-            } else {
-                false
-            };
             if io_ready && let Some(stdin) = child.stdin.as_mut() {
                 if input_offset == input.len() {
                     child.stdin = None;
@@ -1280,29 +1394,26 @@ impl Driver<'_> {
                     }
                 }
             }
-            let polled_signal = match self.reactor.wait(&[], Duration::ZERO) {
-                Ok(event) => {
-                    cancel_pending |= event.cancel_changed;
-                    cancel_watched &= !event.cancel_watch_failed;
-                    census_event_pending |= event.process_changed;
-                    census_event_failed |= event.process_overflow;
-                    event.supervisor_signal
+            if self.reactor.wait(&[], Duration::ZERO).is_err() {
+                cancel_watched = false;
+                census_event_failed = true;
+                census_reactor_failed = true;
+                if !reactor_warning_recorded {
+                    warn(
+                        &mut warnings,
+                        &mut omitted_warnings,
+                        "signal observation failed",
+                    );
+                    reactor_warning_recorded = true;
                 }
-                Err(_) => {
-                    cancel_watched = false;
-                    census_event_failed = true;
-                    census_reactor_failed = true;
-                    if !reactor_warning_recorded {
-                        warn(
-                            &mut warnings,
-                            &mut omitted_warnings,
-                            "signal observation failed",
-                        );
-                        reactor_warning_recorded = true;
-                    }
-                    false
-                }
-            };
+            }
+            // Every edge drained since the last turn, by this poll, the turn's
+            // wait or a cleanup pause, is taken here exactly once.
+            let event = self.reactor.take_events();
+            cancel_pending |= event.cancel_changed;
+            cancel_watched &= !event.cancel_watch_failed;
+            census_event_pending |= event.process_changed;
+            census_event_failed |= event.process_overflow;
             let cancel_due = std::mem::take(&mut cancel_pending)
                 || last_cancel_ms.is_none_or(|last| {
                     now.saturating_sub(last) >= cancel_poll_interval(cancel_watched)
@@ -1332,7 +1443,7 @@ impl Driver<'_> {
             } else {
                 None
             };
-            let signal = std::mem::replace(&mut signal_pending, false) || polled_signal;
+            let signal = event.supervisor_signal;
             use std::sync::atomic::Ordering;
             let newly_terminal = !terminal
                 && (out_events.terminal.load(Ordering::Relaxed)
@@ -1440,8 +1551,6 @@ impl Driver<'_> {
                 Event::ContextHandoff
             } else if newly_terminal {
                 Event::Terminal
-            } else if output_progress || cpu_progress {
-                Event::Progress
             } else {
                 Event::Silence
             };
@@ -1566,32 +1675,6 @@ impl Driver<'_> {
                     break;
                 }
             }
-            // The host is sampled only during this running lane. Reuse the
-            // existing native custody census to find builds, never host-wide
-            // command-line matching. No independent timer survives this lane.
-            if exit.is_none()
-                && stop_reason.is_none()
-                && last_disk_sample_ms.is_none_or(|last| now.saturating_sub(last) >= 1_000)
-            {
-                last_disk_sample_ms = Some(now);
-                if let Some(disk) = hooks.disk {
-                    let warning = match disk.below_floor(&self.holder_context) {
-                        Ok(true) => Some(
-                            "disk space below a configured build threshold; avoid starting new builds; running builds continue",
-                        ),
-                        Ok(false) => None,
-                        Err(_) => Some("disk floor observation failed; running builds continue"),
-                    };
-                    if let Some(message) = warning {
-                        if !disk_warning_active {
-                            warn(&mut warnings, &mut omitted_warnings, message);
-                        }
-                        disk_warning_active = true;
-                    } else {
-                        disk_warning_active = false;
-                    }
-                }
-            }
             // Process events wake the scoped tree and provider-group walk, at
             // most every 100 ms. Without an event nothing watched has forked
             // or exited, so an idle lane walks only at the five-second full
@@ -1632,11 +1715,12 @@ impl Driver<'_> {
                             .chain(self.spared.spared_identities()),
                     );
                     match self.reactor.watch_processes(&pids) {
-                        Ok((added, failures)) => {
-                            process_watch_unavailable = failures != 0;
-                            // Close the gap between observing a new process
-                            // and registering its fork filter.
-                            census_event_pending |= added;
+                        Ok(watches) => {
+                            process_watch_unavailable = watches.failures != 0;
+                            // Close the gap between observing a process and
+                            // registering its filter: a fork or exit there
+                            // sends no event.
+                            census_event_pending |= watches.added || watches.gone;
                         }
                         Err(_) => process_watch_unavailable = true,
                     }
@@ -1695,19 +1779,10 @@ impl Driver<'_> {
                     census_complete: bool,
                     priority: Option<i32>,
                     phase: Phase,
-                    stdout_bytes: u64,
-                    stderr_bytes: u64,
-                    last_output_ms: Option<u64>,
                     last_output_at: Option<WallTime>,
                     observed_at: Option<WallTime>,
-                    last_progress_ms: Option<u64>,
-                    silent: bool,
-                    silent_for_ms: Option<u64>,
-                    provider_cpu_micros: Option<u64>,
-                    last_cpu_progress_ms: Option<u64>,
                     publication_pending: bool,
                 }
-                let silent_for_ms = plan.silent_for_ms(now, state.last_progress_ms());
                 let mut observed = Observed {
                     schema_version: 1,
                     scope: self.reservation.scope,
@@ -1718,16 +1793,8 @@ impl Driver<'_> {
                         && self.reservation.omitted_descendants == 0,
                     priority: child.priority,
                     phase: state.phase(),
-                    stdout_bytes: out.outcome().total_bytes,
-                    stderr_bytes: err.outcome().total_bytes,
-                    last_output_ms,
                     last_output_at,
                     observed_at: None,
-                    last_progress_ms: state.last_progress_ms(),
-                    silent: silent_for_ms.is_some(),
-                    silent_for_ms,
-                    provider_cpu_micros,
-                    last_cpu_progress_ms,
                     publication_pending: false,
                 };
                 let system_publisher = SystemExitPublisher;
@@ -1759,16 +1826,14 @@ impl Driver<'_> {
             }
             let watches = child.watches();
             // Pipes, signals and process events wake the reactor. Timer-only
-            // work wakes at its next deadline: the cancellation backstop,
-            // the one-second CPU sample and the five-second full census.
+            // work wakes at its next deadline: the cancellation backstop
+            // and the five-second full census.
             let wait_now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let wall_ms = wall_started.zip(wall_now()).map_or(0, |(began, current)| {
                 u64::try_from(current.as_micros().saturating_sub(began.as_micros()) / 1000)
                     .unwrap_or(0)
             });
-            let mut wait_ms = last_cpu_observation_ms
-                .saturating_add(resource_sample_interval_ms)
-                .saturating_sub(wait_now);
+            let mut wait_ms = FULL_CENSUS_INTERVAL_MS;
             if let Some(last) = last_full_census_ms {
                 wait_ms = wait_ms.min(
                     last.saturating_add(FULL_CENSUS_INTERVAL_MS)
@@ -1814,15 +1879,13 @@ impl Driver<'_> {
                         .saturating_sub(wait_now),
                 );
             }
+            // The next turn takes what this wait drains.
             match self.reactor.wait(&watches, Duration::from_millis(wait_ms)) {
-                Ok(event) => {
-                    io_ready = event.io_ready;
-                    cancel_pending |= event.cancel_changed;
-                    cancel_watched &= !event.cancel_watch_failed;
-                    signal_pending |= event.supervisor_signal;
-                    census_event_pending |= event.process_changed;
-                    census_event_failed |= event.process_overflow;
-                    if event.process_changed && !census_walk_due(wait_now, last_census_ms) {
+                Ok(ready) => {
+                    io_ready = ready;
+                    if self.reactor.pending().process_changed
+                        && !census_walk_due(wait_now, last_census_ms)
+                    {
                         provenant_os::sys::wait_pause(Duration::from_millis(
                             EVENT_DRAIN_BACKOFF_MS,
                         ));
@@ -1905,10 +1968,12 @@ impl Driver<'_> {
             // replacement followed by failed directory sync is not a durable
             // transition; retain the locks and retry the same proven facts.
             // A linked evidence directory may recover from ENOSPC or a sync
-            // error, so keep custody and retry indefinitely. An unlinked one
-            // cannot accept a reservation at all. In that case only, finish
-            // the same full-census and fresh-lease proof before retiring; do
-            // not publish an exit or clear a fence without its reservation.
+            // error, so keep custody and retry until a supervisor signal
+            // bounds the wait. An unlinked one cannot accept a reservation at
+            // all. In that case only, finish the same full-census and
+            // fresh-lease proof before retiring; do not publish an exit or
+            // clear a fence without its reservation.
+            let mut signalled_retry = SignalledRetry::default();
             while !self.persist_reservation() {
                 if writer_evidence_identity.is_some_and(|identity| {
                     attempt_removed(&self.writer_dir, writer_evidence_path.as_deref(), identity)
@@ -1938,7 +2003,14 @@ impl Driver<'_> {
                         )));
                     }
                 }
-                let _ = self.reactor.wait(&[], Duration::from_millis(25));
+                if signalled_retry.exhausted(self.reactor.signalled()) {
+                    // The previous reservation stays the durable fence, as
+                    // after a crash; reconcile recovers it.
+                    return Err(CustodyError::Io(io::Error::other(
+                        "cleanup reservation still not durable after a supervisor signal",
+                    )));
+                }
+                self.reactor.pause(Duration::from_millis(25));
             }
         }
         let mut totals = totals.into_iter();
@@ -1997,6 +2069,12 @@ impl Driver<'_> {
                 Vec::new()
             },
             settlement_evidence: self.settlement_evidence,
+            retention: unresolved.then(|| Retention {
+                guardian: self.guardian.clone(),
+                since: wall_now(),
+                limit_ms: plan.retained_custody_ms,
+                ended: None,
+            }),
             stdout,
             stderr,
             warnings: warnings.clone(),
@@ -2014,78 +2092,286 @@ impl Driver<'_> {
             self.release(&record)?;
         }
         if !cleanup_complete {
-            // Keep the guardian (and the unreaped
-            // leader) alive while group members remain: poll for cancellation
-            // and for the group emptying, and republish a settled exit.
+            // Keep the guardian (and the unreaped leader) alive while group
+            // members remain and republish a settled exit once they are gone.
+            // The guardian blocks on process, cancellation and signal events;
+            // `RetainedSchedule` decides when to look and when to signal.
+            // Retention is bounded: a supervisor signal or the plan's limit
+            // ends it with the exit still unresolved and the reason recorded.
             let mut cancelled = false;
-            loop {
-                if !outcome_committed && published {
+            let mut schedule = RetainedSchedule::for_platform();
+            let mut cancel_pending = false;
+            let mut last_cancel_ms: Option<u64> = None;
+            let began_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let limit_ms = plan.retained_custody_ms;
+            let ended = loop {
+                let event = self.reactor.take_events();
+                schedule.absorb(&event);
+                cancel_pending |= event.cancel_changed;
+                cancel_watched &= !event.cancel_watch_failed;
+                let now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                if std::mem::take(&mut cancel_pending)
+                    || last_cancel_ms.is_none_or(|last| {
+                        now.saturating_sub(last) >= cancel_poll_interval(cancel_watched)
+                    })
+                {
+                    last_cancel_ms = Some(now);
+                    if !cancelled
+                        && self.read_cancel(&mut warnings, &mut omitted_warnings)
+                            == Some(machine::StopReason::ExplicitCancellation)
+                    {
+                        cancelled = true;
+                        schedule.escalation_requested = true;
+                    }
+                }
+                if self.reactor.signalled() {
+                    // Never leave `unresolved` without one more bounded
+                    // stop attempt: TERM, the descendant grace, then KILL.
+                    let settled = self.cleanup(
+                        &mut child,
+                        plan,
+                        if cancelled {
+                            Some(machine::StopReason::ExplicitCancellation)
+                        } else {
+                            Some(machine::StopReason::SupervisorSignal)
+                        },
+                        &mut warnings,
+                        &mut omitted_warnings,
+                    );
+                    break if let Ok(true) = settled {
+                        RetainedEnd::Settled
+                    } else {
+                        RetainedEnd::Ended(RetentionEndReason::SupervisorSignal)
+                    };
+                }
+                let retained_ms = now.saturating_sub(began_ms);
+                if retained_ms >= limit_ms {
+                    break RetainedEnd::Ended(RetentionEndReason::LimitReached);
+                }
+                let step = schedule.next(now);
+                if step != RetainedStep::Wait && !outcome_committed && published {
                     outcome_committed = self.commit_outcome(&record);
                 }
-                cancelled |= self.read_cancel(&mut warnings, &mut omitted_warnings)
-                    == Some(machine::StopReason::ExplicitCancellation);
-                if let Ok(true) = self.cleanup(
-                    &mut child,
-                    plan,
-                    if cancelled {
-                        Some(machine::StopReason::ExplicitCancellation)
-                    } else {
-                        record.stop_reason
-                    },
-                    &mut warnings,
-                    &mut omitted_warnings,
-                ) {
-                    if published {
-                        self.republish_settled(record)?;
-                    }
-                    break;
+                let settled = match step {
+                    RetainedStep::Escalate => self.retained_stop(
+                        &mut child,
+                        plan,
+                        if cancelled {
+                            Some(machine::StopReason::ExplicitCancellation)
+                        } else {
+                            record.stop_reason
+                        },
+                        &mut warnings,
+                        &mut omitted_warnings,
+                    ),
+                    RetainedStep::Observe => self.settle_without_signals(
+                        &mut child,
+                        &mut warnings,
+                        &mut omitted_warnings,
+                    ),
+                    RetainedStep::Wait => Ok(false),
+                };
+                if let Ok(true) = settled {
+                    break RetainedEnd::Settled;
+                }
+                // Edges the step drained while it waited on exits.
+                let event = self.reactor.take_events();
+                schedule.absorb(&event);
+                cancel_pending |= event.cancel_changed;
+                cancel_watched &= !event.cancel_watch_failed;
+                if step != RetainedStep::Wait {
+                    let (watched, gone) = self.watch_retained_processes();
+                    schedule.watched = watched;
+                    // A blocker that exited after the look's census but
+                    // before its filter sends no event: look at once.
+                    schedule.process_event |= gone && !schedule.escalate_only;
                 }
                 // The old lock inode can be proven idle even after its name is
                 // removed. Leave the durable unresolved fence untouched.
                 #[cfg(target_os = "macos")]
                 if self.retire_unlinked_writer(&mut child) {
-                    break;
+                    break RetainedEnd::Retired;
                 }
-                match self.reactor.wait(&[], Duration::from_millis(100)) {
-                    Ok(event) if event.supervisor_signal => {
-                        // Never leave `unresolved` without one more bounded
-                        // stop attempt: TERM, the descendant grace, then KILL.
-                        if let Ok(true) = self.cleanup(
-                            &mut child,
-                            plan,
-                            if cancelled {
-                                Some(machine::StopReason::ExplicitCancellation)
-                            } else {
-                                Some(machine::StopReason::SupervisorSignal)
+                let wait_now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let wait_ms = schedule
+                    .wait_ms(wait_now)
+                    .min(last_cancel_ms.map_or(0, |last| {
+                        last.saturating_add(cancel_poll_interval(cancel_watched))
+                            .saturating_sub(wait_now)
+                    }))
+                    .min(began_ms.saturating_add(limit_ms).saturating_sub(wait_now));
+                let waited = if cancel_pending || self.reactor.signalled() {
+                    Ok(false)
+                } else if schedule.process_event && wait_ms > 0 {
+                    // A look is already due at the walk rate. Further fork or
+                    // exit events add nothing before it, so sleep out the
+                    // window, then drain what kqueue queued meanwhile.
+                    provenant_os::sys::wait_pause(Duration::from_millis(wait_ms));
+                    self.reactor.wait(&[], Duration::ZERO)
+                } else {
+                    self.reactor.wait(&[], Duration::from_millis(wait_ms))
+                };
+                if waited.is_err() {
+                    // Without the reactor nothing wakes this loop early.
+                    schedule.watched = false;
+                    cancel_watched = false;
+                    let remaining = began_ms.saturating_add(limit_ms).saturating_sub(wait_now);
+                    provenant_os::sys::wait_pause(Duration::from_millis(
+                        RETAINED_OBSERVE_MS.min(remaining.max(1)),
+                    ));
+                }
+            };
+            let limit_reached = match ended {
+                RetainedEnd::Settled => {
+                    if published {
+                        self.republish_settled(record, &warnings, omitted_warnings)?;
+                    }
+                    None
+                }
+                RetainedEnd::Retired => None,
+                RetainedEnd::Ended(reason) => {
+                    let now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    let end = RetentionEnd {
+                        reason,
+                        retained_ms: now.saturating_sub(began_ms),
+                        blocker: self.retention_blocker(),
+                    };
+                    let unresolved_pids: Vec<i64> = self
+                        .tracked
+                        .iter()
+                        .take(16)
+                        .map(|identity| identity.pid)
+                        .collect();
+                    warn(
+                        &mut warnings,
+                        &mut omitted_warnings,
+                        &format!(
+                            "retained custody ended ({}) after {} s: {}; unresolved pids {unresolved_pids:?}; run `provenant reconcile` for the attempt",
+                            match reason {
+                                RetentionEndReason::LimitReached => "limit reached",
+                                RetentionEndReason::SupervisorSignal => "supervisor signal",
                             },
-                            &mut warnings,
-                            &mut omitted_warnings,
-                        ) && published
-                        {
-                            self.republish_settled(record)?;
-                        }
-                        break;
+                            end.retained_ms / 1_000,
+                            end.blocker,
+                        ),
+                    );
+                    if published {
+                        self.republish_retention_end(
+                            record,
+                            end.clone(),
+                            &warnings,
+                            omitted_warnings,
+                        );
                     }
-                    _ => {}
+                    (reason == RetentionEndReason::LimitReached).then_some(RetentionLimitReached {
+                        scope: self.reservation.scope,
+                        limit_ms,
+                        end,
+                        unresolved_pids,
+                    })
                 }
-            }
-            loop {
-                match child.finish_fenced() {
-                    Ok(_) => break,
-                    Err(failure) => {
-                        let (retained, _) = *failure;
-                        child = retained;
-                        let _ = self.reactor.wait(&[], Duration::from_millis(25));
-                    }
-                }
+            };
+            self.finish_fenced(child);
+            if let Some(reached) = limit_reached {
+                return Err(CustodyError::RetentionLimit(Box::new(reached)));
             }
         }
         Ok(())
     }
+    /// What kept the exit unresolved when retention ended, most specific first.
+    fn retention_blocker(&self) -> RetentionBlocker {
+        if self.stop_refused {
+            RetentionBlocker::StopRefused
+        } else if !self.protected.is_empty() {
+            RetentionBlocker::ProtectedOwner
+        } else if self.reservation.census_incomplete {
+            RetentionBlocker::CensusIncomplete
+        } else if !self.tracked.is_empty() {
+            RetentionBlocker::SurvivedStop
+        } else {
+            RetentionBlocker::SettlementUnproven
+        }
+    }
+    /// Record why retention ended on the still-unresolved exit. The exit and
+    /// reservation stay unresolved, so the fence holds for reconcile.
+    /// Best effort: the unresolved exit already on disk stays conservative.
+    fn republish_retention_end(
+        &mut self,
+        mut record: ProcessExit,
+        end: RetentionEnd,
+        warnings: &[String],
+        omitted_warnings: u64,
+    ) {
+        record.unresolved_pids = self
+            .tracked
+            .iter()
+            .take(16)
+            .map(|identity| identity.pid)
+            .collect();
+        record.unresolved_identities = self.tracked.iter().take(16).cloned().collect();
+        record.settlement_evidence = self.settlement_evidence;
+        record.reaped = self.reaped.clone();
+        record.omitted_reaped = self.omitted_reaped;
+        record.delivered_signals = self.delivered_signals.clone();
+        record.failed_deliveries = self.failed_deliveries.clone();
+        record.omitted_failed_deliveries = self.omitted_failed_deliveries;
+        record.warnings = warnings.to_vec();
+        record.omitted_warnings = omitted_warnings;
+        if let Some(retention) = record.retention.as_mut() {
+            retention.ended = Some(end);
+        }
+        let Ok(bytes) = record.bounded_bytes() else {
+            return;
+        };
+        let _ = self
+            .attempt
+            .atomic_write(
+                OsStr::new("process-exit.json"),
+                ".exit-",
+                &bytes,
+                PublishMode::Replace,
+            )
+            .map(|publication| publication.require_durable());
+    }
+    /// Reap the leader while the writer lease stays held. Retries back off and
+    /// are bounded by a monotonic deadline, since a pause ends early on any
+    /// reactor edge; past it the provider group is dropped unsignalled and the
+    /// lease falls with the guardian.
+    #[allow(clippy::disallowed_methods)]
+    fn finish_fenced(&mut self, mut child: crate::process_os::provider::ProviderGroup) {
+        let backoff = provenant_core::retry::Backoff::new(
+            Duration::from_millis(FINISH_FENCED_FIRST_MS),
+            2,
+            Duration::from_millis(FINISH_FENCED_CAP_MS),
+        );
+        let deadline = Instant::now() + Duration::from_millis(FINISH_FENCED_BUDGET_MS);
+        let mut attempt = 0;
+        loop {
+            match child.finish_fenced() {
+                Ok(_) => return,
+                Err(failure) => {
+                    let (retained, _) = *failure;
+                    child = retained;
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return;
+                    }
+                    let delay = backoff.delay(attempt).min(deadline - now);
+                    attempt = attempt.saturating_add(1);
+                    self.reactor.pause(delay);
+                }
+            }
+        }
+    }
     /// Replace the unresolved exit with the settled facts once cleanup proves
     /// the group gone. The reservation is made resolved first, so a crash in
     /// between leaves only the conservative unresolved exit visible.
-    fn republish_settled(&mut self, mut record: ProcessExit) -> Result<()> {
+    fn republish_settled(
+        &mut self,
+        mut record: ProcessExit,
+        warnings: &[String],
+        omitted_warnings: u64,
+    ) -> Result<()> {
         self.reservation.unresolved_cleanup = false;
         if !self.persist_reservation() {
             self.reservation.unresolved_cleanup = true;
@@ -2094,12 +2380,17 @@ impl Driver<'_> {
         record.unresolved_cleanup = false;
         record.unresolved_pids = Vec::new();
         record.unresolved_identities = Vec::new();
+        // A settled exit holds nothing, so it names no retaining guardian.
+        record.retention = None;
         record.settlement_evidence = self.settlement_evidence;
         record.reaped = self.reaped.clone();
         record.omitted_reaped = self.omitted_reaped;
         record.delivered_signals = self.delivered_signals.clone();
         record.failed_deliveries = self.failed_deliveries.clone();
         record.omitted_failed_deliveries = self.omitted_failed_deliveries;
+        // Retained stops add warnings, such as the descendant kill summary.
+        record.warnings = warnings.to_vec();
+        record.omitted_warnings = omitted_warnings;
         let Ok(bytes) = record.bounded_bytes() else {
             return Ok(());
         };
@@ -2128,43 +2419,35 @@ impl Driver<'_> {
         ports: Option<&provenant_os::fs::LockGuard>,
     ) -> io::Result<crate::process_os::provider::ProviderGroup> {
         validate_profile_command(self.profile_file.as_ref(), argv)?;
-        match argv.first() {
-            Some(executable) => match snapshot_executable(executable.as_os_str()) {
-                Ok(snapshot) if snapshot == self.executable_snapshot => {
-                    crate::process_os::provider::ProviderGroup::spawn(
-                        provenant_os::sys::raw_exec::SpawnSpec {
-                            argv,
-                            env: Some(env),
-                            cwd,
-                            input: !input.is_empty(),
-                            secret_input: self.secret_input.as_ref(),
-                            inherited_lease: None,
-                            inherited_profile: self.profile_file.as_ref().map(|profile| {
-                                profile as &dyn provenant_os::sys::profile::LimitSource
-                            }),
-                            inherited_ports: ports,
-                            process_group: false,
-                            capture_stdout: plan.stdout.piped(),
-                            capture_stderr: plan.stderr.piped(),
-                        },
-                        self.writer
-                            .as_ref()
-                            .ok_or_else(|| io::Error::other("writer custody missing"))?,
-                        &self.reservation.boot,
-                        self.priority,
-                    )
-                }
-                Ok(_) => Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "provider executable snapshot changed",
-                )),
-                Err(error) => Err(error),
-            },
-            None => Err(io::Error::new(
+        if argv.is_empty() {
+            return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "provider executable path is missing",
-            )),
+            ));
         }
+        crate::process_os::provider::ProviderGroup::spawn(
+            provenant_os::sys::raw_exec::SpawnSpec {
+                argv,
+                env: Some(env),
+                cwd,
+                input: !input.is_empty(),
+                secret_input: self.secret_input.as_ref(),
+                inherited_lease: None,
+                inherited_profile: self
+                    .profile_file
+                    .as_ref()
+                    .map(|profile| profile as &dyn provenant_os::sys::profile::LimitSource),
+                inherited_ports: ports,
+                process_group: false,
+                capture_stdout: plan.stdout.piped(),
+                capture_stderr: plan.stderr.piped(),
+            },
+            self.writer
+                .as_ref()
+                .ok_or_else(|| io::Error::other("writer custody missing"))?,
+            &self.reservation.boot,
+            self.priority,
+        )
     }
     /// Publish a launch refusal while retaining the scoped custody proof. If
     /// the attempt directory is provably removed there is no exit to publish
@@ -2245,16 +2528,19 @@ impl Driver<'_> {
         };
         let mut recovery = settlement_recovery(
             &mut self.writer,
+            &mut self._holder,
             directory,
             self.lock_dir.try_clone(),
             &self.reservation,
         )?;
         if recovery.prepare_settlement().is_err() {
             self.writer = recovery.lease.take();
+            self._holder = recovery.holder.take();
             return Ok(());
         }
         drop(self._custody.take());
-        // Worktree exclusion spans settlement retries; attempt custody is free.
+        // Worktree occupancy and the slot-local holder proof span settlement;
+        // only this attempt's custody lock is free.
         let settled = (|| {
             let terminal = holder
                 .outcome(&self.holder_context, &self.attempt, &exit, Some(&recovery))
@@ -2299,10 +2585,11 @@ impl Driver<'_> {
         Ok(())
     }
     /// Retry until the exit is durable or the attempt is provably removed.
-    /// Custody survives ENOSPC and signals; process.json exposes
-    /// publication_pending. A removed attempt keeps its held descriptor usable,
-    /// so removal is judged by directory identity, never by a pathname or an
-    /// errno alone.
+    /// Custody survives ENOSPC; a supervisor signal bounds the retries to
+    /// `SIGNALLED_RETRY_BUDGET_MS`, then the guardian exits with an error.
+    /// process.json exposes publication_pending. A removed attempt keeps its
+    /// held descriptor usable, so removal is judged by directory identity,
+    /// never by a pathname or an errno alone.
     fn publish_until_durable(&mut self, record: &ProcessExit, state: &mut State) -> Result<bool> {
         let bytes = record.bounded_bytes()?;
         if bytes.len() as u64 > EXIT_LIMIT {
@@ -2317,6 +2604,7 @@ impl Driver<'_> {
         let system_exit_publisher = SystemExitPublisher;
         let exit_publisher: &dyn ExitPublisher =
             self.exit_publisher.unwrap_or(&system_exit_publisher);
+        let mut signalled_retry = SignalledRetry::default();
         loop {
             let result = if visible {
                 exit_publisher
@@ -2412,7 +2700,13 @@ impl Driver<'_> {
                 },
                 PublishMode::Replace,
             );
-            let _ = self.reactor.wait(&[], Duration::from_millis(50));
+            if signalled_retry.exhausted(self.reactor.signalled()) {
+                // publication_pending stays on disk for reconcile.
+                return Err(CustodyError::Io(io::Error::other(
+                    "exit publication still pending after a supervisor signal",
+                )));
+            }
+            self.reactor.pause(Duration::from_millis(50));
         }
     }
 }
@@ -2502,37 +2796,6 @@ fn push_warning(warnings: &mut Vec<String>, omitted: &mut u64, label: &str) {
     } else {
         *omitted = omitted.saturating_add(1);
     }
-}
-
-fn snapshot_executable(path: &OsStr) -> io::Result<ExecutableSnapshot> {
-    if !Path::new(path).is_absolute() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "provider executable path must be absolute",
-        ));
-    }
-    let file = std::fs::File::open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "provider executable is not a regular file",
-        ));
-    }
-    let modified_nanoseconds = metadata.mtime_nsec();
-    if !(0..1_000_000_000).contains(&modified_nanoseconds) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "provider executable timestamp is invalid",
-        ));
-    }
-    Ok(ExecutableSnapshot {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        length: metadata.len(),
-        modified_seconds: metadata.mtime(),
-        modified_nanoseconds,
-    })
 }
 
 fn valid_resolved_route(route: &str) -> bool {

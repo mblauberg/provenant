@@ -3,6 +3,7 @@ use provenant_config::{CargoBuildProfile, LaneBuildSettings};
 use provenant_core::{Clock, GitOid};
 use provenant_os::exec::{ExecError, ExecOptions, Executor, SystemExecutor, Termination};
 use provenant_run::target_seed::{self, Manifest};
+use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
     ffi::OsString,
@@ -83,6 +84,97 @@ fn check_host_cargo_configuration(state: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Why a project has no seed until its owner repairs it. The pass skips it and
+/// records the reason; it is not a failure of the pass and never stops another
+/// project's seed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    /// No layer declares `verify.base` and the remote HEAD names none.
+    VerifyBaseUnset,
+    /// The declared or inferred verify base is not a ref this repository has.
+    VerifyBaseUnresolved,
+    /// The verify base has no Cargo manifest at the selected workspace.
+    WorkspaceAbsentAtBase,
+    /// A reason a newer writer recorded. It decodes so one unknown skip cannot
+    /// make the whole result unreadable.
+    #[serde(other)]
+    Unrecognised,
+}
+
+impl SkipReason {
+    pub fn cause(self) -> &'static str {
+        match self {
+            Self::VerifyBaseUnset => "verify.base is unset and cannot be inferred",
+            Self::VerifyBaseUnresolved => "its verify base does not resolve to a commit",
+            Self::WorkspaceAbsentAtBase => "its verify base has no Cargo manifest at the workspace",
+            Self::Unrecognised => "of a reason this build does not recognise",
+        }
+    }
+
+    pub fn repair(self) -> &'static str {
+        match self {
+            Self::VerifyBaseUnset => {
+                "Set verify.base in .provenant/ports.json or the host ports.json, or fetch the remote so its HEAD resolves, then run `provenant worktree seed-build` in that repository."
+            }
+            Self::VerifyBaseUnresolved => {
+                "Fetch the verify base or set verify.base to a remote-tracking ref the repository has, then run `provenant worktree seed-build` in that repository."
+            }
+            Self::WorkspaceAbsentAtBase => {
+                "Set verify.workspace to a directory that holds a Cargo.toml at the verify base, or land the workspace on the base, then run `provenant worktree seed-build` in that repository."
+            }
+            Self::Unrecognised => {
+                "Run `provenant worktree seed-build` in that repository to see the current cause."
+            }
+        }
+    }
+}
+
+/// A repairable condition that makes one project unseedable. It travels as the
+/// error of `refresh`, so a caller tells it from a failure by type, not text.
+#[derive(Debug)]
+pub struct SeedSkip {
+    pub reason: SkipReason,
+    detail: String,
+}
+
+impl SeedSkip {
+    pub(crate) fn new(reason: SkipReason, detail: impl Into<String>) -> Self {
+        Self {
+            reason,
+            detail: detail.into(),
+        }
+    }
+
+    fn unset() -> Self {
+        Self::new(
+            SkipReason::VerifyBaseUnset,
+            provenant_config::verify_base_unset_error().to_string(),
+        )
+    }
+}
+
+impl std::fmt::Display for SeedSkip {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl Error for SeedSkip {}
+
+/// The skip an error carries, if any, anywhere in its source chain.
+#[allow(dead_code)] // The harness-free worktree driver includes this module without the tick.
+pub fn skip_of<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a SeedSkip> {
+    let mut cause = Some(error);
+    while let Some(error) = cause {
+        if let Some(skip) = error.downcast_ref::<SeedSkip>() {
+            return Some(skip);
+        }
+        cause = error.source();
+    }
+    None
 }
 
 fn seed_error(stage: &str, error: &(dyn Error + 'static)) -> io::Error {
@@ -342,7 +434,7 @@ fn infer_verify_base(
         GitRead, repo::GitRefName, repo::GitRevision, utility::run_read_utility,
     };
     if remote.is_empty() {
-        return Err(provenant_config::verify_base_unset_error().into());
+        return Err(SeedSkip::unset().into());
     }
     let head = GitRefName::remote_tracking(format!("{remote}/HEAD"))?;
     let revision = GitRevision::new(head.as_str())?;
@@ -360,13 +452,13 @@ fn infer_verify_base(
         || outcome.stdout.truncated
         || outcome.stdout.read_failed
     {
-        return Err(provenant_config::verify_base_unset_error().into());
+        return Err(SeedSkip::unset().into());
     }
     let target = String::from_utf8(outcome.stdout.bytes)
         .map_err(|error| seed_error("reading remote HEAD", &error))?;
     provenant_config::infer_verify_base(remote, target.trim())
         .map(|(base, _)| base)
-        .ok_or_else(|| provenant_config::verify_base_unset_error().into())
+        .ok_or_else(|| SeedSkip::unset().into())
 }
 
 fn verify_base(host_state: &Path, project: &Path, workspace: &Path) -> Result<VerifyBase> {
@@ -396,7 +488,21 @@ fn verify_base(host_state: &Path, project: &Path, workspace: &Path) -> Result<Ve
     let reference = GitRefName::remote_tracking(&base)?;
     let commit = facts
         .resolve_read_commit(&repo, &executor, &utility, budget, reference, &cancel)
-        .map_err(|error| seed_error("resolving verify base", &error))?;
+        .map_err(|error| -> Box<dyn Error> {
+            match error {
+                provenant_confinement::worktrees::WorktreeError::NotFound
+                | provenant_confinement::worktrees::WorktreeError::BaseNotFound { .. } => {
+                    SeedSkip::new(
+                        SkipReason::VerifyBaseUnresolved,
+                        format!(
+                            "verify base {base} does not resolve to a commit in this repository"
+                        ),
+                    )
+                    .into()
+                }
+                error => seed_error("resolving verify base", &error).into(),
+            }
+        })?;
     let tree = facts
         .resolve_read_tree(&repo, &executor, &utility, budget, commit, &cancel)
         .map_err(|error| seed_error("reading verify-base tree", &error))?;
@@ -412,7 +518,8 @@ fn verify_base(host_state: &Path, project: &Path, workspace: &Path) -> Result<Ve
     )?
     .is_none()
     {
-        return Err(io::Error::other(
+        return Err(SeedSkip::new(
+            SkipReason::WorkspaceAbsentAtBase,
             "verify base has no Cargo manifest at the selected workspace",
         )
         .into());
@@ -841,6 +948,11 @@ fn publish_with_publication_wait(
     fs::create_dir(&stage.0)?;
     drop(store_lock);
     let manifest = build(&stage.0)?;
+    // Cargo tags a target directory only when it creates it; tag it here so a
+    // generation and every seed cloned from it carry the tag.
+    provenant_confinement::cache::tag_cache_directory(&provenant_os::fs::Directory::open_anchor(
+        &stage.0.join("target"),
+    )?)?;
     fs::write(
         stage.0.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest)?,
@@ -1731,6 +1843,10 @@ mod tests {
         ] {
             assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o222, 0);
         }
+        assert_eq!(
+            fs::read(generation.join("target/CACHEDIR.TAG")).unwrap(),
+            provenant_confinement::cache::CACHE_DIRECTORY_TAG_CONTENT
+        );
         make_directories_writable(&generation).unwrap();
     }
 }

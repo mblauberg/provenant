@@ -52,11 +52,15 @@ fn verify_worktree_authority_inner(
     }
     let grants = WorktreeWriteGrants::derive(verified, selected_ref);
     grants.validate(credentials)?;
+    let expected_git_state = worktree_git_state(anchors.home, verified, selected_ref, credentials)?;
+    if authority.git_state != expected_git_state {
+        return Err(PermissionError::GitWriteAuthorityMissing);
+    }
     validate_writer_cache(authority, verified, anchors.home, credentials)?;
     if authority.common_git_dir() != grants.common_git_dir.path.as_path() {
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
-    if grants.digest(&authority.cargo_cache) != authority.git_grants_digest {
+    if grants.digest(&authority.cargo_cache, &authority.git_state) != authority.git_grants_digest {
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
     verify_selected_head(verified, selected_ref.short_name())?;
@@ -65,6 +69,13 @@ fn verify_worktree_authority_inner(
             PathScope::Subtree => anchors.verify_grant_held(grant)?,
             PathScope::Exact => anchors.verify_single_link_grant(grant)?,
         }
+    }
+    anchors.verify_grant_held(&authority.git_state)?;
+    anchors.verify_grant_held(&super::grants::worktree_git_state_namespace(
+        &authority.git_state,
+    )?)?;
+    for grant in worktree_git_state_writes(&authority.git_state) {
+        anchors.verify_grant_held(&grant)?;
     }
     verify_git_control_links(verified.repo())?;
     Ok(grants)

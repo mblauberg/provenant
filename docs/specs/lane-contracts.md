@@ -13,8 +13,8 @@ records alone do not implement those flows.
 and `Destination`: the parent's worktree, a managed worktree on a new or
 existing branch, or a parent-owned path. Path claim and own-path commit choice
 are optional, sourced and off by default. Claims are advisory unless explicitly
-strict. Admission resolves paths and links and validates ownership and inherited
-credentials, Git isolation, data integrity and authority; the lexical
+strict. Admission resolves paths and links and validates ownership and the inherited
+[hard boundaries](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md); the lexical
 `NarrowedAuthority::is_within` comparison is only one check, not a grant. Routes
 are a subset, budgets cannot exceed or drop a parent ceiling, and paths must be
 under an allowed root. Unknown authority fields make the comparison inconclusive

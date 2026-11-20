@@ -745,6 +745,70 @@ struct InjectedCensus {
     platform_uids: BTreeMap<i64, ProcessUids>,
 }
 
+// Spec: docs/specs/disk.md#scratch-and-cache-custody
+#[test]
+fn unreadable_process_without_candidate_paths_only_blocks_the_root_it_occupies()
+-> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ProcessIdentity};
+    let fixture = Fixture::new()?;
+    let first = fixture._temp.path().join("candidate-a");
+    let second = fixture._temp.path().join("candidate-b");
+    fs::create_dir(&first)?;
+    fs::create_dir(&second)?;
+    let roots = [canonicalize(&first)?, canonicalize(&second)?];
+    let current = ProcessFact {
+        identity: ProcessIdentity {
+            boot: "eperm-candidate-scope".into(),
+            pid: 100,
+            native_start: 100,
+            group_id: 100,
+            session_id: 100,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: None,
+    };
+    let census = Census::from_observations(
+        [current.clone()],
+        [(200, ObservationIssue::PermissionDenied)],
+        [],
+        true,
+        false,
+        32,
+    )?;
+    let observer = |cwd| InjectedCensus {
+        census: census.clone(),
+        cwds: BTreeMap::from([(200, cwd)]),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+
+    let inside_first = observer(CwdObservation::Path(roots[0].clone()));
+    let states = observe_worker_roots(&roots, &inside_first, &inside_first, &current, false).0;
+    assert!(states[&roots[0]].is_observed());
+    assert!(states[&roots[1]].is_available());
+
+    let unreadable_outside = observer(CwdObservation::PermissionDenied);
+    let mut warnings = Vec::new();
+    let (states, _, _, _) = observe_worker_holders_with_taints_and_audit(
+        &roots,
+        &unreadable_outside,
+        &unreadable_outside,
+        &current,
+        false,
+        &mut |pid, condition| warnings.push((pid, condition)),
+    );
+    assert!(states.values().all(Occupancy::is_available));
+    assert_eq!(
+        warnings,
+        vec![(Some(200), Some(UNREADABLE_NO_CANDIDATE_PATH))]
+    );
+    assert!(mark_unreadable_process_warning("eperm-test", 200));
+    assert!(!mark_unreadable_process_warning("eperm-test", 200));
+    Ok(())
+}
+
 impl ProcessObserver for InjectedCensus {
     fn boot_identity(&self) -> Result<String, provenant_supervisor::census::CensusError> {
         Ok("boot".into())
@@ -808,41 +872,6 @@ impl WorkerObserver for InjectedCensus {
     }
 }
 
-/// A cwd observer whose queries are refused, with host policy answered from a
-/// configured entry list the way the native observer does.
-struct RefusedCwd {
-    uids: ProcessUids,
-}
-impl CwdObserver for RefusedCwd {
-    fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
-        provenant_os::pid::OccupancyObservation {
-            paths: vec![],
-            complete: true,
-            gap: None,
-        }
-    }
-    fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
-        Ok(CwdObservation::PermissionDenied)
-    }
-    fn unreadable_policy_uids(
-        &self,
-        _pid: i64,
-        _: &[CensusIgnoreEntry],
-    ) -> Result<
-        provenant_os::pid::UnreadablePolicyExcusal,
-        provenant_os::pid::UnreadablePolicyFailure,
-    > {
-        if !self.uids.all_system() {
-            return Err("real/effective/saved system uids below 500 required".into());
-        }
-        Err(provenant_os::pid::UnreadablePolicyFailure {
-            condition: "approved daemon directory required",
-            builtin_condition: Some("approved daemon directory required"),
-            configurable: true,
-        })
-    }
-}
-
 fn refused_fact(pid: i64) -> provenant_supervisor::census::ProcessFact {
     use provenant_supervisor::census::ProcessIdentity;
     ProcessFact {
@@ -858,75 +887,6 @@ fn refused_fact(pid: i64) -> provenant_supervisor::census::ProcessFact {
         cpu_micros: None,
         command: None,
     }
-}
-
-fn observe_refused(
-    root: &Path,
-    pids: &[i64],
-    cwd: &RefusedCwd,
-) -> Result<WorkerTaintObservations, Box<dyn Error>> {
-    use provenant_supervisor::census::Census;
-    let current = refused_fact(100);
-    let mut facts = vec![current.clone()];
-    facts.extend(pids.iter().map(|pid| refused_fact(*pid)));
-    let processes = InjectedCensus {
-        census: Census::from_observations(facts, [], [], true, false, 32)?,
-        cwds: BTreeMap::new(),
-        current: current.clone(),
-        platform_uids: BTreeMap::new(),
-    };
-    Ok(observe_worker_root_taints(
-        std::slice::from_ref(&root.to_path_buf()),
-        &processes,
-        cwd,
-        &current,
-        false,
-    ))
-}
-
-const SYSTEM_UIDS: ProcessUids = ProcessUids {
-    real: 0,
-    effective: 0,
-    saved: 0,
-};
-
-#[test]
-fn unreadable_census_refusal_stays_unknown_when_policy_rejects() -> Result<(), Box<dyn Error>> {
-    let fixture = Fixture::new()?;
-    let root = canonicalize(&fixture.root)?;
-    fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
-    let configured_refusal = RefusedCwd { uids: SYSTEM_UIDS };
-    let configured_failure = configured_refusal
-        .unreadable_policy_uids(200, &[])
-        .expect_err("the configured entry does not match this fixture");
-    assert!(configured_failure.configurable);
-    assert!(configured_failure.builtin_condition.is_some());
-    let (refused, taints) = observe_refused(&root, &[200], &configured_refusal)?;
-    assert!(refused[&root].is_unknown());
-    assert_eq!(
-        taints[&root],
-        TaintCause::Uncertainty(UncertaintyReason::PolicyRejected)
-    );
-
-    let user_owned_refusal = RefusedCwd {
-        uids: ProcessUids {
-            real: 0,
-            effective: 501,
-            saved: 0,
-        },
-    };
-    let user_owned_failure = user_owned_refusal
-        .unreadable_policy_uids(200, &[])
-        .expect_err("a user-owned process cannot use a system entry");
-    assert!(!user_owned_failure.configurable);
-    assert!(user_owned_failure.builtin_condition.is_some());
-    let (user_owned, taints) = observe_refused(&root, &[200], &user_owned_refusal)?;
-    assert!(user_owned[&root].is_unknown());
-    assert_eq!(
-        taints[&root],
-        TaintCause::Uncertainty(UncertaintyReason::PolicyRejected)
-    );
-    Ok(())
 }
 
 #[test]
@@ -1363,7 +1323,7 @@ fn unreadable_platform_policy_rechecks_identity_and_preserves_other_unknowns()
 }
 
 #[test]
-fn worker_census_audit_keeps_all_unplaceable_processes_and_first_detail()
+fn worker_census_audit_scopes_eperm_warning_and_retains_unsupported_cwd_unknown()
 -> Result<(), Box<dyn Error>> {
     use provenant_supervisor::census::{Census, ProcessIdentity};
     let fixture = Fixture::new()?;
@@ -1399,6 +1359,9 @@ fn worker_census_audit_keeps_all_unplaceable_processes_and_first_detail()
         platform_uids: BTreeMap::new(),
     };
     let mut audit = BTreeMap::new();
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody. Complete empty
+    // occupancy scopes an EPERM warning to that process; unsupported cwd
+    // evidence still protects the candidate.
     let (states, _, details) = observe_worker_holders_with_audit(
         std::slice::from_ref(&root),
         &observer,
@@ -1410,14 +1373,17 @@ fn worker_census_audit_keeps_all_unplaceable_processes_and_first_detail()
         },
     );
     assert!(states[&root].is_unknown());
+    assert!(details[&root].contains("process 200"));
+    assert!(!details[&root].contains("process 1"));
+    assert_eq!(audit.len(), 2);
+    let unreadable_without_candidate_path = audit.get(&Some(1)).copied().flatten();
     assert_eq!(
-        details[&root],
-        "process 1: cwd unreadable; policy_condition=image policy evidence unavailable"
+        unreadable_without_candidate_path,
+        Some(UNREADABLE_NO_CANDIDATE_PATH)
     );
-    assert_eq!(
-        audit.keys().copied().collect::<Vec<_>>(),
-        vec![Some(1), Some(200)]
-    );
+    let unsupported_cwd = audit.get(&Some(200)).copied().flatten();
+    assert!(unsupported_cwd.is_some());
+    assert_ne!(unsupported_cwd, Some(UNREADABLE_NO_CANDIDATE_PATH));
     assert!(builtin_audit_has_only_rejections(audit.values().copied()));
     // An unplaceable record with fully admissible built-in evidence must
     // fail acceptance, even when other records have real refusals.
@@ -1775,8 +1741,9 @@ fn listed_process_is_excluded_only_after_eperm_and_never_for_the_owner()
     Ok(())
 }
 
+// Spec: docs/specs/disk.md#scratch-and-cache-custody
 #[test]
-fn denied_daemon_policy_distinguishes_system_owner_human_and_missing_evidence()
+fn unreadable_process_without_candidate_paths_is_scoped_independently_of_uid()
 -> Result<(), Box<dyn Error>> {
     use provenant_supervisor::census::{Census, ProcessIdentity};
     let fixture = Fixture::new()?;
@@ -1801,24 +1768,22 @@ fn denied_daemon_policy_distinguishes_system_owner_human_and_missing_evidence()
         current: fact(100),
         platform_uids: BTreeMap::new(),
     };
-    for (name, evidence, expected_available) in [
-        ("root daemon", Some(0), owner != 0),
+    for (name, evidence) in [
+        ("root daemon", Some(0)),
         (
             "foreign service daemon",
             Some(if owner == 88 { 89 } else { 88 }),
-            true,
         ),
-        ("last system account", Some(499), owner != 499),
-        ("first human account", Some(500), false),
-        ("worktree owner", Some(owner), false),
-        ("missing image/signing/uid evidence", None, false),
+        ("last system account", Some(499)),
+        ("first human account", Some(500)),
+        ("worktree owner", Some(owner)),
+        ("missing image/signing/uid evidence", None),
     ] {
         observer.platform_uids = evidence
             .map(|uid| BTreeMap::from([(200, test_uids(uid))]))
             .unwrap_or_default();
-        assert_eq!(
+        assert!(
             observer.observe_roots(std::slice::from_ref(&root))[&root].is_available(),
-            expected_available,
             "{name}"
         );
     }
@@ -1858,7 +1823,7 @@ fn denied_daemon_policy_distinguishes_system_owner_human_and_missing_evidence()
     ] {
         observer.platform_uids = BTreeMap::from([(200, uids)]);
         assert!(
-            observer.observe_roots(std::slice::from_ref(&root))[&root].is_unknown(),
+            observer.observe_roots(std::slice::from_ref(&root))[&root].is_available(),
             "{name}"
         );
     }
@@ -1870,17 +1835,10 @@ fn denied_daemon_policy_distinguishes_system_owner_human_and_missing_evidence()
             saved: 0,
         },
     )]);
-    assert_eq!(
-        observer.observe_roots(std::slice::from_ref(&root))[&root].is_available(),
-        ![0, 88].contains(&owner),
-        "system credentials must differ from the checkout owner"
-    );
+    assert!(observer.observe_roots(std::slice::from_ref(&root))[&root].is_available());
     let roots = [root.clone(), PathBuf::from("/")];
     let states = observer.observe_roots(&roots);
-    assert!(
-        states.values().all(Occupancy::is_unknown),
-        "a credential matching any candidate root's owner refuses exclusion for all roots"
-    );
+    assert!(states.values().all(Occupancy::is_available));
     // A denied fact cannot borrow the cwd exception without a pinned identity.
     observer.census = Census::from_observations(
         [fact(100)],
@@ -1892,7 +1850,7 @@ fn denied_daemon_policy_distinguishes_system_owner_human_and_missing_evidence()
     )?;
     observer.platform_uids = BTreeMap::from([(200, test_uids(88))]);
     assert!(
-        observer.observe_roots(std::slice::from_ref(&root))[&root].is_unknown(),
+        observer.observe_roots(std::slice::from_ref(&root))[&root].is_available(),
         "undescribed process"
     );
     Ok(())
@@ -1950,8 +1908,9 @@ fn cwd_query_errors_never_consult_the_daemon_policy() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+// Spec: docs/specs/disk.md#scratch-and-cache-custody
 #[test]
-fn unreadable_occupant_cwd_keeps_the_tree_for_removal() -> Result<(), Box<dyn Error>> {
+fn unreadable_cwd_without_candidate_paths_does_not_block_removal() -> Result<(), Box<dyn Error>> {
     use provenant_supervisor::census::{Census, ProcessIdentity};
     let fixture = Fixture::new()?;
     fixture.run(&["branch", "-M", "main"])?;
@@ -1978,6 +1937,58 @@ fn unreadable_occupant_cwd_keeps_the_tree_for_removal() -> Result<(), Box<dyn Er
         current,
         platform_uids: BTreeMap::new(),
     };
+    struct DeniedDescriptors<'a>(&'a InjectedCensus);
+    impl ProcessObserver for DeniedDescriptors<'_> {
+        fn boot_identity(&self) -> Result<String, provenant_supervisor::census::CensusError> {
+            self.0.boot_identity()
+        }
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            self.0.observe(pid)
+        }
+        fn census(
+            &self,
+            limit: usize,
+        ) -> Result<provenant_supervisor::census::Census, provenant_supervisor::census::CensusError>
+        {
+            self.0.census(limit)
+        }
+    }
+    impl CwdObserver for DeniedDescriptors<'_> {
+        fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            self.0.cwd(pid)
+        }
+        fn process_uids(&self, pid: i64) -> Option<ProcessUids> {
+            self.0.process_uids(pid)
+        }
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation {
+                paths: vec![],
+                complete: false,
+                gap: Some(provenant_os::pid::OccupancyGap::DescriptorsDenied),
+            }
+        }
+        fn unreadable_policy_uids(
+            &self,
+            pid: i64,
+            entries: &[CensusIgnoreEntry],
+        ) -> Result<
+            provenant_os::pid::UnreadablePolicyExcusal,
+            provenant_os::pid::UnreadablePolicyFailure,
+        > {
+            self.0.unreadable_policy_uids(pid, entries)
+        }
+    }
+    impl WorkerObserver for DeniedDescriptors<'_> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            observe_worker_roots(roots, self, self, &self.0.current, true).0
+        }
+        fn requires_complete_census(&self) -> bool {
+            true
+        }
+        fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
+            observe_worker_roots(roots, self, self, &self.0.current, true)
+        }
+    }
     let created = create(
         &test_context.context(),
         WorktreeCreate {
@@ -1986,9 +1997,30 @@ fn unreadable_occupant_cwd_keeps_the_tree_for_removal() -> Result<(), Box<dyn Er
         },
         &cancellation,
     )?;
-    // The occupant is same-uid, so its unreadable cwd cannot be excluded.
+    // Complete occupancy finds no path under the worktree, so the EPERM cwd
+    // does not retain this candidate.
     fs::set_permissions(&created.path, fs::Permissions::from_mode(0o755))?;
-    let refused = remove_with_port(
+    let denied = DeniedDescriptors(&observer);
+    assert!(denied.observe_roots(std::slice::from_ref(&created.path))[&created.path].is_unknown());
+    assert!(matches!(
+        remove_with_port(
+            &test_context,
+            &WorktreeContext {
+                workers: &denied,
+                ..test_context.context()
+            },
+            WorktreeRemove::Name {
+                name: "landed".to_owned(),
+                discard: false,
+                integration: None,
+                expected_head: None,
+            },
+            &cancellation,
+        ),
+        Err(WorktreeError::IncompleteCensus { .. })
+    ));
+    assert!(created.path.exists());
+    remove_with_port(
         &test_context,
         &WorktreeContext {
             workers: &observer,
@@ -2001,15 +2033,12 @@ fn unreadable_occupant_cwd_keeps_the_tree_for_removal() -> Result<(), Box<dyn Er
             expected_head: None,
         },
         &cancellation,
-    );
-    assert!(matches!(
-        refused,
-        Err(WorktreeError::IncompleteCensus { .. })
-    ));
-    assert!(created.path.exists());
+    )?;
+    assert!(!created.path.exists());
     Ok(())
 }
 
+// Spec: docs/specs/disk.md#scratch-and-cache-custody
 #[test]
 fn only_a_placed_foreign_process_allows_pruning_a_merged_clean_tree() -> Result<(), Box<dyn Error>>
 {
@@ -2103,18 +2132,15 @@ fn only_a_placed_foreign_process_allows_pruning_a_merged_clean_tree() -> Result<
     ));
     assert!(created.path.exists());
 
-    // Foreign credentials and unwritable root permissions cannot prove
-    // where an unreadable process has its cwd.
+    // An unreadable process with no candidate cwd or descriptor does not taint
+    // this root, even when its identity cannot be read from the census.
     let foreign = observer(ObservationIssue::PermissionDenied, None)?;
-    assert!(foreign.observe_roots(std::slice::from_ref(&created.path))[&created.path].is_unknown());
-    assert!(matches!(
-        remove_named(&foreign, "landed"),
-        Err(WorktreeError::IncompleteCensus { .. })
-    ));
+    assert!(
+        foreign.observe_roots(std::slice::from_ref(&created.path))[&created.path].is_available()
+    );
     assert!(created.path.exists());
 
-    // A complete, identity-checked cwd observation outside the tree
-    // provides the positive non-occupancy evidence credentials cannot.
+    // A complete cwd observation outside the tree also leaves the candidate free.
     let placed = InjectedCensus {
         census: Census::from_observations(
             [fact(100), fact(200), fact(300), fact(400)],
@@ -2328,8 +2354,9 @@ mod writer_cohort {
         Ok(())
     }
 
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody
     #[test]
-    fn possible_user_writers_and_positive_system_occupants_remain_protected()
+    fn denied_descriptor_observation_remains_unknown_until_occupancy_is_complete()
     -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
         let root = canonicalize(&fixture.root)?;

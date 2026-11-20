@@ -1,7 +1,10 @@
 //! Recoverable explicit discard and its retention owner. No link is followed.
 use super::*;
 use provenant_config::RetentionIssue;
-use provenant_os::fs::{FileHandle, FileKind, PayloadTree, PublishMode, temporary_name};
+use provenant_os::fs::{
+    DirectoryPosition, FileHandle, FileKind, FsError, Metadata, PayloadTree, PublishMode,
+    temporary_name,
+};
 use std::io::{Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
@@ -27,6 +30,92 @@ pub struct ArchiveReport {
     pub busy: Vec<PathBuf>,
     pub bytes: u64,
     pub errors: Vec<RetentionIssue>,
+    #[serde(skip)]
+    pub interrupted_at: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RootStamp {
+    device: u64,
+    inode: u64,
+    modified_ns: i128,
+}
+
+impl From<Metadata> for RootStamp {
+    fn from(metadata: Metadata) -> Self {
+        Self {
+            device: metadata.device,
+            inode: metadata.inode,
+            modified_ns: metadata.modified_ns,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CandidateIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl From<Metadata> for CandidateIdentity {
+    fn from(metadata: Metadata) -> Self {
+        Self {
+            device: metadata.device,
+            inode: metadata.inode,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RootCursor {
+    position: DirectoryPosition,
+    root: RootStamp,
+    candidate: CandidateIdentity,
+}
+
+fn archive_root_cursor(
+    root: &Directory,
+    position: DirectoryPosition,
+    candidate: &OsStr,
+) -> Result<Option<String>, FsError> {
+    let candidate = match root.metadata_at(candidate, false) {
+        Ok(metadata) => CandidateIdentity::from(metadata),
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let root = RootStamp::from(root.metadata()?);
+    Ok(Some(format!(
+        "archive-root-v3:{}:{}:{}:{}:{}:{}:{}",
+        position.block,
+        position.offset,
+        root.device,
+        root.inode,
+        root.modified_ns,
+        candidate.device,
+        candidate.inode
+    )))
+}
+
+fn archive_root_cursor_position(detail: Option<&str>) -> Option<RootCursor> {
+    let mut components = detail?.strip_prefix("archive-root-v3:")?.split(':');
+    let cursor = RootCursor {
+        position: DirectoryPosition {
+            block: components.next()?.parse().ok()?,
+            offset: components.next()?.parse().ok()?,
+        },
+        root: RootStamp {
+            device: components.next()?.parse().ok()?,
+            inode: components.next()?.parse().ok()?,
+            modified_ns: components.next()?.parse().ok()?,
+        },
+        candidate: CandidateIdentity {
+            device: components.next()?.parse().ok()?,
+            inode: components.next()?.parse().ok()?,
+        },
+    };
+    components.next().is_none().then_some(cursor)
 }
 
 fn failure(operation: &'static str, path: &Path, cause: impl std::fmt::Display) -> ArchiveError {
@@ -115,6 +204,7 @@ pub(super) fn capture(
         let bundle = stage.open_read(OsStr::new("tip.bundle"))?;
         bundle.sync()?;
         let mut captured = Vec::new();
+        let mut status_output = None;
         for (name, operation) in [
             ("worktree.patch", GitRead::DirtyPatch),
             ("index.patch", GitRead::IndexPatch),
@@ -128,6 +218,9 @@ pub(super) fn capture(
                 || result.stdout.sink_failed
             {
                 return Err(WorktreeError::InvalidOutput);
+            }
+            if name == "status.porcelain-v2.z" {
+                status_output = Some(result.stdout.bytes.clone());
             }
             captured.push((operation, result.stdout.bytes.clone()));
             stage
@@ -149,9 +242,28 @@ pub(super) fn capture(
         {
             return Err(WorktreeError::InvalidOutput);
         }
+        let ignored_dirs: std::collections::BTreeSet<PathBuf> =
+            crate::status::parse_porcelain_v2_z(
+                status_output
+                    .as_deref()
+                    .ok_or(WorktreeError::InvalidOutput)?,
+            )
+            .map_err(|_| WorktreeError::InvalidOutput)?
+            .into_iter()
+            .filter(|record| record.kind == crate::status::StatusKind::Ignored)
+            .map(|record| {
+                let mut bytes = record.path;
+                while bytes.last() == Some(&b'/') {
+                    bytes.pop();
+                }
+                PathBuf::from(OsString::from_vec(bytes))
+            })
+            .collect();
         let mut tar = stage.create_new(OsStr::new("untracked.tar"))?;
         let source = Directory::open_anchor(repo.root_path())?;
         let mut observed = Vec::new();
+        let mut cachedir_tag_dirs = std::collections::BTreeSet::new();
+        let mut clean_dirs = std::collections::BTreeSet::new();
         for path in paths
             .stdout
             .bytes
@@ -159,6 +271,15 @@ pub(super) fn capture(
             .filter(|p| !p.is_empty())
         {
             let path = PathBuf::from(OsString::from_vec(path.to_vec()));
+            if is_build_output_or_cache(
+                &path,
+                &source,
+                &ignored_dirs,
+                &mut cachedir_tag_dirs,
+                &mut clean_dirs,
+            ) {
+                continue;
+            }
             let (parent, name) = source_parent(&source, &path)
                 .map_err(|e| failure("inspect untracked", &repo.root_path().join(&path), e))?;
             let metadata = parent.metadata_at(&name, false)?;
@@ -270,6 +391,57 @@ fn source_parent(root: &Directory, path: &Path) -> io::Result<(Directory, OsStri
     Ok((directory, name))
 }
 
+fn is_build_output_or_cache(
+    path: &Path,
+    source: &Directory,
+    ignored_dirs: &std::collections::BTreeSet<PathBuf>,
+    cachedir_tag_dirs: &mut std::collections::BTreeSet<PathBuf>,
+    clean_dirs: &mut std::collections::BTreeSet<PathBuf>,
+) -> bool {
+    if source
+        .metadata_at(OsStr::new("CACHEDIR.TAG"), false)
+        .is_ok()
+    {
+        return true;
+    }
+    let mut current = PathBuf::new();
+    let components: Vec<_> = path.components().collect();
+    for (i, comp) in components.iter().enumerate() {
+        if i == components.len() - 1 && comp.as_os_str() != "CACHEDIR.TAG" {
+            break;
+        }
+        current.push(comp.as_os_str());
+        if comp.as_os_str() == "target"
+            && ignored_dirs
+                .iter()
+                .any(|ignored| current.starts_with(ignored))
+        {
+            return true;
+        }
+        if cachedir_tag_dirs.contains(&current) {
+            return true;
+        }
+        if !clean_dirs.contains(&current) {
+            let has_tag = match source_parent(source, &current.join("CACHEDIR.TAG")) {
+                Ok((dir, name)) => dir.metadata_at(name.as_os_str(), false).is_ok(),
+                Err(_) => false,
+            };
+            if has_tag {
+                cachedir_tag_dirs.insert(current.clone());
+                return true;
+            } else {
+                clean_dirs.insert(current.clone());
+            }
+        }
+    }
+    for tag_dir in cachedir_tag_dirs.iter() {
+        if path.starts_with(tag_dir) {
+            return true;
+        }
+    }
+    false
+}
+
 fn append_path(root: &Directory, path: &Path, out: &mut FileHandle) -> io::Result<()> {
     let (directory, name) = source_parent(root, path)?;
     let name = name.as_os_str();
@@ -350,6 +522,10 @@ pub fn collect_archives(
     context: &WorktreeContext<'_>,
     before_ns: i128,
     dry_run: bool,
+    cancel: &CancelToken,
+    start_at: Option<&Path>,
+    detail: Option<&str>,
+    should_stop: &mut dyn FnMut() -> bool,
 ) -> ArchiveReport {
     let project_state = context.project_state;
     let mut report = ArchiveReport::default();
@@ -378,17 +554,82 @@ pub fn collect_archives(
         }
     };
     let collect = (|| -> Result<(), FsError> {
-        for entry in root.entries()? {
-            let name = entry?;
+        let mut entries = root.entries()?;
+        let mut pending = None;
+        let mut priority_pending = None;
+        let mut priority_path = None;
+        let resume_cursor = archive_root_cursor_position(detail).filter(|_| {
+            start_at.is_some_and(|start| start.parent() == root.current_path().ok().as_deref())
+        });
+        if let (Some(start), Some(cursor)) = (start_at, resume_cursor) {
+            let mut resumed_from_cookie = false;
+            if RootStamp::from(root.metadata()?) == cursor.root
+                && entries.seek(cursor.position).is_ok()
+            {
+                let entry_offset = entries.position()?;
+                if let Some(entry) = entries.next() {
+                    let name = entry?;
+                    let metadata = root.metadata_at(&name, false);
+                    if root.current_path()?.join(&name) == start
+                        && metadata.is_ok_and(|metadata| {
+                            CandidateIdentity::from(metadata) == cursor.candidate
+                        })
+                    {
+                        pending = Some((name, entry_offset));
+                        resumed_from_cookie = true;
+                    }
+                }
+            }
+            if !resumed_from_cookie {
+                entries = root.entries()?;
+                if let Some(name) = start.file_name().map(OsStr::to_os_string)
+                    && root
+                        .metadata_at(&name, false)
+                        .is_ok_and(|metadata| CandidateIdentity::from(metadata) == cursor.candidate)
+                {
+                    priority_path = Some(start.to_owned());
+                    priority_pending = Some((name, DirectoryPosition::default()));
+                }
+            }
+        }
+        let resume_path = resume_cursor.and(start_at);
+        loop {
+            let (name, entry_offset, is_priority) = match priority_pending.take() {
+                Some((name, offset)) => (name, offset, true),
+                None => match pending.take() {
+                    Some((name, offset)) => (name, offset, false),
+                    None => {
+                        let entry_offset = entries.position()?;
+                        let Some(name) = entries.next() else {
+                            break;
+                        };
+                        (name?, entry_offset, false)
+                    }
+                },
+            };
+            let path = root.current_path()?.join(&name);
+            if !is_priority && priority_path.as_deref() == Some(path.as_path()) {
+                continue;
+            }
+            if cancel.is_cancelled() || should_stop() {
+                report.interrupted_at = Some(path);
+                report.continuation = archive_root_cursor(&root, entry_offset, &name)?;
+                break;
+            }
             if !name.as_bytes().starts_with(b"archive-") && !name.as_bytes().starts_with(b".stage-")
             {
                 continue;
             }
             let metadata = root.metadata_at(&name, false)?;
-            if metadata.kind != FileKind::Directory || metadata.modified_ns >= before_ns {
+            if metadata.kind != FileKind::Directory {
                 continue;
             }
-            let path = root.current_path()?.join(&name);
+            let is_resumed_candidate = resume_path == Some(path.as_path())
+                && resume_cursor
+                    .is_some_and(|cursor| CandidateIdentity::from(metadata) == cursor.candidate);
+            if metadata.modified_ns >= before_ns && !is_resumed_candidate {
+                continue;
+            }
             let tree = PayloadTree::claim(&root, &name, &metadata)?;
             let _lease = match tree.directory().try_lock_existing(
                 OsStr::new("archive.lock"),
@@ -430,17 +671,27 @@ pub fn collect_archives(
                         });
                         continue;
                     };
-                    let cancel = CancelToken::new();
-                    match super::ref_tip(context, &reference, &cancel) {
+                    if cancel.is_cancelled() || should_stop() {
+                        report.interrupted_at = Some(path);
+                        report.continuation = archive_root_cursor(&root, entry_offset, &name)?;
+                        break;
+                    }
+                    match super::ref_tip(context, &reference, cancel) {
                         Ok(None) => {}
                         Ok(Some(actual)) if actual == tip => {
+                            if cancel.is_cancelled() || should_stop() {
+                                report.interrupted_at = Some(path);
+                                report.continuation =
+                                    archive_root_cursor(&root, entry_offset, &name)?;
+                                break;
+                            }
                             if let Err(error) = execute_mutation(
                                 context,
                                 GitMutation::DeleteRef {
                                     name: reference,
                                     expected_old_oid: tip,
                                 },
-                                &cancel,
+                                cancel,
                             ) {
                                 report.errors.push(RetentionIssue {
                                     path: path.clone(),
@@ -464,24 +715,53 @@ pub fn collect_archives(
                 }
             }
 
-            fn visit(tree: &PayloadTree, dry: bool) -> Result<u64, FsError> {
+            fn visit(
+                tree: &PayloadTree,
+                dry: bool,
+                cancel: &CancelToken,
+                should_stop: &mut dyn FnMut() -> bool,
+            ) -> Result<Option<u64>, FsError> {
                 let mut bytes = 0_u64;
                 for name in tree.entries()? {
+                    if cancel.is_cancelled() || should_stop() {
+                        return Ok(None);
+                    }
                     let name = name?;
                     let metadata = tree.metadata_at(&name)?;
                     bytes = bytes.saturating_add(metadata.allocated);
                     if metadata.kind == FileKind::Directory {
-                        bytes = bytes.saturating_add(visit(&tree.child(&name)?, dry)?);
+                        let Some(child_bytes) =
+                            visit(&tree.child(&name)?, dry, cancel, should_stop)?
+                        else {
+                            return Ok(None);
+                        };
+                        bytes = bytes.saturating_add(child_bytes);
                         if !dry {
+                            if cancel.is_cancelled() || should_stop() {
+                                return Ok(None);
+                            }
                             tree.rmdir(&name)?;
                         }
                     } else if !dry {
+                        if cancel.is_cancelled() || should_stop() {
+                            return Ok(None);
+                        }
                         tree.unlink(&name)?;
                     }
                 }
-                Ok(bytes)
+                Ok(Some(bytes))
             }
-            let bytes = metadata.allocated.saturating_add(visit(&tree, dry_run)?);
+            let Some(visited_bytes) = visit(&tree, dry_run, cancel, should_stop)? else {
+                report.interrupted_at = Some(path);
+                report.continuation = archive_root_cursor(&root, entry_offset, &name)?;
+                break;
+            };
+            let bytes = metadata.allocated.saturating_add(visited_bytes);
+            if cancel.is_cancelled() || should_stop() {
+                report.interrupted_at = Some(path);
+                report.continuation = archive_root_cursor(&root, entry_offset, &name)?;
+                break;
+            }
             if !dry_run {
                 root.rmdir(&name)?;
                 root.sync()?;

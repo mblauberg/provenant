@@ -307,14 +307,14 @@ pub struct HostHolder<'a> {
 }
 
 /// Resolve host identity and configuration once, sharing the context with the
-/// relay. Only the graph journal is reread during census, including after exit.
+/// relay. Settlement cleanup needs no further graph state: graph children are
+/// separate attempts and never among this lane's cleanup candidates (#3568).
 struct BoundFabric {
     holder_context: Vec<u8>,
     source: Result<Option<HolderFabric>, String>,
 }
 struct HolderFabric {
     context: Arc<crate::fabric::Context>,
-    reference: String,
 }
 impl HolderFabric {
     fn open(raw: &[u8]) -> Result<Option<Self>, Box<dyn std::error::Error>> {
@@ -333,14 +333,12 @@ impl HolderFabric {
         if ctx.identity.project != context.project_id {
             return Err("Fabric custody project mismatch".into());
         }
-        let reference = format!("{}/{}", ctx.identity.host, context.attempt_id);
         ctx.identity.inbox = provenant_fabric_runtime::identity::Address::new(
             ctx.identity.host,
             &format!("lane-{}", context.attempt_id),
         )?;
         Ok(Some(Self {
             context: Arc::new(ctx),
-            reference,
         }))
     }
 }
@@ -438,48 +436,7 @@ impl Drop for HostHolder<'_> {
         let _ = self.stop();
     }
 }
-/// Read retained graph state after the relay has closed, including children
-/// submitted before provider exit and descendants of composite children.
-fn live_graph_children(
-    state: &provenant_core::StateRoot,
-    project: provenant_core::ProjectId,
-    reference: &str,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    use provenant_fabric_runtime::graph::{FileJournal, NodeState, relay};
-    for id in FileJournal::pending_graph_ids(state, project)? {
-        let checkpoint = match FileJournal::read_checkpoint(state, project, &id) {
-            Ok(Some(checkpoint)) => checkpoint,
-            Ok(None) => return Err("missing graph checkpoint".into()),
-            Err(error) => return Err(error.into()),
-        };
-        if let Some(parent) = relay::historical_parent_of_attempt(&checkpoint, reference) {
-            let prefix = format!("{parent}--");
-            if checkpoint.nodes.iter().any(|node| {
-                node.id.starts_with(&prefix)
-                    && matches!(node.state, NodeState::Pending | NodeState::Running)
-            }) {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
 impl Holder for HostHolder<'_> {
-    fn has_live_children(&self, raw: &[u8]) -> custody::Result<bool> {
-        let read = || -> Result<bool, Box<dyn std::error::Error>> {
-            let Some(fabric) = self.fabric(raw)? else {
-                return Ok(false);
-            };
-            live_graph_children(
-                &fabric.context.roots.state,
-                fabric.context.identity.project,
-                &fabric.reference,
-            )
-        };
-        read().map_err(|error| custody::CustodyError::Io(std::io::Error::other(error.to_string())))
-    }
-
     fn admit(&self, raw: &[u8], attempt: &Directory) -> custody::Result<()> {
         self.inner.admit(raw, attempt)?;
         let (context, store) = run::HolderContext::open(raw)
@@ -571,6 +528,10 @@ impl Holder for HostHolder<'_> {
         let Some(fabric) = self.fabric(raw)? else {
             return Ok(());
         };
+        let guardian = super::nested_authority::current_guardian_identity();
+        let authorise_graph = move |peer_pid| {
+            super::nested_authority::caller_is_guardian_descendant(peer_pid, guardian.as_ref())
+        };
         *self
             .fabric_relay
             .lock()
@@ -580,6 +541,7 @@ impl Holder for HostHolder<'_> {
                 Arc::clone(&fabric.context),
                 self.graph_wake.clone(),
                 self.graph_read.clone(),
+                authorise_graph,
             )
             .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?,
         );
@@ -1328,19 +1290,14 @@ mod tests {
 
     // Spec: docs/specs/fabric.md#custody-and-cursors
     #[test]
-    fn custody_reads_live_graph_children_after_parent_exit()
+    fn custody_fabric_binding_survives_checkout_and_config_changes()
     -> Result<(), Box<dyn std::error::Error>> {
         if super::super::tests::reexec_test_in_lane(
-            "run::holder::tests::custody_reads_live_graph_children_after_parent_exit",
+            "run::holder::tests::custody_fabric_binding_survives_checkout_and_config_changes",
         )? {
             return Ok(());
         }
-        use provenant_fabric_runtime::graph::{
-            FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
-        };
-        use serde_json::json;
         let temp = tempfile::tempdir()?;
-        let clock = SystemClock::new();
         let root = std::fs::canonicalize(temp.path())?;
         let home = root.join("home");
         let checkout = root.join("checkout");
@@ -1387,64 +1344,12 @@ mod tests {
         }
         let holder = HostHolder::new(&UnusedHolder);
         let raw = serde_json::to_vec(&holder_context)?;
-        let reference = format!("{}/{}", ctx.identity.host, holder_context.attempt_id);
-        assert!(!holder.has_live_children(&raw)?);
-        // Once resolved, census must not need Git, the checkout or config again.
+        assert!(holder.fabric(&raw)?.is_some());
+        // Once resolved, the holder's fabric no longer needs Git, the checkout
+        // or config again.
         std::fs::rename(&checkout, root.join("moved-checkout"))?;
         std::fs::write(state.as_path().join("config.toml"), b"invalid = [")?;
-        let cancel = CancelToken::new();
-        let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 5)?;
-        let mut journal = FileJournal::open(state, project, "custody", budget, &cancel, &clock)?;
-        let document: GraphDocument = serde_json::from_value(json!({
-            "schema_version":2,"graph_id":"custody",
-            "nodes":[{"id":"parent","access":"read_only","prompt":"Go","route":{"alias":"senior"}}]
-        }))?;
-        journal.bind(GraphExecution {
-            peer_origin_context: None,
-            peer_submission_digest: None,
-            requester_path: None,
-            extra: Default::default(),
-            bases: None,
-            directory: temp.path().to_path_buf(),
-            document,
-        })?;
-        for status in [
-            "pending",
-            "running",
-            "succeeded",
-            "failed",
-            "blocked",
-            "skipped",
-        ] {
-            let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-                "schema_version":2,"graph_id":"custody","plan_digest":"fixture",
-                "nodes":[{"id":"parent","state":"succeeded","attempts":[{
-                    "launched":true,"key":{"graph_id":"custody","node_id":"parent","route_index":0, "attempt": 1},
-                    "route":{"alias":"senior"},"state":"terminal","attempt_ref":reference,
-                    "outcome":null,"launch_actor":"fixture"
-                }]}, {"id":"parent--child--grandchild","state":status,"attempts":[]},
-                {"id":"parental--other","state":"running","attempts":[]}]
-            }))?;
-            journal.prepare_fixture_checkpoint(&mut checkpoint)?;
-            journal.save(&checkpoint)?;
-            assert_eq!(
-                holder.has_live_children(&raw)?,
-                matches!(status, "pending" | "running"),
-                "{status}"
-            );
-            assert!(!live_graph_children(state, project, "host/other-attempt")?);
-        }
-        drop(journal);
-        std::fs::write(
-            state
-                .as_path()
-                .join("fabric/graphs")
-                .join(project.to_string())
-                .join("graph-custody.json"),
-            b"broken checkpoint",
-        )?;
-        // A corrupt checkpoint is surfaced, never read as settled (state.md).
-        assert!(holder.has_live_children(&raw).is_err());
+        assert!(holder.fabric(&raw)?.is_some());
         let mut other = holder_context;
         other.attempt_id = AttemptId::from_bytes([5; 16]);
         assert!(matches!(

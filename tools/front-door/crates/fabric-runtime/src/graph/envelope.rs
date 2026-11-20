@@ -65,10 +65,11 @@ pub(super) fn admit_with_limit(
     }
 }
 
+/// The greatest wall time the wire accepts, used for worst-case wire lengths.
+/// `WallTime::MAX` is a compile-time-validated constant, so there is no parse
+/// to fail and no epoch fallback that could hide a wrong bound.
 pub(super) fn latest() -> provenant_core::WallTime {
-    provenant_core::WallTime::parse("9999-12-30T22:00:00.999999Z")
-        .or_else(|_| provenant_core::WallTime::from_micros(0))
-        .unwrap_or_else(|_| unreachable!("the epoch is a valid wall time"))
+    provenant_core::WallTime::MAX
 }
 
 /// Worst-case link: the IDs, session and deadline of one ask. The question and
@@ -298,6 +299,7 @@ fn node_bound(
         repair_growth: None,
         review_verdict_correction_refused: None,
         provisioned_source: None,
+        provisioned_owner: None,
         warnings: Vec::new(),
         removed_requirements: node.removed_requirements.clone(),
         fragment: (plans::agent(node) && !admitted).then(String::new),

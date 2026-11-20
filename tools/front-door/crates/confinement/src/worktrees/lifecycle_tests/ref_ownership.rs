@@ -654,3 +654,111 @@ fn leased_ref_deletion_keeps_a_moved_or_checked_out_branch() -> Result<(), Box<d
     assert_eq!(ref_tip(&context, &reference, &cancel())?, None);
     Ok(())
 }
+
+#[test]
+fn prepared_branch_delete_observes_worktree_added_after_initial_inventory()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = Fixture::new()?;
+    fixture.executor = provenant_os::exec::SystemExecutor::new(1)?;
+    fixture.run(&["branch", "lane/race-add-first"])?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let reference = GitRefName::branch("lane/race-add-first")?;
+    let path = fixture._temp.path().join("race-add-first");
+    let path = path.to_str().ok_or("non-UTF8 test path")?;
+    let eligible = || {
+        fixture
+            .run(&["worktree", "add", path, "lane/race-add-first"])
+            .map(|_| ())
+            .map_err(|_| WorktreeError::InvalidRequest)
+    };
+
+    assert_eq!(
+        delete_ref_leased_when(&context, &reference, fixture.head()?, &cancel(), &eligible)?,
+        RefDeletion::CheckedOut
+    );
+    assert!(branch_exists(&fixture, "lane/race-add-first"));
+    let inventory = fixture.run(&["worktree", "list", "--porcelain"])?;
+    assert!(
+        String::from_utf8_lossy(&inventory.stdout.bytes)
+            .contains("branch refs/heads/lane/race-add-first")
+    );
+    Ok(())
+}
+
+#[test]
+fn prepared_branch_delete_keeps_a_tip_moved_after_its_precheck() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    fixture.run(&["branch", "lane/race-tip"])?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let reference = GitRefName::branch("lane/race-tip")?;
+    let expected = fixture.head()?;
+    fixture.run(&["commit", "--allow-empty", "-m", "move branch tip"])?;
+    let moved = fixture.head()?;
+    let move_after_precheck = || {
+        fixture
+            .run(&["branch", "-f", "lane/race-tip", &moved.to_string()])
+            .map(|_| ())
+            .map_err(|_| WorktreeError::InvalidRequest)
+    };
+
+    assert_eq!(
+        delete_ref_leased_when(
+            &context,
+            &reference,
+            expected,
+            &cancel(),
+            &move_after_precheck,
+        )?,
+        RefDeletion::Changed
+    );
+    assert_eq!(ref_tip(&context, &reference, &cancel())?, Some(moved));
+    Ok(())
+}
+
+#[test]
+fn prepared_branch_delete_locks_out_a_later_worktree_add() -> Result<(), Box<dyn Error>> {
+    let mut fixture = Fixture::new()?;
+    fixture.executor = provenant_os::exec::SystemExecutor::new(1)?;
+    fixture.run(&["branch", "lane/race-delete-first"])?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let reference = GitRefName::branch("lane/race-delete-first")?;
+    let expected = fixture.head()?;
+    let path = fixture._temp.path().join("race-delete-first");
+    let path = path.to_str().ok_or("non-UTF8 test path")?;
+    let contender = provenant_os::exec::SystemExecutor::new(1)?;
+    let env = crate::test_support::fixture_env(&fixture.home, fixture._temp.path());
+    let mut add_succeeded = None;
+    let mut add_during_prepare = || {
+        add_succeeded = Some(
+            crate::test_support::run_fixture_git(
+                &contender,
+                &fixture.git,
+                &fixture.root,
+                &env,
+                &["worktree", "add", path, "lane/race-delete-first"],
+            )
+            .is_ok(),
+        );
+    };
+    let eligible = || Ok(());
+
+    assert_eq!(
+        super::super::removal::delete_ref_leased_when_with_prepare_hook(
+            &context,
+            &reference,
+            expected,
+            &cancel(),
+            &eligible,
+            &mut add_during_prepare,
+        )?,
+        RefDeletion::Removed
+    );
+    assert_eq!(add_succeeded, Some(false));
+    assert!(!branch_exists(&fixture, "lane/race-delete-first"));
+    let inventory = fixture.run(&["worktree", "list", "--porcelain"])?;
+    assert!(!String::from_utf8_lossy(&inventory.stdout.bytes).contains(path));
+    Ok(())
+}

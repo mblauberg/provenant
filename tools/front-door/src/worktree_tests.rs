@@ -217,7 +217,7 @@ pub fn main() -> std::process::ExitCode {
                 crate::dispatch(provenant_cli::parse(args), &Fixture)
             }))
         }
-        Some("--state-dir" | "internal") => {
+        Some("--state-dir" | "internal" | "admit") => {
             let code = crate::dispatch(provenant_cli::parse(args), &Fixture);
             // A fixture-only observation after the real command has rendered.
             if let Some(path) = std::env::var_os("FIXTURE_LAND_CWD_FILE") {
@@ -278,7 +278,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_dispatch_uses_lane_cache_and_narrow_provider_state",
             "writer_graph_output_preserves_lens_diff_base",
             "writer_dispatch_edits_a_linked_worktree",
-            "second_writer_is_refused_while_first_holds_the_worktree",
+            "shared_holders_both_launch_and_removal_refused_while_holder_is_live",
             "writer_settlement_merges_upstream_advance",
             "writer_terminal_refuses_sequencer_state",
             "writer_production_plan_denies_outside_writes",
@@ -293,7 +293,10 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks",
             "gc_reports_transient_and_preserves_unobserved_project_array",
             "gc_pressure_collects_only_the_selected_primary_project",
-            "gc_refuses_bare_projects_and_their_linked_checkout_fallback",
+            "gc_sweep_budget_stops_then_resumes",
+            "gc_preview_reports_import_pins_and_apply_removes_them",
+            "gc_refuses_unbound_bare_projects",
+            "gc_collects_bound_bare_worktrees",
             "provider_retention_classes_sweep_host_and_refuse_replaced_roots",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
             "merged_pruning_deletes_a_merged_branch_without_a_worktree",
@@ -379,8 +382,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "writer_dispatch_edits_a_linked_worktree" => {
                     writer_dispatch_edits_a_linked_worktree()
                 }
-                "second_writer_is_refused_while_first_holds_the_worktree" => {
-                    second_writer_is_refused_while_first_holds_the_worktree()
+                "shared_holders_both_launch_and_removal_refused_while_holder_is_live" => {
+                    shared_holders_both_launch_and_removal_refused_while_holder_is_live()
                 }
                 "writer_settlement_merges_upstream_advance" => {
                     writer_settlement_merges_upstream_advance()
@@ -414,7 +417,12 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                     crate::provider_retention::provider_retention_classes_sweep_host_and_refuse_replaced_roots()
                 }
                 "gc_pressure_collects_only_the_selected_primary_project" => gc_pressure_collects_only_the_selected_primary_project(),
-                "gc_refuses_bare_projects_and_their_linked_checkout_fallback" => gc_refuses_bare_projects_and_their_linked_checkout_fallback(),
+                "gc_sweep_budget_stops_then_resumes" => gc_sweep_budget_stops_then_resumes(),
+                "gc_preview_reports_import_pins_and_apply_removes_them" => {
+                    gc_preview_reports_import_pins_and_apply_removes_them()
+                }
+                "gc_refuses_unbound_bare_projects" => gc_refuses_unbound_bare_projects(),
+                "gc_collects_bound_bare_worktrees" => gc_collects_bound_bare_worktrees(),
                 "gc_reports_transient_and_preserves_unobserved_project_array" => gc_reports_transient_and_preserves_unobserved_project_array(),
                 "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks" => {
                     scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks()
@@ -580,18 +588,36 @@ pub(super) fn writer_backend_available() -> Result<bool> {
     }
 }
 
-/// Run Git as the lane does: against its private view of refs and objects,
-/// bound to the writer worktree.
-fn lane_git(rig: &TestRig, scratch: &Path, worktree: &Path, args: &[&str]) -> Result<String> {
-    let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
-    let common = scratch.join("git-common");
+/// Run Git against a live attempt's private ref and object view, bound to its
+/// worktree. Every writer attempt commits to its own candidate Git; settlement
+/// verifies and publishes it into the host branch.
+fn lane_git(
+    rig: &TestRig,
+    context: &provenant_run::ExecutionContext,
+    attempt: provenant_core::AttemptId,
+    worktree: &Path,
+    args: &[&str],
+) -> Result<String> {
+    let git =
+        provenant_os::git::resolve_git_executable(None).ok_or("Git executable unavailable")?;
+    let candidate = context
+        .state_root
+        .as_path()
+        .join("attempts")
+        .join(attempt.to_string())
+        .join("tmp/candidate-0");
+    let common = candidate.join("git-common");
     let binding = [
         format!("GIT_DIR={}", common.display()),
         format!("GIT_COMMON_DIR={}", common.display()),
         format!("GIT_WORK_TREE={}", worktree.display()),
         format!(
             "GIT_OBJECT_DIRECTORY={}",
-            scratch.join("git-objects").display()
+            candidate.join("git-objects").display()
+        ),
+        format!(
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES={}",
+            rig.project.join(".git/objects").display()
         ),
         "GIT_AUTHOR_NAME=Lane".to_owned(),
         "GIT_AUTHOR_EMAIL=lane@example.invalid".to_owned(),
@@ -625,9 +651,6 @@ impl provenant_supervisor::Holder for FixtureHolder<'_> {
     // Every defaulted method must forward: a swallowed `outcome` leaves the
     // record non-terminal, so the wrapped `terminal` refuses and settlement
     // retries until the test times out.
-    fn has_live_children(&self, context: &[u8]) -> provenant_supervisor::custody::Result<bool> {
-        self.0.has_live_children(context)
-    }
     fn provider_exited(
         &self,
         context: &[u8],
@@ -1022,6 +1045,7 @@ impl provenant_run::Providers for WriterProvider {
                     .unwrap(),
                     cargo_target_seed: false,
                     state_root: self.state.clone(),
+                    roots: None,
                     sandbox: provenant_confinement::run_config::SandboxMode::required(
                         true,
                         true,
@@ -1030,6 +1054,8 @@ impl provenant_run::Providers for WriterProvider {
                     ),
                     backend: None,
                     cargo_target: Default::default(),
+                    cargo_cache_budget: None,
+                    cargo_target_protection: Default::default(),
                 }),
                 observed_head: None,
                 repository: None,
@@ -1189,27 +1215,24 @@ fn assert_terminal_outcome(
     Ok(())
 }
 
+/// Terminal publication precedes the guardian's release of the reservation. The
+/// guardian notices a holder's exit by event and otherwise at its five-second
+/// full-census backstop, so the wait is an upper bound on that state change, not
+/// a pause: it returns the moment the reservation list is empty.
+const WRITER_RELEASE_BOUND: Duration = Duration::from_secs(20);
+
 pub(super) fn wait_for_writer_release(store: &provenant_run::RunStore) -> Result {
-    let mut failure = None;
-    let released = provenant_test_support::wait_for(
+    let observed = provenant_test_support::wait_for(
         "writer reservation release",
-        Duration::from_secs(5),
-        || match store.writer_fences() {
-            Ok(fences) => fences.is_empty(),
-            Err(error) => {
-                failure = Some(error);
-                true
-            }
-        },
-        |done| *done,
+        WRITER_RELEASE_BOUND,
+        || store.writer_fences(),
+        |fences| fences.as_ref().map_or(true, Vec::is_empty),
     )
-    .is_ok();
-    if let Some(error) = failure {
-        return Err(error.into());
-    }
-    released
-        .then_some(())
-        .ok_or_else(|| "writer reservation was not released after terminal publication".into())
+    .map_err(|error| {
+        format!("writer reservation was not released after terminal publication: {error}")
+    })?;
+    observed?;
+    Ok(())
 }
 
 struct ReleaseOnDrop(PathBuf);
@@ -1348,6 +1371,7 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
     let worktree = verify_worktree(&repo, path)?;
     let branch = GitRefName::new(format!("refs/heads/{branch}"))?;
     let credentials = provenant_core::CredentialRoots::for_home(&rig.home);
+    provenant_confinement::worktrees::acquire_worktree_subject(worktree.repo())?;
     let authority =
         WorktreeWriteAuthority::for_worktree(&worktree, &branch, &rig.home, &credentials)?;
     prepare_writer_directories(&worktree, &branch, &authority, &rig.home, &credentials)?;
