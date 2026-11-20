@@ -155,15 +155,6 @@ impl RunStore {
     }
 }
 
-/// Redact decoded handoff values before a graph consumes local or peer output.
-pub fn sanitise_handoff(handoff: &Handoff) -> Result<Handoff> {
-    transform_handoff(handoff, |text| {
-        let safe = provenant_redact::known_shapes(text.as_bytes())
-            .map_err(|_| RunError::Validation("handoff redaction failed"))?;
-        String::from_utf8(safe).map_err(|_| RunError::Validation("handoff UTF-8"))
-    })
-}
-
 /// Attach the sealed write-scope evidence to the in-memory handoff view. The
 /// original `handoff.json` is an immutable provider snapshot, so derived scope
 /// facts are never resealed over it. Oversized full reports fall back to a
@@ -199,47 +190,9 @@ pub(crate) fn attach_scope_report(attempt: &Directory, handoff: &Handoff) -> Res
     validate_handoff(&compact)
 }
 
-fn walk_handoff_value(
-    value: &mut serde_json::Value,
-    transform: &mut impl FnMut(&str) -> Result<String>,
-) -> Result<()> {
-    match value {
-        serde_json::Value::String(text) => *text = transform(text)?,
-        serde_json::Value::Array(items) => {
-            for item in items {
-                walk_handoff_value(item, transform)?;
-            }
-        }
-        serde_json::Value::Object(fields) => {
-            for (key, mut value) in std::mem::take(fields) {
-                let key = transform(&key)?;
-                walk_handoff_value(&mut value, transform)?;
-                if fields.insert(key, value).is_some() {
-                    return Err(RunError::Validation("handoff field collision"));
-                }
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
 fn validate_handoff(handoff: &Handoff) -> Result<Handoff> {
     let bytes =
         serde_json::to_vec(handoff).map_err(|_| RunError::Validation("handoff encoding"))?;
-    Handoff::from_json(&bytes).map_err(RunError::Handoff)
-}
-
-/// Transform decoded values and object keys, including nested forward fields,
-/// then revalidate both field and total bounds after any replacement growth.
-pub(crate) fn transform_handoff(
-    handoff: &Handoff,
-    mut transform: impl FnMut(&str) -> Result<String>,
-) -> Result<Handoff> {
-    let mut value =
-        serde_json::to_value(handoff).map_err(|_| RunError::Validation("handoff encoding"))?;
-    walk_handoff_value(&mut value, &mut transform)?;
-    let bytes = serde_json::to_vec(&value).map_err(|_| RunError::Validation("handoff encoding"))?;
     Handoff::from_json(&bytes).map_err(RunError::Handoff)
 }
 
@@ -266,33 +219,6 @@ fn read_snapshot(attempt: &Directory) -> Result<Option<HandoffResult>> {
         })
     })
     .transpose()
-}
-
-/// Errors and retained fields are provider output too: redact their keys and
-/// values before persistence or disclosure, just as for a complete handoff.
-pub fn sanitise_handoff_result(handoff: HandoffResult) -> HandoffResult {
-    match handoff {
-        Ok(Some(handoff)) => sanitise_handoff(&handoff)
-            .map(Some)
-            .map_err(|error| match error {
-                RunError::Handoff(error) => error,
-                _ => HandoffError::new("$", "handoff redaction failed"),
-            }),
-        Ok(None) => Ok(None),
-        Err(error) => {
-            let mut value = serde_json::json!(error);
-            let safe = walk_handoff_value(&mut value, &mut |text: &str| {
-                let safe = provenant_redact::known_shapes(text.as_bytes())
-                    .map_err(|_| RunError::Validation("handoff error redaction failed"))?;
-                String::from_utf8(safe).map_err(|_| RunError::Validation("handoff error UTF-8"))
-            });
-            if safe.is_err() {
-                return Err(HandoffError::new("$", "handoff error redaction failed"));
-            }
-            Err(serde_json::from_value(value)
-                .unwrap_or_else(|_| HandoffError::new("$", "handoff error redaction failed")))
-        }
-    }
 }
 
 /// The verification and slot-wait rules every writer lane is told. A writer's `cargo` commands
@@ -356,11 +282,53 @@ impl LaneLocation {
 /// Optional preamble overrides. Default uses the targeted verification paragraph.
 #[derive(Clone, Debug, Default)]
 pub struct PreambleExtras {
+    pub route: Option<provenant_records::run::RouteRecord>,
     pub location: Option<LaneLocation>,
     pub verification: Option<crate::VerificationResolution>,
     pub build_cap: Option<BuildCap>,
     pub cargo_target: Option<crate::ResolvedCargoTarget>,
     pub cargo_cache_budget: Option<provenant_config::CargoCacheBudget>,
+}
+
+/// Format an applied route without repeating a provider already on the model.
+pub fn route_label(
+    provider: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Option<String> {
+    let model = model?;
+    let mut label = match provider {
+        Some(provider) if !model.starts_with(&format!("{provider}/")) => {
+            format!("{provider}/{model}")
+        }
+        _ => model.to_owned(),
+    };
+    if let Some(effort) = effort {
+        label.push('@');
+        label.push_str(effort);
+    }
+    Some(label)
+}
+
+fn route_preamble(route: &provenant_records::run::RouteRecord) -> String {
+    let Some(label) = route_label(
+        route.provider.as_deref(),
+        route.model.as_deref(),
+        route.effort.as_deref(),
+    ) else {
+        return String::new();
+    };
+    let account = route
+        .account_label
+        .as_ref()
+        .map(|account| format!(", account {account}"))
+        .unwrap_or_default();
+    let source = route
+        .source
+        .as_ref()
+        .map(|source| format!(" (source {source})"))
+        .unwrap_or_default();
+    format!("Route: {label}{account}{source}\n")
 }
 
 fn slot_guidance(cap: Option<BuildCap>) -> String {
@@ -454,8 +422,13 @@ pub fn lane_preamble_with(
         })
         .unwrap_or_default();
     format!(
-        "{model_guidance}\n{}{writer}{}{READING_GUIDANCE}Shared notes: `provenant notes add [--tag T] [--scope GRAPH/NODE] -- TEXT`; `provenant notes read` reads new observations; use `--replay` to replay. Notes are unverified claims by default.\n",
+        "{model_guidance}\n{}{writer}{}{}{READING_GUIDANCE}Shared notes: `provenant notes add [--tag T] [--scope GRAPH/NODE] -- TEXT`; `provenant notes read` reads new observations; use `--replay` to replay. Notes are unverified claims by default.\n",
         limits.preamble(),
+        extras
+            .route
+            .as_ref()
+            .map(route_preamble)
+            .unwrap_or_default(),
         handoff.map(handoff_progress_guidance).unwrap_or_default()
     )
 }
@@ -545,6 +518,33 @@ mod tests {
         };
         assert!(!bare.preamble().contains("primary checkout"));
         assert!(bare.preamble().contains("/repo/.worktrees/fix-1"));
+    }
+
+    #[test]
+    fn preamble_reports_applied_route_verbatim_and_omits_unknown_parts() {
+        let mut route = provenant_records::run::RouteRecord {
+            provider: Some("claude".into()),
+            model: Some("opus[1m]".into()),
+            effort: Some("high".into()),
+            account_label: Some("work [east]".into()),
+            source: Some("pool".into()),
+            ..Default::default()
+        };
+        let extras = PreambleExtras {
+            route: Some(route.clone()),
+            ..Default::default()
+        };
+        let text = lane_preamble_with("Policy", &Default::default(), None, None, &extras);
+        assert!(text.contains("Route: claude/opus[1m]@high, account work [east] (source pool)\n"));
+        route.effort = None;
+        route.account_label = None;
+        route.source = None;
+        let extras = PreambleExtras {
+            route: Some(route),
+            ..Default::default()
+        };
+        let text = lane_preamble_with("Policy", &Default::default(), None, None, &extras);
+        assert!(text.contains("Route: claude/opus[1m]\n"));
     }
 
     #[test]

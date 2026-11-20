@@ -669,27 +669,16 @@ pub(super) fn route_label(record: &run::AttemptRecord) -> String {
             (None, effort.clone())
         }
     };
-    let Some(model) = ran
-        .and_then(|route| {
-            let model = route.model.clone()?;
-            Some(match &route.provider {
-                Some(provider) if !model.starts_with(&format!("{provider}/")) => {
-                    format!("{provider}/{model}")
-                }
-                _ => model,
-            })
-        })
-        .or(requested_model)
-    else {
-        return "unresolved".into();
-    };
-    match ran
-        .and_then(|route| route.effort.clone())
-        .or(requested_effort)
-    {
-        Some(effort) => format!("{model}@{effort}"),
-        None => model,
-    }
+    let model = ran
+        .and_then(|route| route.model.as_deref())
+        .or(requested_model.as_deref());
+    let provider = ran
+        .filter(|route| route.model.is_some())
+        .and_then(|route| route.provider.as_deref());
+    let effort = ran
+        .and_then(|route| route.effort.as_deref())
+        .or(requested_effort.as_deref());
+    run::route_label(provider, model, effort).unwrap_or_else(|| "unresolved".into())
 }
 
 /// Receipt facts shared by explicit PR opening and graph delivery. Workflow

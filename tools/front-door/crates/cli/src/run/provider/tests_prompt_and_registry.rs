@@ -986,7 +986,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         strict.overlay(&[("QUOTA_IDENTITY_UNKNOWN".into(), provenant_records::policy::Strength::Refuse)].into(), provenant_records::policy::Source::Project);
         task.profile.launch_policy = Some(strict);
         let result = super::preparation::prepare_candidates_inner(
-            &registry, &providers, &task, prompt, &paths, None, Some(&locate), None, None,
+            &registry, &providers, &task, prompt, &paths, None, Some(&locate), None, None, None,
             Some(&alter),
         );
         assert!(matches!(
@@ -1004,6 +1004,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         &paths,
         None,
         Some(&locate),
+        None,
         None,
         None,
         if unknown_identity { Some(&alter) } else { None },
