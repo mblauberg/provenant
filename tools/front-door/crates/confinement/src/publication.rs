@@ -316,8 +316,16 @@ impl Projector {
     }
 
     fn value(&self, value: &mut Value) -> Result<(), ProjectionError> {
+        self.value_with_metadata(value, false)
+    }
+
+    fn value_with_metadata(
+        &self,
+        value: &mut Value,
+        metadata: bool,
+    ) -> Result<(), ProjectionError> {
         match value {
-            Value::String(text) => {
+            Value::String(text) if !metadata => {
                 let nested = transform_documents(text, self)?;
                 let nested = mask_assignments(&nested);
                 let bytes = provenant_redact::egress_shapes(&self.exact(nested.as_bytes()))
@@ -326,7 +334,7 @@ impl Projector {
             }
             Value::Array(items) => {
                 for item in items {
-                    self.value(item)?;
+                    self.value_with_metadata(item, metadata)?;
                 }
             }
             Value::Object(map) => {
@@ -339,7 +347,7 @@ impl Projector {
                     if secret_field(&key) {
                         item = Value::String(MASK.into());
                     } else {
-                        self.value(&mut item)?;
+                        self.value_with_metadata(&mut item, metadata_field(&key))?;
                     }
                     let key = String::from_utf8(self.exact(key.as_bytes()))
                         .map_err(|_| ProjectionError::Encoding)?;
@@ -583,6 +591,10 @@ fn read_input(project: &Path, path: &str) -> Result<Vec<u8>, ProjectionError> {
 }
 
 fn collect(value: &Value, secrets: &mut Vec<Vec<u8>>) {
+    collect_with_metadata(value, secrets, false);
+}
+
+fn collect_with_metadata(value: &Value, secrets: &mut Vec<Vec<u8>>, metadata: bool) {
     match value {
         Value::Object(map) => {
             for (key, item) in map {
@@ -592,16 +604,16 @@ fn collect(value: &Value, secrets: &mut Vec<Vec<u8>>) {
                 if secret_field(key) {
                     collect_strings(item, secrets);
                 } else {
-                    collect(item, secrets);
+                    collect_with_metadata(item, secrets, metadata_field(key));
                 }
             }
         }
         Value::Array(items) => {
             for item in items {
-                collect(item, secrets);
+                collect_with_metadata(item, secrets, metadata);
             }
         }
-        Value::String(text) => {
+        Value::String(text) if !metadata => {
             visit_documents(text, &mut |value| collect(value, secrets));
         }
         _ => {}
@@ -850,12 +862,21 @@ mod tests {
     fn nested_metadata_containers_do_not_hide_credentials() {
         let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         let projector = Projector::new([]).unwrap();
-        let input = br#"{"model":{"token":"fixture-private-value"},"source":[{"message":"fixture-private-value"}],"name":"ghp_abcdefghijklmnopqrstuvwxyz0123456789"}"#;
+        let input = br#"{"model":{"token":"fixture-private-value"},"source":[{"message":"fixture-private-value"}],"name":"ghp_abcdefghijklmnopqrstuvwxyz0123456789","paths":["ordinary", "ghp_abcdefghijklmnopqrstuvwxyz0123456789", ["fixture-private-value", {"token":"nested-secret"}], "{\"token\":\"embedded-value\"}"],"message":"embedded-value"}"#;
         let result = projector.json(Destination::FixtureExport, input).unwrap();
         let value: Value = serde_json::from_slice(result.bytes()).unwrap();
         assert_eq!(value["model"]["token"], "[REDACTED]");
         assert_eq!(value["source"][0]["message"], "[REDACTED]");
         assert_eq!(value["name"], "ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+        assert_eq!(value["paths"][0], "ordinary");
+        assert_eq!(
+            value["paths"][1],
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+        );
+        assert_eq!(value["paths"][2][0], "fixture-private-value");
+        assert_eq!(value["paths"][2][1]["token"], "[REDACTED]");
+        assert_eq!(value["paths"][3], r#"{"token":"embedded-value"}"#);
+        assert_eq!(value["message"], "embedded-value");
     }
 
     #[test]

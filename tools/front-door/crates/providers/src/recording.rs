@@ -46,28 +46,26 @@ impl Redactor {
             &bytes,
         )?;
         *value = serde_json::from_slice(projection.bytes())?;
-        Self::shape_values(value)?;
+        Self::shape_values(value, false)?;
         Ok(())
     }
 
-    fn shape_values(value: &mut Value) -> Result<()> {
+    fn shape_values(value: &mut Value, metadata: bool) -> Result<()> {
         match value {
-            Value::String(text) => {
+            Value::String(text) if !metadata => {
                 *text = String::from_utf8(provenant_redact::egress_shapes(text.as_bytes())?)?
             }
             Value::Array(items) => {
                 for item in items {
-                    Self::shape_values(item)?;
+                    Self::shape_values(item, metadata)?;
                 }
             }
             Value::Object(map) => {
                 for (key, item) in map {
-                    if !provenant_confinement::publication::metadata_field(key)
-                        || item.is_object()
-                        || item.is_array()
-                    {
-                        Self::shape_values(item)?;
-                    }
+                    Self::shape_values(
+                        item,
+                        provenant_confinement::publication::metadata_field(key),
+                    )?;
                 }
             }
             _ => {}
@@ -177,13 +175,17 @@ mod tests {
                 .to_vec()])
             .unwrap(),
         };
-        let mut value = json!({"model":token,"account_key":token,"message":token,"source":{"token":"fixture-secret-value","name":[{"message":token}]}});
+        let mut value = json!({"model":token,"account_key":token,"message":token,"source":{"token":"fixture-secret-value","name":[{"message":token}]},"paths":["ordinary",token,[token,{"token":"fixture-nested-secret"}]]});
         redactor.value(&mut value).unwrap();
         assert_eq!(value["model"], token);
         assert_eq!(value["account_key"], token);
         assert_eq!(value["message"], "[REDACTED]");
         assert_eq!(value["source"]["token"], "[REDACTED]");
         assert_eq!(value["source"]["name"][0]["message"], "[REDACTED]");
+        assert_eq!(value["paths"][0], "ordinary");
+        assert_eq!(value["paths"][1], token);
+        assert_eq!(value["paths"][2][0], token);
+        assert_eq!(value["paths"][2][1]["token"], "[REDACTED]");
     }
 
     #[test]
