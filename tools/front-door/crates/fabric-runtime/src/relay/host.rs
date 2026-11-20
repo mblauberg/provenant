@@ -465,18 +465,18 @@ fn project_relay_prose(value: &mut Value) -> io::Result<()> {
             }
             Value::Object(map) => {
                 for (key, item) in map {
+                    if let Some(paths) = crate::hosts::handoff_field_paths(key) {
+                        crate::hosts::report_texts(item, paths, texts);
+                        continue;
+                    }
                     let prose = matches!(
                         key.as_str(),
                         "text"
                             | "message"
                             | "reason"
                             | "detail"
-                            | "note"
                             | "prompt"
                             | "body"
-                            | "remaining"
-                            | "decisions"
-                            | "verify"
                             | "warnings"
                             | "launch_warnings"
                             | "availability_warning"
@@ -806,10 +806,21 @@ mod tests {
         let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
         for mode in [provenant_redact::Mode::Off, provenant_redact::Mode::Secrets] {
             let _mode = provenant_redact::scoped(mode);
-            let mut value = serde_json::json!({"model":token,"account_key":token,"reason":token});
+            let mut value = serde_json::json!({"model":token,"account_key":token,"reason":token,"handoff":{"spec_concerns":[{"criterion":token,"claim":token,"evidence":token,"proposed_change":token,"status":"as_written"}]}});
             project_relay_prose(&mut value).unwrap();
             assert_eq!(value["model"], token);
             assert_eq!(value["account_key"], token);
+            for field in ["criterion", "claim", "evidence", "proposed_change"] {
+                assert_eq!(
+                    value["handoff"]["spec_concerns"][0][field],
+                    if mode == provenant_redact::Mode::Off {
+                        token
+                    } else {
+                        "[REDACTED]"
+                    }
+                );
+            }
+            assert_eq!(value["handoff"]["spec_concerns"][0]["status"], "as_written");
             assert_eq!(
                 value["reason"],
                 if mode == provenant_redact::Mode::Off {

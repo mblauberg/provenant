@@ -973,15 +973,7 @@ fn handoff_texts<'a>(
                 texts.push(&mut dropped.error);
             }
             for (key, value) in &mut error.retained {
-                let paths: &[&str] = match key.as_str() {
-                    "note" => &[""],
-                    "remaining" | "decisions" | "verify" => &["*"],
-                    "spec_concerns" => {
-                        &["*/criterion", "*/claim", "*/evidence", "*/proposed_change"]
-                    }
-                    _ => &[],
-                };
-                report_texts(value, paths, texts);
+                report_texts(value, handoff_field_paths(key).unwrap_or(&[]), texts);
             }
         }
         Ok(None) => {}
@@ -1077,9 +1069,19 @@ fn attempt_texts<'a, 's: 'a>(
     }
 }
 
+pub(crate) fn handoff_field_paths(key: &str) -> Option<&'static [&'static str]> {
+    match key {
+        "note" => Some(&[""]),
+        "dropped" => Some(&["*/error"]),
+        "remaining" | "decisions" | "verify" => Some(&["*"]),
+        "spec_concerns" => Some(&["*/criterion", "*/claim", "*/evidence", "*/proposed_change"]),
+        _ => None,
+    }
+}
+
 // Doctor and console are JSON views. Select their declared prose by path;
 // a coincidentally named field in an extension is still opaque metadata.
-fn report_texts<'a>(
+pub(crate) fn report_texts<'a>(
     value: &'a mut serde_json::Value,
     paths: &[&str],
     texts: &mut Vec<&'a mut String>,
@@ -1115,6 +1117,74 @@ fn report_texts<'a>(
             }
         }
         _ => {}
+    }
+}
+
+/// Collect the declared prose in a flattened output lane row.
+pub fn output_lane_texts<'a>(
+    fields: &'a mut provenant_records::ExtraFields,
+    texts: &mut Vec<&'a mut String>,
+) {
+    for (key, value) in fields {
+        let paths: &[&str] = match key.as_str() {
+            "title" | "waiting_for" | "provider_error" => &[""],
+            "settlement" | "git_import_failure" => &["reason"],
+            "budget_usage" => &["unit_detail", "notice"],
+            "delivery" => &["state/reason"],
+            "skipped_routes" => &["*/detail", "*/next"],
+            "applied_route" | "observed_route" | "requested_route" => &[
+                "availability_warning",
+                "launch_warnings/*",
+                "discovery_warnings/*",
+                "sandbox/warning",
+                "dependency_preparation/reason",
+                "project_paths/warnings/*/reason",
+                "project_paths/warnings/*/policy_message",
+                "user_skills/warnings/*/reason",
+                "tool_closure/*/reason",
+                "tool_closure/*/reasons/*",
+                "applied_access/omitted_grants/*/reason",
+            ],
+            _ => &[],
+        };
+        if key == "handoff" {
+            handoff_row_texts(value, texts);
+        } else {
+            report_texts(value, paths, texts);
+        }
+    }
+}
+
+fn handoff_row_texts<'a>(value: &'a mut serde_json::Value, texts: &mut Vec<&'a mut String>) {
+    fn fields<'a>(value: &'a mut serde_json::Value, texts: &mut Vec<&'a mut String>) {
+        if let serde_json::Value::Object(map) = value {
+            for (key, value) in map {
+                report_texts(value, handoff_field_paths(key).unwrap_or(&[]), texts);
+            }
+        }
+    }
+    if let serde_json::Value::Object(map) = value {
+        for (key, value) in map {
+            match key.as_str() {
+                "Ok" => fields(value, texts),
+                "Err" => {
+                    if let serde_json::Value::Object(error) = value {
+                        for (key, value) in error {
+                            match key.as_str() {
+                                "retained" => fields(value, texts),
+                                "dropped" => report_texts(
+                                    value,
+                                    handoff_field_paths(key).unwrap_or(&[]),
+                                    texts,
+                                ),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -1236,23 +1306,7 @@ pub fn encode_peer_response(
                 texts.extend(diagnostic.detail.iter_mut());
                 texts.extend(diagnostic.next.iter_mut());
             }
-            facade::FacadeError::DispatchRefused { reason, fact, .. } => {
-                if let Some(fact) = fact {
-                    use facade::DispatchRefusalFact;
-                    match fact {
-                        DispatchRefusalFact::GraphCycle { node }
-                        | DispatchRefusalFact::GraphWriterWorktree { node }
-                        | DispatchRefusalFact::GraphNodeLimit { node, .. } => node.project_egress(),
-                        DispatchRefusalFact::GraphExtension(cause) => {
-                            if let Some(id) = &mut cause.loop_id {
-                                id.project_egress();
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                texts.push(reason);
-            }
+            facade::FacadeError::DispatchRefused { reason, .. } => texts.push(reason),
             facade::FacadeError::InvalidInput {
                 detail: Some(detail),
             }
@@ -2167,9 +2221,13 @@ mod tests {
     }
 
     #[test]
-    fn graph_refusal_identifier_is_raw_locally_and_projected_for_peer() {
+    fn graph_refusal_identifier_remains_visible_to_peer() {
         let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-        for mode in [provenant_redact::Mode::Off, provenant_redact::Mode::Secrets] {
+        for mode in [
+            provenant_redact::Mode::Off,
+            provenant_redact::Mode::Secrets,
+            provenant_redact::Mode::Full,
+        ] {
             let _mode = provenant_redact::scoped(mode);
             let node = crate::graph::refusal::GraphIdentifier::try_from(token.to_owned()).unwrap();
             assert_eq!(node.to_string(), token);
@@ -2194,7 +2252,13 @@ mod tests {
             let projector = provenant_confinement::publication::Projector::new([]).unwrap();
             let wire =
                 String::from_utf8(encode_peer_response(response, &projector).unwrap()).unwrap();
-            assert_eq!(wire.contains(token), mode == provenant_redact::Mode::Off);
+            let value: serde_json::Value = serde_json::from_str(&wire).unwrap();
+            assert!(value.to_string().contains(token));
+            assert!(
+                value["result"]["data"]["error"]["fact"]
+                    .to_string()
+                    .contains(token)
+            );
         }
     }
 

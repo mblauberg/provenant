@@ -62,7 +62,10 @@ impl Redactor {
             }
             Value::Object(map) => {
                 for (key, item) in map {
-                    if !provenant_confinement::publication::metadata_field(key) {
+                    if !provenant_confinement::publication::metadata_field(key)
+                        || item.is_object()
+                        || item.is_array()
+                    {
                         Self::shape_values(item)?;
                     }
                 }
@@ -174,11 +177,13 @@ mod tests {
                 .to_vec()])
             .unwrap(),
         };
-        let mut value = json!({"model":token,"account_key":token,"message":token});
+        let mut value = json!({"model":token,"account_key":token,"message":token,"source":{"token":"fixture-secret-value","name":[{"message":token}]}});
         redactor.value(&mut value).unwrap();
         assert_eq!(value["model"], token);
         assert_eq!(value["account_key"], token);
         assert_eq!(value["message"], "[REDACTED]");
+        assert_eq!(value["source"]["token"], "[REDACTED]");
+        assert_eq!(value["source"]["name"][0]["message"], "[REDACTED]");
     }
 
     #[test]
