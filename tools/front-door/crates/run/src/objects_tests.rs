@@ -2015,10 +2015,12 @@ fn clear_import_refs_removes_every_attempt_pin_in_one_transaction() -> TestResul
     let marker = fixture.root.join("update-ref-attempts");
     let wrapper = fixture.root.join("counting-git");
     let shell_quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    // The executor places `--git-dir` and `-c` options before the subcommand,
+    // so count `update-ref` wherever it appears rather than assuming `$1`.
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = update-ref ]; then printf x >> {}; fi\nexec {} \"$@\"\n",
+            "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = update-ref ]; then printf x >> {}; fi\ndone\nexec {} \"$@\"\n",
             shell_quote(&marker),
             shell_quote(&fixture.git),
         ),

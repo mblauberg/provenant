@@ -1608,21 +1608,27 @@ fn gc_project(
                 actor_id: provenant_core::ActorId::from_bytes([0; 16]),
                 read_prompts: false,
             };
-            let import_pins = if let Some(store) =
-                provenant_run::RunStore::open_disk_read_only(&store_context, &call)
-                    .map_err(|error| Error::RetentionCollection(error.to_string()))?
-            {
-                provenant_run::gc_import_pins(
-                    context.utility.git_program_path(),
-                    context.repo,
-                    &store,
-                    &call,
-                    read_only,
-                )
-                .map_err(|error| Error::RetentionCollection(error.to_string()))?
-            } else {
-                0
-            };
+            let import_pins =
+                match provenant_run::RunStore::open_disk_read_only(&store_context, &call) {
+                    Ok(Some(store)) => match provenant_run::gc_import_pins(
+                        context.utility.git_program_path(),
+                        context.repo,
+                        &store,
+                        &call,
+                        read_only,
+                    ) {
+                        Ok(count) => count,
+                        Err(error) => {
+                            warn_import_pin_collection(project, &error);
+                            0
+                        }
+                    },
+                    Ok(None) => 0,
+                    Err(error) => {
+                        warn_import_pin_collection(project, &error);
+                        0
+                    }
+                };
             Ok(GcProject {
                 binding: context.binding.clone(),
                 path: project.to_owned(),
@@ -1642,6 +1648,18 @@ fn gc_project(
             })
         },
     )
+}
+
+/// An unreadable run store cannot prove which pins are settled, so the
+/// backstop keeps them all. Warn and let the rest of the sweep run: failing the
+/// project here would skip settled-lane collection and the path-based pass.
+fn warn_import_pin_collection(project: &Path, error: &(impl std::fmt::Display + ?Sized)) {
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "warning: import pin collection failed for {}: {error}",
+        project.display()
+    );
 }
 
 /// What `land` did to a merged branch's registered worktree.
