@@ -176,6 +176,30 @@ pub fn active_lane_admission(
     Ok((holders, waiters))
 }
 
+/// Ids of every live (non-terminal) lane, paged with the same bounded query as
+/// [`active_lane_admission`]. A read-only caller uses this before a release
+/// swap to name attempts that may still settle under the new format.
+pub fn live_attempt_ids(
+    store: &run::RunStore,
+    call: &run::Request<'_>,
+) -> run::Result<Vec<String>> {
+    let mut query = lane_query(false, 100, 0);
+    let mut ids = Vec::new();
+    loop {
+        let page = store.lanes(&query, call)?;
+        ids.extend(
+            page.lanes
+                .into_iter()
+                .map(|lane| lane.attempt_id.to_string()),
+        );
+        match page.next {
+            Some(next) => query.after = next,
+            None => break,
+        }
+    }
+    Ok(ids)
+}
+
 /// Project a status row using one bounded process census shared by the caller.
 /// `Err(())` records that census was unavailable, so each live attempt stays
 /// explicitly unknown instead of triggering one fresh host scan per row,
