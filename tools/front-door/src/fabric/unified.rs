@@ -2161,11 +2161,22 @@ pub(crate) fn graph_listing(
         let root = &factory.context.roots.state;
         let project = factory.context.identity.project;
         let mut graphs = Vec::new();
+        // Every graph starts as a cheap checkpoint projection. Evidence is
+        // added later only where it can change the page, so settled history
+        // does not spend the shared wait budget. Keyed by name so the page
+        // pass can find the rows for a graph after selection moves the graphs.
+        let mut projections = std::collections::BTreeMap::<String, Vec<Value>>::new();
         for name in FileJournal::graph_ids(root, project)? {
             match FileJournal::read_status_checkpoint(root, project, &name) {
                 Ok(Some(checkpoint)) => {
                     use provenant_fabric_runtime::graph::{GraphOutcome, GraphStatus};
                     let run = graph_snapshot(checkpoint);
+                    let target = GraphTarget {
+                        graph: name.clone(),
+                        node: None,
+                        attempt: None,
+                    };
+                    projections.insert(name.clone(), status_rows(&run, &target));
                     // A complete graph reads as how it ended.
                     let state = match run.outcome.filter(|_| run.status == GraphStatus::Complete) {
                         Some(outcome) => json!(outcome),
@@ -2227,43 +2238,17 @@ pub(crate) fn graph_listing(
         let now = factory.clock.wall_now()?.as_micros();
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
-        // Classify by liveness before selecting the page. A settled graph can
-        // still own a live lane, and presence is only known after enrichment.
-        // Selecting first would drop an old settled graph (one outside the
-        // window or past the display limit) before finish_listing can keep its
-        // live lanes and count it as live.
-        for graph in &mut graphs {
-            let Some(checkpoint) = FileJournal::read_status_checkpoint(root, project, &graph.name)
-                .ok()
-                .flatten()
-            else {
-                continue;
-            };
-            let target = GraphTarget {
-                graph: graph.name.clone(),
-                node: None,
-                attempt: None,
-            };
-            let mut rows = status_rows(&graph_snapshot(checkpoint), &target);
-            // Unavailable attempt/peer evidence must not hide the graph. The
-            // retained projection still explicitly marks external facts stale.
-            if let Err(error) = enrich_status_rows_within(
-                &mut rows,
-                &factory.context,
-                &factory.clock,
-                &cancel,
-                budget,
-            ) {
-                graph.reason = Some(provenant_fabric_runtime::hosts::plain_text(
-                    &format!(
-                        "{}; status evidence unavailable: {error}",
-                        graph.reason.as_deref().unwrap_or("")
-                    ),
-                    1024,
-                ));
-            }
-            graph.digests = super::graph_status::node_digests(&rows);
-        }
+        // Unavailable attempt/peer evidence must not hide a graph: the retained
+        // projection still explicitly marks external facts stale.
+        let enrich = |_name: &str, rows: &mut [Value]| {
+            enrich_status_rows_within(rows, &factory.context, &factory.clock, &cancel, budget)
+        };
+        // Classify liveness before selecting the page. Only active work and
+        // settled graphs still naming a non-terminal attempt can acquire a live
+        // lane, so only those pay for evidence up front. Selecting first would
+        // drop an old settled graph (one outside the window or past the display
+        // limit) before finish_listing can keep its live lane and count it live.
+        let enriched = enrich_liveness_candidates(&mut graphs, &mut projections, enrich);
         // Settled-but-open graphs are counted in one summary line and hidden
         // from the default listing; --full (like --all) includes their rows.
         let settled_count = graphs.iter().filter(|graph| graph.settled).count();
@@ -2274,6 +2259,20 @@ pub(crate) fn graph_listing(
             usize::try_from(command.limit).unwrap_or(usize::MAX),
             command.cursor,
         );
+        // Rows the page will show still need their full evidence for display.
+        // Skip graphs that already received it in the liveness pass.
+        for graph in &mut listing.rows {
+            if enriched.contains(&graph.name) {
+                continue;
+            }
+            let Some(rows) = projections.get_mut(&graph.name) else {
+                continue;
+            };
+            if let Err(error) = enrich(&graph.name, rows) {
+                graph.reason = Some(status_evidence_failure(graph.reason.as_deref(), &error));
+            }
+            graph.digests = super::graph_status::node_digests(rows);
+        }
         let mut finished = finish_listing(listing, settled_count, command.all || globals.full);
         if root.as_path().exists() {
             finished.admission_holders =
@@ -2477,6 +2476,66 @@ fn admission_lines(listing: &Listing, now_micros: i64) -> Vec<String> {
         ));
     }
     lines
+}
+
+/// A graph may still own a live lane when its checkpoint projection names an
+/// attempt that has not reached a terminal state (`starting`, `running` or
+/// `unresolved`). This is a cheap over-approximation: only enrichment decides
+/// whether the lane is actually live, so it is safe to enrich every match and
+/// still bound cost to the page plus the possibly-live graphs.
+fn projection_has_live_attempt(rows: &[Value]) -> bool {
+    rows.iter().any(|row| {
+        row["kind"] == "attempt"
+            && !row["attempt_id"].is_null()
+            && row["state"]
+                .as_str()
+                .is_some_and(|state| state != "terminal")
+    })
+}
+
+/// Append evidence failure to a graph's existing reason without hiding the
+/// retained projection, which still marks external facts stale.
+fn status_evidence_failure(reason: Option<&str>, error: &FacadeError) -> String {
+    provenant_fabric_runtime::hosts::plain_text(
+        &format!(
+            "{}; status evidence unavailable: {error}",
+            reason.unwrap_or("")
+        ),
+        1024,
+    )
+}
+
+/// Resolve liveness only for the graphs that can change the page: active work
+/// and settled graphs whose projection still names a non-terminal attempt. A
+/// settled graph whose attempts are all terminal can never report a live lane,
+/// so enriching it would only spend the shared wait budget on history that is
+/// about to be omitted. Returns the names that received fresh evidence so the
+/// page pass can skip rows that are already current.
+fn enrich_liveness_candidates(
+    graphs: &mut [ListedGraph],
+    projections: &mut std::collections::BTreeMap<String, Vec<Value>>,
+    mut enrich: impl FnMut(&str, &mut [Value]) -> Result<(), FacadeError>,
+) -> std::collections::BTreeSet<String> {
+    let mut enriched = std::collections::BTreeSet::new();
+    for graph in graphs.iter_mut() {
+        let Some(rows) = projections.get_mut(&graph.name) else {
+            // No checkpoint: an unreadable graph has no attempt rows.
+            continue;
+        };
+        if graph.settled && !projection_has_live_attempt(rows) {
+            // Settled history with only terminal attempts. Digests from the
+            // projection cannot report a live presence, so it is counted as
+            // omitted without any evidence read.
+            graph.digests = super::graph_status::node_digests(rows);
+            continue;
+        }
+        if let Err(error) = enrich(&graph.name, rows) {
+            graph.reason = Some(status_evidence_failure(graph.reason.as_deref(), &error));
+        }
+        graph.digests = super::graph_status::node_digests(rows);
+        enriched.insert(graph.name.clone());
+    }
+    enriched
 }
 
 /// A graph still has live work when any of its digests reports a `live`
@@ -4601,6 +4660,92 @@ mod tests {
             listing.omitted.get("settled"),
             Some(&3),
             "a window with only old settled graphs still reports the omitted total"
+        );
+    }
+
+    fn listing_attempt_row(state: &str) -> Value {
+        let key = provenant_records::WorkKey::new(
+            provenant_core::ProjectId::from_bytes([7; 16]),
+            "g",
+            "n",
+            1,
+        )
+        .expect("valid work key");
+        json!({
+            "id": "g/n#1",
+            "kind": "attempt",
+            "graph_id": "g",
+            "node_id": "n",
+            "attempt_id": "g/n#1",
+            "state": state,
+            "work_key": key,
+        })
+    }
+
+    #[test]
+    fn terminal_settled_history_is_not_enriched_and_is_counted_as_omitted() {
+        // The graph_listing path: cheap projection rows for every graph,
+        // evidence only for active work and possibly-live settled graphs, then
+        // selection and finish. The fake enricher counts which graphs pay for
+        // evidence and marks a live presence on a still-running attempt.
+        let day = provenant_cli::limits::LISTING_SETTLED_SECONDS * 1_000_000;
+        let now = 10 * day;
+        let mut graphs = vec![
+            listed("active", false, now - 1),
+            listed("recent-terminal", true, now - 1),
+            listed("old-terminal", true, now - 3 * day),
+            listed("old-live", true, now - 4 * day),
+        ];
+        let mut projections = std::collections::BTreeMap::new();
+        projections.insert("active".to_owned(), vec![listing_attempt_row("running")]);
+        projections.insert(
+            "recent-terminal".to_owned(),
+            vec![listing_attempt_row("terminal")],
+        );
+        projections.insert(
+            "old-terminal".to_owned(),
+            vec![listing_attempt_row("terminal")],
+        );
+        projections.insert("old-live".to_owned(), vec![listing_attempt_row("running")]);
+
+        let mut enriched_names = Vec::new();
+        let mut enrich = |name: &str, rows: &mut [Value]| -> Result<(), FacadeError> {
+            enriched_names.push(name.to_owned());
+            for row in rows.iter_mut() {
+                if row["kind"] == "attempt" && row["state"] == "running" {
+                    row["presence"] = json!("live");
+                }
+            }
+            Ok(())
+        };
+        let enriched =
+            super::enrich_liveness_candidates(&mut graphs, &mut projections, &mut enrich);
+        assert_eq!(
+            enriched_names,
+            ["active", "old-live"],
+            "only active work and a settled graph naming a running attempt are enriched"
+        );
+        assert_eq!(
+            enriched,
+            std::collections::BTreeSet::from(["active".to_owned(), "old-live".to_owned()])
+        );
+
+        let settled_count = graphs.iter().filter(|graph| graph.settled).count();
+        let selected = select_listing(graphs, now, false, 20, None);
+        let listing = finish_listing(selected, settled_count, false);
+        assert!(
+            listing.rows.iter().any(|row| row.name == "active"),
+            "the active graph is listed"
+        );
+        assert!(
+            listing.rows.iter().any(|row| row.name == "old-live"),
+            "the old settled graph with a live lane is still listed"
+        );
+        assert_eq!(live_lanes(&listing), 1, "only the live lane is counted");
+        assert_eq!(
+            listing.omitted.get("settled"),
+            Some(&2),
+            "both terminal settled graphs, including the one outside the page window, are omitted"
         );
     }
 
