@@ -2950,11 +2950,15 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
     let writer_path = root.join("crash-writer");
     // An unsandboxed lane is proven gone only after its guardian completed a
     // census of the tree, which a running guardian does within seconds. Wait
-    // for that record, so the loss below is the ordinary mid-run one.
+    // for that record, so the loss below is the ordinary mid-run one. This is
+    // setup, not the behaviour under test: a loaded macOS runner can delay the
+    // first census and its durable write well past a short fixed deadline, so
+    // wait generously for the condition rather than failing the whole case on
+    // scheduling latency. The custody assertions below remain unchanged.
     let reservation = writer_path
         .join(scope().attempt.to_string())
         .join("reservation.json");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while !std::fs::read(&reservation)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
