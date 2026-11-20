@@ -536,12 +536,41 @@ esac
     for expected in [
         "path=/usr/bin:/bin home=/tmp/build-home cargo_home=/tmp/cargo-home rustup_home=/tmp/rustup-home",
         "target=/tmp/build-target jobs=7 encoded=-Clink-arg=-Wl,test rustflags=-C debuginfo=0 rustdocflags=-D warnings",
-        "rustc=/toolchain/rustc rustdoc=/toolchain/rustdoc wrapper=/wrapper/rustc workspace_wrapper=/wrapper/workspace slot=build:123:456",
+        "rustc=/toolchain/rustc rustdoc=/toolchain/rustdoc wrapper=/wrapper/rustc workspace_wrapper=/wrapper/workspace slot=build:",
         "phase=build source=project attempt=unset token=unset context=unset",
     ] {
         assert!(
             log.contains(expected),
             "wrapper environment mismatch: {expected}; got {log}"
+        );
+    }
+    // The admitted process replaces the caller's placeholder with its own
+    // liveness marker (class:pid:start) before the wrapper runs. Each wrapper
+    // invocation must see that real slot identity.
+    let slots: Vec<_> = log
+        .lines()
+        .filter_map(|line| line.split_once("slot=").map(|(_, slot)| slot))
+        .collect();
+    assert_eq!(slots.len(), 4, "one slot marker per wrapper run: {log}");
+    for slot in slots {
+        let (class, identity) = slot.split_once(':').ok_or("slot must carry a class")?;
+        assert_eq!(class, "build", "slot class: {log}");
+        let mut parts = identity.split(':');
+        let pid = parts.next().ok_or("slot must carry a pid")?;
+        let start = parts.next().ok_or("slot must carry a start time")?;
+        assert!(
+            parts.next().is_none(),
+            "slot must be class:pid:start: {log}"
+        );
+        for part in [pid, start] {
+            assert!(
+                !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()),
+                "slot marker {slot:?} must use numeric pid and start: {log}"
+            );
+        }
+        assert_ne!(
+            slot, "build:123:456",
+            "the caller's placeholder must be replaced by the admitted process marker: {log}"
         );
     }
     Ok(())
@@ -711,15 +740,13 @@ fn bounded_wait_warns_and_proceeds() -> Result {
 
     assert!(finish(&mut child, Duration::from_secs(15))?);
     let stderr = stderr_of(&mut child)?;
+    // An overflow must warn with both the reason (all build slots stayed busy)
+    // and the fallback (the build proceeds without holding one).
     assert!(
-        stderr.contains("build slot unavailable, building without one")
-            || stderr.contains("admission slot unavailable, proceeding without one"),
+        stderr.contains("bounded wait ended with every build slot busy"),
         "stderr: {stderr}"
     );
-    assert!(
-        stderr.contains("bounded wait ended with every slot busy"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("building without one"), "stderr: {stderr}");
 
     // Clean up held process
     Command::new("/bin/kill")

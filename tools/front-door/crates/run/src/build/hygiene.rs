@@ -575,7 +575,13 @@ fn claim_maintenance_budget(
 fn release_maintenance_reservation(state: &Path, reservation: &MaintenanceReservation) {
     let owner = format!("{}:{}", reservation.pid, reservation.start_time);
     let _ = with_maintenance_state(state, |record| {
-        record.reservations.remove(&owner);
+        // A unit is consumed on claim, so returning the reservation must give
+        // the hour its unit back; otherwise a worker that cannot run drains
+        // the budget for everyone else. The guard keeps a stale or refunded
+        // claim from decrementing twice.
+        if record.reservations.remove(&owner).is_some() {
+            record.hour_budget_used.count = record.hour_budget_used.count.saturating_sub(1);
+        }
         Ok(())
     });
 }

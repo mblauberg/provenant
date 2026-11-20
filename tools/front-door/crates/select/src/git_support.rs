@@ -185,7 +185,6 @@ pub(super) fn load_metadata(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "scratch Git fixtures")]
 mod tests {
     use super::*;
 
@@ -195,7 +194,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         fs::create_dir(&repo).unwrap();
         let run = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = provenant_test_support::git_command()
                 .current_dir(&repo)
                 .args(args)
                 .output()
@@ -223,7 +222,7 @@ mod tests {
         )
         .unwrap();
         let invoke = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = provenant_test_support::git_command()
                 .current_dir(&repo)
                 .env("GIT_OBJECT_DIRECTORY", &objects)
                 .args(args)
@@ -244,7 +243,7 @@ mod tests {
             vec![PathBuf::from("file")]
         );
         assert!(
-            !Command::new("git")
+            !provenant_test_support::git_command()
                 .current_dir(repo)
                 .args(["cat-file", "-e", &head])
                 .status()

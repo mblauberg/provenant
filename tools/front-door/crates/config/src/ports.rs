@@ -2420,9 +2420,11 @@ mod tests {
 
         assert_eq!(table.build.source_for_leaf("strategy"), PortSource::Builtin);
         assert_eq!(table.build.source_for_leaf("offload"), PortSource::Builtin);
+        // Neither layer declares the seed leaf; it comes from the builtin asset
+        // even though another build leaf is project-sourced.
         assert_eq!(
             table.build.source_for_leaf("seed.stale_after"),
-            PortSource::Project
+            PortSource::Builtin
         );
         // Arrays replace rather than concatenate across layers.
         assert_eq!(table.build.prepare.len(), 1);
