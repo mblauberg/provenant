@@ -252,6 +252,95 @@ fn lowered_structural_limit_pauses_running_graph_until_raised() {
 }
 
 #[test]
+fn resumed_writer_settles_and_reports_head_under_structural_pause() {
+    // Spec: docs/specs/retry-owner.md#recovery-preserves-work-and-budget
+    // A supervisor restart resumes with tighter host limits. The terminal
+    // writer attempt must still advance its node and publish its final commit;
+    // a live node left behind would also pin the structural pause forever.
+    let base = "1".repeat(40);
+    let final_head = "2".repeat(40);
+
+    let mut writer = node("writer", route("first"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some(".worktrees/writer".into());
+    writer.source = Some(SourceBinding::Commit {
+        commit: base.clone(),
+    });
+    // A second node keeps the resumed graph over the one-node structural limit.
+    let sink = node("sink", route("first"));
+
+    let writer_done = AttemptObservation::Terminal {
+        attempt_ref: Some("host/writer".into()),
+        outcome: AttemptOutcome::Succeeded,
+        launched: true,
+        result: None,
+        result_warning: None,
+        result_path: None,
+        branch: Some("writer".into()),
+        commit: Some(final_head.clone()),
+        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        stop: None,
+    };
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            // Before the restart the writer and sink are still running.
+            AttemptObservation::Pending {
+                attempt_ref: Some("host/writer".into()),
+            },
+            AttemptObservation::Pending {
+                attempt_ref: Some("host/sink".into()),
+            },
+            // After the restart the writer's attempt is terminal with its
+            // final pushed commit; the sink is still running.
+            writer_done,
+            AttemptObservation::Pending {
+                attempt_ref: Some("host/sink".into()),
+            },
+        ]),
+        implicit_head: Some(base.clone()),
+        ..Default::default()
+    };
+    let document = graph(vec![writer, sink]);
+    let mut journal = MemoryJournal::default();
+    advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+
+    let lowered = crate::config::GraphLimits {
+        nodes: 1,
+        ..Default::default()
+    };
+    let run = resume_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &lowered,
+        &Default::default(),
+        &[],
+    )
+    .unwrap();
+
+    let writer = &run.checkpoint.nodes[0];
+    assert_eq!(writer.state, NodeState::Succeeded, "{writer:?}");
+    assert_eq!(
+        writer.outputs.as_ref().and_then(|out| out.commit.as_deref()),
+        Some(final_head.as_str()),
+        "head must be the writer's final commit, not the bound base"
+    );
+    // The sink is still live, so the structural pause must survive settlement.
+    assert_eq!(
+        run.checkpoint.pause_cause(),
+        Some(PauseCause::StructuralLimit),
+        "the durable structural pause must be preserved on resume"
+    );
+}
+
+#[test]
 fn fan_out_and_depth_refuse_before_publication() {
     let root = node("root", route("first"));
     let mut a = node("a", route("first"));
