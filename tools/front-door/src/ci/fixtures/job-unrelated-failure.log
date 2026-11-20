@@ -1,0 +1,13 @@
+Nextest run ID 6cf7a0c0-0e5d-4f92-a25f-2ab7c8b4c111
+FAIL [   0.213s] provenant-confinement permissions::tests::sandbox_default_changed
+
+    thread 'sandbox_default_changed' panicked at crates/confinement/src/permissions/tests/host_boundaries.rs:399:17:
+    default=allow was not expected
+
+FAIL [   0.102s] provenant-cache tests::reads_expired
+
+    thread 'reads_expired' panicked at crates/cache/src/store.rs:64:5:
+    cache entry had already expired
+
+Summary [   0.315s] 2/300 tests run: 2 failed
+error: test run failed
