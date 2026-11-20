@@ -212,8 +212,45 @@ fn monthly_pacing_is_account_eligibility_with_sourced_overrides()
     ctx.quota = &observations[..1];
     let mut pooled = request(model)?;
     pooled.choice = RouteChoice::NamedRoute(RouteName::parse("monthly-test")?);
+    let inferred = resolve(&pooled, &ctx)?;
+    assert_eq!(inferred.account_key.as_deref(), Some("b"));
+    assert!(matches!(inferred.readiness, RouteReadiness::Ready { .. }));
+    assert!(
+        inferred
+            .diagnostics
+            .account_load
+            .as_ref()
+            .ok_or("account load")?
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("account=b")
+                && warning.contains("inferred monthly cycle"))
+    );
+
+    // Both observed cycles have exhausted their pacing budget: no standby escape.
+    let all_held = [
+        monthly_quota(model, "a", 3000),
+        monthly_quota(model, "b", 3000),
+    ];
+    ctx.quota = &all_held;
     let held = resolve(&pooled, &ctx)?;
-    assert!(matches!(held.readiness, RouteReadiness::Unavailable { .. })); // No standby escape.
+    assert!(matches!(
+        held.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::PacingReserve,
+            ..
+        }
+    ));
+    for account in ["a", "b"] {
+        assert!(
+            held.diagnostics
+                .account_exclusions
+                .iter()
+                .any(|detail| detail.contains(account)
+                    && detail.contains("window=billing_cycle")
+                    && detail.contains("knob=domains.routing.pacing.monthly"))
+        );
+    }
     for (value, allowed, origin) in [
         (
             serde_json::json!({"monthly":{"burst_percent":40}}),
