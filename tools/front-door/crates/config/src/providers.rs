@@ -24,15 +24,6 @@ pub enum OutOfScopePin {
     Allow,
 }
 
-/// OpenCode profile selected for lane launches.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OpenCodeProfile {
-    #[default]
-    Host,
-    Lane,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProviderSettings {
@@ -41,7 +32,6 @@ pub struct ProviderSettings {
     /// Codex's optional suppression of inherited configuration for writers.
     /// Read-only authority still requires a clean configuration.
     pub clean_config: bool,
-    pub profile: OpenCodeProfile,
     pub out_of_scope_pin: OutOfScopePin,
     pub update: ProviderUpdate,
     pub update_interval_seconds: u64,
@@ -56,7 +46,6 @@ impl Default for ProviderSettings {
         Self {
             models: None,
             clean_config: false,
-            profile: OpenCodeProfile::default(),
             out_of_scope_pin: OutOfScopePin::default(),
             update: ProviderUpdate::default(),
             update_interval_seconds: 24 * 60 * 60,

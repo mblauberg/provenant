@@ -50,7 +50,7 @@ reads! {
     "pr contributions" => ["fabric"],
     "gc" => ["fabric"], "tick" => ["fabric", "quota", "accounts", "routing", "steward"],
     "disk" => [], "cloud" => ["accounts"], "workflow" => ["routing"],
-    "tracker" => [], "verify" => [], "check" => [], "check install" => ["accounts"],
+    "tracker" => [], "verify" => [], "build" => [], "check" => [], "check install" => ["accounts"],
     "check providers" => ["accounts", "quota", "wait", "fabric", "run", "routing", "lanes", "policy"], "hook" => ["fabric", "run", "pr"],
     "internal" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy", "steward", "wait"],
     "knobs" => [], "admit" => []

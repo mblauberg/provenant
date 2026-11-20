@@ -1044,6 +1044,30 @@ pub fn dispatch() -> io::Result<bool> {
             let mut stream = std::os::unix::net::UnixStream::connect(fixture_path(&args, 3)?)?;
             stream.write_all(b"R")?;
             writeln!(stream, "{}", std::process::id())?;
+            // The guardian decodes this frame as an immediate exit. When the
+            // caller supplies a reservation path, hold the frame until that
+            // writer reservation records a complete census, so the crash
+            // proves guardian loss only after that precondition holds. A
+            // caller with only a socket keeps the original immediate crash.
+            if let Ok(reservation) = fixture_path(&args, 4) {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    let complete = std::fs::read(&reservation)
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                        .and_then(|value| value.get("census_incomplete").and_then(|v| v.as_bool()))
+                        == Some(false);
+                    if complete {
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(io::Error::other(
+                            "guardian did not publish a complete census before the crash frame",
+                        ));
+                    }
+                    std::thread::park_timeout(std::time::Duration::from_millis(5));
+                }
+            }
             io::stdout().write_all(b"crash-guardian\n")?;
             wait_for_eof(&mut stream)?;
         }

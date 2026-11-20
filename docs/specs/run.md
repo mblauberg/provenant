@@ -110,7 +110,8 @@ or invalid table warns and runs no prepare command. A failing command fails that
 build: the project's outcome is `prepare_failed` with the command and the last
 2 KiB of the combined output in `seed-result.json` and the refresh record, while
 the operator note gives a repair and never echoes the output. The same prepare
-list runs before every seed generation build and, later, slot builds. Writer selection uses matching generations and Cargo's normal per-unit freshness checks before reusing artifacts.
+list runs before every seed generation build; the slot path runs it after
+snapshot sync, as specified in [Build strategy](#build-strategy). Writer selection uses matching generations and Cargo's normal per-unit freshness checks before reusing artifacts.
 
 A generation holds dependency units only. After `cargo build`, `cargo test --no-run` and `cargo check --workspace --all-targets --locked`, the seed build enumerates the checkout with `cargo metadata --format-version 1 --locked` using the same child environment and target overrides, and runs `cargo clean -p` for every path package it finds (packages with no `source`): workspace members and non-member path packages alike. Registry and other non-path dependencies stay in the seed, including build and check-mode units that clippy can reuse. The manifest records this as `contents: "deps"`; older generations without the marker (or with another value) hold a full build. Those older full generations are not current: refresh builds a deps-only replacement for the same identity, and lane selection skips them with the stable `full_generation` fallback instead of reusing member units whose sources can move with a lane. Collection removes full generations as obsolete outside the keep-count and whatever the keep-count is; they never displace a deps generation from a retained slot, and the removal is reported with a distinguishing `obsolete_full_generation` reason.
 
@@ -206,9 +207,211 @@ so the two outputs cannot disagree about the unit.
 
 - Why: budget enforcement must preserve completed work and report its evidence; a budget that excludes cache reads must not look unenforced beside a larger provider-reported input.
 
+## Build strategy
+
+Lane admission, verification and landing dispatch build work through one
+runtime in `crates/run/src/build/`. `build::run` is the only entry point; it
+appends exactly one `JobOutcome` row for every job, on every path. The `build.*`
+leaves are typed at read time: an unknown value warns with the leaf and its
+source and falls back to the builtin value (source `default`), so one bad leaf
+never refuses a port table. The strategy and its source are frozen in
+`PROVENANT_BUILD_CONTEXT` at lane launch; outside a lane they are read live from
+the port table.
+
+### Strategies and the job model
+
+`strategy` selects `slots`, `lane_seed`, `lane` or `command`. `lane_seed` and
+`lane` execute locally; `lane_seed` also requests target seeding at launch, as
+does `slots`. `command` prepends `build.command.argv` to the intercepted argv
+and keeps the exit-code disposition of the removed `build_admission` backend.
+`wrapper` is declared but unavailable: it warns `BUILD_STRATEGY_UNAVAILABLE`,
+names the leaf and its source, and uses `lane_seed`. One cap serves every
+strategy: `N = [admission.build].slots`, derived from cores and memory when
+unset, `0` disabling admission.
+
+A `Job` carries a project key, origin (`lane`, `chair`, `landing`,
+`maintenance`), owner, kind (`intercepted`, `tier`, `gate`, `maintenance`),
+priority, source, optional verify base, ordered steps, output mode, timeout and
+the caller's environment. Every step runs in one hold, in order. A prelude runs
+after materialisation and before the first step and returns extra environment.
+`local.rs` owns process execution for every strategy: a child process group,
+SIGINT/SIGTERM/SIGHUP forwarded to the group then SIGKILL ten seconds later, a
+timeout, bounded capture or streamed output, and code or signal exits (a
+signalled child yields 128 + signal). Nested calls detect a live ancestor slot
+and run directly, without a ticket.
+
+### Slot lifecycle and snapshot
+
+Slots live under `~/Library/Caches/provenant-slots/<project_key>/<n>/`. Under
+the held index `slot.lock` is held; custody intent is published in `job.json`
+before spawn and upgraded to the child's process identity after spawn. The
+`intent.lock` lease is inherited by the build's process tree, so an intent
+without a running marker keeps the slot occupied until that lease is free; a
+live process group named by a running `job.json` is killed (SIGTERM, five
+seconds, SIGKILL) with a warning. The slot is cloned from
+the store when absent (`--no-checkout`, `core.hooksPath=/dev/null`,
+`gc.auto=0`, objects hardlinked, never shared alternates). `build.prepare` runs
+when its argv digest differs, after the clock guard and snapshot sync and
+before the first step, so a reset re-runs it. Sync fetches the snapshot and base
+refs, checks out the snapshot with `--force --detach`, points
+`refs/remotes/<remote_ref>` at the base so `git diff origin/main...HEAD` works,
+and cleans by `build.clean`: `none`, `untracked` (`git clean -ffd`) or `ignored`
+(`git clean -ffdx`). After the steps,
+`git status --porcelain=v2 -z --untracked-files=all` fills `slot_changes`; one
+stderr line reports a nonzero count as "not copied back" and nothing is copied
+back. `slot.json`, `after_job` and lock release finish the hold.
+
+A working-tree snapshot copies the lane index file to the slot's `tmp/`
+(falling back to `read-tree HEAD`), runs `add -A`, `write-tree` and
+`rev-parse HEAD^{commit}` against that copy with optional locks off and system
+config off, then writes a commit with fixed author/committer and epoch date, so
+the same tree and parent give the same commit. The objects go into the lane's
+private object directory and reach the store by `git fetch` with
+`allowAnySHA1InWant`, reading any `info/alternates`. The lane's index, refs,
+worktree files and mtimes are never written. A `commit` source pins that commit
+as-is. Under slots, `verify --commit` and a landing gate use this path
+directly.
+
+### Job environment, output and units
+
+The job environment starts from the caller's and removes `PROVENANT_*`,
+`GIT_*`, `PWD`/`OLDPWD`, the `CARGO_*_DIR` overrides, the lane-lint target var
+and `TMPDIR`/`TMP`/`TEMP`. It sets `CARGO_TARGET_DIR` to the slot's `target/`,
+`TMPDIR` to its `tmp/`, `HOME`, `CARGO_HOME`, `RUSTUP_HOME` when known, and the
+host `PATH` without lane shim dirs, and leases a slot-local lane-port block
+from the host plan (warn and set none when none is free). Caller `RUSTFLAGS`,
+`RUSTC_WRAPPER` and `CARGO_PROFILE_*` are kept as real inputs. Stream output
+maps the slot repo path back to the worktree component by component, line by
+line, passing lines over 1 MiB through unchanged; target paths are real and
+unmapped, and no `--message-format` flag is injected. Capture output is not
+path-mapped. Unit counts come from a fingerprint census after the job:
+directories modified after the start are rebuilt, their package names fill
+`rebuilt_packages` (sorted, at most 256), and the rest are fresh. Peak RSS is
+sampled every five seconds, null when unavailable.
+
+A job runs locally under slots when it is sandboxed, its argv is not eligible,
+`offload` is `off`, staging or the pool is unavailable, the local overflow
+window ends, every slot is quarantined, or no snapshot exists. Each case
+records its `exception` and warns; an all-quarantined pool names
+`provenant build reset`. Unavailability warns and runs locally rather than
+refusing a build.
+
+### Queue
+
+`build.priority` maps job classes to `interactive`, `test`, `train` and
+`prewarm`, ordered from most to least urgent. A free slot is taken at once in
+affinity order, then by ascending index; only a busy pool writes a ticket at
+`<state>/build/queue/build/<id>.json` and holds an exclusive flock on it.
+Waiters list tickets every 80 to 120 ms, reap those whose lock is free, and
+order live tickets by effective level, then enqueue time and id. Effective
+level falls by one per `build.queue_aging` the ticket has waited, so every
+level's wait is bounded; priority orders waiters and never preempts a running
+job. A ticket with the same owner, priority and command digest as a newer one
+exits 75 (EX_TEMPFAIL); running jobs are never superseded. A signal while
+waiting deletes the ticket and exits 128 + signal. With `overflow = auto`,
+slots queue until admitted or cancelled and the lane strategies run locally
+after `[admission.build].wait_seconds`; `queue` and `local` select those paths
+explicitly. An unreadable slot directory is unavailability, not a refusal.
+Waiting and held markers stay the status surface.
+
+### Hygiene
+
+After each job, only an infrastructure failure inside 24 hours advances the
+reset ladder: first light, second full, third quarantine. Cancellation and
+clock rollbacks do not count. A clock rollback performs a full reset before
+reuse with infra kind `clock` and no ladder step. A light reset checks out HEAD
+and cleans `-ffdx`; a full reset removes the slot's `target`, `repo` and `tmp`
+and the caller re-clones. A slot Git-sync failure before the first step is
+retried once after the reset; once output has streamed there is no retry.
+`hygiene::gc` (through `gc_projects`) removes slots idle past each project's
+`build.slot_idle` or at indices at or above N, skips locked slots, expires store
+pins older than `build.snapshot_retention` and runs `git gc --prune=1.hour.ago`
+under the store lock. It also rotates `jobs.jsonl` above 64 MiB into
+`jobs-<yyyymmdd>.jsonl` and drops rotations older than 30 days. Tick calls it
+after a completed collection, beside the seed pass, resolving idle and
+retention per registered project.
+
+`build maintain` runs one best-effort prewarm of
+`cargo check --workspace --all-targets --locked` on the verify base in an idle
+slot at Prewarm priority, after a non-blocking admission probe. It is skipped
+with a warning when the project had no job in 24 hours, the sampled build load
+is at or above `verify.load_per_cpu × cpus`, the hourly `build.prewarm_budget`
+is spent, or no slot is idle. A slot whose `last_canary` is older than
+`build.canary_every` runs a canary instead; a canary that exits non-zero on the
+CI-green base gets a full reset and a `freshness_failure` warning on its ledger
+row. A successful canary stamps `last_canary` in `slot.json`. Tick spawns one
+detached `provenant build maintain --project P` per recently used registered
+project after the collection; a scheduling failure warns and never fails the
+tick.
+
+### Ledger and report
+
+Each `JobOutcome` is schema 1 and its field order is a persisted pin: job id,
+project key, owner, origin, kind, priority, strategy, placement, exception,
+slot, snapshot, previous snapshot, base, enqueue/start/finish timestamps,
+wait and wall milliseconds, exit, timeouts and cancellation, reset, infra kind,
+fresh and rebuilt unit counts, rebuilt packages, peak RSS, slot changes and
+warnings. Rows append to `<state>/build/jobs.jsonl` under `jobs.lock`; when
+host state is unwritable they go to the attempt's scratch ledger and the report
+counts them missing. `build report` computes wait p50/p95 by priority
+(nearest-rank), peak concurrent admitted jobs from the overlap of slot rows
+(start/finish, bounded by N), peak RSS against physical memory, local
+exceptions by reason and their fraction, churn, and freshness and recovery
+failures. Churn compares each slot row's rebuilt packages with the affected set
+from `provenant_select` between its previous and current snapshot, evaluated in
+a temporary detached worktree of the build store and cached at
+`<state>/build/report-cache/<prev>-<snap>.json`, plus the always-rebuild set:
+the configured root package, packages whose build script has no `rerun-if`
+directive, and Cargo's `build-script-build` fingerprint unit. A full selection
+expects every workspace member. An uncached or failed selection leaves the row
+unknown, and unknown rows cannot pass. It prints one PASS, FAIL or NOT YET line
+per D1 criterion with thresholds from `build.soak.*`, with fewer than
+`min_runs` lane rows or less than `min_days` of span giving NOT YET. A gap of
+jobs that neither ran nor reported is not observable from rows, and the report
+says so.
+
+### Callers
+
+A lane's unchanged shims call `provenant admit build -- <real> "$@"`; admit
+builds an `intercepted` job from `PROVENANT_BUILD_CONTEXT` with the lane's Git
+binding, one step, stream output and the attempt as owner. Nested checks, the
+local-Cargo advisory, disk and memory trim and `CARGO_SOURCE_WRITES` keep their
+behaviour. The chair uses the same path with `chair-<pid>` as owner.
+`provenant verify [TIER] [--commit REV] [--affected]` builds one `tier` job
+whose single step runs the verify engine; the builtin engine is the bundled
+`verify-tier` script and the command backend substitutes `{tier}`. Selection
+runs in the prelude and sets `PROVENANT_VERIFY_SELECTION`. The report carries
+the snapshot commit, strategy, slot and exception; the runner contract's final
+`{commit, tier, exit_status}` line is unchanged. A landing Commands gate builds
+one `gate` job at `train` priority from the candidate commit, one `sh -c` step
+per configured command, stopping on failure, with the gate deadline covering
+admission. Each step's exit maps to the existing `CheckEvidence`, and evidence
+binding is unchanged.
+
+### Failure modes
+
+| Failure | Detected by | Effect |
+| --- | --- | --- |
+| admit killed mid-job | `intent.lock` still held or live group in `job.json` at next sync | slot stays occupied until the lease frees; orphan group killed, then sync |
+| waiter killed | free ticket flock | ticket and its lock reaped by any waiter |
+| store fetch fails | git exit | `no_snapshot`, local with a warning |
+| clone or prepare fails | git or prepare exit | `pool_unavailable`, local; creation retried |
+| checkout or clean fails | git exit before spawn | infra `git`, reset ladder, one retry |
+| ENOSPC or EIO in our fs ops | io error kind | infra `disk`, reset ladder |
+| SEGV, BUS, ILL or ABRT in the child | wait status | infra `crash_signal`, ladder |
+| clock rollback | `before_job` | full reset |
+| OS purges Caches | missing slot directory | slot recreated with its record |
+| store corrupt | fetch or connectivity error | `no_snapshot`, local; the next fetch recreates a missing store |
+| ledger unwritable | append error | row goes to scratch and counts missing |
+
+- Why: lanes, the chair and landing must get the same strategy, one outcome row
+  and one host cap, and a pool problem must never fail a lane's `cargo check`.
+- Owner: `crates/run/src/build/`, `src/admit.rs`, `src/verify.rs`,
+  `src/pr/landing/gate.rs`
+
 ## Lane verification and build admission
 
-A writer preamble's verification paragraph is `lanes.verification` (`check`, `targeted` or `full`). Unset, the sourced default is targeted: build in the worktree's own warm target (`lanes.cargo_target`), run cargo check, clippy on touched crates and targeted tests, and leave the workspace suite to CI. A brief line `Verification scope: targeted` (or `check` or `full`) overrides the knob and the paragraph names source `brief`. When the knob and that line disagree, the paragraph follows the brief and the stop cause names both scopes. Lane Cargo commands share the `build` admission class, configured through `[admission.build].slots`; unset, its count is derived from cores and memory (source `default`), and a configured value names its host or project source. Set it to `0` to disable the cap. Lane Cargo commands, including aliases and nextest, use a PATH shim to acquire a slot. A command that finds every slot busy waits a bounded time, then warns and proceeds; status shows the wait. Direct paths bypass this cooperative throttle.
+A writer preamble's verification paragraph is `lanes.verification` (`check`, `targeted` or `full`). Unset, the sourced default is targeted: build in the worktree's own warm target (`lanes.cargo_target`), run cargo check, clippy on touched crates and targeted tests, and leave the workspace suite to CI. A brief line `Verification scope: targeted` (or `check` or `full`) overrides the knob and the paragraph names source `brief`. When the knob and that line disagree, the paragraph follows the brief and the stop cause names both scopes. Admission, slot and queue behaviour are specified in [Build strategy](#build-strategy).
 
 Admission attribution has the same host scope as slot occupancy. Before confinement,
 `configure_build_slots` registers each lane under `<state>/admission/<class>/lanes/`,

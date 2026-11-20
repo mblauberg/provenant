@@ -35,6 +35,32 @@ The catalogue derives flag relationships and child commands from the parser, and
 
 - Why: inspection must be safe outside a checkout and paths must not change in transit.
 
+## Build commands
+
+The build command surface is `provenant build status [--json]`,
+`provenant build report [--since DUR] [--project P] [--json]`,
+`provenant build reset [--project P] [--slot N] [--full]`, and
+`provenant build maintain --project P`. The `--json`, `--project` and
+`--full` flags use the shared global options. `status` reports each slot's
+project, index, health and allocated bytes, and the store size. `report`
+aggregates the outcome ledger within `--since` and prints one verdict per soak
+criterion; churn uses the configured affected-package selector against a
+temporary checkout of the build store, cached per snapshot pair, plus the
+always-rebuild set, and a row whose selection cannot be computed stays unknown.
+`reset` clears quarantine and resets one `--slot` or every slot of the
+project; `--full` recreates the checkout and target cache. `maintain` runs one
+prewarm or canary on the verify base when recency, load and the hourly budget
+allow; when it is skipped it reports why as a warning rather than failing.
+
+`provenant verify [TIER] [--commit REV] [--affected]` runs one tier through the
+build strategy. `--commit` pins the revision to verify, and `--affected` applies
+the configured affected-package selection. The report carries `commit`,
+`strategy`, `slot` and `exception` beside the tier result.
+
+- Why: an operator must inspect and reset slots without reading their files,
+  and verification of a candidate or a selected subset must use the same
+  strategy as a lane's builds.
+
 ## Console catalogue and peer coverage
 
 Console reads do not allocate product state. Peer observations retain local

@@ -92,7 +92,7 @@ fn live_usage(frame: &[u8]) -> Option<u64> {
 /// The exec JSON stream carries no answering-model position.
 const MODEL_ON_WIRE: bool = false;
 
-/// Sandboxed Codex uses a private `CODEX_HOME` linked to the selected login.
+/// Isolated Codex uses a private `CODEX_HOME` linked to the selected login.
 /// Native lanes retain the ordinary provider home unless an account selects
 /// another one. Codex's own sandbox is disabled; the outer profile supplies
 /// confinement when requested.
@@ -103,24 +103,28 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    if plan.selected_authentication.as_deref() != Some("login") {
+    if plan.selected_authentication.as_deref() != Some("login") && input.isolated() {
         return Err(input.boundary_error(
             "CODEX_PREPARE_CREDENTIALS",
             "Codex requires its selected login authentication",
             ProviderError::UnsupportedPolicy,
         ));
     }
-    let codex_home = &plan
-        .private_state
-        .as_ref()
-        .ok_or_else(|| {
-            input.boundary_error(
-                "CODEX_PREPARE_CREDENTIALS",
-                "Codex login requires its isolated private credential state",
-                ProviderError::UnsupportedPolicy,
-            )
-        })?
-        .path;
+    let codex_home = if input.isolated() {
+        &plan
+            .private_state
+            .as_ref()
+            .ok_or_else(|| {
+                input.boundary_error(
+                    "CODEX_PREPARE_CREDENTIALS",
+                    "Codex login requires its isolated private credential state",
+                    ProviderError::UnsupportedPolicy,
+                )
+            })?
+            .path
+    } else {
+        &plan.scratch.path
+    };
     let credential = input.account.map_or_else(
         || input.home.join(".codex/auth.json"),
         |account| account.directory().join("auth.json"),
@@ -151,7 +155,7 @@ fn prepare(
         ]
         .map(OsString::from),
     );
-    if input.confined.codex_policy() == CodexPolicy::Clean {
+    if input.isolated() && input.confined.codex_policy() == CodexPolicy::Clean {
         argv.push("--ignore-user-config".into());
     } else {
         argv.extend([
@@ -188,7 +192,7 @@ fn prepare(
     let tool_writes = Vec::new();
     let staged_skills = input.stage_user_skills();
     let omitted_discovery = package_omissions;
-    let mut setup = if input.sandboxed() {
+    let mut setup = if input.isolated() {
         vec![SetupStep::Symlink {
             link: codex_home.join("auth.json"),
             target: credential.clone(),
@@ -221,24 +225,24 @@ fn prepare(
         false,
         input.policy,
     )?;
-    if input.sandboxed() {
+    if input.isolated() {
         env.extend([("GIT_CONFIG_GLOBAL".into(), "/dev/null".into())]);
     }
-    if input.sandboxed() && (staged_skills.root.is_some() || !input.user_skills()) {
+    if input.isolated() && (staged_skills.root.is_some() || !input.user_skills()) {
         for (key, value) in &mut env {
             if key == "HOME" {
                 *value = codex_home.into();
             }
         }
     }
-    let selected_home = if input.sandboxed() {
+    let selected_home = if input.isolated() {
         Some(codex_home.to_path_buf())
     } else {
         input
             .account
             .map(|account| account.directory().to_path_buf())
     };
-    let session_state = if input.sandboxed() {
+    let session_state = if input.isolated() {
         crate::SessionStateLocation::AttemptPrivate
     } else {
         crate::SessionStateLocation::Native {
@@ -248,6 +252,13 @@ fn prepare(
                 input.home,
             ),
         }
+    };
+    let native_state = match &session_state {
+        // A host lane's provider home is user-owned: grant writes to the native
+        // root, but never create it with run-owned setup. Native provider state
+        // is not Provenant's to create or rewrite.
+        crate::SessionStateLocation::Native { root } if input.sandboxed() => vec![subtree(root)],
+        _ => Vec::new(),
     };
     if let Some(selected_home) = selected_home {
         env.retain(|(key, _)| key != "CODEX_HOME");
@@ -279,6 +290,7 @@ fn prepare(
                 process_executables: vec![exact(input.executable)],
                 allow_process_fork: true,
                 runtime_reads,
+                state_writes: native_state,
                 authentication: vec![AuthenticationProfile {
                     keychain: None,
                     mechanism: "login".into(),

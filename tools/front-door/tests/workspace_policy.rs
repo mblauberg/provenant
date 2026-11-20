@@ -137,6 +137,7 @@ const LAYERS: &[(&str, &[&str])] = &[
             // Preset selection rules and routine pool-effort diagnostics.
             "routing",
             "run",
+            "select",
             "fabric-store",
             // The binary sets the process-wide store busy timeout at startup.
             "sqlite",

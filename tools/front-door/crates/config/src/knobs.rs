@@ -135,7 +135,10 @@ impl<D> crate::ResolvedConfig<D> {
                 return Err(invalid(name, "host_only"));
             }
             let value = parse_cli(spec, text).map_err(|rule| invalid(name, rule))?;
-            check(spec, &value).map_err(|rule| invalid(name, rule))?;
+            // Access is advisory: preserve invalid launch text so resolution warns and uses host.
+            if name != "lanes.access" {
+                check(spec, &value).map_err(|rule| invalid(name, rule))?;
+            }
             knobs.insert(
                 name.into(),
                 KnobValue {
@@ -669,6 +672,15 @@ mod chair_tests {
 #[allow(clippy::unwrap_used)]
 mod ceiling_tests {
     use super::*;
+    #[test]
+    fn lane_access_is_documented_and_defaults_to_host() {
+        let registry = registry().unwrap();
+        let spec = &registry.knobs["lanes.access"];
+        assert!(documented_field("lanes.access"));
+        assert_eq!(spec.default, "host");
+        assert_eq!(spec.values, ["host", "isolated"]);
+    }
+
     #[test]
     fn registry_runtime_deadline_maximum_is_the_lane_ceiling() {
         let registry: Value = serde_json::from_str(REGISTRY).unwrap();

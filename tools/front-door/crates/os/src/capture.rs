@@ -6,7 +6,7 @@ use crate::exec::{
 };
 #[cfg(test)]
 use crate::exec::{FilterError, NonblockingSink};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use thiserror::Error;
 
 const INPUT_CHUNK_LIMIT: usize = 16 * 1024;
@@ -126,6 +126,7 @@ pub struct StreamCapture<'a, 'f> {
     policy: StreamPolicy<'a>,
     decoder: Option<FrameDelivery<'a>>,
     filter: Option<&'f mut dyn CaptureFilter>,
+    writer: Option<&'f mut dyn Write>,
     frames: Frames,
     finished: bool,
     outcome: CapturedStream,
@@ -136,10 +137,20 @@ impl<'a, 'f> StreamCapture<'a, 'f> {
         decoder: Option<FrameDelivery<'a>>,
         filter: Option<&'f mut dyn CaptureFilter>,
     ) -> Result<Self, ExecError> {
+        Self::new_with_writer(policy, decoder, filter, None)
+    }
+
+    pub fn new_with_writer(
+        policy: StreamPolicy<'a>,
+        decoder: Option<FrameDelivery<'a>>,
+        filter: Option<&'f mut dyn CaptureFilter>,
+        writer: Option<&'f mut dyn Write>,
+    ) -> Result<Self, ExecError> {
         let limit = match &policy {
             StreamPolicy::Capture { limit }
             | StreamPolicy::Tail { limit }
             | StreamPolicy::Tee { limit, .. } => *limit,
+            StreamPolicy::Inherit => 0,
             StreamPolicy::Discard => 0,
         };
         if limit > MAX_CAPTURE_LIMIT {
@@ -149,6 +160,7 @@ impl<'a, 'f> StreamCapture<'a, 'f> {
             policy,
             decoder,
             filter,
+            writer,
             frames: Frames {
                 bytes: Vec::with_capacity(FRAME_LIMIT),
                 oversized: false,
@@ -170,8 +182,13 @@ impl<'a, 'f> StreamCapture<'a, 'f> {
         for chunk in bytes.chunks(INPUT_CHUNK_LIMIT) {
             self.frames
                 .decode_delivery(chunk, self.decoder, &mut self.outcome);
-            self.frames
-                .filter_and_retain(&self.policy, &mut self.filter, chunk, &mut self.outcome);
+            self.frames.filter_and_retain(
+                &self.policy,
+                &mut self.filter,
+                &mut self.writer,
+                chunk,
+                &mut self.outcome,
+            );
         }
         Ok(())
     }
@@ -182,8 +199,12 @@ impl<'a, 'f> StreamCapture<'a, 'f> {
             return;
         }
         self.frames.finish_delivery(self.decoder, &mut self.outcome);
-        self.frames
-            .finish_filter(&self.policy, &mut self.filter, &mut self.outcome);
+        self.frames.finish_filter(
+            &self.policy,
+            &mut self.filter,
+            &mut self.writer,
+            &mut self.outcome,
+        );
         self.finished = true;
     }
 
@@ -230,8 +251,12 @@ impl<'a, 'f> StreamCapture<'a, 'f> {
         if !self.finished {
             self.frames
                 .discard_partial_frame(self.decoder, &mut self.outcome);
-            self.frames
-                .finish_filter(&self.policy, &mut self.filter, &mut self.outcome);
+            self.frames.finish_filter(
+                &self.policy,
+                &mut self.filter,
+                &mut self.writer,
+                &mut self.outcome,
+            );
         }
         self.outcome
     }
@@ -337,6 +362,7 @@ impl Frames {
         &mut self,
         policy: &StreamPolicy<'_>,
         filter: &mut Option<&mut dyn CaptureFilter>,
+        writer: &mut Option<&mut dyn Write>,
         chunk: &[u8],
         out: &mut CapturedStream,
     ) {
@@ -344,7 +370,7 @@ impl Frames {
             return;
         }
         let Some(filter) = filter.as_deref_mut() else {
-            Self::retain_filtered(policy, chunk, out);
+            Self::retain_filtered(policy, writer, chunk, out);
             return;
         };
         let disabled = &mut self.filter_disabled;
@@ -357,7 +383,7 @@ impl Frames {
                 out.filter_failed = true;
                 return;
             }
-            Self::retain_filtered(policy, frame, out);
+            Self::retain_filtered(policy, writer, frame, out);
         };
         if filter.filter(chunk, &mut sink).is_err() {
             *disabled = true;
@@ -369,6 +395,7 @@ impl Frames {
         &mut self,
         policy: &StreamPolicy<'_>,
         filter: &mut Option<&mut dyn CaptureFilter>,
+        writer: &mut Option<&mut dyn Write>,
         out: &mut CapturedStream,
     ) {
         if self.filter_disabled {
@@ -385,7 +412,7 @@ impl Frames {
                     out.filter_failed = true;
                     return;
                 }
-                Self::retain_filtered(policy, frame, out);
+                Self::retain_filtered(policy, writer, frame, out);
             };
             if filter.finish(&mut sink).is_err() {
                 *disabled = true;
@@ -394,9 +421,20 @@ impl Frames {
         }
     }
 
-    fn retain_filtered(policy: &StreamPolicy<'_>, bytes: &[u8], out: &mut CapturedStream) {
+    fn retain_filtered(
+        policy: &StreamPolicy<'_>,
+        writer: &mut Option<&mut dyn Write>,
+        bytes: &[u8],
+        out: &mut CapturedStream,
+    ) {
         if bytes.is_empty() {
             return;
+        }
+        if let Some(writer) = writer.as_deref_mut()
+            && writer.write_all(bytes).is_err()
+        {
+            out.sink_lost_bytes = out.sink_lost_bytes.saturating_add(bytes.len() as u64);
+            out.sink_failed = true;
         }
         if let StreamPolicy::Tee { sink, .. } = policy
             && let Err(loss) = sink.try_send(bytes)
@@ -424,7 +462,7 @@ impl Frames {
         }
         let limit = match policy {
             StreamPolicy::Capture { limit } | StreamPolicy::Tee { limit, .. } => *limit,
-            StreamPolicy::Discard | StreamPolicy::Tail { .. } => return,
+            StreamPolicy::Discard | StreamPolicy::Inherit | StreamPolicy::Tail { .. } => return,
         };
         let room = limit.saturating_sub(out.bytes.len());
         out.bytes.extend_from_slice(&bytes[..bytes.len().min(room)]);
@@ -456,12 +494,13 @@ impl Pump<'_> {
             return;
         };
         let mut buffer = [0; INPUT_CHUNK_LIMIT];
+        let mut writer: Option<&mut dyn Write> = None;
         match reader.read(&mut buffer) {
             Ok(0) => {
                 self.frames
                     .finish_delivery(self.decoder.map(FrameDelivery::Raw), out);
                 self.frames
-                    .finish_filter(&self.policy, &mut self.filter, out);
+                    .finish_filter(&self.policy, &mut self.filter, &mut writer, out);
                 *pipe = None;
             }
             Ok(count) => {
@@ -469,8 +508,13 @@ impl Pump<'_> {
                 out.total_bytes = out.total_bytes.saturating_add(count as u64);
                 self.frames
                     .decode_delivery(bytes, self.decoder.map(FrameDelivery::Raw), out);
-                self.frames
-                    .filter_and_retain(&self.policy, &mut self.filter, bytes, out);
+                self.frames.filter_and_retain(
+                    &self.policy,
+                    &mut self.filter,
+                    &mut writer,
+                    bytes,
+                    out,
+                );
             }
             Err(error)
                 if matches!(

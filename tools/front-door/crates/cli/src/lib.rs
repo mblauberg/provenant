@@ -199,6 +199,14 @@ fn parse_with_models(
             };
         }
     };
+    if matches!(&invocation.command, Command::Build(Build::Maintain))
+        && invocation.globals.project.is_none()
+    {
+        return ParseOutcome::Invalid {
+            error: CliError::invalid("build maintain requires --project PATH"),
+            globals: invocation.globals,
+        };
+    }
     if let Command::Help { command, all } = &invocation.command {
         let scope = format!("provenant {}", command.join(" "));
         let mut expanded = if *all || (!command.is_empty() && !is_core_scope(&model, &scope)) {
@@ -1184,6 +1192,35 @@ mod tests {
             "{help}"
         );
         assert!(help.contains("60-minute"), "{help}");
+    }
+
+    #[test]
+    fn build_commands_and_verify_selection_flags_parse() {
+        assert!(matches!(
+            valid(&["build", "status", "--json"]).command,
+            Command::Build(Build::Status)
+        ));
+        assert!(matches!(
+            valid(&["build", "report", "--since", "7d", "--project", "."]).command,
+            Command::Build(Build::Report { since: Some(since) }) if since == 604_800
+        ));
+        assert!(matches!(
+            valid(&["build", "reset", "--project", ".", "--slot", "2", "--full"]).command,
+            Command::Build(Build::Reset {
+                slot: Some(2),
+                full: true
+            })
+        ));
+        assert!(matches!(
+            valid(&["build", "maintain", "--project", "."]).command,
+            Command::Build(Build::Maintain)
+        ));
+        invalid(&["build", "maintain"]);
+        assert!(matches!(
+            valid(&["verify", "unit", "--commit", "HEAD", "--affected"]).command,
+            Command::Verify { tier: Some(tier), commit: Some(commit), affected: true }
+                if tier == "unit" && commit == "HEAD"
+        ));
     }
 
     #[test]

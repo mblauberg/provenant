@@ -426,10 +426,12 @@ pins the newest commit of a writer's continuation chain. The runtime never
 resets or creates a worktree to satisfy a binding.
 Registered linked worktrees are verified at their real paths wherever they
 live, including `.claude/worktrees` and locations outside the project.
-Declared credential stores still refuse every overlapping source or grant;
-project-local agent configuration is advisory, with overlap warnings off by
-default and configurable through `CONFINEMENT_SOURCE_AGENT_CONFIG_NONE`. Explanation and launch
-preparation share the same source admission decision.
+Declared credential stores refuse overlapping source or grant access under
+isolated lane access; host access warns and proceeds with the resolved access
+and source. Project-local agent configuration is advisory, with overlap warnings off by
+default and configurable through `CONFINEMENT_SOURCE_AGENT_CONFIG_NONE`. Explanation checks source identity and state boundaries, and reports credential
+admission as `pending_route`: the selected route's access receipt decides it
+during launch preparation.
 - Why: scouts share read access while review and repair keep one immutable subject.
 
 A relay admission stores one schema-versioned typed receipt with its request digest in the patch record; replay returns that receipt with `replayed=true`, independent of current worktree-layout configuration. A missing or malformed receipt is invalid.

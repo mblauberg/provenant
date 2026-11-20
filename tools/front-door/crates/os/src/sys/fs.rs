@@ -223,6 +223,9 @@ pub fn open_read(dir: &File, name: &OsStr) -> io::Result<File> {
         0,
     )
 }
+pub fn open_read_follow(dir: &File, name: &OsStr) -> io::Result<File> {
+    open_at(dir.as_raw_fd(), name, libc::O_RDONLY | libc::O_NONBLOCK, 0)
+}
 pub fn open_source(path: &Path) -> io::Result<File> {
     open_at(
         libc::AT_FDCWD,

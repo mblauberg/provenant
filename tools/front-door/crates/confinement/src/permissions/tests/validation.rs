@@ -405,6 +405,14 @@ fn every_declared_credential_root_protects_grants_and_enclosing_paths() {
         ] {
             assert!(result.is_err());
         }
+        let host = provenant_records::LaneAccessReceipt {
+            access: provenant_records::LaneAccess::Host,
+            source: provenant_records::LaneAccessSource::Default,
+            key: "lanes.access".into(),
+            extra: Default::default(),
+        };
+        assert!(validate_read_exec_grant_for_access(&grant, &credentials, &host).is_ok());
+        assert!(validate_noncredential_grant_for_access(&grant, &credentials, &host).is_ok());
         assert!(refuses_lane_root(&grant.path, true, &credentials));
         assert!(refuses_lane_root(&grant.path, false, &credentials));
         assert!(!root.source.is_empty());
@@ -651,6 +659,7 @@ fn directory_discovery_keeps_literal_scope_and_refuses_symlinks()
         &selected_ref,
         &home,
         &provenant_core::CredentialRoots::for_home(&home),
+        &isolated_access_receipt(),
     )?;
     prepare_writer_directories(
         &linked,
@@ -658,6 +667,7 @@ fn directory_discovery_keeps_literal_scope_and_refuses_symlinks()
         &authority,
         &home,
         &provenant_core::CredentialRoots::for_home(&home),
+        &isolated_access_receipt(),
     )?;
     let scratch = root.join("scratch");
     std::fs::create_dir(&scratch)?;

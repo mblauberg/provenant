@@ -1299,7 +1299,7 @@ pub fn peer(
                     let metadata = directory
                         .metadata()
                         .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
-                    let access = provenant_records::run::LaneAccess {
+                    let access = provenant_records::run::LaneAccessRequest {
                         network,
                         source_root: Some(source),
                         source_identity: Some(provenant_records::run::SourceIdentity {

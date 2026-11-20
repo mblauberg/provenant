@@ -2,6 +2,15 @@
 #![cfg(target_os = "macos")]
 use super::*;
 
+fn isolated_access() -> provenant_records::LaneAccessReceipt {
+    provenant_records::LaneAccessReceipt {
+        access: provenant_records::LaneAccess::Isolated,
+        source: provenant_records::LaneAccessSource::Default,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    }
+}
+
 #[test]
 fn native_host_inventory_protects_aliases_and_later_worktrees()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -290,6 +299,7 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
             }],
             &[],
             true,
+            isolated_access(),
         )?;
         plan.policy = Some(HostPolicySettings::resolve(None, &state, mandatory));
         plan.network = NetworkAccess::Open;
@@ -409,6 +419,7 @@ fn native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
             &[],
             &[],
             true,
+            isolated_access(),
         )
         .err()
         .ok_or("external directory link overlapping lane authority accepted")?;
