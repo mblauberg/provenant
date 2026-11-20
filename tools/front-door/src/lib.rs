@@ -345,6 +345,24 @@ fn accounts_summary(settings: &provenant_providers::accounts::Settings) -> prove
         .collect();
     provenant_cli::Summary::new(headline, rows, None)
 }
+/// The one construction of a refusal's transport facts. `cause` is extra
+/// evidence beside the short message and is rendered indented in human output
+/// and as `error.cause` in JSON; owners whose cause repeats the message let the
+/// renderer suppress the duplicate.
+pub(crate) fn command_error(
+    code: &str,
+    message: &str,
+    cause: Option<&str>,
+    repair: Option<&str>,
+) -> CommandError {
+    CommandError {
+        diagnostic: None,
+        code: code.into(),
+        message: message.into(),
+        cause: cause.map(Into::into),
+        repair: repair.map(Into::into),
+    }
+}
 fn fail(
     command: &str,
     status: Outcome,
@@ -362,14 +380,21 @@ fn fail_with_repair(
     repair: Option<&str>,
     globals: &provenant_cli::Globals,
 ) -> u8 {
+    fail_with_cause(command, status, code, message, None, repair, globals)
+}
+/// `fail_with_repair` with a cause the operator needs to see, such as the
+/// bounded output of a failing `build.prepare` command.
+fn fail_with_cause(
+    command: &str,
+    status: Outcome,
+    code: &str,
+    message: &str,
+    cause: Option<&str>,
+    repair: Option<&str>,
+    globals: &provenant_cli::Globals,
+) -> u8 {
     let mut result = CommandResult::new(command, status, ());
-    result.error = Some(CommandError {
-        diagnostic: None,
-        code: code.into(),
-        message: message.into(),
-        cause: None,
-        repair: repair.map(Into::into),
-    });
+    result.error = Some(command_error(code, message, cause, repair));
     emit(&result, globals, "", false)
 }
 fn fail_with_diagnostic(
@@ -384,13 +409,14 @@ fn fail_with_diagnostic(
         .clone()
         .unwrap_or_else(|| diagnostic.code.clone());
     let mut result = CommandResult::new(command, status, ());
-    result.error = Some(CommandError {
-        diagnostic: Some(diagnostic.into()),
-        code: code.into(),
-        message,
-        cause: diagnostic.detail.clone(),
-        repair: diagnostic.next.clone(),
-    });
+    let mut error = command_error(
+        code,
+        &message,
+        diagnostic.detail.as_deref(),
+        diagnostic.next.as_deref(),
+    );
+    error.diagnostic = Some(diagnostic.into());
+    result.error = Some(error);
     emit(&result, globals, "", false)
 }
 /// Resolve Run's composition paths, then emit the owner's reply.

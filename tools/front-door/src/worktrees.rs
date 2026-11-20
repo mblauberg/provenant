@@ -75,8 +75,14 @@ pub(crate) enum Error {
     DiskSpace(std::io::Error),
     #[error("invalid worktree removal scope")]
     InvalidScope,
-    #[error("target seed build: {0}")]
-    SeedBuild(String),
+    #[error("target seed build: {message}")]
+    SeedBuild {
+        message: String,
+        /// Bounded output tail of a failed `build.prepare` command, when that
+        /// is the cause. The renderer shows it as an indented human cause and
+        /// as `error.cause` in JSON.
+        tail: Option<String>,
+    },
     #[error("{0}")]
     Settlement(String),
 }
@@ -155,6 +161,26 @@ impl Error {
             _ => Outcome::Error,
         }
     }
+
+    fn cause(&self) -> Option<&str> {
+        match self {
+            Self::SeedBuild {
+                tail: Some(tail), ..
+            } => Some(tail),
+            _ => None,
+        }
+    }
+}
+
+/// Keep a failing `build.prepare` command's bounded output alongside its
+/// message. A seed-build operator otherwise sees only the command and exit
+/// status and has to reproduce the failure to learn why it happened.
+fn seed_build_failure(error: &(dyn std::error::Error + 'static)) -> Error {
+    Error::SeedBuild {
+        message: error.to_string(),
+        tail: crate::target_seed_build::prepare_failed_of(error)
+            .map(|prepare| prepare.tail.clone()),
+    }
 }
 
 #[derive(Serialize)]
@@ -210,7 +236,7 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
                 globals,
             ),
         },
-        Err(error) => crate::fail_with_repair(
+        Err(error) => crate::fail_with_cause(
             name,
             error.outcome(),
             if matches!(error, Error::Worktree(WorktreeError::LockBusy)) {
@@ -219,6 +245,7 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
                 "WORKTREE"
             },
             &error.local_message(),
+            error.cause(),
             error.repair(),
             globals,
         ),
@@ -380,7 +407,7 @@ fn execute(
     let (roots, home, project) = (&resolved.roots, &resolved.home, &resolved.project);
     if matches!(command, Worktree::SeedBuild) {
         let generation = crate::target_seed_build::build(roots.state.as_path(), project)
-            .map_err(|error| Error::SeedBuild(error.to_string()))?;
+            .map_err(|error| seed_build_failure(error.as_ref()))?;
         return Ok(Data::SeedBuilt(generation));
     }
     let facts = worktrees::RepoFacts::default();
@@ -4532,6 +4559,61 @@ mod human_tests {
             }
             assert_eq!(Error::Worktree(error).local_message(), message);
         }
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn failing_prepare_marker_is_visible_in_human_and_json_renderings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let marker = "Cannot find package 'zod'";
+        let tail = format!("npm ERR! {marker}\ninstall the missing dependency\n");
+        let prepare = crate::target_seed_build::PrepareFailed {
+            index: 0,
+            argv: vec!["node".into(), "scripts/generate.mjs".into()],
+            exit: Some(1),
+            tail: tail.clone(),
+        };
+        let boxed: Box<dyn std::error::Error> = Box::new(prepare);
+        let failure = seed_build_failure(boxed.as_ref());
+        assert!(
+            failure
+                .local_message()
+                .contains("build.prepare[0] command failed")
+        );
+        let mut result = CommandResult::new("worktree seed-build", failure.outcome(), ());
+        result.error = Some(crate::command_error(
+            "WORKTREE",
+            &failure.local_message(),
+            failure.cause(),
+            failure.repair(),
+        ));
+
+        let mut human = Vec::new();
+        provenant_cli::render(
+            &result,
+            provenant_cli::RenderMode::Human {
+                text: "",
+                read_only: false,
+                summary: None,
+            },
+            &mut human,
+        )?;
+        let human = String::from_utf8(human)?;
+        assert!(human.contains("build.prepare[0] command failed"), "{human}");
+        assert!(human.contains(marker), "{human}");
+        assert!(human.contains("install the missing dependency"), "{human}");
+
+        let mut json = Vec::new();
+        provenant_cli::render(&result, provenant_cli::RenderMode::Json, &mut json)?;
+        let value: serde_json::Value = serde_json::from_slice(&json)?;
+        assert_eq!(value["error"]["cause"].as_str(), Some(tail.as_str()));
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("build.prepare[0]")),
+            "{value}"
+        );
+        Ok(())
     }
 
     #[allow(dead_code)] // The harness=false driver compiles only the helpers.

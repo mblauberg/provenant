@@ -280,12 +280,27 @@ pub fn render_within<T: Serialize>(
             .and_then(|()| buffer.write_all(b"\n").map_err(RenderError::Write)),
         RenderMode::Human { .. } | RenderMode::Compact { .. } => {
             let text = match &result.error {
-                Some(error) => format!(
-                    "provenant: {}: {}\nnext: {}\n",
-                    error.code,
-                    error.message,
-                    error.repair.as_deref().unwrap_or_default()
-                ),
+                Some(error) => {
+                    let mut text = format!("provenant: {}: {}\n", error.code, error.message);
+                    // A cause is extra evidence, not a second copy of the
+                    // message. Owners that set both to the same detail must
+                    // not make the operator read it twice.
+                    if let Some(cause) = error.cause.as_deref()
+                        && !cause.is_empty()
+                        && cause != error.message
+                    {
+                        for line in safe_human_text(cause).lines() {
+                            text.push_str("  ");
+                            text.push_str(line);
+                            text.push('\n');
+                        }
+                    }
+                    text.push_str(&format!(
+                        "next: {}\n",
+                        error.repair.as_deref().unwrap_or_default()
+                    ));
+                    text
+                }
                 None => match mode {
                     RenderMode::Compact { text, summary, .. } => {
                         compact_text(&result.command, text, summary)
@@ -344,6 +359,21 @@ fn is_unsafe(c: char) -> bool {
         | '\u{70f}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
         | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}'
         | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
+}
+/// Human diagnostic text keeps its line breaks but never its terminal controls.
+/// Used for an error's extra cause, which may be captured command output.
+fn safe_human_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\n' | '\t' => out.push(character),
+            character if character.is_control() || is_unsafe(character) => {
+                out.push_str(&character.escape_default().to_string());
+            }
+            character => out.push(character),
+        }
+    }
+    out
 }
 /// Quote text outside the conservative bare set `[A-Za-z0-9._:/@+%,-]`.
 fn quoted(text: &str) -> String {
@@ -553,6 +583,46 @@ mod tests {
             String::from_utf8(bytes)?,
             "body\nnext: provenant output aaaa\n"
         );
+        Ok(())
+    }
+    #[test]
+    // Spec: docs/specs/cli.md#results
+    fn error_cause_is_indented_after_the_message_and_never_repeats_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cause = "npm ERR! Cannot find package 'zod'\nnext line of output";
+        let mut result = CommandResult::new("worktree seed-build", Outcome::Error, ());
+        result.error = Some(provenant_records::CommandError {
+            diagnostic: None,
+            code: "WORKTREE".into(),
+            message: "target seed build: build.prepare[0] command failed (exit 1)".into(),
+            cause: Some(cause.into()),
+            repair: None,
+        });
+        let human_mode = || RenderMode::Human {
+            text: "",
+            read_only: false,
+            summary: None,
+        };
+        let mut human = Vec::new();
+        render(&result, human_mode(), &mut human)?;
+        let text = String::from_utf8(human)?;
+        assert!(text.starts_with("provenant: WORKTREE: target seed build:"));
+        assert!(text.contains("  npm ERR! Cannot find package 'zod'\n"), "{text}");
+        assert!(text.contains("  next line of output\n"), "{text}");
+
+        let mut json = Vec::new();
+        render(&result, RenderMode::Json, &mut json)?;
+        let value: serde_json::Value = serde_json::from_slice(&json)?;
+        assert_eq!(value["error"]["cause"].as_str(), Some(cause));
+
+        // Owners that set cause to the message must not show the same detail
+        // twice in human output.
+        let message = result.error.as_ref().ok_or("missing error")?.message.clone();
+        result.error.as_mut().ok_or("missing error")?.cause = Some(message.clone());
+        let mut human = Vec::new();
+        render(&result, human_mode(), &mut human)?;
+        let text = String::from_utf8(human)?;
+        assert_eq!(text.matches(&message).count(), 1, "{text}");
         Ok(())
     }
     #[test]

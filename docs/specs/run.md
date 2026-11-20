@@ -109,7 +109,10 @@ repository only declares the command, nothing is added to it, and an unreadable
 or invalid table warns and runs no prepare command. A failing command fails that
 build: the project's outcome is `prepare_failed` with the command and the last
 2 KiB of the combined output in `seed-result.json` and the refresh record, while
-the operator note gives a repair and never echoes the output. The same prepare
+the operator note gives a repair and never echoes the output. The manual
+`provenant worktree seed-build` path shows that bounded output as an indented
+cause in human output and in `error.cause` under `--json`, so the operator need
+not reproduce the failed command to see why it failed. The same prepare
 list runs before every seed generation build; the slot path runs it after
 snapshot sync, as specified in [Build strategy](#build-strategy). Writer selection uses matching generations and Cargo's normal per-unit freshness checks before reusing artifacts.
 
