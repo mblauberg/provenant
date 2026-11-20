@@ -39,17 +39,7 @@
       "providers.{provider}.runtime_deadline_seconds",
       "providers.codex.clean_config",
       "gc.graph_checkpoint_days",
-      "gc.sweep_budget",
-      "build.strategy",
-      "build.prepare",
-      "build.seed.stale_after",
-      "build.wrapper.argv",
-      "build.command.argv",
-      "build.offload",
-      "build.overflow",
-      "build.clean",
-      "build.stacks",
-      "build.snapshot_retention"
+      "gc.sweep_budget"
   ],
   "host_gc_settings": {
     "path": "gc",
@@ -530,6 +520,7 @@
   },
   "port_build_settings": {
     "path": "build",
+    "where": "the `build` object of host `state/ports.json`, a host-project `state/projects/<key>/ports.json` or project `.provenant/ports.json`",
     "settings": {
       "strategy": {"type": "string", "allowed": "slots, lane_seed, lane, wrapper, command", "default": "lane_seed", "effect": "Build strategy port. Declared and layered now; a later slice consumes it. The builtin stays lane_seed so this slice changes no behaviour."},
       "prepare": {"type": "argv_list", "allowed": "ordered arrays of argv; each program is non-empty", "default": "[]", "effect": "Ordered argv arrays run from the checkout root before a seed build; a failing command fails that build."},
