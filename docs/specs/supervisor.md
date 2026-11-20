@@ -46,7 +46,9 @@ Descendant proof survives session changes and reparenting, but every signal
 revalidates the full native identity. On macOS, however the provider ends,
 natural exit included, cleanup ends the lane's own tree: recorded descendants and
 sandbox-marked escapees get TERM, then KILL after the descendant grace. The
-child registry must permit cleanup. A live graph child spares only its own
+child registry must permit cleanup. With no native child registry, a present
+host holder permits the lane's own descendant stops; an absent holder does not.
+A live graph child spares only its own
 process tree: it is a separate attempt, never a recorded descendant of this
 lane's provider and never carrying this lane's sandbox mark, so it is never a
 cleanup candidate and cannot withhold a lane's signals or its custody release.

@@ -1769,12 +1769,12 @@ fn the_guardian_names_an_unreadable_host_clock_in_its_admission_refusal(root: &P
     }
     Ok(())
 }
-/// A live graph child spares only its own process tree (#3568): it is a
-/// separate attempt, never this lane's descendant or sandbox escapee. The
-/// lane's own escapee is therefore ended at settlement, cleanup resolves and
-/// custody is released even while a detached graph child is running.
+/// With no native child registry, a present host holder permits the lane's
+/// own descendant and escapee stops (#3568). Graph children are separate
+/// attempts, so nothing about them gates this: the escapee is ended at
+/// settlement, cleanup resolves and custody is released.
 #[cfg(target_os = "macos")]
-fn escapee_is_ended_even_with_live_graph_children(root: &Path) -> Result<()> {
+fn escapee_is_ended_with_no_child_registry_and_a_present_holder(root: &Path) -> Result<()> {
     let home = root.join("HOME");
     std::fs::create_dir_all(&home)?;
     std::fs::write(home.join(S2_PRODUCTION_SHAPE), b"no registry")?;
@@ -1801,19 +1801,11 @@ fn escapee_is_ended_even_with_live_graph_children(root: &Path) -> Result<()> {
         let exit = exited(&handle)?;
         Ok((exit, escapee, stream))
     };
-    for name in ["empty", "live-graph-children"] {
-        if name == "live-graph-children" {
-            // The host may still have detached graph children. Nothing reads
-            // this marker now: they are separate attempts and cannot gate the
-            // lane's own cleanup (#3568).
-            std::fs::write(home.join("live-graph-children"), b"pending")?;
-        }
-        let (exit, escapee, stream) = case(name)?;
-        assert!(!exit.unresolved_cleanup, "{name}: {exit:?}");
-        assert!(exit.unresolved_pids.is_empty(), "{name}: {exit:?}");
-        wait_for_identity_absence(&escapee)?;
-        drop(stream);
-    }
+    let (exit, escapee, stream) = case("empty")?;
+    assert!(!exit.unresolved_cleanup, "{exit:?}");
+    assert!(exit.unresolved_pids.is_empty(), "{exit:?}");
+    wait_for_identity_absence(&escapee)?;
+    drop(stream);
     Ok(())
 }
 /// Half the five-second full-census backstop: a retained guardian that
@@ -3366,8 +3358,8 @@ const CASES: &[Case] = &[
     ),
     #[cfg(target_os = "macos")]
     (
-        "escapee_is_ended_even_with_live_graph_children",
-        escapee_is_ended_even_with_live_graph_children,
+        "escapee_is_ended_with_no_child_registry_and_a_present_holder",
+        escapee_is_ended_with_no_child_registry_and_a_present_holder,
     ),
     #[cfg(target_os = "macos")]
     (
@@ -3475,7 +3467,7 @@ fn run_case(name: &str) -> Result<()> {
     let escape = matches!(
         name,
         "escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures"
-            | "escapee_is_ended_even_with_live_graph_children"
+            | "escapee_is_ended_with_no_child_registry_and_a_present_holder"
             | "detached_descendant_in_the_attempt_sandbox_is_found_and_ended"
     );
     for scoped in [false, true].into_iter().take(if escape { 2 } else { 1 }) {
