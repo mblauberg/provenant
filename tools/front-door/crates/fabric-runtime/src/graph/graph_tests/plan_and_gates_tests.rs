@@ -494,13 +494,18 @@ fn gate_verdict_accepts_one_line_wherever_it_sits_outside_fences() {
     }
 }
 
+// Spec: docs/specs/run-settlement.md#review-verdict-wording
 #[test]
 fn gate_verdict_rejects_spoofed_multiple_and_malformed_lines() {
+    // Multiple declarations and words that are not a complete recognised
+    // verdict still fail a gate. Trailing text after a complete recognised
+    // word is now accepted; that contract is pinned by the test below.
     for text in [
         "VERDICT: FAIL\nVERDICT: PASS".to_owned(),
         "VERDICT: PASS\nVERDICT: PASS".to_owned(),
-        "VERDICT: PASS x".to_owned(),
-        format!("VERDICT: PASS{}", " ".repeat(1024)),
+        "VERDICT: PASSX".to_owned(),
+        "VERDICT: passable".to_owned(),
+        "VERDICT: PASS/FAIL".to_owned(),
         format!(
             "{}\nVERDICT: FAIL\n{}\nVERDICT: PASS",
             "x".repeat(5000),
@@ -523,6 +528,36 @@ fn gate_verdict_rejects_spoofed_multiple_and_malformed_lines() {
                 None
             );
         }
+    }
+}
+
+// Spec: docs/specs/run-settlement.md#review-verdict-wording
+#[test]
+fn gate_verdict_accepts_trailing_text_after_a_recognised_word() {
+    // #3536 ignores trailing text after a complete recognised verdict word or
+    // phrase: a stray token, padding, a reviewed sha or an explanation. The
+    // captured verdict is still canonicalised before the gate reads it.
+    for text in [
+        "VERDICT: PASS x".to_owned(),
+        format!("VERDICT: PASS{}", " ".repeat(1024)),
+        "Verdict: LGTM abc123".to_owned(),
+        "VERDICT: approved 0be4e6c".to_owned(),
+    ] {
+        let (document, mut owner) =
+            verdict_fixture(VerdictThreshold::All, &[Some("PASS"), Some("PASS")]);
+        owner.observations[0] = terminal_with_result(AttemptOutcome::Succeeded, &text);
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(run.checkpoint.nodes[2].state, NodeState::Succeeded, "{text:?}");
+        assert_eq!(
+            run.checkpoint.nodes[0]
+                .outputs
+                .as_ref()
+                .unwrap()
+                .verdict
+                .as_deref(),
+            Some("VERDICT: PASS"),
+            "{text:?}"
+        );
     }
 }
 

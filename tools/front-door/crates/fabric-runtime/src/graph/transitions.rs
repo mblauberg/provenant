@@ -2187,7 +2187,11 @@ mod tests {
         let key = start(&plan, &positions, &mut checkpoint, &limits);
 
         let mut capture = crate::result_capture::ResultCapture::new(None);
-        capture.push(b"VERDICT: PASS\n");
+        // review.tests requires a valid findings block; without one the
+        // settlement is not a review result and records no review settlement.
+        capture.push(
+            "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS\n".as_bytes(),
+        );
         let attempt_id = provenant_core::AttemptId::from_bytes([7; 16]);
         let observation = AttemptObservation::Terminal {
             attempt_ref: Some(format!("fixture/{attempt_id}")),
