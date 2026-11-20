@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "scope": {"attempt": "02020202020202020202020202020202", "generation": 1},
+  "launch_state": "never_spawned",
+  "attempt_device": 0, "attempt_inode": 0,
+  "reservation_device": 0, "reservation_inode": 0,
+  "binding": {"kind": "read_only"},
+  "boot": "darwin:00000000-0000-0000-0000-000000000001",
+  "guardian": null, "provider": null, "unresolved_cleanup": false,
+  "descendants": [], "census_incomplete": false, "omitted_descendants": 0
+}

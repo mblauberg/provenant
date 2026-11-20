@@ -215,6 +215,58 @@ fn settled(rig: &TestRig, reference: &str) -> Result<Value> {
     Ok(lane)
 }
 
+// Spec: docs/specs/supervisor.md#host-inventory-problems-stay-local
+#[test]
+fn upgrade_corpus_allows_unrelated_read_only_launch() -> Result {
+    if !available()? {
+        return Ok(());
+    }
+    let rig = rig(json!({"upgrade-smoke":{"argv":["/usr/bin/true"]}}))?;
+    let _cleanup = rig.process_cleanup();
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    assert_eq!(
+        code(&identity),
+        0,
+        "{}",
+        String::from_utf8_lossy(&identity.stderr.bytes)
+    );
+    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+    let project = identity["data"]["project"].as_str().ok_or("project id")?;
+    let seed = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/upgrade-corpus/v2.4.1/seed.py");
+    let output = rig.execute(
+        std::path::Path::new("/usr/bin/python3"),
+        &[
+            seed.to_str().ok_or("seed path")?,
+            rig.state.to_str().ok_or("state path")?,
+            project,
+        ],
+        None,
+    )?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let inventory = provenant_supervisor::custody::list_writer_reservations(
+        &provenant_os::fs::Directory::open_anchor(&rig.state.join("worktrees").join(project))?,
+    )?;
+    assert!(
+        inventory.issues.iter().any(|issue| matches!(
+            issue.kind,
+            provenant_supervisor::custody::ReservationIssueKind::LegacyEvidence
+        )),
+        "corpus must exercise legacy guardian inventory: {inventory:?}"
+    );
+    let result = dispatch(&rig, "upgrade-smoke", 15)?;
+    assert_eq!(
+        result["data"]["checkpoint"]["nodes"][0]["state"], "succeeded",
+        "{result}"
+    );
+    Ok(())
+}
+
 #[test]
 fn command_task_feeds_an_attemptless_verdict_gate() -> Result {
     if !available()? {
