@@ -294,6 +294,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "gc_reports_transient_and_preserves_unobserved_project_array",
             "gc_pressure_collects_only_the_selected_primary_project",
             "gc_sweep_budget_stops_then_resumes",
+            "gc_preview_reports_import_pins_and_apply_removes_them",
             "gc_refuses_unbound_bare_projects",
             "gc_collects_bound_bare_worktrees",
             "provider_retention_classes_sweep_host_and_refuse_replaced_roots",
@@ -417,6 +418,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "gc_pressure_collects_only_the_selected_primary_project" => gc_pressure_collects_only_the_selected_primary_project(),
                 "gc_sweep_budget_stops_then_resumes" => gc_sweep_budget_stops_then_resumes(),
+                "gc_preview_reports_import_pins_and_apply_removes_them" => {
+                    gc_preview_reports_import_pins_and_apply_removes_them()
+                }
                 "gc_refuses_unbound_bare_projects" => gc_refuses_unbound_bare_projects(),
                 "gc_collects_bound_bare_worktrees" => gc_collects_bound_bare_worktrees(),
                 "gc_reports_transient_and_preserves_unobserved_project_array" => gc_reports_transient_and_preserves_unobserved_project_array(),

@@ -1201,9 +1201,12 @@ pub(crate) fn cleanup_git_pins(
             "open writer repository for Git ref cleanup",
             Some(&writer.project),
         ))?;
-    // Every terminal outcome reaches this cleanup effect: remove this
-    // attempt's import-extra pins even when the publication path never ran.
-    crate::objects::clear_import_refs(utility.git_program_path(), &repo, scope.attempt)?;
+    // The same recovery condition that protects the import pin protects the
+    // import-extra refs: a refused import or a broken writer fence keeps its
+    // pins as evidence, so only delete them when the import pin is removed.
+    if remove_import_pin {
+        crate::objects::clear_import_refs(utility.git_program_path(), &repo, scope.attempt)?;
+    }
     let mut refs = vec![format!("refs/provenant/lane-base/{}", scope.attempt)];
     if remove_import_pin && let Some(head) = head {
         refs.push(crate::objects::import_pin(scope.attempt, head));

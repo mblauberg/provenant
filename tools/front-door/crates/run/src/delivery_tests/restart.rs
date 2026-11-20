@@ -991,6 +991,52 @@ fn terminal_cleanup_removes_only_its_import_pin()
 }
 
 #[test]
+// Spec: docs/specs/run.md#lane-git-and-import
+fn terminal_cleanup_without_removal_keeps_import_pins_as_recovery_evidence()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let execution = registered_landed_writer_fixture(&fixture)?;
+    let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
+    let call = tests::call(&clock, &cancel);
+    let store = RunStore::open(&execution, &call)?;
+    let mut input = tests::input();
+    input.request.task.writer = Some(fixture.writer.clone());
+    store.create(&input, &call)?;
+    let attempt = store.attempt_dir(input.attempt_id, false)?;
+    let scope = RunStore::scope(&store.record(input.attempt_id, &call)?);
+    let launch = crate::prepare_writer(
+        &fixture.writer,
+        execution.state_root.as_path(),
+        execution.project_id,
+    )?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let own = crate::objects::import_pin(input.attempt_id, launch.base);
+    let own_extra = format!("refs/provenant/import-extra/{}/object", input.attempt_id);
+    let oid = launch.base.to_string();
+    for reference in [&own, &own_extra] {
+        fixture.git(&["update-ref", reference, &oid])?;
+    }
+
+    crate::writer::cleanup_git_pins(
+        execution.state_root.as_path(),
+        &fixture.writer,
+        &attempt,
+        scope,
+        Some(launch.base),
+        false,
+    )?;
+
+    for reference in [&own, &own_extra] {
+        assert_eq!(
+            crate::objects::resolve_ref(&git, launch.worktree.repo(), reference)?,
+            launch.base,
+            "pins kept as recovery evidence must survive cleanup {reference}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 // Spec: docs/specs/run-settlement.md#retention-and-disclosure
 fn gc_removes_import_pins_of_missing_attempts_and_keeps_live_ones()
 -> std::result::Result<(), Box<dyn std::error::Error>> {

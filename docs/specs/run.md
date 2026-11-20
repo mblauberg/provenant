@@ -213,7 +213,10 @@ publication and cleanup remove only that attempt's pins. Settlement clears an
 attempt's import pins on every terminal outcome, not just successful
 publication, and GC removes the pins of any settled or missing attempt so ref
 listings stay small. Bulk pin removal is one batched ref transaction, never one
-Git process per pin; a refused import keeps its pins as recovery evidence.
+Git process per pin. The same condition gates the import pin and the
+import-extra refs: when no writer slot is available or the fence listing has
+issues, cleanup keeps both as recovery evidence. GC counts the import pins a
+preview would remove and deletes them only when applied.
 Lane Git import runs with `-c advice.graftFileDeprecated=false`, and raw git advice
 (such as `hint:` lines) is filtered from stderr before warning so advice lines
 never surface as Provenant warnings.

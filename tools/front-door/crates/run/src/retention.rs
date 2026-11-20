@@ -827,10 +827,9 @@ pub fn gc_import_pins(
         let Some(id) = import_pin_attempt(&reference) else {
             continue;
         };
-        match import_pin_gc_eligible(store, id, call) {
-            Ok(true) => eligible.push(reference),
-            // An unreadable attempt is not proof of settlement: keep its pins.
-            Ok(false) | Err(_) => {}
+        // An unreadable attempt is not proof of settlement: keep its pins.
+        if let Ok(true) = import_pin_gc_eligible(store, id, call) {
+            eligible.push(reference);
         }
     }
     if !dry_run {
