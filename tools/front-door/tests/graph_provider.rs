@@ -6064,7 +6064,9 @@ fn provider_checks_preserve_routes_and_settlement_causes() -> Result {
     ])?;
     assert_eq!(code(&out), 1, "{out:?}");
     let data: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(data["data"]["live"], true);
     let rows = data["data"]["rows"].as_array().ok_or("live rows")?;
+    assert_eq!(rows.len(), 2);
     let passed = rows
         .iter()
         .find(|row| row["route"] == pass)
@@ -6077,7 +6079,11 @@ fn provider_checks_preserve_routes_and_settlement_causes() -> Result {
     assert_eq!(passed["cause"], "completed");
     assert_eq!(failed["status"], "fail");
     assert_eq!(failed["cause"], "auth_required");
-    assert!(rows.iter().all(|row| row["attempt_id"].is_string()));
+    // Both routes are probed in one invocation, each with its own attempt and
+    // its own settlement cause: neither may report the other's custody refusal.
+    let passed_attempt = passed["attempt_id"].as_str().ok_or("passing attempt")?;
+    let failed_attempt = failed["attempt_id"].as_str().ok_or("failing attempt")?;
+    assert_ne!(passed_attempt, failed_attempt);
     let out = rig.command(&[
         "check",
         "providers",
