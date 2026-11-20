@@ -2877,14 +2877,14 @@ fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
         let structural_pause =
             transitions::refresh_structure_pause(&mut checkpoint, &expanded, &plan, limits);
         if structural_pause.is_some() {
+            // Persist the durable pause before observing attempts. A resume
+            // against tighter limits still owes every terminal attempt its
+            // settlement: returning here would leave its node running forever,
+            // and the live node would in turn keep the structural pause in
+            // place. Observing under the pause is already the non-resume
+            // behaviour; the pause is refreshed again after settlement and
+            // only clears when the whole graph settles (#3558).
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
-            // A resume against tighter limits must return the durable pause
-            // before observing attempts can settle the graph and clear it.
-            if resume {
-                return Ok(ScheduleExit::Done(Box::new(transitions::graph_run(
-                    checkpoint,
-                ))));
-            }
         }
         if structural_pause.is_none() {
             if let Some(next) =

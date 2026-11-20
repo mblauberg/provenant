@@ -42,12 +42,19 @@ reopens selected consumers without restarting unrelated work.
 Graph-wide retry with no work left to resume and no extension must select a
 node or refuse with the node retry command. Lowered host structural limits
 pause an unchanged graph on resume or graph-wide retry, saving the structural
-limit pause; only a changed candidate refuses admission. Pending work and budget extensions
+limit pause; only a changed candidate refuses admission. A structural-limit
+pause never defers observing an already terminal attempt: its node still
+settles to a terminal state and publishes the writer's final commit from the
+bound branch, so a wait keyed on node state converges and `head` is not left at
+the bound base. The pause is refreshed after settlement and clears only when
+the whole graph settles. Pending work and budget extensions
 remain resumable even when an advisory node failed. Prior model exclusions
 use `adapter/id`; a carried graph exclusion that no longer resolves is dropped
 with a warning. Explicit flag and standing configuration errors remain visible
 to their author.
 - Why: a retry must neither discard useful work nor erase the cost of failure.
+  Returning from a resume before observing a terminal attempt wedges the node
+  in `running` with a base `head` and keeps its own structural pause in place.
 
 ## Credential admission and publication
 
