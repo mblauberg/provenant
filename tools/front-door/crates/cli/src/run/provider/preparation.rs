@@ -4230,7 +4230,10 @@ pub(super) fn prepare_candidates_inner(
         let mut provider_route = adapter_route(&route);
         let model_id =
             provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?;
-        let launch_model = catalogue.launch_model(&model_id, route.effort.as_deref());
+        // Resolve a family alias once at selection: the provider reports the
+        // exact model, which launch and identity comparison must both use.
+        let (exact_model, requested_alias) = resolved_launch_model(&catalogue, &model_id);
+        let launch_model = catalogue.launch_model(&exact_model, route.effort.as_deref());
         let provider_model = (launch_model != route.model).then_some(launch_model);
         let project_id_str = project_id.to_string();
         let project_key = format!("domains.lanes.projects.{project_id_str}.user_skills");
@@ -4863,6 +4866,9 @@ pub(super) fn prepare_candidates_inner(
             resume.is_some(),
             current_candidate > 0,
         );
+        // The launch uses the exact model; record it alongside the requested
+        // alias so identity comparison cannot judge the two as different.
+        apply_resolved_model(&mut provider, &exact_model, requested_alias.as_deref());
         provider.account_source = Some(if resume.is_some() {
             provenant_records::run::AccountSource::Continuation
         } else if task.account.is_some() {
@@ -5164,6 +5170,37 @@ fn origin_receipt(
         .unwrap_or_default()
 }
 
+/// Resolve a family alias once for launch. A provider reports its exact model,
+/// so launch, receipts and identity comparison must all speak in exact models;
+/// the requested alias is retained separately for the receipt.
+/// Spec: docs/specs/routing.md#provider-model-discovery
+fn resolved_launch_model(
+    catalogue: &provenant_routing::Catalogue,
+    requested: &provenant_routing::ModelId,
+) -> (provenant_routing::ModelId, Option<String>) {
+    match catalogue.resolve_family_alias(requested) {
+        Some(exact) if exact != requested => (exact.clone(), Some(requested.as_str().to_owned())),
+        _ => (requested.clone(), None),
+    }
+}
+
+/// Carry the exact model into the launch receipt and keep the requested alias
+/// beside it, so identity comparison sees the model the provider reports.
+/// Spec: docs/specs/routing.md#provider-model-discovery
+fn apply_resolved_model(
+    record: &mut provenant_records::run::RouteRecord,
+    exact: &provenant_routing::ModelId,
+    requested_alias: Option<&str>,
+) {
+    record.model = Some(format!("{}/{}", exact.adapter(), exact.model()));
+    if let Some(alias) = requested_alias {
+        record.extra.insert(
+            "requested_model".to_owned(),
+            serde_json::Value::String(alias.to_owned()),
+        );
+    }
+}
+
 /// Preserve the resolver's decision at the launch boundary.
 fn launch_route_record(
     route: &ResolvedRoute,
@@ -5335,6 +5372,40 @@ mod receipt_tests {
         );
         assert!(wire.get("prompt").is_none());
         assert!(wire.get("credential").is_none());
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#provider-model-discovery
+    #[test]
+    fn family_alias_launch_uses_exact_model_and_keeps_the_requested_alias()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let catalogue = Catalogue::bundled()?;
+        let alias = provenant_routing::ModelId::parse("claude/sonnet")?;
+        let (exact, requested) = resolved_launch_model(&catalogue, &alias);
+        assert_eq!(exact.as_str(), "claude/claude-sonnet-5-5");
+        assert_eq!(requested.as_deref(), Some("claude/sonnet"));
+
+        // Launch and the observed identity both speak in exact models, so the
+        // model reported by the provider matches the applied route.
+        assert_eq!(catalogue.launch_model(&exact, None), "claude-sonnet-5-5");
+        let mut applied = run::RouteRecord {
+            model: Some(alias.as_str().to_owned()),
+            ..Default::default()
+        };
+        apply_resolved_model(&mut applied, &exact, requested.as_deref());
+        assert_eq!(applied.model.as_deref(), Some("claude/claude-sonnet-5-5"));
+        assert_eq!(
+            applied
+                .extra
+                .get("requested_model")
+                .and_then(|v| v.as_str()),
+            Some("claude/sonnet")
+        );
+
+        // An already-exact model needs no alias retention.
+        let (same, none) = resolved_launch_model(&catalogue, &exact);
+        assert_eq!(same, exact);
+        assert_eq!(none, None);
         Ok(())
     }
 }
