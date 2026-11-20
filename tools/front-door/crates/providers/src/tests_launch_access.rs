@@ -1410,9 +1410,10 @@ fn sandboxed_private_git_config_includes_host_config() -> Result<(), Box<dyn std
             .find_map(|(key, value)| (key == name).then(|| value.to_string_lossy().into_owned()))
     };
     assert_eq!(get("GIT_CONFIG_COUNT").as_deref(), Some("2"));
-    assert_eq!(get("GIT_CONFIG_KEY_1").as_deref(), Some("credential.helper"));
+    assert_eq!(get("GIT_CONFIG_KEY_0").as_deref(), Some("credential.helper"));
+    assert_eq!(get("GIT_CONFIG_VALUE_0").as_deref(), Some(""));
     assert_eq!(
-        get("GIT_CONFIG_KEY_2").as_deref(),
+        get("GIT_CONFIG_KEY_1").as_deref(),
         Some("credential.https://github.com.helper")
     );
     Ok(())
