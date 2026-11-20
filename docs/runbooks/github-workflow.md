@@ -50,6 +50,12 @@ rows bound to the exact head, the independent-review block) and pass it with
 `provenant pr open --from-attempt TARGET --review TARGET --summary-file summary.md --issue N --dry-run`.
 Complete rows marked `pending` before asking for review.
 
+Inside a lane, open the pull request with `gh pr create --body-file` against a
+filled copy of the template: the lane's own attempt is still running, so
+`provenant pr open --from-attempt` refuses it. `pr open` is for the chair
+after the attempt settles. The lane's `gh` is pinned to the host's gh
+configuration directory, so no `GH_CONFIG_DIR` prefix is needed.
+
 A stack is a linear chain of dependent slices: the bottom PR targets `main`,
 each later PR the branch below, each with its own issue link (`gh stack --help`).
 Rebase and force-push with lease only your own unmerged branches, then recheck

@@ -395,6 +395,10 @@ pub fn lane_preamble(
     )
 }
 
+/// Which pull request command a lane runs: its own attempt is still running,
+/// so `provenant pr open` (settled attempts only) refuses it.
+const PULL_REQUEST_GUIDANCE: &str = "Pull request: open it from inside the lane with `gh pr create --body-file FILE` against a filled copy of the pull request template; `provenant pr open` is for after settlement, not for a running lane.\n";
+
 pub fn lane_preamble_with(
     model_guidance: &str,
     limits: &provenant_records::LaneLimits,
@@ -443,7 +447,7 @@ pub fn lane_preamble_with(
                 .map(LaneLocation::preamble)
                 .unwrap_or_default();
             format!(
-                "{location}{verification}{cargo_target}{cargo_cache_budget}In a shared worktree, commit only your own paths with `git commit -- <paths>`; coordinate overlapping edits with the owning lane.\n{}{}{budget}",
+                "{location}{verification}{cargo_target}{cargo_cache_budget}In a shared worktree, commit only your own paths with `git commit -- <paths>`; coordinate overlapping edits with the owning lane.\n{}{}{budget}{PULL_REQUEST_GUIDANCE}",
                 slot_guidance(extras.build_cap),
                 scope.preamble()
             )

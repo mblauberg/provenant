@@ -1495,19 +1495,24 @@ printf 'agy 1.0.0\n'
         }
     } else {
         assert!(!gh_config.exists());
+        // gh is pinned to the host's own directory (here the default under
+        // HOME), in the environment and in the shim, and the receipt says so.
+        let host_gh = home.join(".config/gh");
         assert!(
-            !publishing
+            publishing
                 .environment
                 .iter()
-                .any(|(key, _)| key == "GH_CONFIG_DIR")
+                .any(|(key, value)| key == "GH_CONFIG_DIR" && value == host_gh.as_os_str())
         );
+        assert!(gh_shim.contains(host_gh.to_str().ok_or("host gh config path")?));
+        assert!(credential.detail.contains("default ~/.config/gh"));
         assert!(
             publishing
                 .environment
                 .iter()
                 .any(|(key, value)| key == "HOME" && value == home.as_os_str())
         );
-        assert!(!gh_shim.contains("GH_CONFIG_DIR="));
+        assert!(gh_shim.contains("GH_CONFIG_DIR="));
     }
     let profile = &publishing
         .confinement
