@@ -158,7 +158,7 @@ fn commit_source_lanes_can_read_their_view_without_changing_adapter_writes()
     for adapter in ["codex", "claude", "cursor", "agy", "opencode", "command"] {
         let mut task_writes = None;
         for kind in ["task", "live", "commit"] {
-            let mut access = run::LaneAccess::default();
+            let mut access = run::LaneAccessRequest::default();
             if kind != "task" {
                 access.source_root = Some(source.clone());
                 access.source_live = kind == "live";
@@ -321,7 +321,7 @@ fn registered_credential_roots_protect_lane_tokens_for_dedicated_and_shared_root
     let alias_target = base.join("unselected-endpoint");
     std::fs::write(&alias_target, b"synthetic credential")?;
     std::os::unix::fs::symlink(&alias_target, dedicated.join(provenant_providers::claude::LANE_TOKEN_FILE))?;
-    let roots = credential_roots(&Registry::default(), &home, &settings, &[&lane])?;
+    let roots = isolated_credential_roots(&Registry::default(), &home, &settings, &[&lane])?;
     assert!(roots.entries().iter().any(|root| root.path == alias_target && root.scope == CredentialScope::Exact && root.source.contains("claude/dedicated")));
     for dir in [&dedicated, &shared, &home] {
         for name in [provenant_providers::claude::LANE_TOKEN_FILE, "undeclared.txt"] {
@@ -348,10 +348,12 @@ fn unresolvable_registered_store_names_its_account() -> Result<(), Box<dyn std::
     let settings: provenant_providers::accounts::Settings = serde_json::from_value(
         serde_json::json!({"entries": {"work": {"adapter":"claude", "label":"work", "key":"work", "directory":account}}}),
     )?;
-    let error = credential_roots(&Registry::default(), &home, &settings, &[])
+    let error = isolated_credential_roots(&Registry::default(), &home, &settings, &[])
         .expect_err("dangling store must refuse");
     assert!(error.contains("claude/work"), "{error}");
     assert!(error.contains("provenant-lane-token"), "{error}");
+    let receipt = provenant_records::LaneAccessReceipt { access: provenant_records::LaneAccess::Host, source: provenant_records::LaneAccessSource::Default, key: "lanes.access".into(), extra: Default::default() };
+    assert!(credential_roots(&Registry::default(), &home, &settings, &[&account], Some(&receipt), &provenant_records::policy::Policy::default()).is_ok());
     Ok(())
 }
 
@@ -388,7 +390,7 @@ fn host_declared_codex_home_equal_to_home_protects_store_and_admits_project_belo
         ..Registry::default()
     };
     let settings = provenant_providers::accounts::Settings::default();
-    let roots = credential_roots(&registry, &home, &settings, &[&project])?;
+    let roots = isolated_credential_roots(&registry, &home, &settings, &[&project])?;
     assert!(roots.entries().iter().any(|r| r.path == home && r.scope == CredentialScope::Subtree));
     for name in ["auth.json", "config.toml", "unlisted-secret"] {
         assert!(roots.refuses(&home.join(name), CredentialScope::Exact, true));
@@ -398,7 +400,6 @@ fn host_declared_codex_home_equal_to_home_protects_store_and_admits_project_belo
         &project,
         &state,
         &project,
-        &roots,
         crate::run::SourceAdmissionMode::Live,
     );
     assert!(
@@ -421,7 +422,7 @@ fn dangling_account_directory_that_is_also_the_source_root_refuses_naming_accoun
     let settings: provenant_providers::accounts::Settings = serde_json::from_value(
         serde_json::json!({"entries": {"work": {"adapter":"claude", "label":"work", "key":"work", "directory":account}}}),
     )?;
-    let error = credential_roots(&Registry::default(), &home, &settings, &[&account])
+    let error = isolated_credential_roots(&Registry::default(), &home, &settings, &[&account])
         .expect_err("dangling account directory that is also source root must refuse");
     assert!(error.contains("claude/work"), "{error}");
     assert!(error.contains("dangling-account"), "{error}");
@@ -472,7 +473,7 @@ fn relocated_codex_stores_never_gain_the_builtin_package_exception()
             host: Some(&host),
             ..Registry::default()
         };
-        let roots = credential_roots(&registry, &home, &settings, &[&project])?;
+        let roots = isolated_credential_roots(&registry, &home, &settings, &[&project])?;
         let package = store.join("packages/standalone/releases/1.0/bin/codex");
         assert!(
             roots.refuses(&package, CredentialScope::Exact, true),
@@ -484,12 +485,12 @@ fn relocated_codex_stores_never_gain_the_builtin_package_exception()
         ));
         let nested = store.join("project");
         std::fs::create_dir_all(&nested)?;
-        let shared = credential_roots(&registry, &home, &settings, &[&nested])?;
+        let shared = isolated_credential_roots(&registry, &home, &settings, &[&nested])?;
         assert!(shared.refuses(&store.join("unlisted-secret"), CredentialScope::Exact, false), "{origin}");
         // Materialised reads cannot inherit the sandbox-only runtime carve-out.
         assert!(shared.refuses(&package, CredentialScope::Exact, true), "{origin}");
         assert!(!shared.refuses(&nested.join("ordinary"), CredentialScope::Exact, true), "{origin}");
-        assert!(crate::run::admit_source_root(&project, &state, &nested, &shared, crate::run::SourceAdmissionMode::Live).is_ok(), "{origin}");
+        assert!(crate::run::admit_source_root(&project, &state, &nested, crate::run::SourceAdmissionMode::Live).is_ok(), "{origin}");
 
     }
     Ok(())
@@ -521,7 +522,7 @@ fn alternate_sources_inside_builtin_stores_keep_only_actual_launch_carveouts()
             host: Some(&host),
             ..Registry::default()
         };
-        let roots = credential_roots(&registry, &home, &Default::default(), &[&project])?;
+        let roots = isolated_credential_roots(&registry, &home, &Default::default(), &[&project])?;
         assert!(roots.entries().iter().any(|root| root.path == store && root.scope == CredentialScope::Subtree));
         assert!(roots.refuses(&store.join("unlisted-secret"), CredentialScope::Exact, false));
         // The initial project's table must never be unioned back into this
@@ -535,6 +536,7 @@ fn alternate_sources_inside_builtin_stores_keep_only_actual_launch_carveouts()
         for sandboxed in [false, true] {
             let mandatory = provenant_confinement::permissions::MandatoryRoots::for_host_with_scratch_mode(
                 &host_roots, &home, &project, &base.join("scratch"), &roots, &[], &[], sandboxed,
+                provenant_records::LaneAccessReceipt { access: provenant_records::LaneAccess::Isolated, source: provenant_records::LaneAccessSource::Default, key: "lanes.access".into(), extra: Default::default() },
             )?;
             assert!(!mandatory.credential_roots().refuses(&project, CredentialScope::Subtree, true));
             assert!(!mandatory.credential_roots().refuses(&ordinary, CredentialScope::Exact, true));
@@ -546,7 +548,6 @@ fn alternate_sources_inside_builtin_stores_keep_only_actual_launch_carveouts()
                 &project,
                 &state,
                 &project,
-                &roots,
                 crate::run::SourceAdmissionMode::Live
             )
             .is_ok()
@@ -581,7 +582,7 @@ fn shared_host_stores_retain_subtrees_even_without_file_inventories()
         host: Some(&host),
         ..Registry::default()
     };
-    let roots = credential_roots(&registry, &home, &Default::default(), &[&project])?;
+    let roots = isolated_credential_roots(&registry, &home, &Default::default(), &[&project])?;
     for name in ["hosts.yml", "config.yml"] {
         assert!(roots.refuses(&home.join(name), CredentialScope::Exact, true));
     }
@@ -592,7 +593,6 @@ fn shared_host_stores_retain_subtrees_even_without_file_inventories()
             &project,
             &state,
             &project,
-            &roots,
             crate::run::SourceAdmissionMode::Live
         )
         .is_ok()
@@ -606,7 +606,7 @@ fn shared_host_stores_retain_subtrees_even_without_file_inventories()
         host: Some(&unknown_host),
         ..registry
     };
-    let roots = credential_roots(&registry, &home, &Default::default(), &[&project])?;
+    let roots = isolated_credential_roots(&registry, &home, &Default::default(), &[&project])?;
     assert!(roots.refuses(&home.join("unlisted-secret"), CredentialScope::Exact, false));
     assert!(!roots.refuses(&project, CredentialScope::Subtree, true));
     Ok(())
@@ -639,7 +639,7 @@ fn shared_store_refuses_declared_files_in_lane_roots_and_names_the_origin()
             inventory: CredentialInventory::Files(vec!["project/declared-token".into()]),
         }];
         let registry = Registry { host: Some(&host), ..Registry::default() };
-        let error = credential_roots(&registry, &home, &Default::default(), &[&project]).unwrap_err();
+        let error = isolated_credential_roots(&registry, &home, &Default::default(), &[&project]).unwrap_err();
         assert!(error.contains("host fixture inventory") && error.contains(credential.to_str().ok_or("path")?), "{error}");
     }
     // Both link directions must refuse for exact declarations and inventories:
@@ -663,7 +663,7 @@ fn shared_store_refuses_declared_files_in_lane_roots_and_names_the_origin()
                 inventory: CredentialInventory::Files(vec![name.into()]),
             }];
             let registry = Registry { host: Some(&host), ..Registry::default() };
-            let error = credential_roots(&registry, &home, &Default::default(), &[&project]).unwrap_err();
+            let error = isolated_credential_roots(&registry, &home, &Default::default(), &[&project]).unwrap_err();
             assert!(error.contains("host symlink inventory") && error.contains(credential.to_str().ok_or("path")?), "{error}");
         }
         std::fs::remove_file(credential)?;
@@ -680,7 +680,7 @@ fn shared_store_refuses_declared_files_in_lane_roots_and_names_the_origin()
         }}}))?;
         host.credential_roots.clear();
         let registry = Registry { host: Some(&host), ..Registry::default() };
-        let error = credential_roots(&registry, &home, &settings, &[&project]).unwrap_err();
+        let error = isolated_credential_roots(&registry, &home, &settings, &[&project]).unwrap_err();
         assert!(error.contains("claude/work") && error.contains(name), "{error}");
         std::fs::remove_file(token)?;
     }
@@ -691,7 +691,70 @@ fn shared_store_refuses_declared_files_in_lane_roots_and_names_the_origin()
             inventory: CredentialInventory::Unknown,
         }];
         let registry = Registry { host: Some(&host), ..Registry::default() };
-        assert!(credential_roots(&registry, &home, &Default::default(), &[lane]).is_err());
+        assert!(isolated_credential_roots(&registry, &home, &Default::default(), &[lane]).is_err());
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn isolated_credential_roots(
+    registry: &Registry<'_>, home: &Path, settings: &provenant_providers::accounts::Settings, lane_roots: &[&Path],
+) -> Result<provenant_core::CredentialRoots, String> {
+    let receipt = provenant_records::LaneAccessReceipt { access: provenant_records::LaneAccess::Isolated, source: provenant_records::LaneAccessSource::Default, key: "lanes.access".into(), extra: Default::default() };
+    credential_roots(registry, home, settings, lane_roots, Some(&receipt), &provenant_records::policy::Policy::default())
+}
+
+#[test]
+fn credential_grant_admission_follows_resolved_access() {
+    let home = Path::new("/fixture/home");
+    let roots = provenant_core::CredentialRoots::for_home(home);
+    let mut request = run::LaneAccessRequest::default();
+    let credential = home.join(".ssh");
+    let given = home.join("project/../.ssh");
+    let given_display = given.display().to_string();
+    let mut receipt = provenant_records::LaneAccessReceipt { access: provenant_records::LaneAccess::Isolated, source: provenant_records::LaneAccessSource::Default, key: "lanes.access".into(), extra: Default::default() };
+    for (read, attach) in [(true, false), (false, false), (true, true)] {
+        request.read_roots.clear(); request.write_roots.clear(); request.attachments.clear();
+        if attach { request.attachments.push(credential.clone()); } else if read { request.read_roots.push(credential.clone()); } else { request.write_roots.push(credential.clone()); }
+        let kind = if attach {
+            run::LaneAccessGrantKind::Attachment
+        } else if read {
+            run::LaneAccessGrantKind::ReadRoot
+        } else {
+            run::LaneAccessGrantKind::WriteRoot
+        };
+        request.dispatch_grants = vec![run::LaneAccessGrant {
+            kind,
+            path: credential.clone(),
+            given: given_display.clone(),
+        }];
+        receipt.access = provenant_records::LaneAccess::Isolated;
+        let error = credential_access_grant_refusal(&request, &roots, &receipt, &provenant_records::policy::Policy::default()).expect("isolated credential grant refused");
+        assert!(error.contains(if read { "--read-root" } else { "--write-root" }));
+        assert!(error.starts_with(&format!(
+            "{} {} overlaps declared credential root {} (source:",
+            if read { "--read-root" } else { "--write-root" },
+            given_display,
+            credential.display(),
+        )));
+        receipt.access = provenant_records::LaneAccess::Host;
+        assert!(credential_access_grant_refusal(&request, &roots, &receipt, &provenant_records::policy::Policy::default()).is_none());
+    }
+
+    request.read_roots = vec![home.join("project")];
+    request.write_roots.clear();
+    request.attachments.clear();
+    request.dispatch_grants = vec![run::LaneAccessGrant {
+        kind: run::LaneAccessGrantKind::ReadRoot,
+        path: credential,
+        given: given_display,
+    }];
+    receipt.access = provenant_records::LaneAccess::Isolated;
+    assert!(credential_access_grant_refusal(
+        &request,
+        &roots,
+        &receipt,
+        &provenant_records::policy::Policy::default(),
+    )
+    .is_none());
 }

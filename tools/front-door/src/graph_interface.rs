@@ -233,6 +233,20 @@ fn run_human(data: &Value, input: &Value, announced: bool) -> String {
         .unwrap_or_default();
     let mut lanes = String::new();
     lanes += &refusal_lines(&data["checkpoint"]);
+    if let Some(accesses) = data["lane_accesses"].as_array() {
+        for item in accesses {
+            if let Ok(access) =
+                serde_json::from_value::<provenant_records::LaneAccessReceipt>(item.clone())
+            {
+                lanes += &format!(
+                    "access: {} ({} {})\n",
+                    access.access.as_str(),
+                    access.key,
+                    access.source.as_str()
+                );
+            }
+        }
+    }
     if let Some(warnings) = data["warnings"].as_array() {
         for warning in warnings.iter().filter_map(Value::as_str) {
             lanes += &format!("warning: {warning}\n");
@@ -346,6 +360,28 @@ fn invoke(
             result["local_worktree_remedy"] = json!(action);
         }
         factory.name_refusal_causes(&mut result);
+        if command == "run"
+            && let Some(graph) = result["checkpoint"]["graph_id"].as_str()
+            && let Ok(target) = provenant_cli::Target::parse(graph)
+        {
+            let edge = provenant_cli::run::Edge {
+                roots: &factory.context.roots,
+                home: &factory.home,
+                assets: &factory.assets,
+                cwd: &factory.cwd,
+            };
+            let mut session = None;
+            if let Ok(rows) = fabric::final_status_rows(&target, &edge, &mut session) {
+                let accesses: Vec<_> = rows
+                    .into_iter()
+                    .filter(|row| row["kind"] == "attempt")
+                    .filter_map(|row| row.pointer("/applied_route/lane_access").cloned())
+                    .collect();
+                if !accesses.is_empty() {
+                    result["lane_accesses"] = json!(accesses);
+                }
+            }
+        }
         Ok(result)
     })();
     match result {
@@ -1325,6 +1361,14 @@ mod tests {
                 assert!(human.lines().count() <= provenant_cli::limits::SUMMARY_ROWS + 4);
             }
         }
+    }
+
+    #[test]
+    fn compact_run_reports_resolved_lane_access() {
+        let data = json!({"status":"pending", "checkpoint":{"graph_id":"work", "nodes":[]},
+            "lane_accesses":[{"access":"isolated","source":"route_policy","key":"rules.policy.lane.access"}]});
+        let human = run_human(&data, &json!({}), true);
+        assert!(human.contains("access: isolated (rules.policy.lane.access route_policy)\n"));
     }
 
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes

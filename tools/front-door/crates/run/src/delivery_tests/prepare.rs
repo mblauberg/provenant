@@ -143,6 +143,157 @@ fn prepare_refuses_unavailable_and_unsafe_credential_helpers()
             ..
         })
     ));
+    let host = HostDeliveryContext::new(ssh_fixture.environment.clone())
+        .with_host_state(&ssh_fixture.root.join("state"));
+    assert!(
+        host.prepare(&ssh_fixture.writer, &ssh_fixture.request)
+            .is_ok()
+    );
+    Ok(())
+}
+
+#[test]
+fn transport_protects_sandboxed_lane_configuration()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let helper = fixture.writer.worktree.join("ssh-wrapper");
+    fixture.executable(&helper, "#!/bin/sh\nexit 0\n")?;
+    fixture.git(&[
+        "config",
+        "core.sshCommand",
+        helper.to_str().ok_or("helper")?,
+    ])?;
+    let prepare = |sandboxed: bool| {
+        // This pins the sandboxed isolated transport protection. A sandboxed
+        // host-access lane deliberately uses ordinary host transport instead,
+        // so opt into isolation here rather than relying on the old default.
+        let access = sandboxed.then(|| provenant_records::LaneAccessReceipt {
+            access: provenant_records::LaneAccess::Isolated,
+            source: provenant_records::LaneAccessSource::Launch,
+            key: "lanes.access".into(),
+            extra: Default::default(),
+        });
+        HostDeliveryContext::new(fixture.environment.clone())
+            .with_lane_access(access, Some(sandboxed))
+            .with_host_state(&fixture.root.join("state"))
+            .prepare(&fixture.writer, &fixture.request)
+    };
+    assert!(prepare(true).is_err());
+    assert!(prepare(false).is_ok());
+    Ok(())
+}
+
+#[test]
+fn host_transport_trusts_its_own_checkout_but_not_another_lanes_worktree()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let host = |sandboxed: bool, fixture: &PrepareFixture| {
+        HostDeliveryContext::new(fixture.environment.clone())
+            .with_lane_access(
+                Some(provenant_records::LaneAccessReceipt {
+                    access: provenant_records::LaneAccess::Host,
+                    source: provenant_records::LaneAccessSource::Launch,
+                    key: "lanes.access".into(),
+                    extra: Default::default(),
+                }),
+                Some(sandboxed),
+            )
+            .with_host_state(&fixture.root.join("state"))
+            .prepare(&fixture.writer, &fixture.request)
+    };
+    // A host lane reads the primary checkout's Git configuration even when
+    // sandboxed: that checkout and its own worktree are not lane-writable.
+    let fixture = PrepareFixture::new()?;
+    assert!(host(true, &fixture).is_ok());
+
+    // Another lane's worktree stays protected under the same host access.
+    let fixture = PrepareFixture::new()?;
+    let other = fixture.root.join("other-lane");
+    fixture.git(&[
+        "worktree",
+        "add",
+        "-qb",
+        "other-lane",
+        other.to_str().ok_or("other worktree")?,
+    ])?;
+    let helper = other.join("ssh-wrapper");
+    fixture.executable(&helper, "#!/bin/sh\nexit 0\n")?;
+    fixture.git(&[
+        "config",
+        "core.sshCommand",
+        helper.to_str().ok_or("helper")?,
+    ])?;
+    assert!(host(true, &fixture).is_err());
+    Ok(())
+}
+
+#[test]
+fn credential_url_is_not_passed_in_git_arguments()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    let wrapper = fixture.root.join("git-wrapper");
+    let arguments = fixture.root.join("git-arguments");
+    let value = fixture.root.join("git-url");
+    fixture.executable(&wrapper, &format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\ncase \" $* \" in *' ls-remote '*) printf '%s' \"$GIT_CONFIG_VALUE_4\" > '{}'; exit 0;; esac\nexec /usr/bin/git \"$@\"\n",
+        arguments.display(), value.display()
+    ))?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    let host = HostDeliveryContext::new(fixture.environment.clone())
+        .with_host_state(&fixture.root.join("state"))
+        .prepare(&fixture.writer, &fixture.request)?;
+    let url = "https://user:secret@example.invalid/repo.git";
+    host.command(
+        &fixture.writer.worktree,
+        "git",
+        &["ls-remote", "--", url],
+        WriterDeliveryStage::Push,
+    )?;
+    assert_eq!(std::fs::read_to_string(value)?, url);
+    assert!(!std::fs::read_to_string(arguments)?.contains(url));
+    Ok(())
+}
+
+#[test]
+fn userinfo_remote_delivers_with_credential_free_records()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let url = format!(
+        "file://user:secret@localhost{}",
+        fixture.root.join("remote.git").display()
+    );
+    fixture.git(&["remote", "set-url", "origin", &url])?;
+    let host = HostDeliveryContext::new(fixture.environment.clone())
+        .with_host_state(&fixture.root.join("state"))
+        .prepare(&fixture.writer, &fixture.request)?;
+    let binding = host.launch_state_for_test().2.ok_or("missing binding")?;
+    assert!(!String::from_utf8(binding)?.contains("user:secret@"));
+    let head = host.head(&fixture.writer)?;
+    let integration = host
+        .push(&fixture.writer, &fixture.request, head, "fixture")?
+        .integration
+        .ok_or("missing integration")?;
+    let endpoint = provenant_records::custody::RefEndpoint::Remote {
+        remote: integration.remote.clone(),
+        push_url: integration.push_url.clone().ok_or("missing endpoint")?,
+    };
+    for record in [
+        serde_json::to_string(&integration)?,
+        serde_json::to_string(&endpoint)?,
+    ] {
+        assert!(!record.contains("user:secret@"));
+    }
+    assert_eq!(
+        integration.push_url.as_deref(),
+        Some(
+            format!(
+                "file://localhost{}",
+                fixture.root.join("remote.git").display()
+            )
+            .as_str()
+        )
+    );
     Ok(())
 }
 

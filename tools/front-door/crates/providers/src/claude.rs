@@ -843,10 +843,9 @@ fn refresh_account_with_clock_and_lock_observer(
     Ok(token)
 }
 
-/// The host reads the selected Claude login token
-/// and passes it through an inherited pipe. Sandboxed lanes deny keychain
-/// services and use attempt-private configuration; native lanes keep the
-/// ordinary configuration unless an account selects another directory.
+/// Isolated launches receive the selected Claude token through a pipe and use
+/// attempt-private configuration. Host access uses native authentication and
+/// configuration unless an account selects another directory.
 /// Provenant and its hook helpers are added explicitly for lane use.
 fn prepare(
     input: &PrepareInput<'_>,
@@ -855,40 +854,41 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    // No credential path is granted: the token arrives through a pipe.
-    if plan.selected_authentication.is_some() {
-        return Err(input.boundary_error(
-            "CLAUDE_PREPARE_CREDENTIALS",
-            "Claude receives its selected account token through the host pipe",
-            ProviderError::UnsupportedPolicy,
-        ));
-    }
-    let token = input.token.ok_or_else(|| {
-        input.boundary_error(
-            "CLAUDE_PREPARE_CREDENTIALS",
-            "Claude launch requires its selected host-read token",
-            ProviderError::UnsupportedPolicy,
-        )
-    })?;
-    if token.account.is_some() && input.account.is_none() {
-        return Err(input.boundary_error(
-            "CLAUDE_PREPARE_AUTHORITY",
-            "Claude token identity must match the selected account",
-            ProviderError::IdentityMismatch,
-        ));
-    }
-    if let Some(account) = input.account
-        && token
-            .account
-            .as_ref()
-            .is_none_or(|(key, dir)| key != account.key() || dir != account.directory())
-    {
-        return Err(input.boundary_error(
-            "CLAUDE_PREPARE_AUTHORITY",
-            "Claude token identity must match the selected account",
-            ProviderError::IdentityMismatch,
-        ));
-    }
+    // Isolated launches use the host-read token; host launches use the CLI's
+    // native login, including non-OAuth authentication forms.
+    let token = if input.isolated() {
+        if plan.selected_authentication.is_some() {
+            return Err(input.boundary_error(
+                "CLAUDE_PREPARE_CREDENTIALS",
+                "Claude receives its selected account token through the host pipe",
+                ProviderError::UnsupportedPolicy,
+            ));
+        }
+        let token = input.token.ok_or_else(|| {
+            input.boundary_error(
+                "CLAUDE_PREPARE_CREDENTIALS",
+                "Claude launch requires its selected host-read token",
+                ProviderError::UnsupportedPolicy,
+            )
+        })?;
+        if token.account.is_some() && input.account.is_none()
+            || input.account.is_some_and(|account| {
+                token
+                    .account
+                    .as_ref()
+                    .is_none_or(|(key, dir)| key != account.key() || dir != account.directory())
+            })
+        {
+            return Err(input.boundary_error(
+                "CLAUDE_PREPARE_AUTHORITY",
+                "Claude token identity must match the selected account",
+                ProviderError::IdentityMismatch,
+            ));
+        }
+        Some(token)
+    } else {
+        None
+    };
     let session_id = match (session, input.continuation) {
         (Session::Resume, Some(continuation)) => continuation.session().to_owned(),
         (Session::Resume, None) => {
@@ -903,9 +903,6 @@ fn prepare(
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "-p".as_ref(),
-        "--strict-mcp-config".as_ref(),
-        "--setting-sources".as_ref(),
-        "".as_ref(),
         "--permission-prompts".as_ref(),
         "none".as_ref(),
         "--output-format".as_ref(),
@@ -914,6 +911,13 @@ fn prepare(
     ]
     .map(OsString::from)
     .to_vec();
+    if input.isolated() {
+        argv.extend([
+            "--strict-mcp-config".into(),
+            "--setting-sources".into(),
+            "".into(),
+        ]);
+    }
     argv.push(match session {
         Session::Fresh => "--session-id".into(),
         Session::Resume => "--resume".into(),
@@ -993,30 +997,41 @@ fn prepare(
     let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
     let omitted_discovery = package_omissions;
     let discover_skills = user_skills.is_some();
-    let private = crate::launch::private_state_or_scratch(
-        plan.private_state
-            .as_ref()
-            .map(|state| state.path.as_path()),
-        &plan.scratch.path,
-        input.policy,
-        "CLAUDE_PREPARE_NONE",
-    )?;
-    let config = if input.sandboxed() {
+    let private = if input.isolated() {
+        crate::launch::private_state_or_scratch(
+            plan.private_state
+                .as_ref()
+                .map(|state| state.path.as_path()),
+            &plan.scratch.path,
+            input.policy,
+            "CLAUDE_PREPARE_NONE",
+        )?
+    } else {
+        &plan.scratch.path
+    };
+    let config = if input.isolated() {
         private.join("claude-config")
     } else {
         input.account.map_or_else(
-            || input.home.join(".claude"),
+            || {
+                env.iter()
+                    .find(|(key, _)| key == "CLAUDE_CONFIG_DIR")
+                    .map_or_else(
+                        || input.home.join(".claude"),
+                        |(_, value)| std::path::PathBuf::from(value),
+                    )
+            },
             |account| account.directory().to_owned(),
         )
     };
-    if input.sandboxed() || input.account.is_some() {
+    if input.isolated() || input.account.is_some() {
         env.retain(|(key, _)| key != "CLAUDE_CONFIG_DIR");
         env.push(("CLAUDE_CONFIG_DIR".into(), config.clone().into_os_string()));
     }
-    if input.sandboxed() {
+    if input.isolated() {
         setup.push(SetupStep::CreateDir(config.clone()));
     }
-    let session_state = if input.sandboxed() {
+    let session_state = if input.isolated() {
         crate::SessionStateLocation::AttemptPrivate
     } else {
         crate::SessionStateLocation::Native {
@@ -1029,6 +1044,13 @@ fn prepare(
             target: user_skills.clone(),
         });
     }
+    // A host lane's native config directory is user-owned: grant session-state
+    // writes there, but leave its creation to the user's own provider setup.
+    let native_state = if input.sandboxed() && !input.isolated() {
+        vec![subtree(&config)]
+    } else {
+        Vec::new()
+    };
     let mut runtime_reads = vec![package.clone()];
     if discover_skills {
         for grant in &skill_reads {
@@ -1039,7 +1061,7 @@ fn prepare(
     }
     let mut tool_exec_roots = ["/bin", "/usr/bin", "/usr/libexec"].map(subtree).to_vec();
     let tool_writes = Vec::new();
-    if input.sandboxed() {
+    if input.isolated() {
         env.extend([("GIT_CONFIG_GLOBAL".into(), "/dev/null".into())]);
     }
     // The git wrapper script remains available to Bash.
@@ -1055,7 +1077,7 @@ fn prepare(
         argv,
         env,
         stdin: Stdin::Bytes(prompt.into_bytes()),
-        secret_input: Some(provenant_os::exec::SecretInput {
+        secret_input: token.map(|token| provenant_os::exec::SecretInput {
             descriptor_env: "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR".into(),
             bytes: token.access.as_bytes().to_vec(),
         }),
@@ -1073,12 +1095,19 @@ fn prepare(
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
                 allow_process_fork: true,
-                confinement:
-                    provenant_confinement::permissions::ResolvedConfinementPolicy::default()
-                        .without_keychain()
-                        .resolve_for(input.confined.permissions()),
+                confinement: {
+                    let policy =
+                        provenant_confinement::permissions::ResolvedConfinementPolicy::default();
+                    if input.isolated() {
+                        policy.without_keychain()
+                    } else {
+                        policy
+                    }
+                    .resolve_for(input.confined.permissions())
+                },
                 tool_exec_roots,
                 tool_writes,
+                state_writes: native_state,
                 // Never the user's .claude.json, which can hold MCP secrets.
                 runtime_reads,
                 provider_api: vec![NetworkEndpoint {

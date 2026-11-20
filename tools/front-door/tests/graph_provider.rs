@@ -393,9 +393,22 @@ fn fixture() -> Result {
             return Ok(());
         }
         assert!(std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_none());
-        let fd: i32 = std::env::var("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR")?.parse()?;
-        let token = provenant_os::sys::fixture_read_secret_pipe(fd)?;
-        assert_eq!(token, b"credential-sentinel-2719-violet-fox");
+        // Isolated lanes receive the host-read token through a secret pipe.
+        // Host access removed that pipe: the CLI authenticates natively from
+        // the selected account's own config directory, which Provenant does
+        // not rewrite. Both cases must still carry the selected credential
+        // source; only the delivery mechanism differs.
+        if let Some(fd) = std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR") {
+            let fd: i32 = fd.to_str().ok_or("token descriptor")?.parse()?;
+            let token = provenant_os::sys::fixture_read_secret_pipe(fd)?;
+            assert_eq!(token, b"credential-sentinel-2719-violet-fox");
+        } else {
+            assert!(
+                dir.join(".credentials.json").is_file(),
+                "host access must use the selected account's native login: {}",
+                dir.display()
+            );
+        }
         let mut prompt = String::new();
         io::stdin().read_to_string(&mut prompt)?;
         if prompt.contains("fixture host-native") {
@@ -917,7 +930,7 @@ fn register_opencode_plans(rig: &TestRig) -> Result {
         .create(true)
         .append(true)
         .open(rig.state.join("config.toml"))?;
-    writeln!(config, "[providers.opencode]\nprofile='lane'")?;
+    writeln!(config, "[knobs]\n'lanes.access'='isolated'")?;
     for plan in ["go", "zen"] {
         writeln!(
             config,
@@ -1903,10 +1916,27 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     for path in [&paths.scratch, &paths.temporary, &paths.provider_state] {
         fs::create_dir_all(path)?;
     }
-    let task: provenant_run::TaskRequest = serde_json::from_value(json!({
+    let mut task: provenant_run::TaskRequest = serde_json::from_value(json!({
         "prompt_digest":provenant_records::CanonicalV1::file_digest(b"fixture host-native"),
         "route":{"kind":"adapter","provider":"host-native","name":"ci-fixer"}, "account":"pro", "authority_digest":Digest::from_bytes([4;32]), "provider_timeout_seconds":20, "delivery_id":null
     }))?;
+    // The Claude token-pipe and redaction contract pinned below needs an
+    // isolated, sandboxed lane: host access uses native login and carries no
+    // secret input, and the token refresh only runs under a sandbox.
+    task.profile
+        .knobs
+        .insert("lanes.access".into(), serde_json::json!("isolated"));
+    task.profile.knob_sources.insert(
+        "lanes.access".into(),
+        provenant_records::LimitSource::Launch,
+    );
+    task.profile
+        .knobs
+        .insert("lanes.sandbox".into(), serde_json::json!("on"));
+    task.profile.knob_sources.insert(
+        "lanes.sandbox".into(),
+        provenant_records::LimitSource::Launch,
+    );
     let mut absent = task.clone();
     absent.route = provenant_run::RequestedRoute::Adapter {
         required_family: None,
@@ -2068,6 +2098,14 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     assert!(!rig.home.join(".cargo").exists());
     assert!(!rig.home.join(".rustup").exists());
     let cleanup = rig.process_cleanup();
+    // The fake account refresh and private-prompt contract below depend on
+    // isolated, sandboxed preparation; host access uses the native login.
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[knobs]\n'lanes.access'='isolated'\n'lanes.sandbox'='on'\n"
+    )?;
     let account = rig.home.join(".claude-pro");
     if host_native {
         writeln!(
@@ -4286,6 +4324,7 @@ fn opencode_free_pool_cools_second_model() -> Result {
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: Default::default(),
         extra: Default::default(),
         adapter: "opencode".into(),
         model: "opencode/glm-5.3-flash-free".into(),
@@ -4368,6 +4407,7 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: Default::default(),
         extra: Default::default(),
         adapter: "opencode".into(),
         model: "opencode/deepseek-v4.1-flash-free".into(),
@@ -4490,6 +4530,7 @@ fn agy_individual_quota_cools_model_until_revalidation() -> Result {
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: Default::default(),
         extra: Default::default(),
         adapter: "agy".into(),
         model: "gemini-3.8-flash".into(),

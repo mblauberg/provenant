@@ -778,6 +778,16 @@ impl Directory {
             &self.path.join(name),
         )
     }
+    /// Open a regular file through a final symlink, relative to the held
+    /// directory. The caller must validate the opened file's device.
+    pub fn open_read_follow(&self, name: &OsStr) -> Result<FileHandle> {
+        let name = component(name)?;
+        FileHandle::regular(
+            os::open_read_follow(&self.file, name)
+                .map_err(error("openat linked read", &self.path.join(name)))?,
+            &self.path.join(name),
+        )
+    }
     /// Clone a held regular file into a new entry. Never copies as a fallback
     /// and never replaces an existing entry; filesystem errors are returned.
     #[cfg(unix)]

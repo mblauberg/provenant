@@ -21,7 +21,7 @@ pub(super) fn restore_graph_lane_path(
 
 struct SubmissionPolicy<'a> {
     facts: &'a provenant_confinement::worktrees::RepoFacts,
-    access: provenant_records::run::LaneAccess,
+    access: provenant_records::run::LaneAccessRequest,
     settlement_retry_limit: Option<u8>,
     attempt: Option<provenant_fabric_runtime::graph::AttemptSpec>,
     refusal: provenant_run::RefusalContext,
@@ -1358,7 +1358,7 @@ impl BinaryRunOwner<'_> {
         input: SubmitInput,
         budget: WaitBudget,
         cancel: &CancelToken,
-        access: provenant_records::run::LaneAccess,
+        access: provenant_records::run::LaneAccessRequest,
         settlement_retry_limit: Option<u8>,
         attempt: Option<provenant_fabric_runtime::graph::AttemptSpec>,
         facts: &provenant_confinement::worktrees::RepoFacts,

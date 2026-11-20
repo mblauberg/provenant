@@ -52,7 +52,7 @@ pub mod policy;
 mod presets;
 mod providers;
 pub use providers::{
-    OpenCodeProfile, OutOfScopePin, ProviderSettings, ProviderUpdate, defaults as provider_defaults,
+    OutOfScopePin, ProviderSettings, ProviderUpdate, defaults as provider_defaults,
 };
 pub mod detect;
 pub mod ports;

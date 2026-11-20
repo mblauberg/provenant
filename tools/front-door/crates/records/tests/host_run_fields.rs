@@ -98,11 +98,11 @@ fn custody_diagnostics_round_trip_and_reject_malformed_values() {
 
 #[test]
 fn access_capability_sources_round_trip_and_reject_malformed_values() {
-    use provenant_records::run::LaneAccess;
+    use provenant_records::run::LaneAccessRequest;
     for source in ["flag", "node", "project default"] {
         let wire = json!({"capability_sources":{"postgres":source}});
         let bytes = serde_json::to_vec(&wire).unwrap();
-        let access: LaneAccess = decode(bytes.as_slice(), Limits::default()).unwrap();
+        let access: LaneAccessRequest = decode(bytes.as_slice(), Limits::default()).unwrap();
         assert_eq!(
             access
                 .capability_sources
@@ -119,7 +119,7 @@ fn access_capability_sources_round_trip_and_reject_malformed_values() {
     ] {
         let bytes = serde_json::to_vec(&malformed).unwrap();
         assert!(matches!(
-            decode::<LaneAccess, _>(bytes.as_slice(), Limits::default()),
+            decode::<LaneAccessRequest, _>(bytes.as_slice(), Limits::default()),
             Err(DecodeError::Typed { .. })
         ));
     }

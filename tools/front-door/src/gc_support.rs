@@ -32,7 +32,27 @@ pub(crate) fn host_git_with_stderr(
     timeout: Duration,
     capture_stderr: bool,
 ) -> Result<ExecOutcome, Error> {
-    host_git_with_cancel(repo, executor, args, timeout, capture_stderr, None)
+    host_git_with_cancel(repo, executor, args, timeout, capture_stderr, None, None)
+}
+
+/// Execute against a resolved endpoint without placing credentials in argv.
+pub(crate) fn host_git_with_endpoint(
+    repo: &Path,
+    executor: &dyn Executor,
+    args: &[&str],
+    timeout: Duration,
+    capture_stderr: bool,
+    endpoint: &str,
+) -> Result<ExecOutcome, Error> {
+    host_git_with_cancel(
+        repo,
+        executor,
+        args,
+        timeout,
+        capture_stderr,
+        None,
+        Some(endpoint),
+    )
 }
 
 fn host_git_with_cancel(
@@ -42,9 +62,10 @@ fn host_git_with_cancel(
     timeout: Duration,
     capture_stderr: bool,
     cancel: Option<&CancelToken>,
+    endpoint: Option<&str>,
 ) -> Result<ExecOutcome, Error> {
     let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
-    let environment: Vec<(OsString, OsString)> = [
+    let mut environment: Vec<(OsString, OsString)> = [
         "HOME",
         "SSH_AUTH_SOCK",
         "GH_CONFIG_DIR",
@@ -69,6 +90,23 @@ fn host_git_with_cancel(
         ("LANG".into(), "C".into()),
     ])
     .collect();
+
+    let alias = if let Some(url) = endpoint {
+        let name = provenant_os::fs::temporary_name()?;
+        let alias = format!("provenant-cleanup-{}", name.to_string_lossy());
+        environment.retain(|(key, _)| key != "GIT_CONFIG_COUNT");
+        environment.extend([
+            ("GIT_CONFIG_COUNT".into(), "1".into()),
+            (
+                "GIT_CONFIG_KEY_0".into(),
+                format!("remote.{alias}.url").into(),
+            ),
+            ("GIT_CONFIG_VALUE_0".into(), url.into()),
+        ]);
+        Some(alias)
+    } else {
+        None
+    };
 
     let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
             .chain(
@@ -95,8 +133,14 @@ fn host_git_with_cancel(
                     "gc.auto=0",
                 ]
                 .into_iter()
-                .chain(args.iter().copied())
-                .map(OsString::from),
+                .map(OsString::from)
+                .chain(args.iter().map(|arg| {
+                    if *arg == "provenant-cleanup" {
+                        alias.as_deref().unwrap_or(arg).into()
+                    } else {
+                        OsString::from(arg)
+                    }
+                })),
             )
             .collect();
     let mut options = ExecOptions::new(&argv, repo, timeout);
@@ -192,6 +236,7 @@ pub(crate) fn fetch_default(
             timeout,
             false,
             Some(cancel),
+            None,
         )
     };
     let remote = run(

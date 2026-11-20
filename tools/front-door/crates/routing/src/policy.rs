@@ -77,6 +77,9 @@ pub struct LanePolicy {
     pub stop_early_ok: Option<bool>,
     pub read_only: Option<bool>,
     pub user_skills: Option<provenant_records::run::UserSkillsMode>,
+    pub access: Option<provenant_records::LaneAccess>,
+    #[serde(skip)]
+    pub access_key: Option<String>,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -125,6 +128,7 @@ impl ModelPolicy {
             stop_early_ok,
             read_only,
             user_skills,
+            access,
         );
         if patch.result.fallback.is_some() {
             self.result.fallback_family = None;
@@ -617,6 +621,9 @@ impl ModelPolicies {
             ModelPolicy::default()
         };
         policy.overlay(&self.defaults);
+        if self.defaults.lane.access.is_some() {
+            policy.lane.access_key = Some("defaults.lane.access".into());
+        }
         let mut sources = vec![
             if self.bundled {
                 "bundled + defaults"
@@ -684,6 +691,9 @@ impl ModelPolicies {
         });
         for (index, rule) in matching {
             policy.overlay(&rule.policy);
+            if rule.policy.lane.access.is_some() {
+                policy.lane.access_key = Some("rules.policy.lane.access".into());
+            }
             sources.push(format!("rules[{index}]"));
         }
     }
@@ -985,6 +995,37 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn access_route_policy_overlays_defaults() -> Result<(), Box<dyn std::error::Error>> {
+        let policies: ModelPolicies = toml_edit::de::from_str(
+            "[defaults.lane]\naccess='isolated'\n[[rules]]\nadapter='claude'\n[rules.policy.lane]\naccess='host'\n",
+        )?;
+        for (model, expected, key) in [
+            (
+                "claude/claude-sonnet-5-5",
+                provenant_records::LaneAccess::Host,
+                "rules.policy.lane.access",
+            ),
+            (
+                "codex/gpt-6.1-terra",
+                provenant_records::LaneAccess::Isolated,
+                "defaults.lane.access",
+            ),
+        ] {
+            let policy = policies
+                .effective(
+                    &crate::Catalogue::bundled()?,
+                    &ModelId::parse(model)?,
+                    None,
+                    at(1),
+                )
+                .policy;
+            assert_eq!(policy.lane.access, Some(expected));
+            assert_eq!(policy.lane.access_key.as_deref(), Some(key));
+        }
+        Ok(())
     }
 
     #[test]

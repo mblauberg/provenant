@@ -555,6 +555,7 @@ impl HostLaunchContext {
             "CODEX_HOME",
             "CLAUDE_CONFIG_DIR",
             "GH_CONFIG_DIR",
+            "SSH_AUTH_SOCK",
             "GIT_CONFIG_GLOBAL",
             "GIT_CONFIG_NOSYSTEM",
             "GIT_CONFIG_SYSTEM",
@@ -1576,6 +1577,7 @@ impl RunStore {
                         trigger,
                         publish: stop_publish,
                         writer,
+                        route: record.applied_route.as_ref(),
                         publish_granted,
                     }),
                 };
@@ -2308,6 +2310,17 @@ impl RunStore {
                     } => Ok((*host).clone()),
                     _ => {
                         let host = crate::HostDeliveryContext::capture()
+                            .with_lane_access(
+                                record
+                                    .applied_route
+                                    .as_ref()
+                                    .and_then(|route| route.lane_access.clone()),
+                                record
+                                    .applied_route
+                                    .as_ref()
+                                    .and_then(|route| route.sandbox.as_ref())
+                                    .map(|sandbox| sandbox.effective),
+                            )
                             .with_repo_facts(self.repo_facts())
                             .with_host_state(self.context.state_root.as_path());
                         let evidence = ["delivery.json", "delivery-cancelled.json"]
@@ -2967,6 +2980,7 @@ impl RunStore {
                             trigger,
                             publish: stop_publish,
                             writer,
+                            route: record.applied_route.as_ref(),
                             publish_granted,
                         }),
                     };

@@ -1529,6 +1529,96 @@ fn invalid_discovery_reads_are_omitted_before_anchoring_and_rendering()
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
+fn credential_keychain_and_process_denials_follow_lane_access() -> Result<(), PermissionError> {
+    let (mut plan, profile) = write_grants_fixture();
+    let home = Path::new("/fixture/home");
+    let state = Path::new("/fixture/host-state");
+    let mut mandatory = MandatoryRoots::new(home, state, Path::new("/fixture/repo"))?;
+    let config = crate::run_config::RunConfig::default();
+    let isolated = render(&GrantSet::build(&plan, &profile, home, None)?)?;
+    assert!(
+        rule_index(
+            &isolated,
+            RuleAction::Deny,
+            "file-read*",
+            Some("/fixture/home/.ssh")
+        )
+        .is_some()
+    );
+    assert!(
+        rule_index(
+            &isolated,
+            RuleAction::Deny,
+            "process-exec",
+            Some("/usr/bin/security")
+        )
+        .is_some()
+    );
+    assert!(rule_index(&isolated, RuleAction::Deny, "signal", None).is_some());
+    mandatory.set_lane_access(provenant_records::LaneAccessReceipt {
+        access: provenant_records::LaneAccess::Host,
+        source: provenant_records::LaneAccessSource::Default,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    });
+    plan.policy = Some(config.policy_for_launch(state, mandatory));
+    let host = render(&GrantSet::build(&plan, &profile, home, None)?)?;
+    for operation in [
+        "file-read*",
+        "file-clone",
+        "file-link",
+        "file-write*",
+        "process-exec",
+        "file-map-executable",
+        "network-outbound",
+    ] {
+        assert!(
+            rule_index(
+                &host,
+                RuleAction::Deny,
+                operation,
+                Some("/fixture/home/.ssh")
+            )
+            .is_none(),
+            "{operation}"
+        );
+    }
+    assert!(
+        rule_index(
+            &host,
+            RuleAction::Deny,
+            "process-exec",
+            Some("/usr/bin/security")
+        )
+        .is_none()
+    );
+    for operation in [
+        "signal",
+        "process-info-pidinfo",
+        "mach-priv-task-port",
+        "mach-task-read",
+        "process-info-setcontrol",
+        "process-info-dirtycontrol",
+    ] {
+        assert!(
+            rule_index(&host, RuleAction::Deny, operation, None).is_none(),
+            "{operation}"
+        );
+    }
+    assert!(
+        rule_index(
+            &host,
+            RuleAction::Deny,
+            "mach-lookup",
+            Some("com.apple.securityd")
+        )
+        .is_none()
+    );
+    Ok(())
+}
+
 // Small: mandatory and host denials must survive ambient access and broad grants.
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
