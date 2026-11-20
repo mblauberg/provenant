@@ -346,6 +346,9 @@ impl LaneRow {
                 SettlementReason::UncommittedWork => {
                     Some("the writer has uncommitted changes; preserve or commit the edits")
                 }
+                SettlementReason::StrayWork => Some(
+                    "the primary checkout moved and the bound branch gained no commits; the work may be in the primary checkout",
+                ),
                 _ => None,
             };
             if let Some(detail) = detail {

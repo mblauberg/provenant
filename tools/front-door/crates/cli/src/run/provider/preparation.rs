@@ -4054,6 +4054,12 @@ pub(super) fn prepare_candidates_inner(
                 ),
             };
         let extras = run::PreambleExtras {
+            location: writer.as_ref().map(|writer| run::LaneLocation {
+                worktree: writer.worktree.path().to_owned(),
+                branch: writer.branch.as_str().to_owned(),
+                base: writer.source_commit().to_string(),
+                primary_checkout: writer.project_root().map(ToOwned::to_owned),
+            }),
             verification: Some(run::VerificationResolution::resolve(
                 &task.profile,
                 prompt_text,
