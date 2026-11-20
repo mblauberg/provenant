@@ -226,6 +226,15 @@ never surface as Provenant warnings.
 The GitHub credential receipt governs token delivery even when sandboxing is
 off: `none` withholds host token environment variables, `injected` passes only
 the selected token, and `ambient` preserves the native host environment.
+`ambient` also pins `GH_CONFIG_DIR` to the host's gh configuration directory,
+resolved as gh does on the host (the host's `GH_CONFIG_DIR`, else its
+`XDG_CONFIG_HOME/gh`, else `~/.config/gh`), in the lane environment and in the
+lane's `gh` shim, because an adapter may re-point the lane's own
+`XDG_CONFIG_HOME` at private state. The receipt's `detail` names the directory
+and which host setting chose it. The shim directory leads the lane's `PATH` as
+set by the host; a shell profile that reorders `PATH` does not unpin gh, since
+the pin lives in the environment. A lane opens its own pull request with
+`gh pr create --body-file`; `provenant pr open` needs a settled attempt.
 - Why: untrusted lane state must not alter shared Git or publish over another writer.
 
 ## Writer pin and re-pin

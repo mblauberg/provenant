@@ -4599,7 +4599,10 @@ pub(super) fn prepare_candidates_inner(
                 } else {
                     // Nothing is injected, but an unsandboxed lane can still
                     // read the user's login stores itself.
-                    super::gh_auth::Delivery::Ambient
+                    super::gh_auth::Delivery::Ambient(super::gh_auth::HostConfig::resolve(
+                        &home,
+                        &|key| host_provider_var(registry, key),
+                    ))
                 },
                 false,
             );
@@ -4676,8 +4679,14 @@ pub(super) fn prepare_candidates_inner(
         } else if let Some(gh) = publishing_gh.as_ref().filter(|_| !sandbox.effective) {
             // An unsandboxed lane keeps the user's own gh login; the counting
             // wrapper still fronts gh on its PATH. A wrapper that cannot be
-            // installed leaves gh unmediated, which the receipt says.
-            let mediated = match spec.configure_gh_shim(scratch, gh, &gh_shim) {
+            // installed leaves gh unmediated, which the receipt says. Adapters
+            // may re-point XDG_CONFIG_HOME at private state, so gh is pinned to
+            // the host's own configuration directory in the lane environment
+            // (surviving a PATH that a shell profile reorders) and in the shim.
+            let host_config =
+                super::gh_auth::HostConfig::resolve(&home, &|key| host_provider_var(registry, key));
+            host_config.pin(&mut spec.env);
+            let mediated = match spec.configure_gh_shim(scratch, gh, &host_config.path, &gh_shim) {
                 Ok(()) => true,
                 Err(error) => {
                     if let Some(message) = launch_policy
@@ -4694,8 +4703,10 @@ pub(super) fn prepare_candidates_inner(
                     false
                 }
             };
-            gh_selection =
-                super::gh_auth::Selection::new(super::gh_auth::Delivery::Ambient, mediated);
+            gh_selection = super::gh_auth::Selection::new(
+                super::gh_auth::Delivery::Ambient(host_config),
+                mediated,
+            );
         }
         if git_context.is_some()
             && let Some(argument) = adapter_spec.and_then(|spec| spec.context_directory_arg)
