@@ -34,16 +34,23 @@ The catalogue derives flag relationships and child commands from the parser, and
 The build command surface is `provenant build status [--json]`,
 `provenant build report [--since DUR] [--project P] [--json]`,
 `provenant build reset [--project P] [--slot N] [--full]`, and
-`provenant build maintain --project P`. The `--json`, `--project`, and
-`--full` flags use the shared global options. These handlers currently return
-`BUILD_NOT_IMPLEMENTED` while the build report and hygiene owners are added.
+`provenant build maintain --project P`. The `--json`, `--project` and
+`--full` flags use the shared global options. `status` reports each slot's
+project, index, health and allocated bytes, and the store size. `report`
+aggregates the outcome ledger within `--since` and prints one verdict per soak
+criterion; churn selection is currently unavailable, so a row that needs it
+cannot pass. `reset` clears quarantine and resets one `--slot` or every slot
+of the project; `--full` recreates the checkout and target cache. `maintain`
+is declared in the grammar, but its handler returns `BUILD_NOT_IMPLEMENTED`.
 
-`provenant verify [TIER] --commit REV --affected` accepts the commit and
-affected-selection flags; verification continues to use its existing behavior
-until the caller slice implements them.
+`provenant verify [TIER] [--commit REV] [--affected]` runs one tier through the
+build strategy. `--commit` pins the revision to verify, and `--affected` applies
+the configured affected-package selection. The report carries `commit`,
+`strategy`, `slot` and `exception` beside the tier result.
 
-- Why: the command grammar can be shared before the owning build and verify
-  implementations land.
+- Why: an operator must inspect and reset slots without reading their files,
+  and verification of a candidate or a selected subset must use the same
+  strategy as a lane's builds.
 
 ## Console catalogue and peer coverage
 

@@ -585,7 +585,7 @@
       "command.argv": {"type": "argv", "allowed": "argv array with a non-empty program when set", "default": "[]", "effect": "Program and arguments executed by the command strategy before the intercepted build argv; arguments are not shell-split."},
       "command.exit_codes.success": {"type": "int_list", "allowed": "distinct process exit codes", "default": "[0]", "effect": "Exit codes treated as successful by the command strategy."},
       "command.exit_codes.unknown": {"type": "int_list", "allowed": "distinct process exit codes, disjoint from success", "default": "[]", "effect": "Exit codes treated as unknown by the command strategy."},
-      "command.exit_codes.other": {"type": "enum", "allowed": "failed, refused, unknown", "default": "refused", "effect": "Disposition for command exit codes not listed as success or unknown."},
+      "command.exit_codes.other": {"type": "enum", "allowed": "refused, unknown", "default": "refused", "effect": "Disposition for command exit codes not listed as success or unknown."},
       "offload": {"type": "string", "allowed": "auto, off", "default": "auto", "effect": "Auto allows supported Rust build jobs to use slots; off runs every build locally with exception offload_off."},
       "overflow": {"type": "string", "allowed": "auto, queue, local", "default": "auto", "effect": "Auto queues under slots and uses the configured local overflow for local strategies; queue always waits for a slot and local runs locally after the admission wait."},
       "clean": {"type": "string", "allowed": "none, untracked, ignored", "default": "untracked", "effect": "Controls slot cleanup before a job: none preserves files, untracked runs git clean -ffd, and ignored runs git clean -ffdx."},
@@ -609,7 +609,7 @@
     "path": "verify.affected",
     "where": "the `verify.affected` object of host, host-project or project ports.json",
     "settings": {
-      "enabled": {"type": "bool", "allowed": "true or false", "default": "false", "effect": "Enables affected-package selection for verify tiers when requested by the verify invocation."},
+      "enabled": {"type": "bool", "allowed": "true or false", "default": "false", "effect": "Applies the affected-package selection policy to verify tiers without an explicit --affected flag."},
       "global_paths": {"type": "string_list", "allowed": "repository-relative glob patterns", "default": "[]", "effect": "Paths matching these globs force affected selection to include the full workspace."},
       "full_every": {"type": "int", "allowed": "1 or more verify runs", "default": "10", "effect": "Run a full workspace selection after this many affected selections."},
       "full_after": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "24h", "effect": "Run a full workspace selection when this long has elapsed since the last full selection."}

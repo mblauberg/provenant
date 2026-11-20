@@ -454,8 +454,9 @@ Provider preparation may select an account-specific home or redirect state and
 cache paths in either confinement mode; account selectors choose the registered
 account and its required credentials. Credential values stay in the live launch,
 never in prompts or receipts. Native launches skip skill copies, tool dependency
-discovery, credential symlink inventory and the build admission shims. Every lane still
-binds the host Cargo home and private target/build directories before seed
+discovery and credential symlink inventory. Every lane gets the cargo, nextest
+and cargo-nextest PATH shims, which run `provenant admit build -- <real> "$@"`,
+and binds the host Cargo home and private target/build directories before seed
 validation.
 
 Sandboxed lanes use the minimal environment and staged skills, discover tool
