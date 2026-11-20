@@ -667,6 +667,8 @@ pub struct AdapterSpec {
     /// Registered plans partition model namespaces independently of account keys.
     pub account_model_plans: &'static [AccountModelPlan],
     pub free_pool: Option<&'static str>,
+    /// Where a recorded quota refusal's expiry comes from, as the quota view names it.
+    pub refusal_reset_source: &'static str,
     /// Drop a valid but unrecorded model effort with a route warning.
     pub drop_unsupported_effort: bool,
     pub pacing_keys: Option<(&'static str, &'static str)>,
@@ -930,6 +932,7 @@ adapter_specs! { $;
         quota_model_prefix: None,
         account_model_plans: &[],
         free_pool: None,
+        refusal_reset_source: "provider reset",
         drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
@@ -1043,6 +1046,7 @@ adapter_specs! { $;
         quota_model_prefix: None,
         account_model_plans: &[],
         free_pool: None,
+        refusal_reset_source: "provider reset",
         drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
@@ -1161,6 +1165,7 @@ adapter_specs! { $;
         quota_model_prefix: None,
         account_model_plans: &[],
         free_pool: None,
+        refusal_reset_source: "provider reset",
         drop_unsupported_effort: true,
         pacing_keys: None,
         launch: LaunchCapabilities {
@@ -1280,6 +1285,7 @@ adapter_specs! { $;
         quota_model_prefix: None,
         account_model_plans: &[],
         free_pool: None,
+        refusal_reset_source: "provider reset",
         drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
@@ -1397,6 +1403,7 @@ adapter_specs! { $;
             AccountModelPlan { plan: "zen", model_prefix: "opencode/", quota: AccountQuota::ObservedRefusals },
         ],
         free_pool: Some("opencode-free"),
+        refusal_reset_source: "provider retry-after",
         drop_unsupported_effort: true,
         pacing_keys: Some(("opencode_free", "opencode_paid")),
         launch: LaunchCapabilities {
@@ -1484,6 +1491,7 @@ adapter_specs! { $;
         quota_model_prefix: None,
         account_model_plans: &[],
         free_pool: None,
+        refusal_reset_source: "provider reset",
         drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
@@ -1573,6 +1581,7 @@ adapter_specs! { $;
         quota_model_prefix: None,
         account_model_plans: &[],
         free_pool: None,
+        refusal_reset_source: "provider reset",
         drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {
@@ -1661,6 +1670,7 @@ adapter_specs! { $;
         quota_model_prefix: None,
         account_model_plans: &[],
         free_pool: None,
+        refusal_reset_source: "provider reset",
         drop_unsupported_effort: false,
         pacing_keys: None,
         launch: LaunchCapabilities {

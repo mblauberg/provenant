@@ -208,8 +208,14 @@ and exit 0; a clean exit without an error still settles as `Succeeded`.
 Unknown or stale quota does not establish exhaustion. Monthly allowance pacing warns when cycles are unobserved as described below. Missing, expired or
 mismatched readiness evidence never reads as ready. Refusals are scoped to
 model and account unless provider evidence proves a wider pool; a plan usage
-limit holds the whole account until its reset. Agy's recorded refusals expire
-within five minutes even when the provider reports a later reset. This bound
+limit holds the whole account until its reset. OpenCode retry-after values are
+rounded up to whole seconds; a newer refusal for the same pool supersedes its
+older reset, and settlement replay respects retained clearing records. Those
+records are bounded, so an evicted clearing cannot prevent a later replay.
+Absent a usable reset, a refusal expires one hour after observation. `quota show`
+names the provider retry-after as the source of
+a displayed OpenCode refusal reset. Agy's recorded refusals expire within five
+minutes even when the provider reports a later reset. This bound
 also applies when reading previously published readiness, so a stale multi-day
 estimate cannot prevent a new attempt or probe. Fresh provider evidence may
 renew the refusal. A fresh reading below the 95% headroom threshold that

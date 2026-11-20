@@ -815,7 +815,7 @@ pub fn stderr_quota(stderr: &[u8]) -> Option<E> {
             "h" | "hr" | "hrs" | "hour" | "hours" => 3_600,
             _ => return None,
         };
-        (number > 0).then(|| number.saturating_mul(scale).min(86_400))
+        (number > 0).then(|| number.saturating_mul(scale))
     };
     let retry = number_after("retryafterms")
         .and_then(|(n, _)| parse_retry_after(Some(&serde_json::Value::from(n))))
@@ -913,17 +913,16 @@ struct LimitError {
 }
 fn parse_retry_after(value: Option<&serde_json::Value>) -> Option<u64> {
     let value = value?;
-    const MAX_SECONDS: u64 = 86_400;
     let seconds = if let Some(n) = value.as_u64() {
         if n == 0 {
             return None;
         }
-        n.saturating_add(999) / 1000
+        n.div_ceil(1000)
     } else if let Some(i) = value.as_i64() {
         if i <= 0 {
             return None;
         }
-        (i as u64).saturating_add(999) / 1000
+        (i as u64).div_ceil(1000)
     } else {
         let f = value.as_f64()?;
         if !f.is_finite() || f <= 0.0 {
@@ -934,7 +933,7 @@ fn parse_retry_after(value: Option<&serde_json::Value>) -> Option<u64> {
     if seconds == 0 {
         return None;
     }
-    Some(seconds.min(MAX_SECONDS))
+    Some(seconds)
 }
 fn quota(
     message: Option<String>,
