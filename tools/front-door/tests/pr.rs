@@ -244,7 +244,7 @@ fn wait_pr_reports_the_observed_head_and_passes() -> Result {
 
 /// A green head with no Actions run yet stays pending through the grace period,
 /// and settles once the period is over or a run is seen.
-// Spec: docs/specs/cli.md#wait
+// Spec: docs/specs/cli.md#ci-observations
 fn wait_pr_holds_a_green_head_until_actions_runs_exist_or_the_grace_ends() -> Result {
     let rig = self::rig()?;
     fs::write(rig.project.join("no-actions-runs"), "")?;

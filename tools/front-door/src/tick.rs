@@ -2299,7 +2299,7 @@ mod tests {
         assert!(result.error.is_some(), "the missed advance is noted");
     }
 
-    /// Spec: docs/specs/state.md (every new persisted field is optional or defaulted)
+    /// Spec: docs/specs/state.md#typed-host-metadata-in-format-2 (every new persisted field is optional or defaulted)
     #[test]
     fn a_skip_reason_from_a_newer_writer_does_not_make_the_seed_result_unreadable() {
         use crate::target_seed_build::SkipReason;
@@ -2906,7 +2906,7 @@ mod tests {
         );
     }
 
-    /// Spec: docs/specs/state.md (every new persisted field is optional or defaulted)
+    /// Spec: docs/specs/state.md#typed-host-metadata-in-format-2 (every new persisted field is optional or defaulted)
     #[test]
     fn the_seed_result_records_typed_per_project_outcomes_and_reads_an_older_result() {
         use crate::target_seed_build::SkipReason;
