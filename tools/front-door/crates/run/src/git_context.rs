@@ -260,6 +260,10 @@ fn lane_roots(
     env: &[(OsString, OsString)],
     host_state: Option<&Path>,
 ) -> std::result::Result<transport::LaneRoots, transport::TransportError> {
+    let unreadable = || transport::TransportError::Unreadable {
+        cause: transport::ConfigRead::new("resolve transport lane roots", cwd, None)
+            .cause("could not establish the lane-writable roots"),
+    };
     let get = |name: &str| {
         env.iter()
             .find(|(key, _)| key == name)
@@ -272,42 +276,40 @@ fn lane_roots(
     let extra = transport::LaneRoots::new(run_state.clone());
     match (get("GIT_DIR"), get("GIT_COMMON_DIR")) {
         (Some(private), Some(common)) => {
-            let private = provenant_os::fs::canonicalize(&private)
-                .map_err(|_| transport::TransportError::Unreadable)?;
-            let common = provenant_os::fs::canonicalize(&common)
-                .map_err(|_| transport::TransportError::Unreadable)?;
+            let private = provenant_os::fs::canonicalize(&private).map_err(|_| unreadable())?;
+            let common = provenant_os::fs::canonicalize(&common).map_err(|_| unreadable())?;
             let project = if private == common {
                 // The selected repository environment was just derived from
                 // this checkout with sanitised Git. It proves the primary
                 // directly and avoids requiring a saved binding at bootstrap.
                 if let Some(host_state) = host_state {
                     let location = provenant_config::ProjectLocation::new(common.clone())
-                        .map_err(|_| transport::TransportError::Unreadable)?;
+                        .map_err(|_| unreadable())?;
                     let _ = provenant_config::lookup_project_at_state(host_state, &location)
-                        .map_err(|_| transport::TransportError::Unreadable)?;
+                        .map_err(|_| unreadable())?;
                 }
                 Some(cwd.to_path_buf())
             } else {
                 let utility = if let Some(state) = host_state {
                     provenant_confinement::UtilityRuntime::read_only(git, state)
-                        .map_err(|_| transport::TransportError::Unreadable)?
+                        .map_err(|_| unreadable())?
                         .with_lane_roots(provenant_confinement::utility::lane_state_roots(state))
                 } else {
                     provenant_confinement::UtilityRuntime::read_only_without_host_state(git)
-                        .map_err(|_| transport::TransportError::Unreadable)?
+                        .map_err(|_| unreadable())?
                 };
                 let cancel = provenant_core::CancelToken::new();
                 let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))
-                    .map_err(|_| transport::TransportError::Unreadable)?;
+                    .map_err(|_| unreadable())?;
                 let repo = utility
                     .open_repo(executor, cwd, budget, &cancel)
-                    .map_err(|_| transport::TransportError::Unreadable)?;
+                    .map_err(|_| unreadable())?;
                 if repo.common_git_dir() != common || repo.private_git_dir() != private {
-                    return Err(transport::TransportError::Unreadable);
+                    return Err(unreadable());
                 }
                 let layout = utility
                     .project_layout_for_repository(executor, &repo, budget, &cancel)
-                    .map_err(|_| transport::TransportError::Unreadable)?;
+                    .map_err(|_| unreadable())?;
                 layout.project().map(Path::to_path_buf)
             };
             transport::LaneRoots::for_repository(
@@ -352,10 +354,11 @@ fn check_transport(
         kind: (&error).into(),
         reason: error.to_string(),
     };
-    let entries = transport::parse_listing(&listing.bytes).map_err(refusal)?;
+    let ctx = transport::ConfigRead::new("check effective transport configuration", cwd, None);
+    let entries = transport::parse_listing(&listing.bytes, &ctx).map_err(refusal)?;
     let roots = lane_roots(executor, git, cwd, env, host_state).map_err(refusal)?;
-    transport::check_environment(transport_env, cwd, &roots).map_err(refusal)?;
-    transport::check_listing(&entries, cwd, &roots).map_err(refusal)
+    transport::check_environment(transport_env, cwd, &roots, &ctx).map_err(refusal)?;
+    transport::check_listing(&entries, cwd, &roots, &ctx).map_err(refusal)
 }
 
 /// Look up the exact object ID the remote advertises for a tracking ref named

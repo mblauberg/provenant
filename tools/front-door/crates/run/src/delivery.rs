@@ -1992,16 +1992,17 @@ impl HostDeliveryContext {
             .bound
             .as_ref()
             .map_or(cwd, |bound| bound.host_cwd.as_path());
-        transport::check_environment(environment, base, &roots).map_err(refuse)?;
+        let ctx = transport::ConfigRead::new("check delivery transport configuration", base, None);
+        transport::check_environment(environment, base, &roots, &ctx).map_err(refuse)?;
         let listing = self.command_with_input(cwd, "git", &transport::LISTING_ARGS, stage, b"")?;
-        let entries = transport::parse_listing(listing.as_bytes()).map_err(refuse)?;
-        transport::check_listing(&entries, base, &roots).map_err(refuse)?;
+        let entries = transport::parse_listing(listing.as_bytes(), &ctx).map_err(refuse)?;
+        transport::check_listing(&entries, base, &roots, &ctx).map_err(refuse)?;
         // Git rereads configuration for the command itself, so refuse any
         // include directive that names a lane area, read or not: a lane could
         // otherwise create the target between this check and the command.
         let directives =
             self.command_with_input(cwd, "git", &transport::DIRECTIVE_ARGS, stage, b"")?;
-        let top = transport::parse_listing(directives.as_bytes()).map_err(refuse)?;
+        let top = transport::parse_listing(directives.as_bytes(), &ctx).map_err(refuse)?;
         let home = environment
             .iter()
             .find(|(name, _)| name == "HOME")
@@ -2013,17 +2014,21 @@ impl HostDeliveryContext {
             if !file.is_file() {
                 return Ok(None);
             }
-            let file = file.to_str().ok_or(transport::TransportError::Unreadable)?;
+            let ctx =
+                transport::ConfigRead::new("read included config file", file, Some("include.path"));
+            let file = file
+                .to_str()
+                .ok_or_else(|| ctx.unreadable("included config path is not UTF-8"))?;
             let args = ["config", "--file", file]
                 .into_iter()
                 .chain(["--no-includes", "--show-origin", "-z", "--list"])
                 .collect::<Vec<_>>();
             let listing = self
                 .command_with_input(cwd, "git", &args, stage, b"")
-                .map_err(|_| transport::TransportError::Unreadable)?;
-            transport::parse_listing(listing.as_bytes()).map(Some)
+                .map_err(|error| ctx.unreadable(error))?;
+            transport::parse_listing(listing.as_bytes(), &ctx).map(Some)
         };
-        transport::check_includes(&top, base, home, &roots, &mut read).map_err(refuse)
+        transport::check_includes(&top, base, home, &roots, &mut read, &ctx).map_err(refuse)
     }
     pub(super) fn head(&self, writer: &WriterRequest) -> Result<GitOid> {
         let head = self.command(

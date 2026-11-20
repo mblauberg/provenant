@@ -255,7 +255,9 @@ impl From<&provenant_confinement::transport::TransportError> for TransportRefusa
         match error {
             TransportError::LaneConfig { .. } => Self::LaneConfig,
             TransportError::LaneProgram { .. } => Self::LaneProgram,
-            TransportError::Unreadable | TransportError::UnreadablePorts { .. } => Self::Unreadable,
+            TransportError::Unreadable { .. } | TransportError::UnreadablePorts { .. } => {
+                Self::Unreadable
+            }
         }
     }
 }

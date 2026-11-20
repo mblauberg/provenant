@@ -8,8 +8,138 @@
 //! program that lives where a lane can write.
 use provenant_os::fs::canonicalize;
 use std::ffi::OsString;
+use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
+
+/// Bound each part of a Git-config-read cause. Paths and keys are names, not
+/// values; this keeps an error bounded and one line even when Git reports a
+/// long origin or an unexpected diagnostic.
+pub(crate) const CONFIG_CAUSE_BOUND: usize = 192;
+
+/// Replace control characters and bound a cause part so a refusal stays one
+/// line and cannot smuggle a terminal escape or an unbounded diagnostic.
+pub(crate) fn cause_text(value: impl fmt::Display) -> String {
+    let raw = value.to_string();
+    let clean: String = raw
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    if clean.chars().count() <= CONFIG_CAUSE_BOUND {
+        return clean;
+    }
+    let mut bounded: String = clean.chars().take(CONFIG_CAUSE_BOUND).collect();
+    bounded.push('…');
+    bounded
+}
+
+/// A bounded, secret-free explanation of a failed Git configuration read.
+///
+/// It names the operation, the config file and the key or directive involved,
+/// plus a bounded underlying diagnostic. Config *values* are never carried:
+/// keys and paths only, so a credential in a config file cannot leak through
+/// a refusal. `key` is a static label from the code, never a string taken from
+/// the config file being inspected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitConfigCause {
+    /// Stable label for the read that failed.
+    pub operation: &'static str,
+    /// The config file or directory involved, when one is known.
+    pub file: Option<String>,
+    /// Static key or directive label involved, never its value.
+    pub key: Option<&'static str>,
+    /// Bounded underlying error, such as a Git exit status or parse failure.
+    pub detail: String,
+}
+
+impl GitConfigCause {
+    pub(crate) fn new(
+        operation: &'static str,
+        file: Option<&Path>,
+        key: Option<&'static str>,
+        detail: impl fmt::Display,
+    ) -> Self {
+        Self {
+            operation,
+            file: file.map(|path| cause_text(path.display())),
+            key,
+            detail: cause_text(detail),
+        }
+    }
+}
+
+impl fmt::Display for GitConfigCause {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.operation)?;
+        if let Some(file) = &self.file {
+            write!(formatter, " on {file}")?;
+        }
+        if let Some(key) = self.key {
+            write!(formatter, " for key {key}")?;
+        }
+        if !self.detail.is_empty() {
+            write!(formatter, ": {}", self.detail)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for GitConfigCause {}
+
+/// The identity of one Git configuration read. Every config-read function
+/// takes one, and builds every failure through it, so a refusal always names
+/// the operation, file and key it was reading — never a config value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigRead {
+    /// Stable label for the read.
+    pub operation: &'static str,
+    /// The config file or directory being read.
+    pub file: PathBuf,
+    /// Static key or directive label, never a value from the config file.
+    pub key: Option<&'static str>,
+}
+
+impl ConfigRead {
+    pub fn new(
+        operation: &'static str,
+        file: impl Into<PathBuf>,
+        key: Option<&'static str>,
+    ) -> Self {
+        Self {
+            operation,
+            file: file.into(),
+            key,
+        }
+    }
+
+    /// Build a contextual cause for a failure detail.
+    pub fn cause(&self, detail: impl fmt::Display) -> GitConfigCause {
+        GitConfigCause::new(self.operation, Some(&self.file), self.key, detail)
+    }
+
+    /// Build an opaque-but-identified transport failure.
+    pub fn unreadable(&self, detail: impl fmt::Display) -> TransportError {
+        TransportError::Unreadable {
+            cause: self.cause(detail),
+        }
+    }
+}
+
+impl fmt::Display for ConfigRead {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} on {}", self.operation, self.file.display())?;
+        if let Some(key) = self.key {
+            write!(formatter, " for key {key}")?;
+        }
+        Ok(())
+    }
+}
 
 /// Config applied to every host advertisement and fetch: no hooks, no
 /// fsmonitor, and only the transports delivery uses.
@@ -74,15 +204,19 @@ pub fn environment(
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TransportError {
     #[error(
-        "Git configuration includes {file}, which lives where lanes can write; remove that include or move the file"
+        "{context}: Git configuration includes {file}, which lives where lanes can write; remove that include or move the file"
     )]
-    LaneConfig { file: String },
+    LaneConfig { file: String, context: ConfigRead },
+    // The program is a config *value* and is deliberately not carried: naming
+    // it could leak a credential embedded in a helper command. The key names
+    // the offending setting and the context names the read; that is enough to
+    // act on the refusal without disclosing a value.
     #[error(
-        "{key} runs {program}, which lives where lanes can write; point it at a program outside the project"
+        "{context}: {key} names a program in a lane-writable location; point it at a program outside the project"
     )]
-    LaneProgram { key: String, program: String },
-    #[error("Git configuration could not be read")]
-    Unreadable,
+    LaneProgram { key: String, context: ConfigRead },
+    #[error("Git configuration could not be read: {cause}")]
+    Unreadable { cause: GitConfigCause },
     /// A malformed port table is a port error, not a Git configuration error.
     /// The detail already names the file and key that must be corrected.
     #[error("port configuration could not be read: {detail}")]
@@ -295,10 +429,12 @@ impl ConfigEntry {
 /// The argv tail that produces what [`parse_listing`] reads.
 pub const LISTING_ARGS: [&str; 5] = ["config", "--includes", "--show-origin", "-z", "--list"];
 
-/// Parse `git config --includes --show-origin -z --list` output.
-pub fn parse_listing(bytes: &[u8]) -> Result<Vec<ConfigEntry>, TransportError> {
+/// Parse `git config --includes --show-origin -z --list` output. `ctx` names
+/// the read so a malformed listing fails as an identified config error rather
+/// than an opaque one.
+pub fn parse_listing(bytes: &[u8], ctx: &ConfigRead) -> Result<Vec<ConfigEntry>, TransportError> {
     if !bytes.is_empty() && !bytes.ends_with(&[0]) {
-        return Err(TransportError::Unreadable);
+        return Err(ctx.unreadable("git config listing is not NUL-terminated"));
     }
     let mut fields = bytes.split(|byte| *byte == 0);
     let mut entries = Vec::new();
@@ -306,7 +442,9 @@ pub fn parse_listing(bytes: &[u8]) -> Result<Vec<ConfigEntry>, TransportError> {
         if origin.is_empty() && fields.clone().next().is_none() {
             break;
         }
-        let entry = fields.next().ok_or(TransportError::Unreadable)?;
+        let entry = fields
+            .next()
+            .ok_or_else(|| ctx.unreadable("truncated git config listing"))?;
         let (key, value) = match entry.iter().position(|byte| *byte == b'\n') {
             Some(split) => (&entry[..split], Some(&entry[split + 1..])),
             None => (entry, None),
@@ -376,6 +514,7 @@ pub fn check_includes(
     home: &Path,
     roots: &LaneRoots,
     read: &mut ReadConfigFile<'_>,
+    ctx: &ConfigRead,
 ) -> Result<(), TransportError> {
     let mut pending = Vec::new();
     let collect = |entries: &[ConfigEntry], origin: Option<&Path>, pending: &mut Vec<PathBuf>| {
@@ -398,13 +537,14 @@ pub fn check_includes(
         if roots.contains(&target) {
             return Err(TransportError::LaneConfig {
                 file: target.display().to_string(),
+                context: ctx.clone(),
             });
         }
         if !visited.insert(target.clone()) {
             continue;
         }
         if visited.len() > MAX_INCLUDE_FILES {
-            return Err(TransportError::Unreadable);
+            return Err(ctx.unreadable("too many config include targets to verify"));
         }
         if let Some(entries) = read(&target)? {
             collect(&entries, Some(&target), &mut pending);
@@ -459,12 +599,13 @@ fn check_program(
     value: &str,
     base: &Path,
     roots: &LaneRoots,
+    ctx: &ConfigRead,
 ) -> Result<(), TransportError> {
     for word in program_paths(value) {
         if roots.contains(&expand(&word, base)) {
             return Err(TransportError::LaneProgram {
                 key: key.to_owned(),
-                program: word,
+                context: ctx.clone(),
             });
         }
     }
@@ -478,6 +619,7 @@ pub fn check_listing(
     entries: &[ConfigEntry],
     base: &Path,
     roots: &LaneRoots,
+    ctx: &ConfigRead,
 ) -> Result<(), TransportError> {
     for entry in entries {
         if let Some(file) = entry.file(base)
@@ -485,12 +627,13 @@ pub fn check_listing(
         {
             return Err(TransportError::LaneConfig {
                 file: file.display().to_string(),
+                context: ctx.clone(),
             });
         }
         if is_program_key(&entry.key)
             && let Some(value) = &entry.value
         {
-            check_program(&entry.key, value, base, roots)?;
+            check_program(&entry.key, value, base, roots, ctx)?;
         }
     }
     Ok(())
@@ -501,6 +644,7 @@ pub fn check_environment(
     env: &[(OsString, OsString)],
     base: &Path,
     roots: &LaneRoots,
+    ctx: &ConfigRead,
 ) -> Result<(), TransportError> {
     for (name, value) in env {
         let Some(name) = name.to_str() else { continue };
@@ -508,7 +652,7 @@ pub fn check_environment(
             name,
             "GIT_SSH" | "GIT_SSH_COMMAND" | "GIT_ASKPASS" | "SSH_ASKPASS" | "GIT_PROXY_COMMAND"
         ) {
-            check_program(name, &value.to_string_lossy(), base, roots)?;
+            check_program(name, &value.to_string_lossy(), base, roots, ctx)?;
         }
     }
     Ok(())
@@ -519,6 +663,10 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn test_ctx() -> ConfigRead {
+        ConfigRead::new("test config read", Path::new("/project/.git/config"), None)
+    }
 
     fn listing(entries: &[(&str, &str)]) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -538,7 +686,7 @@ mod tests {
             ("file:/x/y.cfg", "user.flag"),
             ("command line:", "a.b\n"),
         ]);
-        let entries = parse_listing(&bytes)?;
+        let entries = parse_listing(&bytes, &test_ctx())?;
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].value.as_deref(), Some("false"));
         assert_eq!(entries[1].value, None);
@@ -548,8 +696,8 @@ mod tests {
             Some(PathBuf::from("/repo/.git/config"))
         );
         assert_eq!(entries[2].file(Path::new("/repo")), None);
-        assert!(parse_listing(b"file:x").is_err());
-        assert!(parse_listing(b"").is_ok_and(|entries| entries.is_empty()));
+        assert!(parse_listing(b"file:x", &test_ctx()).is_err());
+        assert!(parse_listing(b"", &test_ctx()).is_ok_and(|entries| entries.is_empty()));
         Ok(())
     }
 
@@ -710,7 +858,7 @@ mod tests {
                     .find(|(name, _)| Path::new(name) == file)
                     .map(|(_, entries)| entries.clone()))
             };
-            check_includes(top, base, home, &roots, &mut read)
+            check_includes(top, base, home, &roots, &mut read, &test_ctx())
         };
         let config = "/project/.git/config";
         // Absolute, relative to the including file and `..`-laden paths,
@@ -785,7 +933,12 @@ mod tests {
         let base = Path::new("/project");
         let check = |key: &str, value: &str| {
             let bytes = listing(&[("file:/project/.git/config", &format!("{key}\n{value}"))]);
-            check_listing(&parse_listing(&bytes)?, base, &roots)
+            check_listing(
+                &parse_listing(&bytes, &test_ctx())?,
+                base,
+                &roots,
+                &test_ctx(),
+            )
         };
         let lane = "/project/.worktrees/x/helper";
         for (key, value) in [
@@ -820,7 +973,12 @@ mod tests {
         }
         let lane_file = listing(&[("file:/project/.worktrees/x/extra.cfg", "user.name\nsomeone")]);
         assert!(matches!(
-            check_listing(&parse_listing(&lane_file)?, base, &roots),
+            check_listing(
+                &parse_listing(&lane_file, &test_ctx())?,
+                base,
+                &roots,
+                &test_ctx()
+            ),
             Err(TransportError::LaneConfig { .. })
         ));
         Ok(())
@@ -859,11 +1017,11 @@ mod tests {
             OsString::from("GIT_ASKPASS"),
             OsString::from("/project/.worktrees/x/ask"),
         )];
-        assert!(check_environment(&env, Path::new("/project"), &roots).is_err());
+        assert!(check_environment(&env, Path::new("/project"), &roots, &test_ctx()).is_err());
         let env = [(
             OsString::from("GIT_ASKPASS"),
             OsString::from("/usr/bin/ask"),
         )];
-        assert!(check_environment(&env, Path::new("/project"), &roots).is_ok());
+        assert!(check_environment(&env, Path::new("/project"), &roots, &test_ctx()).is_ok());
     }
 }

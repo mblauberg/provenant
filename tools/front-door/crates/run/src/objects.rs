@@ -185,7 +185,12 @@ pub(crate) fn execute_bounded(
         && settings.input.is_some_and(is_atomic_ref_transaction);
     let retry_safe = settings.input.is_none() || buffered_transaction;
     let result = if retry_safe {
-        execute_with_git_lock_retry(settings.timeout, &retry_cancel, &mut run_attempt)
+        execute_with_git_lock_retry(
+            "lane Git import",
+            settings.timeout,
+            &retry_cancel,
+            &mut run_attempt,
+        )
     } else {
         run_attempt(settings.timeout)
     };

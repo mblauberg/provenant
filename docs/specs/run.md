@@ -493,9 +493,9 @@ A Git configuration read that fails names its operation, file and key or include
 with a bounded underlying diagnostic; config values are never carried, so a
 credential in a config file cannot leak through a settlement refusal. A
 transient Git config-lock collision from a sibling writer is waited out within
-the operation's single deadline using the same bounded retry as Git mutations;
-the hardened environment and post-read verification still apply to the retried
-output.
+one deadline shared by all of the operation's attempts, using the same bounded
+retry as Git mutations; the hardened environment and post-read verification
+still apply to the retried output.
 
 The GitHub credential receipt governs token delivery even when sandboxing is
 off: `none` withholds host token environment variables, `injected` passes only
