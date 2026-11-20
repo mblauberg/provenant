@@ -4,6 +4,24 @@ use super::*;
 pub(super) const UNREADABLE_NO_CANDIDATE_PATH: &str =
     "unreadable process has no path under candidate roots";
 
+/// One time budget (microseconds) shared by every advisory dweller census.
+/// The same bound governs gc, hosts doctor and worktree doctor so a report
+/// cannot silently change meaning between commands.
+pub const HELD_CENSUS_BUDGET_MICROS: u64 = 2_000_000;
+
+/// Printed by callers when a bounded dweller census did not finish. An empty
+/// report must never read as "no dwellers" when the census was cut short.
+pub const HELD_CENSUS_INCOMPLETE_WARNING: &str =
+    "dweller census incomplete (budget/cancel); results may be missing";
+
+/// One bounded dweller report. `incomplete` means the census was cut short by
+/// its budget or cancellation, so `processes` may be missing dwellers.
+#[derive(Clone, Debug, Default)]
+pub struct HeldReport {
+    pub processes: Vec<super::HeldProcess>,
+    pub incomplete: bool,
+}
+
 /// Every process one census saw holding each root by cwd, executable image or
 /// open descriptor. Diagnostic only: a cwd observation never grants signal
 /// authority, so this is reported and never acted on.
@@ -16,6 +34,28 @@ fn record_held(held: &mut HeldProcesses, root: &Path, process: &ObservedProcess)
         .any(|seen| seen.pid == process.pid && seen.kind == process.kind && seen.cwd == process.cwd)
     {
         list.push(process.clone());
+    }
+}
+
+/// Whether a process the listing could not name may be named in a held
+/// report. This applies the same caller-session and verified-ancestor
+/// exclusion as the named paths: an ancestor is excluded by pid even when the
+/// census could not describe it, and the caller's session is excluded when a
+/// direct observation can name the process.
+fn held_reportable(
+    pid: i64,
+    excluded: &BTreeSet<provenant_supervisor::census::ProcessIdentity>,
+    current: &ProcessFact,
+    observer: &dyn ProcessObserver,
+) -> bool {
+    if excluded.iter().any(|identity| identity.pid == pid) {
+        return false;
+    }
+    match observer.observe(pid) {
+        ProcessObservation::Present(fact) => {
+            fact.identity.session_id != current.identity.session_id
+        }
+        _ => true,
     }
 }
 
@@ -921,26 +961,33 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
 
 /// Report every process one bounded census saw inside any of `roots`. The
 /// report is advisory: no caller of this function may signal a named PID from
-/// a cwd, executable or descriptor observation.
+/// a cwd, executable or descriptor observation. A census cut short by its
+/// budget or cancellation is reported as incomplete rather than as no rows.
 pub fn held_report(
     workers: &dyn WorkerObserver,
     roots: &[PathBuf],
     keep_going: &dyn Fn() -> bool,
-) -> Vec<super::HeldProcess> {
+) -> HeldReport {
     // `for_land` carries the ancestor-exclusion policy into the census: the
     // caller's own session and verified ancestors are never stray dwellers.
     let Some(evidence) = workers.observe_evidence_while(roots, true, keep_going) else {
-        return Vec::new();
+        return HeldReport {
+            incomplete: true,
+            ..HeldReport::default()
+        };
     };
-    evidence
-        .held
-        .iter()
-        .flat_map(|(root, processes)| {
-            processes
-                .iter()
-                .filter_map(|process| super::HeldProcess::new(root, process))
-        })
-        .collect()
+    HeldReport {
+        processes: evidence
+            .held
+            .iter()
+            .flat_map(|(root, processes)| {
+                processes
+                    .iter()
+                    .filter_map(|process| super::HeldProcess::new(root, process))
+            })
+            .collect(),
+        incomplete: false,
+    }
 }
 
 /// The refusal for a root observed live: it names the process when the
@@ -1470,6 +1517,31 @@ pub(super) fn observe_worker_holders_while(
             );
         }
     };
+    // Exclude the caller and its verified ancestors before any held rows are
+    // recorded, including EPERM processes that a direct census could not name.
+    // A walk that stops early leaves the remaining ancestors in the census,
+    // where one inside a root still makes it live, so an incomplete ancestry
+    // hides nothing.
+    let mut excluded = BTreeSet::from([current.identity.clone()]);
+    if ancestors {
+        let mut child = current;
+        while child.identity.pid != current.identity.session_id {
+            if !within_budget() {
+                return (states, holders, details, taints);
+            }
+            let ProcessLookup::Present(parent) = census.process(child.parent_pid) else {
+                break;
+            };
+            if parent.identity.boot != current.identity.boot
+                || parent.identity.session_id != current.identity.session_id
+                || census.ancestry(&child.identity, &parent.identity) != Ancestry::Yes
+                || !excluded.insert(parent.identity.clone())
+            {
+                break;
+            }
+            child = parent;
+        }
+    }
     // Custody is decided per root. A gap that could hide a process anywhere
     // (an incomplete or truncated listing, or a process that could not be
     // described or placed) leaves every root that is not positively live
@@ -1506,7 +1578,7 @@ pub(super) fn observe_worker_holders_while(
                     pid,
                     path.as_path(),
                     ProcessEvidenceKind::WorkingDirectory,
-                    pid != current.identity.pid,
+                    held_reportable(pid, &excluded, current, observer),
                     unplaceable,
                 );
             }
@@ -1524,7 +1596,7 @@ pub(super) fn observe_worker_holders_while(
                     pid,
                     &path,
                     ProcessEvidenceKind::OtherHeldPath,
-                    pid != current.identity.pid,
+                    held_reportable(pid, &excluded, current, observer),
                     unplaceable,
                 );
             }
@@ -1544,29 +1616,6 @@ pub(super) fn observe_worker_holders_while(
             &detail,
             TaintCause::Uncertainty(UncertaintyReason::UnstableProcessIdentity),
         );
-    }
-    // Exclude the caller's verified ancestors. A walk that stops early leaves
-    // the remaining ancestors in the census, where one inside a root still
-    // makes it live, so an incomplete ancestry hides nothing.
-    let mut excluded = BTreeSet::from([current.identity.clone()]);
-    if ancestors {
-        let mut child = current;
-        while child.identity.pid != current.identity.session_id {
-            if !within_budget() {
-                return (states, holders, details, taints);
-            }
-            let ProcessLookup::Present(parent) = census.process(child.parent_pid) else {
-                break;
-            };
-            if parent.identity.boot != current.identity.boot
-                || parent.identity.session_id != current.identity.session_id
-                || census.ancestry(&child.identity, &parent.identity) != Ancestry::Yes
-                || !excluded.insert(parent.identity.clone())
-            {
-                break;
-            }
-            child = parent;
-        }
     }
     // An incomplete census must not hide positively observed live workers.
     for fact in census.facts() {
@@ -1744,7 +1793,12 @@ pub(super) fn observe_worker_holders_while(
                                 cwd: Some(location.to_path_buf()),
                             });
                         if fact.identity.session_id != current.identity.session_id {
-                            record_held(held, &root, holder);
+                            // `holder` is the first process stored for this root,
+                            // not necessarily this one. Report the current fact.
+                            let mut observed =
+                                ObservedProcess::new(pid, fact.command.clone(), kind);
+                            observed.cwd = Some(location.to_path_buf());
+                            record_held(held, &root, &observed);
                         }
                         taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
                         details.insert(
@@ -1867,7 +1921,11 @@ pub(super) fn observe_worker_holders_while(
                                 cwd: Some(canonical.clone()),
                             });
                         if fact.identity.session_id != current.identity.session_id {
-                            record_held(held, &root, holder);
+                            // Keep the taint's first holder, but name this
+                            // process in the held report.
+                            let mut observed = ObservedProcess::cwd(pid, fact.command.clone());
+                            observed.cwd = Some(canonical.clone());
+                            record_held(held, &root, &observed);
                         }
                         taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
                         details.insert(root, format!("process {}: cwd inside root", holder.pid));

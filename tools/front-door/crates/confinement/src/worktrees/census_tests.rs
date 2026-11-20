@@ -3496,18 +3496,166 @@ fn held_report_uses_one_bounded_census_and_only_reports() -> Result<(), Box<dyn 
     let roots = vec![temp.path().join("lane")];
     let report = held_report(&workers, &roots, &|| true);
     assert_eq!(workers.0.load(Ordering::SeqCst), 1, "one census per pass");
-    assert_eq!(report.len(), 2);
+    assert!(!report.incomplete);
+    assert_eq!(report.processes.len(), 2);
     assert!(
         report
+            .processes
             .iter()
             .any(|row| row.pid == 101 && row.command.as_deref() == Some("zsh -c burn"))
     );
-    assert!(report.iter().any(|row| row.pid == 202));
-    for row in &report {
+    assert!(report.processes.iter().any(|row| row.pid == 202));
+    for row in &report.processes {
         let line = row.advisory();
         assert!(line.contains("report only"), "{line}");
-        assert!(!line.contains("kill"), "{line}");
+        assert!(line.contains(&row.pid.to_string()), "{line}");
+        assert!(line.contains(&row.evidence.to_string()), "{line}");
     }
-    assert!(held_report(&workers, &roots, &|| false).is_empty());
+    // A cut-short census reports incompleteness rather than an empty result.
+    let cut = held_report(&workers, &roots, &|| false);
+    assert!(cut.incomplete);
+    assert!(cut.processes.is_empty());
+    Ok(())
+}
+
+/// Two foreign processes sharing one root are both named; a sibling in the
+/// caller's session is not. This drives the real `observe_worker_holders_while`
+/// path, where `holders` keeps only the first process per root.
+#[test]
+fn held_report_names_every_foreign_dweller_and_excludes_the_callers_session()
+-> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ProcessIdentity};
+    let temp = tempfile::tempdir()?;
+    let root = canonicalize(temp.path())?;
+    for name in ["caller", "first", "second", "sibling"] {
+        fs::create_dir(temp.path().join(name))?;
+    }
+    let fact = |pid: i64, session_id: i64, command: &str| ProcessFact {
+        identity: ProcessIdentity {
+            boot: "dwellers".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: session_id,
+            session_id,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: Some(command.into()),
+    };
+    let current = fact(100, 100, "provenant");
+    let census = Census::from_observations(
+        [
+            current.clone(),
+            fact(201, 201, "zsh -c burn"),
+            fact(202, 202, "yes"),
+            fact(103, 100, "caller sibling"),
+        ],
+        [],
+        [],
+        true,
+        false,
+        32,
+    )?;
+    let observer = InjectedCensus {
+        census,
+        cwds: BTreeMap::from([
+            (100, CwdObservation::Path(temp.path().join("caller"))),
+            (103, CwdObservation::Path(temp.path().join("sibling"))),
+            (201, CwdObservation::Path(temp.path().join("first"))),
+            (202, CwdObservation::Path(temp.path().join("second"))),
+        ]),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+    let mut held = HeldProcesses::new();
+    let (states, _, _, _) = observe_worker_holders_while(
+        std::slice::from_ref(&root),
+        &observer,
+        &observer,
+        &current,
+        true,
+        &mut |_, _| {},
+        &mut held,
+        Some(&|| true),
+    );
+    assert!(states[&root].is_observed());
+    let rows = &held[&root];
+    let pids: BTreeSet<_> = rows.iter().map(|row| row.pid).collect();
+    assert_eq!(pids, BTreeSet::from([201, 202]), "{rows:?}");
+    assert!(
+        rows.iter()
+            .any(|row| row.pid == 201 && row.command.as_deref() == Some("zsh -c burn"))
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.pid == 202 && row.command.as_deref() == Some("yes"))
+    );
+    Ok(())
+}
+
+/// EPERM processes are still aggregated into the held report, but the caller
+/// is excluded even when the listing could not name it.
+#[test]
+fn held_report_aggregates_eperm_dwellers_and_excludes_the_caller() -> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ProcessIdentity};
+    let temp = tempfile::tempdir()?;
+    let root = canonicalize(temp.path())?;
+    for name in ["caller", "first", "second"] {
+        fs::create_dir(temp.path().join(name))?;
+    }
+    let current = ProcessFact {
+        identity: ProcessIdentity {
+            boot: "eperm-dwellers".into(),
+            pid: 100,
+            native_start: 100,
+            group_id: 100,
+            session_id: 100,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: Some("provenant".into()),
+    };
+    let census = Census::from_observations(
+        [],
+        [
+            (100, ObservationIssue::PermissionDenied),
+            (201, ObservationIssue::PermissionDenied),
+            (202, ObservationIssue::PermissionDenied),
+        ],
+        [],
+        true,
+        false,
+        32,
+    )?;
+    let observer = InjectedCensus {
+        census,
+        cwds: BTreeMap::from([
+            (100, CwdObservation::Path(temp.path().join("caller"))),
+            (201, CwdObservation::Path(temp.path().join("first"))),
+            (202, CwdObservation::Path(temp.path().join("second"))),
+        ]),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+    let mut held = HeldProcesses::new();
+    let _ = observe_worker_holders_while(
+        std::slice::from_ref(&root),
+        &observer,
+        &observer,
+        &current,
+        true,
+        &mut |_, _| {},
+        &mut held,
+        None,
+    );
+    let rows = &held[&root];
+    let pids: BTreeSet<_> = rows.iter().map(|row| row.pid).collect();
+    assert_eq!(pids, BTreeSet::from([201, 202]), "{rows:?}");
+    assert!(
+        rows.iter()
+            .all(|row| row.kind == ProcessEvidenceKind::WorkingDirectory)
+    );
     Ok(())
 }

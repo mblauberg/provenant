@@ -56,10 +56,13 @@ pub struct WorktreeDiagnosis {
     pub evidence: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<&'static str>,
-    /// Advisory dwellers of this checkout from the same bounded census that
-    /// decided occupancy. Report only; never a signal target.
+    /// Advisory dwellers of this checkout from a bounded census separate from
+    /// the one that decides occupancy. Report only; never a signal target.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub held_processes: Vec<HeldProcess>,
+    /// The bounded dweller census did not finish, so held rows may be missing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held_incomplete: bool,
 }
 
 impl WorktreeDiagnosis {
@@ -115,6 +118,7 @@ impl WorktreeRepairKind {
 pub fn doctor(
     context: &WorktreeContext<'_>,
     path: &Path,
+    terminal: &dyn Fn(&Path) -> bool,
     cancel: &CancelToken,
 ) -> Result<WorktreeDiagnosis, WorktreeError> {
     validate_binding(context)?;
@@ -141,6 +145,7 @@ pub fn doctor(
         evidence: None,
         source: None,
         held_processes: Vec::new(),
+        held_incomplete: false,
     };
     report.set_state(
         WorktreeDiagnosisState::Unregistered,
@@ -165,43 +170,42 @@ pub fn doctor(
         report.reason = "Git retains a registration for a missing checkout.".into();
         return Ok(report);
     }
-    let (occupancy, held) = match custody {
-        Occupancy::Available if entry.locked => (
-            Occupancy::custody_unknown(path.clone(), "Git marks the worktree locked"),
-            Vec::new(),
-        ),
+    // Keep main's occupancy classification exactly: the unbounded census
+    // decides custody, so ancestors still count and a bounded gap cannot turn
+    // into a census_unknown. A separate bounded census collects held rows.
+    let custody_available = custody.is_available();
+    let occupancy = match custody {
+        Occupancy::Available if entry.locked => {
+            Occupancy::custody_unknown(path.clone(), "Git marks the worktree locked")
+        }
         Occupancy::Available => {
-            let started = context.clock.mono_now().as_micros();
-            let within_budget =
-                || context.clock.mono_now().as_micros().saturating_sub(started) < 2_000_000;
-            let evidence = context.workers.observe_evidence_while(
-                std::slice::from_ref(&path),
-                true,
-                &within_budget,
-            );
-            let observed = evidence
-                .as_ref()
-                .and_then(|evidence| evidence.states.get(&path).cloned())
+            let observed = context
+                .workers
+                .observe_roots(std::slice::from_ref(&path))
+                .remove(&path)
                 .unwrap_or_else(|| {
                     Occupancy::census_unknown(
                         path.clone(),
                         context.workers.incomplete_census_detail(),
                     )
                 });
-            let held = evidence
-                .and_then(|evidence| evidence.held.get(&path).cloned())
-                .unwrap_or_default();
-            (
-                combine_occupancy(&path, Occupancy::Available, observed),
-                held,
-            )
+            combine_occupancy(&path, Occupancy::Available, observed)
         }
-        other => (other, Vec::new()),
+        other => other,
     };
-    report.held_processes = held
-        .iter()
-        .filter_map(|process| HeldProcess::new(&path, process))
-        .collect();
+    // Dwellers are advisory and only meaningful for a settled lane: a live
+    // worktree's processes belong to its writer and must not be named here.
+    let held = if terminal(&path) && custody_available && !entry.locked {
+        let started = context.clock.mono_now().as_micros();
+        let within_budget = || {
+            context.clock.mono_now().as_micros().saturating_sub(started) < HELD_CENSUS_BUDGET_MICROS
+        };
+        held_report(context.workers, std::slice::from_ref(&path), &within_budget)
+    } else {
+        HeldReport::default()
+    };
+    report.held_incomplete = held.incomplete;
+    report.held_processes = held.processes;
     if let Occupancy::Held = occupancy {
         report.set_state(
             WorktreeDiagnosisState::LiveWriter,
@@ -310,6 +314,10 @@ pub fn doctor(
     };
     report.set_state(state, repair_kind, context.repo.root_path(), &path);
     report.reason = reason.into();
+    if report.held_incomplete {
+        report.reason.push_str(HELD_CENSUS_INCOMPLETE_WARNING);
+        report.reason.push('.');
+    }
     if state == WorktreeDiagnosisState::Unknown {
         report.scope = Some(StructuredPathWire::from_path(&path)?);
         report.evidence = Some(report.reason.clone());

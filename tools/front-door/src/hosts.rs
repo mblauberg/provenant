@@ -450,8 +450,22 @@ pub(crate) fn local(
         } else {
             let clock = SystemClock::new();
             let started = clock.mono_now().as_micros();
-            let within_budget = || clock.mono_now().as_micros().saturating_sub(started) < 2_000_000;
-            provenant_confinement::worktrees::held_report(workers, &roots, &within_budget)
+            let within_budget = || {
+                clock.mono_now().as_micros().saturating_sub(started)
+                    < provenant_confinement::worktrees::HELD_CENSUS_BUDGET_MICROS
+            };
+            let report =
+                provenant_confinement::worktrees::held_report(workers, &roots, &within_budget);
+            if report.incomplete
+                && !warnings.iter().any(|warning| {
+                    warning == provenant_confinement::worktrees::HELD_CENSUS_INCOMPLETE_WARNING
+                })
+            {
+                warnings.push(
+                    provenant_confinement::worktrees::HELD_CENSUS_INCOMPLETE_WARNING.to_owned(),
+                );
+            }
+            cap_held_rows(report.processes, &mut warnings)
         }
     };
     Ok(Report {
@@ -512,6 +526,25 @@ impl DoctorError {
         }
     }
 }
+/// Keep a locally produced report within the 128-row peer validation cap.
+/// Omitted rows are acknowledged with one warning line so an empty-looking
+/// report never hides that the census found more dwellers than it shows.
+fn cap_held_rows(
+    mut rows: Vec<provenant_confinement::worktrees::HeldProcess>,
+    warnings: &mut Vec<String>,
+) -> Vec<provenant_confinement::worktrees::HeldProcess> {
+    if rows.len() <= 128 {
+        return rows;
+    }
+    let omitted = rows.len() - 128;
+    rows.truncate(128);
+    if warnings.len() >= 128 {
+        warnings.truncate(127);
+    }
+    warnings.push(format!("{omitted} more held processes not shown"));
+    rows
+}
+
 /// Peer text is untrusted: bounded labels, no controls, and an unverified
 /// token validity exactly as the local report produces it.
 fn valid_remote(report: &Report) -> bool {
@@ -1205,5 +1238,37 @@ mod tests {
         assert!(line.contains("77"), "{line}");
         assert!(line.contains("zsh -c burn"), "{line}");
         assert!(line.contains("report only"), "{line}");
+    }
+
+    #[test]
+    fn held_rows_are_capped_so_a_local_report_validates_as_a_peer_report() {
+        use provenant_confinement::worktrees::{HeldProcess, ProcessEvidenceKind};
+        let root = std::path::Path::new("/tmp/settled-lane");
+        let rows: Vec<HeldProcess> = (0..200)
+            .map(|pid| HeldProcess {
+                root: provenant_records::StructuredPathWire::from_path(root).unwrap(),
+                pid,
+                command: Some(format!("worker-{pid}")),
+                evidence: ProcessEvidenceKind::WorkingDirectory,
+                path: None,
+                report: String::new(),
+            })
+            .collect();
+        let mut warnings = Vec::new();
+        let capped = super::cap_held_rows(rows, &mut warnings);
+        assert_eq!(capped.len(), 128);
+        assert_eq!(
+            warnings,
+            vec![format!("{} more held processes not shown", 200 - 128)]
+        );
+        let mut report: super::Report =
+            serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped","login_accounts":[]}"#)
+                .unwrap();
+        report.held_processes = capped;
+        report.warnings = warnings;
+        assert!(
+            super::valid_remote(&report),
+            "a locally produced report must pass peer validation"
+        );
     }
 }

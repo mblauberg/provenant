@@ -372,6 +372,55 @@ fn terminal_after_worktree_creation(finished_at: i64, created_at: Option<i128>) 
     created_at.is_some_and(|created| i128::from(finished_at) > created)
 }
 
+/// Project attempt directories a report-only census may inspect: only runs
+/// that are terminal and whose custody is released. `is_settled` supplies that
+/// check so the filtering is shared and unit-testable without a run store.
+fn settled_attempt_paths(
+    state: &Path,
+    ids: impl IntoIterator<Item = provenant_core::AttemptId>,
+    is_settled: impl Fn(&provenant_core::AttemptId) -> bool,
+) -> Vec<std::path::PathBuf> {
+    ids.into_iter()
+        .filter(|id| is_settled(id))
+        .map(|id| state.join("attempts").join(id.to_string()))
+        .collect()
+}
+
+/// The settled attempt directories of one project, checked against live run
+/// state rather than inferred from directory existence. gc and host doctor
+/// call this one helper so their reports cannot drift.
+pub(crate) fn settled_attempt_roots(
+    roots: &Roots,
+    project: provenant_core::ProjectId,
+    cancel: &CancelToken,
+    ids: &[provenant_core::AttemptId],
+) -> Vec<std::path::PathBuf> {
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    let context = ExecutionContext {
+        state_root: roots.state.clone(),
+        project_id: project,
+        actor_id: ActorId::from_bytes([0; 16]),
+        read_prompts: false,
+    };
+    let clock = SystemClock;
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel,
+    };
+    let Ok(Some(store)) = RunStore::open_disk_read_only(&context, &call) else {
+        return Vec::new();
+    };
+    let settled = |id: &provenant_core::AttemptId| {
+        store.record(*id, &call).is_ok_and(|record| {
+            matches!(record.state, AttemptState::Terminal { .. })
+                && store.custody_released(&record, &call).unwrap_or(false)
+        })
+    };
+    settled_attempt_paths(roots.state.as_path(), ids.iter().copied(), settled)
+}
+
 /// Roots a host-wide report may inspect: terminal lane worktrees and settled
 /// attempt directories across every registered project. A failed observation
 /// contributes no roots rather than aborting the whole report.
@@ -404,15 +453,11 @@ pub(crate) fn settled_roots(roots: &Roots, cancel: &CancelToken) -> Vec<std::pat
             continue;
         };
         if let Ok(attempts) = store.attempts(&call) {
-            for attempt in attempts.flatten() {
-                result.push(
-                    roots
-                        .state
-                        .as_path()
-                        .join("attempts")
-                        .join(attempt.attempt_id.to_string()),
-                );
-            }
+            let ids: Vec<_> = attempts
+                .flatten()
+                .map(|attempt| attempt.attempt_id)
+                .collect();
+            result.extend(settled_attempt_roots(roots, project_id, cancel, &ids));
         }
     }
     result.sort();
@@ -959,6 +1004,19 @@ mod tests {
         )?;
         assert!(refresh_branch(&repo, &executor, "lane/test").is_err());
         Ok(())
+    }
+
+    #[test]
+    fn settled_attempt_paths_excludes_a_non_terminal_attempt() {
+        use provenant_core::AttemptId;
+        let live = AttemptId::from_bytes([1; 16]);
+        let settled = AttemptId::from_bytes([2; 16]);
+        let paths =
+            settled_attempt_paths(Path::new("/state"), [live, settled], |id| *id == settled);
+        assert_eq!(
+            paths,
+            vec![Path::new("/state/attempts").join(settled.to_string())]
+        );
     }
 
     #[test]
