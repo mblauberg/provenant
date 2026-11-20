@@ -1,5 +1,0 @@
-## Fixes
-
-### Lanes and settlement
-
-- Writer lanes no longer start with a cold Cargo target when the host is busy. A seed generation records the size of its built target, so a clone need not walk a multi-gigabyte seed first, and stage cleanup, generation selection, the clone and dep-info aging each get their own budget rather than sharing one two-second deadline. A clone's reservation follows the cache census's byte unit -- near-zero private bytes when the census reports private sizes, the seed's recorded allocated size when it falls back to allocated bytes -- so it cannot evict an unrelated under-budget target under a private-byte census, while under the fallback it charges the incoming target's full size and evicts a target near the limit to make room. A budget fallback names the step that ran out and reports the effective value and its source in `cargo-target-setup.json` and the warning. A seed without a recorded size is accepted quietly (`size_recorded: false`), and an unreadable host config warns with its path and uses the compiled default. (#3620)
