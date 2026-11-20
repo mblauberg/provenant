@@ -326,7 +326,7 @@ fn probe_directory_error(error: fs::FsError) -> ExecError {
 }
 
 impl Executor for HostProbeExecutor<'_> {
-    fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+    fn execute(&self, mut options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
         // mkdir is exclusive: an existing entry is an error, never a cwd.
         let scratch =
             HostProbeDir::create_in(&self.root, &self.path).map_err(probe_directory_error)?;
@@ -344,6 +344,11 @@ impl Executor for HostProbeExecutor<'_> {
             env.push(("PATH".into(), path.clone()));
             env
         });
+        let mut notify_spawn = |pid| {
+            if let Some(callback) = options.on_spawn.as_mut() {
+                callback(pid);
+            }
+        };
         self.executor.execute(ExecOptions {
             argv: options.argv,
             env: env.as_deref().or(options.env),
@@ -365,14 +370,14 @@ impl Executor for HostProbeExecutor<'_> {
             stderr_filter: options
                 .stderr_filter
                 .map(|filter| filter as &mut dyn CaptureFilter),
-            on_spawn: options
-                .on_spawn
-                .map(|callback| callback as &mut dyn FnMut(u32)),
+            on_spawn: Some(&mut notify_spawn),
             stdout_writer: options
                 .stdout_writer
+                .as_deref_mut()
                 .map(|writer| writer as &mut dyn std::io::Write),
             stderr_writer: options
                 .stderr_writer
+                .as_deref_mut()
                 .map(|writer| writer as &mut dyn std::io::Write),
             cancel: options.cancel,
             timeout: options.timeout,
