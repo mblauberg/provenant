@@ -224,19 +224,12 @@ pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Opt
     })
 }
 
-fn opencode_profile_message(
-    profile: provenant_config::OpenCodeProfile,
-    origin: Option<&provenant_config::Origin>,
-) -> String {
-    let source = match origin {
-        Some(provenant_config::Origin::User { .. }) => "host configuration",
-        _ => "compiled default",
-    };
-    let profile = match profile {
-        provenant_config::OpenCodeProfile::Host => "host",
-        provenant_config::OpenCodeProfile::Lane => "lane",
-    };
-    format!("OpenCode profile={profile} (providers.opencode.profile; source: {source})")
+fn opencode_access_message(access: &provenant_records::LaneAccessReceipt) -> String {
+    format!(
+        "OpenCode profile={} (lanes.access; source: {})",
+        access.access.as_str(),
+        access.source.as_str()
+    )
 }
 
 fn push_launch_warning(route: &mut ResolvedRoute, warning: impl Into<String>) {
@@ -3072,6 +3065,7 @@ pub(super) fn prepare_candidates_inner(
             .map_err(|error| error.to_string())?;
     let eligible = |name: &str| provider_leases.contains_key(name);
     let settings = config.domains.accounts.unique_accounts();
+    let credential_settings = settings.clone();
     let cargo_cache = writer
         .as_ref()
         .map(|writer| {
@@ -3080,11 +3074,18 @@ pub(super) fn prepare_candidates_inner(
         .transpose()?;
     let mut lane_roots = vec![source.as_path(), cwd.as_path(), paths.scratch.as_path()];
     lane_roots.extend(cargo_cache.as_deref());
-    let credential_roots = credential_roots(registry, &home, &settings, &lane_roots)?;
+    let credential_roots = credential_roots(
+        registry,
+        &home,
+        &settings,
+        &lane_roots,
+        None,
+        &launch_policy,
+    )?;
     let github_roots = github_roots(registry);
     let protected_worktrees = protected_worktrees(registry, &source, &git)?;
     let host_writes = config.domains.run;
-    let mut entries: Vec<_> = settings.entries.into_values().collect();
+    let mut entries: Vec<_> = settings.entries.clone().into_values().collect();
     let mut default_failures = std::collections::BTreeMap::new();
     for spec in ADAPTER_SPECS.iter().filter(|spec| eligible(spec.name)) {
         let Some((environment, fallback)) = spec.default_account_directory else {
@@ -3621,6 +3622,7 @@ pub(super) fn prepare_candidates_inner(
         );
         let fallback_dropped = effective.dropped_fallback;
         let model_policy = effective.policy;
+        let lane_access = resolve_lane_access(task, &model_policy);
         if !model_policy.permits(request.intent) {
             reason_boundaries.insert(
                 reasons.len(),
@@ -4055,14 +4057,9 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(setup_skip(&label, error));
             continue;
         }
-        let opencode_profile = config
-            .providers
-            .get(adapter.id())
-            .map_or(provenant_config::OpenCodeProfile::Host, |settings| {
-                settings.profile
-            });
-        let opencode_host = adapter_spec.is_some_and(|spec| spec.host_profile)
-            && opencode_profile == provenant_config::OpenCodeProfile::Host;
+        let opencode_host = adapter_spec
+            .is_some_and(|spec| spec.id == provenant_records::Harness::Opencode)
+            && !lane_access.access.is_isolated();
         let opencode_homes = provenant_providers::opencode::host_xdg_homes(&home, &|key| {
             host_provider_var(registry, key)
         });
@@ -4078,13 +4075,14 @@ pub(super) fn prepare_candidates_inner(
                     state_root,
                     config_root: roots.state.as_path(),
                     private_state: &private_state,
+                    lane_access: Some(&lane_access),
                 },
                 &launch_policy,
                 opencode_host.then_some(opencode_data.as_path()),
             ) {
                 Ok(continuation) => Some(continuation),
                 Err(error)
-                    if adapter_spec.is_some_and(|spec| spec.host_profile)
+                    if opencode_host
                         && matches!(
                             error,
                             ContinuationError::Provider(
@@ -4153,20 +4151,48 @@ pub(super) fn prepare_candidates_inner(
         } else {
             text
         };
-        let credential_roots = if opencode_host {
+        let mut credential_roots = match super::confinement::credential_roots(
+            registry,
+            &home,
+            &credential_settings,
+            &lane_roots,
+            Some(&lane_access),
+            &launch_policy,
+        ) {
+            Ok(roots) => roots,
+            Err(error) => {
+                reasons.push(skip(&label, SkipKind::Refused, error));
+                continue;
+            }
+        };
+        if let Some(error) = super::confinement::credential_access_grant_refusal(
+            &task.access,
+            &credential_roots,
+            &lane_access,
+            &launch_policy,
+        ) {
+            use provenant_records::diagnostic::{BoundaryClass, ConfinementGuard, PlanFailure};
+            reason_boundaries.insert(reasons.len(), BoundaryClass::Credentials);
+            let mut refused = skip(&label, SkipKind::Refused, error);
+            refused.plan_error = Some(PlanFailure::CredentialRoot);
+            refused.guard_boundary = Some(BoundaryClass::Credentials);
+            refused.confinement_guard = Some(ConfinementGuard::CredentialRootRefused);
+            refused.set_cause(provenant_records::RouteExclusionReason::ConfinementUnavailable);
+            reasons.push(refused);
+            continue;
+        }
+        if opencode_host {
             let profile_roots: Vec<_> = opencode_homes
                 .iter()
                 .map(|home| home.join(adapter.id()))
                 .collect();
-            credential_roots
+            credential_roots = credential_roots
                 .without_roots_with_aliases(
                     &profile_roots,
                     provenant_confinement::permissions::resolve_boundary_path,
                 )
-                .map_err(|error| error.to_string())?
-        } else {
-            credential_roots.clone()
-        };
+                .map_err(|error| error.to_string())?;
+        }
         let mut request = match confinement_request(
             project_id,
             ConfinementRoots {
@@ -4187,7 +4213,11 @@ pub(super) fn prepare_candidates_inner(
             &host_writes,
             adapter.id(),
             publishing_gh.is_some(),
-            InventoryContext::Launch(task, &format!("{}/{}", route.adapter, route.model)),
+            InventoryContext::Launch(
+                task,
+                &format!("{}/{}", route.adapter, route.model),
+                &lane_access,
+            ),
         )
         .map_err(PlanCheckError::from)
         {
@@ -4254,6 +4284,10 @@ pub(super) fn prepare_candidates_inner(
             resume.is_some(),
             current_candidate > 0,
         );
+        if let Some(warning) = lane_access_warning(task, &lane_access) {
+            push_launch_warning(&mut route, warning);
+        }
+        provider.lane_access = Some(lane_access.clone());
         apply_resolved_model(&mut provider, &exact_model);
         if let Some(name) = host_native {
             provider.source = Some(format!("domains.fabric.host_native.{name}"));
@@ -4367,8 +4401,48 @@ pub(super) fn prepare_candidates_inner(
                 continue;
             }
         };
+        let sandbox = sandbox_mode(
+            &host_writes,
+            &format!("{}/{}", route.adapter, route.model),
+            task,
+            &plan,
+        );
+        if !lane_access.access.is_isolated() || !sandbox.effective {
+            // The native-authentication warning belongs to the adapters whose
+            // host profile reads the provider's own login. Take that set and
+            // its expected mechanism from the registry rather than restating
+            // adapter names here.
+            let native_auth = adapter_spec.is_some_and(|spec| {
+                spec.id == provenant_records::Harness::Codex
+                    || spec.id == provenant_records::Harness::Cursor
+                    || spec.id == provenant_records::Harness::Agy
+                    || spec.id == provenant_records::Harness::Claude
+            });
+            let claude_native =
+                adapter_spec.is_some_and(|spec| spec.id == provenant_records::Harness::Claude);
+            let expected = adapter_spec.and_then(|spec| spec.authentication);
+            if native_auth
+                && (claude_native
+                    || plan.permissions().selected_authentication.as_deref() != expected)
+            {
+                let detail = format!(
+                    "{} uses native provider authentication (lanes.access={}, source: {})",
+                    adapter.id(),
+                    lane_access.access.as_str(),
+                    lane_access.source.as_str()
+                );
+                if let provenant_records::policy::Effect::Warn(message) = launch_policy.check(
+                    "LAUNCH_NATIVE_AUTH_NONE",
+                    provenant_records::policy::Facts::violation(detail),
+                ) {
+                    provider.launch_warnings.push(format!("warning: {message}"));
+                }
+            }
+        }
         let credential_roots = plan.permissions().credential_roots.clone();
-        let refresh_token = adapter_spec.is_some_and(|spec| spec.launch_token_refresh);
+        let refresh_token = adapter_spec.is_some_and(|spec| spec.launch_token_refresh)
+            && lane_access.access.is_isolated()
+            && sandbox.env_value() != "off";
         let refreshed = if refresh_token && fixture_token.is_none() {
             let account = account.as_ref().ok_or("Claude account is not registered")?;
             let login = provenant_providers::claude::Login {
@@ -4435,6 +4509,7 @@ pub(super) fn prepare_candidates_inner(
             None
         };
         let mut provider_route = adapter_route(&route);
+        provider_route.set_access(lane_access.access);
         let launch_model = catalogue.launch_model(&exact_model, route.effort.as_deref());
         let provider_model = (launch_model != route.model).then_some(launch_model);
         let project_id_str = project_id.to_string();
@@ -4469,12 +4544,6 @@ pub(super) fn prepare_candidates_inner(
         provider_route.set_user_skills(user_skills_mode.is_discover());
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
-        let sandbox = sandbox_mode(
-            &host_writes,
-            &format!("{}/{}", route.adapter, route.model),
-            task,
-            &plan,
-        );
         let lane_worktree = match &plan.permissions().mode {
             AccessMode::WorktreeWrite(_) => writer.as_ref().map(|w| w.worktree.path()),
             AccessMode::ReadOnly => None,
@@ -4509,7 +4578,6 @@ pub(super) fn prepare_candidates_inner(
             });
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
-                opencode_profile,
                 credential_roots: credential_roots.clone(),
                 images: &task.access.attachments,
                 policy: &launch_policy,
@@ -4533,7 +4601,7 @@ pub(super) fn prepare_candidates_inner(
                     } else if key == provenant_core::consumer_env::LANE_CARGO_LINT_TARGET {
                         Some(cargo_target_lint.as_os_str().to_os_string())
                     } else {
-                        host_provider_var(registry, key)
+                        lane_provider_var(registry, key, lane_access.access)
                     }
                 },
                 skill_stage_max_bytes: config.domains.lanes.skill_stage_max_bytes,
@@ -4635,11 +4703,7 @@ pub(super) fn prepare_candidates_inner(
         let native_root = match &spec.session_state {
             provenant_providers::SessionStateLocation::AttemptPrivate => None,
             provenant_providers::SessionStateLocation::Native { root }
-                if (!sandbox.effective
-                    || (adapter_spec.is_some_and(|spec| spec.host_profile)
-                        && config.providers.get(adapter.id()).is_none_or(|settings| {
-                            settings.profile == provenant_config::OpenCodeProfile::Host
-                        })))
+                if (!sandbox.effective || !lane_access.access.is_isolated())
                     && root.is_absolute() =>
             {
                 Some(root.clone())
@@ -4706,6 +4770,7 @@ pub(super) fn prepare_candidates_inner(
                 cwd: &cwd,
                 home: &home,
                 credential_roots: &credential_roots,
+                lane_access: &lane_access,
                 common_git: common_git_path.as_deref(),
                 state_root: roots.state.as_path(),
                 worktree_gitdir: worktree_gitdir.as_deref(),
@@ -4946,6 +5011,12 @@ pub(super) fn prepare_candidates_inner(
             super::command::scratch_cargo_output(&mut spec.env, scratch);
         }
         spec.complete_tool_requirements(&plan, &cwd)?;
+        super::confinement::warn_profile_credential_grants(
+            &spec.profile.spec,
+            &credential_roots,
+            &lane_access,
+            &launch_policy,
+        );
         if isolated {
             super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)
                 .map_err(PrepareError::SourceProfileIsolated)?;
@@ -5149,11 +5220,8 @@ pub(super) fn prepare_candidates_inner(
                 .map(|tool| tool.receipt())
                 .collect(),
         ))?);
-        if adapter_spec.is_some_and(|spec| spec.host_profile) {
-            let message = opencode_profile_message(
-                opencode_profile,
-                config.origins.get("providers.opencode.profile"),
-            );
+        if adapter_spec.is_some_and(|spec| spec.id == provenant_records::Harness::Opencode) {
+            let message = opencode_access_message(&lane_access);
             let _ = writeln!(std::io::stderr().lock(), "{message}");
             for warning in spec.warnings.iter().chain(continuation_warning.iter()) {
                 let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
@@ -5465,6 +5533,179 @@ fn resolved_launch_model(
         .unwrap_or_else(|| requested.clone())
 }
 
+/// Resolve one access decision for each candidate, before preparing its provider.
+pub(super) fn resolve_lane_access(
+    task: &run::TaskRequest,
+    model_policy: &provenant_routing::ModelPolicy,
+) -> provenant_records::LaneAccessReceipt {
+    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource, LimitSource};
+    const KEY: &str = "lanes.access";
+    let source = task
+        .profile
+        .knob_sources
+        .get(KEY)
+        .copied()
+        .unwrap_or_default();
+    let explicit = matches!(
+        source,
+        LimitSource::Launch | LimitSource::Template | LimitSource::Tier
+    );
+    if !explicit && let Some(access) = model_policy.lane.access {
+        return LaneAccessReceipt {
+            access,
+            source: LaneAccessSource::RoutePolicy,
+            key: model_policy
+                .lane
+                .access_key
+                .clone()
+                .unwrap_or_else(|| "defaults.lane.access".into()),
+            extra: Default::default(),
+        };
+    }
+    let receipt_source = match source {
+        LimitSource::Default => LaneAccessSource::Default,
+        LimitSource::Host => LaneAccessSource::Host,
+        LimitSource::Project => LaneAccessSource::Project,
+        LimitSource::Template => LaneAccessSource::Template,
+        LimitSource::Tier => LaneAccessSource::Tier,
+        LimitSource::Launch => LaneAccessSource::Launch,
+    };
+    let access = match task.profile.knobs.get(KEY) {
+        None => LaneAccess::Host,
+        Some(value) => match value.as_str() {
+            Some("host") => LaneAccess::Host,
+            Some("isolated") => LaneAccess::Isolated,
+            _ => LaneAccess::Host,
+        },
+    };
+    LaneAccessReceipt {
+        access,
+        source: receipt_source,
+        key: KEY.into(),
+        extra: Default::default(),
+    }
+}
+
+pub(super) fn lane_access_warning(
+    task: &run::TaskRequest,
+    receipt: &provenant_records::LaneAccessReceipt,
+) -> Option<String> {
+    (receipt.source != provenant_records::LaneAccessSource::RoutePolicy
+        && task
+            .profile
+            .knobs
+            .get("lanes.access")
+            .is_some_and(|value| !matches!(value.as_str(), Some("host" | "isolated"))))
+    .then(|| {
+        format!(
+            "invalid lanes.access value; using host (source: {})",
+            receipt.source.as_str()
+        )
+    })
+}
+
+#[cfg(test)]
+mod lane_access_tests {
+    use super::*;
+    use provenant_records::{LaneAccess, LaneAccessSource, LimitSource};
+
+    #[test]
+    fn precedence_and_invalid_values() {
+        let mut task = run::TaskRequest {
+            context: None,
+            extra: Default::default(),
+            limit_extensions: Default::default(),
+            build_heavy: false,
+            title: None,
+            base: None,
+            head: None,
+            source_head: None,
+            base_ref: None,
+            profile: Default::default(),
+            prompt_digest: provenant_records::CanonicalV1::file_digest(b"test"),
+            route: run::RequestedRoute::Model {
+                required_family: None,
+                extra: Default::default(),
+                provider: "codex".into(),
+                model: "codex/model".into(),
+                effort: None,
+            },
+            account: None,
+            authority_digest: provenant_core::Digest::from_bytes([4; 32]),
+            writer: None,
+            deliver: None,
+            provider_timeout_seconds: 20,
+            delivery_id: None,
+            access: Default::default(),
+        };
+        let mut policy = provenant_routing::ModelPolicy::default();
+        let cases = [
+            (
+                None,
+                None,
+                None,
+                LaneAccess::Host,
+                LaneAccessSource::Default,
+            ),
+            (
+                Some(LimitSource::Host),
+                Some("isolated"),
+                None,
+                LaneAccess::Isolated,
+                LaneAccessSource::Host,
+            ),
+            (
+                Some(LimitSource::Host),
+                Some("isolated"),
+                Some(LaneAccess::Host),
+                LaneAccess::Host,
+                LaneAccessSource::RoutePolicy,
+            ),
+            (
+                Some(LimitSource::Launch),
+                Some("isolated"),
+                Some(LaneAccess::Host),
+                LaneAccess::Isolated,
+                LaneAccessSource::Launch,
+            ),
+            (
+                Some(LimitSource::Template),
+                Some("invalid"),
+                None,
+                LaneAccess::Host,
+                LaneAccessSource::Template,
+            ),
+            (
+                Some(LimitSource::Tier),
+                Some("isolated"),
+                Some(LaneAccess::Host),
+                LaneAccess::Isolated,
+                LaneAccessSource::Tier,
+            ),
+        ];
+        for (source, value, route, expected, expected_source) in cases {
+            task.profile.knob_sources.clear();
+            task.profile.knobs.clear();
+            if let Some(source) = source {
+                task.profile
+                    .knob_sources
+                    .insert("lanes.access".into(), source);
+            }
+            if let Some(value) = value {
+                task.profile
+                    .knobs
+                    .insert("lanes.access".into(), value.into());
+            }
+            policy.lane.access = route;
+            let receipt = resolve_lane_access(&task, &policy);
+            assert_eq!(
+                (receipt.access, receipt.source),
+                (expected, expected_source)
+            );
+        }
+    }
+}
+
 /// Carry the exact model into the launch receipt, so identity comparison sees
 /// the model the provider reports.
 /// Spec: docs/specs/routing.md#provider-model-discovery
@@ -5762,18 +6003,22 @@ fn user_skills_exposure(
 
 #[cfg(test)]
 #[test]
-fn opencode_profile_message_reports_value_and_source() -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_config::{OpenCodeProfile, Origin};
-    let origin = Origin::User {
-        path: serde_json::from_value(serde_json::json!({"encoding":"utf8", "path":"config.toml"}))?,
-    };
-    let default = opencode_profile_message(OpenCodeProfile::Host, None);
-    assert!(default.contains("profile=host") && default.contains("source: compiled default"));
-    let configured = opencode_profile_message(OpenCodeProfile::Lane, Some(&origin));
-    assert!(
-        configured.contains("profile=lane") && configured.contains("source: host configuration")
-    );
-    Ok(())
+fn opencode_access_message_reports_value_and_source() {
+    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource};
+    let default = opencode_access_message(&LaneAccessReceipt {
+        access: LaneAccess::Host,
+        source: LaneAccessSource::Default,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    });
+    assert!(default.contains("profile=host") && default.contains("source: default"));
+    let configured = opencode_access_message(&LaneAccessReceipt {
+        access: LaneAccess::Isolated,
+        source: LaneAccessSource::Host,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    });
+    assert!(configured.contains("profile=isolated") && configured.contains("source: host"));
 }
 
 #[cfg(test)]
@@ -5848,6 +6093,7 @@ mod user_skills_tests {
                 selection_context: Default::default(),
                 diagnostics: Default::default(),
                 user_skills: true,
+                access: provenant_records::LaneAccess::Isolated,
                 extra: Default::default(),
                 adapter: adapter.name.into(),
                 model: "fixture".into(),
@@ -5902,7 +6148,6 @@ mod user_skills_tests {
                     route.set_user_skills(state != "off");
                     let launch_policy = provenant_records::policy::Policy::default();
                     let input = PrepareInput {
-                        opencode_profile: provenant_config::OpenCodeProfile::Lane,
                         credential_roots: provenant_core::CredentialRoots::for_home(&home),
                         route: &route,
                         provider_model: None,
@@ -6249,6 +6494,7 @@ mod candidate_walk_regressions {
             selection_context: Default::default(),
             diagnostics: Default::default(),
             user_skills: true,
+            access: Default::default(),
             extra: Default::default(),
             adapter: "cursor".into(),
             model: model.into(),
@@ -6492,7 +6738,19 @@ mod route_launch_boundary_regressions {
 
         let mut settings = provenant_providers::accounts::Settings::default();
         settings.entries.insert("work".into(), registered.clone());
-        let roots = credential_roots(&Registry::default(), &home, &settings, &[])?;
+        let roots = credential_roots(
+            &Registry::default(),
+            &home,
+            &settings,
+            &[],
+            Some(&provenant_records::LaneAccessReceipt {
+                access: provenant_records::LaneAccess::Isolated,
+                source: provenant_records::LaneAccessSource::Default,
+                key: "lanes.access".into(),
+                extra: Default::default(),
+            }),
+            &provenant_records::policy::Policy::default(),
+        )?;
         // HOME-rooted accounts protect client state and declared credentials,
         // while ordinary HOME children remain available to independent lanes.
         for relative in [
@@ -6518,6 +6776,13 @@ mod route_launch_boundary_regressions {
                 &home,
                 &settings,
                 &[&registered.directory.join("workspace")],
+                Some(&provenant_records::LaneAccessReceipt {
+                    access: provenant_records::LaneAccess::Isolated,
+                    source: provenant_records::LaneAccessSource::Default,
+                    key: "lanes.access".into(),
+                    extra: Default::default()
+                }),
+                &provenant_records::policy::Policy::default(),
             )
             .is_ok()
         );

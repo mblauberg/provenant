@@ -100,6 +100,23 @@ const FINISH_FENCED_BUDGET_MS: u64 = 5_000;
 // the durable fence for reconcile as a crash would.
 const SIGNALLED_RETRY_BUDGET_MS: u64 = 5_000;
 
+/// Guardian census cadence. Production uses the constants above; a fixture
+/// may shorten it through `GuardianHooks` so a complete, durable census is
+/// observed within a few seconds instead of waiting for several full backstops.
+#[derive(Clone, Copy, Debug)]
+pub struct CensusCadence {
+    pub full_ms: u64,
+    pub tracking_ms: u64,
+}
+impl Default for CensusCadence {
+    fn default() -> Self {
+        Self {
+            full_ms: FULL_CENSUS_INTERVAL_MS,
+            tracking_ms: TRACKING_INTERVAL_MS,
+        }
+    }
+}
+
 /// Bounds an otherwise unbounded retry loop once a supervisor signal latches.
 /// The deadline starts at the first retry that sees the signal and is
 /// monotonic, because reactor pauses end early on any edge.
@@ -233,20 +250,29 @@ impl RetainedSchedule {
     }
 }
 
-fn tracking_publication_due(now: u64, last_attempt: Option<u64>, failed: bool) -> bool {
+fn tracking_publication_due(
+    now: u64,
+    last_attempt: Option<u64>,
+    failed: bool,
+    interval_ms: u64,
+) -> bool {
     last_attempt.is_none_or(|last| {
         now.saturating_sub(last)
             >= if failed {
                 JOURNAL_RETRY_INTERVAL_MS
             } else {
-                TRACKING_INTERVAL_MS
+                interval_ms
             }
     })
 }
 
-fn census_full_due(now: u64, last_full: Option<u64>, event_failure: bool) -> bool {
-    event_failure
-        || last_full.is_none_or(|last| now.saturating_sub(last) >= FULL_CENSUS_INTERVAL_MS)
+fn census_full_due(
+    now: u64,
+    last_full: Option<u64>,
+    event_failure: bool,
+    interval_ms: u64,
+) -> bool {
+    event_failure || last_full.is_none_or(|last| now.saturating_sub(last) >= interval_ms)
 }
 
 fn census_walk_due(now: u64, last_walk: Option<u64>) -> bool {
@@ -263,9 +289,12 @@ fn census_turn_due(
     last_walk: Option<u64>,
     last_full: Option<u64>,
     reason_to_walk: bool,
+    full_interval_ms: u64,
 ) -> bool {
     census_walk_due(now, last_walk)
-        && (last_walk.is_none() || reason_to_walk || census_full_due(now, last_full, false))
+        && (last_walk.is_none()
+            || reason_to_walk
+            || census_full_due(now, last_full, false, full_interval_ms))
 }
 
 /// Custody retains zombies until absence is proven, but dead processes cannot
@@ -475,6 +504,10 @@ pub struct GuardianHooks<'a> {
     /// move it as a sleeping host does.
     #[cfg(feature = "fixture")]
     pub wall_clock: Option<&'a dyn Clock>,
+    /// Shortens the census and tracking cadence for fixtures that must prove a
+    /// complete durable census within a few seconds.
+    #[cfg(feature = "fixture")]
+    pub census_cadence: Option<CensusCadence>,
     pub stdout_tee: Option<&'a dyn provenant_os::exec::NonblockingSink>,
     pub stderr_tee: Option<&'a dyn provenant_os::exec::NonblockingSink>,
     pub stdout_decoder: Option<&'a dyn provenant_os::capture::FrameDecoder>,
@@ -1190,6 +1223,10 @@ impl Driver<'_> {
         }
         let env = env.as_slice();
         let started = Instant::now();
+        #[cfg(feature = "fixture")]
+        let cadence = hooks.census_cadence.unwrap_or_default();
+        #[cfg(not(feature = "fixture"))]
+        let cadence = CensusCadence::default();
         let system = provenant_os::clock::SystemClock::new();
         #[cfg(feature = "fixture")]
         let clock = hooks.wall_clock.unwrap_or(&system);
@@ -1723,12 +1760,14 @@ impl Driver<'_> {
                     || census_reactor_failed
                     || process_watch_unavailable
                     || census_retry,
+                cadence.full_ms,
             ) {
                 last_census_ms = Some(now);
                 census_event_pending = false;
                 let event_fallback =
                     std::mem::take(&mut census_event_failed) || process_watch_unavailable;
-                let full_due = census_full_due(now, last_full_census_ms, event_fallback);
+                let full_due =
+                    census_full_due(now, last_full_census_ms, event_fallback, cadence.full_ms);
                 let (mut census, mut fallback) = if full_due {
                     (self.refresh_census(&mut child), false)
                 } else {
@@ -1795,7 +1834,12 @@ impl Driver<'_> {
                     census_warning_active = true;
                 }
             }
-            if tracking_publication_due(now, last_journal_attempt_ms, self.journal_warning_active) {
+            if tracking_publication_due(
+                now,
+                last_journal_attempt_ms,
+                self.journal_warning_active,
+                cadence.tracking_ms,
+            ) {
                 // Batch live history writes; cleanup still flushes synchronously.
                 // Custody and the full census remain authoritative during this window.
                 self.persist_tracking(&mut warnings, &mut omitted_warnings);
@@ -1867,10 +1911,10 @@ impl Driver<'_> {
                 u64::try_from(current.as_micros().saturating_sub(began.as_micros()) / 1000)
                     .unwrap_or(0)
             });
-            let mut wait_ms = FULL_CENSUS_INTERVAL_MS;
+            let mut wait_ms = cadence.full_ms;
             if let Some(last) = last_full_census_ms {
                 wait_ms = wait_ms.min(
-                    last.saturating_add(FULL_CENSUS_INTERVAL_MS)
+                    last.saturating_add(cadence.full_ms)
                         .saturating_sub(wait_now),
                 );
             }

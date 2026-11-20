@@ -282,7 +282,6 @@ HOST_SECTIONS = (
     ("host_quota_settings", "Host quota settings", "Omit a key for its default."),
     ("host_opencode_go_settings", "Host OpenCode Go settings", "Omit a key for its default."),
     ("host_codex_settings", "Host Codex settings", "Omit a key for its default."),
-    ("host_opencode_settings", "Host OpenCode settings", "Omit a key for its default."),
     ("host_store_settings", "Host store settings", "Omit a key for its default."),
     ("host_review_settings", "Host review settings", "Omit a key for its default."),
     ("host_review_lens_settings", "Host review lens settings",

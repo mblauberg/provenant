@@ -450,6 +450,7 @@ pub(super) fn route(adapter: &str, model: &str) -> ResolvedRoute {
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: provenant_records::LaneAccess::Isolated,
         extra: Default::default(),
         adapter: adapter.into(),
         model: model.into(),

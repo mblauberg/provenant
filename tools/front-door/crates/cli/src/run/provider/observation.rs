@@ -656,6 +656,7 @@ pub(super) fn with_alternative(
         selection_context: base.selection_context.clone(),
         diagnostics: alternative.diagnostics.clone(),
         user_skills: base.user_skills,
+        access: base.access,
         extra: alternative.extra.clone(),
         adapter: alternative.adapter.clone(),
         model: alternative.model.clone(),

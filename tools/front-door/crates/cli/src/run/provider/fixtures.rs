@@ -41,7 +41,7 @@ pub fn writer_fixture_plan(
             prompt_file: None,
         },
         Some(writer),
-        &run::LaneAccess::default(),
+        &run::LaneAccessRequest::default(),
         &Default::default(),
         "codex",
         true,

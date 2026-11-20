@@ -1,3 +1,22 @@
+fn isolated_writer_access_receipt() -> provenant_records::LaneAccessReceipt {
+    provenant_records::LaneAccessReceipt {
+        access: provenant_records::LaneAccess::Isolated,
+        source: provenant_records::LaneAccessSource::Default,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    }
+}
+
+fn writer_access_receipt_for_plan(
+    plan: &provenant_confinement::ConfinedPlan,
+) -> provenant_records::LaneAccessReceipt {
+    plan.permissions()
+        .policy
+        .as_ref()
+        .map(|policy| policy.mandatory().lane_access().clone())
+        .unwrap_or_else(isolated_writer_access_receipt)
+}
+
 #[test]
 fn writer_plan_stages_scratch_missing_auth() -> Result<(), Box<dyn std::error::Error>> {
     writer_preparation_fixture(false, false, "missing")
@@ -246,7 +265,19 @@ fn writer_preparation_steps(
         source_head: None,
         base_ref: None,
         profile: provenant_records::run::HarnessProfile {
-            knobs: [("lanes.publish".into(), serde_json::json!(false))].into(),
+            knobs: [
+                ("lanes.publish".into(), serde_json::json!(false)),
+                // These cases pin sandboxed isolated staging and the private
+                // Git-config-includes view; host access stages native state
+                // under HOME instead.
+                ("lanes.access".into(), serde_json::json!("isolated")),
+            ]
+            .into(),
+            knob_sources: [(
+                "lanes.access".into(),
+                provenant_records::LimitSource::Launch,
+            )]
+            .into(),
             ..Default::default()
         },
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
@@ -887,6 +918,7 @@ printf 'agy 1.0.0\n'
                     authority,
                     &home,
                     &confinement.plan.permissions().credential_roots,
+            &writer_access_receipt_for_plan(&confinement.plan),
                 )?;
             }
             let directories =
@@ -1171,6 +1203,7 @@ printf 'agy 1.0.0\n'
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: Default::default(),
         extra: Default::default(),
         adapter: "codex".into(),
         model: "fixture-model".into(),
@@ -1205,7 +1238,6 @@ printf 'agy 1.0.0\n'
     let mut codex = provenant_providers::Adapter::prepare(
         &provenant_providers::codex::Codex,
         provenant_providers::PrepareInput {
-            opencode_profile: provenant_config::OpenCodeProfile::Lane,
             credential_roots: confinement.plan.permissions().credential_roots.clone(),
             images: &images,
             policy: &launch_policy,
@@ -1621,6 +1653,7 @@ printf 'agy 1.0.0\n'
             authority,
             &home,
             &confinement.plan.permissions().credential_roots,
+            &writer_access_receipt_for_plan(&confinement.plan),
         )?;
     }
     // Run the real canonical-anchor check on every host-config read. The
@@ -2158,7 +2191,7 @@ printf 'agy 1.0.0\n'
             prompt_file: None,
         },
         confinement.writer.as_ref(),
-        &run::LaneAccess::default(),
+        &run::LaneAccessRequest::default(),
         &config,
         "cursor",
         false,
@@ -2260,7 +2293,7 @@ fn host_writer_roots_inside_other_checkouts(
         ..Default::default()
     };
     let request = |writer: Option<&run::WriterLaunch>,
-                   access: &run::LaneAccess,
+                   access: &run::LaneAccessRequest,
                    config: &provenant_confinement::run_config::RunConfig| {
         confinement_request(
             project_id,
@@ -2286,7 +2319,7 @@ fn host_writer_roots_inside_other_checkouts(
         )
     };
     let hosted = config(vec![locks.clone()]);
-    let launched = request(Some(writer), &run::LaneAccess::default(), &hosted)?;
+    let launched = request(Some(writer), &run::LaneAccessRequest::default(), &hosted)?;
     let lock_grant = PathGrant {
         path: locks.clone(),
         scope: PathScope::Subtree,
@@ -2307,7 +2340,7 @@ fn host_writer_roots_inside_other_checkouts(
     assert!(mandatory.host_writes().contains(&lock_grant));
     provenant_confinement::ConfinedPlan::new(launched)?;
     // A read-only lane receives no writer roots and no exception.
-    let read_only = request(None, &run::LaneAccess::default(), &hosted)?;
+    let read_only = request(None, &run::LaneAccessRequest::default(), &hosted)?;
     assert!(read_only.permissions.write_roots.is_empty());
     let mandatory = read_only
         .permissions
@@ -2317,7 +2350,7 @@ fn host_writer_roots_inside_other_checkouts(
         .mandatory();
     assert!(mandatory.host_writes().is_empty());
     // A dispatch root inside the checkout is not host policy.
-    let dispatch = run::LaneAccess {
+    let dispatch = run::LaneAccessRequest {
         write_roots: vec![primary.join("scripts")],
         ..Default::default()
     };
@@ -2335,7 +2368,7 @@ fn host_writer_roots_inside_other_checkouts(
             matches!(
                 request(
                     Some(writer),
-                    &run::LaneAccess::default(),
+                    &run::LaneAccessRequest::default(),
                     &config(vec![path.clone()])
                 ),
                 Err(PermissionError::ProtectedOverlap)

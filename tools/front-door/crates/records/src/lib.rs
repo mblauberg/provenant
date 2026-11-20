@@ -114,7 +114,7 @@ pub use stop::{Continuation, NextStep, OnStop, STOP_TABLE, Stop, StopCause, Stop
 pub use work_key::WorkKey;
 #[cfg(test)]
 mod format2_tests;
-pub use run::UserSkillsMode;
+pub use run::{LaneAccess, LaneAccessReceipt, LaneAccessSource, UserSkillsMode};
 
 /// Fields from newer writers, retained in canonical record bytes.
 pub type ExtraFields = std::collections::BTreeMap<String, serde_json::Value>;

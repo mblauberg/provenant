@@ -213,6 +213,7 @@ fn account_placement() -> Result {
             selection_context: Default::default(),
             diagnostics: Default::default(),
             user_skills: true,
+            access: provenant_records::LaneAccess::Isolated,
             extra: Default::default(),
             adapter: "codex".into(),
             model: "fixture".into(),
@@ -238,7 +239,6 @@ fn account_placement() -> Result {
         let prompt = Prompt::new(address.to_string());
         let account = accounts.selected(&route)?;
         let spec = Codex.prepare(PrepareInput {
-            opencode_profile: provenant_config::OpenCodeProfile::Lane,
             credential_roots: plan.permissions().credential_roots.clone(),
             images: &[],
             command: None,

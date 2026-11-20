@@ -408,6 +408,9 @@ pub struct AttemptSpec {
     /// lane kind. Sets the `lanes.sandbox` knob for this node alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<String>,
+    /// Same-host access model for this node, passed as `lanes.access`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_access: Option<String>,
     /// The node whose lane or plan admitted this launch. The host reads its
     /// sealed sandbox evidence; authors cannot replace the admission identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -487,6 +490,9 @@ impl AttemptSpec {
         if self.effective_receipts() != "delivery" {
             knobs.push(format!("lanes.receipts={}", self.effective_receipts()));
         }
+        if let Some(access) = &self.lane_access {
+            knobs.push(format!("lanes.access={access}"));
+        }
         if let Some(sandbox) = &self.sandbox {
             knobs.push(format!("lanes.sandbox={sandbox}"));
         }
@@ -526,6 +532,7 @@ impl AttemptSpec {
             && self.isolation.is_none()
             && self.receipts.is_none()
             && self.sandbox.is_none()
+            && self.lane_access.is_none()
             && self.admitted_by.is_none()
             && !self.parent_sandboxed
             && self.launch_policy.is_none()

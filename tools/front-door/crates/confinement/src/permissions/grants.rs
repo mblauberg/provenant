@@ -162,8 +162,16 @@ pub fn prepare_writer_directories(
     authority: &WorktreeWriteAuthority,
     home: &Path,
     credentials: &provenant_core::CredentialRoots,
+    lane_access: &provenant_records::LaneAccessReceipt,
 ) -> Result<(), PermissionError> {
     worktree.repo().revalidate()?;
+    let host_credentials;
+    let credentials = if lane_access.access == provenant_records::LaneAccess::Host {
+        host_credentials = provenant_core::CredentialRoots::default();
+        &host_credentials
+    } else {
+        credentials
+    };
     let grants = WorktreeWriteGrants::derive(worktree, selected_ref);
     if grants.digest(&authority.cargo_cache, &authority.git_state) != authority.git_grants_digest {
         return Err(PermissionError::GitWriteAuthorityMissing);

@@ -530,7 +530,7 @@ pub(super) enum SourceRootOverlap {
 /// Explicit grants must not reopen the live source beside the pinned view.
 pub(super) fn ensure_source_roots(
     source: &std::path::Path,
-    access: &super::run::LaneAccess,
+    access: &super::run::LaneAccessRequest,
     assets: &std::path::Path,
 ) -> Result<(), SourceRootOverlap> {
     use provenant_confinement::permissions::{PathGrant, PathScope};
@@ -1035,7 +1035,7 @@ mod tests {
     fn source_tree_refuses_grants_that_reopen_the_live_checkout() {
         use provenant_confinement::permissions::{PathGrant, PathScope, ProviderProfileSpec};
         let source = std::path::Path::new("/fixture/project/writer");
-        let mut access = super::super::run::LaneAccess::default();
+        let mut access = super::super::run::LaneAccessRequest::default();
         assert!(
             ensure_source_roots(source, &access, std::path::Path::new("/fixture/assets")).is_ok()
         );

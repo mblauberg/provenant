@@ -17,6 +17,25 @@ use std::{
 };
 use support::{Result, TestRig, code};
 
+fn isolated_writer_access_receipt() -> provenant_records::LaneAccessReceipt {
+    provenant_records::LaneAccessReceipt {
+        access: provenant_records::LaneAccess::Isolated,
+        source: provenant_records::LaneAccessSource::Default,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    }
+}
+
+fn writer_access_receipt_for_plan(
+    plan: &provenant_confinement::ConfinedPlan,
+) -> provenant_records::LaneAccessReceipt {
+    plan.permissions()
+        .policy
+        .as_ref()
+        .map(|policy| policy.mandatory().lane_access().clone())
+        .unwrap_or_else(isolated_writer_access_receipt)
+}
+
 mod writer_cases;
 use writer_cases::*;
 mod gc_cases;
@@ -1392,9 +1411,26 @@ fn prepare_lane_cache(rig: &TestRig, path: &Path, branch: &str) -> Result<PathBu
     let branch = GitRefName::new(format!("refs/heads/{branch}"))?;
     let credentials = provenant_core::CredentialRoots::for_home(&rig.home);
     provenant_confinement::worktrees::acquire_worktree_subject(worktree.repo())?;
-    let authority =
-        WorktreeWriteAuthority::for_worktree(&worktree, &branch, &rig.home, &credentials)?;
-    prepare_writer_directories(&worktree, &branch, &authority, &rig.home, &credentials)?;
+    let authority = WorktreeWriteAuthority::for_worktree(
+        &worktree,
+        &branch,
+        &rig.home,
+        &credentials,
+        &provenant_records::LaneAccessReceipt {
+            access: provenant_records::LaneAccess::Isolated,
+            source: provenant_records::LaneAccessSource::Default,
+            key: "lanes.access".into(),
+            extra: Default::default(),
+        },
+    )?;
+    prepare_writer_directories(
+        &worktree,
+        &branch,
+        &authority,
+        &rig.home,
+        &credentials,
+        &isolated_writer_access_receipt(),
+    )?;
     let cache = authority.cargo_cache().path.clone();
     fs::write(cache.join("artifact"), b"lane build output")?;
     Ok(cache)

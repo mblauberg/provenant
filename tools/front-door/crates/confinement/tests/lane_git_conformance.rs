@@ -19,6 +19,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
 
+fn isolated_access_receipt() -> provenant_records::LaneAccessReceipt {
+    provenant_records::LaneAccessReceipt {
+        access: provenant_records::LaneAccess::Isolated,
+        source: provenant_records::LaneAccessSource::Default,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    }
+}
+
 fn git(git: &Path, git_dir: &Path, tree: &Path, home: &Path, args: &[&str]) -> Output {
     provenant_os::fixture::git_command_at(git)
         .current_dir(tree)
@@ -313,8 +322,26 @@ fn lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only()
     provenant_confinement::worktrees::acquire_worktree_subject(linked.repo())?;
     let selected = GitRefName::branch("lane/test")?;
     let credentials = provenant_core::CredentialRoots::for_home(&home);
-    let authority = WorktreeWriteAuthority::for_worktree(&linked, &selected, &home, &credentials)?;
-    prepare_writer_directories(&linked, &selected, &authority, &home, &credentials)?;
+    let authority = WorktreeWriteAuthority::for_worktree(
+        &linked,
+        &selected,
+        &home,
+        &credentials,
+        &provenant_records::LaneAccessReceipt {
+            access: provenant_records::LaneAccess::Isolated,
+            source: provenant_records::LaneAccessSource::Default,
+            key: "lanes.access".into(),
+            extra: Default::default(),
+        },
+    )?;
+    prepare_writer_directories(
+        &linked,
+        &selected,
+        &authority,
+        &home,
+        &credentials,
+        &isolated_access_receipt(),
+    )?;
     let grant = |path: PathBuf| PathGrant {
         path,
         scope: PathScope::Subtree,
