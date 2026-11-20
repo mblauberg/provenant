@@ -388,6 +388,7 @@ mod tests {
             rustc_vv: "rustc 1.100.0".into(),
             host_triple: "aarch64-apple-darwin".into(),
             commit: "abc".into(),
+            identity: None,
             profile: "default".into(),
             cargo_profile: provenant_config::CargoBuildProfile {
                 incremental: "1".into(),

@@ -741,8 +741,7 @@ fn verify_base(host_state: &Path, project: &Path, workspace: &Path) -> Result<Ve
 pub enum Refresh {
     /// This project has no selected Cargo workspace; nothing to seed.
     NotCargo,
-    /// A complete generation for this repository matches its verify-base commit,
-    /// compiler and effective Cargo profile.
+    /// A complete generation matches the verify-base dependency identity.
     Current,
     /// Another host seed build holds the build lock; nothing was started.
     Busy,
@@ -757,6 +756,7 @@ struct GenerationIdentity {
     rustc_vv: String,
     host_triple: String,
     cargo_profile: CargoBuildProfile,
+    hash: String,
 }
 
 fn workspace_relative(state: &Path, project: &Path) -> Result<Option<PathBuf>> {
@@ -834,6 +834,13 @@ fn refresh_identity_with_probe(
     let base = verify_base(state, project, &workspace)?;
     let (rustc_vv, host_triple) = rustc_metadata_for_base(state, &base, probe)?;
     let cargo_profile = cargo_build_profile(state)?;
+    let source = target_seed::GitSeedSource {
+        checkout: project,
+        commit: Some(&base.commit),
+    };
+    let hash =
+        target_seed::seed_identity(&source, &workspace, &rustc_vv, &host_triple, &cargo_profile)?
+            .hash;
     Ok(IdentityRefresh::Ready {
         identity: GenerationIdentity {
             project_key: base.project_key,
@@ -841,6 +848,7 @@ fn refresh_identity_with_probe(
             rustc_vv,
             host_triple,
             cargo_profile,
+            hash,
         },
         workspace,
     })
@@ -1021,8 +1029,8 @@ fn refresh_racing_with_publication_wait(
 }
 
 /// Check every complete generation because a newer generation may belong to
-/// another repository in the shared seed store. A match includes the compiler
-/// and effective Cargo profile, not just the commit.
+/// another repository in the shared seed store. The identity includes the
+/// compiler and effective Cargo profile.
 fn has_generation(state: &Path, identity: &GenerationIdentity) -> bool {
     let generations = target_seed::store_path(state).join("generations");
     let Ok(entries) = fs::read_dir(generations) else {
@@ -1047,10 +1055,7 @@ fn has_generation(state: &Path, identity: &GenerationIdentity) -> bool {
                 // stale against a lane's sources; it is never current.
                 manifest.contents == "deps"
                     && manifest.project_key == identity.project_key
-                    && manifest.commit == identity.commit
-                    && manifest.rustc_vv == identity.rustc_vv
-                    && manifest.host_triple == identity.host_triple
-                    && manifest.cargo_profile == identity.cargo_profile
+                    && manifest.identity.as_deref() == Some(&identity.hash)
             })
     })
 }
@@ -1156,6 +1161,24 @@ fn build_into(
     let target = stage.join("target");
     fs::create_dir(&target)?;
     let (rustc_vv, host_triple) = target_seed::rustc_metadata(&worktree)?;
+    // Capture the checkout after preparation, so generated changes cannot be
+    // published under the unchanged commit-tree identity.
+    let source = target_seed::GitSeedSource {
+        checkout: &checkout_root,
+        commit: None,
+    };
+    let identity = target_seed::seed_identity(
+        &source,
+        workspace_relative,
+        &rustc_vv,
+        &host_triple,
+        cargo_profile,
+    )?;
+    fs::write(
+        stage.join("identity.json"),
+        serde_json::to_vec_pretty(&identity)?,
+    )?;
+    make_read_only(&stage.join("identity.json"))?;
     let environment = std::env::vars_os().collect::<Vec<_>>();
     let cargo = target_seed::cargo_tool(&environment, "cargo")?;
     let mut flags = vec![
@@ -1208,6 +1231,7 @@ fn build_into(
         rustc_vv,
         host_triple,
         commit: commit.to_owned(),
+        identity: Some(identity.hash),
         profile: "dev".into(),
         cargo_profile: cargo_profile.clone(),
         features: vec!["default".into()],
@@ -1560,6 +1584,7 @@ mod checkout_tests {
             "[package]\nname='seed-fixture'\nversion='0.1.0'\nedition='2021'\n",
         )
         .unwrap();
+        fs::write(remote.join("Cargo.lock"), "version = 3\n").unwrap();
         fs::write(
             remote.join("rust-toolchain.toml"),
             include_str!("../rust-toolchain.toml"),
@@ -1570,6 +1595,7 @@ mod checkout_tests {
             &[
                 "add".into(),
                 "Cargo.toml".into(),
+                "Cargo.lock".into(),
                 "rust-toolchain.toml".into(),
             ],
         )
@@ -1623,6 +1649,7 @@ mod checkout_tests {
                 rustc_vv: identity.rustc_vv.clone(),
                 host_triple: identity.host_triple.clone(),
                 commit: identity.commit.clone(),
+                identity: Some(identity.hash.clone()),
                 profile: "dev".into(),
                 cargo_profile: identity.cargo_profile.clone(),
                 features: vec![],
@@ -1763,6 +1790,7 @@ mod tests {
         GenerationIdentity {
             project_key: project_key.into(),
             commit: commit.into(),
+            hash: "identity".into(),
             rustc_vv: "version".into(),
             host_triple: "host".into(),
             cargo_profile: LaneBuildSettings::default()
@@ -1777,6 +1805,7 @@ mod tests {
             rustc_vv: identity.rustc_vv.clone(),
             host_triple: identity.host_triple.clone(),
             commit: identity.commit.clone(),
+            identity: Some(identity.hash.clone()),
             profile: "dev".into(),
             cargo_profile: identity.cargo_profile.clone(),
             features: vec![],
@@ -2211,9 +2240,15 @@ mod tests {
         let generations = target_seed::store_path(state.path()).join("generations");
         fs::create_dir(generations.join("99999999999999999999-partial")).unwrap();
         assert!(has_generation(state.path(), &identity("repo-a", "aaa")));
-        assert!(matches!(run("bbb"), Refresh::Built(_)));
         assert_eq!(run("bbb"), Refresh::Current);
-        assert_eq!(builds.get(), 2);
+        assert_eq!(
+            builds.get(),
+            1,
+            "a different commit with matching inputs is current"
+        );
+        let mut changed = identity("repo-a", "bbb");
+        changed.hash = "different".into();
+        assert!(!has_generation(state.path(), &changed));
         freeze(state.path());
     }
 
@@ -2273,16 +2308,19 @@ mod tests {
 
         let mut profile_changed = baseline.clone();
         profile_changed.cargo_profile.debug = "full".into();
+        profile_changed.hash = "profile".into();
         assert!(matches!(run(&profile_changed), Refresh::Built(_)));
         assert_eq!(run(&profile_changed), Refresh::Current);
 
         let mut compiler_changed = profile_changed.clone();
         compiler_changed.rustc_vv = "new version".into();
+        compiler_changed.hash = "compiler".into();
         assert!(matches!(run(&compiler_changed), Refresh::Built(_)));
         assert_eq!(run(&compiler_changed), Refresh::Current);
 
         let mut triple_changed = compiler_changed.clone();
         triple_changed.host_triple = "new host".into();
+        triple_changed.hash = "triple".into();
         assert!(matches!(run(&triple_changed), Refresh::Built(_)));
         assert_eq!(builds.get(), 4);
         freeze(state.path());
@@ -2538,6 +2576,7 @@ mod tests {
                 rustc_vv: "version".into(),
                 host_triple: "host".into(),
                 commit: "commit".into(),
+                identity: None,
                 profile: "dev".into(),
                 cargo_profile: LaneBuildSettings::default()
                     .cargo_build_profile(&[])

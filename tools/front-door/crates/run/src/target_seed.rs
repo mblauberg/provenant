@@ -15,6 +15,8 @@ pub struct Manifest {
     pub rustc_vv: String,
     pub host_triple: String,
     pub commit: String,
+    #[serde(default)]
+    pub identity: Option<String>,
     pub profile: String,
     pub cargo_profile: provenant_config::CargoBuildProfile,
     pub features: Vec<String>,
@@ -40,188 +42,220 @@ pub struct SeedIdentity {
     pub hash: String,
 }
 
-/// Draft only: the fallback walk does not yet discover hidden or symlinked
-/// workspace members. Do not use this value for generation selection.
-///
-/// Compute identity from files only. The preimage is compact JSON of `inputs`,
-/// whose object keys are sorted by serde_json. It includes relative file names
-/// and dependency tables; unrelated manifests can over-invalidate a seed.
+/// File access is supplied by the caller; paths are checkout-relative.
+pub trait SeedSource {
+    fn list_manifests(&self) -> io::Result<Vec<PathBuf>>;
+    fn read_file(&self, path: &Path) -> io::Result<Option<Vec<u8>>>;
+}
+
+/// Git-backed source for a checkout or a pinned commit tree.
+pub struct GitSeedSource<'a> {
+    pub checkout: &'a Path,
+    pub commit: Option<&'a str>,
+}
+
+impl GitSeedSource<'_> {
+    fn git(&self, args: &[&str]) -> io::Result<Vec<u8>> {
+        crate::git_context::seed_git(self.checkout, args)
+    }
+
+    fn tree_file(&self, commit: &str, path: &Path, depth: usize) -> io::Result<Option<Vec<u8>>> {
+        if depth > 32 {
+            return Err(io::Error::other("seed symlink depth exceeded"));
+        }
+        let name = path
+            .to_str()
+            .ok_or_else(|| io::Error::other("non-UTF-8 seed path"))?;
+        let listing = self.git(&["--literal-pathspecs", "ls-tree", "-z", commit, "--", name])?;
+        if listing.is_empty() {
+            return Ok(None);
+        }
+        let bytes = self.git(&["show", &format!("{commit}:{name}")])?;
+        if !listing.starts_with(b"120000 ") {
+            return Ok(Some(bytes));
+        }
+        let target = std::str::from_utf8(&bytes).map_err(io::Error::other)?;
+        let mut resolved = path.parent().unwrap_or(Path::new("")).to_path_buf();
+        for component in Path::new(target).components() {
+            match component {
+                std::path::Component::Normal(part) => resolved.push(part),
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir if resolved.pop() => {}
+                _ => return Err(io::Error::other("seed symlink escapes checkout")),
+            }
+        }
+        self.tree_file(commit, &resolved, depth + 1)
+    }
+}
+
+impl SeedSource for GitSeedSource<'_> {
+    fn list_manifests(&self) -> io::Result<Vec<PathBuf>> {
+        let bytes = if let Some(commit) = self.commit {
+            self.git(&[
+                "--literal-pathspecs",
+                "ls-tree",
+                "-r",
+                "--name-only",
+                "-z",
+                commit,
+                "--",
+            ])?
+        } else {
+            self.git(&["ls-files", "-z", "--"])?
+        };
+        bytes
+            .split(|b| *b == 0)
+            .filter(|p| !p.is_empty())
+            .map(|p| {
+                let name = std::str::from_utf8(p).map_err(io::Error::other)?;
+                Ok(PathBuf::from(name))
+            })
+            .filter(|p: &io::Result<PathBuf>| {
+                p.as_ref()
+                    .map_or(true, |p| p.file_name().is_some_and(|n| n == "Cargo.toml"))
+            })
+            .collect()
+    }
+    fn read_file(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        if let Some(commit) = self.commit {
+            self.tree_file(commit, path, 0)
+        } else {
+            match std::fs::read(self.checkout.join(path)) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
+
+/// SHA-256 of compact canonical JSON `{schema: 1, inputs: ...}`. Inputs contain
+/// the lock digest, sorted manifest dependency tables and root profiles, Cargo
+/// config profiles, rustc text and host triple, `deps`, and the effective build
+/// profile. Paths are checkout-relative and object keys are sorted. This can
+/// over-invalidate when declarations change without changing units, but does not
+/// omit any listed input. Cargo metadata is not run: lanes must identify seeds
+/// before Cargo can run under confinement. See state.md "One digest preimage".
 pub fn seed_identity(
-    checkout: &Path,
+    source: &impl SeedSource,
     workspace: &Path,
     rustc_vv: &str,
     host_triple: &str,
     cargo_profile: &provenant_config::CargoBuildProfile,
 ) -> io::Result<SeedIdentity> {
     use sha2::{Digest, Sha256};
-    use std::{collections::BTreeMap, fs};
-    fn parse(path: &Path) -> io::Result<serde_json::Value> {
-        let text = fs::read_to_string(path)?;
-        toml_edit::de::from_str(&text).map_err(io::Error::other)
+    use std::collections::BTreeMap;
+    if workspace.is_absolute()
+        || workspace
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(io::Error::other("workspace outside checkout"));
     }
-    fn walk(
-        root: &Path,
-        dir: &Path,
-        depth: usize,
-        count: &mut usize,
-        manifests: &mut BTreeMap<String, serde_json::Value>,
-    ) -> io::Result<()> {
-        if depth > 64 || *count >= 100_000 {
-            return Err(io::Error::other("seed identity traversal limit exceeded"));
+    let workspace: PathBuf = workspace
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => Some(part),
+            _ => None,
+        })
+        .collect();
+    let workspace = workspace.as_path();
+    let required = |path: &Path| {
+        source.read_file(path)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("missing {}", path.display()),
+            )
+        })
+    };
+    let parse = |bytes: &[u8]| -> io::Result<serde_json::Value> {
+        toml_edit::de::from_str(std::str::from_utf8(bytes).map_err(io::Error::other)?)
+            .map_err(io::Error::other)
+    };
+    let lock = required(&workspace.join("Cargo.lock"))?;
+    let mut manifests = BTreeMap::new();
+    for path in source.list_manifests()? {
+        let mut value = parse(&required(&path)?)?;
+        let table = value
+            .as_object_mut()
+            .ok_or_else(|| io::Error::other("invalid manifest"))?;
+        table.retain(|k, _| {
+            matches!(
+                k.as_str(),
+                "features"
+                    | "dependencies"
+                    | "dev-dependencies"
+                    | "build-dependencies"
+                    | "target"
+                    | "workspace"
+                    | "patch"
+                    | "replace"
+            )
+        });
+        if let Some(w) = table
+            .get_mut("workspace")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            w.retain(|k, _| k == "dependencies");
         }
-        *count += 1;
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let kind = entry.file_type()?;
-            if kind.is_dir() && name != "target" && !name.starts_with('.') {
-                walk(root, &entry.path(), depth + 1, count, manifests)?;
-            } else if kind.is_file() && name == "Cargo.toml" {
-                let path = entry.path();
-                let mut value = parse(&path)?;
-                let table = value
-                    .as_object_mut()
-                    .ok_or_else(|| io::Error::other("invalid manifest"))?;
-                table.retain(|key, _| {
+        if let Some(t) = table
+            .get_mut("target")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for v in t.values_mut().filter_map(serde_json::Value::as_object_mut) {
+                v.retain(|k, _| {
                     matches!(
-                        key.as_str(),
-                        "features"
-                            | "dependencies"
-                            | "dev-dependencies"
-                            | "build-dependencies"
-                            | "target"
-                            | "workspace"
-                            | "patch"
-                            | "replace"
+                        k.as_str(),
+                        "dependencies" | "dev-dependencies" | "build-dependencies"
                     )
                 });
-                if let Some(workspace) = table
-                    .get_mut("workspace")
-                    .and_then(serde_json::Value::as_object_mut)
-                {
-                    workspace.retain(|key, _| key == "dependencies");
-                }
-                if let Some(targets) = table
-                    .get_mut("target")
-                    .and_then(serde_json::Value::as_object_mut)
-                {
-                    for target in targets
-                        .values_mut()
-                        .filter_map(serde_json::Value::as_object_mut)
-                    {
-                        target.retain(|key, _| {
-                            matches!(
-                                key.as_str(),
-                                "dependencies" | "dev-dependencies" | "build-dependencies"
-                            )
-                        });
-                    }
-                }
-                let relative = path.strip_prefix(root).map_err(io::Error::other)?;
-                let relative = relative
-                    .to_str()
-                    .ok_or_else(|| io::Error::other("non-UTF-8 manifest path"))?;
-                manifests.insert(relative.to_owned(), value);
-            } else if kind.is_symlink() && name == "Cargo.toml" {
-                return Err(io::Error::other(
-                    "symlinked Cargo manifest cannot be identified",
-                ));
             }
+            t.retain(|_, v| v.as_object().is_none_or(|v| !v.is_empty()));
         }
-        Ok(())
-    }
-    let checkout = checkout.canonicalize()?;
-    let workspace = workspace.canonicalize()?;
-    if !workspace.starts_with(&checkout) {
-        return Err(io::Error::other("workspace is outside checkout"));
-    }
-    let lock = fs::read(workspace.join("Cargo.lock"))?;
-    let mut manifests = BTreeMap::new();
-    walk(&checkout, &checkout, 0, &mut 0, &mut manifests)?;
-    // An omitted path dependency cannot safely share a generation.
-    fn check_paths(
-        value: &serde_json::Value,
-        base: &Path,
-        root: &Path,
-        manifests: &BTreeMap<String, serde_json::Value>,
-    ) -> io::Result<()> {
-        match value {
-            serde_json::Value::Object(map) => {
-                if let Some(path) = map.get("path").and_then(serde_json::Value::as_str) {
-                    let manifest = base.join(path).join("Cargo.toml").canonicalize()?;
-                    let relative = manifest.strip_prefix(root).map_err(io::Error::other)?;
-                    let relative = relative
-                        .to_str()
-                        .ok_or_else(|| io::Error::other("non-UTF-8 dependency path"))?;
-                    if !manifests.contains_key(relative) {
-                        return Err(io::Error::other("path dependency omitted from identity"));
-                    }
-                }
-                for child in map.values() {
-                    check_paths(child, base, root, manifests)?;
-                }
-            }
-            serde_json::Value::Array(items) => {
-                for child in items {
-                    check_paths(child, base, root, manifests)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-    for (path, value) in &manifests {
-        let manifest = checkout.join(path);
-        check_paths(
+        manifests.insert(
+            path.to_str()
+                .ok_or_else(|| io::Error::other("non-UTF-8 manifest path"))?
+                .to_owned(),
             value,
-            manifest
-                .parent()
-                .ok_or_else(|| io::Error::other("manifest parent unavailable"))?,
-            &checkout,
-            &manifests,
-        )?;
+        );
     }
-    let root_manifest = parse(&workspace.join("Cargo.toml"))?;
-    let profiles = root_manifest
+    let root = parse(&required(&workspace.join("Cargo.toml"))?)?;
+    let profiles = root
         .get("profile")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
     let mut configs = BTreeMap::new();
-    let mut dir = workspace.as_path();
+    let mut dir = workspace;
     loop {
-        for name in ["config", "config.toml"] {
-            let path = dir.join(".cargo").join(name);
-            match fs::read_to_string(&path) {
-                Ok(text) => {
-                    let value: serde_json::Value =
-                        toml_edit::de::from_str(&text).map_err(io::Error::other)?;
-                    let relative = path.strip_prefix(&checkout).map_err(io::Error::other)?;
-                    configs.insert(relative.to_string_lossy().into_owned(), value);
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
+        let path = dir.join(".cargo/config.toml");
+        if let Some(bytes) = source.read_file(&path)? {
+            let config = parse(&bytes)?;
+            if let Some(profile) = config.get("profile") {
+                configs.insert(path.to_string_lossy().into_owned(), profile.clone());
             }
         }
-        if dir == checkout {
+        if dir.as_os_str().is_empty() {
             break;
         }
         dir = dir
             .parent()
             .ok_or_else(|| io::Error::other("workspace parent unavailable"))?;
     }
-    let inputs = serde_json::json!({
-        "lock_sha256": provenant_core::hex(&Sha256::digest(&lock)),
-        "manifests": manifests, "profiles": profiles, "configs": configs,
-        "rustc_vv": rustc_vv, "host_triple": host_triple,
-        "contents": "deps", "cargo_profile": cargo_profile,
-    });
-    let preimage = serde_json::to_vec(&inputs).map_err(io::Error::other)?;
+    let inputs = serde_json::json!({"lock_sha256": provenant_core::hex(&Sha256::digest(&lock)), "manifests": manifests, "profiles": profiles, "configs": configs, "rustc_vv": rustc_vv, "host_triple": host_triple, "contents": "deps", "cargo_profile": cargo_profile});
+    let hash = identity_hash(&inputs)?;
     Ok(SeedIdentity {
         schema: 1,
-        hash: provenant_core::hex(&Sha256::digest(preimage)),
+        hash,
         inputs,
     })
+}
+
+fn identity_hash(inputs: &serde_json::Value) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let preimage =
+        provenant_records::CanonicalV1::bytes(&serde_json::json!({"schema": 1, "inputs": inputs}))
+            .map_err(io::Error::other)?;
+    Ok(provenant_core::hex(&Sha256::digest(preimage.as_bytes())))
 }
 
 /// Allocated bytes of a seed target, measured at seed-build time. A clone of a
@@ -737,6 +771,22 @@ fn lane_release_pin(worktree: &Path, home: &Path, host_state: &Path) -> Result<S
 mod lane_probe_tests {
     use super::*;
 
+    #[derive(Default)]
+    struct MemorySource(std::collections::BTreeMap<PathBuf, Vec<u8>>);
+    impl SeedSource for MemorySource {
+        fn list_manifests(&self) -> io::Result<Vec<PathBuf>> {
+            Ok(self
+                .0
+                .keys()
+                .filter(|p| p.file_name().is_some_and(|n| n == "Cargo.toml"))
+                .cloned()
+                .collect())
+        }
+        fn read_file(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+            Ok(self.0.get(path).cloned())
+        }
+    }
+
     #[test]
     fn identity_changes_with_each_input() {
         use std::fs;
@@ -746,24 +796,79 @@ mod lane_probe_tests {
         fs::write(root.join("Cargo.lock"), "lock one").unwrap();
         let manifest = "[package]\nname = \"sample\"\nversion = \"1.0.0\"\ndescription = \"first\"\n[dependencies]\nexample = \"1\"\n[profile.dev]\nopt-level = 0\n";
         fs::write(root.join("Cargo.toml"), manifest).unwrap();
-        fs::write(root.join(".cargo/config.toml"), "[build]\njobs = 1\n").unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[profile.dev]\nopt-level = 1\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            fs::create_dir(root.join(".hidden")).unwrap();
+            fs::write(
+                root.join(".hidden/declarations"),
+                "[dependencies]\nhidden = '1'\n",
+            )
+            .unwrap();
+            std::os::unix::fs::symlink("declarations", root.join(".hidden/Cargo.toml")).unwrap();
+        }
+        provenant_os::fixture::run_git(root, &["init", "-q"]).unwrap();
+        provenant_os::fixture::run_git(root, &["add", "-A"]).unwrap();
+        provenant_os::fixture::run_git(
+            root,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "inputs",
+            ],
+        )
+        .unwrap();
+        let source = GitSeedSource {
+            checkout: root,
+            commit: None,
+        };
+        let tree = GitSeedSource {
+            checkout: root,
+            commit: Some("HEAD"),
+        };
+        let mut memory = MemorySource::default();
+        for path in ["Cargo.toml", "Cargo.lock", ".cargo/config.toml"] {
+            memory
+                .0
+                .insert(path.into(), fs::read(root.join(path)).unwrap());
+        }
+        #[cfg(unix)]
+        memory.0.insert(
+            ".hidden/Cargo.toml".into(),
+            fs::read(root.join(".hidden/Cargo.toml")).unwrap(),
+        );
         let profile = provenant_config::CargoBuildProfile::default();
         let identity =
             |version: &str, host: &str, profile: &provenant_config::CargoBuildProfile| {
-                seed_identity(root, root, version, host, profile)
+                seed_identity(&source, Path::new(""), version, host, profile)
                     .unwrap()
                     .hash
             };
         fs::write(root.join("source.rs"), "source one").unwrap();
         let original = identity("rustc one", "host one", &profile);
+        let tree_hash =
+            seed_identity(&tree, Path::new(""), "rustc one", "host one", &profile).unwrap();
+        let memory_hash =
+            seed_identity(&memory, Path::new(""), "rustc one", "host one", &profile).unwrap();
+        assert_eq!(original, tree_hash.hash);
+        assert_eq!(original, memory_hash.hash);
+        assert_eq!(memory_hash.inputs["contents"], "deps");
+        let mut other_contents = memory_hash.inputs.clone();
+        other_contents["contents"] = serde_json::json!("full");
+        assert_ne!(original, identity_hash(&other_contents).unwrap());
         fs::write(root.join("source.rs"), "source two").unwrap();
-        fs::write(
-            root.join("Cargo.toml"),
-            manifest
-                .replace("1.0.0", "2.0.0")
-                .replace("first", "second"),
-        )
-        .unwrap();
+        assert_eq!(original, identity("rustc one", "host one", &profile));
+        fs::write(root.join("Cargo.toml"), manifest.replace("1.0.0", "2.0.0")).unwrap();
+        assert_eq!(original, identity("rustc one", "host one", &profile));
+        fs::write(root.join("Cargo.toml"), manifest.replace("first", "second")).unwrap();
         assert_eq!(original, identity("rustc one", "host one", &profile));
         fs::write(root.join("Cargo.lock"), "lock two").unwrap();
         assert_ne!(original, identity("rustc one", "host one", &profile));
@@ -781,9 +886,17 @@ mod lane_probe_tests {
         .unwrap();
         assert_ne!(original, identity("rustc one", "host one", &profile));
         fs::write(root.join("Cargo.toml"), manifest).unwrap();
-        fs::write(root.join(".cargo/config.toml"), "[build]\njobs = 2\n").unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[profile.dev]\nopt-level = 2\n",
+        )
+        .unwrap();
         assert_ne!(original, identity("rustc one", "host one", &profile));
-        fs::write(root.join(".cargo/config.toml"), "[build]\njobs = 1\n").unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[profile.dev]\nopt-level = 1\n",
+        )
+        .unwrap();
         assert_ne!(original, identity("rustc two", "host one", &profile));
         assert_ne!(original, identity("rustc one", "host two", &profile));
         let mut other = profile.clone();

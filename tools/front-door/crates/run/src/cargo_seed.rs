@@ -272,6 +272,8 @@ fallback_reasons! {
     STORE_UNAVAILABLE = "store_unavailable",
     NO_GENERATIONS = "no_generations",
     MANIFEST_INVALID = "manifest_invalid",
+    IDENTITY_UNAVAILABLE = "identity_unavailable",
+    IDENTITY_MISMATCH = "identity_mismatch",
     FULL_GENERATION = "full_generation",
     TOOLCHAIN_MISMATCH = "toolchain_mismatch",
     TRIPLE_MISMATCH = "triple_mismatch",
@@ -553,6 +555,7 @@ fn seed_repair(reason: &str) -> Option<&'static str> {
         fallback_reasons::NO_GENERATIONS
         | fallback_reasons::STORE_UNAVAILABLE
         | fallback_reasons::MANIFEST_INVALID
+        | fallback_reasons::IDENTITY_MISMATCH
         | fallback_reasons::FULL_GENERATION
         | fallback_reasons::TOOLCHAIN_MISMATCH
         | fallback_reasons::TRIPLE_MISMATCH
@@ -683,6 +686,31 @@ pub(crate) fn seed_target_with_reservation(
                 return Outcome::fallback_refusal(fallback_reasons::TOOLCHAIN_UNVERIFIED, refusal);
             }
         };
+        let checkout = match worktree.canonicalize() {
+            Ok(path) => path,
+            Err(_) => return Outcome::fallback(fallback_reasons::IDENTITY_UNAVAILABLE),
+        };
+        let workspace = match crate::target_seed::cargo_build_directory(&checkout, state) {
+            Ok(Some(path)) => match path.strip_prefix(&checkout) {
+                Ok(path) => path.to_path_buf(),
+                Err(_) => return Outcome::fallback(fallback_reasons::IDENTITY_UNAVAILABLE),
+            },
+            _ => return Outcome::fallback(fallback_reasons::IDENTITY_UNAVAILABLE),
+        };
+        let source = crate::target_seed::GitSeedSource {
+            checkout: &checkout,
+            commit: None,
+        };
+        let identity = match crate::target_seed::seed_identity(
+            &source,
+            &workspace,
+            &version,
+            &triple,
+            &cargo_profile,
+        ) {
+            Ok(identity) => identity.hash,
+            Err(_) => return Outcome::fallback(fallback_reasons::IDENTITY_UNAVAILABLE),
+        };
         seed_target_cancellable_inner_for_destination(
             state,
             cache,
@@ -691,6 +719,7 @@ pub(crate) fn seed_target_with_reservation(
                 triple: &triple,
                 cargo_profile: &cargo_profile,
                 project_key,
+                identity: &identity,
             },
             Some(cancel),
             before_clone,
@@ -737,6 +766,7 @@ fn seed_target_with(
             triple,
             cargo_profile: &cargo_profile,
             project_key: "",
+            identity: "identity",
         },
         None,
         |_| {},
@@ -750,6 +780,7 @@ struct SeedCompatibility<'a> {
     triple: &'a str,
     cargo_profile: &'a provenant_config::CargoBuildProfile,
     project_key: &'a str,
+    identity: &'a str,
 }
 
 /// The first line of `rustc -vV`, which names the release, commit and date.
@@ -909,6 +940,7 @@ fn seed_target_cancellable_inner_for_destination(
     let mut found_versions = std::collections::BTreeSet::new();
     let mut found_triples = std::collections::BTreeSet::new();
     let mut found_profiles = std::collections::BTreeSet::new();
+    let mut found_identities = std::collections::BTreeSet::new();
     let mut selected_project = None;
     let mut selected_shared = None;
     for entry in entries {
@@ -948,20 +980,43 @@ fn seed_target_cancellable_inner_for_destination(
             continue;
         }
         if manifest.rustc_vv != compatibility.version {
-            found_versions.insert(compiler_line(&manifest.rustc_vv).to_owned());
+            found_versions.insert(format!(
+                "{} (identity {})",
+                compiler_line(&manifest.rustc_vv),
+                manifest.identity.as_deref().unwrap_or("missing")
+            ));
             continue;
         }
         saw_version = true;
         if manifest.host_triple != compatibility.triple {
-            found_triples.insert(manifest.host_triple.clone());
+            found_triples.insert(format!(
+                "{} (identity {})",
+                manifest.host_triple,
+                manifest.identity.as_deref().unwrap_or("missing")
+            ));
             continue;
         }
         saw_triple = true;
         if &manifest.cargo_profile != compatibility.cargo_profile {
-            found_profiles.insert(describe_profile(&manifest.cargo_profile));
+            found_profiles.insert(format!(
+                "{} (identity {})",
+                describe_profile(&manifest.cargo_profile),
+                manifest.identity.as_deref().unwrap_or("missing")
+            ));
             continue;
         }
         saw_cargo_profile = true;
+        if manifest.project_key != compatibility.project_key
+            || manifest.identity.as_deref() != Some(compatibility.identity)
+        {
+            found_identities.insert(
+                manifest
+                    .identity
+                    .clone()
+                    .unwrap_or_else(|| "missing".into()),
+            );
+            continue;
+        }
         let project_match = !compatibility.project_key.is_empty()
             && manifest.project_key == compatibility.project_key;
         let candidate = SeedCandidate {
@@ -991,7 +1046,11 @@ fn seed_target_cancellable_inner_for_destination(
             Outcome::fallback_differs(
                 fallback_reasons::TOOLCHAIN_MISMATCH,
                 Difference::new(
-                    compiler_line(compatibility.version),
+                    format!(
+                        "{} (identity {})",
+                        compiler_line(compatibility.version),
+                        compatibility.identity
+                    ),
                     Difference::found_among(&found_versions),
                 ),
             )
@@ -999,7 +1058,10 @@ fn seed_target_cancellable_inner_for_destination(
             Outcome::fallback_differs(
                 fallback_reasons::TRIPLE_MISMATCH,
                 Difference::new(
-                    compatibility.triple,
+                    format!(
+                        "{} (identity {})",
+                        compatibility.triple, compatibility.identity
+                    ),
                     Difference::found_among(&found_triples),
                 ),
             )
@@ -1007,12 +1069,22 @@ fn seed_target_cancellable_inner_for_destination(
             Outcome::fallback_differs(
                 fallback_reasons::CARGO_PROFILE_MISMATCH,
                 Difference::new(
-                    describe_profile(compatibility.cargo_profile),
+                    format!(
+                        "{} (identity {})",
+                        describe_profile(compatibility.cargo_profile),
+                        compatibility.identity
+                    ),
                     Difference::found_among(&found_profiles),
                 ),
             )
         } else {
-            Outcome::fallback(fallback_reasons::MANIFEST_INVALID)
+            Outcome::fallback_differs(
+                fallback_reasons::IDENTITY_MISMATCH,
+                Difference::new(
+                    compatibility.identity,
+                    Difference::found_among(&found_identities),
+                ),
+            )
         };
     };
     let source = selected.target;
@@ -1462,6 +1534,7 @@ mod tests {
                     project_key: String::new(),
                     rustc_vv: "v1".into(),
                     host_triple: "host".into(),
+                    identity: Some("identity".into()),
                     commit: "abc".into(),
                     profile: "dev".into(),
                     cargo_profile: cargo_profile.clone(),
@@ -1482,6 +1555,7 @@ mod tests {
                     triple: "host",
                     cargo_profile: &cargo_profile,
                     project_key: "",
+                    identity: "identity",
                 },
                 None,
                 |bytes| reported.set(bytes),
@@ -1590,6 +1664,7 @@ mod tests {
                 triple: "host",
                 cargo_profile: &profile,
                 project_key: "",
+                identity: "identity",
             },
             None,
             |_| {},
@@ -1637,6 +1712,7 @@ mod tests {
             rustc_vv: "v1".into(),
             host_triple: "host".into(),
             commit: "abc".into(),
+            identity: Some("identity".into()),
             profile: "dev".into(),
             cargo_profile: profile.clone(),
             features: vec![],
@@ -1664,6 +1740,7 @@ mod tests {
                 triple: "host",
                 cargo_profile: &profile,
                 project_key: "",
+                identity: "identity",
             },
             None,
             |bytes| reported.set(bytes),
@@ -1701,6 +1778,7 @@ mod tests {
                 triple: "host",
                 cargo_profile: &profile,
                 project_key: "",
+                identity: "identity",
             },
             None,
             |_| {},
@@ -1762,6 +1840,7 @@ mod tests {
                 project_key: project_key.into(),
                 rustc_vv: version.into(),
                 host_triple: triple.into(),
+                identity: Some("identity".into()),
                 commit: "abc".into(),
                 profile: "dev".into(),
                 cargo_profile,
@@ -1803,6 +1882,19 @@ mod tests {
             serde_json::to_vec(manifest).unwrap(),
         )
         .unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_generation_identity(state: &Path, hash: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::target_seed::store_path(state).join("generations/001");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.join("manifest.json");
+        let mut manifest: crate::target_seed::Manifest =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest.identity = Some(hash.into());
+        std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
     }
 
@@ -2113,14 +2205,17 @@ mod tests {
             run("unknown", "host"),
             Outcome::fallback_differs(
                 fallback_reasons::TOOLCHAIN_MISMATCH,
-                Difference::new("unknown", "v1, v2")
+                Difference::new(
+                    "unknown (identity identity)",
+                    "v1 (identity identity), v2 (identity identity)"
+                )
             )
         );
         assert_eq!(
             run("v1", "other"),
             Outcome::fallback_differs(
                 fallback_reasons::TRIPLE_MISMATCH,
-                Difference::new("other", "host")
+                Difference::new("other (identity identity)", "host (identity identity)")
             )
         );
         assert_eq!(run("v1", "host").status, "seeded");
@@ -2144,6 +2239,7 @@ mod tests {
             rustc_vv: "v1".into(),
             host_triple: "host".into(),
             commit: "abc".into(),
+            identity: Some("identity".into()),
             profile: "dev".into(),
             cargo_profile: profile.clone(),
             features: vec![],
@@ -2157,6 +2253,7 @@ mod tests {
             triple: "host",
             cargo_profile: &profile,
             project_key: "",
+            identity: "identity",
         };
         let outcome = seed_target_cancellable(
             &state,
@@ -2205,6 +2302,7 @@ mod tests {
                 triple: "host",
                 cargo_profile: &profile,
                 project_key: "project-a",
+                identity: "identity",
             },
             None,
             |_| {},
@@ -2234,6 +2332,39 @@ mod tests {
 
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
+    fn generation_selection_requires_matching_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        generation_for_project(&state, "001", "v1", "host", "project-a");
+        let profile = provenant_config::CargoBuildProfile::default();
+        let select = |identity| {
+            seed_target_cancellable(
+                &state,
+                &cache,
+                SeedCompatibility {
+                    version: "v1",
+                    triple: "host",
+                    cargo_profile: &profile,
+                    project_key: "project-a",
+                    identity,
+                },
+                None,
+                |_| {},
+                |_, _, _| Ok(()),
+            )
+        };
+        let mismatch = select("different");
+        assert_eq!(mismatch.reason, fallback_reasons::IDENTITY_MISMATCH);
+        assert_eq!(
+            mismatch.differs,
+            Some(Difference::new("different", "identity"))
+        );
+        assert_eq!(select("identity").status, "seeded");
+    }
+
+    #[test]
     fn seed_with_a_different_cargo_profile_is_not_selected() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
@@ -2254,6 +2385,7 @@ mod tests {
                 triple: "host",
                 cargo_profile: &profile,
                 project_key: "project-a",
+                identity: "identity",
             },
             None,
             |_| {},
@@ -2263,14 +2395,17 @@ mod tests {
             outcome,
             Outcome::fallback_differs(
                 fallback_reasons::CARGO_PROFILE_MISMATCH,
-                Difference::new(describe_profile(&profile), describe_profile(&different))
+                Difference::new(
+                    format!("{} (identity identity)", describe_profile(&profile)),
+                    format!("{} (identity identity)", describe_profile(&different))
+                )
             )
         );
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
-    fn compatible_foreign_generation_is_used_only_when_project_seed_is_absent() {
+    fn foreign_generation_is_not_selected() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let cache = tmp.path().join("cache");
@@ -2287,22 +2422,13 @@ mod tests {
                 triple: "host",
                 cargo_profile: &profile,
                 project_key: "project-a",
+                identity: "identity",
             },
             None,
             |_| {},
-            |source, _, _| {
-                assert!(source.ends_with("001/target"));
-                Ok(())
-            },
+            |_, _, _| panic!("foreign seed must not be cloned"),
         );
-        assert_eq!(outcome.status, "seeded");
-        assert_eq!(
-            outcome.seed_source,
-            Some(SeedSource {
-                generation_id: Some("001".into()),
-                project_match: false,
-            })
-        );
+        assert_eq!(outcome.reason, fallback_reasons::IDENTITY_MISMATCH);
     }
 
     #[test]
@@ -2394,7 +2520,17 @@ mod tests {
         )
         .unwrap();
         let report = "rustc 1.99.1\nhost: test-host\nrelease: 1.99.1\n";
-        std::fs::create_dir(worktree.join(".git")).unwrap();
+        std::fs::write(build.join("Cargo.lock"), "version = 3\n").unwrap();
+        provenant_os::fixture::run_git(&worktree, &["init", "-q"]).unwrap();
+        provenant_os::fixture::run_git(
+            &worktree,
+            &[
+                "add",
+                "arbitrary/nested/cargo/workspace/Cargo.toml",
+                "arbitrary/nested/cargo/workspace/Cargo.lock",
+            ],
+        )
+        .unwrap();
         let project_key = crate::target_seed::project_key(&worktree.join(".git"));
         let rustc = bin.join("rustc");
         std::fs::write(
@@ -2404,6 +2540,20 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&rustc, std::fs::Permissions::from_mode(0o755)).unwrap();
         generation_for_project(&state, "001", report, "test-host", &project_key);
+        let source = crate::target_seed::GitSeedSource {
+            checkout: &worktree,
+            commit: None,
+        };
+        let hash = crate::target_seed::seed_identity(
+            &source,
+            Path::new("arbitrary/nested/cargo/workspace"),
+            report,
+            "test-host",
+            &provenant_config::CargoBuildProfile::default(),
+        )
+        .unwrap()
+        .hash;
+        set_generation_identity(&state, &hash);
         // No ambient CARGO_HOME: the same finalisation used by handoff must
         // make a fresh, arbitrarily nested Cargo project seedable.
         let mut env = vec![];
@@ -2649,11 +2799,14 @@ mod tests {
         let cache = root.path().join("cache");
         let state = root.path().join("state");
         let bin = home.join(format!(".rustup/toolchains/{release}-test-host/bin"));
-        for directory in [&bin, &worktree.join(".git"), &cache] {
+        for directory in [&bin, &worktree, &cache] {
             std::fs::create_dir_all(directory).unwrap();
         }
         std::fs::write(home.join(".rustup/settings.toml"), "[overrides]\n").unwrap();
         std::fs::write(worktree.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(worktree.join("Cargo.lock"), "version = 3\n").unwrap();
+        provenant_os::fixture::run_git(&worktree, &["init", "-q"]).unwrap();
+        provenant_os::fixture::run_git(&worktree, &["add", "Cargo.toml", "Cargo.lock"]).unwrap();
         std::fs::write(
             worktree.join("rust-toolchain.toml"),
             format!("[toolchain]\nchannel = '{release}'\n"),
@@ -2678,6 +2831,21 @@ mod tests {
     }
 
     impl OutsideLane {
+        fn identity(&self) -> String {
+            let source = crate::target_seed::GitSeedSource {
+                checkout: &self.worktree,
+                commit: None,
+            };
+            crate::target_seed::seed_identity(
+                &source,
+                Path::new(""),
+                &self.report,
+                "test-host",
+                &provenant_config::CargoBuildProfile::default(),
+            )
+            .unwrap()
+            .hash
+        }
         fn seed(&self, environment: &[(&str, &PathBuf)]) -> WorktreeSeed {
             let environment: Vec<_> = environment
                 .iter()
@@ -2716,11 +2884,17 @@ mod tests {
         assert_eq!(unset.detail, None);
         assert_eq!(
             unset.differs,
-            Some(Difference::new("rustc 1.99.1", "rustc 1.98.0"))
+            Some(Difference::new(
+                format!("rustc 1.99.1 (identity {})", fixture.identity()),
+                "rustc 1.98.0 (identity identity)"
+            ))
         );
         let warning = unset.warning.as_deref().unwrap();
         assert!(
-            warning.contains("expected rustc 1.99.1, found rustc 1.98.0"),
+            warning.contains(&format!(
+                "expected rustc 1.99.1 (identity {}), found rustc 1.98.0 (identity identity)",
+                fixture.identity()
+            )),
             "{warning}"
         );
         assert!(unset.repair.is_some_and(|text| text.contains("seed-build")));
@@ -2767,7 +2941,10 @@ mod tests {
         assert_eq!(seed.reason, "triple_mismatch");
         assert_eq!(
             seed.differs,
-            Some(Difference::new("test-host", "other-host"))
+            Some(Difference::new(
+                format!("test-host (identity {})", fixture.identity()),
+                "other-host (identity identity)"
+            ))
         );
 
         let fixture = outside_lane("1.99.1");
@@ -2789,8 +2966,12 @@ mod tests {
         assert_eq!(
             seed.differs,
             Some(Difference::new(
-                describe_profile(&profile),
-                describe_profile(&different)
+                format!(
+                    "{} (identity {})",
+                    describe_profile(&profile),
+                    fixture.identity()
+                ),
+                format!("{} (identity identity)", describe_profile(&different))
             ))
         );
     }
@@ -2807,6 +2988,7 @@ mod tests {
             "test-host",
             &project_key,
         );
+        set_generation_identity(&fixture.state, &fixture.identity());
         let seed = fixture.seed(&[("HOME", &fixture.home)]);
         assert_eq!(
             (seed.status.as_str(), seed.reason.as_str()),
@@ -2846,6 +3028,7 @@ mod tests {
                     triple: "host",
                     cargo_profile: &profile,
                     project_key: "",
+                    identity: "identity",
                 },
                 None,
                 |_| {},
@@ -2905,6 +3088,7 @@ mod tests {
                     triple: "host",
                     cargo_profile: &profile,
                     project_key: "",
+                    identity: "identity",
                 },
                 None,
                 |_| {},
@@ -3048,6 +3232,7 @@ mod tests {
                 project_key: String::new(),
                 rustc_vv: "v1".into(),
                 host_triple: "host".into(),
+                identity: Some("identity".into()),
                 commit: "abc".into(),
                 profile: "dev".into(),
                 cargo_profile: profile.clone(),
@@ -3086,6 +3271,7 @@ mod tests {
                 triple: "host",
                 cargo_profile: &profile,
                 project_key: "",
+                identity: "identity",
             },
             None,
             |_| {},

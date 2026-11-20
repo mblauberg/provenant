@@ -1050,6 +1050,7 @@ mod tests {
             rustc_vv: "rustc fixture".into(),
             host_triple: "fixture".into(),
             commit: "fixture".into(),
+            identity: None,
             profile: "dev".into(),
             cargo_profile: provenant_config::LaneBuildSettings::default()
                 .cargo_build_profile(&[])

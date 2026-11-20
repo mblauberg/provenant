@@ -65,19 +65,18 @@ Target seeding and clone machinery are used only for `private`. A lane's seed ou
 ## Cargo target seed
 
 A target seed store is shared across registered repositories on the host. Each
-generation records a hash of the verified canonical shared Git directory and
-verify-base commit plus its Rust compiler identity and effective
-`CARGO_INCREMENTAL` and `CARGO_PROFILE_DEV_DEBUG` values, so a toolchain or
-profile change rebuilds the seed even when the commit is unchanged. Compiler
-identity uses toolchain pins read from the verify-base tree at the selected
-workspace, not the registered checkout's current toolchain. The same selected
-workspace path is used to validate and build the pinned checkout. Linked
-checkouts share identity and another repository's newer generation does not
-force a rebuild. A writer lane prefers the newest compatible generation for its
-verified project identity, then uses a compatible generation from another
-project if no own generation exists. The seed builder and writer preparation
-use the same lane profile defaults and preserve explicit profile values;
-incompatible profile generations are skipped. A seed build is not a lane: the
+generation records the verified canonical shared Git directory and a file-only
+identity of its dependency inputs. Currentness and lane selection require the
+same project key, identity hash and `deps` contents; the recorded commit is the
+built-from record. The identity hashes Cargo.lock, tracked manifest dependency,
+feature, patch and replace tables, workspace profile tables and applicable
+`.cargo/config.toml` profile tables, rustc version and host triple, contents and
+the effective Cargo build profile. Manifest declarations are canonicalised, so
+formatting and package metadata do not affect the hash. Edits that do not change
+resolved units can still invalidate it. Both sides use Git's tracked file list;
+no Cargo metadata runs during identity calculation, so lanes can calculate it
+before confinement. Failure to calculate it leaves the lane cold with a warning.
+Compiler identity uses the verify-base toolchain pin. A seed build is not a lane: the
 compiler-selection keys the lane eligibility check lists (`RUSTC_WRAPPER`,
 `RUSTUP_*`, `RUSTFLAGS`, `CARGO_BUILD_TARGET` and the other classes) are inherited
 from whoever launched the build, so the seed build removes them from its Cargo
@@ -97,10 +96,7 @@ or invalid table warns and runs no prepare command. A failing command fails that
 build: the project's outcome is `prepare_failed` with the command and the last
 2 KiB of the combined output in `seed-result.json` and the refresh record, while
 the operator note gives a repair and never echoes the output. The same prepare
-list runs before every seed generation build and, later, slot builds. Refresh
-currentness requires the
-recorded verify-base commit to match; writer selection uses compatible
-generations and Cargo's normal per-unit freshness checks before reusing artifacts.
+list runs before every seed generation build and, later, slot builds. Writer selection uses matching generations and Cargo's normal per-unit freshness checks before reusing artifacts.
 
 A generation holds dependency units only. After `cargo build`, `cargo test --no-run` and `cargo check --workspace --all-targets --locked`, the seed build enumerates the checkout with `cargo metadata --format-version 1 --locked` using the same child environment and target overrides, and runs `cargo clean -p` for every path package it finds (packages with no `source`): workspace members and non-member path packages alike. Registry and other non-path dependencies stay in the seed, including build and check-mode units that clippy can reuse. The manifest records this as `contents: "deps"`; older generations without the marker (or with another value) hold a full build. Those older full generations are not current: refresh builds a deps-only replacement for the same identity, and lane selection skips them with the stable `full_generation` fallback instead of reusing member units whose sources can move with a lane. Collection removes full generations as obsolete outside the keep-count and whatever the keep-count is; they never displace a deps generation from a retained slot, and the removal is reported with a distinguishing `obsolete_full_generation` reason.
 
