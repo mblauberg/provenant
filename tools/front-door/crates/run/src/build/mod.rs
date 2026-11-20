@@ -9,6 +9,7 @@ pub mod hygiene;
 pub mod lane;
 pub mod ledger;
 pub mod local;
+pub mod pathmap;
 pub mod paths;
 pub mod queue;
 pub mod report;
@@ -234,6 +235,10 @@ pub type JobPrelude =
 pub enum BuildError {
     #[error("cancelled")]
     Cancelled,
+    #[error("cancelled by signal {0}")]
+    CancelledSignal(i32),
+    #[error("superseded by a newer identical build request")]
+    Superseded,
     #[error("build pool unavailable: {0}")]
     Unavailable(String),
     #[error("infrastructure failure ({kind:?}): {detail}")]
@@ -445,13 +450,9 @@ fn dispatch(
         return local::execute(&mut job, ctx, outcome, ExecPlace::Local, None, 0);
     }
 
-    if strategy == StrategyName::Command {
-        return command::execute(&mut job, ctx, outcome);
-    }
-
     if matches!(
         strategy,
-        StrategyName::Lane | StrategyName::LaneSeed | StrategyName::Slots
+        StrategyName::Lane | StrategyName::LaneSeed | StrategyName::Slots | StrategyName::Command
     ) {
         if strategy == StrategyName::Slots && job.sandboxed {
             warn_and_record(
@@ -468,10 +469,41 @@ fn dispatch(
             return local::execute(&mut job, ctx, outcome, ExecPlace::Local, None, 0);
         }
 
+        if strategy == StrategyName::Slots {
+            if let rust::RustClass::Local { exception } = rust::classify(&job) {
+                outcome.exception = Some(exception);
+                warn_and_record(
+                    &mut outcome,
+                    &format!(
+                        "Rust command is not eligible for build slots ({exception:?}); running locally"
+                    ),
+                );
+                clear_admission_marker(&mut job);
+                return local::execute(&mut job, ctx, outcome, ExecPlace::Local, None, 0);
+            }
+            let (priority, warnings) = effective_job_priority(&job, &ctx.strategy.port);
+            job.priority = priority;
+            outcome.priority = priority;
+            for warning in warnings {
+                warn_and_record(&mut outcome, &warning);
+            }
+        }
         let request = queue::request_for_job(&job, ctx);
+        if strategy == StrategyName::Slots
+            && request.limit > 0
+            && request.excluded.len() as u64 == request.limit
+        {
+            clear_admission_marker(&mut job);
+            outcome.exception = Some(Exception::AllQuarantined);
+            warn_and_record(
+                &mut outcome,
+                "all build slots are quarantined; run provenant build reset; building locally",
+            );
+            return local::execute(&mut job, ctx, outcome, ExecPlace::Local, None, 0);
+        }
         if request.limit == 0 {
             clear_admission_marker(&mut job);
-            return local::execute(&mut job, ctx, outcome, ExecPlace::Local, None, 0);
+            return execute_local_strategy(&mut job, ctx, outcome, 0);
         }
         match queue::admit(&request) {
             Ok(queue::Admitted::Held {
@@ -492,11 +524,46 @@ fn dispatch(
                 outcome.waited_ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX);
                 if strategy == StrategyName::Slots {
                     outcome.slot = Some(index);
-                    match slots::execute(&job, ctx, index) {
+                    let prelude = job.prelude.take();
+                    let execution = if let Some(prelude) = prelude {
+                        match slots::stage(&job, ctx, index) {
+                            Ok(mut staged) => match prelude(&staged.site) {
+                                Ok(extra) => {
+                                    staged.add_env(extra);
+                                    slots::execute_staged(&job, ctx, index, staged)
+                                }
+                                Err(error) => {
+                                    outcome.infra = Some(InfraKind::SlotLayout);
+                                    outcome.finished_unix_ms = ledger::now_unix_ms();
+                                    return Err((error, Box::new(outcome)));
+                                }
+                            },
+                            Err(stage_failure) => {
+                                job.prelude = Some(prelude);
+                                outcome.exception = Some(stage_failure.exception);
+                                outcome.infra = stage_failure.infra.or(outcome.infra);
+                                if stage_failure.reset != Reset::None {
+                                    outcome.reset = stage_failure.reset;
+                                }
+                                outcome.slot = None;
+                                warn_and_record(
+                                    &mut outcome,
+                                    &format!(
+                                        "build slot staging failed before spawn: {}",
+                                        stage_failure.detail
+                                    ),
+                                );
+                                Err(stage_failure.exception)
+                            }
+                        }
+                    } else {
+                        slots::execute(&job, ctx, index)
+                    };
+                    match execution {
                         Ok(execution) => {
                             drop(guard);
                             drop(_held_marker);
-                            return local::finish_slot_execution(execution, outcome);
+                            return slots::finish_slot_execution(execution, outcome);
                         }
                         Err(exception) => {
                             outcome.exception = Some(exception);
@@ -512,7 +579,7 @@ fn dispatch(
                 }
                 outcome.slot = None;
                 let waited = outcome.waited_ms;
-                return local::execute(&mut job, ctx, outcome, ExecPlace::Local, None, waited);
+                return execute_local_strategy(&mut job, ctx, outcome, waited);
             }
             Ok(queue::Admitted::Overflow { waited }) => {
                 clear_admission_marker(&mut job);
@@ -520,12 +587,10 @@ fn dispatch(
                 outcome.exception = Some(Exception::Overflow);
                 let warning = "bounded wait ended with every build slot busy; building without one. Cargo manages its own build locks";
                 warn_and_record(&mut outcome, warning);
-                return local::execute(
+                return execute_local_strategy(
                     &mut job,
                     ctx,
                     outcome,
-                    ExecPlace::Local,
-                    None,
                     waited.as_millis().min(u128::from(u64::MAX)) as u64,
                 );
             }
@@ -534,6 +599,15 @@ fn dispatch(
                 outcome.finished_unix_ms = ledger::now_unix_ms();
                 return Err((BuildError::Cancelled, Box::new(outcome)));
             }
+            Err(BuildError::CancelledSignal(signal)) => {
+                outcome.cancelled = true;
+                outcome.finished_unix_ms = ledger::now_unix_ms();
+                return Err((BuildError::CancelledSignal(signal), Box::new(outcome)));
+            }
+            Err(BuildError::Superseded) => {
+                outcome.finished_unix_ms = ledger::now_unix_ms();
+                return Err((BuildError::Superseded, Box::new(outcome)));
+            }
             Err(error) => {
                 clear_admission_marker(&mut job);
                 outcome.exception = Some(Exception::PoolUnavailable);
@@ -541,7 +615,7 @@ fn dispatch(
                     &mut outcome,
                     &format!("build slot unavailable, building without one: {error}"),
                 );
-                return local::execute(&mut job, ctx, outcome, ExecPlace::Local, None, 0);
+                return execute_local_strategy(&mut job, ctx, outcome, 0);
             }
         }
     }
@@ -549,7 +623,41 @@ fn dispatch(
     local::execute(&mut job, ctx, outcome, ExecPlace::Local, None, 0)
 }
 
-fn outcome_seed(job: &Job, ctx: &RunContext, now: u64) -> JobOutcome {
+fn execute_local_strategy(
+    job: &mut Job,
+    ctx: &RunContext,
+    outcome: JobOutcome,
+    waited: u64,
+) -> Result<JobResult, DispatchFailure> {
+    if ctx.strategy.name == StrategyName::Command {
+        command::execute(job, ctx, outcome)
+    } else {
+        local::execute(job, ctx, outcome, ExecPlace::Local, None, waited)
+    }
+}
+
+fn effective_job_priority(job: &Job, port: &BuildPort) -> (Priority, Vec<String>) {
+    let class = match &job.kind {
+        JobKind::Intercepted { subcommand, .. } if subcommand == "check" => "check",
+        JobKind::Intercepted { subcommand, .. } if subcommand == "clippy" => "clippy",
+        JobKind::Intercepted { subcommand, .. } if subcommand == "test" => "test",
+        JobKind::Intercepted { subcommand, .. } if subcommand == "nextest" => "nextest",
+        JobKind::Tier { .. } => "tier",
+        JobKind::Gate { .. } => "gate",
+        JobKind::Maintenance { .. } => "maintenance",
+        _ => "other",
+    };
+    let resolved = port.priority_for(class);
+    let priority = match resolved.value {
+        provenant_config::BuildPriority::Interactive => Priority::Interactive,
+        provenant_config::BuildPriority::Test => Priority::Test,
+        provenant_config::BuildPriority::Train => Priority::Train,
+        provenant_config::BuildPriority::Prewarm => Priority::Prewarm,
+    };
+    (priority, resolved.warnings)
+}
+
+pub(crate) fn outcome_seed(job: &Job, ctx: &RunContext, now: u64) -> JobOutcome {
     JobOutcome {
         schema: 1,
         job_id: job.id.clone(),

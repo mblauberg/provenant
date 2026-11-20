@@ -149,6 +149,16 @@ pub struct Snapshot {
     monotonic_micros: u64,
     freshness_micros: u64,
 }
+impl Snapshot {
+    /// Sum resident memory for processes in one observed process group.
+    pub fn group_rss_bytes(&self, pgid: u32) -> u64 {
+        self.sample
+            .processes
+            .iter()
+            .filter(|process| process.pgid == pgid)
+            .fold(0_u64, |sum, process| sum.saturating_add(process.rss_bytes))
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct NativeProcess {

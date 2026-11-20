@@ -15,6 +15,20 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+/// Scoped signal observation while a build waits for admission.
+pub struct BuildSignalWait(crate::sys::build_group::Forwarder);
+impl BuildSignalWait {
+    pub fn install() -> std::io::Result<Self> {
+        crate::sys::build_group::Forwarder::install().map(Self)
+    }
+    pub fn signal(&self) -> Option<i32> {
+        match self.0.signal() {
+            0 => None,
+            signal => Some(signal),
+        }
+    }
+}
+
 pub const DEFAULT_CAPTURE_LIMIT: usize = 8 * 1024 * 1024;
 pub const MAX_CAPTURE_LIMIT: usize = 64 * 1024 * 1024;
 pub const FRAME_LIMIT: usize = 64 * 1024;
@@ -191,6 +205,11 @@ pub struct ExecOptions<'a> {
     pub stderr_decoder: Option<&'a dyn FrameSink>,
     pub stdout_filter: Option<&'a mut dyn CaptureFilter>,
     pub stderr_filter: Option<&'a mut dyn CaptureFilter>,
+    /// Observe the child PID immediately after spawn, before waiting or reading output.
+    pub on_spawn: Option<&'a mut dyn FnMut(u32)>,
+    /// Synchronously write filtered stream bytes without a lossy tee queue.
+    pub stdout_writer: Option<&'a mut dyn std::io::Write>,
+    pub stderr_writer: Option<&'a mut dyn std::io::Write>,
     pub cancel: Option<&'a CancelToken>,
     pub timeout: Duration,
     /// Once spawned, finish the operation even after its soft deadline or cancellation.
@@ -219,6 +238,9 @@ impl<'a> ExecOptions<'a> {
             stderr_decoder: None,
             stdout_filter: None,
             stderr_filter: None,
+            on_spawn: None,
+            stdout_writer: None,
+            stderr_writer: None,
             cancel: None,
             timeout,
             wait_for_completion: false,
@@ -636,6 +658,9 @@ fn run_inner<'a>(
         options.stderr.inherited(),
     )
     .map_err(io_error("spawn"))?;
+    if let (Some(callback), Some(pid)) = (options.on_spawn.as_deref_mut(), child.id()) {
+        callback(pid);
+    }
     child.cleanup_process_group_on_exit(options.cleanup_process_group);
     if let Some(forwarder) = &signal_forwarder
         && let Some(pid) = child.id()
@@ -651,11 +676,17 @@ fn run_inner<'a>(
     } else {
         options.stdout_decoder.map(FrameDelivery::Raw)
     };
-    let mut out_pump = StreamCapture::new(options.stdout, stdout_decoder, options.stdout_filter)?;
-    let mut err_pump = StreamCapture::new(
+    let mut out_pump = StreamCapture::new_with_writer(
+        options.stdout,
+        stdout_decoder,
+        options.stdout_filter,
+        options.stdout_writer,
+    )?;
+    let mut err_pump = StreamCapture::new_with_writer(
         options.stderr,
         options.stderr_decoder.map(FrameDelivery::Raw),
         options.stderr_filter,
+        options.stderr_writer,
     )?;
     let input = options.stdin.unwrap_or_default();
     let mut written = 0;

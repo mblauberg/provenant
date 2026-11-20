@@ -57,8 +57,16 @@ pub(super) fn execute(
     ));
     let env = provenant_config::port_command_environment(job.env.iter().cloned(), &explicit);
     let original = std::mem::replace(&mut job.steps[0].argv, argv);
-    let result =
-        super::local::execute_with_env(job, ctx, outcome, ExecPlace::Local, None, 0, Some(env));
+    let waited_ms = outcome.waited_ms;
+    let result = super::local::execute_with_env(
+        job,
+        ctx,
+        outcome,
+        ExecPlace::Local,
+        None,
+        waited_ms,
+        Some(env),
+    );
     job.steps[0].argv = original;
     let result = result?;
     let Some(exit) = result.outcome.exit else {

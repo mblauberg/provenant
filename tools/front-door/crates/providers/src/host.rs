@@ -365,6 +365,9 @@ impl Executor for HostProbeExecutor<'_> {
             stderr_filter: options
                 .stderr_filter
                 .map(|filter| filter as &mut dyn CaptureFilter),
+            on_spawn: options.on_spawn,
+            stdout_writer: options.stdout_writer,
+            stderr_writer: options.stderr_writer,
             cancel: options.cancel,
             timeout: options.timeout,
             wait_for_completion: options.wait_for_completion,
