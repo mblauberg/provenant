@@ -598,16 +598,41 @@
     "path": "build",
     "where": "the `build` object of host `state/ports.json`, a host-project `state/projects/<key>/ports.json` or project `.provenant/ports.json`",
     "settings": {
-      "strategy": {"type": "string", "allowed": "slots, lane_seed, lane, wrapper, command", "default": "lane_seed", "effect": "Build strategy port. Declared and layered now; a later slice consumes it. The builtin stays lane_seed so this slice changes no behaviour."},
+      "strategy": {"type": "string", "allowed": "slots, lane_seed, lane, wrapper, command", "default": "lane_seed", "effect": "Selects the build runtime strategy. Slots uses the shared slot pool; lane_seed and lane execute locally, with lane_seed requesting target seeding at launch; command runs the configured build.command wrapper. Wrapper is unavailable and warns before falling back to lane_seed."},
       "prepare": {"type": "argv_list", "allowed": "ordered arrays of argv; each program is non-empty", "default": "[]", "effect": "Ordered argv arrays run from the checkout root before a seed build; a failing command fails that build."},
       "seed.stale_after": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "24h", "effect": "Age after which a seed is stale. A bad value warns and falls back to 24h with source default."},
-      "wrapper.argv": {"type": "argv", "allowed": "argv array with a non-empty program when set", "default": "[]", "effect": "Wrapper argv for the wrapper strategy; declared now and consumed by a later slice."},
-      "command.argv": {"type": "argv", "allowed": "argv array with a non-empty program when set", "default": "[]", "effect": "Replacement build command argv for the command strategy; declared now and consumed by a later slice."},
-      "offload": {"type": "string", "allowed": "generic build offload policy name", "default": "auto", "effect": "Offload policy for the build port; declared now and consumed by a later slice."},
-      "overflow": {"type": "string", "allowed": "generic build overflow policy name", "default": "local", "effect": "Overflow policy when build slots are busy; declared now and consumed by a later slice."},
-      "clean": {"type": "string", "allowed": "generic build clean policy name", "default": "none", "effect": "Clean policy before a build; declared now and consumed by a later slice."},
-      "stacks": {"type": "string_list", "allowed": "stack override names", "default": "[]", "effect": "Stack overrides for a consumer repository; declared now and consumed by a later slice."},
-      "snapshot_retention": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "7d", "effect": "How long a build snapshot is retained; declared now and consumed by a later slice."}
+      "wrapper.argv": {"type": "argv", "allowed": "argv array with a non-empty program when set", "default": "[]", "effect": "Reserved argv for the unavailable wrapper strategy; selecting wrapper warns and uses lane_seed."},
+      "command.argv": {"type": "argv", "allowed": "argv array with a non-empty program when set", "default": "[]", "effect": "Program and arguments executed by the command strategy before the intercepted build argv; arguments are not shell-split."},
+      "command.exit_codes.success": {"type": "int_list", "allowed": "distinct process exit codes", "default": "[0]", "effect": "Exit codes treated as successful by the command strategy."},
+      "command.exit_codes.unknown": {"type": "int_list", "allowed": "distinct process exit codes, disjoint from success", "default": "[]", "effect": "Exit codes treated as unknown by the command strategy."},
+      "command.exit_codes.other": {"type": "enum", "allowed": "refused, unknown", "default": "refused", "effect": "Disposition for command exit codes not listed as success or unknown."},
+      "offload": {"type": "string", "allowed": "auto, off", "default": "auto", "effect": "Auto allows supported Rust build jobs to use slots; off runs every build locally with exception offload_off."},
+      "overflow": {"type": "string", "allowed": "auto, queue, local", "default": "auto", "effect": "Auto queues under slots and uses the configured local overflow for local strategies; queue always waits for a slot and local runs locally after the admission wait."},
+      "clean": {"type": "string", "allowed": "none, untracked, ignored", "default": "untracked", "effect": "Controls slot cleanup before a job: none preserves files, untracked runs git clean -ffd, and ignored runs git clean -ffdx."},
+      "stacks": {"type": "string_list", "allowed": "stack override names", "default": "[]", "effect": "Overrides the detected set of build adapters; an empty list uses detected stacks."},
+      "snapshot_retention": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "7d", "effect": "Retains build snapshot and base pins for this duration before store garbage collection can expire them."},
+      "priority": {"type": "object", "allowed": "check, clippy, test, nextest, tier, gate, maintenance, other mapped to interactive, test, train, prewarm", "default": "builtin mapping", "effect": "Sets queue priority by job class; priority orders waiters and never preempts a running job."},
+      "queue_aging": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "120s", "effect": "Wait duration per priority aging step; aging raises queued jobs over time to bound lower-priority waits."},
+      "prewarm_budget": {"type": "int", "allowed": "0 or more jobs per hour", "default": "1", "effect": "Maximum maintenance prewarm jobs per hour; zero disables prewarming."},
+      "canary_every": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "24h", "effect": "Maximum age of a slot's last canary before maintenance schedules another canary."},
+      "slot_idle": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "7d", "effect": "Idle age after which unlocked slots are eligible for garbage collection."},
+      "soak.min_runs": {"type": "int", "allowed": "1 or more lane jobs", "default": "50", "effect": "Minimum lane job count required before the build soak report can pass."},
+      "soak.min_days": {"type": "int", "allowed": "1 or more days", "default": "7", "effect": "Minimum observation span required before the build soak report can pass."},
+      "soak.interactive_wait_p95": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "60s", "effect": "Maximum passing p95 queue wait for interactive priority jobs."},
+      "soak.test_wait_p95": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "300s", "effect": "Maximum passing p95 queue wait for test priority jobs."},
+      "soak.rss_fraction": {"type": "number", "allowed": "0.0 through 1.0", "default": "0.75", "effect": "Maximum passing peak job RSS as a fraction of physical memory."},
+      "soak.local_exception_fraction": {"type": "number", "allowed": "0.0 through 1.0", "default": "0.05", "effect": "Maximum passing fraction of jobs that ran locally under slots due to an exception."},
+      "soak.churn_clean_fraction": {"type": "number", "allowed": "0.0 through 1.0", "default": "0.99", "effect": "Minimum passing fraction of rebuilt packages explained by changed packages and their dependents."}
+    }
+  },
+  "port_verify_affected_settings": {
+    "path": "verify.affected",
+    "where": "the `verify.affected` object of host, host-project or project ports.json",
+    "settings": {
+      "enabled": {"type": "bool", "allowed": "true or false", "default": "false", "effect": "Applies the affected-package selection policy to verify tiers without an explicit --affected flag."},
+      "global_paths": {"type": "string_list", "allowed": "repository-relative glob patterns", "default": "[]", "effect": "Paths matching these globs force affected selection to include the full workspace."},
+      "full_every": {"type": "int", "allowed": "1 or more verify runs", "default": "10", "effect": "Run a full workspace selection after this many affected selections."},
+      "full_after": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "24h", "effect": "Run a full workspace selection when this long has elapsed since the last full selection."}
     }
   },
   "domain_policy_settings": {

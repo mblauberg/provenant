@@ -12,9 +12,13 @@ so Cargo does not put intermediate build output in a separate cold directory. Th
 
 Compiling cargo commands and targeted test runs share the host-wide `build`
 admission class, configured through `[admission.build].slots` and derived from
-CPU cores and RAM when unset. Set it to `0` to disable the cap. Busy slots wait
-a bounded time, then warn and proceed. Cargo serialises access to one target
-with its own locks. `lanes.local_cargo` can warn when a command exceeds a host's
+CPU cores and RAM when unset. Set it to `0` to disable the cap. Every lane gets
+the cargo, nextest and cargo-nextest shims that call `provenant admit build`.
+`build.strategy` then runs the job locally, through `build.command`, or in a
+warm slot; a job that cannot use a slot runs locally with a recorded exception.
+Busy waiters are ordered by priority with aging, and `build.overflow = auto`
+queues under slots but uses a bounded local wait under the lane strategies.
+Cargo serialises access to one target with its own locks. `lanes.local_cargo` can warn when a command exceeds a host's
 preferred scope; it does not refuse the command. By default,
 `lanes.cargo_target` is `private`, the worktree's own target cloned warm from
 the host seed. `project` uses the worktree's `target/`, or an absolute path
@@ -31,6 +35,18 @@ in the `verify` port in `config/ports.json` (also exposed through the optional `
 each tier declares commands as argv arrays with a stack and cwd relative to the effective verify workspace,
 package/integration/all selection, and whether
 to warn under host load. Host-load warnings continue locally.
+
+`provenant verify [TIER]` builds one job whose single step runs the verify
+engine, so a tier is one hold under slots. `--commit REV` verifies an exact
+revision: slots pin the commit in the slot, and the lane strategies use a
+temporary detached checkout that is removed afterwards. `--affected`, or
+`verify.affected.enabled`, passes `PROVENANT_VERIFY_SELECTION` with `packages`,
+`full` and `reason` to `scripts/verify-tier`, which uses it for
+`selection: packages` tiers in place of its own path mapping. The reason names
+the trigger: changed paths, a configured global path, a lockfile or toolchain
+change, an unowned path, the run-count or age limit, or unreadable state. `full`
+selects every workspace member. A selection error warns and the engine keeps
+its own selection. No `--message-format` flag is added to a job's argv.
 
 See [CI](ci.md#pipeline) for pull request selection. A configured host can
 run `scripts/verify-tier --tier 2 --host ci` against a pushed branch; the

@@ -3,6 +3,7 @@
 mod admission;
 mod artifacts;
 mod board;
+pub mod build;
 mod completion;
 pub use board::{BoardLane, BoardPage};
 pub use completion::{

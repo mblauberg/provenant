@@ -1997,7 +1997,26 @@ impl LaunchConfinement {
         destination: &str,
     ) -> crate::cargo_seed::Outcome {
         use crate::cargo_seed::Outcome;
-        if !self.cargo_target_seed {
+        let seed_target = match provenant_config::PortTable::read_for(
+            Some(worktree.path()),
+            &self.state_root,
+        ) {
+            Ok(table) => {
+                let resolved = crate::build::strategy(&table.build);
+                for warning in &resolved.warnings {
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                }
+                resolved.value.lane_preparation().seed_target
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: build strategy could not be read ({error}); using lane_seed from default"
+                );
+                true
+            }
+        };
+        if !seed_target {
             return Outcome::skipped("disabled");
         }
         let build =
