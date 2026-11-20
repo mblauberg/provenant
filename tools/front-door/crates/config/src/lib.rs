@@ -54,6 +54,7 @@ mod providers;
 pub use providers::{
     OutOfScopePin, ProviderSettings, ProviderUpdate, defaults as provider_defaults,
 };
+pub mod detect;
 pub mod ports;
 mod project_binding;
 pub use ports::{

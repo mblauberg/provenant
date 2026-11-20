@@ -62,3 +62,12 @@ those costs. The `supervisor_cpu` example (`idle` and `churn` modes) adds the
 production `HostHolder` reader: build it once with `cargo build --release
 --locked -p provenant-cli --example supervisor_cpu` and run the binary directly
 so a long capture does not hold a build slot. Compare identical release builds.
+
+Stack detection is read-only: `provenant config detect` shows proposed Rust and
+Node commands and their working directories. Rust uses the nearest workspace or
+package manifest within two levels, skipping equal-depth ties. Node uses the
+root `package.json`, its package manager field or lockfile, and only scripts
+that exist. The detected default is below all configured layers; detected argv
+commands are informational and never override configured tier commands. Use
+`provenant config show --full` for effective leaves and sources, and
+`provenant config path --project` for the host-project ports file.

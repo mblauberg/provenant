@@ -525,6 +525,14 @@ fn host_alias(value: &str) -> Result<String, &'static str> {
 pub enum Config {
     /// Show the effective repository integration ports and their sources.
     Ports,
+    /// Inspect detected stacks and commands without writing.
+    Detect,
+    /// Print the host-project configuration path.
+    Path {
+        /// Select the project-specific layer
+        #[arg(long = "project", required = true)]
+        project_layer: bool,
+    },
     /// List configuration warnings with their source file and key.
     Check(Page),
     /// Print effective configuration and knobs, plus the resolved launch
