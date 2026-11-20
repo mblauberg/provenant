@@ -25,6 +25,12 @@ thiserror = "2.0"
 toml_edit = { version = "0.25", features = ["serde"] }
 unicode-normalization = "0.1"
 
+# Affected-crate selection (crates/select). Determinator 0.13 builds against guppy 0.19.1.
+camino = "1.2"
+determinator = "0.13"
+globset = "0.4"
+guppy = "0.19.1"
+
 # Internal crates. Each member may depend only on the crates docs/specs/rust-workspace.md#crate-layering
 # allows it, as `provenant-<name> = { workspace = true }`.
 provenant-core = { path = "crates/core" }
