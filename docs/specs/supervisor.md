@@ -433,7 +433,11 @@ use native Git while retaining the surrounding tool PATH.
 
 ### Native environment and sandbox tool stores
 
-Unsandboxed lanes inherit the host environment. `FilteredLanePath` selects
+`base_env` inherits the host environment for host access, sandboxed or not;
+isolated sandboxed lanes use the minimal reconstructed environment.
+`strip_hosted_credentials` filters hosted-cloud variables only for isolated
+access. Sandboxed lanes use private TMPDIR and TMPPREFIX because host temporary
+paths may not be writable. `FilteredLanePath` selects
 retained requester PATH, otherwise captured host search path, or process PATH
 only without a host handoff. It filters canonical directories and executable
 symlink targets under the primary project and selected worktree, including both
@@ -459,7 +463,7 @@ discovery, credential symlink inventory and the build admission shims. Every lan
 binds the host Cargo home and private target/build directories before seed
 validation.
 
-Sandboxed lanes use the minimal environment and staged skills, discover tool
+Sandboxed lanes stage skills, discover tool
 dependencies and credential aliases, and report inventory omissions in one
 actionable warning. Cargo registry and Git sources are writable unless
 `domains.fabric.lanes.cargo_source_writes` is turned off. Cargo lock and cache-use
@@ -467,7 +471,7 @@ tracking files have exact write grants; Cargo credentials are always denied.
 The pnpm, npm and Node caches the host later runs unconfined stay read-only;
 build output and tool configuration use private lane caches.
 - Why: native lanes use ordinary tools and login state; sandboxed lanes keep
-  source sharing explicit while keeping credentials and build output isolated.
+  source sharing explicit while keeping build output isolated.
 
 ### Network, IPC and process information
 

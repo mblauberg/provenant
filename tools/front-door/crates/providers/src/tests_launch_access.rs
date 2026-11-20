@@ -223,6 +223,75 @@ fn stdin_adapters_receive_oversized_prompts_in_full() -> Result<(), ProviderErro
 }
 
 #[test]
+fn environment_inheritance_follows_access_and_sandbox() -> Result<(), ProviderError> {
+    use provenant_records::LaneAccess;
+    let prompt = Prompt::new("fixture".into());
+    let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
+    let host = || {
+        [
+            ("AWS_PROFILE".into(), "fixture-profile".into()),
+            ("AWS_ACCESS_KEY_ID".into(), "fixture-key".into()),
+            ("GITHUB_TOKEN".into(), "fixture-token".into()),
+            ("JAVA_HOME".into(), "/fixture/java".into()),
+            ("TMPDIR".into(), "/host/tmp".into()),
+            ("TMPPREFIX".into(), "/host/zsh".into()),
+        ]
+        .into_iter()
+    };
+    for sandboxed in [false, true] {
+        for access in [LaneAccess::Host, LaneAccess::Isolated] {
+            let mut route = route("codex", "fixture-model");
+            route.set_access(access);
+            let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+            let host_var = |name: &str| {
+                (name == provenant_core::consumer_env::SANDBOX)
+                    .then(|| if sandboxed { "on" } else { "off" }.into())
+            };
+            input.host_var = &host_var;
+            let env = crate::launch::base_env_with_host(
+                &input,
+                Path::new("/fixture/tmp"),
+                "/bin",
+                host(),
+            )?;
+            for (key, value) in host().take(4) {
+                assert_eq!(
+                    env.iter().any(|entry| entry.0 == key && entry.1 == value),
+                    !(sandboxed && access == LaneAccess::Isolated),
+                    "{access:?} sandboxed={sandboxed} {key:?}"
+                );
+            }
+            let value = |key: &str| {
+                env.iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.as_os_str())
+            };
+            if sandboxed && access == LaneAccess::Isolated {
+                for (key, expected) in [
+                    ("HOME", "/fixture/home"),
+                    ("USER", "fixture"),
+                    ("PATH", "/bin"),
+                    ("LANG", "en_US.UTF-8"),
+                ] {
+                    assert_eq!(value(key), Some(std::ffi::OsStr::new(expected)));
+                }
+            }
+            for (key, native, confined) in [
+                ("TMPDIR", "/host/tmp", "/fixture/tmp"),
+                ("TMPPREFIX", "/host/zsh", "/fixture/tmp/zsh"),
+                (provenant_core::consumer_env::SANDBOX, "off", "on"),
+            ] {
+                assert_eq!(
+                    value(key),
+                    Some(std::ffi::OsStr::new(if sandboxed { confined } else { native }))
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn temporary_environment_follows_the_plan_for_readers_and_writers() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let token = fixture_token();

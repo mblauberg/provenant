@@ -239,9 +239,9 @@ profile and login, Git configuration and credential reads, whether sandboxed
 or not. Isolated reproduces the pre-2.5.3 behaviour: sandboxed lanes get a
 private environment and provider home, filtered Git configuration and
 credential denies, and hosted-cloud credential variables are stripped from
-every lane. Cross-host credential grants are unchanged. This seam records the
-selected model; the enforcement changes are delivered by the remaining #3712
-slices.
+every lane. Cross-host credential grants are unchanged. `base_env` preserves host variables
+for host access, while `strip_hosted_credentials` filters only isolated lanes.
+Other enforcement changes are delivered by the remaining #3712 slices.
 
 `resolve_lane_access` gives an explicit launch, template or tier knob priority
 over route policy, then uses the host or project knob, then the default. The
