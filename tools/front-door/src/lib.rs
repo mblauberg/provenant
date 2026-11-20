@@ -1868,6 +1868,24 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     // Read-only catalogue and checkpoint observation must not record demand
     // telemetry, including on an otherwise empty state root.
     let resolved = roots::resolve(globals, Workspace::Directory, Product::Optional).ok();
+    // A guardian receives its launcher's resolved mode in the private descriptor.
+    if !matches!(&parsed, ParseOutcome::Invocation(inv) if matches!(&inv.command, Command::Internal(provenant_cli::Internal::Supervise { .. })))
+    {
+        let mode = resolved
+            .as_ref()
+            .and_then(|resolved| {
+                provenant_cli::config_reads::read_for(&resolved.roots, "help").ok()
+            })
+            .and_then(|config| {
+                config
+                    .knobs
+                    .get("redaction")
+                    .and_then(|knob| knob.value.as_str())
+                    .and_then(provenant_redact::Mode::parse)
+            })
+            .unwrap_or_default();
+        provenant_redact::init(mode);
+    }
     if let Some(timeout) = resolved.as_ref().and_then(|resolved| {
         provenant_config::StoreSettings::read(resolved.roots.state.as_path())
             .ok()?

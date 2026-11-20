@@ -29,13 +29,13 @@ const LAYERS: &[(&str, &[&str])] = &[
     // Test-only helpers, reachable through dev-dependencies or optional fixture features.
     ("test-support", &["core"]),
     ("records", &["core"]),
-    ("config", &["core", "records", "os"]),
+    ("config", &["core", "records", "os", "redact"]),
     ("os", &["core"]),
     // Per-byte redaction, built optimised in dev and test profiles.
     ("redact", &["core", "os"]),
     // Port-plan tests read the default lane settings from config (a sibling
     // layer), so the edge is acyclic.
-    ("supervisor", &["core", "records", "os", "config"]),
+    ("supervisor", &["core", "records", "os", "config", "redact"]),
     (
         "confinement",
         // Worktree lifecycle tests open a real host store; fabric-store sits
