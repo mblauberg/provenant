@@ -1011,6 +1011,54 @@ impl Factory {
         Ok(())
     }
 
+    /// Whether this submission binds a node to another host. Such a document
+    /// crosses a host boundary, so it must not carry this host's replay
+    /// snapshot: that snapshot retains file-backed brief paths and other
+    /// sender-local attempt state. The peer rebuilds its own snapshot from the
+    /// compiled node and the sealed classification (#3744).
+    fn document_is_peer_bound(&self, document: &GraphDocument) -> bool {
+        fn node_is_peer_bound(
+            node: &provenant_fabric_runtime::graph::GraphNode,
+            context: &Context,
+        ) -> bool {
+            let remote = |name: &str| {
+                !matches!(name, "local" | "localhost")
+                    && context
+                        .peer_host(name)
+                        .is_some_and(|host| host != context.identity.host)
+            };
+            node.attempt
+                .as_ref()
+                .and_then(|attempt| attempt.host.as_deref())
+                .is_some_and(remote)
+                || node.composite.as_ref().is_some_and(|composite| {
+                    composite
+                        .nodes
+                        .iter()
+                        .any(|child| node_is_peer_bound(child, context))
+                })
+                || node.loop_body.as_ref().is_some_and(|body| {
+                    body.body
+                        .iter()
+                        .any(|child| node_is_peer_bound(child, context))
+                })
+                || node
+                    .plan
+                    .as_ref()
+                    .and_then(|plan| plan.fallback.as_ref())
+                    .is_some_and(|fallback| {
+                        fallback
+                            .nodes
+                            .iter()
+                            .any(|child| node_is_peer_bound(child, context))
+                    })
+        }
+        document
+            .nodes
+            .iter()
+            .any(|node| node_is_peer_bound(node, &self.context))
+    }
+
     fn launch_resolvers(
         &self,
         document: Option<&Value>,
@@ -2261,6 +2309,17 @@ impl Factory {
                 self.context.port_table.worktree_layout.clone(),
             )
             .map_err(graph_patch_error)?;
+            // The snapshot is a host-local replay record: it embeds the
+            // file-backed brief path and other sender placement state. A
+            // peer-bound document ships the brief as prompt text and the
+            // classification in its sealed policy, so withhold the snapshot
+            // and let the peer rebuild one from its own bound node (#3744).
+            if self.document_is_peer_bound(&document) {
+                document.submission_patch = None;
+                warn_operator(
+                    "withheld sender-local submission snapshot from peer graph document; the peer binds its own brief inputs",
+                );
+            }
         }
         // Static admission is the single compile gate: a launch no longer seals
         // the submission patch above, so admit here to keep every entry on the
@@ -5110,6 +5169,114 @@ mod tests {
     }
 
     #[test]
+    // Regression #3744: a launch prepared for a cross-host peer must survive
+    // the peer-side graph-document decode exactly as a remote launch does.
+    fn cross_host_launch_document_round_trips_through_peer_decode() -> Result {
+        let rig = TestRig::new()?;
+        let remote_host = provenant_core::HostId::from_bytes([2; 16]);
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let mut context = Context::open_inspection(roots, &rig.home, &rig.project)?;
+        context.in_lane = false;
+        context.config.peers.insert(
+            "workshop".into(),
+            provenant_fabric_runtime::config::Peer {
+                host: remote_host,
+                destination: "workshop".into(),
+                remote_executable: None,
+                connect_timeout_seconds: 10,
+            },
+        );
+        let factory = Factory {
+            context,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            workers: &Workers,
+        };
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let cancel = CancelToken::new();
+        // A file-backed brief makes the launch carry this host's absolute
+        // policy-input path, exactly as `--brief-file` does on the sender.
+        let brief = rig.root.join("sender/private-brief.md");
+        std::fs::create_dir_all(brief.parent().unwrap())?;
+        std::fs::write(&brief, "Inspect the parser")?;
+        let launch = factory.graph_document(
+            json!({
+                "op":"run", "template":"explore", "brief":"Inspect the parser",
+                "host":"workshop", "explain":true,
+                "set":{
+                    "attempt.policy_inputs":[brief.clone()],
+                    "attempt.confidential":true
+                }
+            }),
+            budget,
+            &cancel,
+        )?;
+        let mut sender: provenant_fabric_runtime::graph::AttemptSpec =
+            serde_json::from_value(launch["document"]["nodes"][0]["attempt"].clone())?;
+        assert_eq!(sender.policy_inputs, vec![brief.clone()]);
+        provenant_cli::run::seal_launch_policy(
+            &mut sender,
+            &rig.project,
+            "Inspect the parser",
+            &Default::default(),
+            None,
+            None,
+        )
+        .map_err(|error| std::io::Error::other(error.message))?;
+        assert!(sender.confidential);
+        assert!(sender.launch_policy.is_some());
+        // The peer embeds the peer-bound projection, not the sender attempt.
+        let peer_attempt = sender.peer_bound();
+        let mut peer_document = launch["document"].clone();
+        peer_document["nodes"][0]["attempt"] = serde_json::to_value(&peer_attempt)?;
+        let peer_text = serde_json::to_string(&peer_document)?;
+        let sender_path = brief.to_string_lossy().into_owned();
+        assert!(
+            !peer_text.contains(&sender_path),
+            "sender path {sender_path} reached the peer document"
+        );
+        assert!(peer_attempt.policy_inputs.is_empty());
+        assert!(peer_attempt.directory.is_none());
+        assert_eq!(peer_attempt.launch_policy, sender.launch_policy);
+        let bytes = serde_json::to_vec(&peer_document)?;
+        let decoded = decode_graph_document(&bytes)
+            .map_err(|error| format!("peer decode of cross-host launch: {error:?}"))?;
+        assert_eq!(serde_json::to_value(&decoded)?, peer_document);
+        assert_eq!(
+            decoded.nodes[0]
+                .attempt
+                .as_ref()
+                .and_then(|attempt| attempt.launch_policy.clone()),
+            sender.launch_policy
+        );
+        // Mirror what the host does next: publish the peer-bound document and
+        // launch it.
+        let scratch = factory
+            .prepare_scratch(&cancel)
+            .map_err(|error| format!("{error:?}"))?;
+        let path = publish_graph_document(&scratch, &peer_document)
+            .map_err(|error| format!("publish: {error}"))?;
+        let run = factory
+            .graph(
+                GraphInput::Run {
+                    extra: Default::default(),
+                    document: path,
+                },
+                budget,
+                &cancel,
+            )
+            .map_err(|error| format!("cross-host launch: {error:?}"))?;
+        assert_eq!(run.checkpoint.graph_id, decoded.graph_id);
+        Ok(())
+    }
+
+    #[test]
     // Spec: docs/specs/routing.md#pinned-review-selection
     fn reviews_of_the_same_subject_attach_to_the_completed_attempt() -> Result {
         use provenant_fabric_runtime::graph::{self, AttemptOwner, GraphExecution};
@@ -7426,7 +7593,7 @@ mod tests {
 }
 
 /// Prints a launch warning for the operator; a warning never blocks a launch.
-fn warn_operator(warning: impl std::fmt::Display) {
+pub(super) fn warn_operator(warning: impl std::fmt::Display) {
     use std::io::Write;
     let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
 }

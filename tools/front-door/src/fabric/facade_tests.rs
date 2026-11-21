@@ -50,8 +50,11 @@ fn peer_remote_base_pins_a_commit_reachable_from_the_remote()
     }
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
-    provenant_os::fixture::run_git(&remote, &["init", "--bare", "-q"])?;
-    provenant_os::fixture::run_git(&project, &["init", "-q"])?;
+    provenant_os::fixture::run_git(
+        &remote,
+        &["init", "--bare", "-q", "--initial-branch=main"],
+    )?;
+    provenant_os::fixture::run_git(&project, &["init", "-q", "--initial-branch=main"])?;
     provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
     provenant_os::fixture::run_git(
         &project,
@@ -296,6 +299,220 @@ fn peer_remote_base_pins_a_commit_reachable_from_the_remote()
             Ok(())
         },
     )?;
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#publication-boundary
+#[cfg(test)]
+#[test]
+fn peer_base_resolution_fetches_a_commit_missing_from_a_stale_clone()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
+    use provenant_records::Outcome;
+    use std::collections::BTreeMap;
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|path| (path, Occupancy::Available))
+                .collect()
+        }
+    }
+    let rig = crate::worktree_tests::repository()?;
+    provenant_os::fixture::private_state_dir(&rig.state)?;
+    let temp = tempfile::tempdir()?;
+    let origin = temp.path().join("origin.git");
+    let upstream = temp.path().join("upstream");
+    std::fs::create_dir_all(&origin)?;
+    // Name the branch in the bare repo itself: a clone checks out the branch
+    // Git advertises as HEAD, and a clone on an unborn default branch would
+    // root its commit and then be rejected as non-fast-forward.
+    provenant_os::fixture::run_git(
+        &origin,
+        &["init", "--bare", "-q", "--initial-branch=main"],
+    )?;
+    // Seed the peer clone's origin at the commit the peer already has.
+    provenant_os::fixture::run_git(
+        &rig.project,
+        &["remote", "add", "origin", origin.to_str().ok_or("origin path")?],
+    )?;
+    provenant_os::fixture::run_git(&rig.project, &["push", "origin", "HEAD:refs/heads/main"])?;
+    let base = String::from_utf8(provenant_os::fixture::run_git(
+        &rig.project,
+        &["rev-parse", "HEAD"],
+    )?)?;
+    let base = base.trim().to_owned();
+    // Move the origin forward from a separate clone of main; the peer clone is
+    // behind, and the advance is a descendant, so no push rewrites the origin.
+    provenant_os::fixture::run_git(
+        temp.path(),
+        &[
+            "clone",
+            "-q",
+            "--branch",
+            "main",
+            origin.to_str().ok_or("origin path")?,
+            upstream.to_str().ok_or("upstream path")?,
+        ],
+    )?;
+    provenant_os::fixture::run_git(&upstream, &["config", "user.name", "Fixture"])?;
+    provenant_os::fixture::run_git(&upstream, &["config", "user.email", "fixture@example.invalid"])?;
+    provenant_os::fixture::run_git(&upstream, &["commit", "--allow-empty", "-qm", "ahead"])?;
+    let merge_base = String::from_utf8(provenant_os::fixture::run_git(
+        &upstream,
+        &["merge-base", &base, "HEAD"],
+    )?)?;
+    assert_eq!(
+        merge_base.trim(),
+        base,
+        "the advanced origin must descend from the peer's base"
+    );
+    provenant_os::fixture::run_git(&upstream, &["push", "origin", "HEAD:refs/heads/main"])?;
+    let ahead = String::from_utf8(provenant_os::fixture::run_git(&upstream, &["rev-parse", "HEAD"])?)?;
+    let ahead = ahead.trim().to_owned();
+    assert_ne!(ahead, base);
+    assert!(
+        provenant_os::fixture::run_git(&rig.project, &["cat-file", "-e", &ahead]).is_err(),
+        "the peer clone must start without the pinned commit"
+    );
+
+    let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+    let factory = Factory {
+        context: Context::open(roots, &rig.home, &rig.project)?,
+        project_attribution: false,
+        clock: SystemClock::new(),
+        backoff: ThreadPause,
+        executor: SystemExecutor::new(1)?,
+        home: rig.home.clone(),
+        cwd: rig.project.clone(),
+        assets: rig.project.clone(),
+        host_launch: None,
+        workers: &Free,
+    };
+    let facts = provenant_confinement::worktrees::RepoFacts::default();
+    let cancel = CancelToken::new();
+
+    // Resolution fetches the missing commit from origin, then pins it.
+    let resolved = factory.resolve_base(&factory.cwd, &ahead, &facts, &cancel)?;
+    assert_eq!(resolved.to_string(), ahead);
+    assert!(
+        provenant_os::fixture::run_git(&rig.project, &["cat-file", "-e", &ahead]).is_ok(),
+        "the fetch must bring the pinned commit into the peer clone"
+    );
+
+    // A commit still missing after the fetch is a host-state refusal naming the
+    // clone and the fetch outcome, never an invalid-input error.
+    let absent = "f".repeat(40);
+    let error = factory
+        .resolve_base(&factory.cwd, &absent, &facts, &cancel)
+        .expect_err("an absent commit must be refused");
+    match &error {
+        FacadeError::BaseFetchFailed { clone, fetch } => {
+            assert_eq!(clone, &rig.project.to_string_lossy().into_owned());
+            assert!(fetch.contains("origin"), "fetch outcome: {fetch}");
+        }
+        other => panic!("expected a host-state base failure, got {other:?}"),
+    }
+    let diagnostic = error.diagnostic();
+    let text = format!(
+        "{} {}",
+        diagnostic.detail.as_deref().unwrap_or_default(),
+        diagnostic.next.as_deref().unwrap_or_default()
+    );
+    assert!(text.contains("peer clone"), "diagnostic: {text}");
+    assert!(text.contains("origin"), "diagnostic: {text}");
+    assert_ne!(error.code(), "invalid_input");
+    assert_eq!(
+        provenant_cli::fabric::facade_outcome(&error),
+        (Outcome::Refused, provenant_run::ErrorKind::BaseUnreachable)
+    );
+    Ok(())
+}
+
+// Spec: docs/specs/fabric.md#publication-boundary
+#[cfg(test)]
+#[test]
+fn cancelled_base_fetch_keeps_the_cancellation() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
+    use std::{
+        collections::BTreeMap,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|path| (path, Occupancy::Available))
+                .collect()
+        }
+    }
+    let rig = crate::worktree_tests::repository()?;
+    provenant_os::fixture::private_state_dir(&rig.state)?;
+    let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+    let factory = Factory {
+        context: Context::open(roots, &rig.home, &rig.project)?,
+        project_attribution: false,
+        clock: SystemClock::new(),
+        backoff: ThreadPause,
+        executor: SystemExecutor::new(1)?,
+        home: rig.home.clone(),
+        cwd: rig.project.clone(),
+        assets: rig.project.clone(),
+        host_launch: None,
+        workers: &Free,
+    };
+    let cancel = CancelToken::new();
+    let calls = AtomicUsize::new(0);
+    let resolve = || -> Result<provenant_core::GitOid, FacadeError> {
+        if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            // Cancellation arrives after the base was found unresolvable and
+            // while the origin fetch is in flight. The retry observes it.
+            cancel.cancel();
+            Err(FacadeError::invalid(InvalidInputDetail::UnresolvableBase(
+                "deadbeef".into(),
+            )))
+        } else {
+            assert!(
+                cancel.is_cancelled(),
+                "the retry must observe the cancellation raised during the fetch"
+            );
+            Err(FacadeError::Cancelled)
+        }
+    };
+    let error = factory
+        .resolve_base_with(&rig.project, resolve, &cancel)
+        .expect_err("a cancellation during the fetch must be preserved");
+    assert!(
+        matches!(error, FacadeError::Cancelled),
+        "cancellation must not be recast as a fetch refusal: {error:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    // The same holds for any other retry failure: only a still-unresolvable
+    // base becomes a host-state fetch refusal.
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let calls = AtomicUsize::new(0);
+    let resolve = || -> Result<provenant_core::GitOid, FacadeError> {
+        if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(FacadeError::invalid(InvalidInputDetail::UnresolvableBase(
+                "deadbeef".into(),
+            )))
+        } else {
+            Err(FacadeError::Timeout)
+        }
+    };
+    let error = factory
+        .resolve_base_with(&rig.project, resolve, &cancel)
+        .expect_err("other retry failures must be preserved");
+    assert!(
+        matches!(error, FacadeError::Timeout),
+        "an unrelated retry failure must pass through: {error:?}"
+    );
     Ok(())
 }
 
