@@ -556,8 +556,8 @@ pub(super) fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> 
         &["worktree", "create", "writer", "--base", "HEAD", "--json"],
     )?;
     fs::write(
-        rig.project.join(".fixture-crash-terminal"),
-        b"crash after exit",
+        rig.project.join(".fixture-crash-before-settlement"),
+        b"crash before settlement",
     )?;
     let path = rig.project.join(".worktrees/writer");
     let (roots, context) = writer_context(&rig)?;
@@ -605,10 +605,11 @@ pub(super) fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> 
         store.record(attempt, &call)?.state,
         provenant_run::AttemptState::Terminal { .. }
     ));
-    // The exit record is published before the guardian's terminal callback
-    // crashes. Wait until that guardian is observed gone: its locks are then
-    // released while the crashed attempt's reservation is still retained, so
-    // reconciliation sees a settled slot rather than a live, stalled guardian.
+    // The exit record is published before the guardian crashes at the
+    // settlement handoff. Wait until that guardian is observed gone: its locks
+    // are then released while the crashed attempt's reservation is still
+    // retained, so reconciliation sees a settled slot rather than a live,
+    // stalled guardian.
     provenant_test_support::wait_for(
         "crashed writer guardian gone",
         Duration::from_secs(8),
