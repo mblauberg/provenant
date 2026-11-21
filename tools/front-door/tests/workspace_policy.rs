@@ -1334,38 +1334,49 @@ fn every_capture_uses_the_default_mask_unless_it_names_a_reason() -> Result<(), 
     Ok(())
 }
 
-/// Rule: a site that parses captured bytes byte-for-byte must opt out of the
-/// executor's default stream mask with a named reason, or full local redaction
-/// rewrites the bytes it parses (blobs, patches, tokens and port responses).
+/// Rule: a site that consumes captured bytes byte-for-byte must opt out of the
+/// executor's default stream mask with a reason that names what it owns. A
+/// parser keeps its bytes with `ByteExactParse`; a site whose bytes are the
+/// credential itself keeps them with `CallerOwnsRedaction`, because nothing is
+/// parsed and the caller owns the redaction boundary.
 #[test]
 fn byte_exact_capture_sites_opt_out_of_the_default_mask() -> Result<(), Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let opt_out = "CaptureMask::Raw(RawCaptureReason::ByteExactParse)";
-    // Known byte-exact helpers: each captures stdout to parse it directly,
-    // either as a byte-level protocol (git object ids, port responses) or as a
-    // credential (an access token that must reach the wire unchanged).
+    // Parsers: stdout is a byte-level protocol or response checked against
+    // `total_bytes`, where a rewrite would corrupt what the caller reads.
     for path in [
         "crates/confinement/src/utility.rs",
-        "crates/cli/src/run/provider/gh_auth.rs",
         "crates/config/src/ports.rs",
         "crates/config/src/ports/forge.rs",
         "crates/run/src/delivery.rs",
+    ] {
+        let source = fs::read_to_string(root.join(path))?;
+        assert!(
+            source.contains("CaptureMask::Raw(RawCaptureReason::ByteExactParse)"),
+            "{path} parses captured bytes byte-for-byte and must opt out of the default mask"
+        );
+    }
+    // Credentials: the captured bytes are the secret, not a value being parsed.
+    // The higher layer owns redaction and needs the token intact for the wire.
+    for path in [
+        "crates/cli/src/run/provider/gh_auth.rs",
         "crates/providers/src/claude.rs",
         "crates/providers/src/quota_live/claude.rs",
     ] {
         let source = fs::read_to_string(root.join(path))?;
         assert!(
-            source.contains(opt_out),
-            "{path} parses captured bytes byte-for-byte and must opt out of the default mask"
+            source.contains("CaptureMask::Raw(RawCaptureReason::CallerOwnsRedaction)"),
+            "{path} captures a credential it owns and must opt out of the default mask"
         );
     }
 
     // Derive the credential-capture sites from the tree rather than trusting
     // the list above: any source that asks the Keychain for a password with
     // `-w` and then consumes the captured stdout holds a token the default
-    // mask would silently rewrite to `[REDACTED]` (which still parses). A new
-    // site of this shape must name a Raw reason where it reads the credential,
-    // so the allowlist cannot go stale for this class of defect.
+    // mask would silently rewrite to `[REDACTED]` (which may still parse but
+    // cannot authenticate). A new site of this shape must name a Raw reason
+    // where it reads the credential, so the allowlist cannot go stale for this
+    // class of defect.
     let policy_source = root.join(file!());
     let mut sources = Vec::new();
     for source_root in source_roots() {

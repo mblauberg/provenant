@@ -658,7 +658,9 @@ const ASSIGNMENT_RUN: usize = 32;
 const SCHEME_WORD: usize = 16;
 
 /// Where the assignment scanner is. Quoted values remain masked until a
-/// definite closing delimiter or the raw line end.
+/// definite closing delimiter or the raw line end. Unquoted values also stop
+/// at structural delimiters (a raw NUL, or an unescaped quote) so masking
+/// cannot swallow the record or document boundary that a parser relies on.
 #[derive(Default)]
 enum Assignment {
     #[default]
@@ -674,8 +676,10 @@ enum Assignment {
     },
     /// Letters after `Authorization:`, held until the scheme is known.
     Scheme { word: Vec<u8> },
-    /// Inside a value, which is replaced by one `[REDACTED]`. `line` values end
-    /// only at a newline, so an unknown `Authorization` scheme hides its whole line.
+    /// Inside a value, which is replaced by one `[REDACTED]`. An unknown
+    /// `Authorization` scheme hides its whole line, but even a line value stops
+    /// at a newline, a raw NUL or an unescaped quote so the record or JSON
+    /// document around it stays intact.
     Value {
         quote: Option<u8>,
         quote_slashes: usize,
@@ -989,7 +993,15 @@ impl AssignmentScanner {
                         }
                         None => {
                             let ends = if line {
-                                byte == b'\n' || byte == b'\r'
+                                // A line value still hides an unknown scheme's whole
+                                // line, but it must not swallow a structural boundary:
+                                // a raw NUL ends a porcelain record and an unescaped
+                                // quote ends the surrounding JSON string. An escaped
+                                // quote is part of the value, as for quoted values.
+                                byte == b'\n'
+                                    || byte == b'\r'
+                                    || byte == b'\0'
+                                    || (byte == b'"' && backslashes.is_multiple_of(2))
                             } else {
                                 // Backslashes and escaped delimiters continue the
                                 // credential, even after an exact marker. Raw line
@@ -1066,9 +1078,11 @@ fn quote_close(backslashes: usize, quote_slashes: usize) -> bool {
     }
 }
 
-/// Bytes that end an unquoted value.
+/// Bytes that end an unquoted value. A raw NUL is a record separator in
+/// `-z` porcelain, so a credential-shaped path or branch name must not carry
+/// the mask into the next field.
 fn is_delimiter(byte: u8) -> bool {
-    byte.is_ascii_whitespace() || b"\"'\\&,;<>)]}`".contains(&byte)
+    byte.is_ascii_whitespace() || b"\0\"'\\&,;<>)]}`".contains(&byte)
 }
 
 // Run-length encoding keeps a withheld closing backslash run compact even when
@@ -2853,6 +2867,53 @@ mod tests {
                 );
                 assert!(!redactor.has_redaction(), "split {split}: {input}");
             }
+        }
+    }
+
+    #[test]
+    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
+    fn credential_masking_preserves_json_and_nul_record_boundaries() {
+        let _mode = scoped(Mode::Full);
+        let secret = b"ghp_abcdefghijklmnopqrstuvwxyz";
+        let cases: &[(&[u8], &[u8])] = &[
+            (
+                br#"{"text":"before authorization: token ghp_abcdefghijklmnopqrstuvwxyz after"}"#,
+                br#"{"text":"before authorization: [REDACTED]"}"#,
+            ),
+            (
+                br#"{"text":"authorization: token ghp_abcdefghijklmnopqrstuvwxyz\"LEAK_SENTINEL"}"#,
+                br#"{"text":"authorization: [REDACTED]"}"#,
+            ),
+            (
+                b"authorization: token ghp_abcdefghijklmnopqrstuvwxyz\0next\0",
+                b"authorization: [REDACTED]\0next\0",
+            ),
+            (
+                b"worktree /path/wt-token=abc/one\0HEAD abc\0",
+                b"worktree /path/wt-token=[REDACTED]\0HEAD abc\0",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(known_shapes(input).expect("bounded input"), *expected);
+            for split in 0..=input.len() {
+                let mut redactor = Redactor::new([]).expect("empty secret set");
+                let output = joined(&mut redactor, &[&input[..split], &input[split..]]);
+                assert_eq!(output, *expected, "split {split}");
+                assert!(
+                    !output.windows(secret.len()).any(|window| window == secret),
+                    "split {split}: secret leaked"
+                );
+                assert!(redactor.has_redaction(), "split {split}");
+            }
+            let mut redactor = Redactor::new([]).expect("empty secret set");
+            let bytewise = input.iter().map(std::slice::from_ref).collect::<Vec<_>>();
+            assert_eq!(joined(&mut redactor, &bytewise), *expected);
+        }
+        // Both masked JSON documents still parse; masking never eats the
+        // closing quote or the braces around a credential-shaped value.
+        for (input, _) in cases.iter().take(2) {
+            let output = known_shapes(input).expect("bounded input");
+            serde_json::from_slice::<serde_json::Value>(&output).expect("JSON stays valid");
         }
     }
 

@@ -274,10 +274,10 @@ impl LiveQuota {
                 service.push('-');
                 service.push_str(&crate::claude::keychain_suffix(dir.as_os_str().as_bytes()));
             }
-            // The Keychain item is a credential: `claude_token` parses the
-            // access token out of these bytes and sends it as a Bearer header.
-            // A masked token would still parse (expiresAt survives) but would
-            // be `[REDACTED]` on the wire, so keep this one capture raw.
+            // The Keychain item is a credential, not a value being parsed: the
+            // caller owns its redaction boundary and needs the access token
+            // intact for the Bearer header. A masked token would still parse
+            // (expiresAt survives) but would be `[REDACTED]` on the wire.
             let out = self
                 .command_with_mask(
                     "/usr/bin/security",
@@ -286,7 +286,7 @@ impl LiveQuota {
                     None,
                     deadline,
                     10,
-                    CaptureMask::Raw(RawCaptureReason::ByteExactParse),
+                    CaptureMask::Raw(RawCaptureReason::CallerOwnsRedaction),
                 )
                 .map_err(|error| match error {
                     ProbeFailure::ProbeDirectory => error,

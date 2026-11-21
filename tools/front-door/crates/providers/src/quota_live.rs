@@ -215,10 +215,10 @@ impl LiveQuota {
             CaptureMask::default(),
         )
     }
-    /// Runs a probe whose stdout is a credential parsed byte-for-byte. The
-    /// default stream mask would rewrite an `sk-ant-` token to `[REDACTED]`
-    /// before `claude_token` could use it, so this scoped helper is the only
-    /// path that keeps a probe's captured stdout raw.
+    /// Runs a probe whose stdout is a credential the caller owns. The default
+    /// stream mask would rewrite an `sk-ant-` token to `[REDACTED]` before
+    /// `claude_token` could use it, so this scoped helper is the only path that
+    /// keeps a probe's captured stdout raw.
     #[allow(clippy::too_many_arguments)]
     fn command_with_mask(
         &self,

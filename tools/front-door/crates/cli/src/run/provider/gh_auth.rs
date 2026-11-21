@@ -347,10 +347,11 @@ fn attempt_token(
     options.process_group = true;
     options.cleanup_process_group = true;
     options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
-    // The captured bytes *are* the credential: the executor's default stream
-    // mask would replace the token with `[REDACTED]`, which the check below
-    // would accept as a usable token. Keep the value byte-exact.
-    options.stdout_mask = CaptureMask::Raw(RawCaptureReason::ByteExactParse);
+    // The captured bytes *are* the credential, not a value being parsed: the
+    // caller owns its redaction boundary and needs the token intact to
+    // authenticate. The executor's default mask would replace it with
+    // `[REDACTED]`, which the check below would accept as a usable token.
+    options.stdout_mask = CaptureMask::Raw(RawCaptureReason::CallerOwnsRedaction);
     options.stderr = StreamPolicy::Discard;
     // The selected store and host home survive a cleared guardian environment.
     // A missing login does not prevent other ordinary lane work.
