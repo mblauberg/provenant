@@ -762,6 +762,13 @@ pub fn safe_multiline_text(value: &str, max_bytes: usize) -> String {
     safe_display_text(value, true, max_bytes)
 }
 
+/// Escape terminal controls without applying a bound, for callers that bound
+/// the text afterwards and need to keep its tail (where a failure usually is).
+/// Uses the same one display-sanitisation core as [`safe_text`].
+pub fn escape_display_text(value: &str) -> String {
+    safe_display_text(value, true, usize::MAX)
+}
+
 /// Destination is selected by the audience, not the transport. Local includes
 /// authorised execution context; Remote denotes disclosure outside that authority
 /// and needs a publication projection.

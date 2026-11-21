@@ -149,6 +149,29 @@ pub(crate) fn emit_summarised<T: Serialize>(
     read_only: bool,
     summary: Option<&provenant_cli::Summary>,
 ) -> u8 {
+    emit_with_writers(
+        result,
+        globals,
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+        human,
+        read_only,
+        summary,
+    )
+}
+
+/// The emission seam shared by production and targeted tests: a refusal's
+/// rendered bytes go to the supplied writers, so a test can drive the same
+/// `fail_with_cause` path instead of hand-building a `CommandResult`.
+pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
+    result: &CommandResult<T>,
+    globals: &provenant_cli::Globals,
+    stdout: &mut Wout,
+    stderr: &mut Werr,
+    human: &str,
+    read_only: bool,
+    summary: Option<&provenant_cli::Summary>,
+) -> u8 {
     let explanation = if summary.is_none() && result.command == "land" {
         serde_json::to_value(&result.data)
             .ok()
@@ -169,8 +192,8 @@ pub(crate) fn emit_summarised<T: Serialize>(
     let rendered = provenant_cli::render_or_publish(
         result,
         mode,
-        &mut io::stdout().lock(),
-        &mut io::stderr().lock(),
+        stdout,
+        stderr,
         |value| overflow::publish(value, globals),
     );
     match rendered {
@@ -393,9 +416,73 @@ fn fail_with_cause(
     repair: Option<&str>,
     globals: &provenant_cli::Globals,
 ) -> u8 {
+    fail_with_cause_with_writers(
+        command,
+        status,
+        code,
+        message,
+        cause,
+        repair,
+        globals,
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+    )
+}
+
+/// The testable seam for `fail_with_cause`: the same refusal, emitted to the
+/// supplied writers so a test observes exactly what production renders.
+// The argument list mirrors `fail_with_cause` plus the two writers.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fail_with_cause_with_writers<Wout: Write, Werr: Write>(
+    command: &str,
+    status: Outcome,
+    code: &str,
+    message: &str,
+    cause: Option<&str>,
+    repair: Option<&str>,
+    globals: &provenant_cli::Globals,
+    stdout: &mut Wout,
+    stderr: &mut Werr,
+) -> u8 {
+    fail_with_command_error_with_writers(
+        command,
+        status,
+        command_error(code, message, cause, repair),
+        globals,
+        stdout,
+        stderr,
+    )
+}
+
+/// Emit an already-mapped refusal. Owners with a typed error use this with
+/// [`crate::worktrees::Error::command_error`] so the mapping lives in one place.
+pub(crate) fn fail_with_command_error(
+    command: &str,
+    status: Outcome,
+    error: CommandError,
+    globals: &provenant_cli::Globals,
+) -> u8 {
+    fail_with_command_error_with_writers(
+        command,
+        status,
+        error,
+        globals,
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+    )
+}
+
+pub(crate) fn fail_with_command_error_with_writers<Wout: Write, Werr: Write>(
+    command: &str,
+    status: Outcome,
+    error: CommandError,
+    globals: &provenant_cli::Globals,
+    stdout: &mut Wout,
+    stderr: &mut Werr,
+) -> u8 {
     let mut result = CommandResult::new(command, status, ());
-    result.error = Some(command_error(code, message, cause, repair));
-    emit(&result, globals, "", false)
+    result.error = Some(error);
+    emit_with_writers(&result, globals, stdout, stderr, "", false, None)
 }
 fn fail_with_diagnostic(
     command: &str,

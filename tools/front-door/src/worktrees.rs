@@ -170,18 +170,23 @@ impl Error {
             _ => None,
         }
     }
+
+    /// The one mapping from a worktree refusal to its transport facts. Used by
+    /// the production emit path and by the render tests, so the two cannot drift.
+    pub(crate) fn command_error(&self, code: &str) -> provenant_records::CommandError {
+        crate::command_error(code, &self.local_message(), self.cause(), self.repair())
+    }
 }
 
 /// Keep a failing `build.prepare` command's bounded output alongside its
 /// message. A seed-build operator otherwise sees only the command and exit
 /// status and has to reproduce the failure to learn why it happened. The tail
-/// is masked here, before it becomes `error.cause`, so local `redaction` holds
-/// for both human and JSON output.
+/// was masked on the capture stream, ahead of the Tail window, so it is already
+/// safe to carry as `error.cause` in both human and JSON output.
 pub(crate) fn seed_build_failure(error: &(dyn std::error::Error + 'static)) -> Error {
     Error::SeedBuild {
         message: error.to_string(),
-        tail: crate::target_seed_build::prepare_failed_of(error)
-            .map(|prepare| crate::target_seed_build::redact_operator_text(&prepare.tail)),
+        tail: crate::target_seed_build::prepare_failed_of(error).map(|prepare| prepare.tail.clone()),
     }
 }
 
@@ -238,17 +243,14 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
                 globals,
             ),
         },
-        Err(error) => crate::fail_with_cause(
+        Err(error) => crate::fail_with_command_error(
             name,
             error.outcome(),
-            if matches!(error, Error::Worktree(WorktreeError::LockBusy)) {
+            error.command_error(if matches!(error, Error::Worktree(WorktreeError::LockBusy)) {
                 "WORKTREE_LOCK_BUSY"
             } else {
                 "WORKTREE"
-            },
-            &error.local_message(),
-            error.cause(),
-            error.repair(),
+            }),
             globals,
         ),
     }
@@ -4582,32 +4584,41 @@ mod human_tests {
                 .local_message()
                 .contains("build.prepare[0] command failed")
         );
-        let mut result = CommandResult::new("worktree seed-build", failure.outcome(), ());
-        result.error = Some(crate::command_error(
-            "WORKTREE",
-            &failure.local_message(),
-            failure.cause(),
-            failure.repair(),
-        ));
-
-        let mut human = Vec::new();
-        provenant_cli::render(
-            &result,
-            provenant_cli::RenderMode::Human {
-                text: "",
-                read_only: false,
-                summary: None,
-            },
-            &mut human,
-        )?;
-        let human = String::from_utf8(human)?;
+        // Drive the production emission path with the one Error::command_error
+        // mapping; human refusals render on stderr, JSON on stdout.
+        let human_globals = provenant_cli::Globals {
+            json: false,
+            full: true,
+            ..Default::default()
+        };
+        let (mut human_out, mut human_err) = (Vec::new(), Vec::new());
+        crate::fail_with_command_error_with_writers(
+            "worktree seed-build",
+            failure.outcome(),
+            failure.command_error("WORKTREE"),
+            &human_globals,
+            &mut human_out,
+            &mut human_err,
+        );
+        let human = String::from_utf8(human_err)?;
         assert!(human.contains("build.prepare[0] command failed"), "{human}");
         assert!(human.contains(marker), "{human}");
         assert!(human.contains("install the missing dependency"), "{human}");
 
-        let mut json = Vec::new();
-        provenant_cli::render(&result, provenant_cli::RenderMode::Json, &mut json)?;
-        let value: serde_json::Value = serde_json::from_slice(&json)?;
+        let json_globals = provenant_cli::Globals {
+            json: true,
+            ..Default::default()
+        };
+        let (mut json_out, mut json_err) = (Vec::new(), Vec::new());
+        crate::fail_with_command_error_with_writers(
+            "worktree seed-build",
+            failure.outcome(),
+            failure.command_error("WORKTREE"),
+            &json_globals,
+            &mut json_out,
+            &mut json_err,
+        );
+        let value: serde_json::Value = serde_json::from_slice(&json_out)?;
         assert_eq!(value["error"]["cause"].as_str(), Some(tail.as_str()));
         assert!(
             value["error"]["message"]

@@ -7,7 +7,8 @@ use std::io::{self, Write};
 use thiserror::Error;
 
 /// An error cause can carry a 2 KiB command-output tail, expanded by escaping.
-/// Human output shows all of it; compact output summarises it to one row.
+/// Human output keeps both ends inside this bound and marks the omitted bytes;
+/// compact output summarises it to one row.
 const ERROR_CAUSE_BYTES: usize = 4 * 1024;
 
 /// The compact view an owner supplies for the default human output: a headline
@@ -293,13 +294,17 @@ pub fn render_within<T: Serialize>(
                         && !cause.is_empty()
                         && cause != error.message
                     {
-                        let safe = provenant_records::diagnostic::safe_multiline_text(
-                            cause,
-                            ERROR_CAUSE_BYTES,
-                        );
                         match mode {
                             RenderMode::Human { .. } => {
-                                for line in safe.lines() {
+                                // A cause can be a 2 KiB command tail that expands
+                                // when terminal controls are escaped. Escape first,
+                                // then keep both ends inside the bound with the
+                                // shared omitted-bytes marker: the failure is at the
+                                // end, so never clip it away.
+                                let escaped =
+                                    provenant_records::diagnostic::escape_display_text(cause);
+                                let bounded = head_and_tail(&escaped, ERROR_CAUSE_BYTES);
+                                for line in bounded.lines() {
                                     text.push_str("  ");
                                     text.push_str(line);
                                     text.push('\n');
@@ -308,6 +313,10 @@ pub fn render_within<T: Serialize>(
                             RenderMode::Compact { .. } => {
                                 // Compact stays summarised: one bounded line
                                 // and a pointer to --full, never a tail dump.
+                                let safe = provenant_records::diagnostic::safe_multiline_text(
+                                    cause,
+                                    ERROR_CAUSE_BYTES,
+                                );
                                 let first = safe
                                     .lines()
                                     .find(|line| !line.trim().is_empty())
@@ -686,6 +695,50 @@ mod tests {
         assert!(human.contains("second line") && human.contains("third line"), "{human}");
         Ok(())
     }
+    #[test]
+    // Spec: docs/specs/cli.md#results
+    fn long_human_cause_keeps_its_end_and_marks_the_omitted_bytes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A bounded command tail grows well past the cap once terminal controls
+        // are escaped. The renderer must keep the end, where the failure is,
+        // and say how much it left out instead of silently clipping the tail.
+        let end = "FATAL: final failure line";
+        let cause = format!(
+            "beginning-of-log {}\n{end}",
+            "\u{202e}".repeat(700) // Cf override: 3 raw bytes, 8 escaped chars
+        );
+        assert!(cause.len() <= 2 * ERROR_CAUSE_BYTES, "{cause}");
+        let mut result = CommandResult::new("worktree seed-build", Outcome::Error, ());
+        result.error = Some(provenant_records::CommandError {
+            diagnostic: None,
+            code: "WORKTREE".into(),
+            message: "build failed".into(),
+            cause: Some(cause),
+            repair: None,
+        });
+        let mut human = Vec::new();
+        render(
+            &result,
+            RenderMode::Human {
+                text: "",
+                read_only: false,
+                summary: None,
+            },
+            &mut human,
+        )?;
+        let human = String::from_utf8(human)?;
+        assert!(human.contains(end), "the failure at the end was clipped: {human}");
+        assert!(
+            human.contains("bytes omitted; use --full"),
+            "no omission marker: {human}"
+        );
+        assert!(
+            human.lines().all(|line| line.len() <= ERROR_CAUSE_BYTES + 80),
+            "cause exceeded its bound: {human}"
+        );
+        Ok(())
+    }
+
     #[test]
     // Spec: docs/specs/cli.md#results
     fn fallback_bounds_a_single_long_line() {
