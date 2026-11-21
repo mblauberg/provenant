@@ -901,18 +901,25 @@ pub(crate) fn base_env_with_host(
         ("TMPPREFIX".into(), scratch.join("zsh").into()),
         ("LANG".into(), "en_US.UTF-8".into()),
     ];
-    env.extend(
-        provenant_os::git_config::identity(
-            provenant_os::git_config::ConfigContext {
-                operation: "read Git identity",
-                file: input.cwd.to_owned(),
-                key: None,
-            },
-            input.provenant.git,
-            input.cwd,
-        )
-        .map_err(ProviderError::GitConfigRead)?,
-    );
+    // Reading the host identity is best effort: the lane's private config sets
+    // `user.useConfigOnly`, so an absent identity cannot fall back to a
+    // generated hostname identity. An unavailable pinned Git or working
+    // directory is an environment availability gap, not a config-read failure,
+    // and must not refuse the launch. A real config-read failure still carries
+    // its named cause through ProviderError::GitConfigRead.
+    match provenant_os::git_config::identity(
+        provenant_os::git_config::ConfigContext {
+            operation: "read Git identity",
+            file: input.cwd.to_owned(),
+            key: None,
+        },
+        input.provenant.git,
+        input.cwd,
+    ) {
+        Ok(values) => env.extend(values),
+        Err(error) if error.source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ProviderError::GitConfigRead(error)),
+    }
     Ok(env)
 }
 
