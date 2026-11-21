@@ -510,7 +510,9 @@ where
     hosts.iter().cloned().zip(results).collect()
 }
 
-// Never publish an overflow artefact, including when rendering errors.
+// Never publish an overflow artefact, including when rendering errors. An
+// oversized view is bounded and warned about, never refused: the result still
+// arrives, with an explicit marker for the bytes that could not be shown.
 fn render(
     result: &CommandResult<Option<serde_json::Value>>,
     globals: &provenant_cli::Globals,
@@ -519,40 +521,61 @@ fn render(
     stderr: &mut impl io::Write,
 ) -> u8 {
     let json = globals.json;
-    let mode = globals.render_mode(human, true, None);
+    let full_bytes = serde_json::to_vec(result)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
     // The result's size is a bound on the result, not on how it is presented:
     // a compact view of an oversized result is still an oversized result.
-    let oversized = !json
-        && serde_json::to_vec(result)
-            .is_ok_and(|bytes| bytes.len() > provenant_cli::MAX_RESULT_BYTES);
-    let rendered = if oversized {
-        Err(RenderError::TooLarge)
-    } else if !json && result.error.is_some() {
+    let oversized = !json && full_bytes > provenant_cli::MAX_RESULT_BYTES;
+    let board = result.command == "console board";
+    let source = if board {
+        "--limit"
+    } else {
+        "COMMAND_RESULT_MAX_BYTES"
+    };
+    let repair = if board {
+        "reduce --limit; if --limit 1 still fails, inspect bounded artefacts with `provenant output ATTEMPT`"
+    } else {
+        "narrow the selection"
+    };
+    let clipped;
+    let mode = if oversized {
+        let (text, omitted) =
+            provenant_cli::clip_for_output(human, provenant_cli::MAX_RESULT_BYTES);
+        clipped = text;
+        warn_capped(&result.command, source, repair, omitted, stderr);
+        globals.render_mode(&clipped, true, None)
+    } else {
+        globals.render_mode(human, true, None)
+    };
+    let rendered = if !json && result.error.is_some() {
         provenant_cli::render(result, mode, stderr)
     } else {
         provenant_cli::render(result, mode, stdout)
     };
     match rendered {
         Ok(()) => provenant_cli::exit_status(&result.status),
+        Err(RenderError::TooLarge) => {
+            // JSON cannot be clipped mid-object: page a bounded marker that
+            // names the cap and the omitted size instead of the refusal.
+            let omitted = full_bytes.saturating_sub(provenant_cli::MAX_RESULT_BYTES);
+            warn_capped(&result.command, source, repair, omitted, stderr);
+            let marker = serde_json::json!({
+                "truncated": true,
+                "omitted_bytes": omitted,
+                "source": source,
+                "repair": repair,
+            });
+            let bounded = CommandResult::new(&result.command, Outcome::Ok, Some(marker));
+            let _ = provenant_cli::render(&bounded, RenderMode::Json, stdout);
+            provenant_cli::exit_status(&result.status)
+        }
         Err(error) => {
             let mut failure = CommandResult::new(&result.command, Outcome::Error, ());
             failure.error = Some(CommandError {
                 diagnostic: None,
-                code: if matches!(error, RenderError::TooLarge) {
-                    "RESULT_TOO_LARGE"
-                } else {
-                    "IO"
-                }
-                .into(),
-                message: if matches!(error, RenderError::TooLarge) {
-                    if result.command == "console board" {
-                        "board exceeds 1 MiB; reduce --limit. If --limit 1 still fails, the row cannot fit this surface; inspect bounded artefacts with `provenant output ATTEMPT`. No artefact was written".into()
-                    } else {
-                        "catalogue exceeds 1 MiB; no artefact was written".into()
-                    }
-                } else {
-                    error.to_string()
-                },
+                code: "IO".into(),
+                message: error.to_string(),
                 cause: None,
                 repair: None,
             });
@@ -572,6 +595,21 @@ fn render(
             3
         }
     }
+}
+
+/// The one warning for a capped console view: names the rule, the source that
+/// set the cap, the omitted size and the way to see more.
+fn warn_capped(
+    command: &str,
+    source: &str,
+    repair: &str,
+    omitted: usize,
+    stderr: &mut impl io::Write,
+) {
+    let _ = writeln!(
+        stderr,
+        "warning: [RESULT_TOO_LARGE] {command} exceeds 1 MiB (source: {source}); showing a bounded view with {omitted} bytes omitted; {repair}"
+    );
 }
 
 #[cfg(test)]
@@ -751,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_single_board_row_explains_recovery() {
+    fn oversized_single_board_row_warns_and_pages_a_bounded_marker() {
         let value =
             serde_json::json!({"lanes":[{"metadata":"x".repeat(provenant_cli::MAX_RESULT_BYTES)}]});
         let result = provenant_records::CommandResult::new(
@@ -772,18 +810,24 @@ mod tests {
                 &mut stdout,
                 &mut stderr
             ),
-            3
+            0
         );
-        let failure: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
-        assert_eq!(failure["error"]["code"], "RESULT_TOO_LARGE");
-        let message = failure["error"]["message"].as_str().unwrap();
-        assert!(message.contains("reduce --limit"));
-        assert!(message.contains("--limit 1 still fails"));
-        assert!(message.contains("provenant output ATTEMPT"));
+        let paged: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(paged["data"]["truncated"], true);
+        assert!(paged["data"]["omitted_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(paged["data"]["source"], "--limit");
+        let repair = paged["data"]["repair"].as_str().unwrap();
+        assert!(repair.contains("reduce --limit"));
+        assert!(repair.contains("--limit 1 still fails"));
+        assert!(repair.contains("provenant output ATTEMPT"));
+        assert!(paged["error"].is_null());
+        let warning = String::from_utf8(stderr).unwrap();
+        assert!(warning.contains("warning: [RESULT_TOO_LARGE]"), "{warning}");
+        assert!(warning.contains("bytes omitted"), "{warning}");
     }
 
     #[test]
-    fn oversized_human_catalogue_never_publishes() {
+    fn oversized_human_catalogue_warns_and_bounds_without_publishing() {
         let row = serde_json::json!({"project_id":"x".repeat(32), "common_dir":{"encoding":"utf8","path":"a".repeat(180)}});
         let value = serde_json::json!({"projects":vec![row; 6500], "coverage":{"scope":"local"}});
         let human = provenant_cli::terse(&value);
@@ -806,13 +850,14 @@ mod tests {
                 &mut stdout,
                 &mut stderr
             ),
-            3
+            0
         );
-        assert!(stdout.is_empty());
-        assert!(
-            String::from_utf8(stderr)
-                .unwrap()
-                .contains("RESULT_TOO_LARGE")
-        );
+        assert!(!stdout.is_empty());
+        assert!(stdout.len() <= provenant_cli::MAX_RESULT_BYTES);
+        let text = String::from_utf8(stdout).unwrap();
+        assert!(text.contains("bytes omitted"), "{text}");
+        let warning = String::from_utf8(stderr).unwrap();
+        assert!(warning.contains("warning: [RESULT_TOO_LARGE]"), "{warning}");
+        assert!(warning.contains("COMMAND_RESULT_MAX_BYTES"), "{warning}");
     }
 }

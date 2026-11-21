@@ -154,6 +154,20 @@ pub fn head_and_tail(text: &str, max: usize) -> String {
     )
 }
 
+/// A bounded presentation for surfaces that warn and proceed on an oversized
+/// result: keep both ends of the owner's text and an explicit marker naming the
+/// omitted bytes, rather than refusing the whole result. `limit` includes the
+/// marker. Returns the clipped text and how many bytes were left out.
+pub fn clip_for_output(text: &str, limit: usize) -> (String, usize) {
+    const RESERVE: usize = 96;
+    let clipped = head_and_tail(text, limit.saturating_sub(RESERVE));
+    if clipped.len() <= limit {
+        let omitted = text.len().saturating_sub(clipped.len());
+        (clipped, omitted)
+    } else {
+        (bounded_text(text, limit), text.len().saturating_sub(limit))
+    }
+}
 /// The generic fallback for an owner with no summary: small text is shown
 /// whole; larger text keeps its first rows and says how much was left out.
 fn fallback_text(command: &str, text: &str) -> String {

@@ -1136,7 +1136,7 @@ fn verify_command_strategy_records_one_job_and_commit_uses_its_tree() -> Result 
 }
 
 #[test]
-fn project_none_verify_port_overrides_host_command_without_executing_it() -> Result {
+fn project_none_verify_port_warns_and_skips_without_executing_it() -> Result {
     let rig = TestRig::new()?;
     let marker = rig.project.join("verify-call.txt");
     fs::write(
@@ -1160,14 +1160,23 @@ printf 'executed\n' > verify-call.txt
     let output = rig.command(&["verify", "--json"])?;
     assert_eq!(
         code(&output),
-        4,
+        0,
         "{}",
         String::from_utf8_lossy(&output.stderr.bytes)
     );
     let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(result["status"], "unavailable");
+    assert_eq!(result["status"], "ok");
     assert_eq!(result["data"]["backend"], "none");
-    assert_eq!(result["error"]["code"], "VERIFY_UNAVAILABLE");
+    assert!(
+        result["data"]["skipped"]
+            .as_str()
+            .unwrap()
+            .contains("verify port is disabled")
+    );
+    assert!(result["error"].is_null());
+    assert!(
+        String::from_utf8_lossy(&output.stderr.bytes).contains("warning: [VERIFY_UNAVAILABLE]")
+    );
     assert!(!marker.exists());
     let inventory = provenant_config::port_command_receipts(
         &rig.state,

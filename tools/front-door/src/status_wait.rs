@@ -1129,7 +1129,8 @@ fn forge_request(
 }
 
 /// The local paced-reread cadence for owner-side waits, resolved through the
-/// one wait settings policy. A malformed configuration is a typed refusal.
+/// one wait settings policy. An unreadable or malformed configuration warns and
+/// uses the compiled defaults rather than refusing the wait.
 pub(crate) fn local_cadence(
     roots: &provenant_core::Roots,
 ) -> Result<LocalCadence, provenant_fabric_runtime::coordination::facade::FacadeError> {
@@ -1381,12 +1382,10 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     }
     if command.targets.is_empty() && command.prs.is_empty() {
         if provenant_cli::fabric::in_lane() {
-            return crate::fail(
-                "wait",
-                Outcome::Invalid,
-                "TARGET_REQUIRED",
-                "inside a lane, wait names its targets: NAME[/NODE[#N]] or --pr NUMBER",
-                globals,
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: [TARGET_REQUIRED] wait inside a lane named no targets (source: owner relay); waiting on this lane's children and relay-discovered targets"
             );
         }
         match provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
