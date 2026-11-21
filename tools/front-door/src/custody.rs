@@ -284,6 +284,11 @@ impl<'a> RetirementReader<'a> {
     ) -> Result<Self, provenant_confinement::worktrees::WorktreeError> {
         let store =
             HostStore::open_read_only(&roots.state, Instant::now() + Duration::from_secs(2))
+                .map_err(RetirementWriter::error)?
+                // The open deadline bounds acquisition, not the GC preview that
+                // reuses this reader for every later ref candidate.
+                .map(|store| store.live_read_only())
+                .transpose()
                 .map_err(RetirementWriter::error)?;
         Ok(Self {
             store,
