@@ -2222,14 +2222,21 @@ mod tests {
     /// Eight launches share one origin and start together. Without a per-repo
     /// fetch lock they race on `refs/remotes/origin/main.lock` and the losers
     /// are misclassified as an invalid base (#3748).
+    ///
+    /// The concurrent phase needs an executor with a slot per launch. The
+    /// fixtures' `SystemExecutor::new(1)` admits one child at a time, so
+    /// sharing it here would fail seven threads with `ExecError::Busy` before
+    /// they ever reach base resolution; separate launches own separate
+    /// executors in production.
     #[test]
     fn concurrent_launches_against_one_origin_all_resolve_the_moved_base() -> TestResult {
         use std::sync::{Barrier, atomic::AtomicUsize};
         const LAUNCHES: usize = 8;
         let upstream = small_history()?;
         let local = small_history()?;
+        let concurrent = SystemExecutor::new(LAUNCHES)?;
         let executor = TestHome {
-            executor: &upstream.executor,
+            executor: &concurrent,
             home: &local.root,
         };
         git(
