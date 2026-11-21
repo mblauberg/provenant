@@ -1011,6 +1011,54 @@ impl Factory {
         Ok(())
     }
 
+    /// Whether this submission binds a node to another host. Such a document
+    /// crosses a host boundary, so it must not carry this host's replay
+    /// snapshot: that snapshot retains file-backed brief paths and other
+    /// sender-local attempt state. The peer rebuilds its own snapshot from the
+    /// compiled node and the sealed classification (#3744).
+    fn document_is_peer_bound(&self, document: &GraphDocument) -> bool {
+        fn node_is_peer_bound(
+            node: &provenant_fabric_runtime::graph::GraphNode,
+            context: &Context,
+        ) -> bool {
+            let remote = |name: &str| {
+                !matches!(name, "local" | "localhost")
+                    && context
+                        .peer_host(name)
+                        .is_some_and(|host| host != context.identity.host)
+            };
+            node.attempt
+                .as_ref()
+                .and_then(|attempt| attempt.host.as_deref())
+                .is_some_and(remote)
+                || node.composite.as_ref().is_some_and(|composite| {
+                    composite
+                        .nodes
+                        .iter()
+                        .any(|child| node_is_peer_bound(child, context))
+                })
+                || node.loop_body.as_ref().is_some_and(|body| {
+                    body.body
+                        .iter()
+                        .any(|child| node_is_peer_bound(child, context))
+                })
+                || node
+                    .plan
+                    .as_ref()
+                    .and_then(|plan| plan.fallback.as_ref())
+                    .is_some_and(|fallback| {
+                        fallback
+                            .nodes
+                            .iter()
+                            .any(|child| node_is_peer_bound(child, context))
+                    })
+        }
+        document
+            .nodes
+            .iter()
+            .any(|node| node_is_peer_bound(node, &self.context))
+    }
+
     fn launch_resolvers(
         &self,
         document: Option<&Value>,
@@ -2261,6 +2309,17 @@ impl Factory {
                 self.context.port_table.worktree_layout.clone(),
             )
             .map_err(graph_patch_error)?;
+            // The snapshot is a host-local replay record: it embeds the
+            // file-backed brief path and other sender placement state. A
+            // peer-bound document ships the brief as prompt text and the
+            // classification in its sealed policy, so withhold the snapshot
+            // and let the peer rebuild one from its own bound node (#3744).
+            if self.document_is_peer_bound(&document) {
+                document.submission_patch = None;
+                warn_operator(
+                    "withheld sender-local submission snapshot from peer graph document; the peer binds its own brief inputs",
+                );
+            }
         }
         // Static admission is the single compile gate: a launch no longer seals
         // the submission patch above, so admit here to keep every entry on the
