@@ -736,6 +736,21 @@ _provenant_hook_warning() {{
     );
     bytes.extend_from_slice(
         br#"
+# A short-option cluster such as -an or -qn carries -n (--no-verify). A
+# value-taking option consumes the rest of the cluster, so the 'n' in commit
+# -uno/-unormal or -S<key> is a value, not the hook-bypass flag.
+_provenant_short_has_no_verify() {
+    _provenant_cluster=${1#-}
+    while [ -n "$_provenant_cluster" ]; do
+        case "$_provenant_cluster" in
+            n*) return 0 ;;
+            m*|F*|C*|c*|u*|S*) return 1 ;;
+            ?*) _provenant_cluster=${_provenant_cluster#?} ;;
+            *) return 1 ;;
+        esac
+    done
+    return 1
+}
 _provenant_hook_guard() {
     # Ask Git to parse its two environment configuration encodings. The scope
     # distinguishes command overrides from the repository's configured hooks.
@@ -786,10 +801,26 @@ _provenant_hook_guard() {
             case "$1" in
                 --) break ;;
                 --no-verify) _provenant_hook_warning ;;
+                # Git accepts unambiguous long-option abbreviations. --no-veri
+                # (and --no-verif) name --no-verify for commit, push, rebase and
+                # am. Merge also has --no-verify-signatures and rejects the
+                # abbreviation as ambiguous; cherry-pick has no --no-verify at
+                # all. Only the exact spelling is a bypass for those two.
+                --no-veri|--no-verif)
+                    case "$_provenant_subcommand" in
+                        merge|cherry-pick) ;;
+                        *) _provenant_hook_warning ;;
+                    esac ;;
                 -m|-F|-C|-c|--message|--file|--reuse-message|--reedit-message)
-                    shift; [ "$#" -gt 0 ] || break ;;
+                    case "$_provenant_subcommand:$1" in
+                        rebase:-m) ;; # rebase -m is boolean --merge, not a value
+                        *) shift; [ "$#" -gt 0 ] || break ;;
+                    esac ;;
                 --*|-m*|-F*|-C*|-c*) ;;
-                -*) if [ "$_provenant_subcommand" = commit ]; then case "$1" in -*n*) _provenant_hook_warning ;; esac; fi ;;
+                -?*)
+                    case "$_provenant_subcommand" in
+                        commit|am) _provenant_short_has_no_verify "$1" && _provenant_hook_warning ;;
+                    esac ;;
             esac
             shift
         done ;;
@@ -3596,11 +3627,17 @@ mod tests {
             (&["commit", "-n"], &[]),
             (&["commit", "-qn"], &[]),
             (&["commit", "--no-verify"], &[]),
+            (&["commit", "--no-verif"], &[]),
+            (&["commit", "--no-veri"], &[]),
             (&["merge", "--no-verify"], &[]),
             (&["rebase", "--no-verify"], &[]),
+            (&["rebase", "--no-verif"], &[]),
             (&["cherry-pick", "--no-verify"], &[]),
             (&["am", "--no-verify"], &[]),
+            (&["am", "-n"], &[]),
+            (&["am", "--no-veri"], &[]),
             (&["push", "--no-verify"], &[]),
+            (&["push", "--no-verif"], &[]),
         ];
         for (args, env) in cases {
             let output = run(args, env);
@@ -3608,6 +3645,34 @@ mod tests {
         }
         // One observation per bypass command, including the harmless one above.
         assert_eq!(recorded()?, vec![rule.to_owned(); cases.len() + 1]);
+
+        // Values that merely contain 'n', abbreviations Git rejects, and flags
+        // that mean something other than a bypass must not warn or record.
+        let quiet: &[BypassCase<'_>] = &[
+            (&["commit", "-uno"], &[]),
+            (&["commit", "-unormal"], &[]),
+            (&["commit", "-uall"], &[]),
+            (&["commit", "-Sfixture-key"], &[]),
+            (&["commit", "-m", "-n"], &[]),
+            (&["merge", "-n"], &[]),
+            (&["merge", "--no-verif"], &[]),
+            (&["cherry-pick", "--no-verif"], &[]),
+            (&["push", "-n"], &[]),
+            (&["log", "-n", "1"], &[]),
+        ];
+        for (args, env) in quiet {
+            let output = run(args, env);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !stderr.contains(rule),
+                "{args:?} warned for a non-bypass: {stderr}"
+            );
+        }
+        assert_eq!(
+            recorded()?.len(),
+            cases.len() + 1,
+            "non-bypass commands record no observation"
+        );
         // The fixture `config core.hooksPath` case must not disable hooks; a
         // later case may already have unset the key, so an absent key is fine.
         let _ = base()

@@ -13,6 +13,13 @@ fn budget_usage(record: &run::AttemptRecord) -> Option<Value> {
     serde_json::to_value(usage).ok()
 }
 
+/// The lane's hook-bypass observation, read from the settled record rather than
+/// the lane-authored result artifact. Unlike token usage this is attempt-scoped
+/// for every provider, so it is not masked by session-wide usage accounting.
+fn hook_bypass_usage(record: &run::AttemptRecord) -> Option<Value> {
+    serde_json::to_value(record.usage.hook_bypass.as_ref()?).ok()
+}
+
 /// Render a host-owned read through the same CLI projection.
 pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Reply {
     let receipt_tail = matches!(command.part, Part::Receipt)
@@ -189,6 +196,16 @@ pub(super) fn output_summary(
             access.access.as_str(),
             access.key,
             access.source.as_str()
+        ));
+    }
+    if headed && let Some(bypass) = data.get("hook_bypass") {
+        let count = bypass["count"].as_u64().unwrap_or(0);
+        let rule = bypass["rule"]
+            .as_str()
+            .unwrap_or(provenant_records::run::LANE_HOOK_BYPASS_RULE);
+        lines.push(crate::bounded_text(
+            &format!("hook bypass: {count} {rule} observation(s); hooks must run"),
+            256,
         ));
     }
     if headed {
@@ -572,6 +589,9 @@ fn output_read_part(
         if let Some(usage) = budget_usage(&record) {
             data["budget_usage"] = usage;
         }
+        if let Some(bypass) = hook_bypass_usage(&record) {
+            data["hook_bypass"] = bypass;
+        }
         return Ok((data, format!("{reason}\n")));
     }
     let evicted = status::artifact(
@@ -642,6 +662,9 @@ fn output_read_part(
     });
     if let Some(usage) = budget_usage(&record) {
         data["budget_usage"] = usage;
+    }
+    if let Some(bypass) = hook_bypass_usage(&record) {
+        data["hook_bypass"] = bypass;
     }
     if evicted {
         // Retention removed the bulk payload; the record, result and capture
@@ -1103,6 +1126,49 @@ mod tests {
                 Some("provenant wait repair/writer#2")
             );
         }
+    }
+
+    #[test]
+    fn result_renders_the_settled_hook_bypass_observation() {
+        // The host writes this field from the settled record; the lane-authored
+        // result artifact cannot. Both the JSON reply and the chair's summary
+        // must carry it so a bypass is visible without reading raw usage.
+        let data = json!({
+            "attempt_id":"22222222222222222222222222222222",
+            "state":"succeeded",
+            "part":"result",
+            "eof":true,
+            "hook_bypass":{
+                "count":3,
+                "rule":provenant_records::run::LANE_HOOK_BYPASS_RULE,
+            },
+        });
+        let command = crate::Output {
+            target: crate::Target::parse("repair/writer#2").unwrap(),
+            part: crate::Part::Result,
+            to: None,
+            path: false,
+            offset: 0,
+            tail: None,
+            max_bytes: 65_536,
+        };
+        let reply = super::render_output(command, Ok((data, "answer\n".into())));
+        assert!(reply.result.error.is_none(), "{:?}", reply.result.error);
+        assert_eq!(reply.result.data["hook_bypass"]["count"], 3);
+        assert_eq!(
+            reply.result.data["hook_bypass"]["rule"],
+            provenant_records::run::LANE_HOOK_BYPASS_RULE
+        );
+        let summary = reply.summary.expect("a headed result has a summary");
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line
+                    == "hook bypass: 3 LANE_GIT_HOOK_BYPASS observation(s); hooks must run"),
+            "{:?}",
+            summary.lines
+        );
     }
 
     #[test]

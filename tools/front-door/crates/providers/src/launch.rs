@@ -840,6 +840,68 @@ pub(crate) fn tool_search_path(
     Ok(path)
 }
 
+/// Drop host-inherited command-scope `core.hooksPath` settings from a lane's
+/// environment. A host may harden its own Git with `/dev/null` in `GIT_CONFIG_*`;
+/// copied into a lane that setting would make every bound Git command look like
+/// a hook bypass the lane never attempted. Removing it at launch leaves the
+/// command-scope hook path in the lane's own control, which the bound shim
+/// reports. The host's own Git is unaffected.
+pub(crate) fn drop_inherited_hook_path(env: &mut Vec<(OsString, OsString)>) {
+    const COUNT: &str = "GIT_CONFIG_COUNT";
+    const KEY: &str = "GIT_CONFIG_KEY_";
+    const VALUE: &str = "GIT_CONFIG_VALUE_";
+    let indexed = env.iter().any(|(name, _)| {
+        name == COUNT
+            || name.to_string_lossy().starts_with(KEY)
+            || name.to_string_lossy().starts_with(VALUE)
+    });
+    let count = env
+        .iter()
+        .find(|(name, _)| name == COUNT)
+        .and_then(|(_, value)| value.to_str())
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut kept = Vec::new();
+    for index in 0..count {
+        let key_name = format!("{KEY}{index}");
+        let value_name = format!("{VALUE}{index}");
+        let key = env
+            .iter()
+            .find(|(name, _)| name.to_str() == Some(key_name.as_str()))
+            .map(|(_, value)| value.clone());
+        let value = env
+            .iter()
+            .find(|(name, _)| name.to_str() == Some(value_name.as_str()))
+            .map(|(_, value)| value.clone());
+        if let (Some(key), Some(value)) = (key, value)
+            && key.to_string_lossy().to_ascii_lowercase() != "core.hookspath"
+        {
+            kept.push((key, value));
+        }
+    }
+    if indexed {
+        env.retain(|(name, _)| {
+            let name = name.to_string_lossy();
+            name != COUNT && !name.starts_with(KEY) && !name.starts_with(VALUE)
+        });
+        env.push((COUNT.into(), kept.len().to_string().into()));
+        for (index, (key, value)) in kept.into_iter().enumerate() {
+            env.push((format!("{KEY}{index}").into(), key));
+            env.push((format!("{VALUE}{index}").into(), value));
+        }
+    }
+    // The other environment encoding carries command-scope config only. Keep
+    // it when it has nothing to do with hooks; when it sets a hook path, drop
+    // the whole variable rather than hand the lane a partial config encoding.
+    env.retain(|(name, value)| {
+        name != "GIT_CONFIG_PARAMETERS"
+            || !value
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .contains("core.hookspath")
+    });
+}
+
 /// Host access inherits the host environment; adapters apply provider selectors.
 /// Isolated sandboxed launches reconstruct the prior minimal environment.
 /// Sandboxes use private temporary paths because host temporary directories may
@@ -882,6 +944,9 @@ pub(crate) fn base_env_with_host(
             env.push(("TMPDIR".into(), scratch.into()));
             env.push(("TMPPREFIX".into(), scratch.join("zsh").into()));
         }
+        // Host hardening is not a lane hook-bypass attempt; keep it out of the
+        // command-scope config the bound shim inspects.
+        drop_inherited_hook_path(&mut env);
         return Ok(env);
     }
     let fallbacks = path.as_ref();
@@ -1798,6 +1863,62 @@ impl LaunchSpec {
 #[allow(clippy::items_after_test_module)]
 mod git_tests {
     use super::*;
+
+    #[test]
+    fn inherited_hook_path_is_dropped_but_other_command_config_remains() {
+        let mut env = vec![
+            ("GIT_CONFIG_COUNT".into(), "3".into()),
+            ("GIT_CONFIG_KEY_0".into(), "commit.gpgsign".into()),
+            ("GIT_CONFIG_VALUE_0".into(), "false".into()),
+            ("GIT_CONFIG_KEY_1".into(), "core.hooksPath".into()),
+            ("GIT_CONFIG_VALUE_1".into(), "/dev/null".into()),
+            ("GIT_CONFIG_KEY_2".into(), "user.name".into()),
+            ("GIT_CONFIG_VALUE_2".into(), "Fixture".into()),
+            (
+                "GIT_CONFIG_PARAMETERS".into(),
+                "'other.setting=kept'".into(),
+            ),
+            ("HOME".into(), "/fixture/home".into()),
+        ];
+        drop_inherited_hook_path(&mut env);
+        let value = |name: &str| {
+            env.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.to_string_lossy().into_owned())
+        };
+        assert_eq!(value("GIT_CONFIG_COUNT").as_deref(), Some("2"));
+        assert_eq!(value("GIT_CONFIG_KEY_0").as_deref(), Some("commit.gpgsign"));
+        assert_eq!(value("GIT_CONFIG_VALUE_0").as_deref(), Some("false"));
+        assert_eq!(value("GIT_CONFIG_KEY_1").as_deref(), Some("user.name"));
+        assert_eq!(value("GIT_CONFIG_VALUE_1").as_deref(), Some("Fixture"));
+        assert!(env.iter().all(|(key, value)| {
+            key.to_string_lossy().to_ascii_lowercase() != "core.hookspath"
+                && value.to_string_lossy().to_ascii_lowercase() != "core.hookspath"
+        }));
+        assert_eq!(
+            value("GIT_CONFIG_PARAMETERS").as_deref(),
+            Some("'other.setting=kept'")
+        );
+        assert_eq!(value("HOME").as_deref(), Some("/fixture/home"));
+
+        let mut env = vec![
+            ("GIT_CONFIG_COUNT".into(), "1".into()),
+            ("GIT_CONFIG_KEY_0".into(), "core.hooksPath".into()),
+            ("GIT_CONFIG_VALUE_0".into(), "/dev/null".into()),
+            (
+                "GIT_CONFIG_PARAMETERS".into(),
+                "'core.hooksPath=/dev/null'".into(),
+            ),
+        ];
+        drop_inherited_hook_path(&mut env);
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "GIT_CONFIG_COUNT")
+                .map(|(_, value)| value.as_os_str()),
+            Some(std::ffi::OsStr::new("0"))
+        );
+        assert!(env.iter().all(|(name, _)| name != "GIT_CONFIG_PARAMETERS"));
+    }
 
     #[test]
     fn incomplete_closure_receipt_keeps_only_file_names() {

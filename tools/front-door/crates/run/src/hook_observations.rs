@@ -70,5 +70,9 @@ mod tests {
         let receipt = usage.hook_bypass.expect("hook bypass observation");
         assert_eq!(receipt.count, 2);
         assert_eq!(receipt.rule, "LANE_GIT_HOOK_BYPASS");
+        // The settled receipt is what the CLI projects onto the result reply.
+        let wire = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(wire["count"], 2);
+        assert_eq!(wire["rule"], "LANE_GIT_HOOK_BYPASS");
     }
 }
