@@ -723,6 +723,28 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         let run: Value = serde_json::from_slice(&run.stdout.bytes)?;
         assert_eq!(run["status"], "failed", "{run}");
         assert_eq!(run["data"]["outcome"], "failed", "{run}");
+        if scenario == "quota" {
+            // Issue #3551: a recorded exhaustion on an exact model pin is
+            // advisory. The pinned Claude route is attempted with a warning
+            // naming the record's source and expiry, rather than refused
+            // before launch, so no typed usage_limited refusal is recorded.
+            let node = &run["data"]["checkpoint"]["nodes"][0];
+            let attempts = node["attempts"].as_array().ok_or("attempts")?;
+            assert!(
+                attempts
+                    .iter()
+                    .any(|attempt| attempt["route"]["adapter"] == "claude"),
+                "the pinned Claude route must still be selected: {run}"
+            );
+            assert!(
+                attempts
+                    .iter()
+                    .all(|attempt| attempt["outcome"] != "usage_limited"),
+                "pinned exhaustion must not be a pre-launch refusal: {run}"
+            );
+            cleanup.disarm();
+            continue;
+        }
         let node = &run["data"]["checkpoint"]["nodes"][0];
         let attempts = node["attempts"].as_array().ok_or("attempts")?;
         let refusal_attempt = if scenario == "authority" {

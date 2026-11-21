@@ -1555,26 +1555,10 @@ impl Registry<'_> {
                 SystemClock::new().unix_seconds(),
             );
         }
-        if decoded.outcome == run::Outcome::ModelUnavailable
-            && let Some(model) = route
-                .model
-                .as_deref()
-                .and_then(|id| ModelId::parse(id).ok())
-            && let Ok(catalogue) = provenant_routing::Catalogue::bundled()
-            && catalogue.model(&model).is_none()
-        {
-            let nearest = catalogue.nearest_models(&model);
-            if !nearest.is_empty() {
-                let note = format!(
-                    "selected model is not in the catalogue; nearest catalogued IDs: {}",
-                    nearest.join(", ")
-                );
-                decoded.reason = Some(match decoded.reason.take() {
-                    Some(reason) => format!("{reason}; {note}"),
-                    None => note,
-                });
-            }
-        }
+        // Issue #3551: the provider's own refusal is classified as usual when
+        // the model does not exist. An uncatalogued model was already tried
+        // with a warning at resolve and launch time; no catalogue-specific
+        // note is appended here, so the provider's words stand on their own.
         Ok(decoded)
     }
 }

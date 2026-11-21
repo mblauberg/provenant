@@ -87,7 +87,7 @@ impl Factory {
         reread_delay: Duration,
     ) -> Result<Option<ReviewSubject>, FacadeError> {
         let pr = input.get("pr").filter(|value| !value.is_null());
-        let expected_head = input
+        let mut expected_head = input
             .get("head")
             .filter(|value| !value.is_null())
             .map(|value| {
@@ -98,13 +98,21 @@ impl Factory {
                     .map_err(|_| graph_subject_error(format!("invalid --head SHA: {text}")))
             })
             .transpose()?;
-        if !review {
-            return if pr.is_some() {
-                Err(graph_subject_error("--pr requires a review template"))
-            } else {
-                Ok(None)
-            };
+        // Issue #3551: --pr against a template with no review range is advisory.
+        // Warn with its source and proceed with the host's default review shape
+        // instead of refusing the whole submission. The forge pin is ignored for
+        // that shape because the template cannot consume a review range.
+        let ignored_pr = !review && pr.is_some();
+        if !review && !ignored_pr {
+            return Ok(None);
         }
+        let pr = if ignored_pr { None } else { pr };
+        if ignored_pr {
+            expected_head = None;
+        }
+        let ignored_warning = ignored_pr.then(|| {
+            "--pr was ignored: the selected template does not accept a review range; using the default review subject (source: template review range)".to_owned()
+        });
         if expected_head.is_some() && pr.is_none() {
             return Err(graph_subject_error("--head requires --pr"));
         }
@@ -237,6 +245,10 @@ impl Factory {
                 "review_empty_range: base and subject resolve to the same commit; select a subject with changes",
             ));
         }
+        let warning = match (ignored_warning, warning) {
+            (Some(ignored), Some(default)) => Some(format!("{ignored} {default}")),
+            (one, other) => one.or(other),
+        };
         Ok(Some(ReviewSubject {
             base,
             head,
@@ -523,6 +535,27 @@ mod tests {
                 "unexpected warning: {:?}",
                 result.warning
             );
+        }
+
+        // --pr without a review template warns and proceeds with the host's
+        // default review shape rather than refusing the submission (issue #3551).
+        {
+            let fx = fixture()?;
+            let factory = factory(&fx.rig)?;
+            let input = serde_json::json!({"pr":7});
+            let result = factory
+                .review_subject_with_wait(
+                    &input,
+                    false,
+                    &CancelToken::new(),
+                    |_| Ok(subject(&fx, &fx.forge_old, None)),
+                    3,
+                    Duration::ZERO,
+                )?
+                .ok_or("no default review subject")?;
+            let warning = result.warning.as_deref().ok_or("expected warning")?;
+            assert!(warning.contains("--pr was ignored"), "{warning}");
+            assert!(warning.contains("review range"), "{warning}");
         }
 
         Ok(())

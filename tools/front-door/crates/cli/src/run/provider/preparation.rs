@@ -244,6 +244,51 @@ fn push_launch_warning(route: &mut ResolvedRoute, warning: impl Into<String>) {
     }
 }
 
+/// Compose the warning for a recorded quota or pacing refusal on a model the
+/// owner named exactly (issue #3551). Recorded refusals go stale, so the
+/// warning names where the record came from and when it expires; the caller
+/// launches the pinned model anyway. Unpinned routing is untouched and keeps
+/// preferring available routes.
+fn pinned_refusal_warning(
+    route: &ResolvedRoute,
+    availability: &[provenant_providers::AvailabilityRecord],
+    reason: &provenant_records::RouteExclusionReason,
+    now: i64,
+) -> (String, i64) {
+    use provenant_records::diagnostic::{Diagnostic, ResourceFact};
+    let source = match (&route.diagnostics.pacing_reserve_fact, reason) {
+        (
+            Some(fact @ ResourceFact::PacingReserve { .. }),
+            provenant_records::RouteExclusionReason::PacingReserve,
+        ) => fact
+            .project(Diagnostic::new("PINNED_REFUSAL"))
+            .detail
+            .unwrap_or_else(|| "pacing reserve".to_owned()),
+        _ => route.diagnostics.allowance_warning.as_ref().map_or_else(
+            || format!("quota allowance on {}", route.adapter),
+            |warning| format!("{} (source: {})", warning.warning, warning.source),
+        ),
+    };
+    let expiry = availability
+        .iter()
+        .find(|record| {
+            record.adapter == route.adapter
+                && record.account_key.as_deref() == route.account_key.as_deref()
+        })
+        .map(|record| record.expires_unix_seconds)
+        .unwrap_or_else(|| now.saturating_add(3600))
+        .max(now.saturating_add(60));
+    (
+        format!(
+            "recorded {} for pinned model {}/{} (source: {source}; expiry unix seconds: {expiry}); recorded refusals go stale, attempting the model",
+            provenant_routing::exclusion_detail(reason),
+            route.adapter,
+            route.model
+        ),
+        expiry,
+    )
+}
+
 /// Warn when an ignore file the routed adapter declares, in the writer's
 /// checkout, hides the writer's worktree from that adapter's agent.
 pub(super) fn ignore_file_warnings(
@@ -3770,6 +3815,43 @@ pub(super) fn prepare_candidates_inner(
                 );
             }
         }
+        // Issue #3551: a recorded quota/pacing refusal on a model the owner
+        // named exactly is advisory. Warn with its source and expiry and treat
+        // the route as ready so that model is attempted; recorded refusals go
+        // stale. Unpinned routing is untouched and still prefers available routes.
+        if matches!(
+            &task_request.choice,
+            provenant_routing::RouteChoice::Model(_)
+        ) {
+            let recorded_reason = match &route.readiness {
+                provenant_records::RouteReadiness::Unavailable { reason, .. }
+                    if matches!(
+                        reason,
+                        provenant_records::RouteExclusionReason::Exhausted
+                            | provenant_records::RouteExclusionReason::PacingReserve
+                    ) =>
+                {
+                    Some(reason.clone())
+                }
+                _ => None,
+            };
+            if let Some(reason) = recorded_reason {
+                let (warning, expiry) =
+                    pinned_refusal_warning(&route, &availability, &reason, clock.unix_seconds());
+                let availability_ref = route
+                    .diagnostics
+                    .allowance_warning
+                    .as_ref()
+                    .map_or_else(|| "quota-recorded-refusal".to_owned(), |w| w.source.clone());
+                push_launch_warning(&mut route, warning.clone());
+                route.readiness = provenant_records::RouteReadiness::Ready {
+                    availability_warning: Some(warning),
+                    extra: Default::default(),
+                    availability_ref,
+                    expires_unix_seconds: expiry,
+                };
+            }
+        }
         if let provenant_records::RouteReadiness::Unavailable { reason, .. } = &route.readiness {
             if matches!(
                 reason,
@@ -3943,44 +4025,67 @@ pub(super) fn prepare_candidates_inner(
                 &error,
                 crate::route::EdgeError::Quota(provenant_quota::QuotaError::AllowanceExhausted)
             );
+            // Issue #3551: a model the owner named exactly is attempted despite
+            // recorded exhaustion; the warning names the record's source and
+            // expiry. Unpinned routing still prefers an available route.
+            let pinned_exhaustion = spent
+                && matches!(
+                    &task_request.choice,
+                    provenant_routing::RouteChoice::Model(_)
+                );
+            if pinned_exhaustion {
+                let (warning, _) = pinned_refusal_warning(
+                    &route,
+                    &availability,
+                    &provenant_records::RouteExclusionReason::Exhausted,
+                    clock.unix_seconds(),
+                );
+                push_launch_warning(&mut route, warning);
+            }
             let refused_key = route
                 .account_key
                 .clone()
-                .filter(|_| spent && selected.is_none());
-            let Some(key) = refused_key else {
-                reasons.push(skip(&label, SkipKind::Unavailable, error.to_string()));
-                continue;
-            };
-            let name = entries
-                .iter()
-                .find(|entry| entry.adapter == route.adapter && entry.key == key)
-                .map_or_else(
-                    || "unregistered account".to_owned(),
-                    |entry| entry.label.clone(),
-                );
-            let mut skipped = skip(
-                &label,
-                SkipKind::Account,
-                format!("account {name}: {error}"),
-            );
-            skipped.set_cause(provenant_records::RouteExclusionReason::Exhausted);
-            reasons.push(skipped);
-            previous_outcome = provenant_routing::FallbackOutcome::from_exclusion(
-                &provenant_records::RouteExclusionReason::Exhausted,
-            );
-            refused_accounts.insert((route.adapter.clone(), key));
-            let remaining = without_refused_accounts(&availability, &refused_accounts);
-            if let Ok(model) = provenant_routing::ModelId::parse(&label)
-                && remaining
-                    .iter()
-                    .any(|record| record.adapter == route.adapter)
-            {
-                rejected.retain(|tried| *tried != model);
+                .filter(|_| spent && !pinned_exhaustion && selected.is_none());
+            match refused_key {
+                Some(key) => {
+                    let name = entries
+                        .iter()
+                        .find(|entry| entry.adapter == route.adapter && entry.key == key)
+                        .map_or_else(
+                            || "unregistered account".to_owned(),
+                            |entry| entry.label.clone(),
+                        );
+                    let mut skipped = skip(
+                        &label,
+                        SkipKind::Account,
+                        format!("account {name}: {error}"),
+                    );
+                    skipped.set_cause(provenant_records::RouteExclusionReason::Exhausted);
+                    reasons.push(skipped);
+                    previous_outcome = provenant_routing::FallbackOutcome::from_exclusion(
+                        &provenant_records::RouteExclusionReason::Exhausted,
+                    );
+                    refused_accounts.insert((route.adapter.clone(), key));
+                    let remaining = without_refused_accounts(&availability, &refused_accounts);
+                    if let Ok(model) = provenant_routing::ModelId::parse(&label)
+                        && remaining
+                            .iter()
+                            .any(|record| record.adapter == route.adapter)
+                    {
+                        rejected.retain(|tried| *tried != model);
+                    }
+                    if let Ok(next) = resolve(&remaining, &rejected) {
+                        queue.extend(candidates(next));
+                    }
+                    continue;
+                }
+                // Warned above; try the exact model the owner named.
+                None if pinned_exhaustion => {}
+                None => {
+                    reasons.push(skip(&label, SkipKind::Unavailable, error.to_string()));
+                    continue;
+                }
             }
-            if let Ok(next) = resolve(&remaining, &rejected) {
-                queue.extend(candidates(next));
-            }
-            continue;
         }
         let entry = entries
             .iter()
@@ -6621,6 +6726,27 @@ mod candidate_walk_regressions {
             matches!(refusal, PrepareError::RouteResolution { error: crate::route::DispatchError::Edge(error), checks } if matches!(*error, crate::route::EdgeError::Quota(provenant_quota::QuotaError::AllowanceExhausted)) && checks.iter().any(|check| check.route == "cursor/spent" && check.cause == Some(provenant_records::RouteExclusionReason::Exhausted)))
         );
         Ok(())
+    }
+
+    #[test]
+    fn pinned_refusal_warning_names_the_record_source_and_expiry() {
+        let mut pinned = route("cursor/legacy", "spent");
+        pinned.diagnostics.allowance_warning =
+            Some(provenant_records::route_selection::AllowanceWarning {
+                extra: Default::default(),
+                warning: "allowance spent".into(),
+                source: "quota:fixture".into(),
+            });
+        let (warning, expiry) = pinned_refusal_warning(
+            &pinned,
+            &[],
+            &provenant_records::RouteExclusionReason::Exhausted,
+            1000,
+        );
+        assert!(warning.contains("cursor/legacy"), "{warning}");
+        assert!(warning.contains("quota:fixture"), "{warning}");
+        assert!(warning.contains("expiry unix seconds: 3700"), "{warning}");
+        assert_eq!(expiry, 3700);
     }
 }
 
