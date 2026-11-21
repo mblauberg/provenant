@@ -146,6 +146,24 @@ fn core_config_error(error: provenant_os::git_config::ConfigError<UtilityError>)
     config_context_error(error.context, error.source)
 }
 
+/// A bootstrap bare-setting read already returns a typed config outcome: a
+/// named `ConfigCommand`, or a timeout/cancellation that must keep its own
+/// variant. Propagate it unchanged. Re-wrapping it as `unreadable_config` would
+/// name the file and key a second time, cut its source chain and retype a
+/// timeout or cancellation as a config read failure.
+fn bare_setting_error(error: crate::worktrees::WorktreeError, config: &Path) -> UtilityError {
+    match error {
+        crate::worktrees::WorktreeError::Utility(error) => error,
+        crate::worktrees::WorktreeError::GitConfigRead(error) => core_config_error(*error),
+        error => UtilityError::unreadable_config(
+            "classify local core.bare",
+            Some(config),
+            Some("core.bare"),
+            error,
+        ),
+    }
+}
+
 /// Attach a config command's context without rewriting typed execution
 /// outcomes: a timeout, cancellation or lock exhaustion is never a "could not
 /// be read" failure.
@@ -743,12 +761,7 @@ impl UtilityRuntime {
                     let trusted_bare = crate::worktrees::RepoFacts::default()
                         .bare_setting_with_roots(repo, executor, self, budget, cancel, &bootstrap)
                         .map_err(|error| {
-                            UtilityError::unreadable_config(
-                                "classify bound local core.bare",
-                                Some(&repo.common_git_dir().join("config")),
-                                Some("core.bare"),
-                                error,
-                            )
+                            bare_setting_error(error, &repo.common_git_dir().join("config"))
                         })?;
                     crate::worktrees::project_layout_for_binding_with_bare_setting(
                         executor,
@@ -766,12 +779,7 @@ impl UtilityRuntime {
                 let trusted_bare = crate::worktrees::RepoFacts::default()
                     .bare_setting_with_roots(repo, executor, self, budget, cancel, &bootstrap)
                     .map_err(|error| {
-                        UtilityError::unreadable_config(
-                            "classify local core.bare",
-                            Some(&repo.common_git_dir().join("config")),
-                            Some("core.bare"),
-                            error,
-                        )
+                        bare_setting_error(error, &repo.common_git_dir().join("config"))
                     })?;
                 crate::worktrees::project_layout_for_common_with_bare_setting(
                     executor,

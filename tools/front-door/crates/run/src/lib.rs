@@ -955,9 +955,7 @@ impl RunError {
             }
             Self::DeliveryConfigRead { stage, source } => {
                 diagnostic = diagnostic
-                    .detail(crate::delivery::delivery_config_failure_detail(
-                        *stage, source,
-                    ))
+                    .detail(crate::delivery::delivery_config_failure_detail(source))
                     .fact(DiagnosticFact::DeliveryStage(*stage));
             }
             Self::DeliveryFact { stage, source } => {

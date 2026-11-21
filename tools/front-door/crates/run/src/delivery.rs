@@ -2252,7 +2252,7 @@ impl HostDeliveryContext {
             provenant_os::git_config::Read::Listing,
             |args| self.command_with_input(cwd, "git", &git_config_args(args, stage)?, stage, b""),
         )
-        .map_err(|error| refuse(transport::unreadable(&ctx, error)))?;
+        .map_err(|error| refuse(transport::unreadable(&ctx, error.source)))?;
         let entries = transport::parse_listing(listing.as_bytes(), &ctx).map_err(refuse)?;
         transport::check_listing(&entries, base, &roots, &ctx).map_err(refuse)?;
         // Git rereads configuration for the command itself, so refuse any
@@ -2267,7 +2267,7 @@ impl HostDeliveryContext {
             provenant_os::git_config::Read::Directives,
             |args| self.command_with_input(cwd, "git", &git_config_args(args, stage)?, stage, b""),
         )
-        .map_err(|error| refuse(transport::unreadable(&ctx, error)))?;
+        .map_err(|error| refuse(transport::unreadable(&ctx, error.source)))?;
         let top = transport::parse_listing(directives.as_bytes(), &ctx).map_err(refuse)?;
         let home = environment
             .iter()
@@ -2301,7 +2301,7 @@ impl HostDeliveryContext {
                     self.command_with_input(cwd, "git", &git_config_args(args, stage)?, stage, b"")
                 },
             )
-            .map_err(|error| transport::unreadable(&ctx, error))?;
+            .map_err(|error| transport::unreadable(&ctx, error.source))?;
             transport::parse_listing(listing.as_bytes(), &ctx).map(Some)
         };
         transport::check_includes(&top, base, home, &roots, &mut read, &ctx).map_err(refuse)
@@ -3390,9 +3390,7 @@ pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
         }
         RunError::DeliveryConfigRead { stage, source } => (
             *stage,
-            Some(prepare_reason(delivery_config_failure_detail(
-                *stage, source,
-            ))),
+            Some(prepare_reason(delivery_config_failure_detail(source))),
         ),
         RunError::DeliveryPrepare { .. } => (Stage::Prepare, Some(prepare_reason(error))),
         _ => (Stage::Push, None),
@@ -3442,8 +3440,10 @@ fn delivery_config_read_error(
 /// a refusal says what could not be read instead of only naming the stage. The
 /// config error's `Display` is its context; the cause lives in its source
 /// chain, which is why both are rendered here for operator-visible surfaces.
+/// The stage is reported separately by the receipt and the diagnostic fact, so
+/// it must not be prefixed again here — doing so repeated the stage sentence
+/// already carried by the source chain and crowded out the real cause.
 pub(crate) fn delivery_config_failure_detail(
-    stage: Stage,
     error: &provenant_os::git_config::ConfigError<RunError>,
 ) -> String {
     let mut rendered = error.to_string();
@@ -3453,9 +3453,7 @@ pub(crate) fn delivery_config_failure_detail(
         rendered.push_str(&cause.to_string());
         source = cause.source();
     }
-    let detail =
-        provenant_core::bounded_line(&provenant_redact::delivery_diagnostics(&rendered), 512);
-    format!("host writer delivery failed at {stage:?}: {detail}")
+    provenant_core::bounded_line(&provenant_redact::delivery_diagnostics(&rendered), 512)
 }
 
 fn delivery_stage_error(error: RunError, stage: Stage) -> RunError {
