@@ -18,6 +18,12 @@ const PUBLICATION_WAIT_SECONDS: u64 = 10;
 /// Bound on the output tail a failing `build.prepare` command carries into its
 /// typed error, its refresh record and the seed result.
 const OUTPUT_TAIL_BYTES: usize = 2 * 1024;
+/// Environment marker naming the absolute origin checkout for a `build.prepare`
+/// child running in a standalone seed clone. It is added only to prepare
+/// children, never to the Cargo children whose `CARGO_TARGET_DIR` the
+/// verify-base path sets, so a consumer can tell a seed clone from an ambient
+/// target directory. Documented in docs/specs/run.md#cargo-target-seed.
+const SEED_ORIGIN_ENV: &str = "PROVENANT_SEED_ORIGIN";
 
 /// The single stderr seam for seed-build operator lines. Warnings and the
 /// `build.prepare` trace are facts for the operator, never refusals by themselves.
@@ -331,6 +337,54 @@ fn seed_build_child_environment(
         .collect();
     env.extend_from_slice(overrides);
     env
+}
+
+/// Overrides for the Cargo children of a seed build, including the verify-base
+/// path that sets `CARGO_TARGET_DIR`. [`SEED_ORIGIN_ENV`] is deliberately absent:
+/// that marker identifies standalone seed-clone preparation only.
+fn verify_base_overrides(
+    cargo_profile: &CargoBuildProfile,
+    target: &Path,
+    cargo: &Path,
+) -> Result<Vec<(OsString, OsString)>> {
+    let mut overrides = cargo_profile.environment().to_vec();
+    let mut paths = vec![
+        cargo
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
+    ];
+    if let Some(path) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&path));
+    }
+    overrides.push((
+        "PATH".into(),
+        std::env::join_paths(paths)
+            .map_err(|error| io::Error::other(format!("cargo PATH unresolved: {error}")))?,
+    ));
+    overrides.extend([
+        ("CARGO_TARGET_DIR".into(), target.as_os_str().into()),
+        ("CARGO_BUILD_BUILD_DIR".into(), target.as_os_str().into()),
+        // Provenant's safe value; an inherited non-zero value is cleared.
+        ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
+    ]);
+    Ok(overrides)
+}
+
+/// Overrides for `build.prepare` children in a standalone seed clone: the Cargo
+/// overrides plus the absolute origin checkout. The marker is added here rather
+/// than in [`verify_base_overrides`] so it reaches prepare commands only and
+/// never the verify-base Cargo path that also sets `CARGO_TARGET_DIR`.
+fn seed_prepare_overrides(
+    build_overrides: &[(OsString, OsString)],
+    origin: &Path,
+) -> Result<Vec<(OsString, OsString)>> {
+    let mut overrides = build_overrides.to_vec();
+    overrides.push((
+        OsString::from(SEED_ORIGIN_ENV),
+        origin.canonicalize()?.into_os_string(),
+    ));
+    Ok(overrides)
 }
 
 /// The manifest flags that describe inherited build settings. A cleared key no
@@ -1258,20 +1312,23 @@ fn run_prepares(
         }
     };
     let layer = provenant_config::port_source_layer(table.build.source);
+    let prepare_overrides = seed_prepare_overrides(overrides, project)?;
     for (index, argv) in table.build.prepare.iter().enumerate() {
         seed_build_stderr(format!(
             "seed-build: build.prepare[{index}] (source {layer}): {}",
             argv.join(" ")
         ));
         let argv = argv.iter().map(OsString::from).collect::<Vec<_>>();
-        run_with_tail(checkout_root, &argv, overrides).map_err(|failure| PrepareFailed {
-            index,
-            argv: argv
-                .iter()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect(),
-            exit: failure.exit,
-            tail: failure.tail,
+        run_with_tail(checkout_root, &argv, &prepare_overrides).map_err(|failure| {
+            PrepareFailed {
+                index,
+                argv: argv
+                    .iter()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect(),
+                exit: failure.exit,
+                tail: failure.tail,
+            }
         })?;
     }
     Ok(())
@@ -1299,27 +1356,7 @@ fn build_into(
         "cargo check --workspace --all-targets --locked".to_owned(),
     ];
     flags.extend(seed_build_flags(&environment));
-    let mut overrides = cargo_profile.environment().to_vec();
-    let mut paths = vec![
-        cargo
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf(),
-    ];
-    if let Some(path) = std::env::var_os("PATH") {
-        paths.extend(std::env::split_paths(&path));
-    }
-    overrides.push((
-        "PATH".into(),
-        std::env::join_paths(paths)
-            .map_err(|error| io::Error::other(format!("cargo PATH unresolved: {error}")))?,
-    ));
-    overrides.extend([
-        ("CARGO_TARGET_DIR".into(), target.as_os_str().into()),
-        ("CARGO_BUILD_BUILD_DIR".into(), target.as_os_str().into()),
-        // Provenant's safe value; an inherited non-zero value is cleared.
-        ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
-    ]);
+    let overrides = verify_base_overrides(cargo_profile, &target, &cargo)?;
     run_prepares(state, project, &checkout_root, &overrides)?;
     let worktree = checkout.join(workspace_relative).canonicalize()?;
     if !worktree.starts_with(&checkout_root) || !worktree.join("Cargo.toml").metadata()?.is_file() {
@@ -1928,6 +1965,64 @@ mod tests {
             "a cleared key must not be recorded: {flags:?}"
         );
         assert_eq!(flags, Vec::<String>::new());
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn seed_prepare_marks_origin_without_marking_verify_base() {
+        let temp = tempfile::tempdir().unwrap();
+        let origin = temp.path().join("origin");
+        fs::create_dir(&origin).unwrap();
+        let target = temp.path().join("target");
+        let cargo =
+            target_seed::cargo_tool(&std::env::vars_os().collect::<Vec<_>>(), "cargo").unwrap();
+        let profile = LaneBuildSettings::default()
+            .cargo_build_profile(&[])
+            .expect("default Cargo profile is UTF-8");
+
+        // The verify-base Cargo path sets CARGO_TARGET_DIR but never the marker.
+        let build_overrides = verify_base_overrides(&profile, &target, &cargo).unwrap();
+        assert!(
+            build_overrides
+                .iter()
+                .any(|(name, _)| name == "CARGO_TARGET_DIR")
+        );
+        let verify_env = seed_build_child_environment(&[], &build_overrides);
+        assert!(
+            !verify_env.iter().any(|(name, _)| name == SEED_ORIGIN_ENV),
+            "verify-base Cargo children must not receive {SEED_ORIGIN_ENV}"
+        );
+
+        // Seed-clone prepare children get the absolute origin checkout.
+        let expected = origin.canonicalize().unwrap();
+        let prepare_overrides = seed_prepare_overrides(&build_overrides, &origin).unwrap();
+        let prepare_env = seed_build_child_environment(&[], &prepare_overrides);
+        let marker = prepare_env
+            .iter()
+            .find(|(name, _)| name == SEED_ORIGIN_ENV)
+            .map(|(_, value)| value)
+            .expect("prepare child must receive the origin marker");
+        assert_eq!(marker, expected.as_os_str());
+
+        // An ambient value cannot spoof the marker: the prepared override wins
+        // exactly once, with the canonical origin path.
+        let inherited = vec![(OsString::from(SEED_ORIGIN_ENV), OsString::from("/spoofed"))];
+        let prepare_env = seed_build_child_environment(&inherited, &prepare_overrides);
+        assert_eq!(
+            prepare_env
+                .iter()
+                .filter(|(name, _)| name == SEED_ORIGIN_ENV)
+                .count(),
+            1
+        );
+        assert_eq!(
+            prepare_env
+                .iter()
+                .find(|(name, _)| name == SEED_ORIGIN_ENV)
+                .map(|(_, value)| value)
+                .unwrap(),
+            expected.as_os_str()
+        );
     }
 
     #[allow(dead_code)] // The harness-free target includes this module without its tests.
@@ -2802,7 +2897,7 @@ mod tests {
         fs::write(
             &script,
             format!(
-                "#!/bin/sh\nprintf 'pub fn value() {{}}\\n' > src/generated.rs\nprintf '%s' \"$PWD\" > {}\nprintf '%s\\n' \"$CARGO_TARGET_DIR\" \"$CARGO_BUILD_BUILD_DIR\" \"$RUSTUP_AUTO_INSTALL\" \"$CARGO_INCREMENTAL\" \"$CARGO_PROFILE_DEV_DEBUG\" \"$PATH\" > {}.env\n",
+                "#!/bin/sh\nprintf 'pub fn value() {{}}\\n' > src/generated.rs\nprintf '%s' \"$PWD\" > {}\nprintf '%s\\n' \"$CARGO_TARGET_DIR\" \"$CARGO_BUILD_BUILD_DIR\" \"$RUSTUP_AUTO_INSTALL\" \"$CARGO_INCREMENTAL\" \"$CARGO_PROFILE_DEV_DEBUG\" \"$PATH\" \"$PROVENANT_SEED_ORIGIN\" > {}.env\n",
                 marker.display(), marker.display()
             ),
         )
@@ -2927,6 +3022,11 @@ mod tests {
         assert_eq!(
             std::env::split_paths(lines[5]).next().unwrap(),
             cargo.parent().unwrap()
+        );
+        assert_eq!(
+            lines[6],
+            project.canonicalize().unwrap().to_string_lossy(),
+            "the prepare child must be told the absolute origin checkout"
         );
         assert!(
             manifest
