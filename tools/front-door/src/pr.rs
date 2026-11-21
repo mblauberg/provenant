@@ -419,18 +419,25 @@ fn pull_for_branch_with(
         .into()),
     }
 }
+/// Mask text from an exact capture at the point it becomes an error message.
+fn masked_diagnostic(text: &str) -> String {
+    provenant_redact::known_shapes(text.as_bytes())
+        .map(|masked| String::from_utf8_lossy(&masked).into_owned())
+        .unwrap_or_else(|_| "[REDACTED]".to_owned())
+}
+
 fn extract_github_message(output: &provenant_os::exec::ExecOutcome) -> Option<String> {
     if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stdout.bytes)
         && let Some(msg) = val.get("message").and_then(|m| m.as_str())
         && !msg.trim().is_empty()
     {
-        return Some(msg.trim().to_owned());
+        return Some(masked_diagnostic(msg.trim()));
     }
     if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stderr.bytes)
         && let Some(msg) = val.get("message").and_then(|m| m.as_str())
         && !msg.trim().is_empty()
     {
-        return Some(msg.trim().to_owned());
+        return Some(masked_diagnostic(msg.trim()));
     }
     let stderr = String::from_utf8_lossy(&output.stderr.bytes);
     for line in stderr.lines() {
@@ -441,7 +448,7 @@ fn extract_github_message(output: &provenant_os::exec::ExecOutcome) -> Option<St
             && let Some(msg) = val.get("message").and_then(|m| m.as_str())
             && !msg.trim().is_empty()
         {
-            return Some(msg.trim().to_owned());
+            return Some(masked_diagnostic(msg.trim()));
         }
     }
     let stdout = String::from_utf8_lossy(&output.stdout.bytes);
@@ -453,7 +460,7 @@ fn extract_github_message(output: &provenant_os::exec::ExecOutcome) -> Option<St
             && let Some(msg) = val.get("message").and_then(|m| m.as_str())
             && !msg.trim().is_empty()
         {
-            return Some(msg.trim().to_owned());
+            return Some(masked_diagnostic(msg.trim()));
         }
     }
     let text_lines: Vec<&str> = stderr
@@ -474,10 +481,12 @@ fn merge_failure_from_output(
     output: &provenant_os::exec::ExecOutcome,
     head: GitOid,
 ) -> Box<dyn std::error::Error> {
+    // stdout is an exact capture; mask it here where it becomes an error.
+    let stdout = masked_diagnostic(&String::from_utf8_lossy(&output.stdout.bytes));
     let error = format!(
         "{} {}",
         String::from_utf8_lossy(&output.stderr.bytes),
-        String::from_utf8_lossy(&output.stdout.bytes)
+        stdout
     );
     let status = error
         .split_whitespace()

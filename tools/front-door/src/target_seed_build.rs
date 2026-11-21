@@ -453,10 +453,11 @@ const WITHHELD_TAIL: &str = "[REDACTED]";
 /// Like [`run`], but keeps the combined output tail when a command fails. Both
 /// streams use a tail policy: a long prepare log cannot grow the error without
 /// bound, and the retained bytes are enough to explain a failed generation step.
-/// Both streams are diagnostic captures, so the local-disclosure mask runs on
-/// each ahead of the Tail window: a secret that straddles the window start is
-/// masked before the cut can leave part of it behind. A tail stream's
-/// `truncated` flag is expected, so unlike `run` it is not a failure on its own.
+/// stdout is an exact capture because its bytes are returned as data; stderr
+/// is a diagnostic masked on the stream ahead of the Tail window. When the
+/// combined tail becomes an error it is masked at that disclosure point. A
+/// tail stream's `truncated` flag is expected, so unlike `run` it is not a
+/// failure on its own.
 fn run_with_tail(
     cwd: &Path,
     argv: &[OsString],
@@ -493,7 +494,7 @@ fn run_with_tail(
         let tail = if filter_failed {
             WITHHELD_TAIL.to_owned()
         } else {
-            output_tail(&result.stdout.bytes, &result.stderr.bytes)
+            masked_diagnostic(&output_tail(&result.stdout.bytes, &result.stderr.bytes))
         };
         return Err(failed(tail, exit));
     }
