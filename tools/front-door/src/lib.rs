@@ -2311,28 +2311,46 @@ mod unpublished_result_tests {
     }
 
     #[test]
-    fn an_oversized_result_is_refused_and_writes_nothing() {
+    fn an_oversized_human_result_is_bounded_and_json_signals_too_large() {
+        let text = "x".repeat(4096);
+        let limit = 1024;
         let result = provenant_records::CommandResult::new(
             "telemetry stats",
             provenant_records::Outcome::Ok,
-            "x".repeat(4096),
+            text.clone(),
         );
-        for json in [true, false] {
-            let globals = provenant_cli::Globals {
-                json,
-                full: true,
-                ..Default::default()
-            };
-            let (mut out, mut err) = (Vec::new(), Vec::new());
-            let rendered = super::render_unpublished(
-                &result, &globals, "", false, None, 1024, &mut out, &mut err,
-            );
-            assert!(
-                matches!(rendered, Err(provenant_cli::RenderError::TooLarge)),
-                "json={json}"
-            );
-            assert!(out.is_empty() && err.is_empty(), "json={json}");
-        }
+        // Human output is bounded with an explicit omitted count so the caller
+        // can warn and proceed; it never refuses the whole result.
+        let globals = provenant_cli::Globals {
+            json: false,
+            full: true,
+            ..Default::default()
+        };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let rendered = super::render_unpublished(
+            &result, &globals, &text, false, None, limit, &mut out, &mut err,
+        );
+        let omitted = rendered.expect("an oversized human result is bounded, not refused");
+        assert!(omitted > 0, "the omitted bytes are reported to the caller");
+        assert!(!out.is_empty());
+        assert!(out.len() <= limit, "{} exceeds {limit}", out.len());
+        assert!(err.is_empty());
+
+        // JSON cannot be clipped mid-object, so this helper signals TooLarge
+        // for the caller to page a bounded marker instead of a refusal.
+        let globals = provenant_cli::Globals {
+            json: true,
+            ..Default::default()
+        };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let rendered = super::render_unpublished(
+            &result, &globals, &text, false, None, limit, &mut out, &mut err,
+        );
+        assert!(
+            matches!(rendered, Err(provenant_cli::RenderError::TooLarge)),
+            "JSON oversize must reach the caller's bounded-marker path"
+        );
+        assert!(out.is_empty() && err.is_empty());
     }
 
     #[test]
