@@ -671,7 +671,7 @@ fn peer_review_base_submission_dispatches_with_the_senders_schema() -> TestResul
     };
     let store = owner.store(&cancel)?;
     let call = owner.call(&cancel);
-    let record = store.mark_starting_for_fixture(
+    store.mark_starting_for_fixture(
         attempt,
         &provenant_run::RouteRecord {
             provider: Some("fixture".into()),
@@ -682,7 +682,10 @@ fn peer_review_base_submission_dispatches_with_the_senders_schema() -> TestResul
     )?;
     let directory =
         provenant_os::fs::Directory::open_anchor(&rig.state.join(format!("attempts/{attempt}")))?;
-    store.admit(
+    // Admission moves the attempt to Running and bumps its revision. Publish
+    // against the record admission returns, not the pre-admission one, or the
+    // terminal commit conflicts on the stale revision.
+    let record = store.admit(
         attempt,
         &directory,
         &provenant_run::SystemResources,
