@@ -475,10 +475,10 @@ pub enum RunError {
     /// stage and the config error's own context and bounded cause in one
     /// message, so a printer that only formats the error cannot drop either.
     /// The stage is also reported as a delivery fact by the diagnostic.
-    #[error("host writer delivery failed at {stage:?}: {source}")]
+    #[error("host writer delivery failed at {stage:?}: {cause}")]
     DeliveryConfigRead {
         stage: WriterDeliveryStage,
-        source: Box<provenant_os::git_config::ConfigError<RunError>>,
+        cause: Box<provenant_os::git_config::ConfigError<RunError>>,
     },
     #[error("host writer delivery could not reconcile the pull request: {reason}; next: {next}")]
     DeliveryReconciliation { reason: String, next: String },
@@ -969,9 +969,9 @@ impl RunError {
             Self::ConfigCommandFailed { reason } => {
                 diagnostic = diagnostic.detail(reason.clone());
             }
-            Self::DeliveryConfigRead { stage, source } => {
+            Self::DeliveryConfigRead { stage, cause } => {
                 diagnostic = diagnostic
-                    .detail(crate::delivery::prepare_reason(source))
+                    .detail(crate::delivery::prepare_reason(cause))
                     .fact(DiagnosticFact::DeliveryStage(*stage));
             }
             Self::DeliveryTransport { stage, reason, .. } => {
@@ -1179,7 +1179,7 @@ mod diagnostic_projection_tests {
     fn delivery_config_read_display_names_stage_context_and_cause_once() {
         let error = RunError::DeliveryConfigRead {
             stage: WriterDeliveryStage::Push,
-            source: Box::new(provenant_os::git_config::ConfigError {
+            cause: Box::new(provenant_os::git_config::ConfigError {
                 context: provenant_os::git_config::ConfigContext::new(
                     "read effective Git configuration",
                     "/p/.git/config",

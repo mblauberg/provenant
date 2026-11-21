@@ -3407,7 +3407,7 @@ pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
         RunError::DeliveryLimit { stage, .. } | RunError::DeliveryFact { stage, .. } => {
             (*stage, Some(prepare_reason(error)))
         }
-        RunError::DeliveryConfigRead { stage, source } => (*stage, Some(prepare_reason(source))),
+        RunError::DeliveryConfigRead { stage, cause } => (*stage, Some(prepare_reason(cause))),
         RunError::DeliveryTransport { stage, reason, .. } => (*stage, Some(reason.clone())),
         RunError::DeliveryPrepare { .. } => (Stage::Prepare, Some(prepare_reason(error))),
         _ => (Stage::Push, None),
@@ -3448,7 +3448,7 @@ fn delivery_config_read_error(
 ) -> RunError {
     RunError::DeliveryConfigRead {
         stage,
-        source: Box::new(error),
+        cause: Box::new(error),
     }
 }
 
@@ -3466,9 +3466,7 @@ fn delivery_stage_error(error: RunError, stage: Stage) -> RunError {
             limit,
         },
         RunError::DeliveryFact { source, .. } => RunError::DeliveryFact { stage, source },
-        RunError::DeliveryConfigRead { source, .. } => {
-            RunError::DeliveryConfigRead { stage, source }
-        }
+        RunError::DeliveryConfigRead { cause, .. } => RunError::DeliveryConfigRead { stage, cause },
         _ => RunError::Delivery(stage),
     }
 }

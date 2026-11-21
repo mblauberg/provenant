@@ -76,10 +76,10 @@ pub enum UtilityError {
     /// A core config command failure. `Display` names the command and the
     /// underlying failure in one self-contained message, and it exposes no
     /// `source`, so a chain-walking printer cannot drop or repeat the cause.
-    #[error("{context}: {source}")]
+    #[error("{context}: {cause}")]
     ConfigCommand {
         context: provenant_os::git_config::ConfigContext,
-        source: Box<UtilityError>,
+        cause: Box<UtilityError>,
     },
     #[error(
         "Git configuration {key} comes from {file}, a location lanes can write, and cannot be neutralised; remove that include or move the file out of the project"
@@ -182,7 +182,7 @@ fn config_context_error(
         UtilityError::Execution(ExecError::Cancelled) => UtilityError::Cancelled,
         source => UtilityError::ConfigCommand {
             context,
-            source: Box::new(source),
+            cause: Box::new(source),
         },
     }
 }
@@ -6219,7 +6219,7 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
                 "/repo/.git/config",
                 Some("branch tracking key"),
             ),
-            source: Box::new(UtilityError::unreadable_config(
+            cause: Box::new(UtilityError::unreadable_config(
                 "parse config listing",
                 None,
                 None,
