@@ -101,8 +101,10 @@ The `verify.affected` port controls affected-package selection for verify tiers:
 `build.prepare` is
 an ordered list of argv arrays: each command runs in order with the checkout
 root as its working directory before every seed generation build and after a
-slot's snapshot is checked out, before its first step, in the same sanitised
-child environment as the Cargo steps. A failing command fails that build with
+slot's snapshot is checked out, before its first step. Seed-generation prepares
+run in the same sanitised child environment as the Cargo steps plus
+`PROVENANT_SEED_ORIGIN`, the absolute path of the origin checkout; other
+prepares use the Cargo environment alone. A failing command fails that build with
 a `prepare_failed` outcome that records the
 command and the last 2 KiB of the combined output; an unreadable or invalid
 table warns and runs no prepare command. Arrays replace rather than concatenate

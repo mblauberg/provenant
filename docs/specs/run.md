@@ -104,7 +104,8 @@ eligibility check warns and leaves that lane cold.
 checked out and before the first Cargo command, every command runs in order with
 the checkout root as its working directory (not the selected workspace
 subdirectory), in the same sanitised child environment as the seed build's
-Cargo commands. The runner reads the live project and host port tables; the
+Cargo commands plus `PROVENANT_SEED_ORIGIN` for seed-generation prepares.
+The runner reads the live project and host port tables; the
 repository only declares the command, nothing is added to it, and an unreadable
 or invalid table warns and runs no prepare command. A failing command fails that
 build: the project's outcome is `prepare_failed` with the command and the last

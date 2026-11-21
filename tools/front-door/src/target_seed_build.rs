@@ -1,6 +1,6 @@
 //! Build from a pinned remote-tracking commit in a disposable host checkout.
 use provenant_config::{CargoBuildProfile, LaneBuildSettings};
-use provenant_core::{Clock, GitOid};
+use provenant_core::{Clock, GitOid, consumer_env::SEED_ORIGIN};
 use provenant_os::exec::{ExecError, ExecOptions, Executor, SystemExecutor, Termination};
 use provenant_run::target_seed::{self, Manifest};
 use serde::{Deserialize, Serialize};
@@ -18,12 +18,6 @@ const PUBLICATION_WAIT_SECONDS: u64 = 10;
 /// Bound on the output tail a failing `build.prepare` command carries into its
 /// typed error, its refresh record and the seed result.
 const OUTPUT_TAIL_BYTES: usize = 2 * 1024;
-/// Environment marker naming the absolute origin checkout for a `build.prepare`
-/// child running in a standalone seed clone. It is added only to prepare
-/// children, never to the Cargo children whose `CARGO_TARGET_DIR` the
-/// verify-base path sets, so a consumer can tell a seed clone from an ambient
-/// target directory. Documented in docs/specs/run.md#cargo-target-seed.
-const SEED_ORIGIN_ENV: &str = "PROVENANT_SEED_ORIGIN";
 
 /// The single stderr seam for seed-build operator lines. Warnings and the
 /// `build.prepare` trace are facts for the operator, never refusals by themselves.
@@ -319,8 +313,10 @@ fn make_directories_writable(path: &Path) -> io::Result<()> {
 }
 
 /// The environment a seed-build child process sees. Inherited compiler-selection
-/// keys are dropped, as are `GIT_*` keys and keys Provenant sets through
-/// `overrides`; overrides are then applied last so the safe values win.
+/// keys are dropped, as are `GIT_*` keys, keys Provenant sets through
+/// `overrides`, and the origin marker: an ambient `SEED_ORIGIN` must never make
+/// a Cargo or rustc child look like a seed-clone prepare. Overrides are then
+/// applied last, so a prepare override re-adds the marker with the real origin.
 fn seed_build_child_environment(
     inherited: &[(OsString, OsString)],
     overrides: &[(OsString, OsString)],
@@ -332,6 +328,7 @@ fn seed_build_child_environment(
             !key.to_string_lossy().starts_with("GIT_")
                 && !overrides.iter().any(|(name, _)| name == key)
                 && !cleared.iter().any(|name| OsStr::new(name) == key)
+                && key != SEED_ORIGIN
         })
         .cloned()
         .collect();
@@ -340,7 +337,7 @@ fn seed_build_child_environment(
 }
 
 /// Overrides for the Cargo children of a seed build, including the verify-base
-/// path that sets `CARGO_TARGET_DIR`. [`SEED_ORIGIN_ENV`] is deliberately absent:
+/// path that sets `CARGO_TARGET_DIR`. [`SEED_ORIGIN`] is deliberately absent:
 /// that marker identifies standalone seed-clone preparation only.
 fn verify_base_overrides(
     cargo_profile: &CargoBuildProfile,
@@ -381,7 +378,7 @@ fn seed_prepare_overrides(
 ) -> Result<Vec<(OsString, OsString)>> {
     let mut overrides = build_overrides.to_vec();
     overrides.push((
-        OsString::from(SEED_ORIGIN_ENV),
+        OsString::from(SEED_ORIGIN),
         origin.canonicalize()?.into_os_string(),
     ));
     Ok(overrides)
@@ -1980,6 +1977,14 @@ mod tests {
             .cargo_build_profile(&[])
             .expect("default Cargo profile is UTF-8");
 
+        // An ambient marker is present in a non-empty inherited environment:
+        // no Cargo or rustc child may carry it, and a prepare child must get
+        // the real origin instead of the spoofed value.
+        let inherited = vec![
+            (OsString::from(SEED_ORIGIN), OsString::from("/spoofed")),
+            (OsString::from("UNRELATED"), OsString::from("kept")),
+        ];
+
         // The verify-base Cargo path sets CARGO_TARGET_DIR but never the marker.
         let build_overrides = verify_base_overrides(&profile, &target, &cargo).unwrap();
         assert!(
@@ -1987,38 +1992,33 @@ mod tests {
                 .iter()
                 .any(|(name, _)| name == "CARGO_TARGET_DIR")
         );
-        let verify_env = seed_build_child_environment(&[], &build_overrides);
+        let verify_env = seed_build_child_environment(&inherited, &build_overrides);
         assert!(
-            !verify_env.iter().any(|(name, _)| name == SEED_ORIGIN_ENV),
-            "verify-base Cargo children must not receive {SEED_ORIGIN_ENV}"
+            verify_env.iter().any(|(name, _)| name == "UNRELATED"),
+            "the inherited environment is otherwise kept"
+        );
+        assert!(
+            !verify_env.iter().any(|(name, _)| name == SEED_ORIGIN),
+            "verify-base Cargo children must not receive {SEED_ORIGIN}"
         );
 
-        // Seed-clone prepare children get the absolute origin checkout.
+        // Seed-clone prepare children get the absolute origin checkout. An
+        // ambient value cannot spoof the marker: the prepared override wins
+        // exactly once, with the canonical origin path.
         let expected = origin.canonicalize().unwrap();
         let prepare_overrides = seed_prepare_overrides(&build_overrides, &origin).unwrap();
-        let prepare_env = seed_build_child_environment(&[], &prepare_overrides);
-        let marker = prepare_env
-            .iter()
-            .find(|(name, _)| name == SEED_ORIGIN_ENV)
-            .map(|(_, value)| value)
-            .expect("prepare child must receive the origin marker");
-        assert_eq!(marker, expected.as_os_str());
-
-        // An ambient value cannot spoof the marker: the prepared override wins
-        // exactly once, with the canonical origin path.
-        let inherited = vec![(OsString::from(SEED_ORIGIN_ENV), OsString::from("/spoofed"))];
         let prepare_env = seed_build_child_environment(&inherited, &prepare_overrides);
         assert_eq!(
             prepare_env
                 .iter()
-                .filter(|(name, _)| name == SEED_ORIGIN_ENV)
+                .filter(|(name, _)| name == SEED_ORIGIN)
                 .count(),
             1
         );
         assert_eq!(
             prepare_env
                 .iter()
-                .find(|(name, _)| name == SEED_ORIGIN_ENV)
+                .find(|(name, _)| name == SEED_ORIGIN)
                 .map(|(_, value)| value)
                 .unwrap(),
             expected.as_os_str()
@@ -2848,19 +2848,41 @@ mod tests {
     /// A Cargo project whose build succeeds only once a prepare command has
     /// written a gitignored `src/generated.rs` into the checkout root. The
     /// prepare script records its working directory so the test can see which
-    /// directory it ran in after the disposable checkout is removed.
+    /// directory it ran in after the disposable checkout is removed. Its build
+    /// script records the environment of the Cargo children at the same level,
+    /// so a test can see whether the prepare-only marker leaked into them.
     #[allow(dead_code)] // The harness-free target includes this module without its tests.
     fn prepared_project(temp: &Path) -> (PathBuf, String, PathBuf) {
         let project = temp.join("project");
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(
             project.join("Cargo.toml"),
-            "[package]\nname='prepare-fixture'\nversion='0.1.0'\nedition='2021'\n",
+            "[package]\nname='prepare-fixture'\nversion='0.1.0'\nedition='2021'\nbuild = 'build.rs'\n",
         )
         .unwrap();
         fs::write(
             project.join("src/main.rs"),
             "mod generated;\nfn main() { generated::value(); }\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("build.rs"),
+            r#"use std::{env, fs, path::Path};
+
+fn main() {
+    let Some(dir) = env::var_os("CARGO_MANIFEST_DIR") else { return };
+    let Ok(path) = fs::read_to_string(Path::new(&dir).join("cargo-env-dump-path")) else {
+        return;
+    };
+    let mut entries: Vec<_> = env::vars_os().collect();
+    entries.sort();
+    let text = entries
+        .iter()
+        .map(|(key, value)| format!("{}={}\n", key.to_string_lossy(), value.to_string_lossy()))
+        .collect::<String>();
+    fs::write(path.trim(), text).unwrap();
+}
+"#,
         )
         .unwrap();
         fs::write(project.join(".gitignore"), "src/generated.rs\n").unwrap();
@@ -2881,6 +2903,7 @@ mod tests {
                 "add".into(),
                 "Cargo.toml".into(),
                 "Cargo.lock".into(),
+                "build.rs".into(),
                 "src/main.rs".into(),
                 ".gitignore".into(),
             ],
@@ -2897,7 +2920,7 @@ mod tests {
         fs::write(
             &script,
             format!(
-                "#!/bin/sh\nprintf 'pub fn value() {{}}\\n' > src/generated.rs\nprintf '%s' \"$PWD\" > {}\nprintf '%s\\n' \"$CARGO_TARGET_DIR\" \"$CARGO_BUILD_BUILD_DIR\" \"$RUSTUP_AUTO_INSTALL\" \"$CARGO_INCREMENTAL\" \"$CARGO_PROFILE_DEV_DEBUG\" \"$PATH\" \"$PROVENANT_SEED_ORIGIN\" > {}.env\n",
+                "#!/bin/sh\nprintf 'pub fn value() {{}}\\n' > src/generated.rs\nprintf '%s' \"$PWD\" > {}\nprintf '%s' \"$PWD/../cargo-child-env\" > cargo-env-dump-path\nprintf '%s\\n' \"$CARGO_TARGET_DIR\" \"$CARGO_BUILD_BUILD_DIR\" \"$RUSTUP_AUTO_INSTALL\" \"$CARGO_INCREMENTAL\" \"$CARGO_PROFILE_DEV_DEBUG\" \"$PATH\" \"${SEED_ORIGIN}\" > {}.env\n",
                 marker.display(), marker.display()
             ),
         )
@@ -3027,6 +3050,21 @@ mod tests {
             lines[6],
             project.canonicalize().unwrap().to_string_lossy(),
             "the prepare child must be told the absolute origin checkout"
+        );
+        // The fixture's build script sees the Cargo children's environment at
+        // build level: the prepare-only marker must not follow them there.
+        let cargo_env = fs::read_to_string(stage.join("cargo-child-env")).unwrap();
+        assert!(
+            cargo_env
+                .lines()
+                .any(|line| line.starts_with("CARGO_TARGET_DIR=")),
+            "the Cargo child environment was not observed: {cargo_env}"
+        );
+        assert!(
+            !cargo_env.lines().any(|line| line
+                .split_once('=')
+                .is_some_and(|(name, _)| name == SEED_ORIGIN)),
+            "Cargo children must not receive {SEED_ORIGIN}: {cargo_env}"
         );
         assert!(
             manifest
