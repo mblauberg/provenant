@@ -544,24 +544,21 @@ available from `provenant config show --full`.
 
 ### Disclosure and safe Git evidence
 
-`redaction` is one sourced setting: `off` (default), `secrets` or `full`.
+`redaction` is one sourced setting: `off` (default) or `secrets`.
 `config show` reports its value and source on one line; under `off` that is the
-only trace, with no masking or per-field warnings anywhere. `secrets` masks only
+only trace, with no masking or per-field warnings anywhere. `secrets` masks
 credential values and credential token shapes in text leaving the host, including
 GitHub publication, cross-host peer and relay projection and fixture export, and
-credential-shaped values in config history. Local output remains raw. `full`
-applies the previous text masking locally and at egress, including assignment
-masking and bounded diagnostics. Model, effort, adapter, alias, name, tier,
-account label and key, source, pool selection, paths, worktree, stage, graph and
-node names are never hidden under any mode.
+credential-shaped values in config history. Local output and diagnostics stay raw
+under either mode. A retired `full` config value is accepted as `secrets` with a
+warning naming its source; no command is refused for it. Model, effort, adapter,
+alias, name, tier, account label and key, source, pool selection, paths, worktree,
+stage, graph and node names are never hidden under any mode.
 
 Raw and exported bytes have separate lengths and digests. When an enabled
 projection fails, it withholds the affected publication. Host-local provider
-captures preserve raw bytes for settlement replay. In `full` mode quoted
-credential assignments remain masked until a definite closing quote, agreed by
-every plausible escape layer, or through the end of the raw line. Scanning
-resumes after the close or line end; an exact `[REDACTED]` marker remains stable
-across chunks and rescans.
+captures preserve raw bytes for settlement replay; prepare tails and diagnostics
+are bounded without masking.
 
 In-memory Debug masking, fence-token argv masking, git-config credential
 withholding (controlled by `domains.lanes.git_config_allow`), the GitHub token

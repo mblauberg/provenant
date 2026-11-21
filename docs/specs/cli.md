@@ -253,7 +253,8 @@ old output is not mistaken for a fresh heartbeat. `child_command` is the
 admission-gated command: it is set only when the child went through the
 admission shim (a lane waiting for or holding a slot), not for an arbitrary
 writer. Admission shims bound the command before publishing a wait or a hold;
-local text masking follows `redaction`. Clap errors mask fence tokens independently.
+local text is never masked; `redaction` applies only to text published off the
+host. Clap errors mask fence tokens independently.
 A lane
 waiting for a repository's heavy-job lock reports both the reason and the
 command it is waiting to run, which distinguishes a wait from a hung writer.
@@ -286,7 +287,7 @@ of a check.
 `retry TARGET --brief-file FILE` replaces the brief for a settled node; `-` reads stdin.
 `gc --idle DURATION` accepts zero and spans such as `6h` or `2d` for the minimum
 idle age; scheduled GC uses the configured `gc.idle`.
-`templates show NAME` inspects an effective template. Configuration edits report the changed key, its effective value and source, and the previous value. A pre-launch refusal retains its cause, subject to local text masking, and names a retry command.
+`templates show NAME` inspects an effective template. Configuration edits report the changed key, its effective value and source, and the previous value. A pre-launch refusal retains its bounded cause verbatim and names a retry command.
 
 `config show` summarises the effective configuration; `--full` shows its values
 and sources, and `--json` returns the structured configuration.

@@ -2585,19 +2585,13 @@ mod tests {
 
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
-    fn seed_result_stores_only_the_masked_prepare_tail() {
-        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
+    fn seed_result_stores_the_prepare_tail_verbatim() {
         let secret = "seed-result-secret-3391";
-        let _scope = provenant_redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
         let raw_tail = format!("npm ERR! rejected {secret} (Cannot find package 'zod')\n");
-        // run_with_tail masks on the capture stream, so the tail tick receives
-        // is already masked. Mirror that with the same known-shapes core, then
-        // assert the persisted seed-result holds only that masked form.
-        let masked_tail =
-            String::from_utf8(provenant_redact::known_shapes(raw_tail.as_bytes()).unwrap())
-                .unwrap();
-        assert!(masked_tail.contains("[REDACTED]"));
-        assert!(!masked_tail.contains(secret));
+        // Local diagnostics are not masked: redaction applies only to text
+        // published off the host. The persisted seed-result holds the tail as
+        // the executor captured it.
+        let masked_tail = raw_tail.clone();
 
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
@@ -2627,8 +2621,7 @@ mod tests {
         let stored = String::from_utf8(stored).unwrap();
         let wire: serde_json::Value = serde_json::from_slice(stored.as_bytes()).unwrap();
         assert_eq!(wire["projects"][0]["state"], "prepare_failed");
-        assert!(stored.contains("[REDACTED]"), "{stored}");
-        assert!(!stored.contains(secret), "{stored}");
+        assert!(stored.contains(secret), "{stored}");
         let records = seed_records(&directory);
         assert!(matches!(
             &records[0].outcome,

@@ -17,6 +17,7 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
         trains_on_prompts: None,
         monthly_allowance_usd: None,
         quota_pool: None,
+        superseded_by: Vec::new(),
     });
     catalogue.models.push(ModelEntry {
         capability: Default::default(),
@@ -32,6 +33,7 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
         trains_on_prompts: None,
         monthly_allowance_usd: None,
         quota_pool: None,
+        superseded_by: Vec::new(),
     });
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
@@ -669,6 +671,7 @@ fn family_requires_provider_answer_evidence_at_the_same_revision()
         trains_on_prompts: None,
         monthly_allowance_usd: None,
         quota_pool: None,
+        superseded_by: Vec::new(),
     });
     assert_eq!(
         FamilyFact::from_verified(

@@ -65,7 +65,8 @@ to their author.
 ## Credential admission and publication
 
 Operator brief admission checks held exact credential values of at least eight
-bytes, excluding `[REDACTED]`, only when `redaction` is `secrets` or `full`. A
+bytes, excluding `[REDACTED]`, only when `redaction` is `secrets` (a retired
+`full` value is accepted as `secrets` with a warning naming its source). A
 match warns and proceeds; `off` skips the check. This path skips ambient values
 exceeding 16 KiB each, 128 values or 64 KiB total, warning once per process
 without names or values. It never opens credential stores or refuses an operator

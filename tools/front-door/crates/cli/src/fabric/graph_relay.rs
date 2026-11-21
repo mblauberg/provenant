@@ -3497,7 +3497,7 @@ mod provisioning_tests {
                 journal.save(&checkpoint)?;
             }
             let request = json!({
-                "op":"add","id":"child","use":"task","prompt":"password=example-lost-reply-3391", "idempotency_key":"lost-reply",
+                "op":"add","id":"child","use":"task","prompt":"ghp_abcdefghijklmnopqrstuvwxyz0123456789", "idempotency_key":"lost-reply",
                 "launch":{"node":{"use":"task","prompt":format!("Review {base}...{subject}"),
                     "source":{"type":"commit","commit":subject}}}
             });
@@ -3692,11 +3692,10 @@ mod provisioning_tests {
                         .iter()
                         .any(|w| w.to_string().contains("prompt looks like a credential"))
                 );
-                assert!(
-                    warnings
-                        .iter()
-                        .all(|w| !w.to_string().contains("example-lost-reply-3391"))
-                );
+                assert!(warnings.iter().all(|w| {
+                    !w.to_string()
+                        .contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789")
+                }));
             }
             assert_eq!(replay["replayed"], true);
             let unavailable = |_| panic!("settled run must not prepare or fetch");

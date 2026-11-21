@@ -694,6 +694,7 @@ fn account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks()
             trains_on_prompts: None,
             monthly_allowance_usd: None,
             quota_pool: None,
+            superseded_by: Vec::new(),
         });
     }
     catalogue.pools.insert(

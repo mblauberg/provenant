@@ -4,7 +4,7 @@
 # Pool metadata is migrated from the legacy routing catalogue; exact execution
 # support still depends on each provider's current availability observation.
 schema_version = 1
-revision = "route-pools-20261119-neutral"
+revision = "route-pools-20261121-agy-gemini4-claude55"
 
 [[models]]
 model = "claude/claude-haiku-4-5-20251001"
@@ -166,6 +166,7 @@ read_ratio = 0.05
 model = "agy/gemini-3.8-flash"
 quota_pool = "gemini"
 efforts = ["low", "medium", "high"]
+superseded_by = ["agy/gemini-4-hydrogen", "agy/gemini-4-neon", "agy/gemini-4-argon"]
 evidence_ref = "legacy config/model-routing.json@114e3331"
 trains_on_prompts = false
 
@@ -177,10 +178,43 @@ fallback_effort = "high"
 
 
 [[models]]
+model = "agy/gemini-4-hydrogen"
+quota_pool = "gemini"
+efforts = ["low", "medium", "high", "xhigh"]
+evidence_ref = "legacy config/model-routing.json@114e3331 (agy provider no-training assurance); agy models CLI listing and probe, user observed 2026-11-21"
+trains_on_prompts = false
+
+[[models.policy_rules]]
+[models.policy_rules.policy.result]
+check = true
+fallback_family = "codex/gpt-*-luna"
+fallback_effort = "high"
+
+
+[[models]]
+model = "agy/gemini-4-neon"
+capability = "strong"
+quota_pool = "gemini"
+efforts = ["low", "medium", "high", "xhigh"]
+evidence_ref = "legacy config/model-routing.json@114e3331 (agy provider no-training assurance); agy models CLI listing and probe, user observed 2026-11-21"
+trains_on_prompts = false
+
+
+[[models]]
+model = "agy/gemini-4-argon"
+capability = "frontier"
+quota_pool = "gemini"
+efforts = ["low", "medium", "high"]
+evidence_ref = "legacy config/model-routing.json@114e3331 (agy provider no-training assurance); agy models CLI listing and probe, user observed 2026-11-21"
+trains_on_prompts = false
+
+
+[[models]]
 model = "agy/claude-sonnet-4-6"
 capability = "strong"
 quota_pool = "claude"
 efforts = []
+superseded_by = ["agy/claude-sonnet-5-5"]
 evidence_ref = "legacy config/model-routing.json@114e3331"
 trains_on_prompts = false
 
@@ -189,7 +223,24 @@ model = "agy/claude-opus-4-6-thinking"
 capability = "frontier"
 quota_pool = "claude"
 efforts = []
+superseded_by = ["agy/claude-opus-5-5"]
 evidence_ref = "legacy config/model-routing.json@114e3331"
+trains_on_prompts = false
+
+[[models]]
+model = "agy/claude-sonnet-5-5"
+capability = "strong"
+quota_pool = "claude"
+efforts = ["low", "medium", "high"]
+evidence_ref = "legacy config/model-routing.json@114e3331 (agy provider no-training assurance); agy models CLI listing and probe, user observed 2026-11-21"
+trains_on_prompts = false
+
+[[models]]
+model = "agy/claude-opus-5-5"
+capability = "frontier"
+quota_pool = "claude"
+efforts = ["low", "medium", "high"]
+evidence_ref = "legacy config/model-routing.json@114e3331 (agy provider no-training assurance); agy models CLI listing and probe, user observed 2026-11-21"
 trains_on_prompts = false
 
 [[models]]
@@ -222,54 +273,64 @@ opencode_paid = "pace"
 opencode_free = "max"
 codex = "spend"
 
-# Bundled pool weights are neutral: every member uses the catalogue's default
-# weight, so ranking is tiered by [capability_preferences] alone and no provider,
-# account or plan is favoured. Account- and plan-specific weights and the
-# observations behind them belong in local configuration, not in this asset.
+# Bundled pool weights are neutral across accounts and plans: standard members
+# carry explicit weight = 2 while usage-constrained routes (agy, cursor) use the
+# shared default weight (1), and ranking is tiered by [capability_preferences].
+# Account- and plan-specific weights and the observations behind them belong in
+# local configuration, not in this asset.
 [pools]
 utility = [
     { selector = "cursor/composer-*", efforts = [] },
-    { selector = "claude/claude-haiku-*", effort = "low", efforts = ["low"] },
-    { selector = "codex/gpt-*-luna", effort = "low", efforts = ["low"] },
+    { selector = "claude/claude-haiku-*", weight = 2, effort = "low", efforts = ["low"] },
+    { selector = "codex/gpt-*-luna", weight = 2, effort = "low", efforts = ["low"] },
 ]
 junior = [
     { selector = "cursor/composer-*", efforts = [] },
-    { selector = "opencode/opencode/deepseek-v*-flash-free", free = true, efforts = [] },
-    { selector = "opencode/opencode/glm-*-flash-free", free = true, efforts = [] },
-    { selector = "opencode/opencode-go/deepseek-v*-flash", efforts = [] },
-    { selector = "opencode/opencode-go/glm-*-flash", efforts = [] },
-    { selector = "codex/gpt-*-terra", effort = "low", efforts = ["low", "medium"] },
-    { selector = "codex/gpt-*-luna", effort = "high", efforts = ["medium", "high", "xhigh"] },
-    { selector = "claude/claude-haiku-*", effort = "high", efforts = ["medium", "high", "xhigh"] },
+    { selector = "opencode/opencode/deepseek-v*-flash-free", weight = 2, free = true, efforts = [] },
+    { selector = "opencode/opencode/glm-*-flash-free", weight = 2, free = true, efforts = [] },
+    { selector = "opencode/opencode-go/deepseek-v*-flash", weight = 2, efforts = [] },
+    { selector = "opencode/opencode-go/glm-*-flash", weight = 2, efforts = [] },
+    { selector = "codex/gpt-*-terra", weight = 2, effort = "low", efforts = ["low", "medium"] },
+    { selector = "codex/gpt-*-luna", weight = 2, effort = "high", efforts = ["medium", "high", "xhigh"] },
+    { selector = "claude/claude-haiku-*", weight = 2, effort = "high", efforts = ["medium", "high", "xhigh"] },
+    { selector = "agy/gemini-*-hydrogen", effort = "medium", efforts = ["low", "medium", "high", "xhigh"] },
     { selector = "agy/gemini-*-flash", effort = "medium", efforts = ["low", "medium", "high"] },
-    { selector = "agy/claude-sonnet-*", efforts = [] },
+    { selector = "agy/claude-sonnet-4-*", efforts = [] },
 ]
 senior = [
-    { selector = "opencode/opencode-go/deepseek-v*-flash", efforts = [] },
-    { selector = "opencode/opencode-go/glm-*-flash", efforts = [] },
-    { selector = "codex/gpt-*-sol", effort = "medium", efforts = ["low", "medium", "high"] },
-    { selector = "codex/gpt-*-terra", effort = "medium", efforts = ["low", "medium"] },
-    { selector = "claude/claude-sonnet-*", efforts = ["medium", "high", "xhigh"] },
+    { selector = "opencode/opencode-go/deepseek-v*-flash", weight = 2, efforts = [] },
+    { selector = "opencode/opencode-go/glm-*-flash", weight = 2, efforts = [] },
+    { selector = "codex/gpt-*-sol", weight = 2, effort = "medium", efforts = ["low", "medium", "high"] },
+    { selector = "codex/gpt-*-terra", weight = 2, effort = "medium", efforts = ["low", "medium"] },
+    { selector = "claude/claude-sonnet-*", weight = 2, efforts = ["medium", "high", "xhigh"] },
+    { selector = "agy/gemini-*-neon", effort = "medium", efforts = ["low", "medium", "high", "xhigh"] },
+    { selector = "agy/claude-sonnet-5-*", effort = "medium", efforts = ["low", "medium", "high"] },
     { selector = "agy/gemini-*-flash", effort = "high", efforts = ["low", "medium", "high"] },
     { selector = "agy/claude-opus-*-thinking", efforts = [] },
     { selector = "cursor/grok-*", efforts = ["low", "medium", "high", "xhigh"] },
 ]
 principal = [
-    { selector = "claude/claude-opus-*", efforts = ["low", "medium", "high", "xhigh"] },
-    { selector = "codex/gpt-*-sol", effort = "high", efforts = ["medium", "high", "xhigh"] },
+    { selector = "claude/claude-opus-*", weight = 2, efforts = ["low", "medium", "high", "xhigh"] },
+    { selector = "codex/gpt-*-sol", weight = 2, effort = "high", efforts = ["medium", "high", "xhigh"] },
+    { selector = "agy/gemini-*-neon", effort = "high", efforts = ["medium", "high", "xhigh"] },
+    { selector = "agy/gemini-*-argon", effort = "medium", efforts = ["low", "medium", "high"] },
+    { selector = "agy/claude-opus-5-*", effort = "medium", efforts = ["low", "medium", "high"] },
 ]
 writing = [
     { selector = "cursor/composer-*", efforts = [] },
+    { selector = "claude/claude-haiku-*", weight = 2, efforts = ["low", "medium", "high", "xhigh"] },
+    { selector = "agy/claude-sonnet-5-*", effort = "medium", efforts = ["low", "medium", "high"] },
     { selector = "agy/gemini-*-flash", efforts = ["low", "medium", "high"] },
-    { selector = "claude/claude-haiku-*", efforts = ["low", "medium", "high", "xhigh"] },
-    { selector = "agy/claude-sonnet-*", efforts = [] },
-    { selector = "claude/claude-sonnet-*", efforts = ["medium", "high", "xhigh"] },
-    { selector = "codex/gpt-*-luna", effort = "high", efforts = ["high", "xhigh"] },
+    { selector = "agy/claude-sonnet-4-*", efforts = [] },
+    { selector = "claude/claude-sonnet-*", weight = 2, efforts = ["medium", "high", "xhigh"] },
+    { selector = "codex/gpt-*-luna", weight = 2, effort = "high", efforts = ["high", "xhigh"] },
 ]
 design = [
-    { selector = "claude/claude-sonnet-*", efforts = ["medium", "high", "xhigh"] },
+    { selector = "claude/claude-sonnet-*", weight = 2, efforts = ["medium", "high", "xhigh"] },
+    { selector = "agy/claude-sonnet-5-*", effort = "medium", efforts = ["low", "medium", "high"] },
     { selector = "agy/gemini-*-flash", effort = "high", efforts = ["low", "medium", "high"] },
-    { selector = "claude/claude-opus-*", efforts = ["low", "medium", "high", "xhigh"] },
+    { selector = "claude/claude-opus-*", weight = 2, efforts = ["low", "medium", "high", "xhigh"] },
+    { selector = "agy/claude-opus-5-*", effort = "medium", efforts = ["low", "medium", "high"] },
 ]
 
 # Capability preferences affect ranking without excluding pool members.
