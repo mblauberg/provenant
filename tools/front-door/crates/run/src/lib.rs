@@ -464,6 +464,13 @@ pub enum RunError {
     Input { kind: ErrorKind, message: String },
     #[error("host writer delivery failed at {0:?}")]
     Delivery(WriterDeliveryStage),
+    /// A host command run for a named config read failed. `reason` is the
+    /// bounded leaf cause. The stage is reported by the receipt's delivery
+    /// fact, and the file/key by the named config error that wraps this, so
+    /// `Display` renders only the cause — printing the stage again here would
+    /// repeat it in a transport refusal or a failed receipt.
+    #[error("{reason}")]
+    ConfigCommandFailed { reason: String },
     #[error("host writer delivery failed at {stage:?}")]
     DeliveryConfigRead {
         stage: WriterDeliveryStage,
@@ -952,6 +959,9 @@ impl RunError {
                 diagnostic = diagnostic
                     .detail(format!("host writer delivery failed at {stage:?}"))
                     .fact(DiagnosticFact::DeliveryStage(*stage));
+            }
+            Self::ConfigCommandFailed { reason } => {
+                diagnostic = diagnostic.detail(reason.clone());
             }
             Self::DeliveryConfigRead { stage, source } => {
                 diagnostic = diagnostic
