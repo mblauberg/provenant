@@ -605,7 +605,12 @@ pub(super) fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> 
         store.record(attempt, &call)?.state,
         provenant_run::AttemptState::Terminal { .. }
     ));
-    // The operation remains unfinished when the durable exit is recovered.
+    // The guardian crashes in its terminal callback after sealing the provider's
+    // exit, so `process-exit.json` appears before that callback finishes. Mark
+    // the operation unfinished at once so whichever pass settles it sees the
+    // in-progress cherry-pick. An early reconcile can legitimately report
+    // HostStalled or Held while the guardian is still unwinding, so poll for the
+    // invariant instead of assuming the first pass observes a settled crash.
     fs::write(
         writer
             .worktree
@@ -614,13 +619,25 @@ pub(super) fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> 
             .join("CHERRY_PICK_HEAD"),
         b"unfinished cherry-pick",
     )?;
-    let found = store.reconcile_for_fixture(record.attempt_id, &provider, &call)?;
     // Recovery refuses the unfinished operation, settles once and releases custody.
-    assert!(matches!(
-        found.as_slice(),
-        [(reconciled_attempt, provenant_run::Reconciled::WriterLeaseReleased { locks })]
-            if *reconciled_attempt == attempt && !locks.is_empty()
-    ));
+    // The poll is the assertion: it only tolerates a transient HostStalled or
+    // Held result while the guardian unwinds, and fails unless a pass reports
+    // exactly one attempt whose writer lease was released.
+    provenant_test_support::wait_for(
+        "reconcile to release the crashed writer lease",
+        Duration::from_secs(10),
+        || store.reconcile_for_fixture(record.attempt_id, &provider, &call),
+        |found| {
+            let Ok(found) = found else {
+                return false;
+            };
+            matches!(
+                found.as_slice(),
+                [(reconciled_attempt, provenant_run::Reconciled::WriterLeaseReleased { locks })]
+                    if *reconciled_attempt == attempt && !locks.is_empty()
+            )
+        },
+    )??;
     let terminal = store.record(attempt, &call)?;
     assert_terminal_outcome(&terminal, provenant_run::Outcome::Failed)?;
     assert!(
