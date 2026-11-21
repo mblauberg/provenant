@@ -6,7 +6,9 @@ use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::
 use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
 use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
 use provenant_os::clock::SystemClock;
-use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
+use provenant_os::exec::{
+    CaptureMask, ExecOptions, Executor, RawCaptureReason, StreamPolicy, Termination,
+};
 use provenant_os::fs::{Directory, LockMode};
 use provenant_records::CanonicalV1;
 use serde::{Deserialize, Serialize};
@@ -522,7 +524,12 @@ fn refresh_with_clock_and_lock_observer(
         .to_vec();
         let mut options = ExecOptions::new(&argv, Path::new(PROBE_CWD), timeout);
         options.env = Some(&env);
+        // These bytes are a credential: `parse_stored_token` reads the access
+        // token from this exact JSON and the lane launches with it as a Bearer
+        // header. The default stream mask would turn an `sk-ant-` token into
+        // `[REDACTED]`, which parses cleanly but authenticates nowhere.
         options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
+        options.stdout_mask = CaptureMask::Raw(RawCaptureReason::ByteExactParse);
         options.stderr = StreamPolicy::Discard;
         let out = executor.execute(options).map_err(|_| {
             ProviderError::CredentialReadFailed("cannot execute keychain read".into())

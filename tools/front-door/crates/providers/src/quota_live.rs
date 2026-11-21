@@ -12,7 +12,8 @@ use crate::host::PROBE_DIR_OPERATION;
 use provenant_core::Clock;
 use provenant_os::clock::SystemClock;
 use provenant_os::exec::{
-    ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
+    CaptureMask, ExecError, ExecOptions, ExecOutcome, Executor, RawCaptureReason, StreamPolicy,
+    SystemExecutor, Termination,
 };
 use provenant_quota::{
     AccountRecord, AccountScope, ProbeCapture, ProbeFailure, QuotaDetails, QuotaEffects,
@@ -211,6 +212,34 @@ impl LiveQuota {
             stdin,
             deadline,
             max_seconds,
+            CaptureMask::default(),
+        )
+    }
+    /// Runs a probe whose stdout is a credential parsed byte-for-byte. The
+    /// default stream mask would rewrite an `sk-ant-` token to `[REDACTED]`
+    /// before `claude_token` could use it, so this scoped helper is the only
+    /// path that keeps a probe's captured stdout raw.
+    #[allow(clippy::too_many_arguments)]
+    fn command_with_mask(
+        &self,
+        program: &str,
+        args: &[&str],
+        selector: Option<(&str, &Path)>,
+        stdin: Option<&[u8]>,
+        deadline: i64,
+        max_seconds: u64,
+        mask: CaptureMask,
+    ) -> Result<ExecOutcome, ProbeFailure> {
+        self.command_as(
+            &self.home,
+            None,
+            program,
+            args,
+            selector,
+            stdin,
+            deadline,
+            max_seconds,
+            mask,
         )
     }
     /// Runs a probe with `home` as its `HOME`.
@@ -225,6 +254,7 @@ impl LiveQuota {
         stdin: Option<&[u8]>,
         deadline: i64,
         max_seconds: u64,
+        mask: CaptureMask,
     ) -> Result<ExecOutcome, ProbeFailure> {
         let remaining = deadline.saturating_sub(self.now());
         if remaining <= 0 {
@@ -267,6 +297,7 @@ impl LiveQuota {
         options.env = Some(&env);
         options.stdin = stdin;
         options.stdout = StreamPolicy::Capture { limit: LIMIT };
+        options.stdout_mask = mask;
         options.stderr = StreamPolicy::Discard;
         options.stop_on_output_limit = true;
         match executor.execute(options) {
@@ -302,6 +333,7 @@ impl LiveQuota {
             None,
             deadline,
             seconds,
+            CaptureMask::default(),
         )?;
         if !clean(&out) || out.termination != Termination::Exit(0) {
             return Err(ProbeFailure::Network);

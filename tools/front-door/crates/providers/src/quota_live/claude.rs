@@ -274,14 +274,19 @@ impl LiveQuota {
                 service.push('-');
                 service.push_str(&crate::claude::keychain_suffix(dir.as_os_str().as_bytes()));
             }
+            // The Keychain item is a credential: `claude_token` parses the
+            // access token out of these bytes and sends it as a Bearer header.
+            // A masked token would still parse (expiresAt survives) but would
+            // be `[REDACTED]` on the wire, so keep this one capture raw.
             let out = self
-                .command(
+                .command_with_mask(
                     "/usr/bin/security",
                     &["find-generic-password", "-s", &service, "-w"],
                     None,
                     None,
                     deadline,
                     10,
+                    CaptureMask::Raw(RawCaptureReason::ByteExactParse),
                 )
                 .map_err(|error| match error {
                     ProbeFailure::ProbeDirectory => error,

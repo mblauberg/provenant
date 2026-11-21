@@ -1341,12 +1341,17 @@ fn every_capture_uses_the_default_mask_unless_it_names_a_reason() -> Result<(), 
 fn byte_exact_capture_sites_opt_out_of_the_default_mask() -> Result<(), Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let opt_out = "CaptureMask::Raw(RawCaptureReason::ByteExactParse)";
+    // Known byte-exact helpers: each captures stdout to parse it directly,
+    // either as a byte-level protocol (git object ids, port responses) or as a
+    // credential (an access token that must reach the wire unchanged).
     for path in [
         "crates/confinement/src/utility.rs",
         "crates/cli/src/run/provider/gh_auth.rs",
         "crates/config/src/ports.rs",
         "crates/config/src/ports/forge.rs",
         "crates/run/src/delivery.rs",
+        "crates/providers/src/claude.rs",
+        "crates/providers/src/quota_live/claude.rs",
     ] {
         let source = fs::read_to_string(root.join(path))?;
         assert!(
@@ -1354,5 +1359,44 @@ fn byte_exact_capture_sites_opt_out_of_the_default_mask() -> Result<(), Box<dyn 
             "{path} parses captured bytes byte-for-byte and must opt out of the default mask"
         );
     }
+
+    // Derive the credential-capture sites from the tree rather than trusting
+    // the list above: any source that asks the Keychain for a password with
+    // `-w` and then consumes the captured stdout holds a token the default
+    // mask would silently rewrite to `[REDACTED]` (which still parses). A new
+    // site of this shape must name a Raw reason where it reads the credential,
+    // so the allowlist cannot go stale for this class of defect.
+    let policy_source = root.join(file!());
+    let mut sources = Vec::new();
+    for source_root in source_roots() {
+        rust_sources(&source_root, &mut sources)?;
+    }
+    let mut violations = Vec::new();
+    for path in sources {
+        if path == policy_source {
+            continue;
+        }
+        let code = fs::read_to_string(&path)?
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let keychain_read = code.contains("find-generic-password") && code.contains("\"-w\"");
+        if !keychain_read || !code.contains(".stdout.bytes") {
+            continue;
+        }
+        if !code.contains("CaptureMask::Raw(RawCaptureReason::") {
+            violations.push(format!(
+                "{}: reads a Keychain credential into captured stdout without a \
+                 named raw opt-out",
+                path.display()
+            ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "credential capture masking rule:\n{}",
+        violations.join("\n")
+    );
     Ok(())
 }
