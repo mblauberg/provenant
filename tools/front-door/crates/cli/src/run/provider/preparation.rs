@@ -255,16 +255,35 @@ fn pinned_candidate(choice: &provenant_routing::RouteChoice, route: &ResolvedRou
         .is_ok_and(|candidate| candidate == *pinned)
 }
 
-/// A spent pin is advisory only when redrawing to another account is not an
-/// option: an exact model-and-account pin, or a continuation with a retained
-/// identity. A model-only pin still prefers another account for that model
-/// (issue #3551).
-fn pinned_spent_candidate(
+/// A recorded refusal on a pinned model is advisory only when redrawing to
+/// another account is not an option: an exact model-and-account pin, or a
+/// continuation with a retained identity. A model-only pin still prefers
+/// another account for that model (issue #3551).
+fn pinned_advisory_candidate(
     choice: &provenant_routing::RouteChoice,
     route: &ResolvedRoute,
     selected: Option<&str>,
+    alternative_account: bool,
 ) -> bool {
-    selected.is_some() && pinned_candidate(choice, route)
+    pinned_candidate(choice, route) && (selected.is_some() || !alternative_account)
+}
+
+/// Whether another account could still serve this exact model, so a model-only
+/// pin redraws instead of treating its own account's refusal as advisory.
+fn has_alternative_account(
+    route: &ResolvedRoute,
+    availability: &[provenant_providers::AvailabilityRecord],
+    refused: &std::collections::BTreeSet<(String, String)>,
+) -> bool {
+    availability.iter().any(|record| {
+        record.adapter == route.adapter
+            && record.account_key.as_deref() != route.account_key.as_deref()
+            && record
+                .account_key
+                .as_deref()
+                .is_some_and(|key| !refused.contains(&(record.adapter.clone(), key.to_owned())))
+            && provenant_providers::model_matches_offered(&route.model, &record.observed_models)
+    })
 }
 
 /// Compose the warning for a recorded quota or pacing refusal on a model the
@@ -278,36 +297,79 @@ fn pinned_refusal_warning(
     availability: &[provenant_providers::AvailabilityRecord],
     records: &[provenant_quota::AccountRecord],
     reason: &provenant_records::RouteExclusionReason,
+    now: i64,
 ) -> Option<(String, i64)> {
+    use provenant_records::RouteExclusionReason;
     use provenant_records::diagnostic::{Diagnostic, ResourceFact};
     let record = records.iter().find(|record| {
         record.account.adapter == route.adapter
             && route.account_key.as_deref() == Some(record.account.account_key.as_str())
     });
     let snapshot = record.and_then(|record| record.snapshot.as_ref());
+    // A persisted provider refusal is its own evidence: the observed refusal
+    // names the source and its reset bounds the expiry.
+    let refusal = record
+        .filter(|_| {
+            matches!(
+                reason,
+                RouteExclusionReason::ProviderRefused | RouteExclusionReason::FreeTierRefused
+            )
+        })
+        .and_then(|record| {
+            record
+                .refusals
+                .iter()
+                .filter_map(|refusal| {
+                    let scope = if refusal.model == route.model {
+                        3
+                    } else if refusal.account_wide() {
+                        2
+                    } else if *reason == RouteExclusionReason::ProviderRefused
+                        && refusal.pool.is_some()
+                    {
+                        1
+                    } else {
+                        return None;
+                    };
+                    let expiry = refusal.expires_unix_seconds().ok()?;
+                    (expiry > now).then_some((scope, expiry, refusal))
+                })
+                .max_by_key(|(scope, expiry, _)| (*scope, *expiry))
+        });
     let source = match (&route.diagnostics.pacing_reserve_fact, reason) {
-        (
-            Some(fact @ ResourceFact::PacingReserve { .. }),
-            provenant_records::RouteExclusionReason::PacingReserve,
-        ) => Some(
-            fact.project(Diagnostic::new("PINNED_REFUSAL"))
-                .detail
-                .unwrap_or_else(|| "pacing reserve".to_owned()),
-        ),
-        _ => route
-            .diagnostics
-            .allowance_warning
-            .as_ref()
-            .map(|warning| format!("{} (source: {})", warning.warning, warning.source))
+        (Some(fact @ ResourceFact::PacingReserve { .. }), RouteExclusionReason::PacingReserve) => {
+            Some(
+                fact.project(Diagnostic::new("PINNED_REFUSAL"))
+                    .detail
+                    .unwrap_or_else(|| "pacing reserve".to_owned()),
+            )
+        }
+        _ => refusal
+            .map(|(_, _, refusal)| {
+                format!(
+                    "provider refusal observed unix seconds {}",
+                    refusal.observed_unix_seconds
+                )
+            })
+            .or_else(|| {
+                route
+                    .diagnostics
+                    .allowance_warning
+                    .as_ref()
+                    .map(|warning| format!("{} (source: {})", warning.warning, warning.source))
+            })
             .or_else(|| snapshot.map(|snapshot| snapshot.source_ref.clone())),
     }?;
-    let expiry = snapshot
-        .and_then(|snapshot| {
-            snapshot
-                .windows
-                .iter()
-                .filter_map(|window| window.resets_unix_seconds)
-                .max()
+    let expiry = refusal
+        .map(|(_, expiry, _)| expiry)
+        .or_else(|| {
+            snapshot.and_then(|snapshot| {
+                snapshot
+                    .windows
+                    .iter()
+                    .filter_map(|window| window.resets_unix_seconds)
+                    .max()
+            })
         })
         .or_else(|| {
             availability
@@ -3855,28 +3917,31 @@ pub(super) fn prepare_candidates_inner(
                 );
             }
         }
-        // Issue #3551: a recorded quota/pacing refusal on the exact model the
-        // owner pinned is advisory. Warn with the record's source and expiry
-        // and attempt that model; recorded refusals go stale. Automatic
-        // alternatives keep their own readiness, and unpinned routing still
-        // prefers available routes.
-        if pinned_candidate(&task_request.choice, &route) {
-            let recorded_reason = match &route.readiness {
-                provenant_records::RouteReadiness::Unavailable { reason, .. }
-                    if matches!(
-                        reason,
-                        provenant_records::RouteExclusionReason::Exhausted
-                            | provenant_records::RouteExclusionReason::PacingReserve
-                    ) =>
-                {
-                    Some(reason.clone())
-                }
-                _ => None,
-            };
-            if let Some(reason) = recorded_reason
-                && let Some((warning, expiry)) =
-                    pinned_refusal_warning(&route, &availability, &diagnostic_records, &reason)
-            {
+        // Issue #3551: a recorded quota, pacing or provider refusal on the
+        // exact model the owner pinned is advisory. Warn with the record's
+        // source and expiry and attempt that model; recorded refusals go stale.
+        // Automatic alternatives keep their own readiness, and unpinned
+        // routing still prefers available routes.
+        let mut pinned_advisory = None;
+        let mut pinned_refusal_reason = None;
+        if pinned_candidate(&task_request.choice, &route)
+            && let provenant_records::RouteReadiness::Unavailable { reason, .. } = &route.readiness
+            && matches!(
+                reason,
+                provenant_records::RouteExclusionReason::Exhausted
+                    | provenant_records::RouteExclusionReason::PacingReserve
+                    | provenant_records::RouteExclusionReason::ProviderRefused
+                    | provenant_records::RouteExclusionReason::FreeTierRefused
+            )
+        {
+            pinned_refusal_reason = Some(reason.clone());
+            if let Some((warning, expiry)) = pinned_refusal_warning(
+                &route,
+                &availability,
+                &diagnostic_records,
+                reason,
+                clock.unix_seconds(),
+            ) {
                 let availability_ref = route
                     .diagnostics
                     .allowance_warning
@@ -3884,11 +3949,12 @@ pub(super) fn prepare_candidates_inner(
                     .map_or_else(|| "quota-recorded-refusal".to_owned(), |w| w.source.clone());
                 push_launch_warning(&mut route, warning.clone());
                 route.readiness = provenant_records::RouteReadiness::Ready {
-                    availability_warning: Some(warning),
+                    availability_warning: Some(warning.clone()),
                     extra: Default::default(),
                     availability_ref,
                     expires_unix_seconds: expiry,
                 };
+                pinned_advisory = Some(warning);
             }
         }
         if let provenant_records::RouteReadiness::Unavailable { reason, .. } = &route.readiness {
@@ -4057,38 +4123,60 @@ pub(super) fn prepare_candidates_inner(
         if let Err(error) =
             crate::route::check_dispatch_candidate(roots, &route, provider_registry, &launch_policy)
         {
-            // Admission refuses an account whose allowance is spent. Another
-            // account may still serve the same model, so move on to it once per
-            // account, never past a pinned one.
+            // Admission refuses an account whose allowance or recorded
+            // provider refusal makes it unusable. Another account may still
+            // serve the same model, so move on to it once per account, never
+            // past a pinned one.
             let spent = matches!(
                 &error,
                 crate::route::EdgeError::Quota(provenant_quota::QuotaError::AllowanceExhausted)
             );
-            // Issue #3551: an exact model-and-account pin is attempted despite
-            // recorded exhaustion, with a warning naming the record's source
-            // and expiry. A model-only pin still redraws to another account
-            // for that model, and automatic alternatives keep their own
-            // readiness; both still prefer an available route.
-            let pinned_exhaustion =
-                spent && pinned_spent_candidate(&task_request.choice, &route, selected);
-            let advisory = if pinned_exhaustion {
-                pinned_refusal_warning(
-                    &route,
-                    &availability,
-                    &diagnostic_records,
-                    &provenant_records::RouteExclusionReason::Exhausted,
-                )
-                .map(|(warning, _)| warning)
+            // Issue #3551: an exact model-and-account pin, or a model pin with
+            // no other account to redraw to, is attempted despite a recorded
+            // refusal, with a warning naming the record's source and expiry. A
+            // model-only pin with another account redraws, and automatic
+            // alternatives keep their own readiness; both still prefer an
+            // available route.
+            let alternative_account =
+                has_alternative_account(&route, &availability, &refused_accounts);
+            let pinned_advisory_route = pinned_advisory_candidate(
+                &task_request.choice,
+                &route,
+                selected,
+                alternative_account,
+            );
+            let advisory = if pinned_advisory_route {
+                pinned_advisory.clone().or_else(|| {
+                    if spent {
+                        pinned_refusal_warning(
+                            &route,
+                            &availability,
+                            &diagnostic_records,
+                            &provenant_records::RouteExclusionReason::Exhausted,
+                            clock.unix_seconds(),
+                        )
+                        .map(|(warning, _)| warning)
+                    } else {
+                        None
+                    }
+                })
             } else {
                 None
             };
             if let Some(warning) = &advisory {
                 push_launch_warning(&mut route, warning.clone());
             }
-            let refused_key = route
-                .account_key
-                .clone()
-                .filter(|_| spent && advisory.is_none() && selected.is_none());
+            let recoverable_account_refusal = spent
+                || matches!(
+                    pinned_refusal_reason,
+                    Some(
+                        provenant_records::RouteExclusionReason::ProviderRefused
+                            | provenant_records::RouteExclusionReason::FreeTierRefused
+                    )
+                );
+            let refused_key = route.account_key.clone().filter(|_| {
+                recoverable_account_refusal && advisory.is_none() && selected.is_none()
+            });
             match refused_key {
                 Some(key) => {
                     let name = entries
@@ -6781,13 +6869,70 @@ mod candidate_walk_regressions {
         );
         assert!(pinned_candidate(&choice, &primary));
         assert!(!pinned_candidate(&choice, &alternative));
-        // An exact account pin is attempted; a model-only pin still redraws.
-        assert!(pinned_spent_candidate(&choice, &primary, Some("spent")));
-        assert!(!pinned_spent_candidate(&choice, &primary, None));
-        assert!(!pinned_spent_candidate(
+        // An exact account pin is attempted; a model-only pin redraws while
+        // another account can serve the model, and is attempted when none can.
+        assert!(pinned_advisory_candidate(
+            &choice,
+            &primary,
+            Some("spent"),
+            true
+        ));
+        assert!(pinned_advisory_candidate(
+            &choice,
+            &primary,
+            Some("spent"),
+            false
+        ));
+        assert!(!pinned_advisory_candidate(&choice, &primary, None, true));
+        assert!(pinned_advisory_candidate(&choice, &primary, None, false));
+        assert!(!pinned_advisory_candidate(
             &choice,
             &alternative,
-            Some("spent")
+            Some("spent"),
+            true
+        ));
+    }
+
+    #[test]
+    fn alternative_account_must_serve_the_pinned_model() {
+        let pinned = route("legacy", "spent");
+        let record = |key: &str, models: &[&str]| provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: pinned.adapter.clone(),
+            executable: "/fixture/cursor".into(),
+            version: "fixture".into(),
+            last_update: None,
+            fixture_ref: "fixture".into(),
+            catalogue_revision: "fixture".into(),
+            account_key: Some(key.into()),
+            plan: None,
+            observed_models: models.iter().map(|model| (*model).to_owned()).collect(),
+            observed_unix_seconds: 0,
+            expires_unix_seconds: 1,
+        };
+        let refused = std::collections::BTreeSet::new();
+        assert!(!has_alternative_account(&pinned, &[], &refused));
+        assert!(!has_alternative_account(
+            &pinned,
+            &[record("spent", &["legacy"])],
+            &refused
+        ));
+        assert!(has_alternative_account(
+            &pinned,
+            &[record("other", &["legacy"])],
+            &refused
+        ));
+        assert!(!has_alternative_account(
+            &pinned,
+            &[record("other", &["unrelated"])],
+            &refused
+        ));
+        let mut refused = std::collections::BTreeSet::new();
+        refused.insert(("cursor".to_owned(), "other".to_owned()));
+        assert!(!has_alternative_account(
+            &pinned,
+            &[record("other", &["legacy"])],
+            &refused
         ));
     }
 
@@ -6821,6 +6966,7 @@ mod candidate_walk_regressions {
             &availability,
             &[],
             &provenant_records::RouteExclusionReason::Exhausted,
+            0,
         )
         .expect("availability evidence");
         assert!(warning.contains("cursor/legacy"), "{warning}");
@@ -6833,6 +6979,7 @@ mod candidate_walk_regressions {
                 &[],
                 &[],
                 &provenant_records::RouteExclusionReason::Exhausted,
+                0,
             )
             .is_none(),
             "no record means no source or expiry to claim"
@@ -6874,12 +7021,88 @@ mod candidate_walk_regressions {
             &[],
             std::slice::from_ref(&record),
             &provenant_records::RouteExclusionReason::Exhausted,
+            0,
         )
         .expect("record evidence");
         assert!(warning.contains(&expected_source), "{warning}");
         assert!(!warning.contains("quota allowance on"), "{warning}");
         assert!(warning.contains("expiry unix seconds: 10000"), "{warning}");
         assert_eq!(expiry, 10_000);
+    }
+
+    #[test]
+    fn pinned_refusal_warning_reads_the_provider_refusal_record() {
+        let pinned = route("legacy", "spent");
+        let scope = provenant_quota::AccountScope {
+            extra: Default::default(),
+            adapter: pinned.adapter.clone(),
+            account_key: "spent".into(),
+            label: "pro".into(),
+        };
+        let mut record = provenant_quota::AccountRecord::empty(scope.clone());
+        record.revision = 1;
+        record.refusals.push(provenant_quota::Refusal {
+            extra: Default::default(),
+            account: scope,
+            model: pinned.model.clone(),
+            pool: None,
+            observed_unix_seconds: 2_000,
+            resets_unix_seconds: Some(9_000),
+        });
+        let reason = provenant_records::RouteExclusionReason::ProviderRefused;
+        let (warning, expiry) =
+            pinned_refusal_warning(&pinned, &[], std::slice::from_ref(&record), &reason, 3_000)
+                .expect("refusal evidence");
+        assert!(warning.contains("cursor/legacy"), "{warning}");
+        assert!(
+            warning.contains("source: provider refusal observed unix seconds 2000"),
+            "{warning}"
+        );
+        assert!(warning.contains("expiry unix seconds: 9000"), "{warning}");
+        assert_eq!(expiry, 9_000);
+        assert!(
+            pinned_refusal_warning(&pinned, &[], std::slice::from_ref(&record), &reason, 9_000)
+                .is_none(),
+            "an expired refusal is not evidence for an advisory launch"
+        );
+    }
+
+    #[test]
+    fn persisted_provider_refusal_feeds_the_advisory_warning()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        crate::quota::persist_provider_refusal(
+            temp.path(),
+            &provenant_records::run::RouteRecord {
+                provider: Some("cursor".into()),
+                model: Some("cursor/legacy".into()),
+                account_key: Some("spent".into()),
+                account_label: Some("pro".into()),
+                ..Default::default()
+            },
+            None,
+            5_000,
+            Some(9_000),
+        )?;
+        let records = crate::quota::read_cache_at(temp.path())?;
+        let pinned = route("legacy", "spent");
+        let (warning, expiry) = pinned_refusal_warning(
+            &pinned,
+            &[],
+            &records,
+            &provenant_records::RouteExclusionReason::ProviderRefused,
+            5_001,
+        )
+        .expect("persisted refusal evidence");
+        assert!(
+            warning.contains("source: provider refusal observed unix seconds 5000"),
+            "{warning}"
+        );
+        assert!(warning.contains("expiry unix seconds: 9000"), "{warning}");
+        assert_eq!(expiry, 9_000);
+        Ok(())
     }
 }
 

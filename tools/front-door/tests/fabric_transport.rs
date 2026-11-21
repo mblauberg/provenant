@@ -649,9 +649,21 @@ fn run_attempt_record(
 
 #[test]
 fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
-    for scenario in ["authority", "refresh", "quota"] {
+    for scenario in [
+        "authority",
+        "refresh",
+        "quota",
+        "refusal",
+        "quota-model-only",
+    ] {
         let mut rig = TestRig::new()?;
         let cleanup = rig.process_cleanup();
+        // Quota exhaustion and a persisted provider refusal are both advisory
+        // for the exact pin; the other scenarios pin credential refusals.
+        let advisory = matches!(scenario, "quota" | "refusal" | "quota-model-only");
+        // A model-only pin has one account here, so it cannot redraw and must
+        // still be attempted (issue #3551).
+        let model_only = scenario == "quota-model-only";
         let bin = rig.root.join("bin");
         std::fs::create_dir(&bin)?;
         let executable = bin.join("claude");
@@ -670,7 +682,7 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         let credential = directory.join(".credentials.json");
         if scenario == "authority" {
             std::fs::create_dir(&credential)?;
-        } else if scenario == "quota" {
+        } else if advisory {
             // Issue #3551: the pinned Claude route is now attempted despite a
             // recorded exhaustion, so it needs a valid host-read token. An
             // invalid credential would be refused during token refresh and
@@ -683,7 +695,7 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         let key = provenant_providers::identity::fingerprint("fixture@example.test")
             .ok_or("account key")?;
         support::register_account(&rig, "claude", "pro", &key, &directory)?;
-        if scenario == "quota" {
+        if advisory {
             #[allow(
                 clippy::disallowed_methods,
                 reason = "the quota record must be fresh against the CLI's live clock"
@@ -700,24 +712,38 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
                 label: "pro".into(),
             };
             let mut record = provenant_quota::AccountRecord::empty(scope.clone());
-            record.snapshot = Some(provenant_quota::QuotaSnapshot {
-                extra: Default::default(),
-                schema_version: 1,
-                account: scope,
-                revision: 0,
-                status: provenant_quota::QuotaStatus::Exhausted,
-                observed_unix_seconds: now,
-                source_ref: "fixture".into(),
-                authority_ref: None,
-                windows: vec![provenant_quota::QuotaWindow {
+            if scenario == "refusal" {
+                // Persist the same record shape the refusal writer publishes.
+                record = provenant_quota::record_refusal(
+                    None,
+                    &scope,
+                    "claude/claude-sonnet-5-5",
+                    None,
+                    now,
+                    Some(now + 9000),
+                )?
+                .replacement
+                .ok_or("provider refusal record")?;
+            } else {
+                record.snapshot = Some(provenant_quota::QuotaSnapshot {
                     extra: Default::default(),
-                    pool: "five_hour".into(),
-                    window_seconds: Some(18_000),
-                    used_basis_points: 10_000,
-                    resets_unix_seconds: Some(now + 9000),
-                }],
-                details: None,
-            });
+                    schema_version: 1,
+                    account: scope,
+                    revision: 0,
+                    status: provenant_quota::QuotaStatus::Exhausted,
+                    observed_unix_seconds: now,
+                    source_ref: "fixture".into(),
+                    authority_ref: None,
+                    windows: vec![provenant_quota::QuotaWindow {
+                        extra: Default::default(),
+                        pool: "five_hour".into(),
+                        window_seconds: Some(18_000),
+                        used_basis_points: 10_000,
+                        resets_unix_seconds: Some(now + 9000),
+                    }],
+                    details: None,
+                });
+            }
             let quota = rig.state.join("quota").join(&key);
             std::fs::create_dir_all(&quota)?;
             std::fs::set_permissions(
@@ -732,8 +758,8 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         // The authority and refresh scenarios pin credential refusals, which
         // are isolated, sandboxed behaviour: host access uses native login and
         // proceeds with warnings, and the managed token refresh that inspects
-        // the credential source only runs under a sandbox. The quota scenario
-        // prepares the exact pinned route to pin the advisory warning, so it
+        // the credential source only runs under a sandbox. The advisory
+        // scenarios prepare the exact pinned route to pin the warning, so they
         // must not demand a sandbox the platform cannot enforce: host access
         // prepares without one on every CI platform. Provider custody itself
         // is macOS-only, so on Linux the prepared launch is refused before
@@ -741,21 +767,23 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         {
             let config = rig.state.join("config.toml");
             let mut settings: toml_edit::DocumentMut = std::fs::read_to_string(&config)?.parse()?;
-            settings["knobs"]["lanes.access"] = toml_edit::value(if scenario == "quota" {
-                "host"
-            } else {
-                "isolated"
-            });
-            if scenario != "quota" {
+            settings["knobs"]["lanes.access"] =
+                toml_edit::value(if advisory { "host" } else { "isolated" });
+            if !advisory {
                 settings["knobs"]["lanes.sandbox"] = toml_edit::value("on");
             }
             std::fs::write(config, settings.to_string())?;
         }
+        let pinned_route = if model_only {
+            json!({"adapter":"claude","model":"claude/claude-sonnet-5-5"})
+        } else {
+            json!({"adapter":"claude","model":"claude/claude-sonnet-5-5","account":"pro"})
+        };
         std::fs::write(
             rig.project.join("graph.json"),
             serde_json::to_vec(&json!({
                 "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"typed-refusal","nodes":[{"id":"one","prompt":"work","access":"read_only","routes":[
-                    {"adapter":"claude","model":"claude/claude-sonnet-5-5","account":"pro"},
+                    pinned_route,
                     {"adapter":"fixture","model":"two","account":"pro"}
                 ]}]
             }))?,
@@ -764,14 +792,15 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         let run: Value = serde_json::from_slice(&run_output.stdout.bytes)?;
         let identity = rig.command(&["fabric", "identity", "--json"])?;
         let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
-        if scenario == "quota" {
-            // Issue #3551: a recorded exhaustion on an exact model pin is
-            // advisory. The pinned Claude route is attempted first with a
-            // warning naming the record's source and expiry, rather than
-            // refused before launch, so no typed usage_limited refusal is
-            // recorded and no fallback is promoted ahead of the pin. Unlike a
-            // pre-launch refusal, a launch is asynchronous: wait for the node
-            // to settle before reading its checkpoint and attempt record.
+        if advisory {
+            // Issue #3551: a recorded exhaustion or provider refusal on an
+            // exact model pin is advisory. The pinned Claude route is attempted
+            // first with a warning naming the record's source and expiry,
+            // rather than refused before launch, so no typed usage_limited
+            // refusal is recorded and no fallback is promoted ahead of the pin.
+            // Unlike a pre-launch refusal, a launch is asynchronous: wait for
+            // the node to settle before reading its checkpoint and attempt
+            // record.
             let checkpoint = provenant_test_support::wait_for(
                 "quota pin settlement",
                 std::time::Duration::from_secs(30),
@@ -802,9 +831,14 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
                 .ok_or("reference")?;
             let record = run_attempt_record(&rig, &identity, reference)?;
             let applied = record.applied_route.as_ref().ok_or("applied route")?;
+            let source = if scenario == "refusal" {
+                "source: provider refusal observed unix seconds"
+            } else {
+                "source: fixture"
+            };
             assert!(
                 applied.launch_warnings.iter().any(|warning| {
-                    warning.contains("source: fixture") && warning.contains("expiry unix seconds:")
+                    warning.contains(source) && warning.contains("expiry unix seconds:")
                 }),
                 "the advisory warning must persist its source and expiry: {applied:?}"
             );
