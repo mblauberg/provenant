@@ -52,7 +52,7 @@ a cross-cutting rule.
 | Topic | Contract owner |
 |---|---|
 | State roots, identities, layout and environment | [State](state.md#roots-and-identities) |
-| Envelope and exits | [CLI](cli.md#one-bounded-envelope-never-truncated) |
+| Envelope and exits | [CLI](cli.md#one-bounded-envelope-clipped-with-a-warning) |
 | Consumer stability, lane environment and repository files | [Consumer contract](consumer-contract.md) |
 | Wait budgets and observation | [CLI](cli.md#waits-are-readers) |
 | Command grammar and checks | [CLI](cli.md), `provenant help --all` |
