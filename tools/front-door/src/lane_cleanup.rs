@@ -1524,6 +1524,32 @@ pub(crate) fn collect(
             )),
         ),
     }
+    let local_scope = match worktrees::local_retirement_scope(context, upstream.as_ref(), cancel) {
+        Ok(scope) => Some(scope),
+        Err(error) => {
+            observation_failures.push(
+                ArtefactOutcome::new(
+                    Artefact::LocalBranch,
+                    "local ref candidates",
+                    ArtefactState::Failed,
+                )
+                .with_reason(format!(
+                    "local branches are retained because worktree inventory could not be read: {error}"
+                )),
+            );
+            None
+        }
+    };
+    let local_candidate = |reference: &GitRefName| {
+        local_scope
+            .as_ref()
+            .is_some_and(|scope| scope.permits(reference))
+    };
+    untracked_local.retain(|(reference, _)| local_candidate(reference));
+    created.retain(|record| {
+        record.endpoint != RefEndpoint::Local
+            || GitRefName::new(&record.reference).is_ok_and(|reference| local_candidate(&reference))
+    });
     let has_foreign = created.iter().any(|record| {
         record.origin != RefOrigin::Created
             && match &record.endpoint {
@@ -1996,6 +2022,99 @@ mod tests {
                     && record.origin == RefOrigin::Adopted
                     && record.generation > 0
             }));
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn gc_candidates_exclude_default_and_checked_out_branches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::fixture::run_git;
+
+        let fixture = CleanupFixture::new()?;
+        // The advertised default is `trunk`, which is not checked out; `main`
+        // stays the primary checkout and `lane/checked-out` has a linked
+        // worktree. Only `lane/changed` is a retirable candidate.
+        run_git(
+            &fixture.project,
+            &["branch", "trunk", &fixture.landed.to_string()],
+        )?;
+        run_git(
+            &fixture.project,
+            &[
+                "update-ref",
+                "refs/remotes/origin/trunk",
+                &fixture.landed.to_string(),
+            ],
+        )?;
+        run_git(
+            &fixture.project,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/trunk",
+            ],
+        )?;
+        run_git(
+            &fixture.project,
+            &["branch", "lane/checked-out", &fixture.base.to_string()],
+        )?;
+        let checked_out = fixture._temp.path().join("checked-out");
+        run_git(
+            &fixture.project,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                checked_out.to_str().ok_or("worktree path")?,
+                "lane/checked-out",
+            ],
+        )?;
+
+        fixture.with_context(|context, cancel| {
+            let ledger = RefLedger::for_context(context)?;
+            for branch in ["main", "trunk", "lane/checked-out", "lane/changed"] {
+                record_old_ref(
+                    context,
+                    &ledger,
+                    RefEndpoint::Local,
+                    branch,
+                    fixture.landed,
+                    cancel,
+                )?;
+            }
+            let target = LandingTarget {
+                reference: Some(
+                    GitRefName::branch("main")
+                        .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                ),
+                tip: fixture.landed,
+            };
+            let sweep = Sweep {
+                dry_run: true,
+                ..remote_fixture_sweep()
+            };
+            let outcomes = collect(
+                context,
+                Some(target),
+                &sweep,
+                &EmptyRetirementLookup,
+                None,
+                cancel,
+            );
+            for branch in ["main", "trunk", "lane/checked-out"] {
+                let name = format!("refs/heads/{branch}");
+                assert!(
+                    !outcomes.iter().any(|outcome| outcome.name == name),
+                    "{branch} must never be a GC candidate: {outcomes:?}"
+                );
+            }
+            let would_remove = outcomes
+                .iter()
+                .find(|outcome| outcome.name == "refs/heads/lane/changed")
+                .ok_or(worktrees::WorktreeError::InvalidRequest)?;
+            assert_eq!(would_remove.outcome, ArtefactState::WouldRemove);
             Ok(())
         })?;
         Ok(())
