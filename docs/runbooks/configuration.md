@@ -43,9 +43,9 @@ A port declaration in the wrong place is easy to miss because an absent layer
 is skipped silently. `provenant config check` warns, naming the file and dotted
 key, when a port leaf such as `build.prepare` sits in `.provenant/config.toml`
 instead of a ports layer, or when a host-project `ports.json` sits under the
-32-digit project id directory rather than the full 64-digit project key.
-`provenant config path --project` prints the exact keyed path; the warnings are
-advisory and never refuse a command.
+obsolete 64-digit target-seed key instead of the ProjectId binding directory.
+`provenant config path --project` prints the exact binding path; the warnings
+are advisory and never refuse a command.
 
 When no layer sets `verify.base`, Provenant infers it from
 `refs/remotes/<remote>/HEAD` for the effective `verify.remote` and marks the

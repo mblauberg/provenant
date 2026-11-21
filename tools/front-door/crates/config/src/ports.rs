@@ -1455,9 +1455,9 @@ fn toml_item_has_path(item: &toml_edit::Item, rest: &[&str]) -> bool {
 
 /// Advisory warnings for port declarations an operator placed where no port
 /// reader will ever see them. A port table in `config.toml`, or a host-project
-/// layer filed under the 32-digit project id rather than the full 64-digit
-/// project key, is silently ignored today. Both cases warn and name the file
-/// and the key; neither refuses the command that asked for the check.
+/// layer filed under the obsolete 64-digit target-seed key rather than the
+/// ProjectId binding directory, is silently ignored today. Both cases warn and
+/// name the file and the key; neither refuses the command that asked for the check.
 pub fn port_declaration_warnings(project: Option<&Path>, host_state: &Path) -> Vec<String> {
     let mut warnings = Vec::new();
     let Some(project) = project else {
@@ -1482,48 +1482,36 @@ pub fn port_declaration_warnings(project: Option<&Path>, host_state: &Path) -> V
         }
     }
 
-    // The host-project ports layer is keyed by project_key: the full 64-digit
-    // SHA-256 of the canonical common Git directory. The binding directory in
-    // the same `projects/` tree is named by ProjectId, the first 32 digits of
-    // that digest. A ports.json in the binding directory therefore uses a
-    // prefix of the real key and is never read. Detect it by that relationship
-    // without needing a project-registry lookup, and name the correct path.
-    if let Some(key) = project_key_for(project) {
-        let correct = host_state.join("projects").join(&key).join("ports.json");
-        if let Ok(entries) = fs::read_dir(host_state.join("projects")) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.len() != 32
-                    || !name
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    || !key.starts_with(&name)
-                    || !entry.path().is_dir()
-                {
-                    continue;
-                }
-                let misplaced = entry.path().join("ports.json");
-                if misplaced.is_file() {
-                    let keys = read_bounded(&misplaced)
-                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                        .map(|value| {
-                            let mut leaves = Vec::new();
-                            port_leaf_paths(&value, "", &mut leaves);
-                            leaves
-                        })
-                        .unwrap_or_default();
-                    let declared = if keys.is_empty() {
-                        "port declarations".to_owned()
-                    } else {
-                        keys.join(", ")
-                    };
-                    warnings.push(format!(
-                        "{}: {declared} (project key {name}): host-project ports layers use the full 64-digit project key {key}; move this file to {} (config path --project prints it)",
-                        misplaced.display(),
-                        correct.display(),
-                    ));
-                }
-            }
+    // The host-project ports layer is read from the ProjectId binding
+    // directory reported by `config path` (host_project_dir), not from the
+    // obsolete 64-digit target-seed key used by older releases. A ports.json
+    // filed under that key is never read. Resolve the correct directory through
+    // the single binding helper rather than recomputing the layout here, and
+    // name it in the warning so an operator can move the file.
+    if let Some(dir) = crate::host_project_dir(host_state, project)
+        && let Some(key) = project_key_for(project)
+    {
+        let misplaced = host_state.join("projects").join(&key).join("ports.json");
+        if misplaced.is_file() {
+            let keys = read_bounded(&misplaced)
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .map(|value| {
+                    let mut leaves = Vec::new();
+                    port_leaf_paths(&value, "", &mut leaves);
+                    leaves
+                })
+                .unwrap_or_default();
+            let declared = if keys.is_empty() {
+                "port declarations".to_owned()
+            } else {
+                keys.join(", ")
+            };
+            warnings.push(format!(
+                "{}: {declared} (target-seed key {key}): host-project ports layers use the binding directory {}; move this file to {} (config path --project prints it)",
+                misplaced.display(),
+                dir.display(),
+                dir.join("ports.json").display(),
+            ));
         }
     }
     warnings
@@ -2866,7 +2854,7 @@ mod tests {
     #[test]
     fn port_declaration_warnings_rule_over_every_port_leaf() {
         let temp = tempfile::tempdir().unwrap();
-        let (host, project, key) = checkout_with_key(temp.path());
+        let (host, project, binding) = checkout_with_key(temp.path());
         let config = project.join(".provenant/config.toml");
         let config_text = config.display().to_string();
 
@@ -2922,13 +2910,15 @@ mod tests {
             "a misplaced declaration is advisory and leaves the table untouched"
         );
 
-        // A host-project layer under the 32-digit ProjectId directory names
-        // the file and the keys it actually holds, not a hard-coded leaf.
+        // A host-project layer under the obsolete 64-digit target-seed key
+        // names the file and the keys it actually holds, not a hard-coded leaf,
+        // and points at the binding directory as the correct path.
         std::fs::write(&config, "# no port declarations here\n").unwrap();
-        let binding = host.join("projects").join(&key[..32]);
-        std::fs::create_dir_all(&binding).unwrap();
+        let key = project_key_for(&project).unwrap();
+        let obsolete = host.join("projects").join(&key);
+        std::fs::create_dir_all(&obsolete).unwrap();
         std::fs::write(
-            binding.join("ports.json"),
+            obsolete.join("ports.json"),
             serde_json::to_vec(&serde_json::json!({
                 "build": {"prepare": [["node", "tools/ensure-generated.mjs"]]},
                 "verify": {"base": "origin/main"},
@@ -2940,20 +2930,20 @@ mod tests {
         assert!(
             warnings.iter().any(|warning| {
                 warning.contains("ports.json")
-                    && warning.contains(&key[..32])
                     && warning.contains(&key)
+                    && warning.contains(&binding.display().to_string())
                     && warning.contains("build.prepare")
                     && warning.contains("verify.base")
             }),
             "{warnings:?}"
         );
 
-        // A correctly keyed layer has no misplacement warning and is read.
-        let keyed = host.join("projects").join(&key);
-        std::fs::create_dir_all(&keyed).unwrap();
-        std::fs::rename(binding.join("ports.json"), keyed.join("ports.json")).unwrap();
+        // The binding directory is the correct path: a layer there has no
+        // misplacement warning and is read.
+        std::fs::create_dir_all(&binding).unwrap();
+        std::fs::rename(obsolete.join("ports.json"), binding.join("ports.json")).unwrap();
         let warnings = port_declaration_warnings(Some(&project), &host);
-        let misplaced_path = binding.join("ports.json").display().to_string();
+        let misplaced_path = obsolete.join("ports.json").display().to_string();
         assert!(
             !warnings
                 .iter()

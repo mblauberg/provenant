@@ -860,8 +860,7 @@ mod config_ports_tests {
         std::fs::create_dir_all(&state).unwrap();
         std::fs::create_dir_all(project.join(".git")).unwrap();
         std::fs::create_dir_all(project.join(".provenant")).unwrap();
-        let key = provenant_config::project_key_for(&project).unwrap();
-        let keyed = state.join("projects").join(key);
+        let keyed = provenant_config::host_project_dir(&state, &project).unwrap();
         std::fs::create_dir_all(&keyed).unwrap();
         std::fs::write(state.join("ports.json"), r#"{"build":{"strategy":"lane"}}"#).unwrap();
         std::fs::write(
