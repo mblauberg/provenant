@@ -181,6 +181,15 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'package(=provenant) & binary(=worktrees) & (test(=gc_fetches_default_and_removes_only_clean_merged_worktrees) | test(=pr_contribution_roundtrip) | test(=pr_land_writer_lock_preserves_dirty_and_output_cases))'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+# Each seed-build fixture runs real Cargo builds of a throwaway project through
+# the pipeline (`build`, `test --no-run`, `check`, `metadata`, `clean`), and the
+# three-layer case repeats them per layer. These fixtures measured 8 to 14
+# seconds on main's CI, and three were killed at the 30-second terminate while
+# sharing a runner with the provider fixtures. Keep the real builds and their
+# assertions; bound the fixtures' host work instead.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & (test(=target_seed_build::tests::empty_prepare_changes_nothing) | test(=target_seed_build::tests::prepare_from_any_port_layer_runs_in_the_seed_checkout_before_cargo) | test(=target_seed_build::tests::prepare_runs_before_seed_build_in_checkout_root) | test(=target_seed_build::tests::request_builds_its_commit))'
+slow-timeout = { period = "30s", terminate-after = 4 }
 
 # This native timeout/replay fixture prepares a backend and Git repository,
 # submits twice, permits a 30-second status wait, then checks descendant
