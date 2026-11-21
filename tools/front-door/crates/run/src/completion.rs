@@ -290,7 +290,7 @@ impl LaneLocation {
             })
             .unwrap_or_default();
         format!(
-            "Lane location: your working copy is the bound worktree {worktree} on branch {branch}, started from base {base}. Set the working directory of every shell command to {worktree}, edit files only under it, and commit on {branch}.{primary} An absolute path elsewhere in your context does not override this. Git hooks must run; report a failing hook instead of bypassing it.\n",
+            "Lane location: your working copy is the bound worktree {worktree} on branch {branch}, started from base {base}. Set the working directory of every shell command to {worktree}, edit files only under it, and commit on {branch}.{primary} An absolute path elsewhere in your context does not override this. Git hooks must run; a failing hook is reported to the chair, never bypassed.\n",
             worktree = self.worktree.display(),
             base = self.base,
         )

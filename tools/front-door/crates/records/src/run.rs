@@ -1206,6 +1206,24 @@ impl UsageRecord {
     }
 }
 
+/// The rule named by the lane Git shim's hook-bypass warning. Sharing the name
+/// keeps the shim's stderr line and the settled observation identical.
+pub const LANE_HOOK_BYPASS_RULE: &str = "LANE_GIT_HOOK_BYPASS";
+
+/// Hook-bypass warnings the lane's Git shim recorded for settlement to surface.
+/// The lane can write the observation file, so the count is advisory: it is read
+/// bounded and never gates settlement.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HookBypassReceipt {
+    /// Bypass attempts the shim warned about in this lane.
+    pub count: u64,
+    /// The rule named in each warning.
+    pub rule: String,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageRecord {
     #[serde(flatten)]
@@ -1226,6 +1244,9 @@ pub struct UsageRecord {
     pub session_total: Option<Box<UsageRecord>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_invocations: Option<GhInvocationReceipt>,
+    /// Advisory lane hook-bypass observations, surfaced with handoff and result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_bypass: Option<HookBypassReceipt>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

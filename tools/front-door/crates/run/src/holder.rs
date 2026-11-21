@@ -2639,6 +2639,8 @@ impl RunStore {
         };
         // Advisory: the lane's gh wrapper count, beside its budget.
         crate::gh_usage::record(attempt, record.limits.as_ref(), &mut decoded.usage);
+        // Advisory lane hook-bypass warnings, surfaced with handoff and result.
+        crate::hook_observations::record(attempt, &mut decoded.usage);
         if record
             .applied_route
             .as_ref()

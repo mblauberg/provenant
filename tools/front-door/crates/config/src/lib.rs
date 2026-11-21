@@ -48,6 +48,9 @@ mod loader;
 mod managed;
 pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
 pub const NATIVE_CAPABILITY_UNAVAILABLE: &str = "native_capability_unavailable";
+/// Lane scratch file where the bound Git shim records hook-bypass warnings.
+/// Settlement reads it bounded and surfaces the observations to the chair.
+pub const HOOK_OBSERVATIONS_FILE: &str = "hook-observations";
 pub mod policy;
 mod presets;
 mod providers;

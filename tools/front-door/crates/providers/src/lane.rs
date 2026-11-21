@@ -16,6 +16,9 @@ pub(crate) struct GitWrapper {
     include: Option<String>,
     git: Option<PathBuf>,
     pub(crate) bound: Option<BoundGit>,
+    /// Quoted path of the lane scratch file where the bound shim records
+    /// hook-bypass warnings for settlement to surface with the handoff/result.
+    pub(crate) hook_observation: Option<String>,
 }
 
 /// The writer's private repository binding. It is never exported into the
@@ -47,6 +50,16 @@ impl crate::LaunchSpec {
             ));
         }
         self.git_wrapper.git = Some(git.to_owned());
+        // The wrapper lives in `<scratch>/bin`; its sibling file is where the
+        // bound shim records hook-bypass warnings for settlement to surface.
+        if let Some(scratch) = bin.parent()
+            && let Some(path) = scratch
+                .join(provenant_config::HOOK_OBSERVATIONS_FILE)
+                .to_str()
+                .filter(|path| !path.is_empty() && !path.chars().any(char::is_control))
+        {
+            self.git_wrapper.hook_observation = Some(shell_quote(path));
+        }
         install_git(
             bin,
             git,
@@ -693,33 +706,56 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
     bytes.extend_from_slice(b"_provenant_git_helper=");
     bytes.extend_from_slice(helper.as_bytes());
     bytes.push(b'\n');
+    bytes.extend_from_slice(b"_provenant_hook_observation=");
+    bytes.extend_from_slice(
+        options
+            .hook_observation
+            .as_deref()
+            .unwrap_or("''")
+            .as_bytes(),
+    );
+    bytes.push(b'\n');
+    // Warn, record, proceed. The rule name is shared with the settled receipt.
+    bytes.extend_from_slice(
+        format!(
+            r#"
+# This policy belongs only to the lane-bound wrapper, never host plumbing.
+_provenant_hook_warning() {{
+    # One line and one observation per command, however many forms were seen.
+    [ "${{_provenant_hook_warned:-0}}" = 1 ] && return 0
+    _provenant_hook_warned=1
+    printf '%s\n' 'warning: provenant: {rule}: Git hooks must run; do not bypass hooks.' >&2
+    if [ -n "$_provenant_hook_observation" ]; then
+        printf '%s\n' '{rule}' >> "$_provenant_hook_observation" 2>/dev/null || :
+    fi
+}}
+"#,
+            rule = provenant_records::run::LANE_HOOK_BYPASS_RULE
+        )
+        .as_bytes(),
+    );
     bytes.extend_from_slice(
         br#"
-# This policy belongs only to the lane-bound wrapper, never host plumbing.
-_provenant_hook_rule() {
-    printf '%s\n' 'Provenant lane rule: Git hooks must run; do not bypass hooks.' >&2
-    exit 1
-}
 _provenant_hook_guard() {
     # Ask Git to parse its two environment configuration encodings. The scope
     # distinguishes command overrides from the repository's configured hooks.
     if "$_provenant_git_program" config --list --show-scope 2>/dev/null |
         LC_ALL=C grep -i '^command[[:space:]]core\.hookspath=' >/dev/null; then
-        _provenant_hook_rule
+        _provenant_hook_warning
     fi
     while [ "$#" -gt 0 ]; do
         case "$1" in
             -c|--config-env)
                 [ "$#" -ge 2 ] || return 0
-                case $(printf '%s' "${2%%=*}" | LC_ALL=C tr '[:upper:]' '[:lower:]') in core.hookspath) _provenant_hook_rule ;; esac
+                case $(printf '%s' "${2%%=*}" | LC_ALL=C tr '[:upper:]' '[:lower:]') in core.hookspath) _provenant_hook_warning ;; esac
                 shift 2 ;;
             -c?*)
                 _provenant_key=${1#-c}; _provenant_key=${_provenant_key%%=*}
-                case $(printf '%s' "$_provenant_key" | LC_ALL=C tr '[:upper:]' '[:lower:]') in core.hookspath) _provenant_hook_rule ;; esac
+                case $(printf '%s' "$_provenant_key" | LC_ALL=C tr '[:upper:]' '[:lower:]') in core.hookspath) _provenant_hook_warning ;; esac
                 shift ;;
             --config-env=*)
                 _provenant_key=${1#*=}; _provenant_key=${_provenant_key%%=*}
-                case $(printf '%s' "$_provenant_key" | LC_ALL=C tr '[:upper:]' '[:lower:]') in core.hookspath) _provenant_hook_rule ;; esac
+                case $(printf '%s' "$_provenant_key" | LC_ALL=C tr '[:upper:]' '[:lower:]') in core.hookspath) _provenant_hook_warning ;; esac
                 shift ;;
             -C|--git-dir|--work-tree|--namespace|--attr-source|--super-prefix) [ "$#" -ge 2 ] || return 0; shift 2 ;;
             -*) shift ;;
@@ -741,19 +777,19 @@ _provenant_hook_guard() {
         done
         if [ "$_provenant_config_key" -eq 1 ] && [ "$_provenant_config_read" -eq 0 ]; then
             # A bare key is a query; explicit mutation options also write.
-            [ "$_provenant_config_values" -eq 0 ] || _provenant_hook_rule
-            for _provenant_arg do case "$_provenant_arg" in --unset*|--replace-all|--add|--fixed-value|unset|set) _provenant_hook_rule ;; esac; done
+            [ "$_provenant_config_values" -eq 0 ] || _provenant_hook_warning
+            for _provenant_arg do case "$_provenant_arg" in --unset*|--replace-all|--add|--fixed-value|unset|set) _provenant_hook_warning ;; esac; done
         fi
     fi
     case "$_provenant_subcommand" in commit|merge|rebase|cherry-pick|am|push)
         while [ "$#" -gt 0 ]; do
             case "$1" in
                 --) break ;;
-                --no-verify) _provenant_hook_rule ;;
+                --no-verify) _provenant_hook_warning ;;
                 -m|-F|-C|-c|--message|--file|--reuse-message|--reedit-message)
                     shift; [ "$#" -gt 0 ] || break ;;
                 --*|-m*|-F*|-C*|-c*) ;;
-                -*) if [ "$_provenant_subcommand" = commit ]; then case "$1" in -*n*) _provenant_hook_rule ;; esac; fi ;;
+                -*) if [ "$_provenant_subcommand" = commit ]; then case "$1" in -*n*) _provenant_hook_warning ;; esac; fi ;;
             esac
             shift
         done ;;
@@ -1447,6 +1483,7 @@ fn bound_exports(bound: &BoundGit) -> Result<String, ProviderError> {
             "      --git-dir|--work-tree|--git-dir=*|--work-tree=*) return 1 ;;\n",
             "      -c|--namespace|--config-env|--attr-source|--super-prefix) [ \"$#\" -ge 2 ] || return 1; shift 2 ;;\n",
             "      --namespace=*|--config-env=*|--attr-source=*|--super-prefix=*|--exec-path|--exec-path=*|--list-cmds=*) shift ;;\n",
+            "      -c?*) shift ;;\n",
             "      -v|--version|-h|--help|--html-path|--man-path|--info-path|-p|--paginate|-P|--no-pager) shift ;;\n",
             "      --no-replace-objects|--no-lazy-fetch|--no-optional-locks|--no-advice|--bare) shift ;;\n",
             "      --literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs) shift ;;\n",
@@ -3439,11 +3476,13 @@ mod tests {
 
     #[test]
     #[allow(clippy::disallowed_methods)]
-    fn bound_git_refuses_hook_bypasses_and_runs_hooks() -> Result<(), Box<dyn std::error::Error>> {
+    fn bound_git_warns_on_hook_bypasses_and_runs_hooks() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir()?;
         let repo = dir.path().canonicalize()?.join("repo");
         std::fs::create_dir(&repo)?;
+        let observations = dir.path().join("hook-observations");
+        let rule = provenant_records::run::LANE_HOOK_BYPASS_RULE;
         let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
         let base = || {
             let mut cmd = provenant_os::fixture::git_command_at(&git);
@@ -3476,6 +3515,7 @@ mod tests {
                         worktree: repo.clone(),
                         env: vec![],
                     }),
+                    hook_observation: Some(shell_quote(observations.to_str().ok_or("path")?)),
                     ..Default::default()
                 },
             )?,
@@ -3492,7 +3532,43 @@ mod tests {
                 .envs(env.iter().copied());
             cmd.output().unwrap()
         };
-        let cases: &[(&[&str], &[(&str, &str)])] = &[
+        let recorded = || -> Result<Vec<String>, Box<dyn std::error::Error>> {
+            if !observations.exists() {
+                return Ok(Vec::new());
+            }
+            Ok(std::fs::read_to_string(&observations)?
+                .lines()
+                .map(str::to_owned)
+                .collect())
+        };
+        let warn_once = |output: &std::process::Output, label: &str| {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let warnings: Vec<_> = stderr.lines().filter(|line| line.contains(rule)).collect();
+            assert_eq!(warnings.len(), 1, "{label}: {stderr}");
+            assert!(
+                warnings[0].starts_with("warning: provenant: "),
+                "{label}: {stderr}"
+            );
+            assert!(warnings[0].contains("hooks must run"), "{label}: {stderr}");
+        };
+
+        // A bypass warns and records the observation, but the command proceeds:
+        // Git itself decides whether the invocation succeeds.
+        let proceeds = run(
+            &["-c", "core.hooksPath=/dev/null", "rev-parse", "--git-dir"],
+            &[],
+        );
+        warn_once(&proceeds, "harmless bypass");
+        assert!(
+            proceeds.status.success(),
+            "{}",
+            String::from_utf8_lossy(&proceeds.stderr)
+        );
+        assert_eq!(recorded()?, vec![rule.to_owned()]);
+
+        // Every override and hook-skipping flag form is detected once.
+        type BypassCase<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
+        let cases: &[BypassCase<'_>] = &[
             (&["-c", "core.hooksPath=/dev/null", "commit"], &[]),
             (&["-ccore.hooksPath=/dev/null", "commit"], &[]),
             (
@@ -3528,11 +3604,17 @@ mod tests {
         ];
         for (args, env) in cases {
             let output = run(args, env);
-            assert!(!output.status.success(), "{args:?}");
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert_eq!(stderr.lines().count(), 1, "{args:?}: {stderr}");
-            assert!(stderr.contains("Git hooks must run"), "{args:?}: {stderr}");
+            warn_once(&output, &format!("{args:?}"));
         }
+        // One observation per bypass command, including the harmless one above.
+        assert_eq!(recorded()?, vec![rule.to_owned(); cases.len() + 1]);
+        // The fixture `config core.hooksPath` case must not disable hooks; a
+        // later case may already have unset the key, so an absent key is fine.
+        let _ = base()
+            .args(["config", "--unset-all", "core.hooksPath"])
+            .status()?;
+
+        let before_commit = recorded()?.len();
         std::fs::write(repo.join("file"), "fixture")?;
         assert!(run(&["add", "file"], &[]).status.success());
         let commit = run(&["commit", "-m", "normal"], &[]);
@@ -3542,6 +3624,11 @@ mod tests {
             String::from_utf8_lossy(&commit.stderr)
         );
         assert_eq!(std::fs::read(repo.join("hook-ran"))?, b"ran");
+        assert_eq!(
+            recorded()?.len(),
+            before_commit,
+            "a normal commit records no bypass observation"
+        );
         // Direct host-side Git plumbing is not subject to the lane wrapper.
         assert!(
             base()

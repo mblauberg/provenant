@@ -48,6 +48,7 @@ pub use limits::{HostCaps, gh_budget, lane_limits, writer_budget_limits};
 mod ci_scope;
 pub use ci_scope::{CiScope, ResolvedCiScope};
 mod gh_usage;
+mod hook_observations;
 pub mod token_budget;
 mod transcript;
 pub use service::{DispatchRequest, DispatchTask, ErrorKind, RefusalContext, Service};
