@@ -3188,6 +3188,7 @@ pub fn run(
         &mut io::stdout().lock(),
         &mut io::stderr().lock(),
         publish,
+        crate::OverflowPolicy::Refuse,
     );
     outcome.map_or(3, |outcome| crate::exit_status(&outcome))
 }

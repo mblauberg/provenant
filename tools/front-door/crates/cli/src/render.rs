@@ -1,4 +1,6 @@
-//! Encode completely before delivery; never clip a result or repeat an owner call.
+//! Encode completely before delivery; never repeat an owner call. A result over
+//! the cap is bounded with a warning and an omission marker, or paged once to
+//! a published artefact whose pointer keeps the result's original status.
 use crate::limits;
 pub use crate::limits::MAX_RESULT_BYTES;
 use provenant_records::{CommandResult, Outcome};
@@ -81,6 +83,18 @@ pub enum RenderMode<'a> {
         summary: Option<&'a Summary>,
     },
 }
+
+/// How a published overflow is presented. The envelope status must always
+/// agree with the process exit code; the policy decides which one changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverflowPolicy {
+    /// Page the complete result once, warn on stderr and keep the result's
+    /// status. The envelope and the exit code both stay with the result.
+    Proceed,
+    /// Refuse with a typed `RESULT_TOO_LARGE` Error envelope and exit 3.
+    Refuse,
+}
+
 impl crate::Globals {
     /// JSON is an independent transport; --full only affects human output.
     pub fn render_mode<'a>(
@@ -1044,6 +1058,7 @@ pub fn render_or_publish<T: Serialize>(
     writer: &mut impl Write,
     stderr: &mut impl Write,
     publish: impl FnOnce(&CommandResult<T>) -> io::Result<provenant_records::AbsolutePath>,
+    policy: OverflowPolicy,
 ) -> Result<Outcome, RenderError> {
     let launch_receipt = result.error.is_some()
         && matches!(
@@ -1085,62 +1100,142 @@ pub fn render_or_publish<T: Serialize>(
     match first {
         Ok(()) => Ok(result.status),
         Err(RenderError::TooLarge) => {
-            let published = publish(result);
-            let (code, message, artifact) = match &published {
-                Ok(path) => (
-                    "RESULT_TOO_LARGE",
-                    "result exceeds 1 MiB; read the published artifact",
-                    Some(path.clone()),
-                ),
-                Err(_) => (
-                    "IO",
-                    "cannot publish oversized result; the recorded operation must not be repeated",
-                    None,
-                ),
-            };
             #[derive(Serialize)]
             struct Overflow {
                 artifact: Option<provenant_records::AbsolutePath>,
             }
-            let mut failure =
-                CommandResult::new(&result.command, Outcome::Error, Overflow { artifact });
-            failure.error = Some(provenant_records::CommandError {
-                diagnostic: None,
-                code: code.into(),
-                message: message.into(),
-                cause: None,
-                repair: None,
-            });
-            // Human transport includes the pointer using the same typed path
-            // record, escaped as JSON. JSON carries it in data.artifact.
-            let human = match &failure.data.artifact {
-                Some(path) => format!(
-                    "provenant: {code}: {message}; {}\n",
-                    serde_json::to_string(path).map_err(RenderError::Encode)?
-                ),
-                None => format!("provenant: {code}: {message}\n"),
-            };
-            let fallback_mode = match mode {
-                RenderMode::Json => RenderMode::Json,
-                RenderMode::Human { .. } | RenderMode::Compact { .. } => RenderMode::Human {
-                    text: &human,
-                    read_only: false,
-                    summary: None,
+            let published = publish(result);
+            match policy {
+                OverflowPolicy::Refuse => {
+                    let (code, message, artifact) = match &published {
+                        Ok(path) => (
+                            "RESULT_TOO_LARGE",
+                            "result exceeds 1 MiB; read the published artifact",
+                            Some(path.clone()),
+                        ),
+                        Err(_) => (
+                            "IO",
+                            "cannot publish oversized result; the recorded operation must not be repeated",
+                            None,
+                        ),
+                    };
+                    let mut failure =
+                        CommandResult::new(&result.command, Outcome::Error, Overflow { artifact });
+                    failure.error = Some(provenant_records::CommandError {
+                        diagnostic: None,
+                        code: code.into(),
+                        message: message.into(),
+                        cause: None,
+                        repair: None,
+                    });
+                    // Human transport includes the pointer using the same typed
+                    // path record, escaped as JSON; JSON carries it in data.
+                    let human = match &failure.data.artifact {
+                        Some(path) => format!(
+                            "provenant: {code}: {message}; {}\n",
+                            serde_json::to_string(path).map_err(RenderError::Encode)?
+                        ),
+                        None => format!("provenant: {code}: {message}\n"),
+                    };
+                    let fallback_mode = match mode {
+                        RenderMode::Json => RenderMode::Json,
+                        RenderMode::Human { .. } | RenderMode::Compact { .. } => {
+                            RenderMode::Human {
+                                text: &human,
+                                read_only: false,
+                                summary: None,
+                            }
+                        }
+                    };
+                    if matches!(fallback_mode, RenderMode::Json) {
+                        render(&failure, fallback_mode, writer)?;
+                    } else {
+                        let text_result = CommandResult::new(&result.command, Outcome::Error, ());
+                        render(&text_result, fallback_mode, stderr)?;
+                    }
+                    // A published overflow is handed back so a Refuse caller
+                    // exits 3, matching the Error envelope; a failed publication
+                    // is already an Error envelope and exits 3 either way.
+                    if published.is_ok() {
+                        Err(RenderError::TooLarge)
+                    } else {
+                        Ok(Outcome::Error)
+                    }
+                }
+                OverflowPolicy::Proceed => match published {
+                    Ok(path) => {
+                        // The complete result is paged once. The pointer keeps
+                        // the result's ORIGINAL status so the envelope status
+                        // and the exit code agree: a published overflow is not
+                        // a command failure.
+                        let path_text =
+                            serde_json::to_string(&path).map_err(RenderError::Encode)?;
+                        let _ = writeln!(
+                            stderr,
+                            "warning: [RESULT_TOO_LARGE] {} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); paged to the owner-published artefact; proceeding",
+                            result.command
+                        );
+                        let paged = CommandResult::new(
+                            &result.command,
+                            result.status,
+                            Overflow {
+                                artifact: Some(path),
+                            },
+                        );
+                        // Human transport names the pointer in the same typed
+                        // path record; JSON carries it in data.artifact.
+                        let human =
+                            format!("provenant: result exceeds 1 MiB; paged to {path_text}\n");
+                        let fallback_mode = match mode {
+                            RenderMode::Json => RenderMode::Json,
+                            RenderMode::Human { .. } | RenderMode::Compact { .. } => {
+                                RenderMode::Human {
+                                    text: &human,
+                                    read_only: false,
+                                    summary: None,
+                                }
+                            }
+                        };
+                        render(&paged, fallback_mode, writer)?;
+                        Ok(result.status)
+                    }
+                    Err(_) => {
+                        // A failed publication is a real IO failure: the
+                        // recorded operation must not be repeated and the
+                        // command exits 3 with its Error envelope.
+                        let mut failure = CommandResult::new(
+                            &result.command,
+                            Outcome::Error,
+                            Overflow { artifact: None },
+                        );
+                        failure.error = Some(provenant_records::CommandError {
+                            diagnostic: None,
+                            code: "IO".into(),
+                            message:
+                                "cannot publish oversized result; the recorded operation must not be repeated"
+                                    .into(),
+                            cause: None,
+                            repair: None,
+                        });
+                        let human = "provenant: IO: cannot publish oversized result; the recorded operation must not be repeated\n";
+                        let fallback_mode = match mode {
+                            RenderMode::Json => RenderMode::Json,
+                            RenderMode::Human { .. } | RenderMode::Compact { .. } => {
+                                RenderMode::Human {
+                                    text: human,
+                                    read_only: false,
+                                    summary: None,
+                                }
+                            }
+                        };
+                        if matches!(fallback_mode, RenderMode::Json) {
+                            render(&failure, fallback_mode, writer)?;
+                        } else {
+                            render(&failure, fallback_mode, stderr)?;
+                        }
+                        Ok(Outcome::Error)
+                    }
                 },
-            };
-            if matches!(fallback_mode, RenderMode::Json) {
-                render(&failure, fallback_mode, writer)?;
-            } else {
-                let text_result = CommandResult::new(&result.command, Outcome::Error, ());
-                render(&text_result, fallback_mode, stderr)?;
-            }
-            // A published overflow is not a command failure: hand TooLarge back
-            // so the composition root can warn and proceed with the original
-            // status. A failed publication is a real IO failure and still exits.
-            if published.is_ok() {
-                Err(RenderError::TooLarge)
-            } else {
-                Ok(Outcome::Error)
             }
         }
         Err(error) => Err(error),
@@ -1174,6 +1269,7 @@ mod overflow_tests {
             &mut output,
             &mut errors,
             |_| unreachable!("bounded receipt does not need publication"),
+            OverflowPolicy::Refuse,
         )?;
         assert_eq!(status, Outcome::Refused);
         assert_eq!(String::from_utf8(output)?, receipt);
@@ -1199,9 +1295,8 @@ mod overflow_tests {
                 provenant_records::AbsolutePath::new(std::path::Path::new("/fixture/result.json"))
                     .map_err(io::Error::other)
             },
+            OverflowPolicy::Refuse,
         );
-        // An oversized launch receipt is paged and handed back as TooLarge so
-        // the composition root can warn and proceed with the original status.
         assert!(matches!(outcome, Err(RenderError::TooLarge)), "{outcome:?}");
         assert_eq!(published, 1);
         assert!(output.is_empty());
@@ -1225,6 +1320,7 @@ mod overflow_tests {
                 provenant_records::AbsolutePath::new(std::path::Path::new("/fixture/result.json"))
                     .map_err(io::Error::other)
             },
+            OverflowPolicy::Refuse,
         );
         assert!(matches!(outcome, Err(RenderError::TooLarge)), "{outcome:?}");
         assert_eq!(published, 1);
@@ -1238,10 +1334,40 @@ mod overflow_tests {
             &mut output,
             &mut Vec::new(),
             |_| Err(io::ErrorKind::StorageFull.into()),
+            OverflowPolicy::Refuse,
         )?;
         let value: serde_json::Value = serde_json::from_slice(&output)?;
         assert_eq!(value["error"]["code"], "IO");
         assert!(value["data"]["artifact"].is_null());
+        Ok(())
+    }
+
+    #[test]
+    fn published_overflow_proceeds_with_the_envelope_status()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let result = CommandResult::new("dispatch", Outcome::Ok, "x".repeat(MAX_RESULT_BYTES));
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let outcome = render_or_publish(
+            &result,
+            RenderMode::Json,
+            &mut output,
+            &mut errors,
+            |_| {
+                provenant_records::AbsolutePath::new(std::path::Path::new("/fixture/result.json"))
+                    .map_err(io::Error::other)
+            },
+            OverflowPolicy::Proceed,
+        );
+        // The paged envelope keeps `ok`; the caller exits with this same status
+        // so a script's exit code can never disagree with its envelope.
+        assert!(matches!(outcome, Ok(Outcome::Ok)), "{outcome:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output)?;
+        assert_eq!(value["status"], "ok");
+        assert!(value["error"].is_null());
+        assert!(value["data"]["artifact"].is_object());
+        let warning = String::from_utf8(errors)?;
+        assert!(warning.contains("warning: [RESULT_TOO_LARGE]"), "{warning}");
         Ok(())
     }
 }

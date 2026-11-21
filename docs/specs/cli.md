@@ -87,13 +87,22 @@ valid indexed rows, and missing usage remains distinct from zero.
 
 ## Results
 
-### One bounded envelope, never truncated
+### One bounded envelope, clipped with a warning
 
-A result is whole or refused before output. Paged reads bind the cursor to the
-input, and terminal text escapes control sequences. Unknown facts stay unknown.
-Compact output uses semantic owner summaries and a detail command; JSON preserves the complete envelope.
+A command emits one terminal envelope whose `status` is the code the process
+exits with. When a result exceeds the cap it is bounded, not refused: the human
+view keeps both ends with an explicit omitted-bytes marker and a warning naming
+the cap, its source and the repair. A result the owner can page is published
+once and reported with a pointer in the envelope: commands that warn and proceed
+keep the result's original status, while surfaces that keep the refusal contract
+emit a typed `RESULT_TOO_LARGE` Error envelope and exit 3. Either way the
+envelope status and the process exit code agree. Paged reads bind the cursor to
+the input, and terminal text escapes control sequences. Unknown facts stay
+unknown. Compact output uses semantic owner summaries and a detail command;
+JSON preserves the envelope and its paging pointer, never a truncated object.
 
-- Why: consumers must not mistake partial or forged output for a complete result.
+- Why: a script branches on the exit code, and an operator must see that output
+  was bounded rather than mistake a clipped view for the whole result.
 
 ### Error codes
 
@@ -153,10 +162,10 @@ context: the wait's absolute deadline, capped per read by
 operation derives its bound from the time that context has left, and a wait
 that settles cancels the forge transport of its other targets.
 Wait settings resolve in one place for every waiter (`wait`, owner-side run
-waits, relay child waits and CI cadence). A configuration file that cannot be
-read leaves the compiled defaults in force with a warning, and every reported
-source names the reason; a file that is present but malformed is a typed
-error. Reports name each setting with its source.
+waits, relay child waits and CI cadence). Any configuration the waiter cannot
+use — unreadable, misplaced or malformed — warns and leaves the compiled
+defaults in force; every reported source names the reason and marks the setting
+unavailable. Reports name each setting with its source.
 - Why: a wait must not outlive its budget in a transport it can no longer
   interrupt, and one setting must not fail three different ways.
 
@@ -176,7 +185,10 @@ gate and graph waits use their own knobs (see CI observations below).
   to re-arm the same complete wait several times per pull request.
 
 With `--json`, wait emits JSONL events followed by a terminal command-result
-envelope, including without `--follow`.
+envelope, including without `--follow`. A wait inside a lane that names no
+targets waits on the lane's children through the owner relay: their terminal
+states are the wait's targets, the envelope carries the worst child result, and
+the events and terminal envelope are emitted exactly as for named targets.
 - Why: a reader must neither terminate healthy work nor wake on stale evidence.
 
 ### Status selection

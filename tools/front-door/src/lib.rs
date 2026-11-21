@@ -189,21 +189,18 @@ pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
     } else {
         globals.render_mode(human, read_only, summary)
     };
-    let rendered = provenant_cli::render_or_publish(result, mode, stdout, stderr, |value| {
-        overflow::publish(value, globals)
-    });
+    let rendered = provenant_cli::render_or_publish(
+        result,
+        mode,
+        stdout,
+        stderr,
+        |value| overflow::publish(value, globals),
+        // A published overflow keeps the result's status in its envelope, so
+        // the exit code matches it; only a real render/IO failure exits 3.
+        provenant_cli::OverflowPolicy::Proceed,
+    );
     match rendered {
         Ok(status) => provenant_cli::exit_status(&status),
-        Err(RenderError::TooLarge) => {
-            // The overflow publisher has already paged the result. Warn with
-            // the cap and proceed rather than turning the command into a refusal.
-            let _ = writeln!(
-                stderr,
-                "warning: [RESULT_TOO_LARGE] {} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); paged to the owner-published artefact; proceeding",
-                result.command
-            );
-            provenant_cli::exit_status(&result.status)
-        }
         Err(_) => {
             let _ = io::stderr().write_all(b"provenant: IO: cannot write command result\n");
             3

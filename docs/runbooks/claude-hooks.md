@@ -55,18 +55,22 @@ prints the new worktree's absolute path and nothing else on stdout.
 
 - `worktree-create` accepts a name of 1 to 64 letters, digits, `.`, `_` and `-`
   (starting alphanumeric) and creates branch `claude/<name>` at
-  `<repo>/.worktrees/claude-<name>`. A reused name finds its earlier tree only
-  when it is clean, has no live writer, is on that branch at the recorded HEAD
-  and both creation records agree (one in the Git admin directory, one in
-  `<state>/hooks/claude-worktrees/`). The primary checkout, hand-made trees and
-  dirty trees are never reused: exit 2 with the reason. Invalid event input
-  abstains without creating or removing anything.
-- `worktree-remove` removes only a linked worktree this hook created, through
-  `provenant worktree remove <name>` without `--discard`. Dirty trees, live
-  writers, the primary checkout and unmerged branches (`not_merged`) refuse with
-  exit 2 and the worktree stays; use `provenant worktree remove` yourself once
-  the cause is cleared. Declared regenerable output is reclaimed; any other
-  ignored file, such as an undeclared `target/`, keeps the tree.
+  `<repo>/.worktrees/claude-<name>`. The worktree already holding that branch is
+  reused when it is clean and idle. A clean, idle tree is adopted with a warning
+  even when it is off the hook's usual path or carries no ownership record from
+  `<state>/hooks/claude-worktrees/` or the Git admin directory: those are
+  preferences, not boundaries. The primary checkout, a live or held writer
+  (`live`/`busy`), uncommitted or ignored files and an unknown layout stay
+  refused with exit 2 and the reason. Invalid event input abstains without
+  creating or removing anything.
+- `worktree-remove` removes a clean, idle linked worktree the repository lists,
+  through `provenant worktree remove <name>` without `--discard`. A tree without
+  this hook's ownership record is adopted with a warning only once the removal
+  is confirmed; the warning never claims an adoption that was refused. Dirty
+  trees, live writers, the primary checkout and unmerged branches (`not_merged`)
+  refuse with exit 2 and the worktree stays; use `provenant worktree remove`
+  yourself once the cause is cleared. Declared regenerable output is reclaimed;
+  any other ignored file, such as an undeclared `target/`, keeps the tree.
 - If a hook fails, inspect and resolve the reported cause.
 
 Check with `provenant hook claude --help`; the fixture tests are

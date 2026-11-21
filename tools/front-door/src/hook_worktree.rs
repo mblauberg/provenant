@@ -62,9 +62,11 @@ fn abstain(hook: &str, reason: &dyn std::fmt::Display) -> u8 {
     0
 }
 
-/// Adopt a clean, idle worktree the hook did not create, naming what was
-/// different so the owner can see why it was taken over. Dirty trees and trees
-/// with a live writer are never adopted: those stay refused by `fail`.
+/// Report an adoption that has actually happened, naming what was different so
+/// the owner can see why the tree was taken over. Callers emit it only after
+/// the tree is known clean and idle (create) or is confirmed removed (remove);
+/// a tree the hook only hoped to adopt is never claimed as adopted. Dirty trees
+/// and trees with a live writer stay refused by `fail`.
 fn warn_adopt(hook: &str, reason: &dyn std::fmt::Display) {
     let _ = writeln!(
         io::stderr().lock(),
@@ -355,14 +357,12 @@ pub fn remove(globals: &Globals) -> u8 {
         if !listed {
             return Err("not a linked worktree that Provenant lists for this project".into());
         }
-        // HEAD may have moved on, so only the records are checked.
+        // HEAD may have moved on, so only the records are checked. Whether the
+        // tree is unowned is decided before removal, but the adoption warning
+        // is only emitted once the removal is confirmed: a dirty or held tree
+        // is kept, and calling that an adoption would be a lie.
         let state = state_root(globals, &cwd)?;
-        if owned_record(&state, &target).is_none() {
-            warn_adopt(
-                "worktree-remove",
-                &"the worktree was not created by this hook",
-            );
-        }
+        let unowned = owned_record(&state, &target).is_none();
         let name = target
             .file_name()
             .and_then(|name| name.to_str())
@@ -370,6 +370,12 @@ pub fn remove(globals: &Globals) -> u8 {
         let outcome = cli.data(&["worktree", "remove", name], WORK_TIME, deadline)?;
         if !target.exists() {
             forget(&state, &target);
+            if unowned {
+                warn_adopt(
+                    "worktree-remove",
+                    &"the worktree was not created by this hook",
+                );
+            }
         }
         if target.exists() {
             let reason = outcome["retained"][0]["reason"].as_str().unwrap_or("kept");

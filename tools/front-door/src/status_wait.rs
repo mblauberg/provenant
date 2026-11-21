@@ -1182,6 +1182,97 @@ fn outcome(latest: &[Option<Reading>], settled: &[usize], done: bool, mode: Wait
     }
 }
 
+/// The settle verdict for a child row from the owner relay. A settled node is
+/// either `succeeded` or one of the terminal unsuccessful states; only a node
+/// the relay still reports as running stays pending.
+fn child_settle(child: &Value) -> Settle {
+    if child["settled"] != true {
+        return Settle::Pending;
+    }
+    if child["state"] == "succeeded" {
+        Settle::Succeeded
+    } else {
+        Settle::Unsuccessful
+    }
+}
+
+/// A wait inside a lane that names no targets observes the parent's children
+/// through the owner relay. Those terminal child states are the wait's targets:
+/// emit the same settlement events and terminal envelope a named-target wait
+/// emits. Discarding them would read a failed child as success and leave
+/// `wait --json` with no terminal result at all.
+fn emit_child_wait(
+    children: &[Value],
+    cadence: &LocalCadence,
+    mode: WaitMode,
+    globals: &Globals,
+) -> u8 {
+    let observation = provenant_cli::fabric::graph_relay::child_wait_observation(cadence);
+    let mut human = mode_heading(mode);
+    let mut rows = Vec::new();
+    let mut summary_lines = Vec::new();
+    let mut write_error = None;
+    let mut unsuccessful = false;
+    for child in children {
+        let label = child["node"].as_str().unwrap_or("child").to_owned();
+        let settle = child_settle(child);
+        if settle == Settle::Unsuccessful {
+            unsuccessful = true;
+        }
+        let line = format!("{label} {}", settle_phrase(settle, true));
+        if write_error.is_none() {
+            let event = if globals.json {
+                json!({"event":"settled","target":label,"settle":settle,"line":line}).to_string()
+            } else {
+                line.clone()
+            };
+            write_error = write_line(&event).err();
+        }
+        human.push_str(&line);
+        human.push('\n');
+        summary_lines.push(line.clone());
+        rows.push(json!({
+            "target": label,
+            "settle": settle,
+            "line": line,
+            "data": child,
+        }));
+    }
+    if children.is_empty() {
+        human.push_str("nothing to wait for: no child work\n");
+    }
+    let states = if summary_lines.is_empty() {
+        "nothing to wait for".to_owned()
+    } else {
+        summary_lines.join(", ")
+    };
+    human.push_str(&format!("next: {states}; provenant status\n"));
+    if let Some(error) = write_error {
+        return crate::fail("wait", Outcome::Error, "IO", &error.to_string(), globals);
+    }
+    let outcome = if unsuccessful {
+        Outcome::Failed
+    } else {
+        Outcome::Ok
+    };
+    let summary = provenant_cli::Summary::new(
+        mode_heading(mode).trim_end().to_owned(),
+        summary_lines,
+        Some(format!("{states}; next: provenant status")),
+    );
+    crate::emit_summarised(
+        &provenant_records::CommandResult::new(
+            "wait",
+            outcome,
+            terminal_data(mode, rows, false, Some(&observation)),
+        ),
+        globals,
+        &human,
+        true,
+        Some(&summary),
+    )
+}
+
 fn preflight_error(
     error: &(dyn std::error::Error + 'static),
     deadline: Instant,
@@ -1397,7 +1488,13 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 within,
                 cadence.interval,
             ) {
-                Ok(_settled_children) => 0,
+                Ok(settled_children) => {
+                    let children = settled_children["children"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    emit_child_wait(&children, &cadence, mode, globals)
+                }
                 Err(error) => match error.code() {
                     "cancelled" => crate::fail(
                         "wait",
@@ -2755,6 +2852,27 @@ mod tests {
         );
         assert_eq!(settled, [1, 0]);
         assert_eq!(outcome, Outcome::Ok);
+    }
+
+    #[test]
+    fn a_failed_child_is_never_reported_as_a_successful_wait() {
+        use serde_json::json;
+        // The relay's terminal child rows are the wait's targets. A `failed`
+        // or otherwise unsuccessful settled node must make the wait fail, not
+        // silently return 0 with no result.
+        let child = |node: &str, state: &str| json!({"node":node,"state":state,"settled":state != "running"});
+        assert_eq!(
+            super::child_settle(&child("a", "succeeded")),
+            Settle::Succeeded
+        );
+        for state in ["failed", "blocked", "skipped"] {
+            assert_eq!(
+                super::child_settle(&child("a", state)),
+                Settle::Unsuccessful,
+                "state={state}"
+            );
+        }
+        assert_eq!(super::child_settle(&child("a", "running")), Settle::Pending);
     }
 
     #[test]
