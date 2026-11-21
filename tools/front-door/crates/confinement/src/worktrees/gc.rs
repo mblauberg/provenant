@@ -210,8 +210,15 @@ pub struct LocalRetirementScope {
 }
 
 impl LocalRetirementScope {
+    /// Ledger records may name a local branch by its short name; compare
+    /// the full `refs/heads/` form so both spellings are filtered alike.
     pub fn permits(&self, reference: &GitRefName) -> bool {
-        !self.excluded.contains(reference.as_str())
+        let name = reference.as_str();
+        if name.starts_with("refs/") {
+            !self.excluded.contains(name)
+        } else {
+            !self.excluded.contains(&format!("refs/heads/{name}"))
+        }
     }
 }
 
@@ -225,7 +232,7 @@ pub fn local_retirement_scope(
     // `main` is always a default-branch name even when no remote advertises it.
     excluded.insert("refs/heads/main".to_owned());
     if let Some(reference) = upstream.and_then(|target| target.reference.as_ref())
-        && let Some(local) = local_branch_name(reference)
+        && let Some(local) = local_branch_name(reference.as_str())
     {
         excluded.insert(local);
     }
@@ -235,8 +242,7 @@ pub fn local_retirement_scope(
             .symbolic_revision(context, revision, cancel)
             .ok()
             .flatten()
-        && let Ok(reference) = GitRefName::new(&symbolic)
-        && let Some(local) = local_branch_name(&reference)
+        && let Some(local) = local_branch_name(&symbolic)
     {
         excluded.insert(local);
     }
@@ -251,8 +257,9 @@ pub fn local_retirement_scope(
     Ok(LocalRetirementScope { excluded })
 }
 
-fn local_branch_name(reference: &GitRefName) -> Option<String> {
-    let name = reference.as_str();
+/// Map a full branch or remote-tracking ref name to its local branch ref.
+/// Takes the raw name because remote-tracking refs are not valid branch refs.
+fn local_branch_name(name: &str) -> Option<String> {
     if let Some(branch) = name.strip_prefix("refs/heads/") {
         return Some(format!("refs/heads/{branch}"));
     }
