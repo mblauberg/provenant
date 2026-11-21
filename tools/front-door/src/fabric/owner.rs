@@ -849,16 +849,23 @@ pub(crate) fn decode_graph_document(
             .maximum_u64(),
         ..Default::default()
     };
-    let header: Header =
-        provenant_records::decode(bytes, limits).map_err(|_| FacadeError::field("document"))?;
+    // Keep the parser's field path and message: a bare `document` hides the
+    // field that actually failed, on the peer as much as on the host.
+    let header: Header = provenant_records::decode(bytes, limits).map_err(|error| {
+        FacadeError::invalid(InvalidInputDetail::graph_reason(format!(
+            "document header: {error}"
+        )))
+    })?;
     match header
         .schema_version
         .as_ref()
         .and_then(serde_json::Value::as_u64)
     {
-        Some(1 | 2) => {
-            provenant_records::decode(bytes, limits).map_err(|_| FacadeError::field("document"))
-        }
+        Some(1 | 2) => provenant_records::decode(bytes, limits).map_err(|error| {
+            FacadeError::invalid(InvalidInputDetail::graph_reason(format!(
+                "document: {error}"
+            )))
+        }),
         Some(version) if version > 2 => Err(FacadeError::UpgradeRequired {
             reader_release: env!("CARGO_PKG_VERSION").into(),
             writer_release: "unknown".into(),

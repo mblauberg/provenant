@@ -439,6 +439,44 @@ pub struct AttemptSpec {
 pub const LIGHT_PRESET: &str = "light";
 
 impl AttemptSpec {
+    /// The attempt as it may cross a host boundary.
+    ///
+    /// This is an allowlist, not a list of fields to scrub: a new
+    /// [`AttemptSpec`] field stays host-local until it is named here. Fields
+    /// that name a sender-local filesystem path (`directory`, `policy_inputs`,
+    /// `write_scope`, `write_roots`), sender placement (`host`,
+    /// `new_worktree`), arbitrary extension state (`extra`) and host-only
+    /// replay state (`policy_sealed`, `sealed_profile`) are deliberately
+    /// absent, so they cannot reach a peer document. The sealed classification
+    /// (`confidential`, `launch_policy`, `parent_sandboxed`) and the remaining
+    /// launch controls are carried, so the receiver does not downgrade or lose
+    /// them.
+    pub fn peer_bound(&self) -> Self {
+        Self {
+            confidential: self.confidential,
+            budget_sources: self.budget_sources.clone(),
+            token_budget: self.token_budget,
+            on_budget: self.on_budget,
+            budget_grace: self.budget_grace,
+            provider_timeout: self.provider_timeout,
+            policy_overrides: self.policy_overrides.clone(),
+            account: self.account.clone(),
+            capabilities: self.capabilities.clone(),
+            build_heavy: self.build_heavy,
+            local_cargo: self.local_cargo.clone(),
+            ci_scope: self.ci_scope.clone(),
+            preset: self.preset.clone(),
+            isolation: self.isolation.clone(),
+            receipts: self.receipts.clone(),
+            sandbox: self.sandbox.clone(),
+            lane_access: self.lane_access.clone(),
+            admitted_by: self.admitted_by.clone(),
+            parent_sandboxed: self.parent_sandboxed,
+            launch_policy: self.launch_policy.clone(),
+            ..Self::default()
+        }
+    }
+
     /// Whether the preset name is one this build bundles.
     pub fn preset_known(&self) -> bool {
         self.preset
