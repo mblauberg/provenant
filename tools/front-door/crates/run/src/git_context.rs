@@ -3,11 +3,11 @@ use crate::{Result, RunError, artifacts::seal};
 use provenant_confinement::transport;
 use provenant_os::{
     exec::{CapturedStream, ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
-    fs::Directory,
+    fs::{Directory, FsError, LockGuard, LockMode},
 };
 use std::{
     collections::BTreeSet,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -716,11 +716,17 @@ fn resolve_fetching(
     env: &[(OsString, OsString)],
     host_state: Option<&Path>,
 ) -> Result<String> {
-    match resolve(executor, git, cwd, base, env, host_state) {
-        Err(RunError::InvalidBase(_))
-            if fetch_tracking_ref(executor, git, cwd, base, env, host_state) =>
-        {
-            resolve(executor, git, cwd, base, env, host_state)
+    let initial = resolve(executor, git, cwd, base, env, host_state);
+    match initial {
+        Err(RunError::InvalidBase(_)) => {
+            // A fetch that reports a transient ref-lock collision returns a
+            // contention error, never InvalidBase: the caller retries instead
+            // of classifying a concurrent launch's own input as wrong (#3748).
+            if fetch_tracking_ref(executor, git, cwd, base, env, host_state)? {
+                resolve(executor, git, cwd, base, env, host_state)
+            } else {
+                Err(RunError::InvalidBase(base.to_owned()))
+            }
         }
         result => result,
     }
@@ -728,6 +734,9 @@ fn resolve_fetching(
 
 /// Fetch the configured remote's branch behind a tracking-ref base. Returns
 /// whether a fetch succeeded; a base that is not a tracking ref never fetches.
+/// Concurrent launches against one origin are serialised on a per-repository
+/// lock, and a transient Git ref-lock collision is retried a bounded number of
+/// times before surfacing as contention rather than invalid input (#3748).
 fn fetch_tracking_ref(
     executor: &dyn Executor,
     git: &Path,
@@ -735,7 +744,7 @@ fn fetch_tracking_ref(
     base: &str,
     env: &[(OsString, OsString)],
     host_state: Option<&Path>,
-) -> bool {
+) -> Result<bool> {
     let (root, _) = provenant_core::split_revision_root(base);
     let args = [
         "rev-parse",
@@ -757,25 +766,25 @@ fn fetch_tracking_ref(
         .or_else(|| root.strip_prefix("remotes/"))
         .unwrap_or(root);
     let Some((remote, branch)) = name.split_once('/') else {
-        return false;
+        return Ok(false);
     };
     if branch.is_empty() || branch.starts_with('-') || root.starts_with('-') {
-        return false;
+        return Ok(false);
     }
     let Ok((remotes, false)) = read_git_with_env(executor, git, cwd, &["remote"], 16384, env)
     else {
-        return false;
+        return Ok(false);
     };
     if !remotes
         .bytes
         .split(|byte| *byte == b'\n')
         .any(|name| name == remote.as_bytes())
     {
-        return false;
+        return Ok(false);
     }
     let transport_env = transport_environment(env);
     if check_transport(executor, git, cwd, env, &transport_env, host_state).is_err() {
-        return false;
+        return Ok(false);
     }
     let refspec = format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}");
     let hardening = transport_args();
@@ -791,18 +800,135 @@ fn fetch_tracking_ref(
             refspec.as_str(),
         ])
         .collect();
-    matches!(
-        read_git_within(
-            executor,
-            git,
-            cwd,
-            &args,
-            CONTEXT_LIMIT,
-            &transport_env,
-            FETCH_TIMEOUT,
-        ),
-        Ok((_, false))
+    // Serialise this repository's base fetches. The resolve-before-fetch above
+    // then lets later launches reuse the object the first one brought in.
+    let _fetch_lock = base_fetch_lock(executor, git, cwd);
+    const MAX_FETCH_ATTEMPTS: u8 = 4;
+    for attempt in 1..=MAX_FETCH_ATTEMPTS {
+        match fetch_tracking_ref_once(executor, git, cwd, &args, &transport_env) {
+            TrackingRefFetch::Fetched => return Ok(true),
+            TrackingRefFetch::Collision if attempt < MAX_FETCH_ATTEMPTS => {
+                provenant_os::sys::wait_pause(Duration::from_millis(10 * u64::from(attempt)));
+            }
+            TrackingRefFetch::Collision => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: base fetch hit a transient ref-lock collision after {MAX_FETCH_ATTEMPTS} attempts; retrying the launch"
+                );
+                return Err(RunError::Filesystem(FsError::LockTimeout {
+                    path: cwd.join(".git").join("refs").join("remotes"),
+                    timeout: FETCH_TIMEOUT,
+                }));
+            }
+            TrackingRefFetch::Failed => return Ok(false),
+        }
+    }
+    Ok(false)
+}
+
+/// The outcome of one tracking-ref fetch, keeping Git's ref-lock collision
+/// distinct from an ordinary failure so it can be retried, never blamed on the
+/// caller's base input.
+enum TrackingRefFetch {
+    Fetched,
+    Collision,
+    Failed,
+}
+
+/// Run one fetch, capturing stderr so a ref-lock collision can be recognised.
+fn fetch_tracking_ref_once(
+    executor: &dyn Executor,
+    git: &Path,
+    cwd: &Path,
+    args: &[&str],
+    env: &[(OsString, OsString)],
+) -> TrackingRefFetch {
+    let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
+        .chain(
+            ["--no-pager", "-c", "core.fsmonitor=false"]
+                .into_iter()
+                .chain(args.iter().copied())
+                .map(OsString::from),
+        )
+        .collect();
+    let mut options = ExecOptions::new(&argv, cwd, FETCH_TIMEOUT);
+    options.env = Some(env);
+    options.stdout = StreamPolicy::Capture {
+        limit: CONTEXT_LIMIT,
+    };
+    options.stderr = StreamPolicy::Capture { limit: 4096 };
+    let out = match executor.execute(options) {
+        Ok(out) => out,
+        Err(_) => return TrackingRefFetch::Failed,
+    };
+    if out.cancelled
+        || out.timed_out
+        || out.drain_truncated
+        || out.stderr.truncated
+        || out.stderr.read_failed
+    {
+        return TrackingRefFetch::Failed;
+    }
+    if matches!(out.termination, Termination::Exit(0)) {
+        return TrackingRefFetch::Fetched;
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+    if is_ref_lock_collision(&stderr) {
+        TrackingRefFetch::Collision
+    } else {
+        TrackingRefFetch::Failed
+    }
+}
+
+/// Git reports a ref-lock collision either while creating the `.lock` file or
+/// while committing a compare-and-swap that another fetch just won.
+fn is_ref_lock_collision(stderr: &str) -> bool {
+    let text = stderr.to_ascii_lowercase();
+    text.contains("cannot lock ref")
+        || text.contains("could not lock ref")
+        || (text.contains("unable to create")
+            && text.contains(".lock")
+            && text.contains("file exists"))
+        || (text.contains("fetching ref refs/remotes/")
+            && text.contains("reference already exists"))
+}
+
+/// Hold an exclusive lock keyed on the repository's common Git directory for
+/// the duration of one base fetch. A caller that cannot take the lock warns
+/// and proceeds: the bounded ref-lock retry still absorbs a transient clash.
+fn base_fetch_lock(executor: &dyn Executor, git: &Path, cwd: &Path) -> Option<LockGuard> {
+    use provenant_core::{Clock, WaitBudget};
+    use provenant_os::clock::SystemClock;
+    let common = provenant_os::git::repository_path_with_cancel(
+        executor,
+        git,
+        cwd,
+        provenant_os::git::RepositoryPath::CommonDir,
+        None,
     )
+    .ok()?;
+    let directory = Directory::open_anchor(&common).ok()?;
+    let clock = SystemClock::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 60).ok()?;
+    match directory.lock(
+        OsStr::new("provenant-base-fetch.lock"),
+        LockMode::Exclusive,
+        budget,
+        &provenant_core::CancelToken::new(),
+        &clock,
+    ) {
+        Ok(guard) => Some(guard),
+        Err(FsError::LockTimeout { .. }) => {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: base fetch lock is busy; fetching without coalescing"
+            );
+            None
+        }
+        Err(_) => None,
+    }
 }
 
 /// Resolve the common ancestor of a pinned review subject and base.
@@ -2090,6 +2216,77 @@ mod tests {
             resolve_base("absent-base"),
             Err(RunError::InvalidBase(named)) if named == "absent-base"
         ));
+        Ok(())
+    }
+
+    /// Eight launches share one origin and start together. Without a per-repo
+    /// fetch lock they race on `refs/remotes/origin/main.lock` and the losers
+    /// are misclassified as an invalid base (#3748).
+    #[test]
+    fn concurrent_launches_against_one_origin_all_resolve_the_moved_base() -> TestResult {
+        use std::sync::{Barrier, atomic::AtomicUsize};
+        const LAUNCHES: usize = 8;
+        let upstream = small_history()?;
+        let local = small_history()?;
+        let executor = TestHome {
+            executor: &upstream.executor,
+            home: &local.root,
+        };
+        git(
+            &upstream.executor,
+            &upstream.binary,
+            &upstream.root,
+            &["branch", "-M", "main"],
+        )?;
+        let run = |args: &[&str]| git(&local.executor, &local.binary, &local.root, args);
+        run(&[
+            "remote",
+            "add",
+            "origin",
+            upstream.root.to_str().ok_or("non-UTF8 root")?,
+        ])?;
+        run(&["update-ref", "refs/remotes/origin/main", &local.base])?;
+        git(
+            &upstream.executor,
+            &upstream.binary,
+            &upstream.root,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "moved",
+            ],
+        )?;
+        let moved = resolve_git_base(&upstream.binary, &upstream.root, "HEAD")?;
+        assert!(run(&["cat-file", "-e", &moved]).is_err());
+        let env = repository_environment(&executor, &local.binary, &local.root)?;
+        let start = Barrier::new(LAUNCHES);
+        let resolved = AtomicUsize::new(0);
+        std::thread::scope(|scope| -> TestResult {
+            let mut workers = Vec::new();
+            let env = &env;
+            let binary = &local.binary;
+            let root = &local.root;
+            for _ in 0..LAUNCHES {
+                let executor = &executor;
+                let start = &start;
+                let resolved = &resolved;
+                workers.push(scope.spawn(move || {
+                    start.wait();
+                    let base = resolve_fetching(executor, binary, root, "origin/main", env, None)?;
+                    resolved.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok::<_, RunError>(base)
+                }));
+            }
+            for worker in workers {
+                assert_eq!(worker.join().expect("base resolution panicked")?, moved);
+            }
+            Ok(())
+        })?;
+        assert_eq!(resolved.load(std::sync::atomic::Ordering::SeqCst), LAUNCHES);
         Ok(())
     }
 

@@ -1021,6 +1021,7 @@ fn at(seconds: i64) -> provenant_core::WallTime {
 struct ErrorLauncher {
     errors: std::collections::BTreeMap<usize, crate::coordination::facade::FacadeError>,
     binding_error: Option<crate::coordination::facade::FacadeError>,
+    creation_base_error: Option<crate::coordination::facade::FacadeError>,
     observations: VecDeque<AttemptObservation>,
     calls: Vec<AttemptKey>,
     stored_refs: Vec<Option<String>>,
@@ -1052,6 +1053,17 @@ impl AttemptOwner for ErrorLauncher {
     }
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
         self.now
+    }
+    fn resolve_creation_base(
+        &mut self,
+        _branch: &str,
+        reference: &str,
+        _default_base: bool,
+    ) -> Result<Option<String>, Self::Error> {
+        match self.creation_base_error.take() {
+            Some(error) => Err(error),
+            None => self.resolve_review_base(reference, None),
+        }
     }
     fn admission_timeout_seconds(&self) -> Option<u64> {
         Some(self.admission_seconds.unwrap_or(3600))
