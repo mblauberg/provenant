@@ -12,6 +12,11 @@ impl HostStore {
     pub fn open(root: &provenant_core::StateRoot, request: &Request<'_>) -> Result<Self> {
         Store::open_host(root, request).map(Self)
     }
+    /// Release the preview snapshot and its open deadline so one reader can
+    /// serve a long sweep. Call only on a store returned by `open_read_only`.
+    pub fn live_read_only(self) -> Result<Self> {
+        self.0.live_read_only().map(Self)
+    }
     /// Receipts and custody effects share the host ledger's transaction.
     pub fn coordination_operation<T, E>(
         &self,

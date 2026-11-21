@@ -7,7 +7,7 @@ use provenant_records::custody::{
     RemovalOutcome, RemovalRecord, RemovalUncertainty, RetirementDecision, RetirementRecord,
     RetirementStep, RetirementStepState, Subject, SubjectKind,
 };
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 /// One budget covers every output candidate in a preview. Applied collection
 /// continues to use the full proof before mutation.
@@ -198,6 +198,74 @@ pub fn branch_candidate(
         primary: true,
         occupancy: Occupancy::Available,
     }
+}
+
+/// The local branches one GC pass must never select for retirement: the
+/// default branch named by the fetched upstream, `origin/HEAD` or `main`, and
+/// every branch a worktree has checked out. One filter serves both the ref
+/// ledger's records and the untracked-local observation.
+#[derive(Clone, Debug, Default)]
+pub struct LocalRetirementScope {
+    excluded: BTreeSet<String>,
+}
+
+impl LocalRetirementScope {
+    /// Ledger records may name a local branch by its short name; compare
+    /// the full `refs/heads/` form so both spellings are filtered alike.
+    pub fn permits(&self, reference: &GitRefName) -> bool {
+        let name = reference.as_str();
+        if name.starts_with("refs/") {
+            !self.excluded.contains(name)
+        } else {
+            !self.excluded.contains(&format!("refs/heads/{name}"))
+        }
+    }
+}
+
+/// Read the exclusions a retirement candidate set must respect.
+pub fn local_retirement_scope(
+    context: &WorktreeContext<'_>,
+    upstream: Option<&LandingTarget>,
+    cancel: &CancelToken,
+) -> Result<LocalRetirementScope, WorktreeError> {
+    let mut excluded = BTreeSet::new();
+    // `main` is always a default-branch name even when no remote advertises it.
+    excluded.insert("refs/heads/main".to_owned());
+    if let Some(reference) = upstream.and_then(|target| target.reference.as_ref())
+        && let Some(local) = local_branch_name(reference.as_str())
+    {
+        excluded.insert(local);
+    }
+    if let Ok(revision) = GitRevision::new("refs/remotes/origin/HEAD")
+        && let Some(symbolic) = context
+            .facts
+            .symbolic_revision(context, revision, cancel)
+            .ok()
+            .flatten()
+        && let Some(local) = local_branch_name(&symbolic)
+    {
+        excluded.insert(local);
+    }
+    for entry in context.facts.fresh_inventory(context, cancel)? {
+        if entry.prunable {
+            continue;
+        }
+        if let Some(branch) = entry.branch {
+            excluded.insert(branch.as_str().to_owned());
+        }
+    }
+    Ok(LocalRetirementScope { excluded })
+}
+
+/// Map a full branch or remote-tracking ref name to its local branch ref.
+/// Takes the raw name because remote-tracking refs are not valid branch refs.
+fn local_branch_name(name: &str) -> Option<String> {
+    if let Some(branch) = name.strip_prefix("refs/heads/") {
+        return Some(format!("refs/heads/{branch}"));
+    }
+    let tracking = name.strip_prefix("refs/remotes/")?;
+    let (_, branch) = tracking.split_once('/')?;
+    Some(format!("refs/heads/{branch}"))
 }
 
 fn kept_landing_record(
