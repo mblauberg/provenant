@@ -471,10 +471,13 @@ pub enum RunError {
     /// repeat it in a transport refusal or a failed receipt.
     #[error("{reason}")]
     ConfigCommandFailed { reason: String },
-    #[error("host writer delivery failed at {stage:?}")]
+    /// A host command run for a named config read failed. `Display` names the
+    /// stage and the config error's own context and bounded cause in one
+    /// message, so a printer that only formats the error cannot drop either.
+    /// The stage is also reported as a delivery fact by the diagnostic.
+    #[error("host writer delivery failed at {stage:?}: {source}")]
     DeliveryConfigRead {
         stage: WriterDeliveryStage,
-        #[source]
         source: Box<provenant_os::git_config::ConfigError<RunError>>,
     },
     #[error("host writer delivery could not reconcile the pull request: {reason}; next: {next}")]
@@ -1170,6 +1173,32 @@ mod diagnostic_projection_tests {
             "{detail}"
         );
         assert!(detail.contains("utility command timed out"), "{detail}");
+    }
+
+    #[test]
+    fn delivery_config_read_display_names_stage_context_and_cause_once() {
+        let error = RunError::DeliveryConfigRead {
+            stage: WriterDeliveryStage::Push,
+            source: Box::new(provenant_os::git_config::ConfigError {
+                context: provenant_os::git_config::ConfigContext::new(
+                    "read effective Git configuration",
+                    "/p/.git/config",
+                    None,
+                ),
+                source: RunError::ConfigCommandFailed {
+                    reason: "cause marker".into(),
+                },
+            }),
+        };
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(
+                "host writer delivery failed at Push: read effective Git configuration on /p/.git/config"
+            ),
+            "{rendered}"
+        );
+        assert_eq!(rendered.matches("cause marker").count(), 1, "{rendered}");
+        assert!(std::error::Error::source(&error).is_none());
     }
 
     #[test]

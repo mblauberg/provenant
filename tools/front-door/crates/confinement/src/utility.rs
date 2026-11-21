@@ -73,12 +73,12 @@ pub enum UtilityError {
     InvalidOperationValue,
     #[error("repository Git configuration could not be read: {cause}")]
     UnreadableGitConfiguration { cause: GitConfigCause },
-    /// A core config command failure: the display names the command once, and
-    /// the source chain carries the underlying failure once.
-    #[error("{context}")]
+    /// A core config command failure. `Display` names the command and the
+    /// underlying failure in one self-contained message, and it exposes no
+    /// `source`, so a chain-walking printer cannot drop or repeat the cause.
+    #[error("{context}: {source}")]
     ConfigCommand {
         context: provenant_os::git_config::ConfigContext,
-        #[source]
         source: Box<UtilityError>,
     },
     #[error(
@@ -6212,9 +6212,10 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
     }
 
     #[test]
-    fn config_cause_appears_once_in_error_chain() {
-        // A wrapped core failure has a real chain: the outer error names the
-        // command, and only the source carries the bounded cause.
+    fn config_command_display_is_self_contained() {
+        // The outer error names the command and its source in one message, so
+        // a Display-only printer keeps the cause and a chain walker cannot
+        // repeat it.
         let error = UtilityError::ConfigCommand {
             context: provenant_os::git_config::ConfigContext::new(
                 "read config",
@@ -6228,14 +6229,14 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
                 "failure marker",
             )),
         };
-        let mut rendered = error.to_string();
-        let mut next = std::error::Error::source(&error);
-        while let Some(source) = next {
-            rendered.push_str(&source.to_string());
-            next = source.source();
-        }
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("read config on /repo/.git/config for key branch tracking key"),
+            "{rendered}"
+        );
         assert_eq!(rendered.matches("failure marker").count(), 1);
         assert_eq!(rendered.matches("read config").count(), 1);
+        assert!(std::error::Error::source(&error).is_none());
     }
 
     #[test]
