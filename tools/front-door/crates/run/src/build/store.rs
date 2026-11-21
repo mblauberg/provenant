@@ -2,6 +2,7 @@
 use super::process::Command;
 use super::{BuildError, InfraKind};
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -87,12 +88,11 @@ pub fn ensure(state: &Path, project_key: &str) -> Result<PathBuf, BuildError> {
         ("gc.auto", "0"),
         ("receive.denyDeletes", "false"),
     ] {
-        let status = git()
-            .arg("--git-dir")
-            .arg(&store)
-            .args(["config", key, value])
-            .status()
-            .map_err(io_error)?;
+        let tail = [OsString::from(key), OsString::from(value)];
+        let status = provenant_os::git_config::write(&tail, |args| {
+            git().arg("--git-dir").arg(&store).args(args).status()
+        })
+        .map_err(io_error)?;
         if !status.success() {
             return Err(error(format!("git config {key} failed")));
         }

@@ -201,7 +201,7 @@ fn exact(path: &Path) -> PathGrant {
     }
 }
 
-fn git(cwd: &Path, home: &Path, args: &[&str]) -> Result<()> {
+fn git_command(cwd: &Path, home: &Path, args: &[std::ffi::OsString]) -> Result<()> {
     let status = provenant_os::fixture::git_command()
         .args(args)
         .current_dir(cwd)
@@ -214,6 +214,16 @@ fn git(cwd: &Path, home: &Path, args: &[&str]) -> Result<()> {
         return Err(format!("git {args:?} failed").into());
     }
     Ok(())
+}
+
+fn git(cwd: &Path, home: &Path, args: &[&str]) -> Result<()> {
+    let args: Vec<std::ffi::OsString> = args.iter().map(std::ffi::OsString::from).collect();
+    git_command(cwd, home, &args)
+}
+
+fn git_config_write(cwd: &Path, home: &Path, tail: &[&str]) -> Result<()> {
+    let tail: Vec<std::ffi::OsString> = tail.iter().map(std::ffi::OsString::from).collect();
+    provenant_os::git_config::write(&tail, |args| git_command(cwd, home, args))
 }
 
 struct Layout {
@@ -253,12 +263,8 @@ fn layout(root: &Path, writer: bool) -> Result<Layout> {
     std::fs::write(layout.repo.join("README.md"), "Probe repository.\n")?;
     let home = &layout.home_git;
     git(&layout.repo, home, &["init", "-q", "-b", "main"])?;
-    git(&layout.repo, home, &["config", "user.name", "Probe"])?;
-    git(
-        &layout.repo,
-        home,
-        &["config", "user.email", "probe@example.invalid"],
-    )?;
+    git_config_write(&layout.repo, home, &["user.name", "Probe"])?;
+    git_config_write(&layout.repo, home, &["user.email", "probe@example.invalid"])?;
     git(&layout.repo, home, &["add", "."])?;
     git(&layout.repo, home, &["commit", "-q", "-m", "probe"])?;
     if writer {

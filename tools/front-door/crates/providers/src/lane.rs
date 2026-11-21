@@ -13,9 +13,20 @@ use std::{
 pub(crate) struct GitWrapper {
     pub(crate) scrub: bool,
     pub(crate) identity_config: Option<PathBuf>,
+    /// Pinned Provenant executable used for the typed hooks-path read.
+    pub(crate) hooks_path_reader: Option<PathBuf>,
     include: Option<String>,
     git: Option<PathBuf>,
     pub(crate) bound: Option<BoundGit>,
+}
+
+impl GitWrapper {
+    pub(crate) fn with_hooks_path_reader(reader: PathBuf) -> Self {
+        Self {
+            hooks_path_reader: Some(reader),
+            ..Default::default()
+        }
+    }
 }
 
 /// The writer's private repository binding. It is never exported into the
@@ -687,6 +698,13 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
     bytes.extend_from_slice(b"\n_provenant_git_include=");
     bytes.extend_from_slice(shell_quote(options.include.as_deref().unwrap_or_default()).as_bytes());
     bytes.extend_from_slice(b"\n");
+    bytes.extend_from_slice(b"_provenant_git_hooks_path_reader=");
+    if let Some(reader) = &options.hooks_path_reader {
+        bytes.extend_from_slice(shell_quote_os(reader.as_os_str())?.as_bytes());
+    } else {
+        bytes.extend_from_slice(b"''");
+    }
+    bytes.push(b'\n');
     let helper = shell_quote(&format!(
         "credential.https://github.com.helper={TOKEN_HELPER}"
     ));
@@ -758,16 +776,15 @@ _provenant_git_retry_safe() {
     esac
 }
 
-_provenant_git_config() {
-    if [ -n "$_provenant_git_include" ]; then
-        "$_provenant_git_program" -c "$_provenant_git_include" config "$@"
-    else
-        "$_provenant_git_program" config "$@"
-    fi
-}
-
 _provenant_git_has_hooks() {
-    _provenant_git_hooks=$(_provenant_git_config --path --get core.hooksPath 2>/dev/null)
+    [ -n "$_provenant_git_hooks_path_reader" ] || return 0
+    _provenant_git_hooks=$(PROVENANT_GIT="$_provenant_git_program" "$_provenant_git_hooks_path_reader" --__provenant_internal_git_hooks_path "$_provenant_git_include" 2>/dev/null)
+    _provenant_git_hooks_status=$?
+    case "$_provenant_git_hooks_status" in
+        0) ;;
+        1) [ -z "$_provenant_git_hooks" ] || return 0 ;;
+        *) return 0 ;;
+    esac
     if [ -n "$_provenant_git_hooks" ]; then
         [ "$_provenant_git_hooks" = "/dev/null" ] && return 1
         return 0
@@ -1216,6 +1233,7 @@ impl LaneRuntime<'_> {
             setup,
             &GitWrapper {
                 scrub: scrubbed_git_config,
+                hooks_path_reader: Some(self.executable.to_owned()),
                 ..Default::default()
             },
             scrubbed_git_config,
@@ -1420,6 +1438,18 @@ const UNBOUND: [&str; 9] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_hooks_path_reader(directory: &Path) -> std::io::Result<PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let reader = directory.join("hooks-path-reader");
+        std::fs::write(
+            &reader,
+            "#!/bin/sh\ncase \"$HOOKS_PATH_RESULT\" in\n  __missing__|\"\") exit 1 ;;\n  __error__) exit 2 ;;\n  *) printf '%s\\n' \"$HOOKS_PATH_RESULT\" ;;\nesac\n",
+        )?;
+        std::fs::set_permissions(&reader, std::fs::Permissions::from_mode(0o700))?;
+        Ok(reader)
+    }
 
     fn test_build_context(strategy: &str) -> String {
         let mut port = provenant_config::PortTable::builtin().build;
@@ -3672,6 +3702,7 @@ mod tests {
         std::fs::create_dir_all(&home)?;
         std::fs::create_dir_all(&bin)?;
         let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
+        let hooks_path_reader = test_hooks_path_reader(dir.path())?;
         let base = || {
             let mut command = provenant_os::fixture::git_command_at(&git);
             command
@@ -3692,7 +3723,16 @@ mod tests {
             assert!(base().args(["config", key, value]).status()?.success());
         }
         let wrapper = bin.join("git");
-        std::fs::write(&wrapper, git_wrapper(&git, &GitWrapper::default())?)?;
+        std::fs::write(
+            &wrapper,
+            git_wrapper(
+                &git,
+                &GitWrapper {
+                    hooks_path_reader: Some(hooks_path_reader.clone()),
+                    ..Default::default()
+                },
+            )?,
+        )?;
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
         let wrapped = |args: &[&str]| {
             let mut command = provenant_os::fixture::git_command_at(&wrapper);
@@ -3703,7 +3743,8 @@ mod tests {
                 .env("PATH", "/usr/bin:/bin")
                 .env("HOME", &home)
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null");
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("HOOKS_PATH_RESULT", "/dev/null");
             command
         };
 
@@ -3872,11 +3913,21 @@ mod tests {
         let fake_git = dir.path().join("git");
         std::fs::write(
             &fake_git,
-            b"#!/bin/sh\ncase \"$1\" in\n  --exec-path) exit 1 ;;\n  config) exit 1 ;;\n  rev-parse)\n    case \"$2\" in\n      --git-path) printf '%s\\n' \"$HOOKS_PATH\" ;;\n      --absolute-git-dir) printf '%s\\n' \"$WORKTREE_GIT_DIR\" ;;\n      --git-common-dir) printf '%s\\n' \"$COMMON_GIT_DIR\" ;;\n      *) exit 1 ;;\n    esac\n    exit 0 ;;\n  update-ref)\n    printf x >> \"$INVOCATION_COUNT\"\n    printf \"fatal: update_ref failed for ref 'refs/heads/contended': cannot lock ref 'refs/heads/contended': Unable to create '%s/refs/heads/contended.lock': File exists.\\n\" \"$COMMON_GIT_DIR\" >&2\n    exit 128 ;;\nesac\nexit 1\n",
+            b"#!/bin/sh\ncase \"$1\" in\n  --exec-path) exit 1 ;;\n  rev-parse)\n    case \"$2\" in\n      --git-path) printf '%s\\n' \"$HOOKS_PATH\" ;;\n      --absolute-git-dir) printf '%s\\n' \"$WORKTREE_GIT_DIR\" ;;\n      --git-common-dir) printf '%s\\n' \"$COMMON_GIT_DIR\" ;;\n      *) exit 1 ;;\n    esac\n    exit 0 ;;\n  update-ref)\n    printf x >> \"$INVOCATION_COUNT\"\n    printf \"fatal: update_ref failed for ref 'refs/heads/contended': cannot lock ref 'refs/heads/contended': Unable to create '%s/refs/heads/contended.lock': File exists.\\n\" \"$COMMON_GIT_DIR\" >&2\n    exit 128 ;;\nesac\nexit 1\n",
         )?;
         std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o700))?;
         let wrapper = dir.path().join("git-wrapper");
-        std::fs::write(&wrapper, git_wrapper(&fake_git, &GitWrapper::default())?)?;
+        let hooks_path_reader = test_hooks_path_reader(dir.path())?;
+        std::fs::write(
+            &wrapper,
+            git_wrapper(
+                &fake_git,
+                &GitWrapper {
+                    hooks_path_reader: Some(hooks_path_reader),
+                    ..Default::default()
+                },
+            )?,
+        )?;
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
         let count = dir.path().join("invocation-count");
         let output = provenant_os::fixture::git_command_at(&wrapper)
@@ -3889,6 +3940,7 @@ mod tests {
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOOKS_PATH", &hooks)
+            .env("HOOKS_PATH_RESULT", &hooks)
             .env("WORKTREE_GIT_DIR", &worktree_git_dir)
             .env("COMMON_GIT_DIR", &common_git_dir)
             .env("INVOCATION_COUNT", &count)
@@ -3901,6 +3953,46 @@ mod tests {
                 .count(),
             1
         );
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn hooks_path_reader_error_runs_git_once_without_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir()?;
+        let git = dir.path().join("git");
+        let count = dir.path().join("invocations");
+        std::fs::write(
+            &git,
+            b"#!/bin/sh\ncase \"$1\" in\n  --exec-path) exit 1 ;;\n  commit) printf x >> \"$INVOCATION_COUNT\"; exit 17 ;;\nesac\nexit 1\n",
+        )?;
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700))?;
+        let helper = test_hooks_path_reader(dir.path())?;
+        let wrapper = dir.path().join("git-wrapper");
+        std::fs::write(
+            &wrapper,
+            git_wrapper(
+                &git,
+                &GitWrapper {
+                    hooks_path_reader: Some(helper),
+                    ..Default::default()
+                },
+            )?,
+        )?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+        let output = provenant_os::fixture::git_command_at(&wrapper)
+            .args(["commit", "-m", "fixture"])
+            .current_dir(dir.path())
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOOKS_PATH_RESULT", "__error__")
+            .env("INVOCATION_COUNT", &count)
+            .output()?;
+        assert_eq!(output.status.code(), Some(17));
+        assert_eq!(std::fs::read(count)?, b"x");
         Ok(())
     }
 
@@ -4001,6 +4093,7 @@ mod tests {
         std::fs::create_dir_all(&bin)?;
         std::fs::create_dir_all(&hooks)?;
         let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
+        let hooks_path_reader = test_hooks_path_reader(dir.path())?;
         let base = || {
             let mut command = provenant_os::fixture::git_command_at(&git);
             command
@@ -4020,7 +4113,16 @@ mod tests {
             assert!(base().args(["config", key, value]).status()?.success());
         }
         let wrapper = bin.join("git");
-        std::fs::write(&wrapper, git_wrapper(&git, &GitWrapper::default())?)?;
+        std::fs::write(
+            &wrapper,
+            git_wrapper(
+                &git,
+                &GitWrapper {
+                    hooks_path_reader: Some(hooks_path_reader.clone()),
+                    ..Default::default()
+                },
+            )?,
+        )?;
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
         std::fs::write(repo.join("file"), "hook check\n")?;
         assert!(
@@ -4065,6 +4167,7 @@ mod tests {
             .env("HOME", &home)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("HOOKS_PATH_RESULT", &hooks)
             .output()?;
         assert!(!hook_result.status.success());
         assert!(String::from_utf8_lossy(&hook_result.stderr).contains("Unable to create '"));
@@ -4081,7 +4184,13 @@ mod tests {
         let stdin_wrapper = dir.path().join("stdin-git");
         std::fs::write(
             &stdin_wrapper,
-            git_wrapper(&fake_git, &GitWrapper::default())?,
+            git_wrapper(
+                &fake_git,
+                &GitWrapper {
+                    hooks_path_reader: Some(hooks_path_reader),
+                    ..Default::default()
+                },
+            )?,
         )?;
         std::fs::set_permissions(&stdin_wrapper, std::fs::Permissions::from_mode(0o700))?;
         let mut child = provenant_os::fixture::git_command_at(&stdin_wrapper)
@@ -4089,6 +4198,7 @@ mod tests {
             .current_dir(&repo)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
+            .env("HOOKS_PATH_RESULT", "__missing__")
             .env("INVOCATION_COUNT", &invocation_count)
             .env("STDIN_CAPTURE", &stdin_capture)
             .stdin(Stdio::piped())

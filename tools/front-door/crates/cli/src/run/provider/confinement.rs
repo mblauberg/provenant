@@ -1803,18 +1803,24 @@ fn branch_config_value(
     cancel: &provenant_core::CancelToken,
     key: &str,
 ) -> Option<String> {
-    use provenant_confinement::{GitRead, run_read_utility};
+    use provenant_confinement::{
+        run_verified_git_read_command, utility::validate_branch_config_key,
+    };
     use provenant_os::exec::Termination;
 
-    let out = match run_read_utility(
-        executor,
-        GitRead::ConfigValue {
-            key: key.to_owned(),
-        },
-        repo,
-        utility,
-        budget,
-        cancel,
+    if validate_branch_config_key(key).is_err() {
+        warn_branch_config("read branch Git configuration rejected an invalid key");
+        return None;
+    }
+    let context = provenant_os::git_config::ConfigRead {
+        operation: "read branch Git configuration",
+        file: repo.common_git_dir().join("config"),
+        key: Some("branch tracking key"),
+    };
+    let out = match provenant_os::git_config::read(
+        context,
+        provenant_os::git_config::Read::GetAfterOptions(key),
+        |command| run_verified_git_read_command(executor, command, repo, utility, budget, cancel),
     ) {
         Ok(out) => out,
         Err(error) => {

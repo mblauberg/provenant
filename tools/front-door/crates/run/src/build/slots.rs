@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -810,7 +810,7 @@ fn ensure_slot_repo(paths: &SlotPaths, store: &Path) -> Result<(), Exception> {
         }
     }
     for (key, value) in [("core.hooksPath", "/dev/null"), ("gc.auto", "0")] {
-        if !git_status(&paths.repo, &["config", key, value]) {
+        if !git_config_status(&paths.repo, &[key, value]) {
             return Err(Exception::PoolUnavailable);
         }
     }
@@ -929,9 +929,20 @@ fn checkout_commit(repo: &Path, commit: &str) -> bool {
     )
 }
 
+fn git_config_status(repo: &Path, tail: &[&str]) -> bool {
+    let tail = tail.iter().map(OsString::from).collect::<Vec<_>>();
+    provenant_os::git_config::write(&tail, |args| git_status_os(repo, args))
+        .is_ok_and(|success| success)
+}
+
 fn git_status(repo: &Path, args: &[&str]) -> bool {
+    let args = args.iter().map(OsString::from).collect::<Vec<_>>();
+    git_status_os(repo, &args).is_ok_and(|success| success)
+}
+
+fn git_status_os(repo: &Path, args: &[OsString]) -> Result<bool, std::io::Error> {
     let Some(git) = provenant_os::git::git_executable() else {
-        return false;
+        return Ok(false);
     };
     let mut command = Command::new(git);
     clear_git(&mut command);
@@ -940,7 +951,7 @@ fn git_status(repo: &Path, args: &[&str]) -> bool {
         .arg(repo)
         .args(args)
         .output()
-        .is_ok_and(|output| output.status.success())
+        .map(|output| output.status.success())
 }
 /// Take the slot's custody lease. A held lease means a previous job's child
 /// process still exists, even when its running marker was never published.

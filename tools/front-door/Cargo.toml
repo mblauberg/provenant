@@ -226,5 +226,9 @@ name = "integration"
 path = "tests/integration.rs"
 
 [[test]]
+name = "git_config_helper"
+path = "tests/git_config_helper.rs"
+
+[[test]]
 name = "command_adapter"
 path = "tests/command_adapter.rs"

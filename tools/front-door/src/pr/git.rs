@@ -233,13 +233,60 @@ impl Git {
     }
     /// The remote `base` tracks, or `origin`.
     pub(super) fn remote_of(&self, dir: &Path, base: &str) -> Result<String> {
-        let configured = self.full(dir, &["config", "--get", &format!("branch.{base}.remote")])?;
+        let key = format!("branch.{base}.remote");
+        let configured = self.config_full(
+            dir,
+            "read branch remote configuration",
+            Some("branch tracking key"),
+            provenant_os::git_config::Read::Get(&key),
+        )?;
         Ok(configured
             .as_deref()
             .map(str::trim)
             .filter(|name| plain_ref(name) && *name != ".")
             .unwrap_or("origin")
             .to_owned())
+    }
+    pub(super) fn config_full(
+        &self,
+        dir: &Path,
+        operation: &'static str,
+        key: Option<&'static str>,
+        request: provenant_os::git_config::Read<'_>,
+    ) -> Result<Option<String>> {
+        self.with_repo(dir, |repo| {
+            let context = provenant_os::git_config::ConfigRead {
+                operation,
+                file: repo.common_git_dir().join("config"),
+                key,
+            };
+            let output = provenant_os::git_config::read(context, request, |command| {
+                provenant_confinement::run_verified_git_read_command(
+                    &self.executor,
+                    command,
+                    repo,
+                    &self.utility,
+                    self.budget,
+                    &self.cancel,
+                )
+            })?;
+            Ok((output.termination == Termination::Exit(0))
+                .then(|| String::from_utf8_lossy(&output.stdout.bytes).into_owned()))
+        })
+    }
+    pub(super) fn config_write(&self, dir: &Path, tail: &[&str]) -> Result<()> {
+        let tail: Vec<std::ffi::OsString> = tail.iter().map(std::ffi::OsString::from).collect();
+        provenant_os::git_config::write(&tail, |command| {
+            let args = command
+                .iter()
+                .map(|arg| {
+                    arg.to_str()
+                        .ok_or_else(|| "Git config argument is not UTF-8".to_owned())
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let (success, detail) = self.run(dir, &args)?;
+            if success { Ok(()) } else { Err(detail.into()) }
+        })
     }
     pub(super) fn full(&self, dir: &Path, args: &[&str]) -> Result<Option<String>> {
         let mut argv = vec![self.executable.as_str()];

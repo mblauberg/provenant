@@ -1561,26 +1561,34 @@ impl HostDeliveryContext {
         let stage = Stage::Prepare;
         // Free-form shell helpers can select writer code. Support normal
         // executable helpers and gh's standard helper, otherwise refuse early.
-        let helpers = self
-            .command(
-                &writer.worktree,
-                "git",
-                &[
-                    "config",
-                    "--get-regexp",
-                    "^(credential(\\..*)?\\.helper|core\\.sshcommand)$",
-                ],
-                stage,
-            )
-            .map_err(|error| RunError::DeliveryTransport {
-                stage,
-                kind: crate::TransportRefusal::Unreadable,
-                reason: transport_config_cause(
-                    "read transport helper settings",
+        let context = provenant_os::git_config::ConfigRead {
+            operation: "read transport helper settings",
+            file: writer.worktree.join(".git/config"),
+            key: None,
+        };
+        let helpers = provenant_os::git_config::read(
+            context,
+            provenant_os::git_config::Read::GetRegexp(
+                "^(credential(\\..*)?\\.helper|core\\.sshcommand)$",
+            ),
+            |args| {
+                self.command(
                     &writer.worktree,
-                    error,
-                ),
-            })?;
+                    "git",
+                    &git_config_args(args, stage)?,
+                    stage,
+                )
+            },
+        )
+        .map_err(|error| RunError::DeliveryTransport {
+            stage,
+            kind: crate::TransportRefusal::Unreadable,
+            reason: transport_config_cause(
+                "read transport helper settings",
+                &writer.worktree,
+                error,
+            ),
+        })?;
         for line in helpers.lines() {
             let (key, value) = line.split_once(' ').unwrap_or((line, ""));
             if value.trim().is_empty() {
@@ -2001,17 +2009,32 @@ impl HostDeliveryContext {
             .map_or(cwd, |bound| bound.host_cwd.as_path());
         let ctx = transport::ConfigRead::new("check delivery transport configuration", base, None);
         transport::check_environment(environment, base, &roots, &ctx).map_err(refuse)?;
-        let listing = self
-            .command_with_input(cwd, "git", &transport::LISTING_ARGS, stage, b"")
-            .map_err(|error| refuse(ctx.unreadable(error)))?;
+        let context = provenant_os::git_config::ConfigRead {
+            operation: "read effective Git configuration",
+            file: base.to_owned(),
+            key: None,
+        };
+        let listing = provenant_os::git_config::read(
+            context.clone(),
+            provenant_os::git_config::Read::Listing,
+            |args| self.command_with_input(cwd, "git", &git_config_args(args, stage)?, stage, b""),
+        )
+        .map_err(|error| refuse(ctx.unreadable(error)))?;
         let entries = transport::parse_listing(listing.as_bytes(), &ctx).map_err(refuse)?;
         transport::check_listing(&entries, base, &roots, &ctx).map_err(refuse)?;
         // Git rereads configuration for the command itself, so refuse any
         // include directive that names a lane area, read or not: a lane could
         // otherwise create the target between this check and the command.
-        let directives = self
-            .command_with_input(cwd, "git", &transport::DIRECTIVE_ARGS, stage, b"")
-            .map_err(|error| refuse(ctx.unreadable(error)))?;
+        let directives = provenant_os::git_config::read(
+            provenant_os::git_config::ConfigRead {
+                operation: "read configuration include directives",
+                file: base.to_owned(),
+                key: Some("include.path"),
+            },
+            provenant_os::git_config::Read::Directives,
+            |args| self.command_with_input(cwd, "git", &git_config_args(args, stage)?, stage, b""),
+        )
+        .map_err(|error| refuse(ctx.unreadable(error)))?;
         let top = transport::parse_listing(directives.as_bytes(), &ctx).map_err(refuse)?;
         let home = environment
             .iter()
@@ -2032,16 +2055,20 @@ impl HostDeliveryContext {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                 Err(error) => return Err(ctx.unreadable(error)),
             }
-            let file = file
-                .to_str()
+            file.to_str()
                 .ok_or_else(|| ctx.unreadable("included config path is not UTF-8"))?;
-            let args = ["config", "--file", file]
-                .into_iter()
-                .chain(["--no-includes", "--show-origin", "-z", "--list"])
-                .collect::<Vec<_>>();
-            let listing = self
-                .command_with_input(cwd, "git", &args, stage, b"")
-                .map_err(|error| ctx.unreadable(error))?;
+            let listing = provenant_os::git_config::read(
+                provenant_os::git_config::ConfigRead {
+                    operation: "read included config file",
+                    file: PathBuf::from("<included config>"),
+                    key: Some("include.path"),
+                },
+                provenant_os::git_config::Read::File(file),
+                |args| {
+                    self.command_with_input(cwd, "git", &git_config_args(args, stage)?, stage, b"")
+                },
+            )
+            .map_err(|error| ctx.unreadable(error))?;
             transport::parse_listing(listing.as_bytes(), &ctx).map(Some)
         };
         transport::check_includes(&top, base, home, &roots, &mut read, &ctx).map_err(refuse)
@@ -2305,15 +2332,24 @@ impl HostDeliveryContext {
             return Err(RunError::IntegrationHeadMoved);
         } else {
             // A configured merge driver may execute arbitrary repository code.
-            if !self
-                .command(
-                    &writer.worktree,
-                    "git",
-                    &["config", "--get-regexp", "^merge\\..*\\.driver$"],
-                    stage,
-                )?
-                .is_empty()
-            {
+            let config = provenant_os::git_config::read(
+                provenant_os::git_config::ConfigRead {
+                    operation: "check configured merge drivers",
+                    file: writer.worktree.join(".git/config"),
+                    key: None,
+                },
+                provenant_os::git_config::Read::GetRegexp("^merge\\..*\\.driver$"),
+                |args| {
+                    self.command(
+                        &writer.worktree,
+                        "git",
+                        &git_config_args(args, stage)?,
+                        stage,
+                    )
+                },
+            )
+            .map_err(|error| delivery_config_read_error(stage, error))?;
+            if !config.is_empty() {
                 return Err(RunError::Delivery(stage));
             }
             let tree = self
@@ -2673,17 +2709,19 @@ impl HostDeliveryContext {
             ("merge", destination.as_str()),
             ("pushRemote", request.remote.as_str()),
         ] {
-            self.command(
-                cwd,
-                "git",
-                &[
-                    "config",
-                    "--local",
-                    &format!("branch.{}.{key}", bound.lane_branch),
-                    value,
-                ],
-                Stage::Upstream,
-            )?;
+            let tail = [
+                OsString::from("--local"),
+                OsString::from(format!("branch.{}.{key}", bound.lane_branch)),
+                OsString::from(value),
+            ];
+            provenant_os::git_config::write(&tail, |args| {
+                self.command(
+                    cwd,
+                    "git",
+                    &git_config_args(args, Stage::Upstream)?,
+                    Stage::Upstream,
+                )
+            })?;
         }
         // Read the upstream back from config: `@{upstream}` and `status -sb`
         // only resolve when the remote's fetch refspec covers the branch, and a
@@ -2693,17 +2731,24 @@ impl HostDeliveryContext {
             ("merge", destination.as_str()),
             ("pushRemote", request.remote.as_str()),
         ] {
-            let stored = self.command(
-                cwd,
-                "git",
-                &[
-                    "config",
-                    "--local",
-                    "--get",
-                    &format!("branch.{}.{key}", bound.lane_branch),
-                ],
-                Stage::Verify,
-            )?;
+            let config_key = format!("branch.{}.{key}", bound.lane_branch);
+            let stored = provenant_os::git_config::read(
+                provenant_os::git_config::ConfigRead {
+                    operation: "verify upstream configuration",
+                    file: cwd.to_owned(),
+                    key: None,
+                },
+                provenant_os::git_config::Read::GetLocal(&config_key),
+                |args| {
+                    self.command(
+                        cwd,
+                        "git",
+                        &git_config_args(args, Stage::Verify)?,
+                        Stage::Verify,
+                    )
+                },
+            )
+            .map_err(|error| delivery_config_read_error(Stage::Verify, error))?;
             if stored != value {
                 return Err(RunError::Delivery(Stage::Verify));
             }
@@ -3075,9 +3120,9 @@ pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
         RunError::IntegrationParentBusy { .. } | RunError::IntegrationConflict { .. } => {
             (Stage::Integrate, Some(prepare_reason(error)))
         }
-        RunError::DeliveryLimit { stage, .. } | RunError::DeliveryFact { stage, .. } => {
-            (*stage, Some(prepare_reason(error)))
-        }
+        RunError::DeliveryLimit { stage, .. }
+        | RunError::DeliveryFact { stage, .. }
+        | RunError::DeliveryConfigRead { stage, .. } => (*stage, Some(prepare_reason(error))),
         RunError::DeliveryPrepare { .. } => (Stage::Prepare, Some(prepare_reason(error))),
         _ => (Stage::Push, None),
     };
@@ -3111,6 +3156,16 @@ pub(super) fn git_subcommand(args: &[&str]) -> String {
     }
 }
 
+fn delivery_config_read_error(
+    stage: Stage,
+    error: provenant_os::git_config::ConfigReadError<RunError>,
+) -> RunError {
+    RunError::DeliveryConfigRead {
+        stage,
+        source: Box::new(error),
+    }
+}
+
 fn delivery_stage_error(error: RunError, stage: Stage) -> RunError {
     match error {
         RunError::DeliveryLimit {
@@ -3125,8 +3180,17 @@ fn delivery_stage_error(error: RunError, stage: Stage) -> RunError {
             limit,
         },
         RunError::DeliveryFact { source, .. } => RunError::DeliveryFact { stage, source },
+        RunError::DeliveryConfigRead { source, .. } => {
+            RunError::DeliveryConfigRead { stage, source }
+        }
         _ => RunError::Delivery(stage),
     }
+}
+
+fn git_config_args(args: &[OsString], stage: Stage) -> Result<Vec<&str>> {
+    args.iter()
+        .map(|arg| arg.to_str().ok_or(RunError::Delivery(stage)))
+        .collect()
 }
 
 fn transport_config_cause(

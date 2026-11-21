@@ -9,6 +9,7 @@ pub mod disk;
 pub mod exec;
 pub mod fs;
 pub mod git;
+pub mod git_config;
 pub mod home;
 mod identity;
 pub mod lane_ports;

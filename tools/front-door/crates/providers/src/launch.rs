@@ -847,10 +847,18 @@ pub(crate) fn base_env(
         ("TMPPREFIX".into(), scratch.join("zsh").into()),
         ("LANG".into(), "en_US.UTF-8".into()),
     ];
-    env.extend(provenant_os::sys::git_identity(
-        input.provenant.git,
-        input.cwd,
-    ));
+    env.extend(
+        provenant_os::git_config::identity(
+            provenant_os::git_config::ConfigRead {
+                operation: "read Git identity",
+                file: input.cwd.to_owned(),
+                key: None,
+            },
+            input.provenant.git,
+            input.cwd,
+        )
+        .map_err(ProviderError::GitConfigRead)?,
+    );
     Ok(env)
 }
 
@@ -862,6 +870,7 @@ pub(crate) fn private_git_objects(
     input: &PrepareInput<'_>,
     spec: &mut LaunchSpec,
 ) -> Result<(), ProviderError> {
+    spec.git_wrapper.hooks_path_reader = Some(input.provenant.executable.to_owned());
     if matches!(input.confined.permissions().mode, AccessMode::ReadOnly)
         && input.confined.permissions().read_only.is_none()
     {
@@ -875,7 +884,12 @@ pub(crate) fn private_git_objects(
         spec.setup.push(SetupStep::CreateDir(bin.clone()));
         spec.setup.push(SetupStep::WriteExecutable {
             path: bin.join("git"),
-            bytes: crate::lane::git_wrapper(git, &Default::default())?,
+            bytes: crate::lane::git_wrapper(
+                git,
+                &crate::lane::GitWrapper::with_hooks_path_reader(
+                    input.provenant.executable.to_owned(),
+                ),
+            )?,
         });
         spec.env
             .retain(|(key, _)| key != provenant_core::consumer_env::GIT);
@@ -1770,7 +1784,12 @@ mod git_tests {
                     .success()
             );
         }
-        let env = provenant_os::sys::git_identity(git, dir.path());
+        let context = provenant_os::git_config::ConfigRead {
+            operation: "read Git identity",
+            file: dir.path().to_owned(),
+            key: None,
+        };
+        let env = provenant_os::git_config::identity(context.clone(), git, dir.path()).unwrap();
         for (key, value) in [
             ("GIT_AUTHOR_NAME", "Lane O'Brien"),
             ("GIT_COMMITTER_NAME", "Lane O'Brien"),
@@ -1780,7 +1799,8 @@ mod git_tests {
             assert!(env.iter().any(|(k, v)| k == key && v == value));
         }
         assert!(
-            provenant_os::sys::git_identity(Path::new("/nonexistent/git"), dir.path()).is_empty()
+            provenant_os::git_config::identity(context, Path::new("/nonexistent/git"), dir.path())
+                .is_err()
         );
     }
 }

@@ -30,6 +30,9 @@ pub use plan::{
     valid_read_only_writable,
 };
 pub use repo::{ReadOnlyRepo, VerifiedRepo, VerifiedWorktree, verify_worktree};
-pub use utility::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility, run_utility};
+pub use utility::{
+    GitRead, UtilityBudget, UtilityRuntime, run_read_utility, run_utility,
+    run_verified_git_command, run_verified_git_read_command,
+};
 pub mod publication;
 pub mod push;

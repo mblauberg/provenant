@@ -48,6 +48,8 @@ pub enum RepoError {
     ConfigNormalisationExecution(#[source] provenant_os::exec::ExecError),
     #[error("Git configuration normalisation failed: {0}")]
     ConfigNormalisation(&'static str),
+    #[error(transparent)]
+    ConfigRead(#[from] Box<provenant_os::git_config::ConfigReadError<RepoError>>),
     #[error("alternate Git object stores are not accepted for protected history")]
     AlternateObjects,
     #[error("verified repository path or Git metadata changed")]
@@ -79,6 +81,7 @@ impl RepoError {
             Self::ForeignProject { .. }
             | Self::ConfigNormalisationExecution(_)
             | Self::ConfigNormalisation(_)
+            | Self::ConfigRead(_)
             | Self::Fs(_) => return None,
         })
     }
@@ -93,6 +96,7 @@ impl RepoError {
             Self::InvalidGitDirectory => "InvalidGitDirectory",
             Self::ConfigNormalisationExecution(_) => "ConfigNormalisationExecution",
             Self::ConfigNormalisation(_) => "ConfigNormalisation",
+            Self::ConfigRead(_) => "ConfigRead",
             Self::AlternateObjects => "AlternateObjects",
             Self::IdentityChanged => "IdentityChanged",
             Self::MetadataTooLarge => "MetadataTooLarge",
@@ -1168,27 +1172,28 @@ fn config_parser_metadata(git: &Path) -> Result<Metadata, RepoError> {
 
 fn parse_common_config(git: &Path, bytes: &[u8]) -> Result<Vec<u8>, RepoError> {
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
-    let argv = [
-        git.as_os_str().to_owned(),
-        "config".into(),
-        "--file".into(),
-        "-".into(),
-        // Git refuses relative includes from stdin; included files have their
-        // own digest, so the snapshot is parsed without following them.
-        "--no-includes".into(),
-        "--null".into(),
-        "--list".into(),
-    ];
-    // Parsing needs no repository; running outside the worktree keeps Git's
-    // discovery from failing on the damaged metadata this check exists to report.
-    let mut options = ExecOptions::new(&argv, Path::new("/"), std::time::Duration::from_secs(2));
-    options.stdin = Some(bytes);
-    options.env = Some(&[]);
-    options.stdout = StreamPolicy::Capture {
-        limit: CONFIG_LIMIT as usize * 2,
+    let context = provenant_os::git_config::ConfigRead {
+        operation: "normalise common Git configuration",
+        file: PathBuf::from("<common config>"),
+        key: None,
     };
-    options.stop_on_output_limit = true;
-    normalised_config_output(SystemExecutor::new(1).and_then(|executor| executor.execute(options)))
+    provenant_os::git_config::read(context, provenant_os::git_config::Read::Snapshot, |args| {
+        let mut argv = vec![git.as_os_str().to_owned()];
+        argv.extend_from_slice(args);
+        // No repository discovery: this check also handles damaged metadata.
+        let mut options =
+            ExecOptions::new(&argv, Path::new("/"), std::time::Duration::from_secs(2));
+        options.stdin = Some(bytes);
+        options.env = Some(&[]);
+        options.stdout = StreamPolicy::Capture {
+            limit: CONFIG_LIMIT as usize * 2,
+        };
+        options.stop_on_output_limit = true;
+        normalised_config_output(
+            SystemExecutor::new(1).and_then(|executor| executor.execute(options)),
+        )
+    })
+    .map_err(|error| RepoError::ConfigRead(Box::new(error)))
 }
 
 // Operational parser failures say nothing about the directory's ownership,

@@ -60,6 +60,8 @@ pub enum ProviderError {
     IsolatedKeychainUnavailable(String),
     #[error("provider login token is unavailable")]
     CredentialUnavailable,
+    #[error("Git identity configuration could not be read: {0}")]
+    GitConfigRead(#[source] provenant_os::git_config::ConfigReadError<std::io::Error>),
     #[error("provider token refresh is pending")]
     RefreshDeferred,
     #[error("provider login token was not found")]
@@ -102,7 +104,8 @@ impl ProviderError {
             | Self::InvalidPath
             | Self::UnsupportedPolicy => B::Authority,
             Self::IsolatedKeychainUnavailable(_) | Self::CredentialReadFailed(_) => B::Credentials,
-            Self::CapabilityUnavailable(_)
+            Self::GitConfigRead(_)
+            | Self::CapabilityUnavailable(_)
             | Self::InvalidInvocation(_)
             | Self::PromptTooLarge { .. }
             | Self::Malformed

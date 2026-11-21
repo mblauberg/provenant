@@ -132,6 +132,30 @@ impl From<TransportError> for UtilityError {
     }
 }
 
+fn core_config_error(
+    error: provenant_os::git_config::ConfigReadError<UtilityError>,
+) -> UtilityError {
+    let context = error.context;
+    match error.source {
+        // The core adds config context to ordinary read failures, while typed
+        // execution outcomes retain their meaning through that boundary.
+        error @ (UtilityError::TimedOut
+        | UtilityError::Cancelled
+        | UtilityError::Signalled { .. }
+        | UtilityError::Truncated { .. }
+        | UtilityError::Incomplete
+        | UtilityError::GitLockTimedOut { .. }
+        | UtilityError::ConfigLockTimedOut { .. }) => error,
+        UtilityError::Execution(ExecError::Cancelled) => UtilityError::Cancelled,
+        source => UtilityError::unreadable_config(
+            context.operation,
+            Some(&context.file),
+            context.key,
+            source,
+        ),
+    }
+}
+
 impl UtilityError {
     /// Build a config-read failure whose cause names only the operation, file
     /// and key. Callers must never pass config values as `detail`.
@@ -310,11 +334,6 @@ pub enum GitRead {
     SymbolicRevision {
         revision: GitRevision,
     },
-    /// Read one `branch.<name>.remote` or `branch.<name>.merge` config value.
-    /// The key is validated before it reaches the Git command line.
-    ConfigValue {
-        key: String,
-    },
     Diff {
         base: GitOid,
         head: GitOid,
@@ -352,8 +371,6 @@ pub enum GitRead {
     WorktreeList,
     /// List registrations with the verified common repository's bare setting.
     WorktreeListBare,
-    /// Read local bare settings with their include origins.
-    LocalBareOrigins,
     BranchTips,
     /// Read remote-tracking refs for branch-name collision checks.
     RemoteBranchTips,
@@ -946,44 +963,45 @@ impl UtilityRuntime {
         roots: &LaneRoots,
     ) -> Result<Option<bool>, UtilityError> {
         let git = self.git.program()?;
-        let mut argv = vec![
-            git.into_os_string(),
-            "--git-dir".into(),
-            common.as_os_str().to_owned(),
-        ];
-        argv.extend(GIT_COMMON.iter().map(OsString::from));
-        argv.extend(
-            [
-                "config",
-                "--local",
-                "--includes",
-                "--show-origin",
-                "-z",
-                "--bool",
-                "--get-all",
-                "core.bare",
-            ]
+        let prefix = ["--git-dir"]
             .into_iter()
-            .map(OsString::from),
-        );
+            .map(OsString::from)
+            .chain([common.as_os_str().to_owned()])
+            .chain(GIT_COMMON.iter().map(OsString::from))
+            .collect::<Vec<_>>();
         let environment = crate::worktrees::project_layout_git_environment();
+        let context = provenant_os::git_config::ConfigRead {
+            operation: "read local core.bare",
+            file: common.join("config"),
+            key: Some("core.bare"),
+        };
         let outcome = retry_git_lock_contention(
             "read local core.bare",
             budget,
             cancel,
             || true,
             |attempt_budget| {
-                let options = || {
-                    exec_options(
-                        &argv,
-                        common,
-                        attempt_budget,
-                        &environment,
-                        None,
-                        Some(cancel),
-                    )
-                };
-                validate_outcome(self.git.execute(executor, options)?)
+                provenant_os::git_config::read(
+                    context.clone(),
+                    provenant_os::git_config::Read::LocalBareOrigins,
+                    |tail| {
+                        let mut argv = vec![git.clone().into_os_string()];
+                        argv.extend(prefix.iter().cloned());
+                        argv.extend(tail.iter().cloned());
+                        let options = || {
+                            exec_options(
+                                &argv,
+                                common,
+                                attempt_budget,
+                                &environment,
+                                None,
+                                Some(cancel),
+                            )
+                        };
+                        validate_outcome(self.git.execute(executor, options)?)
+                    },
+                )
+                .map_err(core_config_error)
             },
         )
         .map_err(|error| {
@@ -1190,16 +1208,17 @@ impl UtilityRuntime {
         budget: UtilityBudget,
         cancel: &CancelToken,
     ) -> Result<ExecOutcome, UtilityError> {
-        let context = |error| {
-            UtilityError::unreadable_config(
-                "read local core.bare",
-                Some(&repo.common_git_dir().join("config")),
-                Some("core.bare"),
-                error,
-            )
+        let context = provenant_os::git_config::ConfigRead {
+            operation: "read local core.bare",
+            file: repo.common_git_dir().join("config"),
+            key: Some("core.bare"),
         };
-        let args = git_args(GitRead::LocalBareOrigins, repo, EMPTY_TREE_SHA1).map_err(context)?;
-        run_git_probe(executor, repo, runtime, budget, cancel, &[], &args).map_err(context)
+        provenant_os::git_config::read(
+            context,
+            provenant_os::git_config::Read::LocalBareOrigins,
+            |args| run_git_probe(executor, repo, runtime, budget, cancel, &[], args.as_ref()),
+        )
+        .map_err(core_config_error)
     }
 
     /// One project-discovery owner for CLI/runtime callers. A Git marker is
@@ -1467,8 +1486,68 @@ pub fn run_utility(
             release_scan: false,
             index_file: index_file.as_deref(),
         },
-        |attribute_source| Ok((git_args(operation, repo, attribute_source)?, stdin)),
+        |attribute_source| git_args(operation, repo, attribute_source, stdin),
     )
+}
+
+/// Execute a command created by the config core through a verified repository's
+/// bounded Git environment. ReadCommand cannot be constructed by callers, so
+/// this capability cannot be used to invoke raw or mutating Git commands.
+pub fn run_verified_git_command(
+    executor: &dyn Executor,
+    command: &provenant_os::git_config::ReadCommand,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<ExecOutcome, UtilityError> {
+    run_verified_git_command_inner(executor, command, repo, runtime, budget, cancel)
+}
+
+/// Read-only counterpart for a repository handle that cannot reach mutation
+/// services.
+pub fn run_verified_git_read_command(
+    executor: &dyn Executor,
+    command: &provenant_os::git_config::ReadCommand,
+    repo: &ReadOnlyRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<ExecOutcome, UtilityError> {
+    run_verified_git_command_inner(executor, command, &repo.0, runtime, budget, cancel)
+}
+
+fn run_verified_git_command_inner(
+    executor: &dyn Executor,
+    command: &provenant_os::git_config::ReadCommand,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<ExecOutcome, UtilityError> {
+    execute_git(
+        executor,
+        repo,
+        runtime,
+        budget,
+        cancel,
+        GitEnvironment::default(),
+        |attribute_source| {
+            let mut args = repository_args(repo);
+            args.extend(GIT_COMMON.iter().map(OsString::from));
+            args.push(format!("--attr-source={attribute_source}").into());
+            args.extend(command.as_ref().iter().cloned());
+            Ok(GitCommandSpec {
+                args,
+                stdin: None,
+                config_write: None,
+            })
+        },
+    )
+    .map_err(|error| match error {
+        UtilityError::Execution(ExecError::Cancelled) => UtilityError::Cancelled,
+        error => error,
+    })
 }
 
 fn attempt_index_file(operation: &GitRead) -> Result<Option<PathBuf>, UtilityError> {
@@ -1533,21 +1612,17 @@ impl<'a> HostGit<'a> {
                 Some("transport program"),
             ),
         )?;
-        let listing = host
-            .run(
-                &transport::LISTING_ARGS
-                    .iter()
-                    .map(OsString::from)
-                    .collect::<Vec<_>>(),
-            )
-            .map_err(|error| {
-                UtilityError::unreadable_config(
-                    "read effective Git configuration",
-                    Some(&config),
-                    None,
-                    error,
-                )
-            })?;
+        let listing_context = provenant_os::git_config::ConfigRead {
+            operation: "read effective Git configuration",
+            file: config.clone(),
+            key: None,
+        };
+        let listing = provenant_os::git_config::read(
+            listing_context,
+            provenant_os::git_config::Read::Listing,
+            |args| host.run(args.as_ref()),
+        )
+        .map_err(core_config_error)?;
         if listing.termination != Termination::Exit(0) {
             return Err(UtilityError::unreadable_config(
                 "read effective Git configuration",
@@ -1586,21 +1661,17 @@ impl<'a> HostGit<'a> {
         ctx: &ConfigRead,
     ) -> Result<(), UtilityError> {
         let config = self.repo.common_git_dir().join("config");
-        let directives = self
-            .run(
-                &transport::DIRECTIVE_ARGS
-                    .iter()
-                    .map(OsString::from)
-                    .collect::<Vec<_>>(),
-            )
-            .map_err(|error| {
-                UtilityError::unreadable_config(
-                    "read configuration include directives",
-                    Some(&config),
-                    Some("include directive"),
-                    error,
-                )
-            })?;
+        let directives_context = provenant_os::git_config::ConfigRead {
+            operation: "read configuration include directives",
+            file: config.clone(),
+            key: Some("include directive"),
+        };
+        let directives = provenant_os::git_config::read(
+            directives_context,
+            provenant_os::git_config::Read::Directives,
+            |args| self.run(args.as_ref()),
+        )
+        .map_err(core_config_error)?;
         if directives.termination != Termination::Exit(0) {
             return Err(UtilityError::unreadable_config(
                 "read configuration include directives",
@@ -1637,9 +1708,17 @@ impl<'a> HostGit<'a> {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                 Err(error) => return Err(ctx.unreadable(error)),
             }
-            let outcome = self
-                .run(&transport::file_listing_args(file))
-                .map_err(|error| ctx.unreadable(error))?;
+            let core_context = provenant_os::git_config::ConfigRead {
+                operation: "read included config file",
+                file: PathBuf::from("<included config>"),
+                key: Some("include.path"),
+            };
+            let outcome = provenant_os::git_config::read(
+                core_context,
+                provenant_os::git_config::Read::File(file),
+                |args| self.run(args.as_ref()),
+            )
+            .map_err(|error| ctx.unreadable(error.source))?;
             if outcome.termination != Termination::Exit(0) {
                 return Err(
                     ctx.unreadable(format!("git config exited with {:?}", outcome.termination))
@@ -1843,7 +1922,7 @@ pub fn run_release_read_utility(
             release_scan: true,
             index_file: index_file.as_deref(),
         },
-        |attribute_source| Ok((git_args(operation, &repo.0, attribute_source)?, stdin)),
+        |attribute_source| git_args(operation, &repo.0, attribute_source, stdin),
     )
 }
 
@@ -1964,6 +2043,12 @@ struct GitEnvironment<'a> {
     index_file: Option<&'a Path>,
 }
 
+struct GitCommandSpec {
+    args: Vec<OsString>,
+    stdin: Option<Vec<u8>>,
+    config_write: Option<Vec<OsString>>,
+}
+
 fn execute_git(
     executor: &dyn Executor,
     repo: &VerifiedRepo,
@@ -1971,7 +2056,7 @@ fn execute_git(
     budget: UtilityBudget,
     cancel: &CancelToken,
     selected: GitEnvironment<'_>,
-    command: impl FnOnce(&str) -> Result<(Vec<OsString>, Option<Vec<u8>>), UtilityError>,
+    command: impl FnOnce(&str) -> Result<GitCommandSpec, UtilityError>,
 ) -> Result<ExecOutcome, UtilityError> {
     if cancel.is_cancelled() {
         return Err(UtilityError::Cancelled);
@@ -1984,10 +2069,11 @@ fn execute_git(
         .ok_or(UtilityError::UnprobedRepository)?
         .attribute_source
         .as_str();
-    let (args, stdin) = command(attribute_source)?;
-    let mut argv = Vec::with_capacity(args.len() + 1);
-    argv.push(runtime.git.program()?.into_os_string());
-    argv.extend(args);
+    let GitCommandSpec {
+        mut args,
+        stdin,
+        config_write,
+    } = command(attribute_source)?;
     let mut env = environment(runtime, repo);
     if let Some(index_file) = selected.index_file {
         env.push(("GIT_INDEX_FILE".into(), index_file.as_os_str().to_owned()));
@@ -1996,16 +2082,30 @@ fn execute_git(
         env.push(("GIT_SHALLOW_FILE".into(), "/dev/null".into()));
     }
     env.push(("GIT_ATTR_SOURCE".into(), attribute_source.into()));
-    validate_outcome(runtime.git.execute(executor, || {
-        exec_options(
-            &argv,
-            repo.root_path(),
-            budget,
-            &env,
-            stdin.as_deref(),
-            Some(cancel),
-        )
-    })?)
+
+    let execute = |tail: &[OsString]| {
+        let mut argv = Vec::with_capacity(tail.len() + 1);
+        argv.push(runtime.git.program()?.into_os_string());
+        argv.extend(tail.iter().cloned());
+        validate_outcome(runtime.git.execute(executor, || {
+            exec_options(
+                &argv,
+                repo.root_path(),
+                budget,
+                &env,
+                stdin.as_deref(),
+                Some(cancel),
+            )
+        })?)
+    };
+
+    match config_write {
+        Some(tail) => provenant_os::git_config::write(&tail, |config_args| {
+            args.extend(config_args.iter().cloned());
+            execute(&args)
+        }),
+        None => execute(&args),
+    }
 }
 
 pub(crate) fn validate_outcome(outcome: ExecOutcome) -> Result<ExecOutcome, UtilityError> {
@@ -2088,12 +2188,17 @@ fn git_args(
     operation: GitRead,
     repo: &VerifiedRepo,
     attribute_source: &str,
-) -> Result<Vec<OsString>, UtilityError> {
+    stdin: Option<Vec<u8>>,
+) -> Result<GitCommandSpec, UtilityError> {
     let mut args = repository_args(repo);
     args.extend(GIT_COMMON.iter().map(OsString::from));
     args.push(format!("--attr-source={attribute_source}").into());
     args.extend(git_read_tail(operation)?);
-    Ok(args)
+    Ok(GitCommandSpec {
+        args,
+        stdin,
+        config_write: None,
+    })
 }
 
 /// The subcommand and arguments of a read, after the repository and hardening
@@ -2211,10 +2316,6 @@ fn git_read_tail(operation: GitRead) -> Result<Vec<OsString>, UtilityError> {
             "--end-of-options".into(),
             revision.as_str().into(),
         ],
-        GitRead::ConfigValue { key } => {
-            validate_branch_config_key(&key)?;
-            vec!["config".into(), "--get".into(), "--".into(), key.into()]
-        }
         GitRead::ChangedPaths { base, head } => vec![
             "diff".into(),
             "--no-ext-diff".into(),
@@ -2348,19 +2449,6 @@ fn git_read_tail(operation: GitRead) -> Result<Vec<OsString>, UtilityError> {
             "--porcelain".into(),
             "-z".into(),
         ],
-        GitRead::LocalBareOrigins => [
-            "config",
-            "--local",
-            "--includes",
-            "--show-origin",
-            "-z",
-            "--bool",
-            "--get-all",
-            "core.bare",
-        ]
-        .into_iter()
-        .map(OsString::from)
-        .collect(),
         GitRead::BranchTips => vec![
             "for-each-ref".into(),
             "--format=%(refname)%00%(objectname)%00".into(),
@@ -2456,7 +2544,8 @@ fn append_paths(args: &mut Vec<OsString>, paths: &[RepoPath]) {
 /// Only the two branch tracking keys are readable through `ConfigValue`, and
 /// only with a bounded, single-component-safe branch name. Nothing reaches the
 /// Git command line that could be read as an option or another config key.
-fn validate_branch_config_key(key: &str) -> Result<(), UtilityError> {
+/// Validate that a Git config lookup names a branch remote or merge key.
+pub fn validate_branch_config_key(key: &str) -> Result<(), UtilityError> {
     let Some(branch) = key.strip_prefix("branch.") else {
         return Err(UtilityError::InvalidOperationValue);
     };
@@ -2600,9 +2689,11 @@ pub(crate) fn execute_git_mutation(
                 cancel,
                 GitEnvironment::default(),
                 |attribute_source| {
-                    let (mut args, stdin) = mutation_args(mutation.clone())?;
-                    args.insert(0, format!("--attr-source={attribute_source}").into());
-                    Ok((args, stdin))
+                    let mut command = mutation_args(mutation.clone())?;
+                    command
+                        .args
+                        .insert(0, format!("--attr-source={attribute_source}").into());
+                    Ok(command)
                 },
             )
         },
@@ -2953,16 +3044,17 @@ fn scan_configuration_with_policy(
     roots: &LaneRoots,
     enforce_lane_settings: bool,
 ) -> Result<ConfigScan, UtilityError> {
-    let listing_args = transport::LISTING_ARGS.map(OsString::from);
-    let outcome = run_git_probe(executor, repo, runtime, budget, cancel, &[], &listing_args)
-        .map_err(|error| {
-            UtilityError::unreadable_config(
-                "list effective Git configuration",
-                Some(&repo.common_git_dir().join("config")),
-                None,
-                error,
-            )
-        })?;
+    let listing_context = provenant_os::git_config::ConfigRead {
+        operation: "list effective Git configuration",
+        file: repo.common_git_dir().join("config"),
+        key: None,
+    };
+    let outcome = provenant_os::git_config::read(
+        listing_context,
+        provenant_os::git_config::Read::Listing,
+        |args| run_git_probe(executor, repo, runtime, budget, cancel, &[], args.as_ref()),
+    )
+    .map_err(core_config_error)?;
     if outcome.termination != Termination::Exit(0) {
         return Err(UtilityError::unreadable_config(
             "list effective Git configuration",
@@ -3260,16 +3352,17 @@ fn read_config_file(
             ));
         }
     }
-    let args = transport::file_listing_args(path);
-    let outcome =
-        run_git_probe(executor, repo, runtime, budget, cancel, &[], &args).map_err(|error| {
-            UtilityError::unreadable_config(
-                "read included config file",
-                Some(Path::new("<included config>")),
-                Some("include directive"),
-                error,
-            )
-        })?;
+    let context = provenant_os::git_config::ConfigRead {
+        operation: "read included config file",
+        file: PathBuf::from("<included config>"),
+        key: Some("include directive"),
+    };
+    let outcome = provenant_os::git_config::read(
+        context,
+        provenant_os::git_config::Read::File(path),
+        |args| run_git_probe(executor, repo, runtime, budget, cancel, &[], args.as_ref()),
+    )
+    .map_err(core_config_error)?;
     if outcome.termination != Termination::Exit(0) {
         return Err(UtilityError::unreadable_config(
             "read included config file",
@@ -3464,7 +3557,7 @@ fn run_git_probe(
     )
 }
 
-fn mutation_args(mutation: GitMutation) -> Result<(Vec<OsString>, Option<Vec<u8>>), UtilityError> {
+fn mutation_args(mutation: GitMutation) -> Result<GitCommandSpec, UtilityError> {
     let mut args = GIT_COMMON.iter().map(OsString::from).collect::<Vec<_>>();
     let input = match mutation {
         GitMutation::CreatePreservationRef { reference, tip } => {
@@ -3554,14 +3647,17 @@ fn mutation_args(mutation: GitMutation) -> Result<(Vec<OsString>, Option<Vec<u8>
             None
         }
         GitMutation::SetBranchConfig { branch, key, value } => {
-            args.extend([
-                "config".into(),
-                "--local".into(),
-                "--replace-all".into(),
+            let tail = vec![
+                OsString::from("--local"),
+                OsString::from("--replace-all"),
                 format!("branch.{}.{key}", branch.short_name()).into(),
                 value.into(),
-            ]);
-            None
+            ];
+            return Ok(GitCommandSpec {
+                args,
+                stdin: None,
+                config_write: Some(tail),
+            });
         }
         GitMutation::DeleteRef {
             name,
@@ -3577,7 +3673,11 @@ fn mutation_args(mutation: GitMutation) -> Result<(Vec<OsString>, Option<Vec<u8>
             None
         }
     };
-    Ok((args, input))
+    Ok(GitCommandSpec {
+        args,
+        stdin: input,
+        config_write: None,
+    })
 }
 
 fn validate_absolute_mutation_path(path: &Path) -> Result<PathBuf, UtilityError> {
@@ -6093,21 +6193,96 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
             ],
             None,
         );
-        let args: Vec<OsString> = transport::LISTING_ARGS.iter().map(OsString::from).collect();
-        let outcome = run_git_probe(
-            &scripted,
-            &fixture.repo,
-            &fixture.runtime,
-            fixture.budget()?,
-            &CancelToken::new(),
-            &[],
-            &args,
+        let context = provenant_os::git_config::ConfigRead {
+            operation: "list effective Git configuration",
+            file: fixture.repo.common_git_dir().join("config"),
+            key: None,
+        };
+        let outcome = provenant_os::git_config::read(
+            context,
+            provenant_os::git_config::Read::Listing,
+            |args| {
+                run_git_probe(
+                    &scripted,
+                    &fixture.repo,
+                    &fixture.runtime,
+                    fixture.budget()?,
+                    &CancelToken::new(),
+                    &[],
+                    args.as_ref(),
+                )
+            },
         )?;
         assert_eq!(outcome.termination, Termination::Exit(0));
         assert_eq!(
             scripted.calls(),
             2,
             "one bounded retry must follow Git's config-lock collision"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn config_core_preserves_timeout_and_cancellation_for_bare_origins()
+    -> Result<(), Box<dyn Error>> {
+        struct CancelledConfig;
+        impl Executor for CancelledConfig {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                assert!(options.argv.iter().any(|arg| arg == "config"));
+                Err(ExecError::Cancelled)
+            }
+        }
+
+        let fixture = Fixture::new()?;
+        let mut timed_out = exit_outcome(0, "");
+        timed_out.timed_out = true;
+        let timeout_executor = ScriptedConfig::new(vec![timed_out], None);
+        let timeout = provenant_os::git_config::read(
+            provenant_os::git_config::ConfigRead {
+                operation: "read local core.bare",
+                file: fixture.repo.common_git_dir().join("config"),
+                key: Some("core.bare"),
+            },
+            provenant_os::git_config::Read::LocalBareOrigins,
+            |command| {
+                run_verified_git_command(
+                    &timeout_executor,
+                    command,
+                    &fixture.repo,
+                    &fixture.runtime,
+                    fixture.budget().expect("valid test budget"),
+                    &CancelToken::new(),
+                )
+            },
+        )
+        .expect_err("a timed out config read remains a timeout");
+        assert!(
+            matches!(&timeout.source, UtilityError::TimedOut),
+            "{timeout}"
+        );
+
+        let cancelled = provenant_os::git_config::read(
+            provenant_os::git_config::ConfigRead {
+                operation: "read local core.bare",
+                file: fixture.repo.common_git_dir().join("config"),
+                key: Some("core.bare"),
+            },
+            provenant_os::git_config::Read::LocalBareOrigins,
+            |command| {
+                run_verified_git_command(
+                    &CancelledConfig,
+                    command,
+                    &fixture.repo,
+                    &fixture.runtime,
+                    fixture.budget().expect("valid test budget"),
+                    &CancelToken::new(),
+                )
+            },
+        )
+        .expect_err("a cancelled config read remains cancelled");
+        assert!(
+            matches!(&cancelled.source, UtilityError::Cancelled),
+            "{cancelled}"
         );
         Ok(())
     }

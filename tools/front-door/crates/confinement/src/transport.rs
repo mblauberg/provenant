@@ -434,9 +434,6 @@ impl ConfigEntry {
     }
 }
 
-/// The argv tail that produces what [`parse_listing`] reads.
-pub const LISTING_ARGS: [&str; 5] = ["config", "--includes", "--show-origin", "-z", "--list"];
-
 /// Parse `git config --includes --show-origin -z --list` output. `ctx` names
 /// the read so a malformed listing fails as an identified config error rather
 /// than an opaque one.
@@ -466,19 +463,6 @@ pub fn parse_listing(bytes: &[u8], ctx: &ConfigRead) -> Result<Vec<ConfigEntry>,
     Ok(entries)
 }
 
-/// The argv tail that lists the configuration without following includes, so
-/// every `include.path` and `includeIf.*.path` directive is visible whether or
-/// not Git would read its target for this repository.
-pub const DIRECTIVE_ARGS: [&str; 5] = ["config", "--no-includes", "--show-origin", "-z", "--list"];
-
-/// The argv tail that lists one config file without following its includes.
-pub fn file_listing_args(file: &Path) -> Vec<OsString> {
-    let mut args: Vec<OsString> = vec!["config".into(), "--file".into()];
-    args.push(file.as_os_str().to_owned());
-    args.extend(["--no-includes", "--show-origin", "-z", "--list"].map(OsString::from));
-    args
-}
-
 pub fn is_include_directive(key: &str) -> bool {
     key == "include.path" || (key.starts_with("includeif.") && key.ends_with(".path"))
 }
@@ -501,8 +485,7 @@ pub fn include_target(from: &Path, value: &str, home: &Path) -> PathBuf {
 /// stops at depth ten.
 const MAX_INCLUDE_FILES: usize = 64;
 
-/// Lists one config file taken with [`file_listing_args`], or `None` when it
-/// does not exist.
+/// Lists one config file without following includes, or `None` when absent.
 pub type ReadConfigFile<'a> =
     dyn FnMut(&Path) -> Result<Option<Vec<ConfigEntry>>, TransportError> + 'a;
 
@@ -512,10 +495,9 @@ pub type ReadConfigFile<'a> =
 /// The effective listing only shows files Git read, so a missing target or an
 /// `includeIf` condition that is false for now (`gitdir:`, `onbranch:`,
 /// `hasconfig:`) would escape [`check_listing`], and a lane could create the
-/// file in the window before Git rereads the configuration. `top` is the
-/// listing taken with [`DIRECTIVE_ARGS`]; `read` lists one file taken with
-/// [`file_listing_args`], or `None` when it does not exist. Targets outside
-/// the lane areas are followed, since they may include onward.
+/// file in the window before Git rereads the configuration. `top` lists
+/// directives without following includes; `read` lists one file or returns
+/// `None` when absent. Targets outside lane areas may include onward.
 pub fn check_includes(
     top: &[ConfigEntry],
     base: &Path,

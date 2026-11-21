@@ -462,14 +462,17 @@ impl RepoFacts {
         cancel: &CancelToken,
     ) -> Result<Option<bool>, WorktreeError> {
         let scalar = budget.with_stdout_cap(self.scalar_limit)?;
-        let bare = run_utility(
-            executor,
-            GitRead::LocalBareOrigins,
-            repo,
-            utility,
-            scalar,
-            cancel,
-        )?;
+        let context = provenant_os::git_config::ConfigRead {
+            operation: "read local core.bare",
+            file: repo.common_git_dir().join("config"),
+            key: Some("core.bare"),
+        };
+        let bare = provenant_os::git_config::read(
+            context,
+            provenant_os::git_config::Read::LocalBareOrigins,
+            |command| run_verified_git_command(executor, command, repo, utility, scalar, cancel),
+        )
+        .map_err(|error| WorktreeError::GitConfigRead(Box::new(error)))?;
         match exit_code(&bare)? {
             0 => {
                 let roots = utility.lane_roots(executor, repo, budget, cancel)?;

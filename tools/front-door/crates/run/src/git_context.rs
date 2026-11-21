@@ -345,20 +345,35 @@ fn check_transport(
     transport_env: &[(OsString, OsString)],
     host_state: Option<&Path>,
 ) -> Result<()> {
-    let hardening = transport_args();
-    let args: Vec<&str> = hardening
-        .iter()
-        .map(String::as_str)
-        .chain(transport::LISTING_ARGS)
-        .collect();
     let refusal = |error: transport::TransportError| RunError::GitTransport {
         kind: (&error).into(),
         reason: error.to_string(),
     };
     let ctx = transport::ConfigRead::new("check effective transport configuration", cwd, None);
-    let (listing, timed_out) =
-        read_git_with_env(executor, git, cwd, &args, CONTEXT_LIMIT, transport_env)
-            .map_err(|error| refusal(ctx.unreadable(error)))?;
+    let core_context = provenant_os::git_config::ConfigRead {
+        operation: "check effective transport configuration",
+        file: cwd.to_path_buf(),
+        key: None,
+    };
+    let (listing, timed_out) = provenant_os::git_config::read(
+        core_context,
+        provenant_os::git_config::Read::Listing,
+        |config_args| {
+            let hardening = transport_args();
+            let tail = config_args
+                .iter()
+                .map(|arg| {
+                    arg.to_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| execution_error("Git config argument is not UTF-8"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let args: Vec<String> = hardening.into_iter().chain(tail).collect();
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            read_git_with_env(executor, git, cwd, &args, CONTEXT_LIMIT, transport_env)
+        },
+    )
+    .map_err(|error| refusal(ctx.unreadable(error.source)))?;
     if timed_out || listing.truncated {
         return Err(refusal(ctx.unreadable(
             "Git configuration listing was incomplete or timed out",

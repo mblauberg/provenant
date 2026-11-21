@@ -61,6 +61,8 @@ pub(crate) enum Error {
     Fs(#[from] provenant_os::fs::FsError),
     #[error(transparent)]
     Exec(#[from] provenant_os::exec::ExecError),
+    #[error(transparent)]
+    GitConfigRead(Box<provenant_os::git_config::ConfigReadError<Error>>),
     #[error("Git executable unavailable")]
     GitUnavailable,
     #[error("cannot establish worktree lock budget")]

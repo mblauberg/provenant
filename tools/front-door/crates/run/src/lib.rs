@@ -464,6 +464,12 @@ pub enum RunError {
     Input { kind: ErrorKind, message: String },
     #[error("host writer delivery failed at {0:?}")]
     Delivery(WriterDeliveryStage),
+    #[error("host writer delivery failed at {stage:?}: {source}")]
+    DeliveryConfigRead {
+        stage: WriterDeliveryStage,
+        #[source]
+        source: Box<provenant_os::git_config::ConfigReadError<RunError>>,
+    },
     #[error("host writer delivery could not reconcile the pull request: {reason}; next: {next}")]
     DeliveryReconciliation { reason: String, next: String },
     #[error(
@@ -945,6 +951,11 @@ impl RunError {
             Self::Delivery(stage) => {
                 diagnostic = diagnostic
                     .detail(format!("host writer delivery failed at {stage:?}"))
+                    .fact(DiagnosticFact::DeliveryStage(*stage));
+            }
+            Self::DeliveryConfigRead { stage, .. } => {
+                diagnostic = diagnostic
+                    .detail(self.to_string())
                     .fact(DiagnosticFact::DeliveryStage(*stage));
             }
             Self::DeliveryFact { stage, source } => {
