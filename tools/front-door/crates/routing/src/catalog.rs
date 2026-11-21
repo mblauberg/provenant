@@ -1947,9 +1947,7 @@ impl Catalogue {
         let is_version_segment = |part: &str| {
             !part.is_empty()
                 && part.chars().any(|c| c.is_ascii_digit())
-                && part
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || matches!(c, '.'))
+                && part.chars().all(|c| c.is_ascii_digit() || matches!(c, '.'))
         };
         let mut selectors: Vec<String> = Vec::new();
         for row in self
@@ -2033,7 +2031,10 @@ impl Catalogue {
                 || row.superseded_by.iter().any(|newer| {
                     newer == &row.model
                         || newer.adapter() != row.model.adapter()
-                        || !self.models.iter().any(|candidate| &candidate.model == newer)
+                        || !self
+                            .models
+                            .iter()
+                            .any(|candidate| &candidate.model == newer)
                 })
             {
                 return Err(RoutingError::Catalogue);
@@ -2280,7 +2281,12 @@ mod tests {
                 "{alias}"
             );
         }
-        for unknown in ["claude/unicorn", "claude/claude", "agy/gemini", "agy/claude"] {
+        for unknown in [
+            "claude/unicorn",
+            "claude/claude",
+            "agy/gemini",
+            "agy/claude",
+        ] {
             assert_eq!(
                 catalogue.resolve_family_alias(&ModelId::parse(unknown)?),
                 None,

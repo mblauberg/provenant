@@ -555,10 +555,9 @@ fn adapter_offered_lists<'a>(context: &'a RoutingContext<'_>, adapter: &str) -> 
         return Vec::new();
     }
     let hint_in_availability = context.policy_account_hint.is_some_and(|hint| {
-        context
-            .availability
-            .iter()
-            .any(|a| a.adapter == adapter && account_hint_matches(hint, &a.adapter, a.account_key.as_deref()))
+        context.availability.iter().any(|a| {
+            a.adapter == adapter && account_hint_matches(hint, &a.adapter, a.account_key.as_deref())
+        })
     });
     let mut lists: Vec<&[String]> = context
         .availability
@@ -577,8 +576,11 @@ fn adapter_offered_lists<'a>(context: &'a RoutingContext<'_>, adapter: &str) -> 
         let hint_in_accounts = context.policy_account_hint.is_some_and(|hint| {
             context.accounts.iter().any(|r| {
                 r.account.adapter == adapter
-                    && (account_hint_matches(hint, &r.account.adapter, Some(&r.account.account_key))
-                        || r.account.label == hint)
+                    && (account_hint_matches(
+                        hint,
+                        &r.account.adapter,
+                        Some(&r.account.account_key),
+                    ) || r.account.label == hint)
             })
         });
         lists = context
@@ -614,24 +616,23 @@ fn pool_member_retained_by_offerings(
     }
     let lists = adapter_offered_lists(context, adapter);
     if !lists.is_empty() {
-        return lists.into_iter().any(|list| {
-            offered_list_serves_model(list, &member.model, context.catalogue, false)
-        });
+        return lists
+            .into_iter()
+            .any(|list| offered_list_serves_model(list, &member.model, context.catalogue, false));
     }
     match source {
         AutomaticModelSource::ShippedPool => context
             .catalogue
             .model(&member.model)
             .is_none_or(|entry| entry.superseded_by.is_empty()),
-        AutomaticModelSource::OwnerConfiguration => context
-            .catalogue
-            .model(&member.model)
-            .is_none_or(|entry| {
+        AutomaticModelSource::OwnerConfiguration => {
+            context.catalogue.model(&member.model).is_none_or(|entry| {
                 !entry
                     .superseded_by
                     .iter()
                     .any(|newer| pool_members.iter().any(|other| &other.model == newer))
-            }),
+            })
+        }
     }
 }
 fn effective_pool(context: &RoutingContext<'_>, name: &str) -> Option<Vec<RoutePoolMember>> {

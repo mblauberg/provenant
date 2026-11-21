@@ -42,10 +42,9 @@ fn canonical_snapshot_models(snapshot: &DiscoverySnapshot) -> Vec<String> {
             row.controls_known
                 || !snapshot.models.iter().any(|other| {
                     other.controls_known
-                        && other
-                            .efforts
-                            .iter()
-                            .any(|effort| row.model.model() == format!("{}-{effort}", other.model.model()))
+                        && other.efforts.iter().any(|effort| {
+                            row.model.model() == format!("{}-{effort}", other.model.model())
+                        })
                 })
         })
         .map(|row| row.model.model().to_owned())

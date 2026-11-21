@@ -645,10 +645,7 @@ fn agy_account_offered_models_supersede_legacy_models_in_pools_and_select_capabl
         for seed in 0..16 {
             let resolved = resolve_with_seed(&req, &ctx, "multi-agy", seed)?;
             match resolved.model.as_str() {
-                "gemini-4-hydrogen"
-                | "gemini-4-neon"
-                | "gemini-4-argon"
-                | "claude-sonnet-5-5"
+                "gemini-4-hydrogen" | "gemini-4-neon" | "gemini-4-argon" | "claude-sonnet-5-5"
                 | "claude-opus-5-5" => {
                     assert_eq!(
                         resolved.account_key.as_deref(),
