@@ -670,8 +670,15 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         let credential = directory.join(".credentials.json");
         if scenario == "authority" {
             std::fs::create_dir(&credential)?;
-        } else if scenario != "refresh" {
-            std::fs::write(&credential, b"{}")?;
+        } else if scenario == "quota" {
+            // Issue #3551: the pinned Claude route is now attempted despite a
+            // recorded exhaustion, so it needs a valid host-read token. An
+            // invalid credential would be refused during token refresh and
+            // mask the advisory warning this scenario pins.
+            std::fs::write(
+                &credential,
+                br#"{"claudeAiOauth":{"accessToken":"fixture-token","expiresAt":4102444800000}}"#,
+            )?;
         }
         let key = provenant_providers::identity::fingerprint("fixture@example.test")
             .ok_or("account key")?;
@@ -742,17 +749,8 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
                 ]}]
             }))?,
         )?;
-        let run = rig.command(&["run", "--file", "graph.json", "--json"])?;
-        assert_eq!(
-            code(&run),
-            1,
-            "{scenario}: stdout={} stderr={}",
-            String::from_utf8_lossy(&run.stdout.bytes),
-            String::from_utf8_lossy(&run.stderr.bytes)
-        );
-        let run: Value = serde_json::from_slice(&run.stdout.bytes)?;
-        assert_eq!(run["status"], "failed", "{run}");
-        assert_eq!(run["data"]["outcome"], "failed", "{run}");
+        let run_output = rig.command(&["run", "--file", "graph.json", "--json"])?;
+        let run: Value = serde_json::from_slice(&run_output.stdout.bytes)?;
         let identity = rig.command(&["fabric", "identity", "--json"])?;
         let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
         if scenario == "quota" {
@@ -760,8 +758,19 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
             // advisory. The pinned Claude route is attempted first with a
             // warning naming the record's source and expiry, rather than
             // refused before launch, so no typed usage_limited refusal is
-            // recorded and no fallback is promoted ahead of the pin.
-            let node = &run["data"]["checkpoint"]["nodes"][0];
+            // recorded and no fallback is promoted ahead of the pin. Unlike a
+            // pre-launch refusal, a launch is asynchronous: wait for the node
+            // to settle before reading its checkpoint and attempt record.
+            let checkpoint = provenant_test_support::wait_for(
+                "quota pin settlement",
+                std::time::Duration::from_secs(30),
+                || rig.checkpoint("typed-refusal"),
+                |c| {
+                    c.as_ref()
+                        .is_ok_and(|c| c["nodes"][0]["state"] != "running")
+                },
+            )??;
+            let node = &checkpoint["nodes"][0];
             let attempts = node["attempts"].as_array().ok_or("attempts")?;
             let pinned = attempts
                 .iter()
@@ -769,13 +778,13 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
                 .ok_or("the pinned Claude route must still be selected")?;
             assert_eq!(
                 attempts[pinned]["key"]["route_index"], 0,
-                "the pinned route must be attempted before any fallback: {run}"
+                "the pinned route must be attempted before any fallback: {checkpoint}"
             );
             assert!(
                 attempts
                     .iter()
                     .all(|attempt| attempt["outcome"] != "usage_limited"),
-                "pinned exhaustion must not be a pre-launch refusal: {run}"
+                "pinned exhaustion must not be a pre-launch refusal: {checkpoint}"
             );
             let reference = attempts[pinned]["attempt_ref"]
                 .as_str()
@@ -793,6 +802,15 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
             cleanup.disarm();
             continue;
         }
+        assert_eq!(
+            code(&run_output),
+            1,
+            "{scenario}: stdout={} stderr={}",
+            String::from_utf8_lossy(&run_output.stdout.bytes),
+            String::from_utf8_lossy(&run_output.stderr.bytes)
+        );
+        assert_eq!(run["status"], "failed", "{run}");
+        assert_eq!(run["data"]["outcome"], "failed", "{run}");
         let node = &run["data"]["checkpoint"]["nodes"][0];
         let attempts = node["attempts"].as_array().ok_or("attempts")?;
         let refusal_attempt = if scenario == "authority" {
