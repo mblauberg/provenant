@@ -7,6 +7,8 @@ pub struct ResolvedRoute {
     pub selection_context: RouteAttemptContext,
     #[serde(default = "user_skills_default")]
     pub user_skills: bool,
+    #[serde(default)]
+    pub access: crate::LaneAccess,
     pub diagnostics: RouteDiagnostics,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
@@ -32,6 +34,12 @@ fn user_skills_default() -> bool {
     true
 }
 impl ResolvedRoute {
+    pub fn access(&self) -> crate::LaneAccess {
+        self.access
+    }
+    pub fn set_access(&mut self, access: crate::LaneAccess) {
+        self.access = access;
+    }
     pub fn user_skills(&self) -> bool {
         self.user_skills
     }
@@ -242,6 +250,9 @@ pub enum RouteExclusionReason {
     UnknownAvailability,
     StaleAvailability,
     UnknownAccount,
+    /// The model cannot be matched to any registered account, so readiness is
+    /// not the question: the model name must name its provider first.
+    UnresolvedAccount,
     DisclosureDenied,
     ConfinementUnavailable,
     UnsupportedEffort,
@@ -274,6 +285,7 @@ impl RouteExclusionReason {
         Self::UnknownAvailability,
         Self::StaleAvailability,
         Self::UnknownAccount,
+        Self::UnresolvedAccount,
         Self::DisclosureDenied,
         Self::ConfinementUnavailable,
         Self::UnsupportedEffort,
@@ -330,6 +342,10 @@ impl RouteExclusionReason {
             Self::UnknownAccount => (
                 "the selected account is not registered",
                 "run `provenant accounts list` and select a registered account",
+            ),
+            Self::UnresolvedAccount => (
+                "no registered account can serve the requested model",
+                "name the model in provider/model form or select an eligible account",
             ),
             Self::DisclosureDenied => (
                 "the route cannot receive the requested data",

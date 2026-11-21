@@ -235,15 +235,49 @@ pub(crate) fn observe_codex_rollout(
     Ok(observed)
 }
 
-/// Find the one private OpenCode database that identifies this session.
+/// Find the OpenCode database that identifies this session. Host-profile runs
+/// keep sessions in the host store; lane-profile runs keep them in the
+/// candidate's private store.
 pub(crate) fn observe_opencode_session(
     provider_state: &Path,
     session: &str,
+    route: &run::RouteRecord,
 ) -> Result<(PathBuf, String), provenant_providers::ProviderError> {
+    use provenant_providers::ProviderError;
+    let provider = route
+        .provider
+        .as_deref()
+        .ok_or(ProviderError::UnknownIdentity)?;
+    let model = route
+        .model
+        .as_deref()
+        .and_then(|model| model.strip_prefix(&format!("{provider}/")))
+        .ok_or(ProviderError::UnknownIdentity)?;
+
+    // The native location receipt is written only for host-profile OpenCode
+    // launches. Its absence preserves the isolated lane-profile lookup.
+    match native_session_location_for_route(
+        provider_state,
+        provider,
+        model,
+        route.account_key.as_deref(),
+    ) {
+        Ok(root) => {
+            let observed = provenant_providers::opencode::observe_model(&root, session)?;
+            return Ok((root, observed));
+        }
+        Err(NativeSessionLocationError::Missing) => {}
+        Err(NativeSessionLocationError::Unavailable) => {
+            return Err(ProviderError::UnknownIdentity);
+        }
+        Err(NativeSessionLocationError::Invalid | NativeSessionLocationError::Mismatch(_)) => {
+            return Err(ProviderError::IdentityMismatch);
+        }
+    }
     let candidate = find_opencode_session(provider_state, session)?;
-    let model =
+    let observed =
         provenant_providers::opencode::observe_model(&candidate.join("data/opencode"), session)?;
-    Ok((candidate, model))
+    Ok((candidate, observed))
 }
 
 /// Locate by session identity independently of answering-model telemetry.
@@ -622,6 +656,7 @@ pub(super) fn with_alternative(
         selection_context: base.selection_context.clone(),
         diagnostics: alternative.diagnostics.clone(),
         user_skills: base.user_skills,
+        access: base.access,
         extra: alternative.extra.clone(),
         adapter: alternative.adapter.clone(),
         model: alternative.model.clone(),

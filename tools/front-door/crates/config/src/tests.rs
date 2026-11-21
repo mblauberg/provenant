@@ -140,6 +140,23 @@ fn explicit_profile_selects_the_compiled_preset() {
 }
 
 #[test]
+fn stored_opencode_profile_is_ignored_and_names_lanes_access() {
+    let config = load(
+        &roots(),
+        Some(b"schema_version=1\n[providers.opencode]\nprofile='lane'".as_slice()),
+    )
+    .unwrap();
+    assert_warning(&config, "unknown_key");
+    assert_warning_message(
+        &config,
+        "providers.opencode.profile: ignored; OpenCode profile follows lanes.access",
+    );
+    assert!(!crate::knobs::documented_field(
+        "providers.opencode.profile"
+    ));
+}
+
+#[test]
 fn provider_update_settings_defaults_opt_out_commands_and_validation() {
     let defaults = load::<&[u8]>(&roots(), None).unwrap();
     assert_eq!(defaults.providers["codex"], ProviderSettings::default());

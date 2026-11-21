@@ -102,14 +102,13 @@ pub(super) fn network_access(switch: Option<Switch>, postgres: bool) -> Option<r
 }
 
 /// Resolve dispatch access flags into the sealed record. Roots must be
-/// existing directories, stored canonically, and clear of credential and state
-/// roots; the confinement compiler also checks broad and Git roots.
+/// existing directories, stored canonically, and clear of state roots; the
+/// resolved route's confinement policy validates credential overlap.
 pub fn lane_access(
     access: &crate::Access,
     state_root: &Path,
-    credentials: &provenant_core::CredentialRoots,
-) -> Result<run::LaneAccess, Fail> {
-    lane_access_checked(access, state_root, credentials)
+) -> Result<run::LaneAccessRequest, Fail> {
+    lane_access_checked(access, state_root)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))
 }
 
@@ -129,44 +128,14 @@ pub(super) enum AccessError {
     MissingDirectory { flag: &'static str, path: PathBuf },
     #[error("{flag} {} overlaps the Provenant state root", path.display())]
     StateOverlap { flag: &'static str, path: PathBuf },
-    #[error("{flag} {} overlaps declared credential root {} (source: {declaration_source})", path.display(), root.display())]
-    CredentialRoot {
-        flag: &'static str,
-        path: PathBuf,
-        root: PathBuf,
-        declaration_source: String,
-    },
     #[error("--write-root {} overlaps the --worktree; worktree-write already grants the worktree", .0.display())]
     WorktreeOverlap(PathBuf),
-}
-
-/// Refuse a resolved root by the same rule the confinement compiler applies,
-/// naming the flag and the path in the message.
-pub(super) fn refused_root(
-    flag: &'static str,
-    given: &Path,
-    canonical: &Path,
-    credentials: &provenant_core::CredentialRoots,
-) -> Option<AccessError> {
-    credentials
-        .refusal(
-            canonical,
-            provenant_core::CredentialScope::Subtree,
-            flag == "--read-root",
-        )
-        .map(|root| AccessError::CredentialRoot {
-            flag,
-            path: given.to_path_buf(),
-            root: root.path.clone(),
-            declaration_source: root.source.clone(),
-        })
 }
 
 pub(super) fn lane_access_checked(
     access: &crate::Access,
     state_root: &Path,
-    credentials: &provenant_core::CredentialRoots,
-) -> Result<run::LaneAccess, AccessError> {
+) -> Result<run::LaneAccessRequest, AccessError> {
     let mut postgres = false;
     for name in &access.capability {
         match name.as_str() {
@@ -189,9 +158,6 @@ pub(super) fn lane_access_checked(
                         flag,
                         path: path.clone(),
                     })?;
-                if let Some(error) = refused_root(flag, path, &canonical, credentials) {
-                    return Err(error);
-                }
                 if !run::access_root_allowed(&canonical, &state, flag == "--read-root") {
                     return Err(AccessError::StateOverlap {
                         flag,
@@ -203,6 +169,15 @@ pub(super) fn lane_access_checked(
             .collect::<Result<Vec<_>, AccessError>>()
     };
     let write_roots = resolve(&access.write_root, "--write-root")?;
+    let mut dispatch_grants: Vec<run::LaneAccessGrant> = write_roots
+        .iter()
+        .zip(&access.write_root)
+        .map(|(path, given)| run::LaneAccessGrant {
+            kind: run::LaneAccessGrantKind::WriteRoot,
+            path: path.clone(),
+            given: given.display().to_string(),
+        })
+        .collect();
     // Worktree-write protects `.git` inside the worktree, so a write root that
     // is, or contains, the worktree overlaps it and the plan is invalid. A read
     // root on the worktree is valid and stays allowed.
@@ -227,26 +202,40 @@ pub(super) fn lane_access_checked(
                 continue;
             }
         };
-        if let Some(error) = refused_root("--read-root", path, &canonical, credentials) {
-            return Err(error);
-        }
         if !run::access_root_allowed(&canonical, &state, true) {
             return Err(AccessError::StateOverlap {
                 flag: "--attach",
                 path: path.clone(),
             });
         }
+        dispatch_grants.push(run::LaneAccessGrant {
+            kind: run::LaneAccessGrantKind::Attachment,
+            path: canonical.clone(),
+            given: path.display().to_string(),
+        });
         attachments.push(canonical);
     }
-    Ok(run::LaneAccess {
+    let read_roots = resolve(&access.read_root, "--read-root")?;
+    dispatch_grants.extend(
+        read_roots
+            .iter()
+            .zip(&access.read_root)
+            .map(|(path, given)| run::LaneAccessGrant {
+                kind: run::LaneAccessGrantKind::ReadRoot,
+                path: path.clone(),
+                given: given.display().to_string(),
+            }),
+    );
+    Ok(run::LaneAccessRequest {
         extra: Default::default(),
         capability_sources: Default::default(),
         shared_worktree: None,
         network,
         database_ipc: postgres,
-        read_roots: resolve(&access.read_root, "--read-root")?,
+        read_roots,
         attachments,
         write_roots,
+        dispatch_grants,
         inputs_root: None,
         source_root: None,
         source_live: false,
@@ -274,7 +263,7 @@ pub struct Submitted {
     pub delivery_id: Option<DeliveryId>,
     pub deliver: Option<run::WriterDeliveryRequest>,
     pub worktree: Option<PathBuf>,
-    pub access: run::LaneAccess,
+    pub access: run::LaneAccessRequest,
 }
 
 pub struct Submission {
@@ -644,6 +633,16 @@ fn submit_with_launcher(
         let task = submission.task;
         {
             let mut task_profile = profile.clone();
+            if task.attempt.sealed_profile.is_none() && task.attempt.lane_access.is_some() {
+                task_profile.knob_sources.insert(
+                    "lanes.access".into(),
+                    task.attempt
+                        .budget_sources
+                        .get("lane_access")
+                        .copied()
+                        .unwrap_or(provenant_records::LimitSource::Template),
+                );
+            }
             task_profile.policy_project = Some(session.context.project_id);
             task_profile.require_skill_location = task.require_skill_location;
             task_profile.settlement_retry_limit = task

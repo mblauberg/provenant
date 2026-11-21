@@ -393,9 +393,22 @@ fn fixture() -> Result {
             return Ok(());
         }
         assert!(std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_none());
-        let fd: i32 = std::env::var("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR")?.parse()?;
-        let token = provenant_os::sys::fixture_read_secret_pipe(fd)?;
-        assert_eq!(token, b"credential-sentinel-2719-violet-fox");
+        // Isolated lanes receive the host-read token through a secret pipe.
+        // Host access removed that pipe: the CLI authenticates natively from
+        // the selected account's own config directory, which Provenant does
+        // not rewrite. Both cases must still carry the selected credential
+        // source; only the delivery mechanism differs.
+        if let Some(fd) = std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR") {
+            let fd: i32 = fd.to_str().ok_or("token descriptor")?.parse()?;
+            let token = provenant_os::sys::fixture_read_secret_pipe(fd)?;
+            assert_eq!(token, b"credential-sentinel-2719-violet-fox");
+        } else {
+            assert!(
+                dir.join(".credentials.json").is_file(),
+                "host access must use the selected account's native login: {}",
+                dir.display()
+            );
+        }
         let mut prompt = String::new();
         io::stdin().read_to_string(&mut prompt)?;
         if prompt.contains("fixture host-native") {
@@ -917,6 +930,7 @@ fn register_opencode_plans(rig: &TestRig) -> Result {
         .create(true)
         .append(true)
         .open(rig.state.join("config.toml"))?;
+    writeln!(config, "[knobs]\n'lanes.access'='isolated'")?;
     for plan in ["go", "zen"] {
         writeln!(
             config,
@@ -1902,10 +1916,27 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     for path in [&paths.scratch, &paths.temporary, &paths.provider_state] {
         fs::create_dir_all(path)?;
     }
-    let task: provenant_run::TaskRequest = serde_json::from_value(json!({
+    let mut task: provenant_run::TaskRequest = serde_json::from_value(json!({
         "prompt_digest":provenant_records::CanonicalV1::file_digest(b"fixture host-native"),
         "route":{"kind":"adapter","provider":"host-native","name":"ci-fixer"}, "account":"pro", "authority_digest":Digest::from_bytes([4;32]), "provider_timeout_seconds":20, "delivery_id":null
     }))?;
+    // The Claude token-pipe and redaction contract pinned below needs an
+    // isolated, sandboxed lane: host access uses native login and carries no
+    // secret input, and the token refresh only runs under a sandbox.
+    task.profile
+        .knobs
+        .insert("lanes.access".into(), serde_json::json!("isolated"));
+    task.profile.knob_sources.insert(
+        "lanes.access".into(),
+        provenant_records::LimitSource::Launch,
+    );
+    task.profile
+        .knobs
+        .insert("lanes.sandbox".into(), serde_json::json!("on"));
+    task.profile.knob_sources.insert(
+        "lanes.sandbox".into(),
+        provenant_records::LimitSource::Launch,
+    );
     let mut absent = task.clone();
     absent.route = provenant_run::RequestedRoute::Adapter {
         required_family: None,
@@ -2067,6 +2098,14 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     assert!(!rig.home.join(".cargo").exists());
     assert!(!rig.home.join(".rustup").exists());
     let cleanup = rig.process_cleanup();
+    // The fake account refresh and private-prompt contract below depend on
+    // isolated, sandboxed preparation; host access uses the native login.
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[knobs]\n'lanes.access'='isolated'\n'lanes.sandbox'='on'\n"
+    )?;
     let account = rig.home.join(".claude-pro");
     if host_native {
         writeln!(
@@ -4285,6 +4324,7 @@ fn opencode_free_pool_cools_second_model() -> Result {
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: Default::default(),
         extra: Default::default(),
         adapter: "opencode".into(),
         model: "opencode/glm-5.3-flash-free".into(),
@@ -4323,6 +4363,28 @@ fn opencode_free_pool_cools_second_model() -> Result {
     Ok(())
 }
 
+fn opencode_free_limit_records_provider_retry_after() -> Result {
+    let stdout = br#"{"type":"error","error":{"type":"provider.free-limit","status":429,"retryAfterMs":5624100}}"#;
+    let record = persisted_refusal(
+        "opencode",
+        "opencode/opencode/deepseek-v4.1-flash-free",
+        ("open-code-free", "keyless-free"),
+        stdout,
+    )?;
+    let refusal = &record.refusals[0];
+    assert_eq!(refusal.pool.as_deref(), Some("opencode-free"));
+    // Refusals have whole-second timestamps, so milliseconds round up.
+    assert_eq!(
+        refusal.resets_unix_seconds,
+        Some(refusal.observed_unix_seconds + 5625)
+    );
+    assert_eq!(
+        refusal.expires_unix_seconds()?,
+        refusal.observed_unix_seconds + 5625
+    );
+    Ok(())
+}
+
 fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
     use provenant_records::{
         ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
@@ -4345,6 +4407,7 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: Default::default(),
         extra: Default::default(),
         adapter: "opencode".into(),
         model: "opencode/deepseek-v4.1-flash-free".into(),
@@ -4399,12 +4462,12 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
     admit(&first, resets + 10)?;
     admit(&second, resets + 10)?;
 
-    // Missing, null, negative and huge values fall back or clamp.
+    // Missing, null and negative values fall back; long provider waits are retained.
     for (retry_ms, expected_offset) in [
         (None, None),
         (Some(serde_json::Value::Null), None),
         (Some(serde_json::json!(-5000)), None),
-        (Some(serde_json::json!(999_999_999)), Some(86_400)),
+        (Some(serde_json::json!(999_999_999)), Some(1_000_000)),
     ] {
         let mut err = serde_json::json!({
             "type": "provider.quota",
@@ -4467,6 +4530,7 @@ fn agy_individual_quota_cools_model_until_revalidation() -> Result {
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: Default::default(),
         extra: Default::default(),
         adapter: "agy".into(),
         model: "gemini-3.8-flash".into(),
@@ -6064,7 +6128,9 @@ fn provider_checks_preserve_routes_and_settlement_causes() -> Result {
     ])?;
     assert_eq!(code(&out), 1, "{out:?}");
     let data: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(data["data"]["live"], true);
     let rows = data["data"]["rows"].as_array().ok_or("live rows")?;
+    assert_eq!(rows.len(), 2);
     let passed = rows
         .iter()
         .find(|row| row["route"] == pass)
@@ -6077,7 +6143,11 @@ fn provider_checks_preserve_routes_and_settlement_causes() -> Result {
     assert_eq!(passed["cause"], "completed");
     assert_eq!(failed["status"], "fail");
     assert_eq!(failed["cause"], "auth_required");
-    assert!(rows.iter().all(|row| row["attempt_id"].is_string()));
+    // Both routes are probed in one invocation, each with its own attempt and
+    // its own settlement cause: neither may report the other's custody refusal.
+    let passed_attempt = passed["attempt_id"].as_str().ok_or("passing attempt")?;
+    let failed_attempt = failed["attempt_id"].as_str().ok_or("failing attempt")?;
+    assert_ne!(passed_attempt, failed_attempt);
     let out = rig.command(&[
         "check",
         "providers",
@@ -6406,6 +6476,10 @@ fn main() -> ExitCode {
             (
                 "opencode_free_pool_cools_second_model",
                 opencode_free_pool_cools_second_model,
+            ),
+            (
+                "opencode_free_limit_records_provider_retry_after",
+                opencode_free_limit_records_provider_retry_after,
             ),
             (
                 "opencode_free_reset_cools_pool_until_reset_and_restores",

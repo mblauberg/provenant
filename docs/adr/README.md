@@ -21,3 +21,4 @@ stable.
 | [0039](0039-graph-of-templates.md) | Accepted | One graph of template nodes: a plain lane is one node, composites are data, one patch path changes a graph |
 | [0040](0040-open-lane-policy-with-explicit-boundaries.md) | Accepted | Ambient lane access with explicit mandatory boundaries |
 | [0041](0041-tiered-ci-from-green-evidence.md) | Accepted | Tiered CI that starts pull requests from green `main` evidence |
+| [0042](0042-lane-access-host-by-default.md) | Accepted | Resolve one lane access model, host by default |

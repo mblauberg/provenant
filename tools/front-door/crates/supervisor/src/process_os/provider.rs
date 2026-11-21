@@ -188,7 +188,7 @@ impl GuardianReactor {
     /// it is reported as `gone` instead.
     pub(crate) fn watch_processes(&mut self, pids: &BTreeSet<i64>) -> io::Result<ProcessWatches> {
         let queue = self.queue.as_raw_fd();
-        let mut watches = register_process_watches(
+        let watches = register_process_watches(
             &mut self.processes,
             &mut self.exited,
             pids,
@@ -223,6 +223,8 @@ impl GuardianReactor {
                 )
             },
         )?;
+        #[cfg(feature = "fixture")]
+        let mut watches = watches;
         #[cfg(feature = "fixture")]
         if let Some(state) = std::env::var_os("PROVENANT_STATE_DIR").map(std::path::PathBuf::from)
             && state.join("s2-fail-process-watch").exists()

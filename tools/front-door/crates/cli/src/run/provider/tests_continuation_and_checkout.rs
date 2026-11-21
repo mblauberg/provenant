@@ -205,7 +205,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn read_only_checkout_warning_measures_the_selected_checkout_against_origin_default()
+fn read_only_checkout_warning_reports_a_local_read_for_an_unpinned_checkout()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 
@@ -287,6 +287,8 @@ fn read_only_checkout_warning_measures_the_selected_checkout_against_origin_defa
         .ok_or("behind checkout did not warn")?;
     assert!(warning.contains("1 commit behind"), "{warning}");
     assert!(warning.contains(&stale), "{warning}");
+    assert!(warning.contains("read the local checkout"), "{warning}");
+    assert!(!warning.contains("will read refs/remotes/"), "{warning}");
     assert!(
         warning.contains(&checkout.display().to_string()),
         "{warning}"
@@ -298,8 +300,11 @@ fn read_only_checkout_warning_measures_the_selected_checkout_against_origin_defa
     run(&checkout, &["commit", "-q", "--allow-empty", "-m", "three"])?;
     assert!(confinement::read_only_checkout_warning(&state, &checkout).is_none());
 
-    // Without origin/HEAD, the remote's advertised default is used, not origin/main.
+    // Without a configured upstream or origin/HEAD, the remote's advertised
+    // default is the advisory stand-in, not origin/main.
     run(&checkout, &["reset", "-q", "--hard", &stale])?;
+    run(&checkout, &["config", "--unset", "branch.master.remote"])?;
+    run(&checkout, &["config", "--unset", "branch.master.merge"])?;
     run(
         &checkout,
         &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
@@ -307,6 +312,7 @@ fn read_only_checkout_warning_measures_the_selected_checkout_against_origin_defa
     let warning = confinement::read_only_checkout_warning(&state, &checkout)
         .ok_or("advertised default did not warn")?;
     assert!(warning.contains("1 commit behind"), "{warning}");
+    assert!(warning.contains("refs/remotes/origin/master"), "{warning}");
 
     // An unreachable remote is advisory: the launch continues without a warning.
     run(
@@ -315,6 +321,234 @@ fn read_only_checkout_warning_measures_the_selected_checkout_against_origin_defa
     )?;
     assert!(confinement::read_only_checkout_warning(&state, &checkout).is_none());
     Ok(())
+}
+
+#[test]
+fn read_only_source_ref_names_the_fetched_upstream_head_of_a_behind_checkout()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+
+    fn git(
+        executor: &SystemExecutor,
+        executable: &Path,
+        repo: &Path,
+        env: &[(std::ffi::OsString, std::ffi::OsString)],
+        args: &[&str],
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let argv: Vec<_> = std::iter::once(executable.as_os_str().to_owned())
+            .chain(args.iter().map(std::ffi::OsString::from))
+            .collect();
+        let mut options = ExecOptions::new(&argv, repo, std::time::Duration::from_secs(10));
+        options.env = Some(env);
+        let output = executor.execute(options)?;
+        if output.termination != Termination::Exit(0) {
+            return Err(format!(
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr.bytes)
+            )
+            .into());
+        }
+        Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
+    }
+
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    let state = root.join("state");
+    std::fs::create_dir_all(&state)?;
+    let executable = provenant_os::git::git_executable().ok_or("git unavailable")?;
+    let executor = SystemExecutor::new(1)?;
+    let env: Vec<_> = std::env::vars_os()
+        .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
+        .chain(provenant_os::fixture::fixture_git_settings())
+        .collect();
+    let run = |repo: &Path, args: &[&str]| git(&executor, &executable, repo, &env, args);
+
+    run(root, &["init", "-q", "--bare", "remote.git"])?;
+    run(
+        &root.join("remote.git"),
+        &["symbolic-ref", "HEAD", "refs/heads/master"],
+    )?;
+    let seed = root.join("seed");
+    std::fs::create_dir_all(&seed)?;
+    run(&seed, &["init", "-q", "-b", "master"])?;
+    for args in [
+        ["config", "user.name", "Test"],
+        ["config", "user.email", "test@example.invalid"],
+    ] {
+        run(&seed, &args)?;
+    }
+    let stale = {
+        std::fs::write(seed.join("file"), "one\n")?;
+        run(&seed, &["add", "file"])?;
+        run(&seed, &["commit", "-q", "-m", "one"])?;
+        run(&seed, &["rev-parse", "HEAD"])?
+    };
+    let default = {
+        std::fs::write(seed.join("file"), "two\n")?;
+        run(&seed, &["add", "file"])?;
+        run(&seed, &["commit", "-q", "-m", "two"])?;
+        run(&seed, &["rev-parse", "HEAD"])?
+    };
+    run(&seed, &["push", "-q", "../remote.git", "master"])?;
+    run(root, &["clone", "-q", "remote.git", "checkout"])?;
+    let checkout = root.join("checkout");
+    run(&checkout, &["reset", "-q", "--hard", &stale])?;
+
+    // The selected tree is the fetched upstream head, named by its ref, and
+    // the stale local head is kept in the advisory warning.
+    let selected = confinement::read_only_source_ref(&state, &checkout)
+        .ok_or("behind checkout did not resolve an upstream source")?;
+    assert_eq!(selected.commit, provenant_core::GitOid::parse(&default)?);
+    assert_eq!(selected.head, provenant_core::GitOid::parse(&stale)?);
+    assert_eq!(selected.behind, 1);
+    assert!(
+        selected.reference.contains("origin"),
+        "{}",
+        selected.reference
+    );
+    let warning = crate::run::read_only_source_warning(&checkout, &selected);
+    assert!(warning.contains(&selected.reference), "{warning}");
+    assert!(warning.contains(&default), "{warning}");
+    assert!(warning.contains(&stale), "{warning}");
+
+    // Level with or ahead of the default keeps the local tree: no pin.
+    run(&checkout, &["reset", "-q", "--hard", &default])?;
+    assert!(confinement::read_only_source_ref(&state, &checkout).is_none());
+    run(&checkout, &["commit", "-q", "--allow-empty", "-m", "three"])?;
+    assert!(confinement::read_only_source_ref(&state, &checkout).is_none());
+    Ok(())
+}
+
+#[test]
+fn read_only_source_ref_uses_the_checked_out_branch_upstream_not_the_default_branch()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+
+    fn git(
+        executor: &SystemExecutor,
+        executable: &Path,
+        repo: &Path,
+        env: &[(std::ffi::OsString, std::ffi::OsString)],
+        args: &[&str],
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let argv: Vec<_> = std::iter::once(executable.as_os_str().to_owned())
+            .chain(args.iter().map(std::ffi::OsString::from))
+            .collect();
+        let mut options = ExecOptions::new(&argv, repo, std::time::Duration::from_secs(10));
+        options.env = Some(env);
+        let output = executor.execute(options)?;
+        if output.termination != Termination::Exit(0) {
+            return Err(format!(
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr.bytes)
+            )
+            .into());
+        }
+        Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
+    }
+
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    let state = root.join("state");
+    std::fs::create_dir_all(&state)?;
+    let executable = provenant_os::git::git_executable().ok_or("git unavailable")?;
+    let executor = SystemExecutor::new(1)?;
+    let env: Vec<_> = std::env::vars_os()
+        .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
+        .chain(provenant_os::fixture::fixture_git_settings())
+        .collect();
+    let run = |repo: &Path, args: &[&str]| git(&executor, &executable, repo, &env, args);
+
+    run(root, &["init", "-q", "--bare", "remote.git"])?;
+    run(
+        &root.join("remote.git"),
+        &["symbolic-ref", "HEAD", "refs/heads/master"],
+    )?;
+    let seed = root.join("seed");
+    std::fs::create_dir_all(&seed)?;
+    run(&seed, &["init", "-q", "-b", "master"])?;
+    for args in [
+        ["config", "user.name", "Test"],
+        ["config", "user.email", "test@example.invalid"],
+    ] {
+        run(&seed, &args)?;
+    }
+    let commit = |repo: &Path, text: &str| -> Result<String, Box<dyn std::error::Error>> {
+        std::fs::write(repo.join("file"), text)?;
+        run(repo, &["add", "file"])?;
+        run(repo, &["commit", "-q", "-m", text])?;
+        run(repo, &["rev-parse", "HEAD"])
+    };
+    let base = commit(&seed, "base\n")?;
+    run(&seed, &["push", "-q", "../remote.git", "master"])?;
+    run(&seed, &["checkout", "-q", "-b", "feature"])?;
+    let feature = commit(&seed, "feature\n")?;
+    run(&seed, &["push", "-q", "../remote.git", "feature"])?;
+    run(&seed, &["checkout", "-q", "master"])?;
+    let master = commit(&seed, "master\n")?;
+    run(&seed, &["push", "-q", "../remote.git", "master"])?;
+
+    run(root, &["clone", "-q", "remote.git", "checkout"])?;
+    let checkout = root.join("checkout");
+    run(&checkout, &["config", "user.name", "Test"])?;
+    run(&checkout, &["config", "user.email", "test@example.invalid"])?;
+
+    // A feature branch tracking origin/feature is behind its own upstream while
+    // origin's default (master) is a different, already-contained line. The
+    // fetched feature head, not the default, is the source.
+    run(
+        &checkout,
+        &["checkout", "-q", "-b", "feature", "--track", "origin/feature"],
+    )?;
+    run(&checkout, &["reset", "-q", "--hard", &base])?;
+    let selected = confinement::read_only_source_ref(&state, &checkout)
+        .ok_or("stale feature checkout did not resolve its upstream")?;
+    assert_eq!(selected.commit, provenant_core::GitOid::parse(&feature)?);
+    assert_eq!(selected.head, provenant_core::GitOid::parse(&base)?);
+    assert_eq!(selected.behind, 1);
+    assert_eq!(selected.reference, "refs/remotes/origin/feature");
+
+    // Even when origin's default is already contained in local HEAD, a branch
+    // whose configured upstream is ahead still pins that upstream.
+    run(&checkout, &["checkout", "-q", "master"])?;
+    run(
+        &checkout,
+        &["branch", "--set-upstream-to=origin/feature", "master"],
+    )?;
+    assert_eq!(run(&checkout, &["rev-parse", "HEAD"])?, master);
+    let selected = confinement::read_only_source_ref(&state, &checkout)
+        .ok_or("contained default hid the branch's own upstream")?;
+    assert_eq!(selected.reference, "refs/remotes/origin/feature");
+    assert_eq!(selected.commit, provenant_core::GitOid::parse(&feature)?);
+
+    // A detached HEAD has no configured upstream: the origin default is the
+    // advisory stand-in and names the ref actually used.
+    run(&checkout, &["checkout", "-q", "--detach", &base])?;
+    let selected = confinement::read_only_source_ref(&state, &checkout)
+        .ok_or("detached checkout did not fall back to the origin default")?;
+    assert_eq!(selected.reference, "refs/remotes/origin/HEAD");
+    assert_eq!(selected.commit, provenant_core::GitOid::parse(&master)?);
+    Ok(())
+}
+
+#[test]
+fn read_only_warning_text_distinguishes_a_pin_from_a_local_read() {
+    let commit = provenant_core::GitOid::parse(&"a".repeat(40)).unwrap();
+    let head = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();
+    let selected = crate::run::ReadOnlySourceRef {
+        commit,
+        reference: "refs/remotes/origin/feature".to_owned(),
+        behind: 1,
+        head,
+    };
+    let source = Path::new("/repo/checkout");
+    let pinned = crate::run::read_only_source_warning(source, &selected);
+    assert!(pinned.contains("will read refs/remotes/origin/feature"), "{pinned}");
+    assert!(pinned.contains("instead of local"), "{pinned}");
+    let local = crate::run::read_only_local_checkout_warning(source, &selected);
+    assert!(local.contains("read the local checkout"), "{local}");
+    assert!(local.contains("no upstream source was pinned"), "{local}");
+    assert!(!local.contains("will read refs/remotes/"), "{local}");
 }
 
 #[test]
@@ -510,6 +744,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
             selection_context: Default::default(),
             diagnostics: Default::default(),
             user_skills: true,
+            access: provenant_records::LaneAccess::Isolated,
             extra: Default::default(),
             adapter: adapter.into(),
             model: "fixture-model".into(),
@@ -925,6 +1160,129 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
             assert!(continuation_for(&prior, &route, "fixture", state, state, state).is_err());
         }
     }
+    Ok(())
+}
+
+#[test]
+fn opencode_host_continuation_uses_the_recorded_host_store_by_session_id()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, Digest, ProjectId};
+    use provenant_records::{
+        FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
+    };
+
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let state = base.join("state");
+    let host_data = base.join("xdg-data/opencode");
+    std::fs::create_dir_all(&host_data)?;
+    // A host-profile launch still binds the adapter's local account: the host
+    // profile is where that account's session store lives, not a substitute for
+    // the account identity a continuation must carry.
+    let account_key = provenant_records::AdapterSpec::get("opencode")
+        .ok_or("opencode adapter spec")?
+        .local_account
+        .1;
+    let route = ResolvedRoute {
+        selection_context: Default::default(),
+        diagnostics: Default::default(),
+        user_skills: true,
+        access: Default::default(),
+        extra: Default::default(),
+        adapter: "opencode".into(),
+        model: "fixture-model".into(),
+        effort: None,
+        catalogue_revision: "fixture".into(),
+        account_key: Some(account_key.into()),
+        host: "fixture".into(),
+        alternatives: RouteAlternatives::default(),
+        exclusions: Vec::new(),
+        eligibility: RouteEligibility::Eligible,
+        readiness: RouteReadiness::Ready {
+            availability_warning: None,
+            extra: Default::default(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 100,
+        },
+        confidentiality: RouteConfidentiality {
+            extra: Default::default(),
+            evidence_ref: "fixture".into(),
+        },
+        pool_selection: None,
+    };
+    let attempt = AttemptId::from_bytes([7; 16]);
+    let project = ProjectId::from_bytes([8; 16]);
+    let prior: run::AttemptRecord = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "attempt_id": attempt,
+        "key": {"project": project, "graph": "fixture", "node": "node", "attempt": 1},
+        "project_id": project,
+        "attempt_number": 1, "revision": 1, "generation": 0,
+        "requested_route": {"kind": "model", "provider": "opencode", "model": "fixture-model"},
+        "applied_route": {"provider": "opencode", "model": "opencode/fixture-model", "account_key": account_key},
+        "authority_digest": Digest::from_bytes([0; 32]), "read_only_writable": [], "protected_paths": [], "trace": {},
+        "session": "host-session", "queued_at": "2026-10-25T00:00:00.000000Z",
+        "state": {"state": "queued"}, "usage": {},
+        "prompt": {"path": {"encoding": "utf8", "path": "prompt.txt"}, "digest": FileDigest::from_bytes([0; 32]), "bytes": 0, "complete": true, "redacted": false}
+    }))?;
+    let prior_state = state
+        .join("attempts")
+        .join(attempt.to_string())
+        .join("provider-state");
+    std::fs::create_dir_all(&prior_state)?;
+    super::observation::write_native_session_location(&prior_state, &host_data, &route)?;
+    let db = rusqlite::Connection::open(host_data.join("opencode.db"))?;
+    db.execute_batch(
+        "CREATE TABLE session_v2 (id TEXT PRIMARY KEY); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT);",
+    )?;
+    db.execute("INSERT INTO session_v2 VALUES ('host-session')", [])?;
+    db.execute(
+        "INSERT INTO session_message VALUES ('host-session', 'assistant', ?1)",
+        [r#"{"model":{"providerID":"fixture","id":"model"}}"#],
+    )?;
+    drop(db);
+
+    let child = base.join("child/provider-state/candidate-0");
+    std::fs::create_dir_all(&child)?;
+    let continuation = super::continuation::continuation_for_policy(
+        &prior,
+        &route,
+        "fixture",
+        super::continuation::ContinuationState {
+            state_root: &state,
+            config_root: &state,
+            private_state: &child,
+            lane_access: None,
+        },
+        &provenant_records::policy::Policy::default(),
+        Some(&host_data),
+    )?;
+    assert_eq!(continuation.session(), "host-session");
+    assert_eq!(std::fs::read_dir(&child)?.count(), 0);
+    assert!(super::continuation::prior_uses_native_session_state(
+        prior.applied_route.as_ref().ok_or("applied route")?,
+        "opencode",
+        Some(&prior_state),
+    ));
+    let route_record = run::RouteRecord::from_resolved(&route, None, "fixture");
+    assert_eq!(
+        super::observation::observe_opencode_session(&prior_state, "host-session", &route_record)?,
+        (host_data.clone(), "opencode/fixture/model".to_owned()),
+    );
+    assert!(super::continuation::continuation_for_policy(
+        &prior,
+        &route,
+        "fixture",
+        super::continuation::ContinuationState {
+            state_root: &state,
+            config_root: &state,
+            private_state: &child,
+            lane_access: None,
+        },
+        &provenant_records::policy::Policy::default(),
+        Some(&base.join("different/opencode")),
+    )
+    .is_err());
     Ok(())
 }
 

@@ -7,6 +7,7 @@ use super::validation::{profile_path_representable, validate_absolute};
 use super::{NetworkAccess, PathGrant, PathScope, PermissionError};
 pub use host::{host_credential_declarations, host_credential_roots, host_github_roots};
 use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
+use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -114,6 +115,7 @@ impl DenialRoot {
 /// compilation separately revalidates them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MandatoryRoots {
+    lane_access: LaneAccessReceipt,
     credential_roots: CredentialRoots,
     credentials: Vec<DenialRoot>,
     non_exempt: Vec<PathGrant>,
@@ -154,6 +156,12 @@ impl MandatoryRoots {
             })
             .collect();
         let roots = Self {
+            lane_access: LaneAccessReceipt {
+                access: LaneAccess::Isolated,
+                source: LaneAccessSource::Default,
+                key: "lanes.access".into(),
+                extra: Default::default(),
+            },
             credential_roots,
             non_exempt: [
                 subtree(&home.join("Library/Keychains")),
@@ -214,26 +222,43 @@ impl MandatoryRoots {
         &mut self,
         roots: CredentialRoots,
     ) -> Result<(), PermissionError> {
-        let denials = roots
-            .entries()
-            .iter()
-            .map(|root| {
-                let denial = DenialRoot {
-                    path: root.path.clone(),
-                    scope: match root.scope {
-                        CredentialScope::Exact => PathScope::Exact,
-                        CredentialScope::Subtree => PathScope::Subtree,
-                    },
-                };
-                denial.validate().map_err(|_| {
-                    PermissionError::credential_root_at(&root.path, None, &root.source)
-                })?;
-                Ok(denial)
-            })
-            .collect::<Result<Vec<_>, PermissionError>>()?;
+        let mut denials = Vec::new();
+        for root in roots.entries() {
+            let denial = DenialRoot {
+                path: root.path.clone(),
+                scope: match root.scope {
+                    CredentialScope::Exact => PathScope::Exact,
+                    CredentialScope::Subtree => PathScope::Subtree,
+                },
+            };
+            if denial.validate().is_err() {
+                if self.is_host_access() {
+                    continue;
+                }
+                return Err(PermissionError::credential_root_at(
+                    &root.path,
+                    None,
+                    &root.source,
+                ));
+            }
+            denials.push(denial);
+        }
         self.credentials = denials;
         self.credential_roots = roots;
         Ok(())
+    }
+
+    /// Attach the access decision already resolved during launch preparation.
+    pub fn set_lane_access(&mut self, receipt: LaneAccessReceipt) {
+        self.lane_access = receipt;
+    }
+
+    pub fn lane_access(&self) -> &LaneAccessReceipt {
+        &self.lane_access
+    }
+
+    pub fn is_host_access(&self) -> bool {
+        self.lane_access.access == LaneAccess::Host
     }
 
     /// Add registered identity homes, relocated XDG stores and isolated Agy
@@ -250,8 +275,14 @@ impl MandatoryRoots {
     ) -> Result<(), PermissionError> {
         let root = root.into();
         let source = source.into();
-        root.validate()
-            .map_err(|_| PermissionError::credential_root_at(&root.path, None, &source))?;
+        if root.validate().is_err() {
+            if self.is_host_access() {
+                return Ok(());
+            }
+            return Err(PermissionError::credential_root_at(
+                &root.path, None, &source,
+            ));
+        }
         self.credential_roots.add(
             root.path.clone(),
             match root.scope {
@@ -398,12 +429,14 @@ impl MandatoryRoots {
     /// a newly introduced symlink target must already be denied in this family.
     #[cfg(target_os = "macos")]
     pub(crate) fn revalidate_paths(&self) -> Result<(), PermissionError> {
-        for (path, target) in &self.credential_endpoints {
-            if resolve_boundary_path(path).as_ref().ok() != Some(target) {
-                return Err(super::anchors::anchor_at(
-                    path,
-                    "credential endpoint changed",
-                ));
+        if !self.is_host_access() {
+            for (path, target) in &self.credential_endpoints {
+                if resolve_boundary_path(path).as_ref().ok() != Some(target) {
+                    return Err(super::anchors::anchor_at(
+                        path,
+                        "credential endpoint changed",
+                    ));
+                }
             }
         }
         let families: Vec<Vec<&PathGrant>> = vec![
@@ -420,7 +453,15 @@ impl MandatoryRoots {
             .into_iter()
             .map(|roots| roots.into_iter().map(DenialRoot::from).collect())
             .collect();
-        for roots in families.into_iter().chain([self.credentials.clone()]) {
+        let families = if self.is_host_access() {
+            families
+        } else {
+            families
+                .into_iter()
+                .chain([self.credentials.clone()])
+                .collect()
+        };
+        for roots in families {
             for root in &roots {
                 let resolved = resolve_boundary_path(&root.path).map_err(|_| {
                     super::anchors::anchor_at(&root.path, "mandatory path resolution")
@@ -510,14 +551,16 @@ impl MandatoryRoots {
     /// checkout exceptions.
     pub fn validate_extra_write(&self, grant: &PathGrant) -> Result<(), PermissionError> {
         grant.validate()?;
-        if let Some(root) = self.credential_roots.refusal(
-            &grant.path,
-            match grant.scope {
-                PathScope::Exact => CredentialScope::Exact,
-                PathScope::Subtree => CredentialScope::Subtree,
-            },
-            false,
-        ) {
+        if !self.is_host_access()
+            && let Some(root) = self.credential_roots.refusal(
+                &grant.path,
+                match grant.scope {
+                    PathScope::Exact => CredentialScope::Exact,
+                    PathScope::Subtree => CredentialScope::Subtree,
+                },
+                false,
+            )
+        {
             return Err(PermissionError::credential_store(&grant.path, root));
         }
         // A recorded host write is excepted from other checkouts only; Git,

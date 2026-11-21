@@ -223,6 +223,75 @@ fn stdin_adapters_receive_oversized_prompts_in_full() -> Result<(), ProviderErro
 }
 
 #[test]
+fn environment_inheritance_follows_access_and_sandbox() -> Result<(), ProviderError> {
+    use provenant_records::LaneAccess;
+    let prompt = Prompt::new("fixture".into());
+    let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
+    let host = || {
+        [
+            ("AWS_PROFILE".into(), "fixture-profile".into()),
+            ("AWS_ACCESS_KEY_ID".into(), "fixture-key".into()),
+            ("GITHUB_TOKEN".into(), "fixture-token".into()),
+            ("JAVA_HOME".into(), "/fixture/java".into()),
+            ("TMPDIR".into(), "/host/tmp".into()),
+            ("TMPPREFIX".into(), "/host/zsh".into()),
+        ]
+        .into_iter()
+    };
+    for sandboxed in [false, true] {
+        for access in [LaneAccess::Host, LaneAccess::Isolated] {
+            let mut route = route("codex", "fixture-model");
+            route.set_access(access);
+            let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+            let host_var = |name: &str| {
+                (name == provenant_core::consumer_env::SANDBOX)
+                    .then(|| if sandboxed { "on" } else { "off" }.into())
+            };
+            input.host_var = &host_var;
+            let env = crate::launch::base_env_with_host(
+                &input,
+                Path::new("/fixture/tmp"),
+                "/bin",
+                host(),
+            )?;
+            for (key, value) in host().take(4) {
+                assert_eq!(
+                    env.iter().any(|entry| entry.0 == key && entry.1 == value),
+                    !(sandboxed && access == LaneAccess::Isolated),
+                    "{access:?} sandboxed={sandboxed} {key:?}"
+                );
+            }
+            let value = |key: &str| {
+                env.iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.as_os_str())
+            };
+            if sandboxed && access == LaneAccess::Isolated {
+                for (key, expected) in [
+                    ("HOME", "/fixture/home"),
+                    ("USER", "fixture"),
+                    ("PATH", "/bin"),
+                    ("LANG", "en_US.UTF-8"),
+                ] {
+                    assert_eq!(value(key), Some(std::ffi::OsStr::new(expected)));
+                }
+            }
+            for (key, native, confined) in [
+                ("TMPDIR", "/host/tmp", "/fixture/tmp"),
+                ("TMPPREFIX", "/host/zsh", "/fixture/tmp/zsh"),
+                (provenant_core::consumer_env::SANDBOX, "off", "on"),
+            ] {
+                assert_eq!(
+                    value(key),
+                    Some(std::ffi::OsStr::new(if sandboxed { confined } else { native }))
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn temporary_environment_follows_the_plan_for_readers_and_writers() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let token = fixture_token();
@@ -727,6 +796,104 @@ fn claude_read_only_adds_read_roots_outside_the_working_directory() -> Result<()
 }
 
 #[test]
+fn opencode_profile_follows_lane_access() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path();
+    let state = home.join("state");
+    std::fs::create_dir_all(state.join("opencode"))?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    std::fs::write(state.join("opencode/service.json"), format!(r#"{{"url":"http://{}"}}"#, listener.local_addr()?))?;
+    let lookup = |key: &str| match key {
+        "XDG_CONFIG_HOME" => Some(home.join("config").into_os_string()),
+        "XDG_DATA_HOME" => Some(home.join("data").into_os_string()),
+        "XDG_STATE_HOME" => Some(state.clone().into_os_string()),
+        "XDG_CACHE_HOME" => Some(home.join("cache").into_os_string()),
+        _ => None,
+    };
+    let server = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut stream, _) = listener.accept().expect("health connection");
+        let mut request = [0; 256];
+        let _ = stream.read(&mut request);
+        stream.write_all(b"HTTP/1.1 401 Unauthorized\r\n\r\n").expect("health response");
+    });
+    let prompt = Prompt::new("fixture prompt".into());
+    let base = fixture_access_plan(Access::ReadOnly, Some("login"), false);
+    let plan_for = |access: provenant_records::LaneAccess| {
+        use provenant_records::{LaneAccessReceipt, LaneAccessSource};
+        let mut permissions = base.permissions().clone();
+        let mut policy = provenant_confinement::run_config::RunConfig::default().policy_for_launch(
+            &state,
+            provenant_confinement::permissions::MandatoryRoots::new(
+                home,
+                &state,
+                Path::new("/fixture/repo"),
+            )?,
+        );
+        policy.mandatory_mut().set_lane_access(LaneAccessReceipt {
+            access,
+            source: LaneAccessSource::Default,
+            key: "lanes.access".into(),
+            extra: Default::default(),
+        });
+        permissions.policy = Some(policy);
+        provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
+            scope: base.scope(),
+            permissions,
+            codex: provenant_confinement::CodexPolicy::Clean,
+            extensions: provenant_confinement::ExtensionPolicy::Deny,
+            agy_state: None,
+        })
+    };
+    let mut route = route("opencode", "configured/model");
+    route.set_access(provenant_records::LaneAccess::Host);
+    let host_plan = plan_for(provenant_records::LaneAccess::Host)?;
+    let mut input = fixture_input(
+        &route,
+        &host_plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        None,
+    );
+    input.home = home;
+    input.host_var = &lookup;
+    let attached = opencode::OpenCode.prepare(input)?;
+    server.join().expect("health server");
+    for (key, name) in [("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"), ("XDG_STATE_HOME", "state"), ("XDG_CACHE_HOME", "cache")] {
+        assert_eq!(attached.env.iter().find(|(k, _)| k == key).map(|(_, v)| Path::new(v)), Some(home.join(name).as_path()));
+        assert!(attached.profile.spec.state_writes.contains(&crate::launch::subtree(home.join(name).join("opencode"))));
+    }
+    assert!(!attached.argv.iter().any(|arg| arg == "--standalone"));
+    assert!(attached.profile.spec.loopback_server);
+    std::fs::remove_file(state.join("opencode/service.json"))?;
+    let fallback_plan = plan_for(provenant_records::LaneAccess::Host)?;
+    let mut input = fixture_input(
+        &route,
+        &fallback_plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        None,
+    );
+    input.home = home;
+    input.host_var = &lookup;
+    let fallback = opencode::OpenCode.prepare(input)?;
+    assert!(fallback.argv.iter().any(|arg| arg == "--standalone"));
+    assert!(fallback.warnings.iter().any(|warning| warning.contains("host service unavailable")));
+    assert_eq!(fallback.session_state, crate::SessionStateLocation::Native { root: home.join("data/opencode") });
+    route.set_access(provenant_records::LaneAccess::Isolated);
+    let lane_plan = plan_for(provenant_records::LaneAccess::Isolated)?;
+    let mut input = fixture_input(&route, &lane_plan, &prompt, Path::new("/fixture/repo"), None);
+    input.home = home;
+    input.host_var = &lookup;
+    let lane = opencode::OpenCode.prepare(input)?;
+    assert!(lane.argv.iter().any(|arg| arg == "--standalone"));
+    assert_eq!(lane.session_state, crate::SessionStateLocation::AttemptPrivate);
+    let private = &lane_plan.permissions().private_state.as_ref().expect("private state").path;
+    assert_eq!(lane.env.iter().find(|(k, _)| k == "XDG_DATA_HOME").map(|(_, v)| Path::new(v)), Some(private.join("data").as_path()));
+    Ok(())
+}
+
+#[test]
 fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result<(), ProviderError>
 {
     let prompt = Prompt::new("fixture prompt".into());
@@ -937,6 +1104,55 @@ fn cursor_and_claude_keep_sessions_private_with_or_without_skills() -> Result<()
                     );
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn sandboxed_host_access_uses_native_homes_and_authentication() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture".into());
+    for id in ["codex", "cursor", "claude", "agy"] {
+        let mut route = route(id, "fixture-model");
+        route.account_key = None;
+        let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
+        let adapter = REGISTRY.iter().find(|entry| entry.adapter.id() == id).unwrap().adapter;
+        assert!(matches!(adapter.prepare(fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None)), Err(ProviderError::UnsupportedPolicy)));
+        route.set_access(provenant_records::LaneAccess::Host);
+        let spec = adapter.prepare(fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None))?;
+        let expected = match id {
+            "codex" => Path::new("/fixture/home/.codex"),
+            "claude" => Path::new("/fixture/home/.claude"),
+            _ => Path::new("/fixture/home"),
+        };
+        assert_eq!(spec.session_state, crate::SessionStateLocation::Native { root: expected.into() });
+        assert!(spec.user_skills.root.is_none());
+        assert!(spec.secret_input.is_none());
+        assert!(!spec.env.iter().any(|(key, value)| key == "GIT_CONFIG_GLOBAL" && value == "/dev/null"));
+        let state_root = if id == "agy" { Path::new("/fixture/home/.gemini") } else if id == "cursor" { Path::new("/fixture/home/.cursor") } else { expected };
+        assert!(spec.profile.spec.state_writes.iter().any(|grant| grant.path == state_root));
+        // A host lane reads its native provider home, but run-owned setup may
+        // not create or rewrite it: those paths are refused before launch.
+        let native_home = Path::new("/fixture/home");
+        for step in &spec.setup {
+            let path = match step {
+                SetupStep::CreateDir(path)
+                | SetupStep::WriteFile { path, .. }
+                | SetupStep::WriteExecutable { path, .. }
+                | SetupStep::CreateLock(path) => path,
+                SetupStep::Symlink { link, .. } => link,
+            };
+            assert!(
+                !path.starts_with(native_home),
+                "{id}: host setup must not write the native home: {step:?}"
+            );
+        }
+        assert!(!spec.env.iter().any(|(key, value)| (key == "HOME" || key == "CODEX_HOME" || key == "CLAUDE_CONFIG_DIR") && Path::new(value).starts_with("/fixture/state")));
+        if id == "claude" {
+            assert!(!spec.argv.iter().any(|arg| arg == "--strict-mcp-config" || arg == "--setting-sources"));
+        }
+        if id == "codex" {
+            assert!(!spec.argv.iter().any(|arg| arg == "--ignore-user-config"));
         }
     }
     Ok(())
@@ -1328,7 +1544,7 @@ fn codex_configuration_is_a_writer_preference_and_read_only_authority()
                 let launch = codex::Codex.prepare(input)?;
                 assert_eq!(
                     launch.argv.iter().any(|arg| arg == "--ignore-user-config"),
-                    configuration == CodexPolicy::Clean
+                    sandboxed && configuration == CodexPolicy::Clean
                 );
             }
         }
@@ -1416,5 +1632,163 @@ fn sandboxed_private_git_config_includes_host_config() -> Result<(), Box<dyn std
         get("GIT_CONFIG_KEY_1").as_deref(),
         Some("credential.https://github.com.helper")
     );
+    Ok(())
+}
+
+// Spec: docs/specs/run-launch.md#lane-access
+#[test]
+fn ssh_agent_follows_lane_access() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::LaneAccess;
+    let temp = tempfile::tempdir()?;
+    let socket = temp.path().join("agent.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket)?;
+    let canonical = socket.canonicalize()?;
+    let host_var = |name: &str| (name == "SSH_AUTH_SOCK").then(|| socket.clone().into_os_string());
+    let prompt = Prompt::new("fixture".into());
+    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
+    for access in [LaneAccess::Host, LaneAccess::Isolated] {
+        let mut route = route("codex", "fixture-model");
+        route.account_key = None;
+        route.set_access(access);
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.host_var = &host_var;
+        let spec = codex::Codex.prepare(input)?;
+        let agent = spec.env.iter().find(|(key, _)| key == "SSH_AUTH_SOCK");
+        if access == LaneAccess::Host {
+            assert_eq!(agent.map(|(_, value)| value), Some(&socket.clone().into_os_string()));
+            let grant = spec.profile.spec.ssh_agent_socket.as_ref().expect("agent grant");
+            assert_eq!(grant.path, canonical);
+            assert_eq!(grant.scope, provenant_confinement::permissions::PathScope::Exact);
+        } else {
+            assert!(agent.is_none());
+            assert!(spec.profile.spec.ssh_agent_socket.is_none());
+        }
+    }
+    Ok(())
+}
+
+// Spec: docs/specs/run-launch.md#lane-access
+#[test]
+fn unbounded_reader_git_config_follows_lane_access() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::LaneAccess;
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let config = home.join(".gitconfig");
+    std::fs::write(&config, "[alias]\n  fixture = status\n")?;
+    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
+    let prompt = Prompt::new("fixture".into());
+    for access in [LaneAccess::Host, LaneAccess::Isolated] {
+        let mut route = route("codex", "fixture-model");
+        route.account_key = None;
+        route.set_access(access);
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.home = &home;
+        let spec = codex::Codex.prepare(input)?;
+        let global = spec.env.iter().find(|(key, _)| key == "GIT_CONFIG_GLOBAL").map(|(_, value)| value);
+        let includes = spec.setup.iter().any(|step| match step {
+            SetupStep::WriteFile { path, bytes } if path.ends_with("gitconfig") => String::from_utf8_lossy(bytes).contains(config.to_str().unwrap()),
+            _ => false,
+        });
+        if access == LaneAccess::Host {
+            assert!(includes);
+            assert!(global.is_some_and(|value| value != "/dev/null"));
+            assert!(spec.profile.spec.runtime_reads.iter().any(|grant| grant.path == config));
+        } else {
+            assert!(!includes);
+            assert_eq!(global.map(|v| v.as_os_str()), Some(std::ffi::OsStr::new("/dev/null")));
+        }
+    }
+    Ok(())
+}
+
+// Spec: docs/specs/run-launch.md#lane-access
+#[test]
+fn opencode_config_overlapping_a_credential_root_follows_lane_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{CredentialKind, CredentialScope};
+    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource};
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let config = home.join(".config/opencode");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(config.join("opencode.json"), "{\"model\":\"fixture\"}")?;
+    let state = home.join("state");
+    let repo = home.join("repo");
+    let base = read_only_plan(home.to_str().ok_or("home path")?, Some("login"));
+    let mut roots = provenant_core::CredentialRoots::for_home(&home);
+    roots.add(
+        config.clone(),
+        CredentialScope::Subtree,
+        "fixture declared opencode config",
+        CredentialKind::Store,
+    );
+    let mut permissions = base.permissions().clone();
+    permissions.credential_roots = roots.clone();
+    let prompt = Prompt::new("fixture".into());
+    let canonical = config.canonicalize()?;
+    for access in [LaneAccess::Host, LaneAccess::Isolated] {
+        let mut policy = provenant_confinement::run_config::RunConfig::default().policy_for_launch(
+            &state,
+            provenant_confinement::permissions::MandatoryRoots::new(&home, &state, &repo)?,
+        );
+        policy.mandatory_mut().set_lane_access(LaneAccessReceipt {
+            access,
+            source: LaneAccessSource::Default,
+            key: "lanes.access".into(),
+            extra: Default::default(),
+        });
+        permissions.policy = Some(policy);
+        let plan = provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
+            scope: base.scope(),
+            permissions: permissions.clone(),
+            codex: provenant_confinement::CodexPolicy::Clean,
+            extensions: provenant_confinement::ExtensionPolicy::Deny,
+            agy_state: None,
+        })?;
+        let mut route = route("opencode", "fixture-model");
+        route.account_key = None;
+        route.set_access(access);
+        let mut input = fixture_input(&route, &plan, &prompt, &repo, None);
+        input.home = &home;
+        input.credential_roots = roots.clone();
+        let launch = opencode::OpenCode.prepare(input)?;
+        let discovered = launch
+            .profile
+            .spec
+            .runtime_reads
+            .iter()
+            .any(|grant| grant.path == canonical);
+        let mirrored = launch.setup.iter().any(|step| {
+            matches!(step, SetupStep::Symlink { link, target }
+                if link.file_name() == Some(std::ffi::OsStr::new("opencode.json"))
+                    && target == &config.join("opencode.json"))
+        });
+        let omitted = launch.omitted_discovery.iter().any(|entry| {
+            entry.path == canonical && entry.source == crate::launch::OmissionSource::ProviderConfig
+        });
+        if access == LaneAccess::Host {
+            let config_home = launch
+                .env
+                .iter()
+                .find(|(key, _)| key == "XDG_CONFIG_HOME")
+                .map(|(_, value)| std::path::PathBuf::from(value))
+                .ok_or("host launch has no XDG_CONFIG_HOME")?;
+            assert_eq!(
+                config_home,
+                home.join(".config"),
+                "host lanes use the native XDG config home"
+            );
+            assert!(discovered, "host lanes read the overlapping config directory");
+            assert!(
+                !mirrored,
+                "host lanes read the native config home instead of mirroring it into private state"
+            );
+            assert!(!omitted, "host lanes do not omit the overlapping config");
+        } else {
+            assert!(!discovered, "isolated lanes keep the credential refusal");
+            assert!(!mirrored, "isolated lanes do not mirror credential material");
+            assert!(omitted, "isolated lanes record the omitted config directory");
+        }
+    }
     Ok(())
 }

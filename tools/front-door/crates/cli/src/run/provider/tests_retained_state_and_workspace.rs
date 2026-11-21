@@ -79,11 +79,13 @@ fn retained_state_copy_refuses_a_filesystem_boundary() -> Result<(), Box<dyn std
         entries: RETAINED_STATE.entries,
         bytes: RETAINED_STATE.bytes,
         device: from.metadata()?.device ^ 1,
+        lane_access: None,
+        enforcement: &Default::default(),
     };
     let opened = std::rc::Rc::new(std::cell::Cell::new(false));
     let seen = std::rc::Rc::clone(&opened);
     BEFORE_OPEN.set(Some(Box::new(move |_| seen.set(true))));
-    let result = copy_tree(&from, &to, RETAINED_STATE.depth, &mut budget, true);
+    let result = copy_tree(&from, &to, RETAINED_STATE.depth, &mut budget, true, false);
     BEFORE_OPEN.set(None);
     assert!(matches!(result, Err(CopyRefusal::CrossDevice)));
     assert!(!opened.get(), "a mount point is refused before its open");
@@ -204,6 +206,7 @@ fn codex_resolved_route(
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: Default::default(),
         extra: Default::default(),
         adapter: "codex".into(),
         model: model.into(),
@@ -465,8 +468,10 @@ fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
             state_root: &state,
             config_root: &state,
             private_state: &child_state,
+            lane_access: None,
         },
         &provenant_records::policy::Policy::default(),
+        None,
     )?;
     assert_eq!(continuation.session(), session);
     verify_native_continuation(&prior, &route, &native_home, &state)?;
@@ -563,8 +568,10 @@ fn native_codex_continuation_uses_the_bound_account_home_without_copying_it()
                 state_root: &state,
                 config_root: &state,
                 private_state: &child_state,
+            lane_access: None,
             },
             &Default::default(),
+            None,
         )
         .unwrap_err();
         let guard = error.guard().ok_or("typed route refusal")?;
@@ -589,7 +596,7 @@ fn explicit_write_root_keeps_read_only_git_authority() -> Result<(), Box<dyn std
     std::fs::create_dir(&source)?;
     let write = root.join("write");
     std::fs::create_dir(&write)?;
-    let access = run::LaneAccess {
+    let access = run::LaneAccessRequest {
         write_roots: vec![write.clone()],
         ..Default::default()
     };
@@ -663,7 +670,7 @@ fn launch_policy_binds_mandatory_aliases_and_all_network_ceilings()
             NetworkAccess::Local,
             NetworkAccess::Open,
         ] {
-            let access = run::LaneAccess {
+            let access = run::LaneAccessRequest {
                 network: Some(requested),
                 ..Default::default()
             };
@@ -790,10 +797,10 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
             (name == "CLAUDE_CONFIG_DIR").then(|| skills.join("default-claude").into_os_string())
         }),
     );
-    host.provider_path_environment = [(
-        "XDG_DATA_HOME".into(),
-        root.join("relocated-xdg").into_os_string(),
-    )]
+    host.provider_path_environment = [
+        ("XDG_DATA_HOME".into(), root.join("relocated-xdg").into_os_string()),
+        ("SSH_AUTH_SOCK".into(), root.join("agent/socket").into_os_string()),
+    ]
     .into();
     // Custody encoding retains these host inputs across a cleared guardian
     // environment and through another generation of child launches.
@@ -802,7 +809,7 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         host: Some(&host),
         ..Default::default()
     };
-    let inventory = credential_roots(&registry, &home, &settings, &[])?;
+    let inventory = credential_roots(&registry, &home, &settings, &[], None, &provenant_records::policy::Policy::default())?;
     assert!(
         inventory
             .skill_entry_refusal(&skills.join("SKILL.md"), &skills)
@@ -852,7 +859,14 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
         Some(root.join("relocated-xdg").into_os_string())
     );
     assert_eq!(host_provider_var(&registry, "GH_CONFIG_DIR"), None);
-    assert_eq!(host_provider_var(&registry, "SSH_AUTH_SOCK"), None);
+    assert_eq!(
+        lane_provider_var(&registry, "SSH_AUTH_SOCK", provenant_records::LaneAccess::Host),
+        Some(root.join("agent/socket").into_os_string())
+    );
+    assert_eq!(
+        lane_provider_var(&registry, "SSH_AUTH_SOCK", provenant_records::LaneAccess::Isolated),
+        None
+    );
     let mut inputs = provenant_core::RootInputs::new(home.clone(), root.join("source"));
     inputs.state_dir = Some(root.join("state"));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
@@ -1134,7 +1148,7 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
             prompt_file: None,
         },
         None,
-        &run::LaneAccess::default(),
+        &run::LaneAccessRequest::default(),
         &Default::default(),
         "command",
         false,
@@ -1293,7 +1307,7 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
     inputs.state_dir = Some(state.clone());
     let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     let image = root.join("outside/shot.png");
-    let access = run::LaneAccess {
+    let access = run::LaneAccessRequest {
         attachments: vec![image.clone()],
         ..Default::default()
     };
@@ -1323,6 +1337,7 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: Default::default(),
         extra: Default::default(),
         adapter: "codex".into(),
         model: "fixture".into(),
@@ -1407,7 +1422,7 @@ fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
     inputs.state_dir = Some(state.clone());
     let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
     let image = root.join("outside/image.png");
-    let access = run::LaneAccess {
+    let access = run::LaneAccessRequest {
         attachments: vec![image.clone()],
         ..Default::default()
     };
@@ -1483,7 +1498,7 @@ fn lane_plan_reads_the_active_release_root() -> Result<(), Box<dyn std::error::E
                 prompt_file: Some(&prompt),
             },
             None,
-            &run::LaneAccess::default(),
+            &run::LaneAccessRequest::default(),
             &Default::default(),
             entry.adapter.id(),
             true,
@@ -1566,7 +1581,7 @@ fn host_write_paths_reach_writers_only() {
         writer_writes: vec!["/p/.agent-run/locks".into()],
         ..Default::default()
     };
-    let access = run::LaneAccess {
+    let access = run::LaneAccessRequest {
         write_roots: vec!["/p/extra".into()],
         ..Default::default()
     };
@@ -1607,7 +1622,7 @@ fn writer_plan_roots_are_resolved_for_the_selected_project() {
         .into(),
         ..Default::default()
     };
-    let roots = write_roots(&run::LaneAccess::default(), &config, true, "a");
+    let roots = write_roots(&run::LaneAccessRequest::default(), &config, true, "a");
     assert_eq!(
         roots,
         vec![PathGrant {
@@ -1999,7 +2014,14 @@ fn live_child_source_uses_its_selected_directory_and_rechecks_authority()
         let mut denied = task.clone();
         denied.access.source_root = Some(root.clone());
         denied.access.source_identity = Some(source_identity(root)?);
-        assert!(source_cwd(&registry, &denied).is_err());
+        // A state root is still refused at the source boundary. A credential
+        // root is now an access-aware preparation warning under host access,
+        // not a pre-route source_cwd refusal.
+        if root == &state {
+            assert!(source_cwd(&registry, &denied).is_err());
+        } else {
+            assert_eq!(source_cwd(&registry, &denied)?, *root);
+        }
     }
     Ok(())
 }
@@ -2044,7 +2066,6 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
         state_root: Some(&state),
         ..Default::default()
     };
-    let credentials = crate::run::declared_credentials(&registry)?;
     let mut task = super::super::tests::trace_run(
         50,
         AttemptId::from_bytes([81; 16]),
@@ -2084,7 +2105,6 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
             &project,
             &state,
             &source,
-            &credentials,
             crate::run::SourceAdmissionMode::Registered,
         )?;
         assert_eq!(admission.path, source);
@@ -2127,14 +2147,10 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
         &project,
         &state,
         &protected,
-        &credentials,
         crate::run::SourceAdmissionMode::Registered,
-    )
-    .unwrap_err();
-    let prepared = source_cwd(&registry, &task).unwrap_err();
-    assert_eq!(admission.code, "CONFINEMENT_SOURCE_CWD_AUTHORITY");
-    assert_eq!(admission.reason, prepared.to_string());
-    assert!(admission.reason.contains("built-in secret store"));
+    )?;
+    assert_eq!(admission.path, protected);
+    assert!(source_cwd(&registry, &task).is_ok());
     Ok(())
 }
 
@@ -2621,5 +2637,91 @@ fn write_grant_limit_reports_configured_value_and_origin() -> Result<(), Box<dyn
         configured.origin,
         provenant_records::diagnostic::SettingSource::Configuration
     );
+    Ok(())
+}
+
+#[test]
+fn opencode_continuation_copies_a_linked_host_config_directory()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, Digest};
+    let temp = tempfile::tempdir()?;
+    let base = std::fs::canonicalize(temp.path())?;
+    let state_root = base.join("state");
+    let attempt_id = AttemptId::from_bytes([11; 16]);
+    let candidate = state_root
+        .join("attempts")
+        .join(attempt_id.to_string())
+        .join("provider-state")
+        .join("candidate-0");
+    std::fs::create_dir_all(candidate.join("data/opencode"))?;
+    let session = "fixture-session";
+    let db = rusqlite::Connection::open(candidate.join("data/opencode/opencode.db"))?;
+    db.execute("CREATE TABLE session_v2 (id TEXT PRIMARY KEY)", [])?;
+    db.execute("INSERT INTO session_v2 (id) VALUES (?1)", [session])?;
+    drop(db);
+    // An ordinary host config directory mirrored into the private config as a
+    // link, carrying a regular setting and a nested link of its own.
+    let host_config = base.join("host-config/theme");
+    std::fs::create_dir_all(&host_config)?;
+    std::fs::write(host_config.join("config.json"), "{\"theme\":\"fixture\"}")?;
+    let shared = base.join("host-config/shared.json");
+    std::fs::write(&shared, "shared")?;
+    std::os::unix::fs::symlink(&shared, host_config.join("shared.json"))?;
+    let private_config = candidate.join("config/opencode");
+    std::fs::create_dir_all(&private_config)?;
+    std::os::unix::fs::symlink(&host_config, private_config.join("theme"))?;
+
+    let prior: run::AttemptRecord = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "attempt_id": attempt_id,
+        "key": {"project": "0123456789abcdef0123456789abcdef", "graph": "fixture", "node": "node", "attempt": 1},
+        "project_id": "0123456789abcdef0123456789abcdef",
+        "attempt_number": 1, "revision": 1, "generation": 0,
+        "requested_route": {"kind": "model", "provider": "opencode", "model": "fixture-model"},
+        "applied_route": {"provider": "opencode", "model": "opencode/fixture-model", "account_key": "fixture-account", "sandbox": {"effective": false}},
+        "authority_digest": Digest::from_bytes([0; 32]), "read_only_writable": [], "protected_paths": [], "trace": {},
+        "session": session, "queued_at": "2026-10-25T00:00:00.000000Z",
+        "state": {"state": "queued"}, "usage": {},
+        "prompt": {"path": {"encoding": "utf8", "path": "prompt.txt"}, "digest": provenant_records::FileDigest::from_bytes([0; 32]), "bytes": 0, "complete": true, "redacted": false}
+    }))?;
+    let mut route = codex_resolved_route("fixture-model", Some("fixture-account"));
+    route.adapter = "opencode".into();
+    let child_state = base.join("child/provider-state/candidate-0");
+    std::fs::create_dir_all(&child_state)?;
+    let access = provenant_records::LaneAccessReceipt {
+        access: provenant_records::LaneAccess::Host,
+        source: provenant_records::LaneAccessSource::Default,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    };
+    let continuation = continuation_for_policy(
+        &prior,
+        &route,
+        "fixture",
+        ContinuationState {
+            state_root: &state_root,
+            config_root: &state_root,
+            private_state: &child_state,
+            lane_access: Some(&access),
+        },
+        &Default::default(),
+        None,
+    )?;
+    assert_eq!(continuation.session(), session);
+    let copied = child_state.join("config/opencode/theme");
+    assert!(
+        copied.is_dir(),
+        "the linked config directory is copied as a directory"
+    );
+    assert_eq!(
+        std::fs::read_to_string(copied.join("config.json"))?,
+        "{\"theme\":\"fixture\"}"
+    );
+    let nested = std::fs::symlink_metadata(copied.join("shared.json"))?;
+    assert!(
+        nested.file_type().is_symlink(),
+        "links inside the copied directory are kept as links"
+    );
+    assert_eq!(std::fs::read_to_string(copied.join("shared.json"))?, "shared");
     Ok(())
 }

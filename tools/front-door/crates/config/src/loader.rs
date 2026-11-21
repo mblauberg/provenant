@@ -759,6 +759,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
             "runtime_deadline_seconds",
             "models",
             "clean_config",
+            "profile",
             "out_of_scope_pin",
         ] {
             origins.insert(format!("providers.{provider}.{field}"), compiled.clone());
@@ -1480,6 +1481,16 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
             line: issue.location.line,
             message: format!(
                 "{key}: removed configuration key; use lanes.cargo_cache_max under [knobs] instead"
+            ),
+        });
+    }
+    if key == "providers.opencode.profile" {
+        return Ok(Finding {
+            rule: issue.rule.into(),
+            path: user_path()?,
+            line: issue.location.line,
+            message: format!(
+                "{key}: ignored; OpenCode profile follows lanes.access (host or isolated)"
             ),
         });
     }

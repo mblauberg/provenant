@@ -1,0 +1,15 @@
+Nextest run ID 9c15fbe8-1f14-4a37-9f0f-2f9c2ef39d01
+Start: 2026-11-20T09:14:02.1182340Z
+FAIL [   6.475s] ( 103/1208) provenant-confinement permissions::tests::host_boundaries::native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults
+
+  stdout ───
+
+    running 1 test
+
+   stderr ───
+
+    thread 'permissions::tests::host_boundaries::native_shared_stores_keep_state_and_unlisted_files_denied_under_both_defaults' (10210) panicked at crates/confinement/src/permissions/tests/host_boundaries.rs:399:17:
+    default=allow, store="/Users/runner/work/_temp/.tmpd563f1/home": ExecOutcome { termination: Signal(9) }
+
+Summary [  14.383s] 12/300 tests run: 1 failed, 9 passed
+error: test run failed

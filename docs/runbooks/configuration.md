@@ -22,10 +22,12 @@ behaviour and [GC](gc.md) for retention configuration.
 The port table applies layers in precedence order, lowest to highest:
 `builtin` < `detected` < `host` < `host-project` < `project`. Compiled builtins
 come first, then auto-detected defaults, then host `state/ports.json`, then
-`state/projects/<project_key>/ports.json`, and finally project
-`.provenant/ports.json`. The keyed host-project layer lets a consumer repository
+`state/projects/<project_id>/ports.json`, and finally project
+`.provenant/ports.json`. The host-project directory is the ProjectId binding
+directory, the same path `provenant config path` reports; the 64-hex target-seed
+key is never used for it. The keyed host-project layer lets a consumer repository
 be configured entirely from host state with no files in its tree; a missing
-project key or keyed layer is skipped silently. A layer only needs the fields it
+binding or layer is skipped silently. A layer only needs the fields it
 changes: object fields deep-merge over the lower layer, so
 `{"verify": {"base": "origin/master"}}` keeps the other verify fields from the
 layers below it. `schema_version` is optional in a layer; it defaults to the
@@ -56,18 +58,52 @@ array. The whole elements `{packages}`, `{integration_args}` and
 `{quarantine_args}` expand to zero or more arguments; other elements are
 literal and are never shell split. Arrays replace across layers. Detected Rust tiers 0 and 1 select packages and tier 2 selects all; tiers containing non-Rust commands select all and expand selection placeholders to nothing. An invalid tier command warns with its layer and tier, and that tier falls back to the next lower layer.
 
-The `build` port carries the shared seed-build interface. Its compiled defaults
-are `strategy = "lane_seed"`, `prepare = []`, `seed.stale_after = "24h"`,
-`wrapper.argv = []`, `command.argv = []`, `offload = "auto"`,
-`overflow = "local"`, `clean = "none"`, `stacks = []` and
-`snapshot_retention = "7d"`. `strategy` documents `slots`, `lane_seed`, `lane`,
-`wrapper` and `command`; only `lane_seed` is consumed today. The strategy,
-wrapper, command, offload, overflow, clean, stacks and retention keys only
-declare their shape here; later slices consume them. `build.prepare` is an
-ordered list of argv arrays: each command runs in order with the checkout root
-as its working directory before every seed generation build (and, later, slot
-builds), in the same sanitised child environment as the Cargo steps. A failing
-command fails that build with a `prepare_failed` outcome that records the
+The `build` port selects how intercepted compiler jobs and whole verify or gate
+jobs run. Its leaves, compiled defaults and effects are:
+
+| Leaf | Default | Effect |
+| --- | --- | --- |
+| `strategy` | `lane_seed` | `slots` runs jobs in a warm slot; `lane_seed` and `lane` run locally, `lane_seed` requesting target seeding at launch; `command` runs `command.argv`; `wrapper` warns and falls back to `lane_seed`. |
+| `prepare` | `[]` | Ordered argv arrays run from the checkout root before a seed build and before each slot job's first step; a failing command fails that build. |
+| `seed.stale_after` | `24h` | Age after which a seed generation is stale; an invalid value warns and falls back with source `default`. |
+| `wrapper.argv` | `[]` | Declared argv for the unavailable wrapper strategy; selecting `wrapper` warns and uses `lane_seed`. |
+| `command.argv` | `[]` | Program and argv run by the command strategy before the intercepted build argv; not shell split. |
+| `command.exit_codes.success` | `[0]` | Exit codes treated as success. |
+| `command.exit_codes.unknown` | `[]` | Exit codes treated as unknown. |
+| `command.exit_codes.other` | `refused` | Disposition for other exits: `refused` or `unknown`. |
+| `offload` | `auto` | `auto` allows supported Rust jobs to use slots; `off` runs every build locally with exception `offload_off`. |
+| `overflow` | `auto` | `auto` queues under slots and uses a bounded local wait otherwise; `queue` always waits; `local` runs locally after the admission wait. |
+| `clean` | `untracked` | Slot cleanup before a job: `none` keeps files, `untracked` runs `git clean -ffd`, `ignored` runs `git clean -ffdx`. |
+| `stacks` | `[]` | Overrides the detected adapter set; empty uses detection, and `rust` is the only supported stack. |
+| `snapshot_retention` | `7d` | Age after which snapshot and base pins in the store can expire. |
+| `priority` | builtin mapping | Queue level by class: `check`, `clippy`, `other` = `interactive`; `test`, `nextest`, `tier` = `test`; `gate` = `train`; `maintenance` = `prewarm`. Priority orders waiters and never preempts a running job. |
+| `queue_aging` | `120s` | Wait per priority aging step; raises a waiter's effective level to bound lower-priority waits. |
+| `prewarm_budget` | `1` | Maximum maintenance prewarm jobs per hour; zero disables prewarming. |
+| `canary_every` | `24h` | Maximum age of a slot's last canary before maintenance schedules another. |
+| `slot_idle` | `7d` | Idle age after which unlocked slots are collected. |
+| `soak.min_runs` | `50` | Minimum lane rows before the report can pass. |
+| `soak.min_days` | `7` | Minimum observation span before the report can pass. |
+| `soak.interactive_wait_p95` | `60s` | Passing p95 queue wait for interactive jobs. |
+| `soak.test_wait_p95` | `300s` | Passing p95 queue wait for test jobs. |
+| `soak.rss_fraction` | `0.75` | Passing peak job RSS as a fraction of physical memory. |
+| `soak.local_exception_fraction` | `0.05` | Passing fraction of jobs that fell back locally. |
+| `soak.churn_clean_fraction` | `0.99` | Passing fraction of rebuilt packages explained by changed packages and their dependents. |
+
+The `verify.affected` port controls affected-package selection for verify tiers:
+
+| Leaf | Default | Effect |
+| --- | --- | --- |
+| `enabled` | `false` | Apply the selection policy to verify tiers without `--affected`. |
+| `global_paths` | `[]` | Repository-relative globs that force a full workspace selection. |
+| `full_every` | `10` | Force a full selection after this many affected selections. |
+| `full_after` | `24h` | Force a full selection after this long since the last full one. |
+
+`build.prepare` is
+an ordered list of argv arrays: each command runs in order with the checkout
+root as its working directory before every seed generation build and after a
+slot's snapshot is checked out, before its first step, in the same sanitised
+child environment as the Cargo steps. A failing command fails that build with
+a `prepare_failed` outcome that records the
 command and the last 2 KiB of the combined output; an unreadable or invalid
 table warns and runs no prepare command. Arrays replace rather than concatenate
 across layers. `build.seed.stale_after` is the age after which a seed is
@@ -98,10 +134,30 @@ seeding:
 }
 ```
 
-A later slice removes the `build_admission` command key as a breaking
-configuration change; the key remains declared here for now. Build admission is
-chosen through `build.strategy` and its named `[admission.<class>]` limits, and
-this slice does not remove or reinterpret the old key.
+To enable slots for one repository, add the strategy to its
+`.provenant/ports.json`:
+
+```json
+{
+  "build": {
+    "strategy": "slots"
+  }
+}
+```
+
+The other `build.*` leaves keep their layered values, and
+`[admission.build].slots` remains the one concurrency cap. A repository wrapper
+instead sets `build.strategy = "command"` and configures `build.command` with
+its argv and exit-code dispositions. The removed `build_admission` key is
+treated as an unknown port and produces the normal unknown-key warning.
+
+`provenant config show --full` reports each effective `build.*` leaf and the
+layer that set it, including `project` for a strategy declared in the
+repository; `provenant config show --json` returns the same data as JSON.
+Layer order is `builtin` < `detected` < `host` < `host-project` < `project`, and
+an unknown value warns with the leaf and its source and falls back to the
+builtin value. `verify.affected.*` provenance is resolved in code but is not yet
+listed by `config show --full`.
 
 ## Provider model scope
 
@@ -287,8 +343,11 @@ wait_seconds = 30
 - `disk_floor`: Optional minimum free disk floor required before running.
 - `trim_action`: Optional shell command executed to free resources if limits are
   exceeded before re-sampling.
-- `wait_seconds`: Maximum wait time before emitting a warning and proceeding
-  (default 15 seconds). A saturated class never deadlocks or refuses commands.
+- `wait_seconds`: Bounded local wait for the lane strategies; when it expires
+  the command runs without a slot with a recorded `overflow` exception (default
+  15 seconds). Under `build.strategy = "slots"` with `build.overflow = auto`,
+  waiters queue until a slot is free or the job is cancelled, ordered by
+  priority with aging. No saturated class refuses a command.
 
 Settings layer with provenance: Host `<state>/config.toml`, then project
 `.provenant/config.toml`, falling back to compiled defaults.

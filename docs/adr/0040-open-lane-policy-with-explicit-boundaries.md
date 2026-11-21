@@ -16,11 +16,13 @@ The host may select sandboxed or trusted unsandboxed routes. Unsandboxed routes 
 
 ## Permitted exceptions
 
-A single resolved provider policy owns optional restrictions and mandatory
-credential protection. Credential exceptions are selected by the host, scoped
-to the provider and bounded; task input cannot grant them. Enclosing runtime or
-skill grants do not exempt nested credential declarations. Exceptions grant only
-their declared access and do not transfer credentials between hosts.
+A single resolved provider policy owns optional restrictions and local
+credential access. Host access inherits same-host credential, keychain and
+process access; isolated access applies the local credential denials and its
+bounded selected-authentication exceptions. Task input cannot grant those
+exceptions. Enclosing runtime or skill grants do not exempt nested credential
+declarations under isolated access. Destination credential grants remain
+separate and do not transfer credentials between hosts without authorisation.
 
 Unavailable enforcement is an honest capability failure. Fallback requires
 equivalent inherited protection or an already authorised trusted route and must

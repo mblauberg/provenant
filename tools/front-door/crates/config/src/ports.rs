@@ -282,6 +282,40 @@ pub struct VerifyPort {
     pub default_tier: String,
     pub integrations: Vec<Integration>,
     pub runners: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub affected: VerifyAffectedPort,
+}
+
+/// Configuration for skipping verification tiers whose inputs are unaffected.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyAffectedPort {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub global_paths: Vec<String>,
+    #[serde(default = "default_verify_affected_full_every")]
+    pub full_every: u64,
+    #[serde(default = "default_verify_affected_full_after")]
+    pub full_after: String,
+}
+
+fn default_verify_affected_full_every() -> u64 {
+    10
+}
+
+fn default_verify_affected_full_after() -> String {
+    "24h".to_owned()
+}
+
+impl Default for VerifyAffectedPort {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            global_paths: Vec::new(),
+            full_every: default_verify_affected_full_every(),
+            full_after: default_verify_affected_full_after(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,13 +503,77 @@ fn default_build_offload() -> String {
     "auto".to_owned()
 }
 fn default_build_overflow() -> String {
-    "local".to_owned()
+    "auto".to_owned()
 }
 fn default_build_clean() -> String {
-    "none".to_owned()
+    "untracked".to_owned()
 }
 fn default_build_snapshot_retention() -> String {
     "7d".to_owned()
+}
+
+fn default_build_queue_aging() -> String {
+    "120s".to_owned()
+}
+
+fn default_build_canary_every() -> String {
+    "24h".to_owned()
+}
+
+fn default_build_slot_idle() -> String {
+    "7d".to_owned()
+}
+
+fn default_build_pre_warm_budget() -> u64 {
+    1
+}
+
+fn default_build_command() -> PortCommand {
+    PortCommand {
+        argv: Vec::new(),
+        exit_codes: CommandExitCodes {
+            success: vec![0],
+            unknown: Vec::new(),
+            other: ExitDisposition::Refused,
+        },
+    }
+}
+
+fn deserialize_build_command<'de, D>(deserializer: D) -> Result<PortCommand, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct CommandDeclaration {
+        #[serde(default)]
+        argv: Vec<String>,
+        #[serde(default)]
+        exit_codes: Option<CommandExitCodes>,
+    }
+
+    let declaration = CommandDeclaration::deserialize(deserializer)?;
+    let default = default_build_command();
+    Ok(PortCommand {
+        argv: declaration.argv,
+        exit_codes: declaration.exit_codes.unwrap_or(default.exit_codes),
+    })
+}
+
+fn default_build_priority() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("check".to_owned(), "interactive".to_owned()),
+        ("clippy".to_owned(), "interactive".to_owned()),
+        ("test".to_owned(), "test".to_owned()),
+        ("nextest".to_owned(), "test".to_owned()),
+        ("tier".to_owned(), "test".to_owned()),
+        ("gate".to_owned(), "train".to_owned()),
+        ("maintenance".to_owned(), "prewarm".to_owned()),
+        ("other".to_owned(), "interactive".to_owned()),
+    ])
+}
+
+fn default_build_soak() -> BuildSoakPort {
+    BuildSoakPort::default()
 }
 
 /// The build port declares the seed-build interface. Only the shape is
@@ -483,7 +581,7 @@ fn default_build_snapshot_retention() -> String {
 /// and higher layers override them independently. A later slice consumes the
 /// strategy, wrapper, command, offload, overflow, clean, stack and retention
 /// fields; `build.prepare` and `build.seed.stale_after` are already in use.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BuildPort {
     pub source: PortSource,
     #[serde(default)]
@@ -494,8 +592,11 @@ pub struct BuildPort {
     pub strategy: String,
     #[serde(default)]
     pub wrapper: BuildArgv,
-    #[serde(default)]
-    pub command: BuildArgv,
+    #[serde(
+        default = "default_build_command",
+        deserialize_with = "deserialize_build_command"
+    )]
+    pub command: PortCommand,
     #[serde(default = "default_build_offload")]
     pub offload: String,
     #[serde(default = "default_build_overflow")]
@@ -506,6 +607,349 @@ pub struct BuildPort {
     pub stacks: Vec<String>,
     #[serde(default = "default_build_snapshot_retention")]
     pub snapshot_retention: String,
+    #[serde(default = "default_build_priority")]
+    pub priority: BTreeMap<String, String>,
+    #[serde(default = "default_build_queue_aging")]
+    pub queue_aging: String,
+    #[serde(default = "default_build_pre_warm_budget")]
+    pub prewarm_budget: u64,
+    #[serde(default = "default_build_canary_every")]
+    pub canary_every: String,
+    #[serde(default = "default_build_slot_idle")]
+    pub slot_idle: String,
+    #[serde(default = "default_build_soak")]
+    pub soak: BuildSoakPort,
+    /// Computed per-leaf source labels, populated from the port layer walk.
+    /// This is frozen into lane build contexts and is overwritten when a
+    /// configuration layer is loaded, so declarations cannot claim a source.
+    #[serde(default)]
+    pub leaf_sources: BTreeMap<String, PortSource>,
+}
+
+/// Soak thresholds used by the build report.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BuildSoakPort {
+    #[serde(default = "default_soak_min_runs")]
+    pub min_runs: u64,
+    #[serde(default = "default_soak_min_days")]
+    pub min_days: u64,
+    #[serde(default = "default_soak_interactive_wait_p95")]
+    pub interactive_wait_p95: String,
+    #[serde(default = "default_soak_test_wait_p95")]
+    pub test_wait_p95: String,
+    #[serde(default = "default_soak_rss_fraction")]
+    pub rss_fraction: f64,
+    #[serde(default = "default_soak_local_exception_fraction")]
+    pub local_exception_fraction: f64,
+    #[serde(default = "default_soak_churn_clean_fraction")]
+    pub churn_clean_fraction: f64,
+}
+
+fn default_soak_min_runs() -> u64 {
+    50
+}
+fn default_soak_min_days() -> u64 {
+    7
+}
+fn default_soak_interactive_wait_p95() -> String {
+    "60s".to_owned()
+}
+fn default_soak_test_wait_p95() -> String {
+    "300s".to_owned()
+}
+fn default_soak_rss_fraction() -> f64 {
+    0.75
+}
+fn default_soak_local_exception_fraction() -> f64 {
+    0.05
+}
+fn default_soak_churn_clean_fraction() -> f64 {
+    0.99
+}
+
+impl Default for BuildSoakPort {
+    fn default() -> Self {
+        Self {
+            min_runs: default_soak_min_runs(),
+            min_days: default_soak_min_days(),
+            interactive_wait_p95: default_soak_interactive_wait_p95(),
+            test_wait_p95: default_soak_test_wait_p95(),
+            rss_fraction: default_soak_rss_fraction(),
+            local_exception_fraction: default_soak_local_exception_fraction(),
+            churn_clean_fraction: default_soak_churn_clean_fraction(),
+        }
+    }
+}
+
+/// A typed value resolved from a build leaf. Invalid values fall back to the
+/// builtin value, with a warning that names both the leaf and its source.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedBuildValue<T> {
+    pub value: T,
+    pub source: PortSource,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildStrategyName {
+    Slots,
+    LaneSeed,
+    Lane,
+    Command,
+    Wrapper,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildOverflow {
+    Auto,
+    Queue,
+    Local,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildClean {
+    None,
+    Untracked,
+    Ignored,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildOffload {
+    Auto,
+    Off,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BuildPriority {
+    Interactive,
+    Test,
+    Train,
+    Prewarm,
+}
+
+impl BuildPort {
+    /// Return the exact source for a dotted build leaf. The field-level source
+    /// remains useful for callers that have only an older bare BuildPort.
+    pub fn source_for_leaf(&self, leaf: &str) -> PortSource {
+        let full_path = if leaf.starts_with("build.") {
+            leaf.to_owned()
+        } else {
+            format!("build.{leaf}")
+        };
+        self.leaf_sources
+            .get(&full_path)
+            .copied()
+            .unwrap_or(self.source)
+    }
+
+    fn invalid<T>(&self, leaf: &str, raw: &str, default: T, reason: &str) -> ResolvedBuildValue<T> {
+        let configured_source = self.source_for_leaf(leaf);
+        ResolvedBuildValue {
+            value: default,
+            source: PortSource::Builtin,
+            warnings: vec![format!(
+                "invalid build.{leaf} value {raw:?} from {}; using builtin value (default): {reason}",
+                port_source_layer(configured_source)
+            )],
+        }
+    }
+
+    fn string_value<T: Copy>(
+        &self,
+        leaf: &str,
+        raw: &str,
+        default: T,
+        parse: impl FnOnce(&str) -> Option<T>,
+    ) -> ResolvedBuildValue<T> {
+        match parse(raw) {
+            Some(value) => ResolvedBuildValue {
+                value,
+                source: self.source_for_leaf(leaf),
+                warnings: Vec::new(),
+            },
+            None => self.invalid(leaf, raw, default, "unknown value"),
+        }
+    }
+
+    /// Resolve `build.strategy`, warning and falling back to `lane_seed` for
+    /// unknown names.
+    pub fn strategy_name(&self) -> ResolvedBuildValue<BuildStrategyName> {
+        self.string_value(
+            "strategy",
+            &self.strategy,
+            BuildStrategyName::LaneSeed,
+            |value| match value {
+                "slots" => Some(BuildStrategyName::Slots),
+                "lane_seed" => Some(BuildStrategyName::LaneSeed),
+                "lane" => Some(BuildStrategyName::Lane),
+                "command" => Some(BuildStrategyName::Command),
+                "wrapper" => Some(BuildStrategyName::Wrapper),
+                _ => None,
+            },
+        )
+    }
+
+    /// Resolve `build.overflow`, warning and falling back to `auto`.
+    pub fn overflow_policy(&self) -> ResolvedBuildValue<BuildOverflow> {
+        self.string_value(
+            "overflow",
+            &self.overflow,
+            BuildOverflow::Auto,
+            |value| match value {
+                "auto" => Some(BuildOverflow::Auto),
+                "queue" => Some(BuildOverflow::Queue),
+                "local" => Some(BuildOverflow::Local),
+                _ => None,
+            },
+        )
+    }
+
+    /// Resolve `build.clean`, warning and falling back to `untracked`.
+    pub fn clean_policy(&self) -> ResolvedBuildValue<BuildClean> {
+        self.string_value(
+            "clean",
+            &self.clean,
+            BuildClean::Untracked,
+            |value| match value {
+                "none" => Some(BuildClean::None),
+                "untracked" => Some(BuildClean::Untracked),
+                "ignored" => Some(BuildClean::Ignored),
+                _ => None,
+            },
+        )
+    }
+
+    /// Resolve `build.offload`, warning and falling back to `auto`.
+    pub fn offload_policy(&self) -> ResolvedBuildValue<BuildOffload> {
+        self.string_value(
+            "offload",
+            &self.offload,
+            BuildOffload::Auto,
+            |value| match value {
+                "auto" => Some(BuildOffload::Auto),
+                "off" => Some(BuildOffload::Off),
+                _ => None,
+            },
+        )
+    }
+
+    /// Resolve the configured queue priority for a class. Missing classes use
+    /// their builtin level; malformed levels warn and use that builtin.
+    pub fn priority_for(&self, class: &str) -> ResolvedBuildValue<BuildPriority> {
+        let default = match class {
+            "test" | "nextest" | "tier" => BuildPriority::Test,
+            "gate" => BuildPriority::Train,
+            "maintenance" => BuildPriority::Prewarm,
+            _ => BuildPriority::Interactive,
+        };
+        let Some(raw) = self.priority.get(class) else {
+            return ResolvedBuildValue {
+                value: default,
+                source: PortSource::Builtin,
+                warnings: Vec::new(),
+            };
+        };
+        self.string_value(
+            &format!("priority.{class}"),
+            raw,
+            default,
+            |value| match value {
+                "interactive" => Some(BuildPriority::Interactive),
+                "test" => Some(BuildPriority::Test),
+                "train" => Some(BuildPriority::Train),
+                "prewarm" => Some(BuildPriority::Prewarm),
+                _ => None,
+            },
+        )
+    }
+
+    fn duration(&self, leaf: &str, raw: &str, default: &str) -> ResolvedBuildValue<Duration> {
+        match crate::gc::parse_gc_idle_duration(raw) {
+            Ok(seconds) => ResolvedBuildValue {
+                value: Duration::from_secs(seconds),
+                source: self.source_for_leaf(leaf),
+                warnings: Vec::new(),
+            },
+            Err(reason) => {
+                let fallback = crate::gc::parse_gc_idle_duration(default)
+                    .map(Duration::from_secs)
+                    .unwrap_or_default();
+                self.invalid(leaf, raw, fallback, reason)
+            }
+        }
+    }
+
+    pub fn snapshot_retention_duration(&self) -> ResolvedBuildValue<Duration> {
+        self.duration("snapshot_retention", &self.snapshot_retention, "7d")
+    }
+
+    pub fn queue_aging_duration(&self) -> ResolvedBuildValue<Duration> {
+        self.duration("queue_aging", &self.queue_aging, "120s")
+    }
+
+    pub fn canary_every_duration(&self) -> ResolvedBuildValue<Duration> {
+        self.duration("canary_every", &self.canary_every, "24h")
+    }
+
+    pub fn slot_idle_duration(&self) -> ResolvedBuildValue<Duration> {
+        self.duration("slot_idle", &self.slot_idle, "7d")
+    }
+
+    pub fn soak_interactive_wait_p95_duration(&self) -> ResolvedBuildValue<Duration> {
+        self.duration(
+            "soak.interactive_wait_p95",
+            &self.soak.interactive_wait_p95,
+            "60s",
+        )
+    }
+
+    pub fn soak_test_wait_p95_duration(&self) -> ResolvedBuildValue<Duration> {
+        self.duration("soak.test_wait_p95", &self.soak.test_wait_p95, "300s")
+    }
+
+    fn sync_leaf_sources(&mut self, provenance: &BTreeMap<String, PortSource>) {
+        let leaves = [
+            "strategy",
+            "prepare",
+            "seed.stale_after",
+            "wrapper.argv",
+            "command.argv",
+            "command.exit_codes.success",
+            "command.exit_codes.unknown",
+            "command.exit_codes.other",
+            "offload",
+            "overflow",
+            "clean",
+            "stacks",
+            "snapshot_retention",
+            "priority.check",
+            "priority.clippy",
+            "priority.test",
+            "priority.nextest",
+            "priority.tier",
+            "priority.gate",
+            "priority.maintenance",
+            "priority.other",
+            "queue_aging",
+            "prewarm_budget",
+            "canary_every",
+            "slot_idle",
+            "soak.min_runs",
+            "soak.min_days",
+            "soak.interactive_wait_p95",
+            "soak.test_wait_p95",
+            "soak.rss_fraction",
+            "soak.local_exception_fraction",
+            "soak.churn_clean_fraction",
+        ];
+        self.leaf_sources = leaves
+            .into_iter()
+            .map(|leaf| {
+                let path = format!("build.{leaf}");
+                let source = provenance
+                    .get(&path)
+                    .copied()
+                    .unwrap_or(PortSource::Builtin);
+                (path, source)
+            })
+            .collect();
+    }
 }
 
 impl PortEntry for BuildPort {
@@ -522,7 +966,7 @@ impl PortEntry for BuildPort {
         let declared = |argv: &[String]| argv.first().is_some_and(|program| !program.is_empty());
         self.prepare.iter().all(|argv| declared(argv))
             && (self.wrapper.argv.is_empty() || declared(&self.wrapper.argv))
-            && (self.command.argv.is_empty() || declared(&self.command.argv))
+            && (self.command.argv.is_empty() || self.command.is_valid())
     }
 }
 
@@ -683,6 +1127,7 @@ macro_rules! declare_ports {
                     }
                     self.$field.set_source(highest);
                 })+
+                self.build.sync_leaf_sources(&self.provenance);
             }
 
             pub fn entries(&self) -> impl Iterator<Item = (&'static str, PortSource, PortBackendKind, bool, Option<&'static str>)> + '_ {
@@ -705,7 +1150,6 @@ declare_ports! {
     tracker: Port,
     release: Port,
     admission: Port,
-    build_admission: Port,
     build: BuildPort,
 }
 
@@ -786,9 +1230,13 @@ fn record_leaf_sources(
                 } else {
                     format!("{prefix}.{key}")
                 };
-                // Skip only the synthetic root/port metadata. A tier name is
-                // a repository-defined key and must stay in the walk.
-                if path == "schema_version" || (key == "source" && !prefix.contains('.')) {
+                // Skip synthetic metadata. A tier name is a repository-defined
+                // key and must stay in the walk.
+                if path == "schema_version"
+                    || (key == "source" && !prefix.contains('.'))
+                    || path == "build.leaf_sources"
+                    || path.starts_with("build.leaf_sources.")
+                {
                     continue;
                 }
                 record_leaf_sources(child, source, &path, provenance);
@@ -972,12 +1420,40 @@ impl PortTable {
         let mut table: Self = serde_json::from_str(include_str!("../assets/ports.json"))
             .expect("compiled port table asset must match its schema");
         table.set_sources(PortSource::Builtin);
+        table.sync_sources_from_provenance();
         table
     }
 
     /// The highest layer that set each leaf, keyed by dotted path.
     pub fn provenance(&self) -> &BTreeMap<String, PortSource> {
         &self.provenance
+    }
+
+    /// Resolve the affected-verification full-run interval with its exact
+    /// layer source. Invalid durations warn and fall back to the builtin 24h.
+    pub fn verify_affected_full_after_duration(&self) -> ResolvedBuildValue<Duration> {
+        let leaf = "verify.affected.full_after";
+        let source = self
+            .provenance
+            .get(leaf)
+            .copied()
+            .unwrap_or(PortSource::Builtin);
+        match crate::gc::parse_gc_idle_duration(&self.verify.affected.full_after) {
+            Ok(seconds) => ResolvedBuildValue {
+                value: Duration::from_secs(seconds),
+                source,
+                warnings: Vec::new(),
+            },
+            Err(reason) => ResolvedBuildValue {
+                value: Duration::from_secs(24 * 60 * 60),
+                source: PortSource::Builtin,
+                warnings: vec![format!(
+                    "invalid {leaf} value {:?} from {}; using builtin value (default): {reason}",
+                    self.verify.affected.full_after,
+                    port_source_layer(source)
+                )],
+            },
+        }
     }
 
     /// Resolve the configured path for a managed writer branch.
@@ -1118,14 +1594,16 @@ impl PortTable {
                 &mut on_malformed,
             )?;
             // A consumer repository can be configured entirely from host
-            // state: its keyed layer sits between host and project. A missing
-            // key or file simply skips this layer.
-            if let Some(key) = project.and_then(project_key_for) {
-                let path = host_state.join("projects").join(key).join("ports.json");
+            // state: its binding layer sits between host and project. The
+            // directory is the ProjectId binding directory named by `config
+            // path`; a missing binding or file skips this layer silently.
+            if let Some(dir) =
+                project.and_then(|project| crate::host_project_dir(host_state, project))
+            {
                 apply_layer(
                     &mut document,
                     &mut provenance,
-                    &path,
+                    &dir.join("ports.json"),
                     PortSource::HostProject,
                     &mut on_unknown,
                     &mut on_malformed,
@@ -1412,6 +1890,7 @@ mod tests {
             "schema_version": PORTS_SCHEMA_VERSION,
             "verify": builtin["verify"].clone(),
             "future_port": {"enabled": true},
+            "build_admission": {"backend": {"kind": "builtin"}},
         });
         host_overlay["verify"]["backend"] = serde_json::json!({"kind": "none"});
         host_overlay["verify"]["test_threads"] = serde_json::Value::Null;
@@ -1454,6 +1933,7 @@ mod tests {
                 .collect::<std::collections::BTreeSet<_>>(),
             std::collections::BTreeSet::from([
                 (host_source.clone(), "future_port".to_owned()),
+                (host_source.clone(), "build_admission".to_owned()),
                 (host_source.clone(), "verify.future_nested".to_owned()),
                 (project_source, "naming.future_nested".to_owned()),
             ])
@@ -1842,6 +2322,15 @@ mod tests {
                     let mut expected = builtin.clone();
                     expected[name] = overlay[name].clone();
                     expected[name]["source"] = serde_json::to_value(expected_source).unwrap();
+                    if name == "build" {
+                        // This overlay restates every build leaf, so each leaf
+                        // legitimately reports the layer that declared it.
+                        if let Some(sources) = expected["build"]["leaf_sources"].as_object_mut() {
+                            for source in sources.values_mut() {
+                                *source = serde_json::to_value(expected_source).unwrap();
+                            }
+                        }
+                    }
                     assert_eq!(serde_json::to_value(&table).unwrap(), expected);
                 }
             }
@@ -1858,10 +2347,22 @@ mod tests {
         assert!(build.wrapper.argv.is_empty());
         assert!(build.command.argv.is_empty());
         assert_eq!(build.offload, "auto");
-        assert_eq!(build.overflow, "local");
-        assert_eq!(build.clean, "none");
+        assert_eq!(build.overflow, "auto");
+        assert_eq!(build.clean, "untracked");
         assert!(build.stacks.is_empty());
         assert_eq!(build.snapshot_retention, "7d");
+        assert_eq!(build.priority, default_build_priority());
+        assert_eq!(build.queue_aging, "120s");
+        assert_eq!(build.prewarm_budget, 1);
+        assert_eq!(build.canary_every, "24h");
+        assert_eq!(build.slot_idle, "7d");
+        assert_eq!(build.soak, BuildSoakPort::default());
+        assert_eq!(build.strategy_name().value, BuildStrategyName::LaneSeed);
+        assert_eq!(build.overflow_policy().value, BuildOverflow::Auto);
+        assert_eq!(build.clean_policy().value, BuildClean::Untracked);
+        assert_eq!(build.offload_policy().value, BuildOffload::Auto);
+        assert_eq!(build.priority_for("test").value, BuildPriority::Test);
+        assert_eq!(build.queue_aging_duration().value, Duration::from_secs(120));
         assert_eq!(build.seed, BuildSeed::default());
         assert_eq!(
             build.seed.stale_after_duration().unwrap(),
@@ -1918,6 +2419,15 @@ mod tests {
         let table = PortTable::read_for(Some(project.as_path()), &host).unwrap();
         assert_eq!(table.build.prepare, project_prepare);
         assert_eq!(table.build.source, PortSource::Project);
+
+        assert_eq!(table.build.source_for_leaf("strategy"), PortSource::Builtin);
+        assert_eq!(table.build.source_for_leaf("offload"), PortSource::Builtin);
+        // Neither layer declares the seed leaf; it comes from the builtin asset
+        // even though another build leaf is project-sourced.
+        assert_eq!(
+            table.build.source_for_leaf("seed.stale_after"),
+            PortSource::Builtin
+        );
         // Arrays replace rather than concatenate across layers.
         assert_eq!(table.build.prepare.len(), 1);
 
@@ -1993,21 +2503,21 @@ mod tests {
         }
     }
 
-    fn checkout_with_key(temp: &Path) -> (PathBuf, PathBuf, String) {
+    fn checkout_with_key(temp: &Path) -> (PathBuf, PathBuf, PathBuf) {
         let host = temp.join("host");
         let project = temp.join("project");
         std::fs::create_dir_all(&host).unwrap();
         std::fs::create_dir_all(project.join(".git")).unwrap();
         std::fs::create_dir_all(project.join(".provenant")).unwrap();
-        let key = project_key_for(&project).expect("a checkout resolves its project key");
-        (host, project, key)
+        let dir = crate::host_project_dir(&host, &project)
+            .expect("a checkout resolves its host project directory");
+        (host, project, dir)
     }
 
     #[test]
     fn host_project_layer_order_for_ports() {
         let temp = tempfile::tempdir().unwrap();
-        let (host, project, key) = checkout_with_key(temp.path());
-        let keyed = host.join("projects").join(&key);
+        let (host, project, keyed) = checkout_with_key(temp.path());
         std::fs::create_dir_all(&keyed).unwrap();
 
         // builtin < host < host-project < project: each leaf overrides the
@@ -2065,8 +2575,7 @@ mod tests {
     #[test]
     fn provenance_reports_highest_layer_per_leaf() {
         let temp = tempfile::tempdir().unwrap();
-        let (host, project, key) = checkout_with_key(temp.path());
-        let keyed = host.join("projects").join(&key);
+        let (host, project, keyed) = checkout_with_key(temp.path());
         std::fs::create_dir_all(&keyed).unwrap();
         std::fs::write(
             host.join("ports.json"),
@@ -2109,9 +2618,11 @@ mod tests {
         assert_eq!(provenance.get("verify.base"), Some(&PortSource::Host));
         assert_eq!(table.build.source, PortSource::Project);
 
-        // Provenance is derived state: it never appears in a serialised layer.
+        // The table's full provenance remains derived state; only the frozen
+        // build context carries the per-build-leaf map needed by lane jobs.
         let encoded = serde_json::to_value(&table).unwrap();
         assert!(encoded.get("provenance").is_none());
+        assert!(encoded["build"]["leaf_sources"].is_object());
         assert_eq!(
             serde_json::from_value::<PortTable>(encoded)
                 .unwrap()
@@ -2119,6 +2630,46 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    #[test]
+    fn typed_build_values_warn_with_leaf_source_and_fall_back_to_builtins() {
+        let mut build = PortTable::builtin().build;
+        build.strategy = "future_strategy".into();
+        build.overflow = "future_overflow".into();
+        build.clean = "future_clean".into();
+        build.queue_aging = "tomorrow".into();
+        build
+            .leaf_sources
+            .insert("build.strategy".into(), PortSource::Project);
+        build
+            .leaf_sources
+            .insert("build.overflow".into(), PortSource::Host);
+        build
+            .leaf_sources
+            .insert("build.clean".into(), PortSource::Project);
+        build
+            .leaf_sources
+            .insert("build.queue_aging".into(), PortSource::Host);
+
+        let strategy = build.strategy_name();
+        assert_eq!(strategy.value, BuildStrategyName::LaneSeed);
+        assert_eq!(strategy.source, PortSource::Builtin);
+        assert!(strategy.warnings[0].contains("build.strategy"));
+        assert!(strategy.warnings[0].contains("project"));
+
+        let overflow = build.overflow_policy();
+        assert_eq!(overflow.value, BuildOverflow::Auto);
+        assert!(overflow.warnings[0].contains("host"));
+
+        let clean = build.clean_policy();
+        assert_eq!(clean.value, BuildClean::Untracked);
+        assert!(clean.warnings[0].contains("project"));
+
+        let aging = build.queue_aging_duration();
+        assert_eq!(aging.value, Duration::from_secs(120));
+        assert!(aging.warnings[0].contains("build.queue_aging"));
+        assert!(aging.warnings[0].contains("host"));
     }
 
     #[test]

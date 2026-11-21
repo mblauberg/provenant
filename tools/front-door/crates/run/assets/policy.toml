@@ -506,6 +506,14 @@ strength = "refuse"
 justification = "Required anchors must be present and resolvable to enforce the selected grants."
 
 [[rule]]
+code = "LAUNCH_NATIVE_AUTH_NONE"
+site = "cli/src/run/provider/preparation.rs#prepare_candidates_inner"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_NATIVE_AUTH_NONE"
+justification = "Host access uses native provider authentication when managed authentication is unavailable or bypassed."
+
+[[rule]]
 code = "LAUNCH_FILTER_OPTIONAL_GRANTS_NONE"
 site = "providers/src/launch.rs#filter_optional_grants"
 boundary = "none"
@@ -1416,3 +1424,43 @@ strength = "warn"
 refusable = true
 knob = "policy.PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE"
 justification = "Incomplete provider identity evidence with no conflict warns and settles on the observed exit and result; a conflict still refuses."
+
+[[rule]]
+code = "CREDENTIAL_ROOTS_OVERLAP_NONE"
+site = "cli/src/run/provider/confinement.rs#credential_roots"
+boundary = "none"
+strength = "warn"
+knob = "policy.CREDENTIAL_ROOTS_OVERLAP_NONE"
+justification = "Host access permits credential roots that overlap lane roots or cannot be resolved precisely, with a warning."
+
+[[rule]]
+code = "PROJECT_PATHS_CREDENTIAL_NONE"
+site = "cli/src/run/provider/project_paths.rs#apply"
+boundary = "none"
+strength = "warn"
+knob = "policy.PROJECT_PATHS_CREDENTIAL_NONE"
+justification = "Host access permits project grants overlapping credential roots, with a warning."
+
+[[rule]]
+code = "LAUNCH_SANDBOX_UNAVAILABLE_NONE"
+site = "run/src/launch.rs#bind_sandbox_backend"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_SANDBOX_UNAVAILABLE_NONE"
+justification = "An unavailable sandbox warns and proceeds for host access."
+
+[[rule]]
+code = "CONTINUATION_LINK_NONE"
+site = "cli/src/run/provider/continuation.rs#copy_tree"
+boundary = "none"
+strength = "warn"
+knob = "policy.CONTINUATION_LINK_NONE"
+justification = "Host access copies linked retained files by content."
+
+[[rule]]
+code = "DELIVERY_HOST_TRANSPORT_NONE"
+site = "run/src/delivery.rs#transport_warning"
+boundary = "none"
+strength = "warn"
+knob = "policy.DELIVERY_HOST_TRANSPORT_NONE"
+justification = "Host access permits ordinary host Git transport configuration."

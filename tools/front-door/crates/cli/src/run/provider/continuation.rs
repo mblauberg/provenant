@@ -183,6 +183,7 @@ pub(super) struct ContinuationState<'a> {
     pub(super) state_root: &'a Path,
     pub(super) config_root: &'a Path,
     pub(super) private_state: &'a Path,
+    pub(super) lane_access: Option<&'a provenant_records::LaneAccessReceipt>,
 }
 
 impl ContinuationError {
@@ -286,8 +287,10 @@ pub(super) fn continuation_for(
             state_root,
             config_root,
             private_state,
+            lane_access: None,
         },
         &policy,
+        None,
     )
 }
 
@@ -297,11 +300,13 @@ pub(super) fn continuation_for_policy(
     grant_digest: &str,
     state: ContinuationState<'_>,
     enforcement: &provenant_records::policy::Policy,
+    opencode_data_root: Option<&Path>,
 ) -> Result<provenant_providers::Continuation, ContinuationError> {
     let ContinuationState {
         state_root,
         config_root,
         private_state,
+        lane_access,
     } = state;
     let session = prior.session.as_deref().ok_or_else(|| {
         enforcement.boundary_error(
@@ -329,16 +334,61 @@ pub(super) fn continuation_for_policy(
     }
     let continuation =
         provenant_providers::Continuation::retained(&route.adapter, session, route, grant_digest)?;
-    // Native state is selected by the provider during launch preparation.
-    // Validate its recorded root after the `LaunchSpec` exists; never search a
-    // native account tree or copy it into the child's private state.
-    if prior_uses_native_session_state(applied, &route.adapter) {
-        return Ok(continuation);
-    }
     let prior_state = state_root
         .join("attempts")
         .join(prior.attempt_id.to_string())
         .join("provider-state");
+    if let Some(current_root) = opencode_data_root {
+        if !AdapterSpec::get(&route.adapter)
+            .is_some_and(|spec| spec.id == provenant_records::Harness::Opencode)
+            || !current_root.is_absolute()
+        {
+            return Err(ContinuationError::Provider(
+                provenant_providers::ProviderError::UnknownIdentity,
+            ));
+        }
+        let prior_root = super::observation::native_session_location_for_route(
+            &prior_state,
+            &route.adapter,
+            &route.model,
+            route.account_key.as_deref(),
+        )?;
+        if prior_root != current_root {
+            return Err(
+                super::observation::NativeSessionLocationError::Mismatch(F::NativeHome).into(),
+            );
+        }
+        // OpenCode's host service owns this database. Reuse its session id;
+        // copying the database would fork session identity from the service.
+        provenant_providers::opencode::session_exists(current_root, session)?;
+        return Ok(continuation);
+    }
+    if AdapterSpec::get(&route.adapter)
+        .is_some_and(|spec| spec.id == provenant_records::Harness::Opencode)
+    {
+        match super::observation::native_session_location_for_route(
+            &prior_state,
+            &route.adapter,
+            &route.model,
+            route.account_key.as_deref(),
+        ) {
+            // A host-profile session must never be copied into lane-private
+            // state when the successor is using the lane profile.
+            Ok(_) => {
+                return Err(ContinuationError::NativeSessionLocation(
+                    super::observation::NativeSessionLocationError::Mismatch(F::SessionState),
+                ));
+            }
+            Err(super::observation::NativeSessionLocationError::Missing) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    // Native state is selected by the provider during launch preparation.
+    // Validate its recorded root after the `LaunchSpec` exists; never search a
+    // native account tree or copy it into the child's private state.
+    if prior_uses_native_session_state(applied, &route.adapter, Some(&prior_state)) {
+        return Ok(continuation);
+    }
     let mut policy = StateCopyPolicy::read(config_root, enforcement);
     let located = if AdapterSpec::get(&route.adapter)
         .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase)
@@ -385,6 +435,8 @@ pub(super) fn continuation_for_policy(
             private_state,
             policy,
             AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.copy_sessions_only),
+            lane_access,
+            enforcement,
         )?,
         None => return Err(missing_continuation(&route.adapter)),
     }
@@ -408,13 +460,56 @@ fn route_mismatch(applied: &run::RouteRecord, route: &ResolvedRoute) -> Option<F
     .find_map(|(changed, field)| changed.then_some(field))
 }
 
-pub(super) fn prior_uses_native_session_state(applied: &run::RouteRecord, provider: &str) -> bool {
-    applied
-        .sandbox
-        .as_ref()
-        .is_some_and(|sandbox| !sandbox.effective)
-        && !AdapterSpec::get(provider)
-            .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase)
+pub(super) fn prior_uses_native_session_state(
+    applied: &run::RouteRecord,
+    provider: &str,
+    provider_state: Option<&Path>,
+) -> bool {
+    let host_profile_session = AdapterSpec::get(provider)
+        .is_some_and(|spec| spec.id == provenant_records::Harness::Opencode)
+        && provider_state.is_some_and(|provider_state| {
+            applied
+                .model
+                .as_deref()
+                .and_then(|model| model.strip_prefix("opencode/"))
+                .is_some_and(|model| {
+                    super::observation::native_session_location_for_route(
+                        provider_state,
+                        provider,
+                        model,
+                        applied.account_key.as_deref(),
+                    )
+                    .is_ok()
+                })
+        });
+    host_profile_session
+        || ((applied
+            .sandbox
+            .as_ref()
+            .is_some_and(|sandbox| !sandbox.effective)
+            || applied
+                .lane_access
+                .as_ref()
+                .is_some_and(|receipt| !receipt.access.is_isolated()))
+            && !AdapterSpec::get(provider)
+                .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase))
+}
+
+#[test]
+fn native_session_selection_follows_recorded_access_and_legacy_sandbox() {
+    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource};
+    let mut route = run::RouteRecord::default();
+    assert!(!prior_uses_native_session_state(&route, "codex", None));
+    route.lane_access = Some(LaneAccessReceipt {
+        access: LaneAccess::Host,
+        source: LaneAccessSource::Default,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    });
+    assert!(prior_uses_native_session_state(&route, "codex", None));
+    assert!(!prior_uses_native_session_state(&route, "opencode", None));
+    route.lane_access.as_mut().unwrap().access = LaneAccess::Isolated;
+    assert!(!prior_uses_native_session_state(&route, "codex", None));
 }
 
 pub(super) fn verify_native_continuation(
@@ -434,17 +529,13 @@ pub(super) fn verify_native_continuation(
     if let Some(field) = route_mismatch(applied, route) {
         return Err(ContinuationError::RouteMismatch(field));
     }
-    if applied
-        .sandbox
-        .as_ref()
-        .is_some_and(|sandbox| sandbox.effective)
-    {
-        return Err(ContinuationError::RouteMismatch(F::SessionState));
-    }
     let prior_state = state_root
         .join("attempts")
         .join(prior.attempt_id.to_string())
         .join("provider-state");
+    if !prior_uses_native_session_state(applied, &route.adapter, Some(&prior_state)) {
+        return Err(ContinuationError::RouteMismatch(F::SessionState));
+    }
     let prior_root = super::observation::native_session_location_for_route(
         &prior_state,
         &route.adapter,
@@ -799,8 +890,15 @@ pub(super) fn copy_state_within(
     limits: StateLimits,
     sessions_only: bool,
 ) -> Result<(), String> {
-    copy_state_classified(from, to, StateCopyPolicy::shipped(limits), sessions_only)
-        .map_err(|error| error.to_string())
+    copy_state_classified(
+        from,
+        to,
+        StateCopyPolicy::shipped(limits),
+        sessions_only,
+        None,
+        &Default::default(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn copy_state_classified(
@@ -808,9 +906,18 @@ fn copy_state_classified(
     to: &Path,
     mut policy: StateCopyPolicy,
     sessions_only: bool,
+    lane_access: Option<&provenant_records::LaneAccessReceipt>,
+    enforcement: &provenant_records::policy::Policy,
 ) -> Result<(), StateCopyError> {
     loop {
-        let result = copy_state_bounded(from, to, policy.clone(), sessions_only);
+        let result = copy_state_bounded(
+            from,
+            to,
+            policy.clone(),
+            sessions_only,
+            lane_access,
+            enforcement,
+        );
         let Err(error) = &result else {
             return result;
         };
@@ -887,6 +994,8 @@ fn copy_state_bounded(
     to: &Path,
     policy: StateCopyPolicy,
     sessions_only: bool,
+    lane_access: Option<&provenant_records::LaneAccessReceipt>,
+    enforcement: &provenant_records::policy::Policy,
 ) -> Result<(), StateCopyError> {
     let limits = policy.limits;
     let failed =
@@ -924,6 +1033,8 @@ fn copy_state_bounded(
         entries: limits.entries,
         bytes,
         device: source.metadata().map_err(|error| failed(&error))?.device,
+        lane_access,
+        enforcement,
     };
     // The copy fills a fresh private sibling and is renamed into place, onto
     // the empty destination, only once whole. Any refusal removes it.
@@ -934,7 +1045,16 @@ fn copy_state_bounded(
     let copied = parent
         .open_directory(&staging)
         .map_err(CopyRefusal::from)
-        .and_then(|target| copy_tree(&source, &target, limits.depth, &mut budget, sessions_only))
+        .and_then(|target| {
+            copy_tree(
+                &source,
+                &target,
+                limits.depth,
+                &mut budget,
+                sessions_only,
+                false,
+            )
+        })
         .and_then(|()| Ok(parent.replace(&staging, &parent, name)?));
     let copied = copied.map_err(|refusal| {
         let class = refusal.boundary_class();
@@ -970,7 +1090,7 @@ fn copy_state_bounded(
 
 #[test]
 #[allow(clippy::print_stderr, reason = "report an unavailable test fixture")]
-fn retained_state_hard_link_is_an_integrity_refusal() -> Result<(), Box<dyn std::error::Error>> {
+fn retained_state_links_follow_access_model() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_records::diagnostic::BoundaryClass;
     let temp = tempfile::tempdir()?;
     let source = temp.path().join("source");
@@ -989,6 +1109,8 @@ fn retained_state_hard_link_is_an_integrity_refusal() -> Result<(), Box<dyn std:
         &temp.path().join("copy"),
         StateCopyPolicy::shipped(RETAINED_STATE),
         false,
+        None,
+        &Default::default(),
     )
     .unwrap_err();
     assert_eq!(error.class, BoundaryClass::Integrity);
@@ -996,6 +1118,38 @@ fn retained_state_hard_link_is_an_integrity_refusal() -> Result<(), Box<dyn std:
         error.to_string(),
         "retained provider state holds a hard-linked file"
     );
+    std::fs::remove_file(source.join("link"))?;
+    std::os::unix::fs::symlink(&external, source.join("symlink"))?;
+    let isolated_target = temp.path().join("isolated-copy");
+    copy_state_classified(
+        &source,
+        &isolated_target,
+        StateCopyPolicy::shipped(RETAINED_STATE),
+        false,
+        None,
+        &Default::default(),
+    )?;
+    assert!(!isolated_target.join("symlink").exists());
+    std::fs::hard_link(&external, source.join("link"))?;
+    let access = provenant_records::LaneAccessReceipt {
+        access: provenant_records::LaneAccess::Host,
+        source: provenant_records::LaneAccessSource::Default,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    };
+    let target = temp.path().join("host-copy");
+    copy_state_classified(
+        &source,
+        &target,
+        StateCopyPolicy::shipped(RETAINED_STATE),
+        false,
+        Some(&access),
+        &Default::default(),
+    )?;
+    assert_eq!(std::fs::read(target.join("link"))?, b"state");
+    assert_eq!(std::fs::read(target.join("symlink"))?, b"state");
+    std::fs::write(target.join("symlink"), "changed")?;
+    assert_eq!(std::fs::read(&external)?, b"state");
     Ok(())
 }
 
@@ -1022,10 +1176,12 @@ pub(super) fn remove_staged(parent: &Directory, name: &std::ffi::OsStr) -> Resul
 }
 
 /// What the rest of a copy may still spend, and the source's filesystem.
-pub(super) struct Budget {
+pub(super) struct Budget<'a> {
     pub(super) entries: u32,
     pub(super) bytes: u64,
     pub(super) device: u64,
+    pub(super) lane_access: Option<&'a provenant_records::LaneAccessReceipt>,
+    pub(super) enforcement: &'a provenant_records::policy::Policy,
 }
 
 pub(super) enum CopyRefusal {
@@ -1110,12 +1266,31 @@ pub(super) fn before_open(_name: &std::ffi::OsStr) {
     });
 }
 
+fn warn_link(budget: &Budget<'_>, kind: &str) {
+    let source = budget
+        .lane_access
+        .map_or("default", |receipt| receipt.source.as_str());
+    let detail =
+        format!("copying retained {kind} by content (lanes.access=host, source: {source})");
+    if let Some(message) = budget
+        .enforcement
+        .check(
+            "CONTINUATION_LINK_NONE",
+            provenant_records::policy::Facts::violation(detail),
+        )
+        .message()
+    {
+        let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+    }
+}
+
 pub(super) fn copy_tree(
     from: &Directory,
     to: &Directory,
     depth: u32,
     budget: &mut Budget,
     sessions_only: bool,
+    keep_links: bool,
 ) -> Result<(), CopyRefusal> {
     for name in listed(from, &mut budget.entries)?
         .ok_or(CopyRefusal::Limit(ContinuationCopyLimit::Entries))?
@@ -1139,6 +1314,17 @@ pub(super) fn copy_tree(
         }
         before_open(&name);
         match metadata.kind {
+            // Inside a copied linked directory, keep nested links as links:
+            // they belong to that configuration tree and must not redirect
+            // the copy into unrelated host paths.
+            FileKind::Symlink if keep_links => {
+                let target = match from.read_link(&name) {
+                    Ok(target) => target,
+                    Err(error) if changed_entry(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                to.symlink(&target, &name)?;
+            }
             FileKind::Directory => {
                 let depth = depth
                     .checked_sub(1)
@@ -1156,7 +1342,14 @@ pub(super) fn copy_tree(
                     Err(error) if error.is_exists() => {}
                     Err(error) => return Err(error.into()),
                 }
-                copy_tree(&child, &to.open_directory(&name)?, depth, budget, false)?;
+                copy_tree(
+                    &child,
+                    &to.open_directory(&name)?,
+                    depth,
+                    budget,
+                    false,
+                    keep_links,
+                )?;
             }
             FileKind::Regular => {
                 let mut file = match from.open_read(&name) {
@@ -1171,7 +1364,13 @@ pub(super) fn copy_tree(
                 // A hard link can name a host file the lane could not otherwise
                 // read; the host copy would then publish its contents.
                 if opened.links > 1 {
-                    return Err(CopyRefusal::HardLink);
+                    if budget
+                        .lane_access
+                        .is_none_or(|receipt| receipt.access.is_isolated())
+                    {
+                        return Err(CopyRefusal::HardLink);
+                    }
+                    warn_link(budget, "hard-linked file");
                 }
                 // The destination is the copy's fresh staging directory, so an
                 // existing entry there is refused, not replaced.
@@ -1193,6 +1392,78 @@ pub(super) fn copy_tree(
                 budget.bytes -= copied;
                 if opened.mode & 0o100 != 0 {
                     copy.make_owner_executable()?;
+                }
+            }
+            FileKind::Symlink
+                if budget
+                    .lane_access
+                    .is_some_and(|receipt| !receipt.access.is_isolated()) =>
+            {
+                let followed = match from.metadata_at(&name, true) {
+                    Ok(followed) => followed,
+                    Err(error) if changed_entry(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                if followed.device != budget.device {
+                    return Err(CopyRefusal::CrossDevice);
+                }
+                if followed.kind == FileKind::Directory {
+                    // OpenCode mirrors ordinary configuration directories as
+                    // links. Reading one as a file fails; walk its contents as
+                    // a bounded directory instead, preserving nested links.
+                    warn_link(budget, "linked directory");
+                    let depth = depth
+                        .checked_sub(1)
+                        .ok_or(CopyRefusal::Limit(ContinuationCopyLimit::Depth))?;
+                    let child = match from.open_directory_with_links(&name, true) {
+                        Ok(child) => child,
+                        Err(error) if changed_entry(&error) => continue,
+                        Err(error) => return Err(error.into()),
+                    };
+                    if child.metadata()?.device != budget.device {
+                        return Err(CopyRefusal::CrossDevice);
+                    }
+                    match to.mkdir(&name, 0o700) {
+                        Ok(()) => {}
+                        Err(error) if error.is_exists() => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                    copy_tree(
+                        &child,
+                        &to.open_directory(&name)?,
+                        depth,
+                        budget,
+                        false,
+                        true,
+                    )?;
+                } else {
+                    let mut file = match from.open_read_follow(&name) {
+                        Ok(file) => file,
+                        Err(error) if changed_entry(&error) => continue,
+                        Err(error) => return Err(error.into()),
+                    };
+                    let opened = file.metadata()?;
+                    if opened.device != budget.device {
+                        return Err(CopyRefusal::CrossDevice);
+                    }
+                    warn_link(budget, "symlinked file");
+                    let mut copy = to.create_new(&name)?;
+                    let copied = std::io::copy(
+                        &mut std::io::Read::take(&mut file, budget.bytes.saturating_add(1)),
+                        &mut copy,
+                    )
+                    .map_err(|source| FsError::Io {
+                        operation: "copy linked file",
+                        path: name.clone().into(),
+                        source,
+                    })?;
+                    if copied > budget.bytes {
+                        return Err(CopyRefusal::Limit(ContinuationCopyLimit::Bytes));
+                    }
+                    budget.bytes -= copied;
+                    if opened.mode & 0o100 != 0 {
+                        copy.make_owner_executable()?;
+                    }
                 }
             }
             FileKind::Symlink | FileKind::Other => {}
@@ -1220,6 +1491,8 @@ fn retained_state_copy_refuses_redirected_roots_as_authority()
             &target,
             StateCopyPolicy::shipped(RETAINED_STATE),
             false,
+            None,
+            &Default::default(),
         )
         .unwrap_err();
         assert_eq!(error.class, BoundaryClass::Authority);

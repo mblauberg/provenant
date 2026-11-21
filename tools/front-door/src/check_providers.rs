@@ -557,26 +557,28 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
         let cadence = origin.local_cadence(&wait);
         let cadence = &cadence;
         if args.live {
-            // Factories and SQLite connections belong to their worker, never
-            // shared across threads. Each route stays on the normal run path.
+            // Every live probe launches an ordinary read-only lane on the same
+            // project checkout. The launch path takes custody of a shared
+            // worktree with a nonblocking lease and refuses a contending
+            // holder as `worktree_busy`, so two probes in flight together can
+            // make one route report its sibling's custody refusal instead of
+            // its own provider cause. One worker keeps each probe on its own
+            // graph stack and settles it before the next route starts.
             let queue = std::sync::Mutex::new(rows.iter_mut());
             std::thread::scope(|scope| {
-                for _ in 0..settings.concurrency.value {
-                    let queue = &queue;
-                    // A route runs the full graph path, so a worker gets the
-                    // graph stack size (#3542).
-                    let worker = std::thread::Builder::new()
-                        .stack_size(provenant_fabric_runtime::graph::GRAPH_STACK_BYTES);
-                    worker.spawn_scoped(scope, move || loop {
-                        let row = match queue.lock() { Ok(mut queue) => queue.next(), Err(_) => None };
-                        let Some(row) = row else { break; };
-                        if let Err(error) = live(row, settings, cadence, globals, workers) {
-                            row.status = Verdict::Fail;
-                            row.cause = Cause::Check(CheckCause::LaunchRefused);
-                            row.error_code.get_or_insert_with(|| error.downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>().map_or("provider_check_error", |error| error.code()).to_owned());
-                        }
-                    })?;
-                }
+                // A route runs the full graph path, so the worker gets the
+                // graph stack size (#3542).
+                let worker = std::thread::Builder::new()
+                    .stack_size(provenant_fabric_runtime::graph::GRAPH_STACK_BYTES);
+                worker.spawn_scoped(scope, move || loop {
+                    let row = match queue.lock() { Ok(mut queue) => queue.next(), Err(_) => None };
+                    let Some(row) = row else { break; };
+                    if let Err(error) = live(row, settings, cadence, globals, workers) {
+                        row.status = Verdict::Fail;
+                        row.cause = Cause::Check(CheckCause::LaunchRefused);
+                        row.error_code.get_or_insert_with(|| error.downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>().map_or("provider_check_error", |error| error.code()).to_owned());
+                    }
+                })?;
                 Ok::<(), std::io::Error>(())
             })?;
         }

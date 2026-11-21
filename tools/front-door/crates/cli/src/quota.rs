@@ -514,15 +514,24 @@ pub(crate) fn persist_provider_refusal_once(
                 && record.account.account_key == account.account_key
         })
         .cloned();
-    if replay
-        && current.as_ref().is_some_and(|record| {
-            record.refusals.iter().any(|refusal| {
-                refusal.model == model.strip_prefix(&format!("{adapter}/")).unwrap_or(model)
-                    && refusal.pool.as_deref() == pool
-                    && refusal.observed_unix_seconds >= now_unix_seconds
-            })
-        })
-    {
+    let local_model = model.strip_prefix(&format!("{adapter}/")).unwrap_or(model);
+    let same_scope = |other_model: &str, other_pool: Option<&str>| match pool {
+        Some(pool) => other_pool == Some(pool),
+        None => other_pool.is_none() && other_model == local_model,
+    };
+    // Replayed settlement evidence must not undo a later observation or a
+    // recorded clearing. A live refusal at the same second is new evidence.
+    if current.as_ref().is_some_and(|record| {
+        record.refusals.iter().any(|refusal| {
+            same_scope(&refusal.model, refusal.pool.as_deref())
+                && (refusal.observed_unix_seconds > now_unix_seconds
+                    || (replay && refusal.observed_unix_seconds == now_unix_seconds))
+        }) || (replay
+            && record.cleared_refusals.iter().any(|clearing| {
+                same_scope(&clearing.model, clearing.pool.as_deref())
+                    && clearing.observed_unix_seconds >= now_unix_seconds
+            }))
+    }) {
         return Ok(());
     }
     let account = current.as_ref().map_or(&account, |record| &record.account);
@@ -653,6 +662,17 @@ pub(crate) fn persist_capacity_cooldown(
         return Ok(());
     };
     write_intent(&directory, state_root, &intent, &mut records)
+}
+
+/// The adapter's registered free pool when a successful model draws on it.
+/// Model classification comes from the catalogue and the pool name from the
+/// adapter registry; neither is a literal here.
+fn successful_free_pool(adapter: &str, model: &str) -> Option<String> {
+    let id = provenant_routing::ModelId::parse(model).ok()?;
+    let catalogue = provenant_routing::Catalogue::bundled().ok()?;
+    provenant_routing::free_pools(adapter, || catalogue.is_free_model(&id))
+        .into_iter()
+        .next()
 }
 
 /// Record successful account-scoped provider evidence, without inventing quota.
@@ -801,6 +821,17 @@ fn persist_success(
     // clear its recorded refusal with source `run`. A login probe proves only
     // authentication, so it never clears a quota refusal.
     if !login_probe && let Some(model) = route.model.as_deref() {
+        // A free-model launch proves the keyless pool, not just the one model
+        // that happened to hit the 429, so clear the pool's refusal first and
+        // name the observed success as its source.
+        if let Some(pool) = successful_free_pool(adapter, model) {
+            provenant_quota::clear_refusals(
+                &mut next,
+                now,
+                RefusalClearSource::ObservedSuccess,
+                |refusal| refusal.pool.as_deref() == Some(pool.as_str()),
+            )?;
+        }
         let prefix = format!("{adapter}/");
         let model = model.strip_prefix(&prefix).unwrap_or(model);
         provenant_quota::clear_refusals(&mut next, now, RefusalClearSource::Run, |refusal| {
@@ -2676,7 +2707,10 @@ fn quota_human_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> String
             "{} [{}]: {status}{}, age {age}",
             row.account.label,
             row.account.adapter,
-            reset.map_or_else(String::new, |label| format!(" {label}"))
+            reset.map_or_else(String::new, |label| format!(
+                " {label} (source: {})",
+                refusal_reset_source(&row.account.adapter)
+            ))
         ));
         if let Some(readiness) = &row.readiness {
             human.push_str(&format!(
@@ -2716,7 +2750,10 @@ fn quota_human_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> String
                 .and_then(|at| reset_label(at, report.generated_unix_seconds, &time_zone));
             human.push_str(&format!(
                 "; recorded refusal for {name}{pool}{}",
-                reset.map_or_else(String::new, |label| format!(" {label}"))
+                reset.map_or_else(String::new, |label| format!(
+                    " {label} (source: {})",
+                    refusal_reset_source(&row.account.adapter)
+                ))
             ));
         }
         if let Some(snapshot) = &row.snapshot {
@@ -2834,6 +2871,11 @@ fn reset_label(resets_at: &str, now: i64, time_zone: &jiff::tz::TimeZone) -> Opt
         "%a %H:%M"
     };
     Some(format!("until {}", reset.strftime(format)))
+}
+
+fn refusal_reset_source(adapter: &str) -> &'static str {
+    provenant_records::AdapterSpec::get(adapter)
+        .map_or("provider reset", |spec| spec.refusal_reset_source)
 }
 
 /// Avoid repeating the account-level free-pool expiry already printed beside its status.
@@ -2970,7 +3012,10 @@ fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crat
                     .and_then(|at| reset_label(at, report.generated_unix_seconds, &time_zone));
                 format!(
                     "recorded refusal for {name}{pool}{}",
-                    reset.map_or_else(String::new, |label| format!(" {label}"))
+                    reset.map_or_else(String::new, |label| format!(
+                        " {label} (source: {})",
+                        refusal_reset_source(&row.account.adapter)
+                    ))
                 )
             })
             .collect::<Vec<_>>();
@@ -2985,7 +3030,10 @@ fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crat
             row.account.adapter,
             state(row),
             pools,
-            reset.map_or_else(String::new, |label| format!(" {label}")),
+            reset.map_or_else(String::new, |label| format!(
+                " {label} (source: {})",
+                refusal_reset_source(&row.account.adapter)
+            )),
             refusals
         )
     }));
@@ -3274,6 +3322,7 @@ mod tests {
             selection_context: Default::default(),
             diagnostics: Default::default(),
             user_skills: true,
+            access: Default::default(),
             extra: Default::default(),
             adapter: "cursor".into(),
             model: "composer-2.5".into(),
@@ -3952,7 +4001,7 @@ mod tests {
         let today = report("2026-11-02T00:00:00Z", Some("2026-11-02T00:11:00Z"));
         let human = quota_human_at(&today, zone.clone());
         assert!(
-            human.contains("zen [opencode]: EXHAUSTED until 10:11"),
+            human.contains("zen [opencode]: EXHAUSTED until 10:11 (source: provider retry-after)"),
             "{human}"
         );
         assert!(
@@ -3965,10 +4014,8 @@ mod tests {
         );
         let compact = quota_summary_at(&today, zone.clone());
         assert!(
-            compact
-                .lines
-                .iter()
-                .any(|line| line == "zen [opencode]: exhausted until 10:11")
+            compact.lines.iter().any(|line| line
+                == "zen [opencode]: exhausted until 10:11 (source: provider retry-after)")
         );
         assert!(
             compact
@@ -4012,12 +4059,12 @@ mod tests {
         let human = quota_human_at(&scoped, zone.clone());
         assert!(
             human
-                .contains("recorded refusal for opencode/beam-pro in pool opencode-go until 10:11"),
+                .contains("recorded refusal for opencode/beam-pro in pool opencode-go until 10:11 (source: provider retry-after)"),
             "{human}"
         );
         let compact = quota_summary_at(&scoped, zone.clone());
         assert!(compact.lines.iter().any(|line| {
-            line == "unknown [opencode]: available (recorded refusal for opencode/beam-pro in pool opencode-go until 10:11)"
+            line == "unknown [opencode]: available (recorded refusal for opencode/beam-pro in pool opencode-go until 10:11 (source: provider retry-after))"
         }));
         assert_eq!(
             serde_json::to_value(&scoped).unwrap()["accounts"][1]["refusals"][0]["resets_at"],
@@ -4683,6 +4730,126 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn a_successful_free_launch_clears_its_pool_refusal_with_observed_success()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let root = private(temp.path())?;
+        let dir = child(&root, OsStr::new("quota"))?;
+        let spec = provenant_records::ADAPTER_SPECS
+            .iter()
+            .find(|spec| spec.free_pool.is_some())
+            .ok_or("free pool adapter")?;
+        let pool = spec.free_pool.expect("pool").to_owned();
+        let catalogue = provenant_routing::Catalogue::bundled()?;
+        let free = catalogue
+            .models()
+            .iter()
+            .find(|entry| entry.free && entry.model.adapter() == spec.name)
+            .ok_or("free model")?;
+        let account = AccountScope {
+            extra: Default::default(),
+            adapter: spec.name.into(),
+            account_key: "key".into(),
+            label: "zen".into(),
+        };
+        let refusal = |model: &str, pool: Option<&str>| Refusal {
+            extra: Default::default(),
+            account: account.clone(),
+            model: model.into(),
+            pool: pool.map(str::to_owned),
+            observed_unix_seconds: 100,
+            resets_unix_seconds: Some(900),
+        };
+        let mut record = AccountRecord::empty(account.clone());
+        record.revision = 1;
+        record.refusals = vec![
+            refusal("free-model", Some(&pool)),
+            refusal("other-model", None),
+        ];
+        write_intent(
+            &dir,
+            temp.path(),
+            &UpdateIntent {
+                account: account.clone(),
+                expected: None,
+                replacement: Some(record),
+                clear_provider_observations: false,
+                readiness_probe_result: None,
+                login_probe_expiry: None,
+            },
+            &mut Vec::new(),
+        )?;
+        let route = provenant_records::run::RouteRecord {
+            provider: Some(spec.name.into()),
+            model: Some(free.model.as_str().to_owned()),
+            account_label: Some("zen".into()),
+            account_key: Some("key".into()),
+            ..Default::default()
+        };
+        persist_provider_success(temp.path(), &route, 120)?;
+        let found = read_records(&dir)?;
+        let found = found
+            .iter()
+            .find(|r| r.account.account_key == "key")
+            .ok_or("account record")?;
+        assert_eq!(found.refusals.len(), 1);
+        assert_eq!(found.refusals[0].model, "other-model");
+        assert_eq!(found.cleared_refusals.len(), 1);
+        assert_eq!(
+            found.cleared_refusals[0].source,
+            RefusalClearSource::ObservedSuccess
+        );
+        assert_eq!(
+            found.cleared_refusals[0].pool.as_deref(),
+            Some(pool.as_str())
+        );
+        assert_eq!(found.cleared_refusals[0].cleared_unix_seconds, 120);
+
+        // A paid success on the same account is not evidence the free pool
+        // recovered: a fresh free-pool refusal stays until a free run clears it.
+        let paid = catalogue
+            .models()
+            .iter()
+            .find(|entry| !entry.free && entry.model.adapter() == spec.name)
+            .ok_or("paid model")?;
+        persist_provider_refusal(temp.path(), &route, Some(&pool), 200, Some(1000))?;
+        persist_provider_success(
+            temp.path(),
+            &provenant_records::run::RouteRecord {
+                model: Some(paid.model.as_str().to_owned()),
+                ..route
+            },
+            250,
+        )?;
+        let found = read_records(&dir)?;
+        let found = found
+            .iter()
+            .find(|r| r.account.account_key == "key")
+            .ok_or("account record")?;
+        // The paid run clears neither refusal: the fresh free-pool refusal
+        // stays live with its provider reset, and the unrelated model-scoped
+        // refusal from the first half is still held. Only a free-model success
+        // may clear the pool's refusal.
+        let live_pool = found
+            .refusals
+            .iter()
+            .find(|refusal| refusal.pool.as_deref() == Some(pool.as_str()))
+            .ok_or("live free-pool refusal")?;
+        assert_eq!(live_pool.observed_unix_seconds, 200);
+        assert_eq!(live_pool.resets_unix_seconds, Some(1000));
+        assert!(
+            found
+                .refusals
+                .iter()
+                .any(|refusal| refusal.model == "other-model" && refusal.pool.is_none())
+        );
+        assert_eq!(found.cleared_refusals.len(), 1);
+        Ok(())
+    }
+
     // Spec: docs/specs/routing.md#unknown-never-means-ready
     #[test]
     fn a_fresh_reading_clears_a_model_refusal_with_source_reading()
@@ -4769,6 +4936,54 @@ mod tests {
     }
 
     // Spec: docs/specs/routing.md#unknown-never-means-ready
+    #[test]
+    fn newest_pool_refusal_replaces_longer_reset_and_stale_replay()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let route = |model: &str| provenant_records::run::RouteRecord {
+            provider: Some("opencode".into()),
+            model: Some(format!("opencode/{model}")),
+            account_key: Some("key".into()),
+            account_label: Some("zen".into()),
+            ..Default::default()
+        };
+        let pool = Some("opencode-free");
+        persist_provider_refusal(temp.path(), &route("first"), pool, 100, Some(900))?;
+        persist_provider_refusal(temp.path(), &route("second"), pool, 200, Some(400))?;
+        persist_provider_refusal_once(temp.path(), &route("first"), pool, 100, Some(900), true)?;
+        let records = read_cache_at(temp.path())?;
+        assert_eq!(records[0].refusals.len(), 1);
+        assert_eq!(records[0].refusals[0].model, "second");
+        assert_eq!(records[0].refusals[0].resets_unix_seconds, Some(400));
+        Ok(())
+    }
+
+    #[test]
+    fn manual_clear_survives_settlement_replay_until_new_refusal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let route = provenant_records::run::RouteRecord {
+            provider: Some("opencode".into()),
+            model: Some("opencode/first".into()),
+            account_key: Some("key".into()),
+            account_label: Some("zen".into()),
+            ..Default::default()
+        };
+        let pool = Some("opencode-free");
+        persist_provider_refusal(temp.path(), &route, pool, 100, Some(900))?;
+        assert_eq!(clear_report(temp.path(), "zen", None, 150)?.0["count"], 1);
+        persist_provider_refusal_once(temp.path(), &route, pool, 100, Some(900), true)?;
+        assert!(read_cache_at(temp.path())?[0].refusals.is_empty());
+        persist_provider_refusal(temp.path(), &route, pool, 200, Some(400))?;
+        let records = read_cache_at(temp.path())?;
+        assert_eq!(records[0].refusals[0].resets_unix_seconds, Some(400));
+        Ok(())
+    }
+
     #[test]
     fn quota_clear_removes_recorded_refusals_and_reports_what_it_cleared()
     -> Result<(), Box<dyn std::error::Error>> {

@@ -120,6 +120,12 @@ custody, not a configured path. A verified primary checkout and managed linked
 worktrees are eligible regardless of foreign cleanup policy. A bound bare Git
 owner may collect its linked worktrees; an unbound bare repository cannot.
 Every output mutation holds writer exclusion and requires a fresh free census.
+`gc` names stranded work in its report: a registered or project worktree with
+uncommitted edits and no live holder is kept and listed with its branch, linked
+issue or PR, changed file and line counts and newest-edit age, so a lane that
+stopped or died cannot lose its edits silently during cleanup. This is
+reporting only; the ordinary dirty-work and custody guards still decide whether
+a checkout may be removed, and an unknown holder is never called stranded.
 - Why: space recovery must retain evidence and live data while collecting idle
   read-only scratch and both forms of Cargo output.
 
@@ -153,13 +159,11 @@ Below `gc.critical_free` (default 2 GiB; `0B` disables it) `DISK_FLOOR` decides:
 it warns and proceeds by default, for every lane class; `policy.DISK_FLOOR =
 "refuse"` holds new work and `"off"` silences it. Messages report available
 bytes, both thresholds, their configuration or shipped-default sources and the
-`provenant gc` remedy. Running builds continue. The admission shim receives the
-host's serialised gate in `PROVENANT_ADMISSION_DISK_LIMITS` when `PortTable.build_admission`
-selects builtin admission. The shim receives its selected backend and effective source
-in `PROVENANT_ADMISSION_BACKEND` and `PROVENANT_ADMISSION_SOURCE`.
-A command backend streams the repository wrapper around Cargo; `none` skips
-build admission. Both retain the independent local-Cargo execution policy. Builtin sandbox-off preparation
-takes the same decision against its target volume before launch. A record that
+`provenant gc` remedy. Running builds continue. Lane build shims receive the
+frozen build configuration in `PROVENANT_BUILD_CONTEXT`; the build strategy
+uses the existing admission limits and keeps the independent local-Cargo
+execution policy. Builtin sandbox-off preparation takes the same decision
+against its target volume before launch. A record that
 cannot be written still fails as a data-integrity error, outside this decision.
 - Why: low space is not a hard boundary
   ([ADR 0035](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md)); a collection target must not

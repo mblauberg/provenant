@@ -1155,6 +1155,18 @@ fn defaults(_: Profile) -> &'static str {
 /// Enforced model policy restrictions, including a retired schedule key in a
 /// restricting rule, are a boundary; other routing input recovers.
 pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::new("model_exclusions", "array"),
+    FieldMetadata::new("model_choices", "array"),
+    FieldMetadata::new("model_policy", "table"),
+    FieldMetadata::new("writer_advisory", "table"),
+    FieldMetadata::new("suppress_opus_writer_warning", "bool"),
+    FieldMetadata::new("capacity_cooldown_seconds", "int"),
+    FieldMetadata::new("depletion", "table"),
+    FieldMetadata::new("routes", "table"),
+    FieldMetadata::new("pools", "table"),
+    FieldMetadata::new("pacing_reserve", "table"),
+    FieldMetadata::new("pacing_overrides", "array"),
+    FieldMetadata::new("opencode_go", "table"),
     FieldMetadata::new("model_policy.defaults.cache.read_share_target", "float"),
     FieldMetadata::new("model_policy.defaults.cache.price_multiplier", "float"),
     FieldMetadata::new("model_policy.defaults.cache.read_ratio", "float"),
@@ -1174,6 +1186,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("model_policy.defaults.lane.max_turns", 1, i64::MAX),
     FieldMetadata::new("model_policy.defaults.lane.stop_early_ok", "bool"),
     FieldMetadata::new("model_policy.defaults.lane.read_only", "bool"),
+    FieldMetadata::enumeration("model_policy.defaults.lane.access", &["host", "isolated"]),
     FieldMetadata::enumeration(
         "model_policy.defaults.lane.user_skills",
         &["discover", "off"],
@@ -2050,6 +2063,55 @@ impl Catalogue {
             several => Err(BareModelError::Ambiguous {
                 candidates: several.iter().map(|id| id.as_str().to_owned()).collect(),
             }),
+        }
+    }
+    /// Full catalogued IDs for an `ADAPTER/NAME` written without its provider
+    /// segment, such as `opencode/hy4-flash-free` for the catalogued
+    /// `opencode/opencode/hy4-flash-free`. Only adapters that declare namespaced
+    /// models are considered, so no adapter name is ever spelled out here. An
+    /// exact or genuinely unknown ID, or one that already carries a provider
+    /// segment of its own, has no candidates.
+    pub fn namespaced_candidates(&self, id: &ModelId) -> Vec<&ModelId> {
+        if self.model(id).is_some() || id.model().contains('/') {
+            return Vec::new();
+        }
+        if !provenant_records::AdapterSpec::get(id.adapter())
+            .is_some_and(|spec| spec.namespaced_models)
+        {
+            return Vec::new();
+        }
+        self.models
+            .iter()
+            .map(|row| &row.model)
+            .filter(|candidate| {
+                candidate.adapter() == id.adapter()
+                    && candidate
+                        .model()
+                        .rsplit_once('/')
+                        .is_some_and(|(_, name)| name == id.model())
+            })
+            .collect()
+    }
+    /// A launch warning for an ID missing its provider segment. A unique
+    /// candidate is named in full; several candidates are all listed. An exact
+    /// or genuinely unknown ID produces no warning here.
+    pub fn provider_segment_warning(&self, id: &ModelId) -> Option<String> {
+        match self.namespaced_candidates(id).as_slice() {
+            [only] => Some(format!(
+                "model {} is missing its provider segment; did you mean {}?",
+                id.as_str(),
+                only.as_str()
+            )),
+            several if !several.is_empty() => Some(format!(
+                "model {} is missing its provider segment; catalogued IDs ending in this name: {}",
+                id.as_str(),
+                several
+                    .iter()
+                    .map(|candidate| candidate.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            _ => None,
         }
     }
     /// The single owner of a model's quota pool group. An uncatalogued model

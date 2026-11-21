@@ -1167,7 +1167,9 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::WorktreeUnregistered { .. } => {
             (Outcome::Refused, ErrorKind::WorktreeUnregistered)
         }
-        FacadeError::BaseUnreachable => (Outcome::Refused, ErrorKind::BaseUnreachable),
+        FacadeError::BaseUnreachable | FacadeError::BaseFetchFailed { .. } => {
+            (Outcome::Refused, ErrorKind::BaseUnreachable)
+        }
         FacadeError::BranchExists => (Outcome::Refused, ErrorKind::BranchExists),
         FacadeError::LaneDepth => (Outcome::Refused, ErrorKind::LaneDepth),
         FacadeError::LaneCoordinationRefused => {

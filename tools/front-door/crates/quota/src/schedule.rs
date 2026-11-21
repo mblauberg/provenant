@@ -91,6 +91,13 @@ pub fn next_due(
         }
         _ => i64::MIN,
     };
+    // A live free-pool refusal gets a cheap re-check before its provider reset
+    // when the adapter registers a quota probe. It is still subject to the
+    // backoff and claim bounds below, so a confirmed refusal is not re-probed
+    // on every tick.
+    if let Some(recheck) = crate::free_pool_recheck_due(record)? {
+        due = due.min(recheck);
+    }
     if let Some(backoff) = record.backoff_until_unix_seconds
         && !event_auth_retry
     {
@@ -975,6 +982,78 @@ mod tests {
             .is_err()
         );
     }
+    #[test]
+    fn tick_rechecks_a_free_pool_refusal_before_its_provider_reset() {
+        let spec = provenant_records::ADAPTER_SPECS
+            .iter()
+            .find(|spec| {
+                spec.free_pool.is_some()
+                    && spec.quota_probe != provenant_records::QuotaProbeKind::None
+            })
+            .expect("free pool adapter with a quota probe");
+        let account = AccountScope {
+            extra: Default::default(),
+            adapter: spec.name.into(),
+            account_key: "key".into(),
+            label: "zen".into(),
+        };
+        let mut record = AccountRecord::empty(account.clone());
+        record.last_attempt_unix_seconds = Some(100);
+        record.refusals.push(crate::Refusal {
+            extra: Default::default(),
+            account: account.clone(),
+            model: "free-model".into(),
+            pool: spec.free_pool.map(str::to_owned),
+            observed_unix_seconds: 100,
+            resets_unix_seconds: Some(100 + 50_000),
+        });
+        // The configured polling interval is much longer than the recheck.
+        let policies = [QuotaPolicy {
+            adapter: spec.name,
+            timer_seconds: 7200,
+            panel_seconds: 3600,
+            probe_seconds: 14,
+            low_power: true,
+            solo: false,
+        }];
+        assert_eq!(
+            next_due(&policies, &record, Trigger::Timer, Power::Ac).unwrap(),
+            Some(100 + FREE_POOL_RECHECK_SECONDS)
+        );
+        let detection = Detection {
+            adapter: account.adapter.clone(),
+            accounts: Some(vec![account.clone()]),
+            status: QuotaStatus::Available,
+        };
+        let tick = QuotaTick {
+            adapter: None,
+            trigger: Trigger::Timer,
+            power: Power::Ac,
+        };
+        let before = plan_tick(
+            &policies,
+            std::slice::from_ref(&record),
+            std::slice::from_ref(&detection),
+            &tick,
+            100,
+        )
+        .unwrap()
+        .batches;
+        assert!(before.is_empty());
+        let after = plan_tick(
+            &policies,
+            std::slice::from_ref(&record),
+            std::slice::from_ref(&detection),
+            &tick,
+            100 + FREE_POOL_RECHECK_SECONDS,
+        )
+        .unwrap()
+        .batches;
+        assert_eq!(after, vec![vec![account]]);
+        // A probe that found no headroom leaves the recorded reset in place.
+        assert_eq!(record.refusals[0].resets_unix_seconds, Some(100 + 50_000));
+    }
+
     #[test]
     fn next_owner_tick_reprobes_a_repaired_isolated_keychain() {
         let mut agy = account();

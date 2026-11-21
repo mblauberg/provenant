@@ -11,9 +11,10 @@ use provenant_os::{
 use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
+    io::Write,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 
 mod steward;
@@ -513,6 +514,10 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
                 || spawn_seed_worker(resolved.roots.state.as_path(), &resolved.home),
             );
         }
+        // Build-slot GC and prewarm follow a collection that finished its work.
+        for warning in schedule_build_hygiene(&resolved) {
+            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+        }
         failed.map_or(Ok(()), |error| Err(error.into()))
     })();
     match result {
@@ -690,6 +695,80 @@ fn spawn_seed_worker(state: &std::path::Path, home: &std::path::Path) -> Result<
         "tick-seed".into(),
     ];
     provenant_os::exec::spawn_detached(&argv, home).map_err(|error| error.to_string())
+}
+
+fn spawn_build_maintain(state: &Path, home: &Path, project: &Path) -> Result<(), String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let argv = [
+        executable.into_os_string(),
+        "--state-dir".into(),
+        state.as_os_str().to_owned(),
+        "--project".into(),
+        project.as_os_str().to_owned(),
+        "build".into(),
+        "maintain".into(),
+    ];
+    provenant_os::exec::spawn_detached(&argv, home).map_err(|error| error.to_string())
+}
+
+/// Run build-slot GC and queue one detached maintenance job per recently used
+/// project, beside the seed pass after a completed collection. Every failure is
+/// a warning: host hygiene never fails the tick.
+fn schedule_build_hygiene(resolved: &crate::roots::Resolved) -> Vec<String> {
+    use provenant_run::build::hygiene;
+    let state = resolved.roots.state.as_path();
+    let host = match provenant_config::PortTable::read_for(None, state) {
+        Ok(table) => table,
+        Err(error) => return vec![format!("build hygiene configuration unavailable: {error}")],
+    };
+    let default = (
+        host.build.slot_idle_duration().value,
+        host.build.snapshot_retention_duration().value,
+    );
+    let limit = provenant_config::ResolvedAdmissionClass::resolve("build", state, None, None).slots;
+    let mut settings: BTreeMap<String, (Duration, Duration)> = BTreeMap::new();
+    let mut projects: Vec<(PathBuf, String)> = Vec::new();
+    for binding in provenant_config::registered_gc_projects(&resolved.roots).unwrap_or_default() {
+        let Some(path) = binding.primary_checkout_hint().map(Path::to_path_buf) else {
+            continue;
+        };
+        let key = provenant_config::project_key_for(&path)
+            .unwrap_or_else(|| provenant_config::project_key(&path));
+        let resolved_settings = provenant_config::PortTable::read_for(Some(&path), state)
+            .map(|port| {
+                (
+                    port.build.slot_idle_duration().value,
+                    port.build.snapshot_retention_duration().value,
+                )
+            })
+            .unwrap_or(default);
+        settings.insert(key.clone(), resolved_settings);
+        projects.push((path, key));
+    }
+    let now_ms = provenant_run::build::ledger::now_unix_ms();
+    let now = UNIX_EPOCH + Duration::from_millis(now_ms);
+    let report = hygiene::gc_projects(&resolved.home, state, limit, now, |key| {
+        settings.get(key).copied().unwrap_or(default)
+    });
+    let mut warnings = report.warnings;
+    if report.rotated_ledgers > 0 {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "build ledger rotated; {} rotation(s) expired",
+            report.expired_ledgers
+        );
+    }
+    for (path, key) in projects.iter().take(8) {
+        if !hygiene::has_recent_job(state, key, now_ms) {
+            continue;
+        }
+        if let Err(error) = spawn_build_maintain(state, &resolved.home, path) {
+            warnings.push(format!(
+                "cannot schedule build maintenance for {key}: {error}"
+            ));
+        }
+    }
+    warnings
 }
 
 fn truncate_bytes(message: String, limit: usize) -> String {
@@ -2502,6 +2581,59 @@ mod tests {
             {"project":"/a","project_key":"a","state":"built"}]}"#;
         let older: SeedResult = serde_json::from_slice(older).unwrap();
         assert_eq!(seed_summary(&older), "ok:1");
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn seed_result_stores_only_the_masked_prepare_tail() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
+        let secret = "seed-result-secret-3391";
+        let _scope = provenant_redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
+        let raw_tail = format!("npm ERR! rejected {secret} (Cannot find package 'zod')\n");
+        // run_with_tail masks on the capture stream, so the tail tick receives
+        // is already masked. Mirror that with the same known-shapes core, then
+        // assert the persisted seed-result holds only that masked form.
+        let masked_tail =
+            String::from_utf8(provenant_redact::known_shapes(raw_tail.as_bytes()).unwrap())
+                .unwrap();
+        assert!(masked_tail.contains("[REDACTED]"));
+        assert!(!masked_tail.contains(secret));
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let directory = provenant_config::private_directory(&root, true).unwrap();
+        let project = seed_project(&root, "masked", true);
+        seed_pass(
+            &directory,
+            &root,
+            &seed_clock(),
+            true,
+            &SeedRequest::full(),
+            || Ok(SeedDiscovery::from_paths(vec![project.clone()])),
+            |_| {
+                Err(Box::new(crate::target_seed_build::PrepareFailed {
+                    index: 0,
+                    argv: vec!["node".into(), "generate.mjs".into()],
+                    exit: Some(7),
+                    tail: masked_tail.clone(),
+                }))
+            },
+        )
+        .unwrap();
+
+        let stored = directory
+            .read_bounded(SEED_RESULT.as_ref(), MAX_SEED_RESULT_BYTES)
+            .unwrap();
+        let stored = String::from_utf8(stored).unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(stored.as_bytes()).unwrap();
+        assert_eq!(wire["projects"][0]["state"], "prepare_failed");
+        assert!(stored.contains("[REDACTED]"), "{stored}");
+        assert!(!stored.contains(secret), "{stored}");
+        let records = seed_records(&directory);
+        assert!(matches!(
+            &records[0].outcome,
+            SeedProjectOutcome::PrepareFailed { tail, .. } if tail == &masked_tail
+        ));
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed

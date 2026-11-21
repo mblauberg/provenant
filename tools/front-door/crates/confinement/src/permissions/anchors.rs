@@ -329,6 +329,7 @@ pub fn required_anchors(
         .chain(&spec.process_executables)
         .chain(&spec.runtime_reads)
         .chain(spec.fabric_socket.iter())
+        .chain(spec.ssh_agent_socket.iter())
         .chain(
             spec.discovery_reads
                 .iter()

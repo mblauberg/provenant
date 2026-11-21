@@ -555,7 +555,8 @@ pub fn registered_gc_project_selection_with_progress(
         snapshot.offset = entries.position()?;
         snapshot.next_key = None;
         let Some(name) = entry.to_str() else {
-            return Err(ConfigError::InvalidProjectBinding);
+            warn_unrecognised_project(&registry_path.join(&entry));
+            continue;
         };
         if let Some(id) = name.strip_prefix(STAGE_PREFIX)
             && id
@@ -568,9 +569,11 @@ pub fn registered_gc_project_selection_with_progress(
         if snapshot.scanned > MAX_PROJECTS {
             return Err(ConfigError::InvalidProjectBinding);
         }
-        let project = name
-            .parse::<ProjectId>()
-            .map_err(|_| ConfigError::InvalidProjectBinding)?;
+        // Keep the bounded scan resilient to stray entries, matching bindings().
+        let Ok(project) = name.parse::<ProjectId>() else {
+            warn_unrecognised_project(&registry_path.join(&entry));
+            continue;
+        };
         snapshot.project_ids.insert(project);
     }
 
@@ -687,6 +690,24 @@ fn binding_id(path: &Path) -> ProjectId {
     ProjectId::from_bytes(id)
 }
 
+/// The host project directory for a binding. This is the single owner of the
+/// `state/projects/<id>` layout: host-project ports.json and config.toml
+/// readers and writers all resolve their directory here.
+pub fn project_binding_dir(state: &Path, project: ProjectId) -> PathBuf {
+    state.join(PROJECTS_DIR).join(project.to_string())
+}
+
+/// The host project directory for a checkout, named by its ProjectId binding
+/// rather than the 64-hex target-seed key. The id is derived from the canonical
+/// common Git dir, so linked checkouts share one directory. Returns `None`
+/// when the path has no usable Git marker or common dir.
+pub fn host_project_dir(state: &Path, project: &Path) -> Option<PathBuf> {
+    let marker = provenant_os::git::repository_marker(project)?;
+    let common_dir = marker.common_dir?;
+    let canonical = std::fs::canonicalize(common_dir).ok()?;
+    Some(project_binding_dir(state, binding_id(&canonical)))
+}
+
 fn existing_projects(roots: &Roots) -> Result<Option<Directory>, ConfigError> {
     existing_projects_at_state(roots.state.as_path())
 }
@@ -725,6 +746,17 @@ fn find_binding(
     Ok(found)
 }
 
+/// One clear warning for an entry that cannot be a binding directory. The
+/// path is named so an operator can move or remove the stray entry.
+fn warn_unrecognised_project(path: &Path) {
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "warning: ignoring unrecognised project directory at {}; it is not a project binding",
+        path.display()
+    );
+}
+
 fn bindings(
     projects: &Directory,
     projects_path: &Path,
@@ -733,7 +765,11 @@ fn bindings(
     let mut found = Vec::new();
     for entry in projects.entries()? {
         let entry = entry?;
-        let name = entry.to_str().ok_or(ConfigError::InvalidProjectBinding)?;
+        let path = projects_path.join(&entry);
+        let Some(name) = entry.to_str() else {
+            warn_unrecognised_project(&path);
+            continue;
+        };
         // Old staging records and dotfiles are not binding directories.
         if let Some(id) = name.strip_prefix(STAGE_PREFIX)
             && id
@@ -746,9 +782,13 @@ fn bindings(
         if count > MAX_PROJECTS {
             return Err(ConfigError::InvalidProjectBinding);
         }
-        let project = name
-            .parse::<ProjectId>()
-            .map_err(|_| ConfigError::InvalidProjectBinding)?;
+        // A stray directory (for example one made from an obsolete keyed
+        // ports path) is not a binding. Warn and skip it; only a recognised
+        // binding with a corrupt record refuses the whole inventory.
+        let Ok(project) = name.parse::<ProjectId>() else {
+            warn_unrecognised_project(&path);
+            continue;
+        };
         let directory = projects.open_verified_directory(&entry)?;
         verify_directory(&directory, &projects_path.join(name))?;
         // A concurrent first binding may have made the directory but not yet
@@ -1187,6 +1227,35 @@ mod tests {
         fs::write(next.join("HEAD"), "ref: refs/heads/main").unwrap();
         bind_project(&roots, ProjectLocation::new(&next).unwrap()).unwrap();
         assert_eq!(fs::read_to_string(stage.join(RECORD)).unwrap(), "partial");
+    }
+
+    #[test]
+    fn an_unknown_project_directory_does_not_break_the_inventory() {
+        let temp = tempdir();
+        let roots = roots(&temp);
+        let common = canonical_base(&temp).join("repo/.git");
+        fs::create_dir_all(common.join("objects")).unwrap();
+        fs::write(common.join("HEAD"), "ref: refs/heads/main").unwrap();
+        let binding = bind_project(&roots, ProjectLocation::new(&common).unwrap()).unwrap();
+
+        // A stray directory named by an obsolete 64-hex ports key is skipped
+        // with a warning; it does not invalidate every other binding.
+        let stray_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let stray = roots.state.as_path().join(PROJECTS_DIR).join(stray_key);
+        fs::create_dir_all(&stray).unwrap();
+        fs::write(stray.join("ports.json"), "{}").unwrap();
+        assert_eq!(registered_projects(&roots).unwrap(), vec![binding.clone()]);
+        assert_eq!(
+            registered_gc_projects(&roots).unwrap(),
+            vec![binding.clone()]
+        );
+        let selection = registered_gc_project_selection(&roots).unwrap();
+        assert_eq!(selection.project_ids, vec![binding.project_id()]);
+
+        // A recognised binding whose record is corrupt still refuses.
+        let binding_dir = project_binding_dir(roots.state.as_path(), binding.project_id());
+        fs::write(binding_dir.join(RECORD), "not a binding record").unwrap();
+        assert!(registered_projects(&roots).is_err());
     }
 
     #[test]

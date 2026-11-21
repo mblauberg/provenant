@@ -445,7 +445,12 @@ fn read(
                 crate::pr::observer::POLL,
             ) {
                 Ok(line) => {
-                    let line = gate_line(line, watch_head.as_deref());
+                    let mut line = gate_line(line, watch_head.as_deref());
+                    line.attach_failure_digest(
+                        edge.roots.state.as_path(),
+                        edge.cwd,
+                        &forge_request(deadline, cancel, pr_read_timeout),
+                    );
                     Reading {
                         settle: match line.wait_verdict(*complete) {
                             Some(true) => Settle::Succeeded,
@@ -1990,6 +1995,10 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                     human.push_str(&failure);
                     human.push('\n');
                 }
+                for digest in status.digest_rows() {
+                    human.push_str(&digest);
+                    human.push('\n');
+                }
             }
             if let Some(reading) = reading {
                 for digest in reading.data["digests"].as_array().into_iter().flatten() {
@@ -2060,6 +2069,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 serde_json::from_value::<crate::pr::status::Line>(reading.data.clone())
         {
             summary.lines.extend(status.failure_lines());
+            summary.lines.extend(status.digest_rows());
         }
     }
     crate::emit_summarised(

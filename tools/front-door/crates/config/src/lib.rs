@@ -58,18 +58,20 @@ pub mod detect;
 pub mod ports;
 mod project_binding;
 pub use ports::{
-    Adapter, CommandExitCodes, DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition, Forge,
-    ForgeOperation, ForgePort, ForgeResponse, HeadersObservation, Integration, LandBackend,
+    Adapter, BuildClean, BuildOffload, BuildOverflow, BuildPort, BuildPriority, BuildSoakPort,
+    BuildStrategyName, CommandExitCodes, DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition,
+    Forge, ForgeOperation, ForgePort, ForgeResponse, HeadersObservation, Integration, LandBackend,
     LandPort, PORTS_CONFIG, PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend, PortBackendKind,
     PortCommand, PortCommandBackend, PortCommandDisposition, PortCommandExecution,
     PortCommandPublication, PortCommandReceipt, PortCommandReceiptCollectionLock,
     PortCommandReceiptEntry, PortCommandReceiptInventory, PortCommandReceiptProof, PortError,
     PortEvidenceError, PortExecution, PortReceiptIssue, PortReceiptLifetime, PortSource, PortTable,
-    TierCommand, VerifyPort, VerifySelection, VerifyTier, WorktreeLayoutPort,
-    dispatch_port_backend, execute_port_command, execute_port_command_with_input,
-    infer_verify_base, land_backend, port_command_environment, port_command_receipt_proof,
-    port_command_receipts, port_source_layer, project_key, project_key_for, record_port_command,
-    remove_port_command_receipt, try_lock_port_command_receipts, verify_base_unset_error,
+    ResolvedBuildValue, TierCommand, VerifyAffectedPort, VerifyPort, VerifySelection, VerifyTier,
+    WorktreeLayoutPort, dispatch_port_backend, execute_port_command,
+    execute_port_command_with_input, infer_verify_base, land_backend, port_command_environment,
+    port_command_receipt_proof, port_command_receipts, port_source_layer, project_key,
+    project_key_for, record_port_command, remove_port_command_receipt,
+    try_lock_port_command_receipts, verify_base_unset_error,
 };
 mod release;
 pub mod repository_files;
@@ -107,9 +109,10 @@ pub use loader::{
 pub use presets::Profile;
 pub use project_binding::{
     GcProjectSelection, GcProjectStatus, ProjectBinding, ProjectLocation, bind_host, bind_project,
-    lookup_gc_project, lookup_host, lookup_project, lookup_project_at_state,
-    registered_gc_project_selection, registered_gc_project_selection_with_progress,
-    registered_gc_projects, registered_projects, transient_location,
+    host_project_dir, lookup_gc_project, lookup_host, lookup_project, lookup_project_at_state,
+    project_binding_dir, registered_gc_project_selection,
+    registered_gc_project_selection_with_progress, registered_gc_projects, registered_projects,
+    transient_location,
 };
 pub use provenant_records::Finding;
 pub use schema::{

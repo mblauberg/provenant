@@ -22,6 +22,7 @@ mod owner;
 mod refs;
 mod removal;
 mod setup;
+mod stranded;
 pub use census::*;
 pub use context::{
     with_context, with_context_using_facts, with_context_using_workers,
@@ -62,6 +63,7 @@ pub use removal::{
     created_branch, delete_ref_leased, delete_ref_leased_when, has_commit, landing_in_repo,
     ref_tip,
 };
+pub use stranded::{EditStats, edit_stats};
 
 use crate::repo::{
     GitRefName, GitRevision, RepoError, VerifiedRepo, VerifiedWorktree, verify_worktree,

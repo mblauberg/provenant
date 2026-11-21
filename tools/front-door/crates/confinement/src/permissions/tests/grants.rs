@@ -455,7 +455,8 @@ fn serialised_digest_cannot_authorise_without_a_verified_worktree() {
         verify_worktree_authority(
             &authority,
             &anchors,
-            &provenant_core::CredentialRoots::for_home(anchors.home)
+            &provenant_core::CredentialRoots::for_home(anchors.home),
+            &isolated_access_receipt()
         ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
@@ -482,8 +483,13 @@ fn concurrent_writers_prepare_caches_and_shared_git_state_in_one_home()
             let worktree = crate::repo::verify_worktree(&fixture.repo, &path)?;
             crate::worktrees::acquire_worktree_subject(worktree.repo())?;
             let branch = GitRefName::branch(&branch)?;
-            let authority =
-                WorktreeWriteAuthority::for_worktree(&worktree, &branch, &home, &credentials)?;
+            let authority = WorktreeWriteAuthority::for_worktree(
+                &worktree,
+                &branch,
+                &home,
+                &credentials,
+                &isolated_access_receipt(),
+            )?;
             Ok((worktree, branch, authority))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -504,7 +510,14 @@ fn concurrent_writers_prepare_caches_and_shared_git_state_in_one_home()
                     let credentials = &credentials;
                     scope.spawn(move || {
                         ready.wait();
-                        prepare_writer_directories(worktree, branch, authority, home, credentials)
+                        prepare_writer_directories(
+                            worktree,
+                            branch,
+                            authority,
+                            home,
+                            credentials,
+                            &isolated_access_receipt(),
+                        )
                     })
                 })
                 .collect::<Vec<_>>();
@@ -554,6 +567,60 @@ fn concurrent_writers_prepare_caches_and_shared_git_state_in_one_home()
 }
 
 #[test]
+fn writer_cache_credential_overlap_follows_lane_access() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::repo::verify_worktree;
+
+    let fixture = crate::test_support::Fixture::new()?;
+    let path = fixture._temp.path().join("lane");
+    fixture.run(&[
+        "worktree",
+        "add",
+        "-b",
+        "cache-credential-access",
+        path.to_str().ok_or("worktree path")?,
+    ])?;
+    let worktree = verify_worktree(&fixture.repo, &path)?;
+    crate::worktrees::acquire_worktree_subject(worktree.repo())?;
+    let home = provenant_os::fs::canonicalize(&fixture.home)?;
+    let credentials = provenant_core::CredentialRoots::for_home(&home);
+    let authority = WorktreeWriteAuthority::for_worktree(
+        &worktree,
+        &GitRefName::branch("cache-credential-access")?,
+        &home,
+        &credentials,
+        &isolated_access_receipt(),
+    )?;
+    let mut overlapping = credentials;
+    overlapping.add(
+        authority.cargo_cache.path.clone(),
+        provenant_core::CredentialScope::Subtree,
+        "fixture credential declaration",
+        provenant_core::CredentialKind::Store,
+    );
+    let selected_ref = GitRefName::branch("cache-credential-access")?;
+    assert!(
+        prepare_writer_directories(
+            &worktree,
+            &selected_ref,
+            &authority,
+            &home,
+            &overlapping,
+            &isolated_access_receipt(),
+        )
+        .is_err()
+    );
+    prepare_writer_directories(
+        &worktree,
+        &selected_ref,
+        &authority,
+        &home,
+        &overlapping,
+        &host_access_receipt(),
+    )?;
+    Ok(())
+}
+
+#[test]
 fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::repo::verify_worktree;
@@ -582,6 +649,7 @@ fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
         &selected_ref,
         &home,
         &provenant_core::CredentialRoots::for_home(&home),
+        &isolated_access_receipt(),
     )?;
     let cache = &authority.cargo_cache.path;
     let git_state = authority.git_state.path.clone();
@@ -604,7 +672,8 @@ fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
             &linked,
             &selected_ref,
             &home,
-            &provenant_core::CredentialRoots::for_home(&home)
+            &provenant_core::CredentialRoots::for_home(&home),
+            &isolated_access_receipt()
         )?
     );
     let other_branch_state =
@@ -626,7 +695,8 @@ fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
             &other_linked,
             &selected_ref,
             &home,
-            &provenant_core::CredentialRoots::for_home(&home)
+            &provenant_core::CredentialRoots::for_home(&home),
+            &isolated_access_receipt()
         )?
         .cargo_cache
         .path
@@ -637,7 +707,8 @@ fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
             &other_linked,
             &selected_ref,
             &home,
-            &provenant_core::CredentialRoots::for_home(&home)
+            &provenant_core::CredentialRoots::for_home(&home),
+            &isolated_access_receipt()
         )?
         .git_state
         .path
@@ -651,7 +722,8 @@ fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
             &sibling,
             &GitRefName::branch("sibling")?,
             &home,
-            &provenant_core::CredentialRoots::for_home(&home)
+            &provenant_core::CredentialRoots::for_home(&home),
+            &isolated_access_receipt()
         )?
         .cargo_cache
         .path
@@ -662,7 +734,8 @@ fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
             &sibling,
             &GitRefName::branch("sibling")?,
             &home,
-            &provenant_core::CredentialRoots::for_home(&home)
+            &provenant_core::CredentialRoots::for_home(&home),
+            &isolated_access_receipt()
         )?
         .git_state
         .path
@@ -674,6 +747,7 @@ fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
         &authority,
         &home,
         &provenant_core::CredentialRoots::for_home(&home),
+        &isolated_access_receipt(),
     )?;
     prepare_writer_directories(
         &linked,
@@ -681,6 +755,7 @@ fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
         &authority,
         &home,
         &provenant_core::CredentialRoots::for_home(&home),
+        &isolated_access_receipt(),
     )?;
     let mut metadata = Directory::open_anchor(cache)?.metadata()?;
     verify_cache_metadata(&metadata)?;
@@ -698,7 +773,8 @@ fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
                     &selected_ref,
                     &authority,
                     &home,
-                    &provenant_core::CredentialRoots::for_home(&home)
+                    &provenant_core::CredentialRoots::for_home(&home),
+                    &isolated_access_receipt()
                 ),
                 Err(PermissionError::AnchorMismatch)
             ),
@@ -714,7 +790,8 @@ fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
             &selected_ref,
             &authority,
             &home,
-            &provenant_core::CredentialRoots::for_home(&home)
+            &provenant_core::CredentialRoots::for_home(&home),
+            &isolated_access_receipt()
         ),
         Err(PermissionError::AnchorMismatch)
     ));
@@ -734,7 +811,8 @@ fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
             &recreated,
             &GitRefName::branch("recreated")?,
             &home,
-            &provenant_core::CredentialRoots::for_home(&home)
+            &provenant_core::CredentialRoots::for_home(&home),
+            &isolated_access_receipt()
         )?
         .cargo_cache
         .path
@@ -745,7 +823,8 @@ fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
             &recreated,
             &GitRefName::branch("recreated")?,
             &home,
-            &provenant_core::CredentialRoots::for_home(&home)
+            &provenant_core::CredentialRoots::for_home(&home),
+            &isolated_access_receipt()
         )?
         .git_state
         .path
@@ -791,8 +870,13 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
 
     let home = provenant_os::fs::canonicalize(&fixture.home)?;
     let credentials = provenant_core::CredentialRoots::for_home(&home);
-    let authority =
-        WorktreeWriteAuthority::for_worktree(&linked, &selected_ref, &home, &credentials)?;
+    let authority = WorktreeWriteAuthority::for_worktree(
+        &linked,
+        &selected_ref,
+        &home,
+        &credentials,
+        &isolated_access_receipt(),
+    )?;
     fixture.run(&["pack-refs", "--all"])?;
     let missing_parent = common.join("refs/heads/s3");
     if missing_parent.exists() {
@@ -800,7 +884,14 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
     }
     assert!(!missing_parent.exists());
 
-    prepare_writer_directories(&linked, &selected_ref, &authority, &home, &credentials)?;
+    prepare_writer_directories(
+        &linked,
+        &selected_ref,
+        &authority,
+        &home,
+        &credentials,
+        &isolated_access_receipt(),
+    )?;
     let grants = WorktreeWriteGrants::derive(&linked, &selected_ref);
     assert_eq!(authority.git_state.scope, PathScope::Subtree);
     assert_eq!(
@@ -863,7 +954,8 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
         verify_worktree_authority(
             &authority,
             &wrong_home,
-            &provenant_core::CredentialRoots::for_home(wrong_home.home)
+            &provenant_core::CredentialRoots::for_home(wrong_home.home),
+            &isolated_access_receipt()
         ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
@@ -871,6 +963,7 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
         &authority,
         &anchors,
         &provenant_core::CredentialRoots::for_home(anchors.home),
+        &isolated_access_receipt(),
     )?;
     assert_eq!(verified_grants.worktree.path, linked.path());
     assert_eq!(verified_grants.private_git_dir.path, private);
@@ -891,7 +984,8 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
         verify_worktree_authority(
             &authority,
             &mismatched,
-            &provenant_core::CredentialRoots::for_home(mismatched.home)
+            &provenant_core::CredentialRoots::for_home(mismatched.home),
+            &isolated_access_receipt()
         ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
@@ -902,7 +996,8 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
         verify_worktree_authority(
             &tampered,
             &anchors,
-            &provenant_core::CredentialRoots::for_home(anchors.home)
+            &provenant_core::CredentialRoots::for_home(anchors.home),
+            &isolated_access_receipt()
         ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
@@ -913,7 +1008,8 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
         verify_worktree_authority(
             &tampered,
             &anchors,
-            &provenant_core::CredentialRoots::for_home(anchors.home)
+            &provenant_core::CredentialRoots::for_home(anchors.home),
+            &isolated_access_receipt()
         ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
@@ -923,7 +1019,8 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
         verify_worktree_authority(
             &tampered,
             &anchors,
-            &provenant_core::CredentialRoots::for_home(anchors.home)
+            &provenant_core::CredentialRoots::for_home(anchors.home),
+            &isolated_access_receipt()
         ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
@@ -944,9 +1041,16 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
     std::fs::write(private.join("HEAD"), b"ref: refs/heads/s3/other\n")?;
     assert!(matches!(
         verify_worktree_authority(
-            &WorktreeWriteAuthority::for_worktree(&linked, &selected_ref, &home, &credentials)?,
+            &WorktreeWriteAuthority::for_worktree(
+                &linked,
+                &selected_ref,
+                &home,
+                &credentials,
+                &isolated_access_receipt()
+            )?,
             &anchors,
-            &credentials
+            &credentials,
+            &isolated_access_receipt()
         ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
@@ -955,6 +1059,7 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
         &authority,
         &anchors,
         &provenant_core::CredentialRoots::for_home(anchors.home),
+        &isolated_access_receipt(),
     )?;
     Ok(())
 }

@@ -251,8 +251,8 @@ pub struct TaskRequest {
     pub provider_timeout_seconds: u64,
     pub delivery_id: Option<DeliveryId>,
     /// Dispatch-time access beyond the mode's defaults.
-    #[serde(default, skip_serializing_if = "LaneAccess::is_default")]
-    pub access: LaneAccess,
+    #[serde(default, skip_serializing_if = "LaneAccessRequest::is_default")]
+    pub access: LaneAccessRequest,
 }
 
 /// Network reach for a lane's provider and the tools it runs.
@@ -270,10 +270,41 @@ pub enum NetworkAccess {
 /// Capability name to the source that enabled it, shared by graph and access records.
 pub type CapabilitySources = std::collections::BTreeMap<String, String>;
 
+/// The kind of explicit access path retained from dispatch input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneAccessGrantKind {
+    ReadRoot,
+    Attachment,
+    WriteRoot,
+}
+
+impl LaneAccessGrantKind {
+    pub fn flag(self) -> &'static str {
+        match self {
+            Self::ReadRoot | Self::Attachment => "--read-root",
+            Self::WriteRoot => "--write-root",
+        }
+    }
+
+    pub fn is_read(self) -> bool {
+        !matches!(self, Self::WriteRoot)
+    }
+}
+
+/// Canonical access path and its display spelling, retained until route
+/// policy resolves whether credential overlap is allowed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneAccessGrant {
+    pub kind: LaneAccessGrantKind,
+    pub path: std::path::PathBuf,
+    pub given: String,
+}
+
 /// Access a dispatch adds to its mode's defaults, sealed in the authority
 /// digest. Paths are canonical directories checked at the submission edge.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaneAccess {
+pub struct LaneAccessRequest {
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -295,6 +326,11 @@ pub struct LaneAccess {
     pub attachments: Vec<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<std::path::PathBuf>,
+    /// Explicit CLI/Fabric grant spellings retained for route-time refusal
+    /// messages. The canonical path lists above remain the authority used by
+    /// planning and confinement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dispatch_grants: Vec<LaneAccessGrant>,
     /// A graph node's materialised upstream results, read-only. The host
     /// grants it from its own graph-inputs directory under the state root,
     /// where a `--read-root` may not reach; any other path is refused.
@@ -329,7 +365,7 @@ pub fn host_publishing_requested(
             .unwrap_or(true)
 }
 
-impl LaneAccess {
+impl LaneAccessRequest {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
@@ -337,6 +373,63 @@ impl LaneAccess {
     pub fn network(&self, _writer: bool) -> NetworkAccess {
         self.network.unwrap_or(NetworkAccess::Open)
     }
+}
+
+/// The intended same-host access model for a lane.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneAccess {
+    #[default]
+    Host,
+    Isolated,
+}
+
+impl LaneAccess {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Isolated => "isolated",
+        }
+    }
+
+    pub fn is_isolated(self) -> bool {
+        self == Self::Isolated
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneAccessSource {
+    Default,
+    Host,
+    Project,
+    Template,
+    Tier,
+    Launch,
+    RoutePolicy,
+}
+
+impl LaneAccessSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Host => "host",
+            Self::Project => "project",
+            Self::Template => "template",
+            Self::Tier => "tier",
+            Self::Launch => "launch",
+            Self::RoutePolicy => "route_policy",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneAccessReceipt {
+    pub access: LaneAccess,
+    pub source: LaneAccessSource,
+    pub key: String,
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
 }
 
 /// Whether a lane discovers the host's user skills read-only.
@@ -523,7 +616,7 @@ pub struct WriterIntegration {
     pub extra: crate::ExtraFields,
     /// The bound remote name, or empty for a ref in the local repository.
     pub remote: String,
-    /// The bound push URL; absent for a local ref.
+    /// Credential-free identity of the bound push URL; absent for a local ref.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_url: Option<String>,
     /// Full destination ref, such as `refs/heads/main`.
@@ -698,6 +791,8 @@ pub struct RouteRecord {
     pub dependency_preparation: Option<DependencyPreparationReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_skills: Option<UserSkillsReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_access: Option<LaneAccessReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cargo_home: Option<CargoHomeReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3538,7 +3633,7 @@ mod tests {
             deliver: None,
             provider_timeout_seconds: 60,
             delivery_id: None,
-            access: LaneAccess::default(),
+            access: LaneAccessRequest::default(),
         };
         let mut wire = serde_json::to_value(&task)?;
         assert_eq!(serde_json::from_value::<TaskRequest>(wire.clone())?, task);
@@ -3589,7 +3684,7 @@ mod tests {
 
     #[test]
     fn lane_access_network_defaults_to_open() {
-        let access = LaneAccess::default();
+        let access = LaneAccessRequest::default();
         assert!(!access.database_ipc);
         assert_eq!(access.network(false), NetworkAccess::Open);
         assert_eq!(access.network(true), NetworkAccess::Open);
@@ -3597,16 +3692,26 @@ mod tests {
 
     #[test]
     fn default_access_denies_database_ipc_and_explicit_access_round_trips() {
-        let defaults = LaneAccess::default();
+        let defaults = LaneAccessRequest::default();
         assert!(!defaults.database_ipc);
-        let access = LaneAccess {
+        let access = LaneAccessRequest {
             database_ipc: true,
+            dispatch_grants: vec![LaneAccessGrant {
+                kind: LaneAccessGrantKind::ReadRoot,
+                path: std::path::PathBuf::from("/Users/alice/.ssh"),
+                given: "/Users/alice/project/../.ssh".into(),
+            }],
             ..Default::default()
         };
         let value = serde_json::to_value(&access).expect("access JSON");
         assert_eq!(value["database_ipc"], true);
         assert_eq!(
-            serde_json::from_value::<LaneAccess>(value).expect("access round trip"),
+            value["dispatch_grants"][0]["given"],
+            "/Users/alice/project/../.ssh"
+        );
+        assert_eq!(value["dispatch_grants"][0]["path"], "/Users/alice/.ssh");
+        assert_eq!(
+            serde_json::from_value::<LaneAccessRequest>(value).expect("access round trip"),
             access
         );
         assert!(!access.is_default());

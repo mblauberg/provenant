@@ -237,7 +237,16 @@ pub enum Command {
     Verify {
         /// Free-form tier name from the effective verify port
         tier: Option<String>,
+        /// Verify this exact commit instead of the current checkout
+        #[arg(long, value_name = "REV")]
+        commit: Option<String>,
+        /// Apply the configured affected-package selection policy
+        #[arg(long)]
+        affected: bool,
     },
+    /// Inspect and maintain build slots and their report
+    #[command(subcommand)]
+    Build(Build),
     /// Run fast repository checks
     #[command(subcommand)]
     Check(Check),
@@ -254,6 +263,29 @@ pub enum Command {
     },
     #[command(subcommand, hide = true)]
     Internal(Internal),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Build {
+    /// Show build slot status
+    Status,
+    /// Report build outcomes since an optional duration
+    Report {
+        /// Include outcomes from this duration, for example 7d
+        #[arg(long, value_name = "DUR", value_parser = positive_span_seconds)]
+        since: Option<u64>,
+    },
+    /// Reset a project's build slots
+    Reset {
+        /// Reset only this slot index
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64))]
+        slot: Option<u64>,
+        /// Recreate the checkout and target cache
+        #[arg(long)]
+        full: bool,
+    },
+    /// Run build slot maintenance for a project
+    Maintain,
 }
 
 fn landing_strategy_parser()
@@ -666,6 +698,9 @@ pub struct GraphRunArgs {
     /// Access for a plain task; writer targets imply worktree-write
     #[arg(long, value_parser = ["read-only", "worktree-write"])]
     pub mode: Option<String>,
+    /// Tree a read-only task reads: the fetched upstream head, or the local checkout
+    #[arg(long, value_parser = ["upstream", "local"])]
+    pub source: Option<String>,
     /// Existing writer worktree
     #[arg(long, conflicts_with = "branch")]
     pub worktree: Option<PathBuf>,
@@ -678,6 +713,9 @@ pub struct GraphRunArgs {
     /// Pin a review to this pull request (host resolves its base and head)
     #[arg(long, value_name = "NUMBER", catalog_u64_range = 1..)]
     pub pr: Option<u64>,
+    /// Expected head for `--pr`: re-read the forge briefly, then refuse a persistent mismatch
+    #[arg(long, value_name = "SHA", requires = "pr")]
+    pub head: Option<String>,
     /// Advisory relative paths; empty or unset means the whole worktree; repeatable
     #[arg(long = "write-scope")]
     pub write_scope: Vec<String>,

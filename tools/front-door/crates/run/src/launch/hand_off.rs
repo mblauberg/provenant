@@ -349,6 +349,15 @@ impl RunStore {
                     .ok_or(RunError::Validation("delivery lacks host context"))?;
                 let host = host
                     .with_repo_facts(self.repo_facts())
+                    .with_lane_access(
+                        plan.route.lane_access.clone(),
+                        plan.route
+                            .sandbox
+                            .as_ref()
+                            .map(|sandbox| sandbox.effective)
+                            .or(Some(false)),
+                    )
+                    .with_policy(policy.clone())
                     .cancellable(&setup_cancel)
                     .prepare(writer, deliver)?;
                 host.seal_launch_binding(&self.attempt_dir(id, false)?, scope)?;
@@ -392,7 +401,17 @@ impl RunStore {
                         .with_repo_facts(self.repo_facts())
                         .with_host_state(self.context.state_root.as_path())
                 });
-                let host = host.prepare_stop_publish(writer_request, &request)?;
+                let host = host
+                    .with_lane_access(
+                        plan.route.lane_access.clone(),
+                        plan.route
+                            .sandbox
+                            .as_ref()
+                            .map(|sandbox| sandbox.effective)
+                            .or(Some(false)),
+                    )
+                    .with_policy(policy.clone())
+                    .prepare_stop_publish(writer_request, &request)?;
                 host.seal_stop_publish_binding(&self.attempt_dir(id, false)?, scope)?;
                 holder.host_delivery = Some(host);
                 holder.encode()
@@ -416,7 +435,8 @@ impl RunStore {
         }
         let mut profile_file = None;
         if let Some(confinement) = &mut plan.confinement {
-            let prepared = confinement.prepare_git(&setup_cancel, &policy);
+            let prepared =
+                confinement.prepare_git(&setup_cancel, &policy, plan.route.lane_access.as_ref());
             if let Err(error) = prepared {
                 lease.withdraw_unlaunched().map_err(|release| {
                     HandOff::Protected(format!("Git setup: {error}; custody withdrawal: {release}"))
@@ -523,7 +543,15 @@ impl RunStore {
                 }
             }
         }
-        strip_hosted_credentials(&mut plan.environment);
+        strip_hosted_credentials(
+            &mut plan.environment,
+            plan.route
+                .lane_access
+                .as_ref()
+                .map_or(provenant_records::LaneAccess::Host, |receipt| {
+                    receipt.access
+                }),
+        );
         // Route records name models as `adapter/model`; prefix only a
         // provider-native one (which may itself contain `/`).
         let provider = plan.route.provider.as_deref().unwrap_or_default();
@@ -703,12 +731,16 @@ impl Drop for CancelWatch {
     }
 }
 
-/// Hosted-cloud and third-party credentials never reach a lane, sandboxed
-/// or not. Adapters already rebuild the environment from an allowlist; this
-/// holds the boundary if an allowlist ever grows. `GH_TOKEN` is the one
-/// credential the host hands a publishing lane on purpose.
-pub(crate) fn strip_hosted_credentials(environment: &mut Vec<(OsString, OsString)>) {
-    environment.retain(|(name, _)| !hosted_credential(name));
+/// Isolated lanes strip hosted-cloud and third-party credentials. Cross-host
+/// and ungranted-provider credential boundaries are enforced at that crossing.
+/// `GH_TOKEN` remains available to publishing lanes.
+pub(crate) fn strip_hosted_credentials(
+    environment: &mut Vec<(OsString, OsString)>,
+    access: provenant_records::LaneAccess,
+) {
+    if access.is_isolated() {
+        environment.retain(|(name, _)| !hosted_credential(name));
+    }
 }
 
 fn hosted_credential(name: &std::ffi::OsStr) -> bool {
@@ -793,7 +825,9 @@ mod tests {
             .map(|(name, _)| ((*name).into(), format!("value:{name}").into()))
             .collect();
         let original = environment.clone();
-        super::strip_hosted_credentials(&mut environment);
+        super::strip_hosted_credentials(&mut environment, provenant_records::LaneAccess::Host);
+        assert_eq!(environment, original);
+        super::strip_hosted_credentials(&mut environment, provenant_records::LaneAccess::Isolated);
         for (name, value) in original {
             let retained = environment.iter().find(|(key, _)| key == &name);
             if super::hosted_credential(&name) {

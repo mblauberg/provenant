@@ -8,6 +8,12 @@ Use `provenant help --all` for commands and `provenant config schema` for config
 The outward contract is declared in `crates/cli/src/external_contract.rs`, covering commands, lane environment and JSON schemas.
 `scripts/generate-reference` renders `external-contract.md` from that declaration through `provenant-cli print-reference-data`; the same data derives threshold behaviour from the policy table. Every enumeration an owner declares for the editor, such as `gc.projects.{project}.foreign_worktrees`, publishes its values and runtime default through the same data; the configuration reference fills them in and refuses an entry that restates them.
 The [consumer contract](consumer-contract.md) describes output and variable tiers; command names may change freely. Direct internal-state readers are unsupported.
+
+## Configuration schema completeness
+
+Every setting a registered domain deserializes has field metadata and a `config/harness-knobs.json` entry. The typed schema is the authority: a probe over each domain's serde types names every accepted setting, recording each struct's declared fields independently of whether a value can be constructed, so an unprobeable field cannot hide the settings after it. A test fails when metadata or the registry omits one. Metadata and the registry cannot replace that source, because a setting absent from all three lists would otherwise pass unnoticed.
+
+- Why: three independently maintained lists drift silently unless each is checked against what the runtime actually accepts.
 Conditional PR wait observations report `review=unknown` because the REST response has no GraphQL review decision; CI settlement still determines the wait verdict. One-shot `pr status` keeps its detailed review observation.
 Repository CI reads its tier declaration from `config/ports.json`; the optional `.provenant/ports.json` entry links that same table, so running repository checks requires neither an installed Provenant nor a `.provenant` directory.
 Repository CI selection, its gate and quarantine validation are specified in [CI](ci.md).
@@ -28,6 +34,32 @@ bytes, and invalid or conflicting arguments are rejected.
 The catalogue derives flag relationships and child commands from the parser, and declares each command's configuration domains. Every catalogued command resolves to scoped help containing its metadata.
 
 - Why: inspection must be safe outside a checkout and paths must not change in transit.
+
+## Build commands
+
+The build command surface is `provenant build status [--json]`,
+`provenant build report [--since DUR] [--project P] [--json]`,
+`provenant build reset [--project P] [--slot N] [--full]`, and
+`provenant build maintain --project P`. The `--json`, `--project` and
+`--full` flags use the shared global options. `status` reports each slot's
+project, index, health and allocated bytes, and the store size. `report`
+aggregates the outcome ledger within `--since` and prints one verdict per soak
+criterion; churn uses the configured affected-package selector against a
+temporary checkout of the build store, cached per snapshot pair, plus the
+always-rebuild set, and a row whose selection cannot be computed stays unknown.
+`reset` clears quarantine and resets one `--slot` or every slot of the
+project; `--full` recreates the checkout and target cache. `maintain` runs one
+prewarm or canary on the verify base when recency, load and the hourly budget
+allow; when it is skipped it reports why as a warning rather than failing.
+
+`provenant verify [TIER] [--commit REV] [--affected]` runs one tier through the
+build strategy. `--commit` pins the revision to verify, and `--affected` applies
+the configured affected-package selection. The report carries `commit`,
+`strategy`, `slot` and `exception` beside the tier result.
+
+- Why: an operator must inspect and reset slots without reading their files,
+  and verification of a candidate or a selected subset must use the same
+  strategy as a lane's builds.
 
 ## Console catalogue and peer coverage
 
@@ -165,6 +197,17 @@ default, expands with `--full`, and exposes typed records and native presence
 with `--json`. Pagination uses `--limit` and `--cursor`; `--session` selects the
 exact chair session for the session-start digest. Settled custody leaves the
 active view. The digest reads this view instead of extracting PRs from prose.
+`provenant status` and `provenant worktree list` also report a `stranded work`
+section: a registered or project worktree with uncommitted edits and no live
+holder, whether it is dirty or an interrupted Git operation is in progress.
+It is named by its branch and linked issue or PR when the branch carries one,
+or labelled as a detached HEAD when it does not; a row also names an operation
+left in progress. Each row gives the changed file and line counts, the age of
+the newest edit and the `run implement --worktree` command that adopts the work. A clean worktree,
+one with a live lane and one whose holder cannot be determined are not called
+stranded. The section is advisory state only: it never refuses a command or
+signals a process. `status --json` carries `stranded_work`; `worktree list` keeps
+its worktree array in JSON and adds the section to human output.
 Graph status rows share the same keys across graph, node and attempt kinds.
 An attempt row carries `provenant_version` and `release_source_digest` read
 from that attempt's stored trace; both keys are absent when the observation is.
@@ -389,9 +432,15 @@ worktree links without following them through the host filesystem.
 
 `pr status [NUMBER ...]` reports each pull request's head, check rollup and failed check names in one batched GraphQL read when available; omitting numbers selects this account's open pull requests. The REST observer shares ETag-backed check pages by repository and head SHA. Batched results have a short per-pull-request freshness window and fall back to REST when GraphQL cannot answer; a REST rate limit falls back to GraphQL when available.
 
+### Integration batch membership
+
+`pr status` infers integration batches from bounded Git history: a member whose head commit is contained in an open batch pull request's head, or in the local `land/` candidate branch that `land --target` gates, reads `in batch #M (head merged); own CI superseded` with the batch's CI state beside it. The member's cancelled checks are not reported as failures. A member whose head moved after it was batched is flagged `head moved since batching`. For a batch pull request, `pr status M` lists its members and attributes each changed file to the member whose commit last touched it, newest first. Membership is a state report from observed history only: it adds no refusal and changes no landing decision.
+
+- Why: a cancelled member run must not hide the batch CI that superseded it, and a review finding on the batch must be assignable to a member.
+
 `wait --pr NUMBER` is the one way to block on a pull request. By default a failed check settles the PR immediately; `--until complete` waits until all observed checks finish and no Actions workflow run for the head is active, then reports each failed or cancelled check with its link when available. Every wait reads head-filtered Actions runs through the shared observer; if runs cannot be read or none are found, it warns once per wait and falls back to observed checks. A head with no Actions run yet cannot settle a wait, because a push's workflows start after the push: a reading that would settle (a pass, or any result under `--until complete`) stays pending for `domains.wait.actions_grace_seconds` (default 60, 0 disables) from the first reading of that head, then settles on the observed checks; a failure still settles a default wait at once. A run that stays in `waiting` (a pending environment approval, for example), `queued` or `in_progress` counts as active, so under `--until complete` it holds the wait until the timeout. Failure lines escape terminal controls, clip a check name to 120 bytes and show a link only when it is an http(s) URL of at most 300 bytes without whitespace. This uses the same PR observer and applies separately from the choice of `--all`, `--any` or `--fail-fast` across targets. By default a merged or closed PR settles immediately; completion mode first waits for its observed checks and Actions runs. It reads CI through the shared observer and reports the PR's class as it changes (`--follow` for every transition), always naming the head being watched. `--head SHA` pins the wait to one head: until GitHub reports that exact SHA the reading stays pending whatever the previous head's checks say, so a push's predecessor can never produce a verdict. Without `--head`, when the PR's branch is known locally and its tip differs from GitHub's head, the wait warns and watches the local tip instead. At a timeout it prints the last known check summary (including a complete wait's failing head whose checks still run), naming the checks still pending by their observed names, and, when no check was ever reported, the next step: check the workflow triggers or push an empty commit to start CI. Its budget is `--timeout`, or `domains.wait.pr_complete_timeout_seconds` (default 3600 seconds) under `--until complete` and `domains.wait.timeout_seconds` (default 300 seconds) otherwise, clamped to `domains.wait.max_timeout_seconds`. That is the `wait` budget only. The landing gate uses `domains.pr.land.gate.timeout_seconds` (default 3600 seconds, overridable with `land --wait`); graph waits use `domains.fabric.graph.launch_wait_seconds` (default 55 seconds). These are separate knobs with separate defaults, not one shared policy. The last line names every target's settle state (`settled ok`, `failed`, `needs input` or `still running at timeout`) and the one next command, and compact output keeps that line through an owner summary. The observation method is diagnostic detail shown only under `--full` and in the JSON envelope, never as the last line of default output.
 
-`ci failures pr NUMBER` and `ci failures run ID` report failing test names, panic locations and messages, and error lines from failed job logs. The parser handles nextest and legacy `cargo test` output. Human output is compact by default; `--json` returns structured evidence. Failed logs share the CI observation cache for a short freshness window. Unreadable logs and bounded output remain visible in the result.
+`ci failures pr NUMBER` and `ci failures run ID` report the failing side of CI from the Actions jobs endpoint, not from a whole-run `gh run view --log-failed` read that waits for the slowest job. Each ended job's log is fetched on its own through `repos/OWNER/REPO/actions/jobs/ID/logs`, following the 302 redirect to the signed log archive, so a job's evidence is available as soon as that job ends. The digest names the failed step and, for a test step, each failing nextest (or legacy `cargo test`) test with its first panic location and message, or the first `error:` / `##[error]` lines when it was not a test step. Each job is classified as failed, cancelled, or failed only because its gated inputs were cancelled; an aggregate gate whose only bad inputs were cancelled is cancellation, never a real failed job. The gate's inputs come from its own dependency metadata when the jobs endpoint publishes it, otherwise from the workflow file pinned to the run's head SHA; conclusions from jobs the gate does not aggregate are never evidence, and every declared matrix member must produce a job. When those inputs cannot be resolved, the gate is reported as a failure with uncertain cause rather than demoted to a cancellation. When the pull request's changed files can be read, a failure in an untouched crate or file carries `possibly unrelated: PATH untouched by this PR`; an unreadable file list suppresses the advisory rather than reading as an empty delta. A rerun is suggested but never executed. The same digest appears in compact human output and in `--json`; failed logs and per-job metadata share the CI observation cache for a short freshness window; logs are read with terminal escape sequences allowed and stripped before parsing, and a log that cannot be read reports the gh message as unreadable evidence rather than as zero failures. Unreadable logs and bounded output remain visible in the result. `pr status` and `wait --pr` report this digest for the failed checks they carry, in compact human output and in `--json`, rather than only pointing at a separate command.
 
 ### Wait/pr causes
 

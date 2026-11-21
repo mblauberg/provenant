@@ -2,6 +2,7 @@
   "schema_version": 1,
   "documented_fields": [
       "profile",
+      "lanes.access",
       "lanes.max_concurrency",
       "lanes.max_concurrency_read_only",
       "lanes.max_depth",
@@ -38,8 +39,7 @@
       "providers.{provider}.update",
       "providers.{provider}.runtime_deadline_seconds",
       "providers.codex.clean_config",
-      "gc.graph_checkpoint_days",
-      "gc.sweep_budget"
+      "gc.graph_checkpoint_days"
   ],
   "host_gc_settings": {
     "path": "gc",
@@ -80,6 +80,7 @@
       "refresh_min_budget_seconds": {"type": "int", "allowed": "1 to 600 seconds", "min": 1, "max": 600, "default": "60", "effect": "Minimum wall-clock budget kept for a quota refresh after other work; it must not exceed refresh_budget_seconds."},
       "login_expiry_warning_seconds": {"type": "int", "allowed": "0 or more seconds", "min": 0, "default": "864000", "effect": "Warn this many seconds before a provider login expires."},
       "display.headline": {"type": "enum", "effect": "Which quota window the headline shows: auto, 5h or weekly."},
+      "display.icon": {"type": "string", "allowed": "icon selection", "default": "most_constrained", "effect": "Which account's usage drives the quota menu-bar icon."},
       "polling_intervals.{adapter}.timer_seconds": {"type": "int", "allowed": "1 to 2305843009213693951 seconds", "min": 1, "default": "unset", "effect": "Timer cadence for quota polling of this adapter.", "max": 2305843009213693951},
       "polling_intervals.{adapter}.panel_seconds": {"type": "int", "allowed": "1 to 2305843009213693951 seconds", "min": 1, "default": "unset", "effect": "Panel refresh cadence for quota polling of this adapter.", "max": 2305843009213693951},
       "calibration.{account}.five_hour": {"type": "int", "allowed": "0 to 100", "min": 0, "max": 100, "default": "unset", "effect": "Calibrated five-hour usage percentage for this account."},
@@ -300,7 +301,18 @@
       "compose.completion": {"type": "string", "allowed": "event or bounded_subscription", "default": "unset", "effect": "Completion component of the landing composition."},
       "projects.{project}.compose": {"type": "table", "allowed": "partial landing composition table", "default": "unset", "effect": "Composition overrides for this project's landing candidate."},
       "projects.{project}.branches": {"type": "array", "allowed": "list of branches", "default": "unset", "effect": "Branches considered by this project's landing candidate."},
+      "projects.{project}.compose.dependencies": {"type": "string", "allowed": "independent or stack", "default": "unset", "effect": "Dependency component of this project's landing composition."},
+      "projects.{project}.compose.candidate": {"type": "string", "allowed": "single or batch", "default": "unset", "effect": "Candidate component of this project's landing composition."},
+      "projects.{project}.compose.schedule": {"type": "string", "allowed": "immediate, ordered or forge_queue", "default": "unset", "effect": "Schedule component of this project's landing composition."},
+      "projects.{project}.compose.publication": {"type": "string", "allowed": "exact_candidate or forge", "default": "unset", "effect": "Publication component of this project's landing composition."},
+      "projects.{project}.compose.completion": {"type": "string", "allowed": "event or bounded_subscription", "default": "unset", "effect": "Completion component of this project's landing composition."},
       "tiers.{tier}.compose": {"type": "table", "allowed": "partial landing composition table", "default": "unset", "effect": "Composition overrides for this risk tier's landing candidate."},
+      "tiers.{tier}.branches": {"type": "array", "allowed": "list of branches", "default": "unset", "effect": "Branches considered by this risk tier's landing candidate."},
+      "tiers.{tier}.compose.dependencies": {"type": "string", "allowed": "independent or stack", "default": "unset", "effect": "Dependency component of this risk tier's landing composition."},
+      "tiers.{tier}.compose.candidate": {"type": "string", "allowed": "single or batch", "default": "unset", "effect": "Candidate component of this risk tier's landing composition."},
+      "tiers.{tier}.compose.schedule": {"type": "string", "allowed": "immediate, ordered or forge_queue", "default": "unset", "effect": "Schedule component of this risk tier's landing composition."},
+      "tiers.{tier}.compose.publication": {"type": "string", "allowed": "exact_candidate or forge", "default": "unset", "effect": "Publication component of this risk tier's landing composition."},
+      "tiers.{tier}.compose.completion": {"type": "string", "allowed": "event or bounded_subscription", "default": "unset", "effect": "Completion component of this risk tier's landing composition."},
       "approval_sources": {"type": "array", "allowed": "list of approval sources", "default": "[\"provenant_review\", \"forge\"]", "effect": "Sources that may approve a landing candidate."},
       "projects.{project}.approval_carry": {"type": "string_list", "allowed": "list of clean deltas", "default": "unset", "effect": "Clean deltas that carry an approval for this project."},
       "tiers.{tier}.approval_carry": {"type": "string_list", "allowed": "list of clean deltas", "default": "unset", "effect": "Clean deltas that carry an approval for this risk tier."},
@@ -374,6 +386,7 @@
       "defaults.lane.max_context": {"type": "int", "allowed": "tokens, 1 or more", "default": "unset", "effect": "Enforced largest context for a lane on this model."},
       "defaults.lane.max_turns": {"type": "int", "allowed": "turns, 1 or more", "default": "unset", "effect": "Enforced most turns for a lane on this model."},
       "defaults.lane.stop_early_ok": {"type": "bool", "allowed": "true or false", "default": "false", "effect": "false asks writers to report completion through the shared handoff."},
+      "defaults.lane.access": {"type": "enum", "default": "inherit lanes.access", "effect": "Override host and project lane access for matching routes unless an explicit launch, template or tier knob wins. rules.policy.lane.access uses the same values."},
       "defaults.lane.user_skills": {"type": "enum", "default": "inherit domains.lanes.user_skills", "effect": "Override host and project user skill discovery for matching routes. rules.policy.lane.user_skills uses the same values."},
       "defaults.lane.read_only": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "true refuses write lanes on this model."},
       "defaults.result.check": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "Check the result for the required sections before accepting it."},
@@ -492,6 +505,9 @@
       "policy.PREPARATION_GH_SHIM_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "An unsandboxed lane whose counting gh wrapper cannot be installed runs gh unmediated; the receipt records it as unmediated. The setting source is named in each warning."},
       "policy.PREPARATION_PREPARE_WRITER_DEPENDENCIES_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Automatic dependency setup warns with a redacted cause and lets the writer continue; cancellation still stops preparation. The setting source is named in each warning."},
       "policy.LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Unreadable or unrepresentable lane-port settings warn and leave the lane without an allocated port block. The setting source is named in each warning."},
+      "policy.DELIVERY_HOST_TRANSPORT_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Host delivery warns when using ordinary host transport commands or URL features, naming the access source."},
+      "policy.CONTINUATION_LINK_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Host access copies linked retained files by content, warning with the access source."},
+      "policy.LAUNCH_SANDBOX_UNAVAILABLE_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "An unavailable sandbox backend warns and proceeds for host access, naming the access source and recording the reason in the receipt."},
       "policy.LAUNCH_PROCESS_TREE_INTERVAL_OR_WARN_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Unreadable run settings warn and launch the lane without a process-tree sampler; admission then skips its memory limit with a warning. The setting source is named in each warning."},
       "policy.LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Unreadable run settings warn and launch the lane with the shipped retained-custody limit. The setting source is named in each warning."},
       "policy.PORT_BLOCKS": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "An exhausted port-block pool warns the writer and reports the effective count, its host or compiled origin, and the setting that can raise the pool or disable allocation. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
@@ -503,9 +519,12 @@
       "policy.RUN_WRITER_GC_SETTINGS_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "An unreadable GC configuration warns and uses compiled defaults; an unavailable disk policy context warns and skips the check. The setting source is named in each warning."},
       "policy.SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "An unobservable disk floor or available space warns and allows dispatch; measured low space retains the configurable floor. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.CONFINEMENT_SOURCE_AGENT_CONFIG_NONE": {"type": "enum", "allowed": "warn, off", "default": "off", "effect": "Project-local agent configuration is not a credential boundary; operators may opt into overlap warnings. The setting source is named in each warning."},
-      "policy.LAUNCH_FILTER_OPTIONAL_GRANTS_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Optional discovered grants that cannot be represented in SBPL are omitted and reported; required grants remain subject to confinement validation. The setting source is named in each warning."},
+      "policy.CREDENTIAL_ROOTS_OVERLAP_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Under host access, credential roots that overlap lane roots or cannot be resolved precisely warn with their paths, effective access and source, then preparation proceeds; isolated access keeps the existing refusals. The setting source is named in each warning."},
+      "policy.LAUNCH_NATIVE_AUTH_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Host access warns and uses native provider authentication when managed authentication is unavailable or bypassed. The effective access and its source are named."},
+      "policy.LAUNCH_FILTER_OPTIONAL_GRANTS_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Optional discovered grants that cannot be represented in SBPL are omitted and reported; required grants remain subject to confinement validation. Credential-overlapping discoveries warn with the path, effective access and source, and are retained under host access while isolated access keeps its omission. The setting source is named in each warning."},
       "policy.LAUNCH_LAUNCHSPEC_COMPLETE_TOOL_REQUIREMENTS_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Unrepresentable optional write grants are omitted; unrepresentable library dependencies make the reported closure incomplete. The setting source is named in each warning."},
       "policy.PROJECT_PATHS_RESOLVE_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "A configured optional project path whose canonical target cannot be represented is omitted with its setting key and reason. The setting source is named in each warning."},
+      "policy.PROJECT_PATHS_CREDENTIAL_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Under host access, project grants overlapping credential roots are accepted with a warning naming the paths, effective access and source; isolated access keeps its existing filtering. The setting source is named in each warning."},
       "policy.OPENCODE_PREPARE_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Absent separate private state warns and uses the already-confined attempt scratch directory for OpenCode configuration. The setting source is named in each warning."},
       "policy.AGY_PREPARE_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Absent separate private state warns and uses the already-confined attempt scratch directory as Agy's home. The setting source is named in each warning."},
       "policy.CLAUDE_PREPARE_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Absent separate private state warns and uses the already-confined attempt scratch directory for Claude configuration. The setting source is named in each warning."},
@@ -579,16 +598,41 @@
     "path": "build",
     "where": "the `build` object of host `state/ports.json`, a host-project `state/projects/<key>/ports.json` or project `.provenant/ports.json`",
     "settings": {
-      "strategy": {"type": "string", "allowed": "slots, lane_seed, lane, wrapper, command", "default": "lane_seed", "effect": "Build strategy port. Declared and layered now; a later slice consumes it. The builtin stays lane_seed so this slice changes no behaviour."},
+      "strategy": {"type": "string", "allowed": "slots, lane_seed, lane, wrapper, command", "default": "lane_seed", "effect": "Selects the build runtime strategy. Slots uses the shared slot pool; lane_seed and lane execute locally, with lane_seed requesting target seeding at launch; command runs the configured build.command wrapper. Wrapper is unavailable and warns before falling back to lane_seed."},
       "prepare": {"type": "argv_list", "allowed": "ordered arrays of argv; each program is non-empty", "default": "[]", "effect": "Ordered argv arrays run from the checkout root before a seed build; a failing command fails that build."},
       "seed.stale_after": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "24h", "effect": "Age after which a seed is stale. A bad value warns and falls back to 24h with source default."},
-      "wrapper.argv": {"type": "argv", "allowed": "argv array with a non-empty program when set", "default": "[]", "effect": "Wrapper argv for the wrapper strategy; declared now and consumed by a later slice."},
-      "command.argv": {"type": "argv", "allowed": "argv array with a non-empty program when set", "default": "[]", "effect": "Replacement build command argv for the command strategy; declared now and consumed by a later slice."},
-      "offload": {"type": "string", "allowed": "generic build offload policy name", "default": "auto", "effect": "Offload policy for the build port; declared now and consumed by a later slice."},
-      "overflow": {"type": "string", "allowed": "generic build overflow policy name", "default": "local", "effect": "Overflow policy when build slots are busy; declared now and consumed by a later slice."},
-      "clean": {"type": "string", "allowed": "generic build clean policy name", "default": "none", "effect": "Clean policy before a build; declared now and consumed by a later slice."},
-      "stacks": {"type": "string_list", "allowed": "stack override names", "default": "[]", "effect": "Stack overrides for a consumer repository; declared now and consumed by a later slice."},
-      "snapshot_retention": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "7d", "effect": "How long a build snapshot is retained; declared now and consumed by a later slice."}
+      "wrapper.argv": {"type": "argv", "allowed": "argv array with a non-empty program when set", "default": "[]", "effect": "Reserved argv for the unavailable wrapper strategy; selecting wrapper warns and uses lane_seed."},
+      "command.argv": {"type": "argv", "allowed": "argv array with a non-empty program when set", "default": "[]", "effect": "Program and arguments executed by the command strategy before the intercepted build argv; arguments are not shell-split."},
+      "command.exit_codes.success": {"type": "int_list", "allowed": "distinct process exit codes", "default": "[0]", "effect": "Exit codes treated as successful by the command strategy."},
+      "command.exit_codes.unknown": {"type": "int_list", "allowed": "distinct process exit codes, disjoint from success", "default": "[]", "effect": "Exit codes treated as unknown by the command strategy."},
+      "command.exit_codes.other": {"type": "enum", "allowed": "refused, unknown", "default": "refused", "effect": "Disposition for command exit codes not listed as success or unknown."},
+      "offload": {"type": "string", "allowed": "auto, off", "default": "auto", "effect": "Auto allows supported Rust build jobs to use slots; off runs every build locally with exception offload_off."},
+      "overflow": {"type": "string", "allowed": "auto, queue, local", "default": "auto", "effect": "Auto queues under slots and uses the configured local overflow for local strategies; queue always waits for a slot and local runs locally after the admission wait."},
+      "clean": {"type": "string", "allowed": "none, untracked, ignored", "default": "untracked", "effect": "Controls slot cleanup before a job: none preserves files, untracked runs git clean -ffd, and ignored runs git clean -ffdx."},
+      "stacks": {"type": "string_list", "allowed": "stack override names", "default": "[]", "effect": "Overrides the detected set of build adapters; an empty list uses detected stacks."},
+      "snapshot_retention": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "7d", "effect": "Retains build snapshot and base pins for this duration before store garbage collection can expire them."},
+      "priority": {"type": "object", "allowed": "check, clippy, test, nextest, tier, gate, maintenance, other mapped to interactive, test, train, prewarm", "default": "builtin mapping", "effect": "Sets queue priority by job class; priority orders waiters and never preempts a running job."},
+      "queue_aging": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "120s", "effect": "Wait duration per priority aging step; aging raises queued jobs over time to bound lower-priority waits."},
+      "prewarm_budget": {"type": "int", "allowed": "0 or more jobs per hour", "default": "1", "effect": "Maximum maintenance prewarm jobs per hour; zero disables prewarming."},
+      "canary_every": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "24h", "effect": "Maximum age of a slot's last canary before maintenance schedules another canary."},
+      "slot_idle": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "7d", "effect": "Idle age after which unlocked slots are eligible for garbage collection."},
+      "soak.min_runs": {"type": "int", "allowed": "1 or more lane jobs", "default": "50", "effect": "Minimum lane job count required before the build soak report can pass."},
+      "soak.min_days": {"type": "int", "allowed": "1 or more days", "default": "7", "effect": "Minimum observation span required before the build soak report can pass."},
+      "soak.interactive_wait_p95": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "60s", "effect": "Maximum passing p95 queue wait for interactive priority jobs."},
+      "soak.test_wait_p95": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "300s", "effect": "Maximum passing p95 queue wait for test priority jobs."},
+      "soak.rss_fraction": {"type": "number", "allowed": "0.0 through 1.0", "default": "0.75", "effect": "Maximum passing peak job RSS as a fraction of physical memory."},
+      "soak.local_exception_fraction": {"type": "number", "allowed": "0.0 through 1.0", "default": "0.05", "effect": "Maximum passing fraction of jobs that ran locally under slots due to an exception."},
+      "soak.churn_clean_fraction": {"type": "number", "allowed": "0.0 through 1.0", "default": "0.99", "effect": "Minimum passing fraction of rebuilt packages explained by changed packages and their dependents."}
+    }
+  },
+  "port_verify_affected_settings": {
+    "path": "verify.affected",
+    "where": "the `verify.affected` object of host, host-project or project ports.json",
+    "settings": {
+      "enabled": {"type": "bool", "allowed": "true or false", "default": "false", "effect": "Applies the affected-package selection policy to verify tiers without an explicit --affected flag."},
+      "global_paths": {"type": "string_list", "allowed": "repository-relative glob patterns", "default": "[]", "effect": "Paths matching these globs force affected selection to include the full workspace."},
+      "full_every": {"type": "int", "allowed": "1 or more verify runs", "default": "10", "effect": "Run a full workspace selection after this many affected selections."},
+      "full_after": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "24h", "effect": "Run a full workspace selection when this long has elapsed since the last full selection."}
     }
   },
   "domain_policy_settings": {
@@ -600,6 +644,21 @@
   "domain_accounts_settings": {
     "path": "domains.accounts",
     "settings": {
+      "entries.{id}.adapter": {"type": "string", "allowed": "registered provider adapter", "default": "required", "effect": "Provider adapter this registration signs into; accepted adapters include claude, codex, cursor, agy and opencode."},
+      "entries.{id}.label": {"type": "string", "allowed": "non-empty, at most 64 characters", "default": "required", "effect": "Short label for this registration in account lists and routing rules."},
+      "entries.{id}.key": {"type": "string", "allowed": "provider account identifier", "default": "required", "effect": "Credential identity reported by the provider; used to distinguish registrations and reconcile quota probes."},
+      "entries.{id}.org_fingerprint": {"type": "string", "allowed": "provider organisation identifier", "default": "unset", "effect": "Organisation observed at validation when the provider exposes one; otherwise absent."},
+      "entries.{id}.directory": {"type": "string", "allowed": "absolute path", "default": "required", "effect": "Config directory whose credentials and settings belong to this account."},
+      "entries.{id}.directories": {"type": "array", "allowed": "up to 8 absolute paths", "default": "empty", "effect": "Further config directories signed into the same account; native session ingest will attribute them to this label."},
+      "entries.{id}.plan": {"type": "string", "allowed": "provider plan label", "default": "unset", "effect": "Detected plan label for this account, distinct from the priced plans table."},
+      "entries.{id}.plans": {"type": "array", "allowed": "array of tables with name, price, currency, effective_from and notional_usd", "default": "empty", "effect": "Subscription prices over time for value reporting; the latest effective_from on or before a reading applies."},
+      "entries.{id}.priority": {"type": "int", "allowed": "0 or more", "min": 0, "default": "unset", "effect": "Selection priority for this registration when more than one account matches."},
+      "entries.{id}.billing_anchor": {"type": "string", "allowed": "RFC 3339 timestamp", "default": "unset", "effect": "Billing cycle anchor used when estimating monthly allowance."},
+      "entries.{id}.limits": {"type": "table", "allowed": "monthly_usd, cycle_anchor and weekly_anchor", "default": "unset", "effect": "Spending limits declared for this account."},
+      "entries.{id}.limits.monthly_usd": {"type": "float", "allowed": "0 or more", "default": "unset", "effect": "Monthly spending limit for this account."},
+      "entries.{id}.limits.cycle_anchor": {"type": "string", "allowed": "RFC 3339 timestamp or schedule", "default": "unset", "effect": "Anchor for this account's monthly billing cycle."},
+      "entries.{id}.limits.weekly_anchor": {"type": "string", "allowed": "RFC 3339 timestamp or schedule", "default": "unset", "effect": "Anchor for this account's weekly billing cycle."},
+      "entries.{id}.settings": {"type": "table", "allowed": "allow-listed Claude setting keys", "default": "empty", "effect": "Shared Claude settings this account holds instead of the shared source."},
       "entries.{id}.order": {"type": "int", "allowed": "1 to 999", "min": 1, "max": 999, "default": "unset", "effect": "Display order for this account entry."},
       "entries.{id}.hidden": {"type": "bool", "allowed": "true or false", "default": false, "effect": "Hide this account entry from account listings."},
       "entries.{id}.display_name": {"type": "string", "allowed": "string", "default": "unset", "effect": "Display name for this account entry."},
@@ -611,6 +670,18 @@
   "domain_routing_settings": {
     "path": "domains.routing",
     "settings": {
+      "model_exclusions": {"type": "array", "allowed": "up to 256 model selectors with an optional schedule", "default": "from bundled policy", "effect": "Models excluded from routing, with optional scheduled windows; an exclusion without a schedule stays excluded."},
+      "model_choices": {"type": "array", "allowed": "array of override tables", "default": "from bundled policy", "effect": "Preference overrides for model choices by dimension, task kind and risk tier."},
+      "model_policy": {"type": "table", "allowed": "bundled policy defaults and restricting rules", "default": "from bundled policy", "effect": "Model policy defaults and host restrictions applied to route selection."},
+      "writer_advisory": {"type": "table", "allowed": "override of the bundled writer advisory", "default": "unset", "effect": "Overrides the advisory shown to writers before a write lane starts."},
+      "suppress_opus_writer_warning": {"type": "bool", "allowed": "true or false", "default": false, "effect": "Suppress the advisory for Opus implementation lanes."},
+      "capacity_cooldown_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "from compiled defaults", "effect": "Cooldown after a capacity or quota settlement before a retry."},
+      "depletion": {"type": "table", "allowed": "depletion routing policy", "default": "from bundled policy", "effect": "Where work goes when its account or model is depleted."},
+      "routes": {"type": "table", "allowed": "named route definitions", "default": "from bundled policy", "effect": "Named model or pool aliases a lane may select."},
+      "pools": {"type": "table", "allowed": "named model pools", "default": "from bundled policy", "effect": "Pools of models available to routes."},
+      "pacing_reserve": {"type": "table", "allowed": "per-account pacing reserve overrides", "default": "unset", "effect": "Reserve settings that keep allowance ahead of a pacing window."},
+      "pacing_overrides": {"type": "array", "allowed": "array of override tables", "default": "unset", "effect": "Per-account and per-provider pacing overrides with optional schedules."},
+      "opencode_go": {"type": "table", "allowed": "OpenCode Go allowance preference", "default": "unset", "effect": "Minimum monthly allowance that enables the OpenCode Go preference."},
       "pacing.free.{provider}.monthly.enabled": {"type": "bool", "allowed": "true or false", "default": true, "effect": "Enable monthly-allowance pacing for free accounts on this provider. These field defaults apply when the monthly table is declared; without it the override is unset."},
       "pacing.free.{provider}.monthly.burst_percent": {"type": "int", "allowed": "0 to 100", "min": 0, "max": 100, "default": "10", "effect": "Percentage points of monthly allowance available ahead of elapsed time for free accounts on this provider. These field defaults apply when the monthly table is declared; without it the override is unset."},
       "pacing.free.{provider}.monthly.initial_launch_cost_basis_points": {"type": "int", "allowed": "1 to 10000", "min": 1, "max": 10000, "default": "100", "effect": "Initial launch cost estimate for free accounts on this provider, in basis points of the monthly allowance. These field defaults apply when the monthly table is declared; without it the override is unset."},
@@ -642,9 +713,17 @@
   "domain_fabric_settings": {
     "path": "domains.fabric",
     "settings": {
+      "agent_label": {"type": "string", "allowed": "non-empty label", "default": "agent", "effect": "Label the fabric uses for the chair agent in lane metadata."},
+      "client_label": {"type": "string", "allowed": "label", "default": "agent", "effect": "Label the fabric uses for the client in lane metadata."},
+      "host_native": {"type": "table", "allowed": "named host-native tool declarations", "default": "unset", "effect": "Host-native tools available to lanes, each declaring its kind and executable."},
+      "ssh_executable": {"type": "string", "allowed": "absolute path", "default": "unset", "effect": "Executable a host-native SSH route uses instead of the system ssh."},
+      "limits": {"type": "table", "allowed": "body, frame, JSON, page, output, result, peer and timeout bounds", "default": "compiled defaults", "effect": "Size and time bounds applied to fabric reads and results."},
+      "implement": {"type": "table", "allowed": "implementation template defaults", "default": "compiled defaults", "effect": "Default template choices for implementation lanes."},
+      "plan": {"type": "table", "allowed": "planner mode, route, node cap and auto thresholds", "default": "compiled defaults", "effect": "Planner front-end settings for preset runs."},
       "batch.max_parallel": {"type": "int", "allowed": "1 to 64", "min": 1, "max": 64, "default": "4", "effect": "Cap on the number of concurrent slices running at once."},
       "peers.{peer}.connect_timeout_seconds": {"type": "int", "allowed": "1 to 30 seconds", "min": 1, "max": 30, "default": "10", "effect": "Connection timeout for this fabric peer."},
       "commands.{name}.argv": {"type": "array", "allowed": "non-empty argv, with a non-empty program and no NUL bytes", "default": "required", "effect": "Program and arguments for a named fabric command."},
+      "commands.{name}.runtimes": {"type": "array", "allowed": "absolute paths", "default": "empty", "effect": "Additional absolute runtime paths a named fabric command may use."},
       "home_hosts.{host}": {"type": "string", "allowed": "host ID, keyed by 64 lowercase hexadecimal characters", "default": "unset", "effect": "Host mapping for a named home host."}
     }
   },
@@ -776,6 +855,12 @@
       "reader": "tools/front-door/src/chair.rs",
       "effect": "Ordered registered Claude account labels allowed as switch targets; empty allows none.",
       "trade_off": "An explicit list controls which signed-in accounts may receive the chair."
+    },
+    "lanes.access": {
+      "type": "enum", "values": ["host", "isolated"], "default": "host", "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/run/provider/preparation.rs",
+      "effect": "Select the resolved lane access model. host (the default) gives same-host lanes the host environment, provider native home, profile and login, host Git configuration and credential reads like the host user, whether or not sandboxed; credential-root overlaps warn and proceed, host sandbox profiles omit credential, keychain/security, process inspection, signal and task-port denies, and doubtful delivery, continuation-link and sandbox-backend cases warn and proceed instead of refusing. Every warning names the effective access and its source. isolated: sandboxed lanes retain the existing private environment, provider home, filtered Git configuration and credential denies, including credential-file replacement protection and credential-root refusals; hosted-cloud credential variables are stripped and unavailable sandbox backends refuse. Cross-host credential grants are unchanged under both. Set per run with --knob lanes.access=isolated, per node with attempt.lane_access, in host or project knobs, or by route or provider through route policy.",
+      "trade_off": "Host access preserves the native environment; isolated opts into the existing restrictions."
     },
     "lanes.launch_retry_limit": {
       "type": "int", "min": 0, "max": 20, "default": 3, "status": "wired",
@@ -954,7 +1039,7 @@
       "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run/provider/confinement.rs",
       "effect": "Whether a lane runs under the operating-system sandbox. auto (default) and off run unsandboxed unless the user configured a sandboxed route or selected lanes.sandbox_floor=strict for an explicitly sandboxed parent. on opts into sandboxing. An inherited operating-system sandbox remains effective. Unsupported hosts warn and proceed without a sandbox; the requested and effective mode and source remain visible. Set per run with --sandbox or --no-sandbox, per node with attempt.sandbox, or in the host [knobs].",
-      "trade_off": "Unsandboxed lanes work like the same CLI started by hand: they share host build caches and services, and can read on-disk credential stores and write outside their worktree. The environment is still rebuilt from an allowlist with hosted-cloud keys stripped, Git delivery stays host-owned with one writer per worktree, and host_policy path denials apply only to sandboxed lanes. A sandboxed lane reads domains.run.sandbox_cache_reads and never writes there."
+      "trade_off": "Unsandboxed lanes work like the same CLI started by hand: they share host build caches and services, and can read on-disk credential stores and write outside their worktree. Host access inherits the host environment; isolated access strips hosted-cloud keys and sandboxed isolated lanes use a minimal environment. Git delivery stays host-owned with one writer per worktree, and host_policy path denials apply only to sandboxed lanes. A sandboxed lane reads domains.run.sandbox_cache_reads and never writes there."
     }
   },
   "presets": {

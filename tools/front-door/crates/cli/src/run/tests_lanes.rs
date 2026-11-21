@@ -1,7 +1,8 @@
 use super::*;
 
 #[test]
-fn lane_access_refuses_credential_and_enclosing_roots() -> Result<(), Box<dyn std::error::Error>> {
+fn lane_access_defers_credential_root_validation_to_the_resolved_route()
+-> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("host-home");
     let credential = home.join(".ssh").join("nested");
@@ -9,9 +10,8 @@ fn lane_access_refuses_credential_and_enclosing_roots() -> Result<(), Box<dyn st
     let config = home.join(".config");
     std::fs::create_dir_all(config.join("gh"))?;
     let roots = [credential.clone(), home.clone(), config];
-    let credentials = provenant_core::CredentialRoots::for_home(&home);
     for root in roots {
-        for (flag, read) in [("--read-root", true), ("--write-root", false)] {
+        for read in [true, false] {
             let access = crate::Access {
                 attach: Vec::new(),
                 mode: Some(Mode::ReadOnly),
@@ -22,12 +22,16 @@ fn lane_access_refuses_credential_and_enclosing_roots() -> Result<(), Box<dyn st
                 capability: vec![],
                 no_capability: Vec::new(),
             };
-            let fail = lane_access(&access, &temp.path().join("state"), &credentials).unwrap_err();
-            assert!(fail.message.contains(flag), "{}", fail.message);
-            assert!(
-                fail.message.contains(&root.display().to_string()),
-                "{}",
-                fail.message
+            let granted =
+                lane_access(&access, &temp.path().join("state")).map_err(|fail| fail.message)?;
+            let canonical = std::fs::canonicalize(&root)?;
+            assert_eq!(
+                if read {
+                    granted.read_roots
+                } else {
+                    granted.write_roots
+                },
+                vec![canonical]
             );
         }
     }

@@ -8,10 +8,12 @@ fn node_attempt_spec_reaches_the_launch() {
         provider_timeout: Some(42),
         account: Some("work".into()),
         build_heavy: true,
+        lane_access: Some("isolated".into()),
         capabilities: vec!["postgres".into()],
         write_roots: vec!["/tmp/graph-write".into()],
         ..Default::default()
     };
+    assert!(spec.lane_knobs().contains(&"lanes.access=isolated".to_string()));
     let mut lane = node("lane", route("first"));
     lane.attempt = Some(spec.clone());
     let mut owner = FakeOwner {

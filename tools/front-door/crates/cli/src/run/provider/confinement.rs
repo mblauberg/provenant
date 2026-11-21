@@ -3,7 +3,7 @@ use super::*;
 /// Bind declared lane capabilities to the provider's confinement profile.
 pub(in crate::run) fn apply_lane_capabilities(
     profile: &mut provenant_confinement::permissions::ProviderProfileSpec,
-    access: &run::LaneAccess,
+    access: &run::LaneAccessRequest,
 ) {
     profile.allow_database_ipc = access.database_ipc;
 }
@@ -163,7 +163,7 @@ pub(super) fn project_scratch_reads(project: &Path) -> Vec<PathGrant> {
 
 /// Dispatch write roots, plus project-resolved shared run state for writers only.
 pub(super) fn write_roots(
-    access: &run::LaneAccess,
+    access: &run::LaneAccessRequest,
     host_writes: &provenant_confinement::run_config::RunConfig,
     writer: bool,
     project: &str,
@@ -189,7 +189,11 @@ pub(super) fn write_roots(
 /// Preflight still validates the fixed authority roots without walking the home.
 pub(super) enum InventoryContext<'a> {
     Preflight,
-    Launch(&'a run::TaskRequest, &'a str),
+    Launch(
+        &'a run::TaskRequest,
+        &'a str,
+        &'a provenant_records::LaneAccessReceipt,
+    ),
     #[cfg(any(test, feature = "fixture"))]
     Sandboxed,
 }
@@ -200,12 +204,28 @@ pub(super) fn confinement_request(
     project_id: ProjectId,
     roots: ConfinementRoots<'_>,
     writer: Option<&run::WriterLaunch>,
-    access: &run::LaneAccess,
+    access: &run::LaneAccessRequest,
     host_writes: &provenant_confinement::run_config::RunConfig,
     adapter: &str,
     publishing: bool,
     sandbox_context: InventoryContext<'_>,
 ) -> Result<PlanRequest, provenant_confinement::permissions::PermissionError> {
+    let lane_access = match &sandbox_context {
+        InventoryContext::Launch(_, _, receipt) => (*receipt).clone(),
+        InventoryContext::Preflight => provenant_records::LaneAccessReceipt {
+            access: provenant_records::LaneAccess::Host,
+            source: provenant_records::LaneAccessSource::Default,
+            key: "lanes.access".into(),
+            extra: Default::default(),
+        },
+        #[cfg(any(test, feature = "fixture"))]
+        InventoryContext::Sandboxed => provenant_records::LaneAccessReceipt {
+            access: provenant_records::LaneAccess::Isolated,
+            source: provenant_records::LaneAccessSource::Default,
+            key: "lanes.access".into(),
+            extra: Default::default(),
+        },
+    };
     let mode = match writer {
         Some(writer) => {
             let mut authority = WorktreeWriteAuthority::for_worktree(
@@ -213,6 +233,7 @@ pub(super) fn confinement_request(
                 &writer.branch,
                 roots.home,
                 roots.credential_roots,
+                &lane_access,
             )?;
             authority.set_publishing(publishing);
             AccessMode::WorktreeWrite(Box::new(authority))
@@ -243,7 +264,7 @@ pub(super) fn confinement_request(
         InventoryContext::Preflight => false,
         #[cfg(any(test, feature = "fixture"))]
         InventoryContext::Sandboxed => true,
-        InventoryContext::Launch(task, route) => {
+        InventoryContext::Launch(task, route, _) => {
             let minimal = provenant_confinement::permissions::MandatoryRoots::new(
                 roots.home,
                 roots.state,
@@ -272,6 +293,7 @@ pub(super) fn confinement_request(
             roots.github_roots,
             roots.protected_worktrees,
             sandboxed,
+            lane_access,
         )?;
     if writer.is_none() && access.source_root.is_some() && !access.source_live {
         // The host materialises a commit source beside candidate scratch under
@@ -847,6 +869,11 @@ fn credential_declarations(
     unique
 }
 
+fn report_credential_warning(message: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+}
+
 /// Inventory names and registration metadata only; credential contents are
 /// never needed to establish the mandatory boundary.
 pub(super) fn credential_roots(
@@ -854,19 +881,46 @@ pub(super) fn credential_roots(
     home: &Path,
     settings: &provenant_providers::accounts::Settings,
     lane_roots: &[&Path],
+    access: Option<&provenant_records::LaneAccessReceipt>,
+    policy: &provenant_records::policy::Policy,
 ) -> Result<provenant_core::CredentialRoots, String> {
     use provenant_core::{CredentialInventory, CredentialRoots, CredentialScope};
     let declarations = credential_declarations(registry, home, settings);
+    let isolated = access.is_some_and(|receipt| receipt.access.is_isolated());
+    let warn = |detail: String| {
+        if let Some(receipt) = access {
+            let detail = format!(
+                "{detail} (lanes.access={}, source: {})",
+                receipt.access.as_str(),
+                receipt.source.as_str()
+            );
+            if let Some(message) = policy
+                .check(
+                    "CREDENTIAL_ROOTS_OVERLAP_NONE",
+                    provenant_records::policy::Facts::violation(detail),
+                )
+                .message()
+            {
+                report_credential_warning(message);
+            }
+        }
+    };
     let resolve = |path: &Path| {
         provenant_confinement::permissions::resolve_boundary_path(path)
             .map_err(|error| error.to_string())
     };
     let resolve_declared = |path: &Path, source: &str| {
-        resolve(path).map_err(|error| {
-            format!(
+        resolve(path).or_else(|error| {
+            let detail = format!(
                 "{source} at {} cannot be resolved precisely: {error}",
                 path.display()
-            )
+            );
+            if isolated {
+                Err(detail)
+            } else {
+                warn(detail);
+                Ok(path.to_owned())
+            }
         })
     };
     for decl in &declarations {
@@ -899,11 +953,25 @@ pub(super) fn credential_roots(
                 .iter()
                 .any(|lane| root.path.starts_with(lane) || path.starts_with(lane))
             {
-                return Err(format!(
-                    "{}: declared credential file {} lies inside lane root",
+                let detail = format!(
+                    "{}: declared credential file {} lies inside lane root(s) {}",
                     root.source,
-                    root.path.display()
-                ));
+                    root.path.display(),
+                    lanes
+                        .iter()
+                        .filter(|lane| root.path.starts_with(lane) || path.starts_with(lane))
+                        .map(|lane| lane.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                if isolated {
+                    return Err(format!(
+                        "{}: declared credential file {} lies inside lane root",
+                        root.source,
+                        root.path.display()
+                    ));
+                }
+                warn(detail);
             }
             roots.add_entry(root.clone());
             continue;
@@ -913,11 +981,25 @@ pub(super) fn credential_roots(
             .iter()
             .any(|lane| root.path.starts_with(lane) || resolved_store.starts_with(lane))
         {
-            return Err(format!(
-                "{}: credential store {} is equal to or inside lane root",
+            let detail = format!(
+                "{}: credential store {} is equal to or inside lane root(s) {}",
                 root.source,
-                resolved_store.display()
-            ));
+                resolved_store.display(),
+                lanes
+                    .iter()
+                    .filter(|lane| root.path.starts_with(lane) || resolved_store.starts_with(lane))
+                    .map(|lane| lane.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            if isolated {
+                return Err(format!(
+                    "{}: credential store {} is equal to or inside lane root",
+                    root.source,
+                    resolved_store.display()
+                ));
+            }
+            warn(detail);
         }
         roots.add_entry(root.clone());
         let inventory = match &decl.inventory {
@@ -958,11 +1040,25 @@ pub(super) fn credential_roots(
                 .iter()
                 .any(|lane| path.starts_with(lane) || resolved.starts_with(lane))
             {
-                return Err(format!(
-                    "{}: declared credential file {} lies inside lane root",
+                let detail = format!(
+                    "{}: declared credential file {} lies inside lane root(s) {}",
                     root.source,
-                    path.display()
-                ));
+                    path.display(),
+                    lanes
+                        .iter()
+                        .filter(|lane| path.starts_with(lane) || resolved.starts_with(lane))
+                        .map(|lane| lane.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                if isolated {
+                    return Err(format!(
+                        "{}: declared credential file {} lies inside lane root",
+                        root.source,
+                        path.display()
+                    ));
+                }
+                warn(detail);
             }
             roots.add(
                 path,
@@ -974,23 +1070,131 @@ pub(super) fn credential_roots(
     }
     let roots = roots.with_lane_roots(lanes);
 
-    bind_credential_roots(roots)
+    if isolated {
+        bind_credential_roots(roots)
+    } else {
+        roots.with_aliases(|path| resolve_declared(path, "credential root"))
+    }
 }
 
-/// Resolve declarations for source admission without classifying a launch.
-pub fn declared_credentials(
-    registry: &Registry<'_>,
-) -> Result<provenant_core::CredentialRoots, String> {
-    let home = registry.home.ok_or("home directory is unavailable")?;
-    let roots = registry
-        .roots
-        .ok_or("host account registry is unavailable")?;
-    let settings = crate::config_reads::read_for(roots, "run")
-        .map_err(|error| error.to_string())?
-        .domains
-        .accounts
-        .unique_accounts();
-    credential_roots(registry, home, &settings, &[])
+/// Retain the dispatch flag credential checks after the route access is known.
+/// Early parsing cannot make this decision because access may be route-specific.
+pub(super) fn credential_access_grant_refusal(
+    access: &run::LaneAccessRequest,
+    credentials: &provenant_core::CredentialRoots,
+    receipt: &provenant_records::LaneAccessReceipt,
+    policy: &provenant_records::policy::Policy,
+) -> Option<String> {
+    use provenant_records::run::LaneAccessGrantKind as Kind;
+    let mut used_provenance = vec![false; access.dispatch_grants.len()];
+    for (kind, paths) in [
+        (Kind::WriteRoot, &access.write_roots),
+        (Kind::Attachment, &access.attachments),
+        (Kind::ReadRoot, &access.read_roots),
+    ] {
+        for path in paths {
+            let given = access
+                .dispatch_grants
+                .iter()
+                .enumerate()
+                .find_map(|(index, grant)| {
+                    (!used_provenance[index] && grant.kind == kind && grant.path == *path).then(
+                        || {
+                            used_provenance[index] = true;
+                            grant.given.clone()
+                        },
+                    )
+                })
+                .unwrap_or_else(|| path.display().to_string());
+            if let Some(root) = credentials.refusal(
+                path,
+                provenant_core::CredentialScope::Subtree,
+                kind.is_read(),
+            ) {
+                if receipt.access.is_isolated() {
+                    return Some(format!(
+                        "{} {} overlaps declared credential root {} (source: {})",
+                        kind.flag(),
+                        given,
+                        root.path.display(),
+                        root.source
+                    ));
+                }
+                let detail = format!(
+                    "{} {} overlaps declared credential root {} (declaration: {}; lanes.access={}, source: {})",
+                    kind.flag(),
+                    given,
+                    root.path.display(),
+                    root.source,
+                    receipt.access.as_str(),
+                    receipt.source.as_str()
+                );
+                if let Some(message) = policy
+                    .check(
+                        "CREDENTIAL_ROOTS_OVERLAP_NONE",
+                        provenant_records::policy::Facts::violation(detail),
+                    )
+                    .message()
+                {
+                    report_credential_warning(message);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Surface credential overlaps in the final provider profile with the resolved policy.
+pub(super) fn warn_profile_credential_grants(
+    profile: &provenant_confinement::permissions::ProviderProfileSpec,
+    credentials: &provenant_core::CredentialRoots,
+    receipt: &provenant_records::LaneAccessReceipt,
+    policy: &provenant_records::policy::Policy,
+) {
+    if receipt.access.is_isolated() {
+        return;
+    }
+    let reads = profile
+        .process_executables
+        .iter()
+        .chain(&profile.runtime_reads)
+        .chain(&profile.tool_exec_roots);
+    let writes = profile
+        .continuation_reads
+        .iter()
+        .chain(&profile.state_writes)
+        .chain(&profile.tool_writes)
+        .chain(profile.fabric_socket.iter());
+    let mut reported = std::collections::BTreeSet::new();
+    for (grant, read) in reads
+        .map(|grant| (grant, true))
+        .chain(writes.map(|grant| (grant, false)))
+    {
+        if let Some(root) = provenant_confinement::permissions::credential_overlap_for_grant(
+            grant,
+            read,
+            credentials,
+        ) && reported.insert((grant.path.clone(), root.path.clone()))
+        {
+            let detail = format!(
+                "provider grant {} overlaps credential root {} (declaration: {}; lanes.access={}, source: {})",
+                grant.path.display(),
+                root.path.display(),
+                root.source,
+                receipt.access.as_str(),
+                receipt.source.as_str()
+            );
+            if let Some(message) = policy
+                .check(
+                    "CREDENTIAL_ROOTS_OVERLAP_NONE",
+                    provenant_records::policy::Facts::violation(detail),
+                )
+                .message()
+            {
+                report_credential_warning(message);
+            }
+        }
+    }
 }
 
 fn bind_credential_roots(
@@ -1043,11 +1247,28 @@ pub(super) fn host_provider_var(registry: &Registry<'_>, name: &str) -> Option<s
                 | "GIT_CONFIG_SYSTEM"
                 | "XDG_CONFIG_HOME"
                 | "XDG_DATA_HOME"
+                | "XDG_STATE_HOME"
+                | "XDG_CACHE_HOME"
         )
     {
         return host.provider_path_environment.get(name).cloned();
     }
     std::env::var_os(name)
+}
+
+/// Select the captured host agent only for host-access lane launches.
+pub(super) fn lane_provider_var(
+    registry: &Registry<'_>,
+    name: &str,
+    access: provenant_records::LaneAccess,
+) -> Option<std::ffi::OsString> {
+    if name == "SSH_AUTH_SOCK" && !access.is_isolated() {
+        return registry.host.map_or_else(
+            || std::env::var_os(name),
+            |host| host.provider_path_environment.get(name).cloned(),
+        );
+    }
+    host_provider_var(registry, name)
 }
 
 /// Host token delivery must respect the same typed GitHub exception as file
@@ -1282,23 +1503,15 @@ pub(super) fn source_cwd(
     let state = registry
         .state_root
         .ok_or_else(|| SourceCwdError::Operational("state root is unavailable".into()))?;
-    let credentials = declared_credentials(registry).map_err(|error| {
-        source_cwd_authority(format!("credential declarations unavailable: {error}"))
-    })?;
     let Some(source) = &task.access.source_root else {
         if task.access.source_identity.is_some() || task.access.source_live {
             return Err(source_cwd_authority(
                 "graph source identity has no checkout".into(),
             ));
         }
-        let admission = crate::run::admit_source_root(
-            cwd,
-            state,
-            cwd,
-            &credentials,
-            crate::run::SourceAdmissionMode::Live,
-        )
-        .map_err(source_admission_error)?;
+        let admission =
+            crate::run::admit_source_root(cwd, state, cwd, crate::run::SourceAdmissionMode::Live)
+                .map_err(source_admission_error)?;
         report_source_warnings(&admission, registry, task);
         return Ok(admission.path);
     };
@@ -1318,8 +1531,8 @@ pub(super) fn source_cwd(
     } else {
         crate::run::SourceAdmissionMode::Registered
     };
-    let admission = crate::run::admit_source_root(cwd, state, source, &credentials, mode)
-        .map_err(source_admission_error)?;
+    let admission =
+        crate::run::admit_source_root(cwd, state, source, mode).map_err(source_admission_error)?;
     report_source_warnings(&admission, registry, task);
     if !task.access.source_live && admission.path != *source {
         return Err(source_cwd_authority(
@@ -1663,8 +1876,22 @@ pub(super) fn read_only_plan(
 /// warnings. The lane reads `source`: the `--worktree` checkout, or the caller's
 /// checkout when none is named. Absent or unusable Git data yields no warning.
 pub(in crate::run) fn read_only_checkout_warning(state: &Path, source: &Path) -> Option<String> {
+    let selected = read_only_source_ref(state, source)?;
+    Some(crate::run::read_only_local_checkout_warning(
+        source, &selected,
+    ))
+}
+
+/// The fetched upstream head a stale read-only checkout should review instead
+/// of its own working tree. This is advisory: missing or unusable Git data
+/// yields no pin, so the launch keeps its existing local-source behaviour.
+pub(in crate::run) fn read_only_source_ref(
+    state: &Path,
+    source: &Path,
+) -> Option<crate::run::ReadOnlySourceRef> {
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_os::exec::SystemExecutor;
+    use std::io::Write;
 
     let git = provenant_os::git::git_executable()?;
     let utility_home = host_git_home(state).ok()?;
@@ -1687,55 +1914,210 @@ pub(in crate::run) fn read_only_checkout_warning(state: &Path, source: &Path) ->
     .ok()
     .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
     .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok())?;
-    let count = commits_behind_default(&executor, &repo, &utility, budget, &cancel, head)?;
-    Some(format!(
-        "{} is {count} commit{} behind origin's default branch; read-only lane will read {head}",
-        source.display(),
-        if count == 1 { "" } else { "s" }
-    ))
+    let (commit, reference) = configured_upstream(&executor, &repo, &utility, budget, &cancel)
+        .or_else(|| {
+            let fallback = default_upstream(&executor, &repo, &utility, budget, &cancel)?;
+            // The branch's own tracking configuration could not be resolved, so
+            // the remote's default branch is only an advisory stand-in.
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: read-only source could not resolve this branch's configured upstream; using {} instead, which may not track this checkout",
+                fallback.1
+            );
+            Some(fallback)
+        })?;
+    let behind = commits_behind(&executor, &repo, &utility, budget, &cancel, head, commit)?;
+    (behind > 0).then_some(crate::run::ReadOnlySourceRef {
+        commit,
+        reference,
+        behind,
+        head,
+    })
 }
 
-/// Compare `head` with the remote's default branch as last fetched. This never
-/// fetches. The remote is asked only when no `origin/HEAD` is recorded, and only
-/// within the utility budget.
-fn commits_behind_default(
+/// Resolve a fetched ref to its commit and keep the exact ref that named it.
+fn resolve_upstream_ref(
+    executor: &dyn provenant_os::exec::Executor,
+    repo: &provenant_confinement::ReadOnlyRepo,
+    utility: &provenant_confinement::UtilityRuntime,
+    budget: provenant_confinement::UtilityBudget,
+    cancel: &provenant_core::CancelToken,
+    reference: &str,
+) -> Option<(provenant_core::GitOid, String)> {
+    use provenant_confinement::{GitRead, run_read_utility};
+    use provenant_os::exec::Termination;
+
+    let out = run_read_utility(
+        executor,
+        GitRead::ResolveRevision {
+            revision: provenant_confinement::repo::GitRevision::new(reference).ok()?,
+        },
+        repo,
+        utility,
+        budget,
+        cancel,
+    )
+    .ok()?;
+    if out.termination != Termination::Exit(0) {
+        return None;
+    }
+    let oid =
+        provenant_core::GitOid::parse(std::str::from_utf8(&out.stdout.bytes).ok()?.trim()).ok()?;
+    Some((oid, reference.to_owned()))
+}
+
+/// The short name of the checked-out branch, when HEAD is symbolic.
+fn current_branch(
+    executor: &dyn provenant_os::exec::Executor,
+    repo: &provenant_confinement::ReadOnlyRepo,
+    utility: &provenant_confinement::UtilityRuntime,
+    budget: provenant_confinement::UtilityBudget,
+    cancel: &provenant_core::CancelToken,
+) -> Option<String> {
+    use provenant_confinement::{GitRead, run_read_utility};
+    use provenant_os::exec::Termination;
+
+    let out = run_read_utility(
+        executor,
+        GitRead::SymbolicRevision {
+            revision: provenant_confinement::repo::GitRevision::new("HEAD").ok()?,
+        },
+        repo,
+        utility,
+        budget,
+        cancel,
+    )
+    .ok()?;
+    if out.termination != Termination::Exit(0) {
+        return None;
+    }
+    std::str::from_utf8(&out.stdout.bytes)
+        .ok()?
+        .trim()
+        .strip_prefix("refs/heads/")
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_owned)
+}
+
+/// One `branch.<name>.remote` or `branch.<name>.merge` value from the verified
+/// repository config. A missing or non-zero result is no upstream, never a
+/// reason to guess.
+fn branch_config_value(
+    executor: &dyn provenant_os::exec::Executor,
+    repo: &provenant_confinement::ReadOnlyRepo,
+    utility: &provenant_confinement::UtilityRuntime,
+    budget: provenant_confinement::UtilityBudget,
+    cancel: &provenant_core::CancelToken,
+    key: &str,
+) -> Option<String> {
+    use provenant_confinement::{GitRead, run_read_utility};
+    use provenant_os::exec::Termination;
+
+    let out = run_read_utility(
+        executor,
+        GitRead::ConfigValue {
+            key: key.to_owned(),
+        },
+        repo,
+        utility,
+        budget,
+        cancel,
+    )
+    .ok()?;
+    if out.termination != Termination::Exit(0) {
+        return None;
+    }
+    let value = std::str::from_utf8(&out.stdout.bytes).ok()?.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// The fetched remote-tracking head configured for the current branch, by way
+/// of `branch.<name>.remote` and `branch.<name>.merge`. A detached HEAD, a
+/// local-only upstream or an unfetched ref yields no pin here.
+fn configured_upstream(
+    executor: &dyn provenant_os::exec::Executor,
+    repo: &provenant_confinement::ReadOnlyRepo,
+    utility: &provenant_confinement::UtilityRuntime,
+    budget: provenant_confinement::UtilityBudget,
+    cancel: &provenant_core::CancelToken,
+) -> Option<(provenant_core::GitOid, String)> {
+    use provenant_confinement::repo::GitRefName;
+
+    let branch = current_branch(executor, repo, utility, budget, cancel)?;
+    let remote = branch_config_value(
+        executor,
+        repo,
+        utility,
+        budget,
+        cancel,
+        &format!("branch.{branch}.remote"),
+    )?;
+    let merge = branch_config_value(
+        executor,
+        repo,
+        utility,
+        budget,
+        cancel,
+        &format!("branch.{branch}.merge"),
+    )?;
+    let short = merge.strip_prefix("refs/heads/")?;
+    let name = GitRefName::remote_tracking(format!("{remote}/{short}")).ok()?;
+    resolve_upstream_ref(executor, repo, utility, budget, cancel, name.as_str())
+}
+
+/// The remote's default branch as last fetched, with the exact ref that named
+/// it. Advisory fallback only: this never fetches. The remote is asked only
+/// when no `origin/HEAD` is recorded, and only within the utility budget.
+fn default_upstream(
+    executor: &dyn provenant_os::exec::Executor,
+    repo: &provenant_confinement::ReadOnlyRepo,
+    utility: &provenant_confinement::UtilityRuntime,
+    budget: provenant_confinement::UtilityBudget,
+    cancel: &provenant_core::CancelToken,
+) -> Option<(provenant_core::GitOid, String)> {
+    use provenant_confinement::utility::advertised_default_branch;
+
+    resolve_upstream_ref(
+        executor,
+        repo,
+        utility,
+        budget,
+        cancel,
+        "refs/remotes/origin/HEAD",
+    )
+    .or_else(|| {
+        let branch =
+            advertised_default_branch(executor, repo, utility, "origin", budget, cancel).ok()??;
+        resolve_upstream_ref(
+            executor,
+            repo,
+            utility,
+            budget,
+            cancel,
+            &format!("refs/remotes/origin/{}", branch.short_name()),
+        )
+    })
+}
+
+/// How many commits of `head` are not in `base`, as last fetched. Zero means
+/// the checkout is level with or ahead of the default branch.
+fn commits_behind(
     executor: &dyn provenant_os::exec::Executor,
     repo: &provenant_confinement::ReadOnlyRepo,
     utility: &provenant_confinement::UtilityRuntime,
     budget: provenant_confinement::UtilityBudget,
     cancel: &provenant_core::CancelToken,
     head: provenant_core::GitOid,
+    base: provenant_core::GitOid,
 ) -> Option<u64> {
-    use provenant_confinement::{GitRead, run_read_utility, utility::advertised_default_branch};
+    use provenant_confinement::{GitRead, run_read_utility};
     use provenant_os::exec::Termination;
 
-    let resolve = |reference: &str| {
-        let out = run_read_utility(
-            executor,
-            GitRead::ResolveRevision {
-                revision: provenant_confinement::repo::GitRevision::new(reference).ok()?,
-            },
-            repo,
-            utility,
-            budget,
-            cancel,
-        )
-        .ok()?;
-        if out.termination != Termination::Exit(0) {
-            return None;
-        }
-        provenant_core::GitOid::parse(std::str::from_utf8(&out.stdout.bytes).ok()?.trim()).ok()
-    };
-    let default = resolve("refs/remotes/origin/HEAD").or_else(|| {
-        let branch =
-            advertised_default_branch(executor, repo, utility, "origin", budget, cancel).ok()??;
-        resolve(&format!("refs/remotes/origin/{}", branch.short_name()))
-    })?;
     let behind = run_read_utility(
         executor,
         GitRead::AncestorCount {
             base: head,
-            head: default,
+            head: base,
         },
         repo,
         utility,
@@ -1751,7 +2133,6 @@ fn commits_behind_default(
         .trim()
         .parse::<u64>()
         .ok()
-        .filter(|count| *count > 0)
 }
 
 /// Publishing hands the lane the GitHub credential. It is on by default for

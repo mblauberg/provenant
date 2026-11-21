@@ -1,3 +1,22 @@
+fn isolated_writer_access_receipt() -> provenant_records::LaneAccessReceipt {
+    provenant_records::LaneAccessReceipt {
+        access: provenant_records::LaneAccess::Isolated,
+        source: provenant_records::LaneAccessSource::Default,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    }
+}
+
+fn writer_access_receipt_for_plan(
+    plan: &provenant_confinement::ConfinedPlan,
+) -> provenant_records::LaneAccessReceipt {
+    plan.permissions()
+        .policy
+        .as_ref()
+        .map(|policy| policy.mandatory().lane_access().clone())
+        .unwrap_or_else(isolated_writer_access_receipt)
+}
+
 #[test]
 fn writer_plan_stages_scratch_missing_auth() -> Result<(), Box<dyn std::error::Error>> {
     writer_preparation_fixture(false, false, "missing")
@@ -246,7 +265,19 @@ fn writer_preparation_steps(
         source_head: None,
         base_ref: None,
         profile: provenant_records::run::HarnessProfile {
-            knobs: [("lanes.publish".into(), serde_json::json!(false))].into(),
+            knobs: [
+                ("lanes.publish".into(), serde_json::json!(false)),
+                // These cases pin sandboxed isolated staging and the private
+                // Git-config-includes view; host access stages native state
+                // under HOME instead.
+                ("lanes.access".into(), serde_json::json!("isolated")),
+            ]
+            .into(),
+            knob_sources: [(
+                "lanes.access".into(),
+                provenant_records::LimitSource::Launch,
+            )]
+            .into(),
             ..Default::default()
         },
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
@@ -887,6 +918,7 @@ printf 'agy 1.0.0\n'
                     authority,
                     &home,
                     &confinement.plan.permissions().credential_roots,
+            &writer_access_receipt_for_plan(&confinement.plan),
                 )?;
             }
             let directories =
@@ -1171,6 +1203,7 @@ printf 'agy 1.0.0\n'
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: Default::default(),
         extra: Default::default(),
         adapter: "codex".into(),
         model: "fixture-model".into(),
@@ -1249,10 +1282,13 @@ printf 'agy 1.0.0\n'
     // A writer may receive its target later; admission must not depend on it.
     let target = codex.env.iter().find(|(key, _)| key == "CARGO_TARGET_DIR").cloned().unwrap();
     codex.env.retain(|(key, _)| key != "CARGO_TARGET_DIR");
+    let writer_worktree = project.join(".worktrees/writer");
     let coordination_reads = configure_build_slots(
         &mut codex,
         &provenant_config::LaneBuildSettings::default(),
         &project,
+        &writer_worktree,
+        &git,
         &home,
         &confinement.plan.permissions().scratch.path,
         &codex_runtime,
@@ -1261,7 +1297,17 @@ printf 'agy 1.0.0\n'
         &provenant_records::policy::Policy::default(),
         "test-lane",
     )
-    .expect("sandboxed lanes receive their optional build-slot shim");
+    .expect("sandboxed lanes receive their build context and admission shim");
+    let context_json = codex
+        .env
+        .iter()
+        .find(|(key, _)| key == provenant_core::consumer_env::BUILD_CONTEXT)
+        .and_then(|(_, value)| value.to_str())
+        .ok_or("lane build context")?;
+    let build_context = provenant_run::build::BuildContext::from_json(context_json)?;
+    assert_eq!(build_context.project, project);
+    assert_eq!(build_context.worktree, writer_worktree);
+    assert!(build_context.git.is_some(), "writer Git binding is frozen at launch");
     assert!(
         coordination_reads
             .iter()
@@ -1273,14 +1319,28 @@ printf 'agy 1.0.0\n'
             .any(|root| root.path.ends_with("slot-0.lock"))
     );
     codex.env.push(target);
-    // An unrepresentable shim input warns and leaves preparation intact without new grants.
-    let env_before = codex.env.clone();
+    // An unrepresentable shim input warns and leaves preparation intact without
+    // new grants. The frozen build context is still republished for verify.
+    let context_before = codex
+        .env
+        .iter()
+        .find(|(name, _)| name == provenant_core::consumer_env::BUILD_CONTEXT)
+        .cloned()
+        .ok_or("lane build context before skipped shim")?;
+    let env_before: Vec<_> = codex
+        .env
+        .iter()
+        .filter(|(name, _)| name != provenant_core::consumer_env::BUILD_CONTEXT)
+        .cloned()
+        .collect();
     let profile_before = codex.profile.spec.clone();
     let setup_count = codex.setup.len();
     let skipped_coordination_reads = configure_build_slots(
         &mut codex,
         &provenant_config::LaneBuildSettings::default(),
         &project,
+        &writer_worktree,
+        &git,
         &home,
         &confinement.plan.permissions().scratch.path,
         Path::new("relative-runtime"),
@@ -1291,7 +1351,23 @@ printf 'agy 1.0.0\n'
     )
     .expect("an unrepresentable shim leaves launch preparation intact");
     assert!(skipped_coordination_reads.is_empty());
-    assert_eq!(codex.env, env_before);
+    let skipped_context = codex
+        .env
+        .iter()
+        .find(|(name, _)| name == provenant_core::consumer_env::BUILD_CONTEXT)
+        .cloned()
+        .ok_or("lane build context after skipped shim")?;
+    assert_eq!(
+        skipped_context, context_before,
+        "the frozen build context survives a skipped shim"
+    );
+    let env_after: Vec<_> = codex
+        .env
+        .iter()
+        .filter(|(name, _)| name != provenant_core::consumer_env::BUILD_CONTEXT)
+        .cloned()
+        .collect();
+    assert_eq!(env_after, env_before);
     assert_eq!(codex.profile.spec, profile_before);
     assert_eq!(codex.setup.len(), setup_count);
     let slots = state.join("admission");
@@ -1577,6 +1653,7 @@ printf 'agy 1.0.0\n'
             authority,
             &home,
             &confinement.plan.permissions().credential_roots,
+            &writer_access_receipt_for_plan(&confinement.plan),
         )?;
     }
     // Run the real canonical-anchor check on every host-config read. The
@@ -2114,7 +2191,7 @@ printf 'agy 1.0.0\n'
             prompt_file: None,
         },
         confinement.writer.as_ref(),
-        &run::LaneAccess::default(),
+        &run::LaneAccessRequest::default(),
         &config,
         "cursor",
         false,
@@ -2216,7 +2293,7 @@ fn host_writer_roots_inside_other_checkouts(
         ..Default::default()
     };
     let request = |writer: Option<&run::WriterLaunch>,
-                   access: &run::LaneAccess,
+                   access: &run::LaneAccessRequest,
                    config: &provenant_confinement::run_config::RunConfig| {
         confinement_request(
             project_id,
@@ -2242,7 +2319,7 @@ fn host_writer_roots_inside_other_checkouts(
         )
     };
     let hosted = config(vec![locks.clone()]);
-    let launched = request(Some(writer), &run::LaneAccess::default(), &hosted)?;
+    let launched = request(Some(writer), &run::LaneAccessRequest::default(), &hosted)?;
     let lock_grant = PathGrant {
         path: locks.clone(),
         scope: PathScope::Subtree,
@@ -2263,7 +2340,7 @@ fn host_writer_roots_inside_other_checkouts(
     assert!(mandatory.host_writes().contains(&lock_grant));
     provenant_confinement::ConfinedPlan::new(launched)?;
     // A read-only lane receives no writer roots and no exception.
-    let read_only = request(None, &run::LaneAccess::default(), &hosted)?;
+    let read_only = request(None, &run::LaneAccessRequest::default(), &hosted)?;
     assert!(read_only.permissions.write_roots.is_empty());
     let mandatory = read_only
         .permissions
@@ -2273,7 +2350,7 @@ fn host_writer_roots_inside_other_checkouts(
         .mandatory();
     assert!(mandatory.host_writes().is_empty());
     // A dispatch root inside the checkout is not host policy.
-    let dispatch = run::LaneAccess {
+    let dispatch = run::LaneAccessRequest {
         write_roots: vec![primary.join("scripts")],
         ..Default::default()
     };
@@ -2291,7 +2368,7 @@ fn host_writer_roots_inside_other_checkouts(
             matches!(
                 request(
                     Some(writer),
-                    &run::LaneAccess::default(),
+                    &run::LaneAccessRequest::default(),
                     &config(vec![path.clone()])
                 ),
                 Err(PermissionError::ProtectedOverlap)

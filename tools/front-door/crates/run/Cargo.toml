@@ -1,6 +1,6 @@
 [package]
 name = "provenant-run"
-version = "2.5.1"
+version = "2.6.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -24,6 +24,7 @@ fixture = [
 workspace = true
 
 [dependencies]
+libc = { workspace = true }
 provenant-test-support = { path = "../test-support", optional = true }
 provenant-os = { workspace = true }
 provenant-confinement = { workspace = true }

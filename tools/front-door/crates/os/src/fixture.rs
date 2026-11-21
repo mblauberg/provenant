@@ -16,6 +16,24 @@ pub fn on_existing_lock_wait(hook: impl FnOnce() + 'static) {
     });
 }
 
+/// Run once on this thread after an existing lock has been acquired and before
+/// its path inode is revalidated. Fixtures use this to simulate a holder
+/// unlinking the entry mid-probe without relying on timing.
+pub fn on_existing_lock_acquire(hook: impl FnOnce() + 'static) {
+    crate::fs::EXISTING_LOCK_ACQUIRE_HOOK.with(|pending| {
+        assert!(pending.borrow_mut().replace(Box::new(hook)).is_none());
+    });
+}
+
+/// Run once on this thread after an owner lock has been acquired and before
+/// its path inode is revalidated. The hook receives the lock name so unrelated
+/// acquisitions do not consume it.
+pub fn on_owner_lock_acquire(hook: impl FnMut(&std::ffi::OsStr) + 'static) {
+    crate::fs::OWNER_LOCK_ACQUIRE_HOOK.with(|pending| {
+        assert!(pending.borrow_mut().replace(Box::new(hook)).is_none());
+    });
+}
+
 /// Create a fixture state root with the private permissions required by stores.
 ///
 /// Missing parents are created private too, and the leaf is set explicitly, so

@@ -287,70 +287,6 @@ pub fn assess_evidence(
     (result, unmet)
 }
 
-/// Remove a gate checkout through git only; never delete a path directly.
-fn remove_checkout(project: &std::path::Path, checkout: &std::path::Path) {
-    #[allow(clippy::disallowed_methods, reason = "git boundary for gate checkout")]
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(project)
-        .args(["worktree", "remove", "--force"])
-        .arg(checkout)
-        .output();
-    #[allow(clippy::disallowed_methods, reason = "git boundary for gate checkout")]
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(project)
-        .args(["worktree", "prune"])
-        .output();
-}
-
-enum Run {
-    Passed,
-    Failed,
-    TimedOut,
-}
-
-#[allow(
-    clippy::disallowed_methods,
-    reason = "bound each command to the gate deadline"
-)]
-fn run_command(
-    checkout: &std::path::Path,
-    command: &str,
-    deadline: std::time::Instant,
-    passthrough: &[String],
-) -> Result<Run, LandingError> {
-    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
-    let timeout = deadline.saturating_duration_since(std::time::Instant::now());
-    if timeout.is_zero() {
-        return Ok(Run::TimedOut);
-    }
-    let argv = ["sh".into(), "-c".into(), command.into()];
-    let env: Vec<_> = std::env::vars_os()
-        .filter(|(key, _)| {
-            !["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"]
-                .iter()
-                .any(|name| key == name && !passthrough.iter().any(|allowed| allowed == name))
-        })
-        .collect();
-    let mut options = ExecOptions::new(&argv, checkout, timeout);
-    options.env = Some(&env);
-    options.cleanup_process_group = true;
-    let outcome = SystemExecutor::new(1)
-        .and_then(|executor| executor.execute(options))
-        .map_err(|error| failed(format!("cannot execute gate command: {error:?}")))?;
-    use std::io::Write;
-    let _ = std::io::stderr().write_all(&outcome.stdout.bytes);
-    let _ = std::io::stderr().write_all(&outcome.stderr.bytes);
-    Ok(if outcome.timed_out {
-        Run::TimedOut
-    } else if outcome.termination == Termination::Exit(0) {
-        Run::Passed
-    } else {
-        Run::Failed
-    })
-}
-
 /// Execute a configured command plan in an isolated candidate checkout.
 #[allow(
     clippy::disallowed_methods,
@@ -378,68 +314,139 @@ pub fn execute_commands(
     let deadline = started + Duration::from_secs(definition.timeout_seconds);
     let ports = provenant_config::PortTable::read_for(Some(project), state)
         .map_err(|error| failed(format!("cannot resolve worktree layout port: {error}")))?;
-    let short: String = candidate.commit.chars().take(12).collect();
-    let branch = format!("land-gate-{short}-{}", std::process::id());
-    let relative = ports
-        .managed_writer_path(&branch)
-        .map_err(|error| failed(format!("cannot resolve gate checkout path: {error}")))?;
-    let checkout = project.join(relative);
-    let root = checkout
-        .parent()
-        .ok_or_else(|| failed("configured gate checkout has no parent"))?;
-    if checkout.exists() {
-        return Err(failed("gate checkout already exists"));
-    }
-    std::fs::create_dir_all(root)
-        .map_err(|error| failed(format!("cannot prepare gate checkout directory: {error}")))?;
-    let added = std::process::Command::new("git")
-        .arg("-C")
-        .arg(project)
-        .args(["worktree", "add", "--detach"])
-        .arg(&checkout)
-        .arg(&candidate.commit)
-        .output()
-        .map_err(|error| failed(format!("cannot start git: {error}")))?;
-    if !added.status.success() {
+    let checkout =
+        crate::verify::DetachedCheckout::new(project, &ports, &candidate.commit, "land-gate")
+            .map_err(|error| failed(format!("cannot create gate checkout: {error}")))?;
+    let common =
+        provenant_os::git::repository_path(project, provenant_os::git::RepositoryPath::CommonDir)
+            .map_err(|error| failed(format!("cannot resolve gate repository: {error}")))?;
+    let env = std::env::vars_os()
+        .filter(|(key, _)| {
+            key != "PROVENANT_BUILD_LOCAL_ROOT"
+                && !["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"]
+                    .iter()
+                    .any(|name| {
+                        key == name
+                            && !definition
+                                .env_passthrough
+                                .iter()
+                                .any(|allowed| allowed == name)
+                    })
+        })
+        .chain(std::iter::once((
+            "PROVENANT_BUILD_LOCAL_ROOT".into(),
+            checkout.path.as_os_str().to_owned(),
+        )))
+        .collect();
+    use provenant_run::build::{
+        self, Job, JobKind, Origin, Output, Priority, SnapshotSource, Step,
+    };
+    if deadline <= std::time::Instant::now() {
         return Err(failed(format!(
-            "cannot create gate checkout: {}",
-            String::from_utf8_lossy(&added.stderr).trim()
+            "gate command timed out after {}s: {}",
+            definition.timeout_seconds, definition.commands[0]
+        )));
+    }
+    let job = Job {
+        id: format!(
+            "gate-{}-{}",
+            std::process::id(),
+            build::ledger::now_unix_ms()
+        ),
+        project_key: provenant_config::project_key_for(project)
+            .unwrap_or_else(|| provenant_config::project_key(&common)),
+        project: project.to_path_buf(),
+        origin: Origin::Landing,
+        owner: format!("landing-{}", std::process::id()),
+        kind: JobKind::Gate {
+            name: "commands".into(),
+        },
+        priority: Priority::Train,
+        source: SnapshotSource::Commit {
+            repo_common_dir: common,
+            commit: candidate.commit.clone(),
+        },
+        verify_base: None,
+        steps: definition
+            .commands
+            .iter()
+            .map(|command| Step {
+                cwd_rel: Default::default(),
+                argv: vec!["sh".into(), "-c".into(), command.into()],
+            })
+            .collect(),
+        stop_on_failure: true,
+        env,
+        output: Output::Capture {
+            limit_bytes: 8 * 1024 * 1024,
+        },
+        timeout: Some(deadline.saturating_duration_since(std::time::Instant::now())),
+        sandboxed: false,
+        prelude: None,
+    };
+    let context = build::RunContext {
+        state: state.to_path_buf(),
+        home: std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| project.to_path_buf()),
+        strategy: build::strategy(&ports.build).value,
+        cancel: provenant_core::CancelToken::new(),
+    };
+    // The gate deadline includes admission, not just the spawned commands.
+    let (finished, wait) = std::sync::mpsc::channel::<()>();
+    let cancel = context.cancel.clone();
+    let watchdog = std::thread::spawn(move || {
+        if wait
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .is_err()
+        {
+            cancel.cancel();
+        }
+    });
+    let execution = build::run(job, &context);
+    let _ = finished.send(());
+    let _ = watchdog.join();
+    let expired = context.cancel.is_cancelled();
+    if expired && execution.is_err() {
+        return Err(failed(format!(
+            "gate command timed out after {}s: {}",
+            definition.timeout_seconds, definition.commands[0]
+        )));
+    }
+    let execution =
+        execution.map_err(|error| failed(format!("cannot execute gate command: {error}")))?;
+    if let Some(capture) = &execution.captured {
+        use std::io::Write;
+        let _ = std::io::stderr().write_all(&capture.stdout);
+        let _ = std::io::stderr().write_all(&capture.stderr);
+    }
+    if execution.outcome.timed_out || expired {
+        let index = execution.step_exits.len().saturating_sub(1);
+        let command = &definition.commands[index.min(definition.commands.len() - 1)];
+        return Err(failed(format!(
+            "gate command timed out after {}s: {command}",
+            definition.timeout_seconds
         )));
     }
     let mut checks = Vec::new();
     let mut result = GateResult::Passed;
-    let mut outcome = Ok(());
-    for command in &definition.commands {
-        match run_command(&checkout, command, deadline, &definition.env_passthrough) {
-            Ok(Run::Passed) => checks.push(CheckEvidence {
-                name: command.clone(),
-                issuer: None,
-                result: GateResult::Passed,
-            }),
-            Ok(Run::Failed) => {
-                checks.push(CheckEvidence {
-                    name: command.clone(),
-                    issuer: None,
-                    result: GateResult::Failed,
-                });
-                result = GateResult::Failed;
-                break;
-            }
-            Ok(Run::TimedOut) => {
-                outcome = Err(failed(format!(
-                    "gate command timed out after {}s: {command}",
-                    definition.timeout_seconds
-                )));
-                break;
-            }
-            Err(error) => {
-                outcome = Err(error);
-                break;
-            }
+    for (command, exit) in definition.commands.iter().zip(&execution.step_exits) {
+        let passed = exit.is_some_and(|exit| exit.code == Some(0));
+        let verdict = if passed {
+            GateResult::Passed
+        } else {
+            GateResult::Failed
+        };
+        checks.push(CheckEvidence {
+            name: command.clone(),
+            issuer: None,
+            result: verdict,
+        });
+        if !passed {
+            result = GateResult::Failed;
+            break;
         }
     }
-    remove_checkout(project, &checkout);
-    outcome?;
     let executor = "local".to_owned();
     for check in &mut checks {
         check.issuer = Some(executor.clone());
@@ -896,27 +903,46 @@ mod tests {
             );
             return;
         }
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        assert!(matches!(
-            run_command(
-                std::path::Path::new("."),
-                "test -z \"$GH_TOKEN$GITHUB_TOKEN$GH_ENTERPRISE_TOKEN\"",
-                deadline,
-                &[]
-            )
-            .unwrap(),
-            Run::Passed
-        ));
-        assert!(matches!(
-            run_command(
-                std::path::Path::new("."),
-                "test \"$GH_TOKEN\" = gate-test && test -z \"$GITHUB_TOKEN$GH_ENTERPRISE_TOKEN\"",
-                deadline,
-                &["GH_TOKEN".into()]
-            )
-            .unwrap(),
-            Run::Passed
-        ));
+        let repository = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = provenant_os::fixture::git_command()
+                .arg("-C")
+                .arg(repository.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(repository.path().join("f"), "x").unwrap();
+        git(&["add", "f"]);
+        git(&["commit", "-qm", "fixture"]);
+        let mut cand = candidate(1);
+        cand.commit = git(&["rev-parse", "HEAD"]);
+        cand.tree = git(&["rev-parse", "HEAD^{tree}"]);
+        let mut def = definition();
+        def.kind = GateKind::Commands;
+        def.executor = Some("local".into());
+        def.commands = vec!["test -z \"$GH_TOKEN$GITHUB_TOKEN$GH_ENTERPRISE_TOKEN\"".into()];
+        assert_eq!(
+            execute_commands(repository.path(), repository.path(), &cand, &def)
+                .unwrap()
+                .result,
+            GateResult::Passed
+        );
+        def.env_passthrough = vec!["GH_TOKEN".into()];
+        def.commands = vec![
+            "test \"$GH_TOKEN\" = gate-test && test -z \"$GITHUB_TOKEN$GH_ENTERPRISE_TOKEN\""
+                .into(),
+        ];
+        assert_eq!(
+            execute_commands(repository.path(), repository.path(), &cand, &def)
+                .unwrap()
+                .result,
+            GateResult::Passed
+        );
+        def.env_passthrough.clear();
         let dir = tempfile::tempdir().unwrap();
         let wait_for_marker = |marker: &std::path::Path, timeout: Duration| {
             provenant_test_support::wait_for(
@@ -953,8 +979,10 @@ mod tests {
                 trigger_path.display(),
                 marker_path.display()
             );
-            let result = run_command(dir.path(), &command, deadline, &[]).unwrap();
-            assert!(matches!(result, Run::Passed) == expected_success);
+            def.commands = vec![command];
+            let result =
+                execute_commands(repository.path(), repository.path(), &cand, &def).unwrap();
+            assert_eq!(result.result == GateResult::Passed, expected_success);
             std::fs::write(&trigger_path, b"").unwrap();
             assert!(
                 !wait_for_marker(&marker_path, Duration::from_secs(1)),
@@ -998,12 +1026,55 @@ mod tests {
         let got = execute_commands(&dir, &dir, &cand, &def).unwrap();
         assert_eq!(got.result, GateResult::Passed);
         assert_eq!(got.issuer.as_deref(), Some("local"));
+        assert_eq!(got.commit, cand.commit);
+        assert_eq!(got.tree, cand.tree);
+        assert_eq!(got.definition_digest, def.digest);
+        assert_eq!(got.checks.len(), 1);
+        assert_eq!(got.checks[0].name, def.commands[0]);
+        assert_eq!(got.checks[0].result, GateResult::Passed);
+        assert_eq!(got.checks[0].issuer.as_deref(), Some("local"));
         assert!(got.duration_seconds.is_some());
-        def.commands = vec!["test -f missing".into()];
-        assert_eq!(
-            execute_commands(&dir, &dir, &cand, &def).unwrap().result,
-            GateResult::Failed
-        );
+        def.commands = vec!["test -f f".into(), "test -f missing".into(), "false".into()];
+        let failed = execute_commands(&dir, &dir, &cand, &def).unwrap();
+        assert_eq!(failed.result, GateResult::Failed);
+        assert_eq!(failed.checks.len(), 2);
+        assert_eq!(failed.checks[0].result, GateResult::Passed);
+        assert_eq!(failed.checks[1].result, GateResult::Failed);
+        assert_eq!(failed.checks[1].name, def.commands[1]);
+        assert_eq!(failed.checks[1].issuer.as_deref(), Some("local"));
+        assert_eq!(failed.commit, cand.commit);
+        assert_eq!(failed.tree, cand.tree);
+        assert_eq!(failed.definition_digest, def.digest);
+        // The configured strategy must wrap every step while preserving evidence.
+        let marker = dir.join("wrapper-calls");
+        let wrapper = dir.join("wrapper.sh");
+        std::fs::write(
+            &wrapper,
+            format!("printf x >> '{}'; exec \"$@\"\n", marker.display()),
+        )
+        .unwrap();
+        let mut config: serde_json::Value =
+            serde_json::from_str(include_str!("../../../crates/config/assets/ports.json")).unwrap();
+        config["build"]["strategy"] = serde_json::json!("command");
+        config["build"]["command"]["argv"] = serde_json::json!(["/bin/sh", wrapper]);
+        std::fs::create_dir_all(dir.join(".provenant")).unwrap();
+        std::fs::write(
+            dir.join(".provenant/ports.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        def.commands = vec!["true".into(), "true".into()];
+        let wrapped = execute_commands(&dir, &dir, &cand, &def).unwrap();
+        assert_eq!(wrapped.result, GateResult::Passed);
+        assert_eq!(wrapped.checks.len(), 2);
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "xx");
+        // Restore lane strategy for the deadline case.
+        config["build"]["strategy"] = serde_json::json!("lane");
+        std::fs::write(
+            dir.join(".provenant/ports.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
         def.commands = vec!["sleep 30".into()];
         def.timeout_seconds = 1;
         assert!(execute_commands(&dir, &dir, &cand, &def).is_err());

@@ -4,9 +4,7 @@
 use crate::{Output, Part, PricesRefresh, Reconcile, Stats, Switch, Target, Trace, limits};
 #[cfg(test)]
 use provenant_core::ActorId;
-use provenant_core::{
-    AttemptId, CancelToken, Clock, CredentialRoots, DeliveryId, OperationId, Roots, WallTime,
-};
+use provenant_core::{AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, WallTime};
 use provenant_fabric_runtime::hosts::plain_text;
 use provenant_os::clock::SystemClock;
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
@@ -282,6 +280,53 @@ fn command_error(fail: &Fail) -> CommandError {
     }
 }
 
+/// The upstream head a stale read-only checkout should review. `head` is kept
+/// so a launch can name both the tree it would have read and the one it reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadOnlySourceRef {
+    pub commit: provenant_core::GitOid,
+    pub reference: String,
+    pub behind: u64,
+    pub head: provenant_core::GitOid,
+}
+
+/// Resolve the default source of a read-only launch from `source`. Only a
+/// checkout behind its fetched upstream yields a pin; a level or ahead checkout
+/// keeps its local tree. Missing Git evidence is advisory, never a refusal.
+pub fn read_only_source_ref(state: &Path, source: &Path) -> Option<ReadOnlySourceRef> {
+    provider::confinement::read_only_source_ref(state, source)
+}
+
+/// The warning a stale read-only checkout carries when an upstream source is
+/// pinned, naming the ref and commit the lane will read and the local head it
+/// replaces.
+pub fn read_only_source_warning(source: &Path, selected: &ReadOnlySourceRef) -> String {
+    format!(
+        "{} is {} commit{} behind {}; read-only lane will read {} ({}) instead of local {} because the checkout is stale",
+        source.display(),
+        selected.behind,
+        if selected.behind == 1 { "" } else { "s" },
+        selected.reference,
+        selected.reference,
+        selected.commit,
+        selected.head
+    )
+}
+
+/// The warning for an unpinned read-only launch. The lane still reads the
+/// local checkout; the fetched upstream is only the reason it is stale.
+pub fn read_only_local_checkout_warning(source: &Path, selected: &ReadOnlySourceRef) -> String {
+    format!(
+        "{} is {} commit{} behind {} ({}); read-only lane will read the local checkout ({}) because no upstream source was pinned",
+        source.display(),
+        selected.behind,
+        if selected.behind == 1 { "" } else { "s" },
+        selected.reference,
+        selected.commit,
+        selected.head
+    )
+}
+
 pub fn read_only_checkout_warning(state: &Path, source: &Path) -> Option<String> {
     provider::confinement::read_only_checkout_warning(state, source)
 }
@@ -360,13 +405,13 @@ impl std::error::Error for SourceAdmissionError {}
 
 /// The same source-root decision used by preparation and graph explanation.
 /// Pinned roots are verified against the selected project's Git registration;
-/// live roots retain their selected location. Both modes use declared paths
-/// for credential and state boundaries.
+/// live roots retain their selected location. This pre-route check enforces
+/// state boundaries; the resolved route's confinement plan enforces credential
+/// policy with its effective lane access.
 pub fn admit_source_root(
     cwd: &Path,
     state: &Path,
     source: &Path,
-    credentials: &CredentialRoots,
     mode: SourceAdmissionMode,
 ) -> Result<SourceAdmission, SourceAdmissionError> {
     const CODE: &str = "CONFINEMENT_SOURCE_CWD_AUTHORITY";
@@ -374,23 +419,8 @@ pub fn admit_source_root(
         code: CODE,
         reason: reason.to_owned(),
     };
-    let check_credentials = |path: &Path| {
-        credentials
-            .entries()
-            .iter()
-            .find(|root| root.path == path || root.path.starts_with(path))
-            .map_or(Ok(()), |root| {
-                Err(refuse(&format!(
-                    "graph source checkout overlaps declared credential root {} (source: {})",
-                    root.path.display(),
-                    root.source,
-                )))
-            })
-    };
-    check_credentials(source)?;
     let candidate = provenant_confinement::permissions::resolve_boundary_path(source)
         .map_err(|_| refuse("graph source checkout is not an allowed read root"))?;
-    check_credentials(&candidate)?;
     if !run::access_root_allowed(&candidate, state, true) {
         return Err(refuse("graph source checkout is not an allowed read root"));
     }
@@ -407,7 +437,6 @@ pub fn admit_source_root(
                 refuse("graph source checkout is no longer registered with the project")
             })?,
     };
-    check_credentials(&path)?;
     if !run::access_root_allowed(&path, state, true) {
         return Err(refuse("graph source checkout is not an allowed read root"));
     }
@@ -436,11 +465,6 @@ pub fn admit_source_root(
     warnings.sort_by(|left, right| left.path.cmp(&right.path));
     warnings.dedup_by(|left, right| left.path == right.path);
     Ok(SourceAdmission { path, warnings })
-}
-
-/// Built-in and host declarations classified before account configuration is available.
-pub fn declared_credentials(registry: &Registry<'_>) -> Result<CredentialRoots, String> {
-    provider::declared_credentials(registry)
 }
 
 impl Registry<'_> {
@@ -1104,7 +1128,8 @@ impl Registry<'_> {
                 let session = outcome
                     .session()
                     .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
-                provider::observe_opencode_session(provider_state, session).map(|(_, model)| model)
+                provider::observe_opencode_session(provider_state, session, route)
+                    .map(|(_, model)| model)
             });
         let opencode_model = match opencode_model {
             Some(Ok(model)) => Some(model),

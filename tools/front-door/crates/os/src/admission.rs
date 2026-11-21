@@ -593,9 +593,20 @@ impl AdmissionSlots {
 
     /// Take the first free slot below `limit`, or none when all are held.
     pub fn try_acquire(&self, limit: u64) -> Result<Option<SlotGuard>> {
+        self.try_acquire_indices(0..limit)
+    }
+
+    /// Try the supplied indices in order.
+    pub fn try_acquire_ordered(&self, order: &[u64]) -> Result<Option<SlotGuard>> {
+        self.try_acquire_indices(order.iter().copied())
+    }
+
+    fn try_acquire_indices(&self, order: impl Iterator<Item = u64>) -> Result<Option<SlotGuard>> {
+        let mut count = 0;
         let mut missing = None;
         let mut absent = 0;
-        for index in 0..limit {
+        for index in order {
+            count += 1;
             match self
                 .dir
                 .try_lock_existing(&slot_name(index), LockMode::Exclusive)
@@ -616,7 +627,7 @@ impl AdmissionSlots {
             }
         }
         match missing {
-            Some(error) if absent == limit => Err(error),
+            Some(error) if absent == count => Err(error),
             _ => Ok(None),
         }
     }
@@ -704,6 +715,15 @@ mod tests {
         AdmissionSlots::provision(state.path(), class, limit).unwrap();
         let slots = AdmissionSlots::open(state.path(), class).unwrap();
         (state, slots)
+    }
+
+    #[test]
+    fn ordered_acquisition_prefers_requested_indices() {
+        let (_state, slots) = provisioned("build", 3);
+        let first = slots.try_acquire_ordered(&[2, 0, 1]).unwrap().unwrap();
+        assert_eq!(first.index(), 2);
+        let second = slots.try_acquire_ordered(&[2, 0, 1]).unwrap().unwrap();
+        assert_eq!(second.index(), 0);
     }
 
     #[test]

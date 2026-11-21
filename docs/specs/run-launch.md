@@ -225,8 +225,8 @@ The `policy.<CODE>` knobs are documented in `config/harness-knobs.json`.
 Every provider lane has its native tool and shell surface. Read-only mode
 constrains filesystem writes; it does not remove shell, editing or web tools
 from the provider. The common confinement planner owns worktree writes, reads
-of the primary and sibling checkouts, explicit read roots, credential denials
-and network reach. Network defaults to open, and explicit network reach is
+of the primary and sibling checkouts, explicit read roots, isolated-mode
+credential denials and network reach. Network defaults to open, and explicit network reach is
 applied by that same planner for every adapter. Every launch finalises the
 host Cargo home and lane target binding through the common environment path.
 Private harness instruction files receive the canonical global rules compiled
@@ -235,17 +235,87 @@ without depending on the installed asset layout. Native integration differences
 belong to `AdapterSpec`, with a reason and source for an unavailable capability.
 - Why: provider selection must not silently narrow a lane's working surface.
 
+Credential-root classification identifies the most specific declared store
+and its source. Under `lanes.access=isolated`, a declared store or exact
+credential file that overlaps a lane root, and a store that cannot be resolved
+precisely, keeps its existing preparation refusal. Under `host`, the same
+overlap or unresolved store warns with the paths, effective access and source,
+then preparation continues. Credential-overlapping grants and discovered
+tool paths follow that access choice as well: isolated keeps its refusals and
+omissions; host accepts the grant and keeps the discovered path. In a host
+profile, credential, keychain/security and process inspection, signal and
+task-port denies are absent. Sandboxing
+continues to enforce its write roots, network policy and explicit denies. The
+isolated profile retains its credential write restrictions, including the
+protection against replacing credential files. `LaneAccessGrant` retains the
+input spelling for a credential-refusal diagnostic; the canonical grant remains
+the only path used for authority checks. Route selection precedes this
+credential decision so a host-access fallback can still proceed.
+- Why: same-host credential classification must not become a launch boundary.
+
+### Lane access
+
+`LaneAccess` resolves `lanes.access` to `host` by default or `isolated`. Host
+access means a same-host lane inherits the host environment, provider home,
+profile and login, Git configuration and credential reads, whether sandboxed
+or not. Isolated reproduces the pre-2.5.3 behaviour: sandboxed lanes get a
+private environment and provider home, filtered Git configuration and
+credential denies, and hosted-cloud credential variables are stripped from
+every lane. Cross-host credential grants are unchanged. `base_env` preserves host variables
+for host access, while `strip_hosted_credentials` filters only isolated lanes.
+
+The same access choice governs credential roots, keychain/security and
+host-process access: host-mode sandboxing still confines writes, network and
+explicit denies, while credential, keychain/security and process inspection,
+signal and task-port denials are lifted. An overlapping or unresolved
+credential root warns with its paths, effective access and source, then
+preparation proceeds; isolated retains the existing refusals.
+Credential-overlapping grants and discovered tool paths follow the choice as
+well: isolated keeps its refusals and omissions; host accepts the grant and
+keeps the discovered path. The same rule applies at delivery and continuation:
+host access warns and proceeds with ordinary host Git transport and linked
+retained files, and with an unavailable sandbox backend (recording the reason
+in the receipt); isolated keeps its refusals. Each warning names the effective
+access and its source.
+
+For host access, `lane_provider_var` passes the captured `SSH_AUTH_SOCK` to
+`finalise_provider_env`, which grants the exact resolved agent socket to a
+sandboxed lane. The credential inventory retains its exact socket boundary for
+isolated lanes; the host-access grant does not open its parent directory.
+- Why: a same-host lane can authenticate through the user's SSH agent.
+
+Provider `prepare` implementations for every adapter, including OpenCode, use
+the native home and session store under host access, including sandboxed
+launches. OpenCode uses the host XDG profile and attaches to its service when
+available; isolated launches use its private per-attempt profile. An explicitly
+selected account keeps its account-specific home to select that login. Claude
+uses native authentication there; isolated launches retain the managed token
+pipe and private configuration. `PrepareInput::stage_user_skills` copies and
+filters skills for isolated launches; native discovery reads the user's own
+skills and linked references directly.
+
+`resolve_lane_access` gives an explicit launch, template or tier knob priority
+over route policy, then uses the host or project knob, then the default. The
+applied route receipt records the value, source and deciding key. Invalid knob
+text warns and resolves to host. The real boundaries remain other lanes' refs,
+commits and uncommitted work; data integrity; merge, release and ruleset
+authority; and credentials crossing to another host or an ungranted provider.
+- Why: sandbox selection must not silently select several unrelated restrictions.
+
 ### Lane state stays outside the worktree
 
 `finalise_provider_env` rebinds `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` into the attempt scratch (`scratch/home` and `scratch/xdg/<name>`) whenever the final value is the lane's worktree or lies under it, compared lexically and canonically when the path exists; it creates each rebound directory mode 0700, records one warning naming the variable, old path, new path and reason, and leaves values outside the worktree unchanged.
 - Why: a lane that resolves tool state under a HOME inside its own checkout can commit that state with its work; the rebound happens in the one place every adapter finishes rather than per tool.
 
 The selected sandbox floor applies to each candidate and is sealed for
-continuations. Unsupported confinement is reported rather than represented as
-sandboxed execution.
-- Why: a retry must not silently weaken the requested boundary.
+continuations. `SandboxMode::resolve_backend` refuses an unavailable backend
+for isolated access; host access warns, proceeds without that backend, and
+records effective=false and the reason in the sandbox receipt.
+- Why: a retry must disclose when requested confinement was unavailable.
 
-A lane sees the host's Git configuration as the host does. Its Git wrapper no
+`bind_host_git_config` also supplies the host global files to an unbounded
+read-only lane with host access; isolated read-only lanes keep their existing
+private setting. A lane sees the host's Git configuration as the host does. Its Git wrapper no
 longer forces `GIT_CONFIG_NOSYSTEM`, and launch no longer drops
 `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`, `GIT_CONFIG_VALUE_*` or
 `GIT_CONFIG_PARAMETERS`. The lane's own token helper entries are appended on
@@ -277,6 +347,17 @@ rewritten, and the launch receipt carries no Git-config filtering field.
   what lets an included host file be loaded inside the sandbox.
 
 ## Inputs and resources
+
+A plain read-only launch from a checkout behind its fetched upstream reviews
+that upstream head by default. `read_only_source_ref` resolves the default branch
+as last fetched without fetching; `bind_default_read_only_source` pins the
+graph's read-only nodes to that commit, and the launch warning names the ref,
+the commit and the stale local head it replaced. A level or ahead checkout keeps
+its local tree. An explicit `source` choice of `local`, a review range, an
+authored document or a writer launch keeps its own subject. Absent or unusable
+Git evidence stays advisory and never refuses the launch.
+- Why: file:line evidence from a stale working tree would report findings that
+  upstream has already fixed.
 
 Unreadable required host inputs reject an attempt before launch. A pinned source
 view reports its failure without exposing captured contents or credentials.

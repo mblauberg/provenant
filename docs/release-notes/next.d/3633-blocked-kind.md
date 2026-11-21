@@ -1,5 +1,0 @@
-## Behaviour changes
-
-### Lanes and settlement
-
-- A writer that declares `status: blocked` can now say what blocked it with the optional handoff field `blocked_on` (`owner_decision`, `capability`, `environment` or `dependency`). The field is additive and never refuses a handoff; an unknown value, or one given with another status, is kept and warned about. Only `owner_decision` and `capability` blocks read as an owner decision or a missing capability. An `environment` block retries once on the same route in a fresh session, then pauses for the chair worded as an environment problem; a `dependency` block pauses as a wait; a blocked handoff with no `blocked_on` reads as plain "blocked" and no longer claims an owner decision is needed. The new `blocked_environment` and `blocked_dependency` stop causes can be set in a node's `on_stop`. The lane preamble and the routing policy's guidance now share one statement of the status rules, which tells writers to retry or work around environment trouble before declaring it. (#3633)

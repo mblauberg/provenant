@@ -675,6 +675,34 @@ fn writer_directory_inner(
     Ok(directory)
 }
 
+/// Name the Git operation left in progress in a worktree, for advisory
+/// stranded-work reports. Only the same markers the terminal check uses are
+/// inspected; no operation content is read and nothing is changed.
+pub fn in_progress_git_operation(
+    context: &WorktreeContext<'_>,
+    path: &Path,
+    cancel: &CancelToken,
+) -> Result<Option<&'static str>, WorktreeError> {
+    let tree = verify_probed_worktree(context, path, cancel)?;
+    let private = tree.repo().private_dir();
+    for (marker, label) in [
+        ("MERGE_HEAD", "merge"),
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+        ("sequencer", "sequencer"),
+        ("BISECT_START", "bisect"),
+    ] {
+        match private.metadata_at(OsStr::new(marker), false) {
+            Ok(_) => return Ok(Some(label)),
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(None)
+}
+
 /// Verify a registered worktree and probe its own effective Git configuration,
 /// so every host Git operation on it neutralises what lanes can influence
 /// there (an `onbranch:` include of a lane-writable file, for one).

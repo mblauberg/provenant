@@ -248,17 +248,16 @@ replayable authority.
   leave the old or new file whole.
 - Owner: `crates/os/src/fs.rs`
 
-### Build admission is a sourced port
+### Build strategy context
 
-Lane Cargo shims, including native launches, use `PortTable.build_admission`, independently of attempt
-admission: builtin uses host slots and the effective disk policy, command runs
-the repository wrapper around Cargo, and none omits admission. The host freezes
-the backend/source in `PROVENANT_ADMISSION_BACKEND` and
-`PROVENANT_ADMISSION_SOURCE`. Native launches retain their host toolchain
-behind the shim. Local-Cargo policy still applies to every shim
-backend. Wrapper execution streams Cargo output without a host-state receipt.
+Lane Cargo shims carry the host-resolved build port in
+`PROVENANT_BUILD_CONTEXT`. The frozen context includes the strategy and its
+source, host toolchain paths and the lane's private Git binding. Build strategy
+selects local lane execution, a repository command wrapper, or slot execution;
+slot provisioning remains available for every strategy. The separate local
+Cargo advisory still applies to shim invocations.
 - Why: build coordination varies by repository without changing attempt custody.
-- Owner: `crates/providers/src/lane.rs`; `src/admit.rs`
+- Owner: `crates/providers/src/lane.rs`; `src/admit.rs`; `crates/run/src/build/`
 
 ### Bounded execution
 
@@ -277,7 +276,20 @@ sources. An absent optional setting leaves ordinary files, tools, local
 services and network access open. Capacity settings warn by default; a sourced
 configured stop remains distinct from a mandatory boundary refusal.
 
-Every credential declaration is enforced independently. An exception for an
+OpenCode's profile follows `lanes.access`: `host` (the default) points the
+client at the host's real XDG data, config, state and cache directories and
+grants the lane access to them, including their credential stores; `isolated`
+keeps the private per-attempt directories. Host access attaches to the service
+when available, and the lane continues its sessions by the recorded session ID in
+the host store. If the prior session is unavailable in the selected host store, launch warns and
+starts a fresh session; without a service it warns and runs standalone on the host
+profile. The client needs loopback access to attach. Attached tools
+execute in the host service process with the attempt worktree as their directory,
+outside the lane's process confinement; standalone tools remain subject to the
+lane profile. Launch diagnostics report the effective profile and its source.
+
+Every credential declaration is enforced independently, except for the host
+access choice above. An exception for an
 enclosing runtime, package or selected authentication root cannot open a nested
 declared store. Selected authentication and its exact aliases retain only their
 declared access. A lane cannot create a hard link to a file in a credential root, the shared
@@ -317,17 +329,23 @@ declarations and refuses state roots inside dedicated stores. A declaration
 exactly at HOME does not displace Provenant's normal home-relative state tree;
 exact credential declarations there retain their hold. This host-state rule
 does not classify or narrow the later launch boundary.
-Generic and sandbox credential refusals use `CredentialRoots::select_refusal`
-to name the most specific applicable declaration and its origin: an exact path
-match first, then the deepest enclosing or enclosed store, independent of
-declaration order. Equal-depth ties use stable declaration fields.
+Credential-root classification uses `CredentialRoots::select_refusal` to name
+the most specific applicable declaration and its origin: an exact path match
+first, then the deepest enclosing or enclosed store, independent of declaration
+order. Equal-depth ties use stable declaration fields. Under isolated access,
+overlap with a lane root retains its refusal. Under host access, an overlapping
+or unresolved credential root warns with its path, access and source, then
+preparation continues.
 
-Mandatory credential denials use `DenialRoot`, independently of grant
-validation: denial paths must be absolute, normalised and below the filesystem
-root. A denial may cover HOME; this never relaxes broad-grant validation.
+Isolated profiles render mandatory credential denials from `DenialRoot`,
+independently of grant validation: denial paths must be absolute, normalised
+and below the filesystem root. A denial may cover HOME; this never relaxes
+broad-grant validation. Host profiles omit credential, keychain/security, and
+process inspection, signal and task-port denials.
 
-A store containing no lane root retains whole-subtree protection. A store
-strictly containing lane roots retains whole-subtree protection minus validated
+A store containing no lane root retains whole-subtree protection in isolated
+profiles. A store strictly containing lane roots retains whole-subtree
+protection minus validated
 lane, process-executable, runtime-read and tool-execution grants. Each carve-out
 must be a strict descendant of the store and enclose no dedicated store.
 An enclosed exact credential endpoint retains its independent denial; a grant
@@ -340,26 +358,30 @@ renderer is open; this rule also defines the boundary for an allowlist profile.
 Metadata on ancestors of admitted paths remains available for executable and
 dynamic-loader traversal; directory contents and extended attributes stay denied.
 These metadata exceptions do not add read or execution authority over siblings.
-Undeclared store files outside validated carve-outs remain denied in both profiles;
-files inside a lane root are accessible by design. A store equal to or inside
-a lane root refuses the launch. A provider can use its admitted runtime files
+Undeclared store files outside validated carve-outs remain denied in isolated
+profiles; files inside a lane root are accessible by design. Under isolated
+access, a store equal to or inside a lane root refuses the launch; under host
+access it warns and proceeds. A provider can use its admitted runtime files
 and lane-private writable state while unlisted store files remain inaccessible.
 
 Adapter and host file inventories, including Provenant-owned per-account lane
-tokens and refresh locks, serve only to check that no declared credential file
-lies inside any lane root. Such a file refuses the launch, naming its origin
-and path. Both the declared path and its resolved target are checked against
+tokens and refresh locks, serve only to check whether a declared credential
+file lies inside any lane root. Under isolated access, such a file refuses the
+launch, naming its origin and path; host access warns and proceeds. Both the
+declared path and its resolved target are checked against
 every declared and resolved lane root, so neither direction of a symlink can
-evade the boundary. An inventory does not replace or narrow the store denial. Stores without an inventory retain the
-same subtree boundary. A HOME-rooted store may enclose default state: the store
+evade the boundary. An inventory does not replace or narrow the isolated-mode
+store denial. Stores without an inventory retain the same subtree boundary.
+A HOME-rooted store may enclose default state: the store
 is a protection rather than an authentication grant, and state retains its
 independent mandatory protection. Independent sibling profiles and file
-declarations keep exact scope. No grant may enclose a store or open
-a store outside its validated carve-outs. Read and execution grants may enclose
+declarations keep exact scope. In isolated profiles, no grant may enclose a
+store or open it outside its validated carve-outs. Read and execution grants may enclose
 exact credential files because their independent denials still apply; writes
-and lane authority enclosing a declared credential file refuse. Input
-materialisation also refuses enclosing endpoints: staged copies cannot inherit
-the original path's sandbox denial. Selected authentication retains its
+and lane authority enclosing a declared credential file refuse under isolated
+access. Host access accepts credential-overlapping grants with a warning.
+Input materialisation also refuses enclosing endpoints under isolated access:
+staged copies cannot inherit the original path's sandbox denial. Selected authentication retains its
 explicit exact-file access; a broad authentication or configuration grant
 cannot reopen a shared store. Adapters declare the selected identity's exact
 authentication endpoints, including database sidecars when required, and stage
@@ -369,7 +391,7 @@ a discarded subtree read cannot confer alias access. Directory links under a
 store also deny the resolved target subtree when it is outside HOME. A target
 overlapping lane authority refuses inventory; runtime authority overlapping the
 target refuses compilation. Refusals identify the link origin and target path.
-Declared credential denials follow grants in the rendered profile. The
+Isolated-profile credential denials follow grants in the rendered profile. The
 standalone Codex release package read exception belongs only to the built-in
 default Codex home; dedicated relocated and registered stores retain whole-store
 protection. Shared stores use the validated carve-out rule above. The exception confers no writes and never exempts another
@@ -379,7 +401,7 @@ Every declaration is kept, whatever its order or kind; each spelling of a
 declared location carries every declaration made at or beneath any spelling of
 it, so a store registered at a Codex home or its alias stays refused.
 
-Skill snapshots use `CredentialRoots::skill_entry_refusal` for each entry and
+Isolated skill snapshots use `CredentialRoots::skill_entry_refusal` for each entry and
 resolved link target. The selected skills directory may sit beneath an enclosing
 provider store; that permits ordinary skills only within the selected source.
 Every independently declared nested store and exact endpoint remains excluded,
@@ -393,12 +415,14 @@ A component named `.claude`, `.codex`, `.cursor` or `.gemini` does not establish
 a credential boundary. Project-local agent configuration overlaps warn with
 their source and proceed. A verified linked worktree is admitted at its real
 path, including beneath project-local agent configuration or outside the
-project. A declared store may strictly contain that root under the carve-out
-rule above; equality, enclosed stores and enclosed credential files refuse.
+project. Under isolated access, a declared store may strictly contain that
+root under the carve-out rule above; equality, enclosed stores and enclosed
+credential files refuse. Under host access those overlaps warn and proceed.
 Git markers, common
 directories and private worktree Git directories keep their hard hold.
-`run --explain` and launch preparation use one source admission decision and
-report its refusal code and reason or sourced warnings.
+`run --explain` and launch preparation share source and state admission checks;
+explanation reports credential admission as `pending_route` until launch
+preparation resolves the selected route's access.
 
 Unsupported confinement fails honestly and never widens a selected profile's
 access. The mere presence of an inherited OS sandbox does not prove equivalent
@@ -407,8 +431,9 @@ default or an explicit off setting can retain an existing OS sandbox without a
 new profile when neither explicit restrictions nor an active parent floor
 require one; its receipt reports inherited enforcement.
 Failure to enforce a selected profile cannot choose that route implicitly.
-An optional root that resolves into a declared
-credential root is omitted with a warning.
+An optional project path that resolves into a declared credential root is
+omitted with a warning under isolated access; host access retains it and warns
+with the path, effective access and source.
 
 Registered Git projects' declared worktree allocation roots remain protected
 from extra host write grants, including before those roots exist. Resolve the
@@ -435,7 +460,11 @@ use native Git while retaining the surrounding tool PATH.
 
 ### Native environment and sandbox tool stores
 
-Unsandboxed lanes inherit the host environment. `FilteredLanePath` selects
+`base_env` inherits the host environment for host access, sandboxed or not;
+isolated sandboxed lanes use the minimal reconstructed environment.
+`strip_hosted_credentials` filters hosted-cloud variables only for isolated
+access. Sandboxed lanes use private TMPDIR and TMPPREFIX because host temporary
+paths may not be writable. `FilteredLanePath` selects
 retained requester PATH, otherwise captured host search path, or process PATH
 only without a host handoff. It filters canonical directories and executable
 symlink targets under the primary project and selected worktree, including both
@@ -453,23 +482,33 @@ A capture failure leaves the previous binding and checkpoint intact; a
 deliberately empty PATH remains a valid captured value. Remote peers record their
 own PATH at ingress because origin directories may not exist there.
 
+`HostLaunchContext::provider_path_environment` captures the host SSH agent
+selector across guardian custody. Host-access preparation grants the resolved
+exact socket under a sandbox; isolated preparation retains the credential
+boundary.
+
 Provider preparation may select an account-specific home or redirect state and
 cache paths in either confinement mode; account selectors choose the registered
 account and its required credentials. Credential values stay in the live launch,
 never in prompts or receipts. Native launches skip skill copies, tool dependency
-discovery, credential symlink inventory and the build admission shims. Every lane still
-binds the host Cargo home and private target/build directories before seed
+discovery and credential symlink inventory. Every lane gets the cargo, nextest
+and cargo-nextest PATH shims, which run `provenant admit build -- <real> "$@"`,
+and binds the host Cargo home and private target/build directories before seed
 validation.
 
-Sandboxed lanes use the minimal environment and staged skills, discover tool
+Isolated sandboxed lanes stage skills. Host access uses native provider homes
+and skill discovery, including linked references; account-specific homes remain
+when they select a login. Sandboxed lanes discover tool
 dependencies and credential aliases, and report inventory omissions in one
 actionable warning. Cargo registry and Git sources are writable unless
 `domains.fabric.lanes.cargo_source_writes` is turned off. Cargo lock and cache-use
-tracking files have exact write grants; Cargo credentials are always denied.
+tracking files have exact write grants; Cargo credentials are denied under
+isolated access and available under host access subject to the sandbox's write
+roots and explicit denies.
 The pnpm, npm and Node caches the host later runs unconfined stay read-only;
 build output and tool configuration use private lane caches.
 - Why: native lanes use ordinary tools and login state; sandboxed lanes keep
-  source sharing explicit while keeping credentials and build output isolated.
+  source sharing explicit while keeping build output isolated.
 
 ### Network, IPC and process information
 

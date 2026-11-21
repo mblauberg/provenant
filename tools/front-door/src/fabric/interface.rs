@@ -463,7 +463,7 @@ fn launch_input(input: &Value) -> Result<Value, FacadeError> {
         }
     }
     // Retain provenance when these run controls are merged onto a template.
-    for field in ["token_budget", "on_budget", "budget_grace"] {
+    for field in ["token_budget", "on_budget", "budget_grace", "lane_access"] {
         if attempt.get(field).is_some() {
             if !attempt["budget_sources"].is_object() {
                 attempt["budget_sources"] = json!({});
@@ -602,6 +602,33 @@ fn bind_submission_subject(node: &mut provenant_fabric_runtime::graph::GraphNode
         node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
             commit: head.into(),
         });
+    }
+}
+
+/// Pin a plain read-only node to the resolved upstream head. Explicit source
+/// bindings, continuations and writer nodes keep their own subject; nested
+/// templates are visited so every reader in a composite sees the same tree.
+fn bind_default_read_only_source(
+    node: &mut provenant_fabric_runtime::graph::GraphNode,
+    commit: &str,
+) {
+    if node.access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
+        && node.source.is_none()
+        && node.continues.is_none()
+    {
+        node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
+            commit: commit.into(),
+        });
+    }
+    if let Some(composite) = &mut node.composite {
+        for child in &mut composite.nodes {
+            bind_default_read_only_source(child, commit);
+        }
+    }
+    if let Some(loop_spec) = &mut node.loop_body {
+        for child in &mut loop_spec.body {
+            bind_default_read_only_source(child, commit);
+        }
     }
 }
 
@@ -984,6 +1011,54 @@ impl Factory {
         Ok(())
     }
 
+    /// Whether this submission binds a node to another host. Such a document
+    /// crosses a host boundary, so it must not carry this host's replay
+    /// snapshot: that snapshot retains file-backed brief paths and other
+    /// sender-local attempt state. The peer rebuilds its own snapshot from the
+    /// compiled node and the sealed classification (#3744).
+    fn document_is_peer_bound(&self, document: &GraphDocument) -> bool {
+        fn node_is_peer_bound(
+            node: &provenant_fabric_runtime::graph::GraphNode,
+            context: &Context,
+        ) -> bool {
+            let remote = |name: &str| {
+                !matches!(name, "local" | "localhost")
+                    && context
+                        .peer_host(name)
+                        .is_some_and(|host| host != context.identity.host)
+            };
+            node.attempt
+                .as_ref()
+                .and_then(|attempt| attempt.host.as_deref())
+                .is_some_and(remote)
+                || node.composite.as_ref().is_some_and(|composite| {
+                    composite
+                        .nodes
+                        .iter()
+                        .any(|child| node_is_peer_bound(child, context))
+                })
+                || node.loop_body.as_ref().is_some_and(|body| {
+                    body.body
+                        .iter()
+                        .any(|child| node_is_peer_bound(child, context))
+                })
+                || node
+                    .plan
+                    .as_ref()
+                    .and_then(|plan| plan.fallback.as_ref())
+                    .is_some_and(|fallback| {
+                        fallback
+                            .nodes
+                            .iter()
+                            .any(|child| node_is_peer_bound(child, context))
+                    })
+        }
+        document
+            .nodes
+            .iter()
+            .any(|node| node_is_peer_bound(node, &self.context))
+    }
+
     fn launch_resolvers(
         &self,
         document: Option<&Value>,
@@ -1283,7 +1358,7 @@ impl Factory {
             .resolve(template_name)
             .map_err(|_| invalid())?
             .accepts_review_range();
-        let review_subject = self.review_subject(input, review)?;
+        let review_subject = self.review_subject(input, review, &CancelToken::new())?;
         let idempotency_key = if let Some(subject) = &review_subject
             && name.is_some()
             && input
@@ -1764,10 +1839,21 @@ impl Factory {
             input["set"] = Value::Object(typed);
         }
         let input = &input;
+        let source_choice = input.get("source").filter(|value| !value.is_null());
+        if let Some(choice) = source_choice
+            && !matches!(choice.as_str(), Some("upstream" | "local"))
+        {
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "source".into(),
+            )));
+        }
         // Review ranges are launch controls: resolve them on the host before
         // admitting a graph, and bind immutable object IDs into its identity.
         let review_launch = declared.accepts_review_range();
-        let review_subject = self.review_subject(input, review_launch)?;
+        let review_subject = self.review_subject(input, review_launch, cancel)?;
+        let review_pin = review_subject
+            .as_ref()
+            .map(|subject| json!({"base":subject.base,"head":subject.head}));
         let git = provenant_os::git::git_executable();
         let mut resolved_head = review_subject.as_ref().map(|subject| subject.head.clone());
         let resolved_review_base = review_subject.as_ref().map(|subject| subject.base.clone());
@@ -1783,11 +1869,29 @@ impl Factory {
             limits: &self.context.config.graph.limits,
             worktree_layout: self.context.port_table.worktree_layout.clone(),
         };
+        // A plain read-only task from a checkout behind its fetched upstream
+        // reviews that upstream head, not its stale local tree. Explicit source
+        // choices, authored documents, writer launches and review ranges keep
+        // resolving their own subject. Absent Git evidence stays advisory.
+        let default_source = if review_subject.is_none()
+            && raw.is_none()
+            && !matches!(
+                input.get("access").and_then(Value::as_str),
+                Some("worktree_write")
+            )
+            && source_choice.and_then(Value::as_str) != Some("local")
+        {
+            provenant_cli::run::read_only_source_ref(self.context.roots.state.as_path(), &self.cwd)
+        } else {
+            None
+        };
         // The commit the launch starts from belongs to its identity. A checkout
         // with no commit yet simply has none.
-        let source_commit = resolved_head.clone().or_else(|| {
-            git.as_deref()
-                .and_then(|git| provenant_run::resolve_git_base(git, &self.cwd, "HEAD").ok())
+        let source_commit = resolved_head.clone().or_else(|| match &default_source {
+            Some(selected) => Some(selected.commit.to_string()),
+            None => git
+                .as_deref()
+                .and_then(|git| provenant_run::resolve_git_base(git, &self.cwd, "HEAD").ok()),
         });
         if resolved_head.is_none() && raw.and_then(|document| document.get("graph_id")).is_none() {
             resolved_head = source_commit.clone();
@@ -2164,6 +2268,15 @@ impl Factory {
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
             ));
         }
+        if let Some(selected) = &default_source {
+            let commit = selected.commit.to_string();
+            for node in &mut document.nodes {
+                bind_default_read_only_source(node, &commit);
+            }
+            document.schema_version = document.schema_version.max(u64::from(
+                provenant_fabric_runtime::graph::minimum_schema_version(&document),
+            ));
+        }
         let mut bound = encode(&document)?;
         self.confine_nodes(&mut bound)?;
         // Template binding can assemble a credential from individually safe
@@ -2196,6 +2309,17 @@ impl Factory {
                 self.context.port_table.worktree_layout.clone(),
             )
             .map_err(graph_patch_error)?;
+            // The snapshot is a host-local replay record: it embeds the
+            // file-backed brief path and other sender placement state. A
+            // peer-bound document ships the brief as prompt text and the
+            // classification in its sealed policy, so withhold the snapshot
+            // and let the peer rebuild one from its own bound node (#3744).
+            if self.document_is_peer_bound(&document) {
+                document.submission_patch = None;
+                warn_operator(
+                    "withheld sender-local submission snapshot from peer graph document; the peer binds its own brief inputs",
+                );
+            }
         }
         // Static admission is the single compile gate: a launch no longer seals
         // the submission patch above, so admit here to keep every entry on the
@@ -2210,6 +2334,11 @@ impl Factory {
         )
         .map_err(FacadeError::graph_candidate)?;
         if let Some(warning) = review_subject.and_then(|subject| subject.warning) {
+            input_warnings.push(warning);
+        }
+        if let Some(selected) = &default_source {
+            let warning = provenant_cli::run::read_only_source_warning(&self.cwd, selected);
+            warn_operator(&warning);
             input_warnings.push(warning);
         }
         input_warnings.sort();
@@ -2298,7 +2427,8 @@ impl Factory {
                 .any(|row| row["status"] == "refused");
             return Ok(json!({
                 "document":document, "skipped":skipped, "writer_budgets":writer_budgets,
-                "status": if refused { "refused" } else { "admitted" },
+                "status": if refused { "refused" } else if source_admission.is_empty() { "admitted" } else { "pending_route" },
+                "credential_admission": if source_admission.is_empty() { "not_applicable" } else { "pending_route" },
                 "source_admission": source_admission, "warnings": warnings,
                 "implement_plan": {
                     "value": input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).cloned().unwrap_or(json!(self.context.config.implement.plan)),
@@ -2326,6 +2456,9 @@ impl Factory {
         if let Some(object) = result.as_object_mut() {
             object.remove("replayed");
         }
+        if let Some(pin) = review_pin {
+            result["review_subject"] = pin;
+        }
         result["warnings"] = json!(warnings);
         result["named"] = json!({
             "requested": requested, "graph": id, "replayed": replayed, "superseded": taken,
@@ -2333,14 +2466,13 @@ impl Factory {
         Ok(result)
     }
 
-    /// Inspect the same root decision launch preparation will make, without
-    /// preparing a provider or creating an attempt or product state.
+    /// Inspect source and state admission without preparing a provider. The
+    /// route-specific credential decision remains pending until selection.
     fn explain_source_admission(
         &self,
         nodes: &[provenant_fabric_runtime::graph::GraphNode],
     ) -> Result<Vec<Value>, FacadeError> {
         use provenant_cli::run::{SourceAdmissionMode, admit_source_root};
-        let credentials = self.credential_roots()?;
         let mut rows = Vec::new();
         for node in nodes {
             if !provenant_fabric_runtime::graph::when::holds(&node.when)
@@ -2376,11 +2508,9 @@ impl Factory {
                 capability: Vec::new(),
                 no_capability: Vec::new(),
             };
-            if let Err(error) = provenant_cli::run::lane_access(
-                &access,
-                self.context.roots.state.as_path(),
-                &credentials,
-            ) {
+            if let Err(error) =
+                provenant_cli::run::lane_access(&access, self.context.roots.state.as_path())
+            {
                 rows.push(json!({"node":node.id,"status":"refused",
                     "code":"dispatch_refused","reason":error.message}));
                 continue;
@@ -2417,13 +2547,7 @@ impl Factory {
             } else {
                 SourceAdmissionMode::Registered
             };
-            match admit_source_root(
-                &self.cwd,
-                self.context.roots.state.as_path(),
-                &path,
-                &credentials,
-                mode,
-            ) {
+            match admit_source_root(&self.cwd, self.context.roots.state.as_path(), &path, mode) {
                 Ok(admission) => {
                     let warnings: Vec<_> = admission
                         .warnings
@@ -2431,8 +2555,8 @@ impl Factory {
                         .map(|warning| json!({"path":warning.path, "source":warning.source}))
                         .collect();
                     rows.push(json!({"node":node.id, "path":admission.path,
-                        "status":if proposed { "pending_registration" } else { "admitted" },
-                        "warnings":warnings}));
+                        "status":if proposed { "pending_registration" } else { "pending_route" },
+                        "credential_admission":"pending_route", "warnings":warnings}));
                 }
                 Err(error) => rows.push(json!({"node":node.id,"path":path,"status":"refused",
                     "code":error.code,"reason":error.reason})),
@@ -3691,7 +3815,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::worktree_tests::support::{Result, TestRig};
+    use crate::worktree_tests::support::{Result, TestRig, git};
 
     struct Workers;
     impl WorkerObserver for Workers {
@@ -4476,6 +4600,13 @@ mod tests {
                         let changed_wait = factory.relay_document(&named, budget, &cancel)?;
                         assert_eq!(first["request_id"], changed_wait["request_id"]);
                     }
+                    // The launch receipt names the commit pair the review is pinned to.
+                    let mut launch = request.clone();
+                    launch["explain"] = json!(false);
+                    launch["name"] = json!("review-receipt-pin");
+                    let receipt = factory.graph_document(launch, budget, &cancel)?;
+                    assert_eq!(receipt["review_subject"]["base"], base);
+                    assert_eq!(receipt["review_subject"]["head"], head);
                 }
                 let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
                 let expanded = document.expanded(&factory.context.config.graph.limits)?;
@@ -5034,6 +5165,114 @@ mod tests {
                 .contains(&rig.project.to_string_lossy().to_string())
         );
 
+        Ok(())
+    }
+
+    #[test]
+    // Regression #3744: a launch prepared for a cross-host peer must survive
+    // the peer-side graph-document decode exactly as a remote launch does.
+    fn cross_host_launch_document_round_trips_through_peer_decode() -> Result {
+        let rig = TestRig::new()?;
+        let remote_host = provenant_core::HostId::from_bytes([2; 16]);
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let mut context = Context::open_inspection(roots, &rig.home, &rig.project)?;
+        context.in_lane = false;
+        context.config.peers.insert(
+            "workshop".into(),
+            provenant_fabric_runtime::config::Peer {
+                host: remote_host,
+                destination: "workshop".into(),
+                remote_executable: None,
+                connect_timeout_seconds: 10,
+            },
+        );
+        let factory = Factory {
+            context,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            workers: &Workers,
+        };
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let cancel = CancelToken::new();
+        // A file-backed brief makes the launch carry this host's absolute
+        // policy-input path, exactly as `--brief-file` does on the sender.
+        let brief = rig.root.join("sender/private-brief.md");
+        std::fs::create_dir_all(brief.parent().unwrap())?;
+        std::fs::write(&brief, "Inspect the parser")?;
+        let launch = factory.graph_document(
+            json!({
+                "op":"run", "template":"explore", "brief":"Inspect the parser",
+                "host":"workshop", "explain":true,
+                "set":{
+                    "attempt.policy_inputs":[brief.clone()],
+                    "attempt.confidential":true
+                }
+            }),
+            budget,
+            &cancel,
+        )?;
+        let mut sender: provenant_fabric_runtime::graph::AttemptSpec =
+            serde_json::from_value(launch["document"]["nodes"][0]["attempt"].clone())?;
+        assert_eq!(sender.policy_inputs, vec![brief.clone()]);
+        provenant_cli::run::seal_launch_policy(
+            &mut sender,
+            &rig.project,
+            "Inspect the parser",
+            &Default::default(),
+            None,
+            None,
+        )
+        .map_err(|error| std::io::Error::other(error.message))?;
+        assert!(sender.confidential);
+        assert!(sender.launch_policy.is_some());
+        // The peer embeds the peer-bound projection, not the sender attempt.
+        let peer_attempt = sender.peer_bound();
+        let mut peer_document = launch["document"].clone();
+        peer_document["nodes"][0]["attempt"] = serde_json::to_value(&peer_attempt)?;
+        let peer_text = serde_json::to_string(&peer_document)?;
+        let sender_path = brief.to_string_lossy().into_owned();
+        assert!(
+            !peer_text.contains(&sender_path),
+            "sender path {sender_path} reached the peer document"
+        );
+        assert!(peer_attempt.policy_inputs.is_empty());
+        assert!(peer_attempt.directory.is_none());
+        assert_eq!(peer_attempt.launch_policy, sender.launch_policy);
+        let bytes = serde_json::to_vec(&peer_document)?;
+        let decoded = decode_graph_document(&bytes)
+            .map_err(|error| format!("peer decode of cross-host launch: {error:?}"))?;
+        assert_eq!(serde_json::to_value(&decoded)?, peer_document);
+        assert_eq!(
+            decoded.nodes[0]
+                .attempt
+                .as_ref()
+                .and_then(|attempt| attempt.launch_policy.clone()),
+            sender.launch_policy
+        );
+        // Mirror what the host does next: publish the peer-bound document and
+        // launch it.
+        let scratch = factory
+            .prepare_scratch(&cancel)
+            .map_err(|error| format!("{error:?}"))?;
+        let path = publish_graph_document(&scratch, &peer_document)
+            .map_err(|error| format!("publish: {error}"))?;
+        let run = factory
+            .graph(
+                GraphInput::Run {
+                    extra: Default::default(),
+                    document: path,
+                },
+                budget,
+                &cancel,
+            )
+            .map_err(|error| format!("cross-host launch: {error:?}"))?;
+        assert_eq!(run.checkpoint.graph_id, decoded.graph_id);
         Ok(())
     }
 
@@ -5626,6 +5865,82 @@ mod tests {
                 .is_err()
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn plain_read_only_task_pins_fetched_upstream_and_local_source_is_honoured() -> Result {
+        let rig = TestRig::new()?;
+        let remote = rig.root.join("remote.git");
+        let remote = remote.to_str().ok_or("remote path")?;
+        git(&rig, &["init", "-q", "--bare", remote])?;
+        git(
+            &rig,
+            &["-C", remote, "symbolic-ref", "HEAD", "refs/heads/master"],
+        )?;
+        let commit = |message: &str| {
+            git(
+                &rig,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-q",
+                    "-m",
+                    message,
+                ],
+            )
+        };
+        std::fs::write(rig.project.join("file"), "one\n")?;
+        git(&rig, &["add", "file"])?;
+        commit("one")?;
+        let stale = git(&rig, &["rev-parse", "HEAD"])?;
+        git(&rig, &["branch", "-M", "master"])?;
+        std::fs::write(rig.project.join("file"), "two\n")?;
+        git(&rig, &["add", "file"])?;
+        commit("two")?;
+        let default = git(&rig, &["rev-parse", "HEAD"])?;
+        git(&rig, &["remote", "add", "origin", remote])?;
+        git(&rig, &["push", "-q", "origin", "master"])?;
+        git(&rig, &["remote", "set-head", "origin", "master"])?;
+        git(&rig, &["reset", "-q", "--hard", &stale])?;
+
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let submit = |source: Option<&str>| {
+            let mut input =
+                json!({"op":"run","template":"task","brief":"Review the tree","explain":true});
+            if let Some(source) = source {
+                input["source"] = json!(source);
+            }
+            factory.graph_document(input, budget, &cancel)
+        };
+
+        let pinned = submit(None)?;
+        let node = &pinned["document"]["nodes"][0];
+        assert_eq!(node["source"]["commit"], json!(default), "{node}");
+        let warnings = pinned["warnings"].as_array().ok_or("warnings")?;
+        assert!(
+            warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|text| text.contains("origin") && text.contains(&default))),
+            "the launch must name the source ref it used: {warnings:?}"
+        );
+
+        // An explicit local source keeps the stale checkout as the subject.
+        let local = submit(Some("local"))?;
+        let node = &local["document"]["nodes"][0];
+        assert!(node["source"].is_null(), "{node}");
+        let local_warnings = local["warnings"].as_array().ok_or("local warnings")?;
+        assert!(
+            !local_warnings
+                .iter()
+                .any(|warning| warning.as_str().is_some_and(|text| text.contains(&default))),
+            "a local source must not report an upstream pin: {local_warnings:?}"
+        );
         Ok(())
     }
 
@@ -6433,7 +6748,7 @@ mod tests {
 
     #[test]
     fn explanation_and_preparation_share_worktree_admission() -> Result {
-        use provenant_cli::run::{SourceAdmissionMode, admit_source_root, declared_credentials};
+        use provenant_cli::run::{SourceAdmissionMode, admit_source_root};
         let rig = crate::worktree_tests::repository()?;
         let locations = [
             rig.project.join(".worktrees/source"),
@@ -6455,19 +6770,10 @@ mod tests {
             )?;
             let mut factory = factory(&rig)?;
             factory.cwd = std::fs::canonicalize(path)?;
-            let registry = provenant_cli::run::Registry {
-                roots: Some(&factory.context.roots),
-                home: Some(&rig.home),
-                cwd: Some(&factory.cwd),
-                state_root: Some(&rig.state),
-                ..Default::default()
-            };
-            let credentials = declared_credentials(&registry)?;
             let preparation = admit_source_root(
                 &factory.cwd,
                 &rig.state,
                 &factory.cwd,
-                &credentials,
                 SourceAdmissionMode::Live,
             );
             let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
@@ -6480,30 +6786,26 @@ mod tests {
                 .as_array()
                 .ok_or("admission rows")?;
             assert!(!rows.is_empty());
-            match preparation {
-                Ok(admission) => {
-                    assert!(rows.iter().all(|row| row["status"] == "admitted"));
-                    assert!(rows.iter().all(|row| row["path"] == json!(admission.path)));
-                    assert_eq!(preview["status"], "admitted");
-                    if path.starts_with(rig.project.join(".claude")) {
-                        assert!(!admission.warnings.is_empty());
-                        assert!(
-                            rows.iter()
-                                .all(|row| row["warnings"].as_array().is_some_and(|warnings| {
-                                    warnings.iter().any(|warning| {
-                                        warning["source"]
-                                            .as_str()
-                                            .is_some_and(|source| !source.is_empty())
-                                    })
-                                }))
-                        );
-                    }
-                }
-                Err(error) => {
-                    assert!(path.starts_with(&rig.home));
-                    assert_eq!(preview["status"], "refused");
-                    assert!(rows.iter().all(|row| row["code"] == error.code));
-                }
+            let admission = preparation?;
+            assert!(rows.iter().all(|row| row["status"] == "pending_route"
+                && row["credential_admission"] == "pending_route"));
+            assert!(rows.iter().all(|row| row["path"] == json!(admission.path)));
+            assert_eq!(preview["status"], "pending_route");
+            assert_eq!(preview["credential_admission"], "pending_route");
+            if path.starts_with(rig.project.join(".claude"))
+                || path.starts_with(rig.home.join(".claude"))
+            {
+                assert!(!admission.warnings.is_empty());
+                assert!(
+                    rows.iter()
+                        .all(|row| row["warnings"].as_array().is_some_and(|warnings| {
+                            warnings.iter().any(|warning| {
+                                warning["source"]
+                                    .as_str()
+                                    .is_some_and(|source| !source.is_empty())
+                            })
+                        }))
+                );
             }
             assert!(!rig.state.join("writer-git-home").exists());
         }
@@ -7291,7 +7593,7 @@ mod tests {
 }
 
 /// Prints a launch warning for the operator; a warning never blocks a launch.
-fn warn_operator(warning: impl std::fmt::Display) {
+pub(super) fn warn_operator(warning: impl std::fmt::Display) {
     use std::io::Write;
     let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
 }

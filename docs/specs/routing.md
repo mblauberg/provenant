@@ -108,8 +108,15 @@ When `provenant run review-panel` or a review leaf supplies `--pr N`, the host
 pins the PR's base and head, independently of the launching checkout. Supplying
 both `subject` and `review_base` pins an explicit range instead. The host uses
 base...head (three-dot) for diff evidence and selection, including branches with
-merges from main. Without a subject, the host warns which checkout-derived range
-it chose and why. Nested review launches retain the same pins. A retry whose
+merges from main. Because the forge can still report the previous head seconds
+after a push, `--pr N --head SHA` pins the expected head: the host re-reads the
+forge within a bounded wait when its head differs and refuses with both SHAs
+named if the mismatch persists. Without `--head`, when the local remote-tracking
+ref for the PR head branch is ahead of the forge's head, the launch warns and
+names both commits rather than refusing. Every pinned launch receipt reports the
+base and head it selected. Without a subject, the host warns which
+checkout-derived range it chose and why. Nested review launches retain the same
+pins. A retry whose
 canonical raw-request identity matches a stored child receipt replays that
 receipt and its admitted pins before host preparation, whether the parent is
 active or inactive. The relay rechecks the stored identity under the journal
@@ -208,17 +215,29 @@ and exit 0; a clean exit without an error still settles as `Succeeded`.
 Unknown or stale quota does not establish exhaustion. Monthly allowance pacing warns when cycles are unobserved as described below. Missing, expired or
 mismatched readiness evidence never reads as ready. Refusals are scoped to
 model and account unless provider evidence proves a wider pool; a plan usage
-limit holds the whole account until its reset. Agy's recorded refusals expire
-within five minutes even when the provider reports a later reset. This bound
+limit holds the whole account until its reset. OpenCode retry-after values are
+rounded up to whole seconds; a newer refusal for the same pool supersedes its
+older reset, and settlement replay respects retained clearing records. Those
+records are bounded, so an evicted clearing cannot prevent a later replay.
+Absent a usable reset, a refusal expires one hour after observation. `quota show`
+names the provider retry-after as the source of
+a displayed OpenCode refusal reset. Agy's recorded refusals expire within five
+minutes even when the provider reports a later reset. This bound
 also applies when reading previously published readiness, so a stale multi-day
 estimate cannot prevent a new attempt or probe. Fresh provider evidence may
 renew the refusal. A fresh reading below the 95% headroom threshold that
 postdates a refusal clears it, including a model-scoped refusal without a pool:
 with no verified binding, every reported window must show headroom before that
 model is unblocked. A successful run on a route clears that model's refusal,
-and `provenant quota clear ACCOUNT [MODEL]` removes recorded refusals on owner
-request and reports exactly what it removed (saying so when nothing matched).
-Each clearing is recorded with its source: `reading`, `run` or `manual`.
+and a successful run on a free-model route clears the registered free pool's
+refusal with source `observed_success`: a later lane on the same pool disproves
+the whole pool's 429, not just one model. `provenant quota tick` re-checks a free-pool refusal
+older than a bounded interval with the adapter's registered quota probe, where
+one exists; a refusal the probe does not supersede keeps its provider reset and
+gets another bounded window. `provenant quota clear ACCOUNT [MODEL]` removes
+recorded refusals on owner request and reports exactly what it removed (saying
+so when nothing matched). Each clearing is recorded with its source: `reading`,
+`run`, `observed_success` or `manual`.
 One function, `Admission::account_block`, decides account blocks for both
 resolution and the pre-launch recheck. Readiness is stored apart from quota records; a failed
 publication leaves readiness unknown and never erases held refusals.
@@ -367,7 +386,8 @@ the attempt-bound host relay.
 A child launch is journalled and launched by the host, bound to the calling
 attempt rather than a lane-written record. Children share the graph's budget
 and cancellation and may use another adapter and account within the user's
-authority; ordinary launch policy still refuses credential and state roots.
+authority; ordinary launch policy still refuses state roots, while
+credential-root overlap follows the resolved lane access.
 Parent settlement closes attached children, never detached ones.
 - Why: cross-family delegation must not make lane-controlled identity
   authoritative.

@@ -75,8 +75,14 @@ pub(crate) enum Error {
     DiskSpace(std::io::Error),
     #[error("invalid worktree removal scope")]
     InvalidScope,
-    #[error("target seed build: {0}")]
-    SeedBuild(String),
+    #[error("target seed build: {message}")]
+    SeedBuild {
+        message: String,
+        /// Bounded output tail of a failed `build.prepare` command, when that
+        /// is the cause. The renderer shows it as an indented human cause and
+        /// as `error.cause` in JSON.
+        tail: Option<String>,
+    },
     #[error("{0}")]
     Settlement(String),
 }
@@ -106,21 +112,21 @@ pub(crate) fn local_worktree_message(error: &WorktreeError) -> String {
 }
 
 impl Error {
-    fn local_message(&self) -> String {
+    pub(crate) fn local_message(&self) -> String {
         match self {
             Self::Worktree(error) => local_worktree_message(error),
             _ => self.to_string(),
         }
     }
 
-    fn repair(&self) -> Option<&'static str> {
+    pub(crate) fn repair(&self) -> Option<&'static str> {
         match self {
             Self::Worktree(error) => error.repair(),
             _ => None,
         }
     }
 
-    fn outcome(&self) -> Outcome {
+    pub(crate) fn outcome(&self) -> Outcome {
         match self {
             Self::Root(roots::RootError::Checkout | roots::RootError::State(_))
             | Self::InvalidScope
@@ -155,6 +161,34 @@ impl Error {
             _ => Outcome::Error,
         }
     }
+
+    pub(crate) fn cause(&self) -> Option<&str> {
+        match self {
+            Self::SeedBuild {
+                tail: Some(tail), ..
+            } => Some(tail),
+            _ => None,
+        }
+    }
+
+    /// The one mapping from a worktree refusal to its transport facts. Used by
+    /// the production emit path and by the render tests, so the two cannot drift.
+    pub(crate) fn command_error(&self, code: &str) -> provenant_records::CommandError {
+        crate::command_error(code, &self.local_message(), self.cause(), self.repair())
+    }
+}
+
+/// Keep a failing `build.prepare` command's bounded output alongside its
+/// message. A seed-build operator otherwise sees only the command and exit
+/// status and has to reproduce the failure to learn why it happened. The tail
+/// was masked on the capture stream, ahead of the Tail window, so it is already
+/// safe to carry as `error.cause` in both human and JSON output.
+pub(crate) fn seed_build_failure(error: &(dyn std::error::Error + 'static)) -> Error {
+    Error::SeedBuild {
+        message: error.to_string(),
+        tail: crate::target_seed_build::prepare_failed_of(error)
+            .map(|prepare| prepare.tail.clone()),
+    }
 }
 
 #[derive(Serialize)]
@@ -188,6 +222,11 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
                 let human = match &data {
                     // Only the path on stdout, for `CARGO_TARGET_DIR=$(...)`.
                     Data::SeedTarget(seed) => seed_target_human(seed),
+                    Data::Listed(_) => {
+                        let mut text = human(value);
+                        text.push_str(&worktree_list_stranded_human(globals, workers));
+                        text
+                    }
                     _ => human(value),
                 };
                 emit(
@@ -205,16 +244,16 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
                 globals,
             ),
         },
-        Err(error) => crate::fail_with_repair(
+        Err(error) => crate::fail_with_command_error(
             name,
             error.outcome(),
-            if matches!(error, Error::Worktree(WorktreeError::LockBusy)) {
-                "WORKTREE_LOCK_BUSY"
-            } else {
-                "WORKTREE"
-            },
-            &error.local_message(),
-            error.repair(),
+            error.command_error(
+                if matches!(error, Error::Worktree(WorktreeError::LockBusy)) {
+                    "WORKTREE_LOCK_BUSY"
+                } else {
+                    "WORKTREE"
+                },
+            ),
             globals,
         ),
     }
@@ -307,6 +346,35 @@ fn human(mut value: serde_json::Value) -> String {
     provenant_cli::terse(&value)
 }
 
+/// The human-only stranded-work section appended to `worktree list`. Its
+/// JSON stays the worktree array so consumers of that shape are unchanged.
+fn worktree_list_stranded_human(globals: &Globals, workers: &dyn WorkerObserver) -> String {
+    let Ok(resolved) = roots::resolve(
+        globals,
+        roots::Workspace::Checkout,
+        roots::Product::Required,
+    ) else {
+        return String::new();
+    };
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let rows = crate::stranded_work::survey(
+        &resolved.roots,
+        &resolved.home,
+        &resolved.project,
+        workers,
+        &clock,
+        &cancel,
+        crate::stranded_work::now_micros(&clock),
+    );
+    let mut text = String::new();
+    for line in crate::stranded_work::human_lines(&rows) {
+        text.push_str(&line);
+        text.push('\n');
+    }
+    text
+}
+
 fn plain_paths(value: &mut serde_json::Value) {
     use serde_json::Value;
     match value {
@@ -346,7 +414,7 @@ fn execute(
     let (roots, home, project) = (&resolved.roots, &resolved.home, &resolved.project);
     if matches!(command, Worktree::SeedBuild) {
         let generation = crate::target_seed_build::build(roots.state.as_path(), project)
-            .map_err(|error| Error::SeedBuild(error.to_string()))?;
+            .map_err(|error| seed_build_failure(error.as_ref()))?;
         return Ok(Data::SeedBuilt(generation));
     }
     let facts = worktrees::RepoFacts::default();
@@ -639,6 +707,10 @@ struct GcData {
     /// bounded census this pass. Never a signal target.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     held_processes: Vec<worktrees::HeldProcess>,
+    /// Uncommitted work in worktrees with no live lane. Kept, never removed,
+    /// and named here so cleanup cannot lose it silently.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    stranded_work: Vec<crate::stranded_work::StrandedWork>,
     /// The bounded dweller census did not finish, so held rows may be missing.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     held_incomplete: bool,
@@ -1058,6 +1130,10 @@ fn gc_compact_summary(data: &GcData) -> String {
         summary.push_str(&process.advisory());
         summary.push('\n');
     }
+    for line in crate::stranded_work::summary_lines(&data.stranded_work) {
+        summary.push_str(&line);
+        summary.push('\n');
+    }
     if data.held_incomplete {
         summary.push_str(worktrees::HELD_CENSUS_INCOMPLETE_WARNING);
         summary.push('\n');
@@ -1464,6 +1540,10 @@ fn gc_data_summary(data: &GcData) -> String {
     for process in &data.held_processes {
         human.push_str(&format!("{}\n", process.advisory()));
     }
+    for line in crate::stranded_work::human_lines(&data.stranded_work) {
+        human.push_str(&line);
+        human.push('\n');
+    }
     if data.held_incomplete {
         human.push_str(&format!("{}\n", worktrees::HELD_CENSUS_INCOMPLETE_WARNING));
     }
@@ -1541,6 +1621,8 @@ enum GcOutput<'a> {
         alerts: &'a [String],
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
         held_processes: &'a [worktrees::HeldProcess],
+        #[serde(skip_serializing_if = "<[_]>::is_empty")]
+        stranded_work: &'a [crate::stranded_work::StrandedWork],
         held_incomplete: bool,
         notice: &'a Option<String>,
     },
@@ -1623,6 +1705,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         unobserved_projects: &data.unobserved_projects,
         alerts: &data.alerts,
         held_processes: &data.held_processes,
+        stranded_work: &data.stranded_work,
         held_incomplete: data.held_incomplete,
         notice: &data.notice,
     }
@@ -1649,6 +1732,8 @@ struct GcProject {
     /// Advisory dwellers found by one census over terminal worktrees and
     /// settled attempt directories. Never used to signal a process.
     held_processes: Vec<worktrees::HeldProcess>,
+    /// Uncommitted work in worktrees no lane holds. Kept and named only.
+    stranded_work: Vec<crate::stranded_work::StrandedWork>,
     held_incomplete: bool,
 }
 
@@ -1764,6 +1849,9 @@ fn gc_project(
             } else {
                 worktrees::list_for_gc(context, cancel)?
             };
+            let now_micros = crate::stranded_work::now_micros(context.clock);
+            let stranded_work =
+                crate::stranded_work::survey_in_context(context, cancel, now_micros);
             let report = settled_held_processes(roots, context, &lanes, cancel);
             // Settlement clears these pins on every outcome. GC is the
             // backstop for pins left by an earlier version or an attempt
@@ -1813,6 +1901,7 @@ fn gc_project(
                 )?,
                 lanes,
                 held_processes: report.processes,
+                stranded_work,
                 held_incomplete: report.incomplete,
             })
         },
@@ -2518,8 +2607,10 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 }
                 Ok(provenant_config::GcProjectStatus::Excluded) => continue,
                 Err(error) => {
-                    unobserved_projects
-                        .push(roots.state.as_path().join("projects").join(&project_key));
+                    unobserved_projects.push(provenant_config::project_binding_dir(
+                        roots.state.as_path(),
+                        project_id,
+                    ));
                     append_sweep_warning(
                         &mut sweep_warning,
                         format!("project {project_key} lookup failed: {error}"),
@@ -2753,6 +2844,11 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .iter()
         .flat_map(|project| project.held_processes.iter().cloned())
         .collect();
+    let mut stranded_work: Vec<_> = projects
+        .iter()
+        .flat_map(|project| project.stranded_work.iter().cloned())
+        .collect();
+    stranded_work.sort_by(|left, right| left.path.cmp(&right.path));
     let held_incomplete = projects.iter().any(|project| project.held_incomplete);
     let import_pins = projects.iter().map(|project| project.import_pins).sum();
     let mut adapters = GcAdapters {
@@ -2786,6 +2882,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             sweep_budget_source: sweep_budget_source.clone(),
             sweep_warning,
             held_processes,
+            stranded_work,
             held_incomplete,
             unobserved_projects,
             skipped_transient,
@@ -4471,6 +4568,70 @@ mod human_tests {
             }
             assert_eq!(Error::Worktree(error).local_message(), message);
         }
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn failing_prepare_marker_is_visible_in_human_and_json_renderings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let marker = "Cannot find package 'zod'";
+        let tail = format!("npm ERR! {marker}\ninstall the missing dependency\n");
+        let prepare = crate::target_seed_build::PrepareFailed {
+            index: 0,
+            argv: vec!["node".into(), "scripts/generate.mjs".into()],
+            exit: Some(1),
+            tail: tail.clone(),
+        };
+        let boxed: Box<dyn std::error::Error> = Box::new(prepare);
+        let failure = seed_build_failure(boxed.as_ref());
+        assert!(
+            failure
+                .local_message()
+                .contains("build.prepare[0] command failed")
+        );
+        // Drive the production emission path with the one Error::command_error
+        // mapping; human refusals render on stderr, JSON on stdout.
+        let human_globals = provenant_cli::Globals {
+            json: false,
+            full: true,
+            ..Default::default()
+        };
+        let (mut human_out, mut human_err) = (Vec::new(), Vec::new());
+        crate::fail_with_command_error_with_writers(
+            "worktree seed-build",
+            failure.outcome(),
+            failure.command_error("WORKTREE"),
+            &human_globals,
+            &mut human_out,
+            &mut human_err,
+        );
+        let human = String::from_utf8(human_err)?;
+        assert!(human.contains("build.prepare[0] command failed"), "{human}");
+        assert!(human.contains(marker), "{human}");
+        assert!(human.contains("install the missing dependency"), "{human}");
+
+        let json_globals = provenant_cli::Globals {
+            json: true,
+            ..Default::default()
+        };
+        let (mut json_out, mut json_err) = (Vec::new(), Vec::new());
+        crate::fail_with_command_error_with_writers(
+            "worktree seed-build",
+            failure.outcome(),
+            failure.command_error("WORKTREE"),
+            &json_globals,
+            &mut json_out,
+            &mut json_err,
+        );
+        let value: serde_json::Value = serde_json::from_slice(&json_out)?;
+        assert_eq!(value["error"]["cause"].as_str(), Some(tail.as_str()));
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("build.prepare[0]")),
+            "{value}"
+        );
+        Ok(())
     }
 
     #[allow(dead_code)] // The harness=false driver compiles only the helpers.
