@@ -1,5 +1,5 @@
 # Catalogue classes for the writer cost advisory. Exact IDs, never name inference.
 label = "Opus"
-warn_selectors = ["claude/claude-opus-*", "agy/claude-opus-*-thinking"]
-cheaper_selectors = ["claude/claude-sonnet-*", "agy/claude-sonnet-*", "codex/gpt-*-luna", "codex/gpt-*-sol", "codex/gpt-*-terra"]
+warn_selectors = ["claude/claude-opus-*", "agy/claude-opus-*", "agy/claude-opus-*-thinking"]
+cheaper_selectors = ["claude/claude-sonnet-*", "agy/claude-sonnet-*", "agy/gemini-*-neon", "codex/gpt-*-luna", "codex/gpt-*-sol", "codex/gpt-*-terra"]
 pool_priority = ["principal", "senior", "junior", "design", "writing", "utility"]

@@ -503,6 +503,127 @@ fn effective_pool_names(context: &RoutingContext<'_>) -> BTreeSet<String> {
 fn raw_pool<'a>(context: &'a RoutingContext<'_>, name: &str) -> Option<&'a Vec<RoutePoolMember>> {
     crate::ladder::pool(context.catalogue, context.config, name)
 }
+fn offered_list_serves_model(
+    offered: &[String],
+    model: &ModelId,
+    catalogue: &Catalogue,
+    allow_superseded: bool,
+) -> bool {
+    if offered.is_empty() {
+        return true;
+    }
+    if !provenant_providers::model_matches_offered(model.model(), offered) {
+        return false;
+    }
+    allow_superseded
+        || !catalogue
+            .transitively_superseded_by(model)
+            .into_iter()
+            .any(|newer| provenant_providers::model_matches_offered(newer.model(), offered))
+}
+fn account_serves_model(
+    record: &AvailabilityRecord,
+    model: &ModelId,
+    catalogue: &Catalogue,
+    allow_superseded: bool,
+) -> bool {
+    if record.adapter != model.adapter()
+        || !provenant_records::AdapterSpec::get(model.adapter())
+            .is_none_or(|spec| spec.account_serves_model(record.plan.as_deref(), model.model()))
+    {
+        return false;
+    }
+    if provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|spec| spec.offered_models)
+    {
+        return offered_list_serves_model(
+            &record.observed_models,
+            model,
+            catalogue,
+            allow_superseded,
+        );
+    }
+    true
+}
+fn account_hint_matches(hint: &str, adapter: &str, account_key: Option<&str>) -> bool {
+    match hint.split_once('/') {
+        Some((hint_adapter, hint_key)) => hint_adapter == adapter && account_key == Some(hint_key),
+        None => account_key == Some(hint),
+    }
+}
+fn adapter_offered_lists<'a>(context: &'a RoutingContext<'_>, adapter: &str) -> Vec<&'a [String]> {
+    if !provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| spec.offered_models) {
+        return Vec::new();
+    }
+    let hint_in_availability = context.policy_account_hint.is_some_and(|hint| {
+        context.availability.iter().any(|a| {
+            a.adapter == adapter && account_hint_matches(hint, &a.adapter, a.account_key.as_deref())
+        })
+    });
+    let mut lists: Vec<&[String]> = context
+        .availability
+        .iter()
+        .filter(|a| {
+            a.adapter == adapter
+                && !a.observed_models.is_empty()
+                && (!hint_in_availability
+                    || context.policy_account_hint.is_none_or(|hint| {
+                        account_hint_matches(hint, &a.adapter, a.account_key.as_deref())
+                    }))
+        })
+        .map(|a| a.observed_models.as_slice())
+        .collect();
+    if lists.is_empty() {
+        let hint_in_accounts = context.policy_account_hint.is_some_and(|hint| {
+            context.accounts.iter().any(|r| {
+                r.account.adapter == adapter
+                    && (account_hint_matches(
+                        hint,
+                        &r.account.adapter,
+                        Some(&r.account.account_key),
+                    ) || r.account.label == hint)
+            })
+        });
+        lists = context
+            .accounts
+            .iter()
+            .filter(|r| {
+                r.account.adapter == adapter
+                    && (!hint_in_accounts
+                        || context.policy_account_hint.is_none_or(|hint| {
+                            account_hint_matches(
+                                hint,
+                                &r.account.adapter,
+                                Some(&r.account.account_key),
+                            ) || r.account.label == hint
+                        }))
+            })
+            .filter_map(|r| r.snapshot.as_ref()?.details.as_ref())
+            .filter(|d| !d.models.is_empty())
+            .map(|d| d.models.as_slice())
+            .collect();
+    }
+    lists
+}
+fn pool_member_retained_by_offerings(
+    member: &RoutePoolMember,
+    source: AutomaticModelSource,
+    context: &RoutingContext<'_>,
+) -> bool {
+    if source == AutomaticModelSource::OwnerConfiguration {
+        return true;
+    }
+    let adapter = member.model.adapter();
+    if !provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| spec.offered_models) {
+        return true;
+    }
+    let lists = adapter_offered_lists(context, adapter);
+    if lists.is_empty() {
+        return offered_list_serves_model(&[], &member.model, context.catalogue, false);
+    }
+    lists
+        .into_iter()
+        .any(|list| offered_list_serves_model(list, &member.model, context.catalogue, false))
+}
 fn effective_pool(context: &RoutingContext<'_>, name: &str) -> Option<Vec<RoutePoolMember>> {
     let members = raw_pool(context, name)?;
     let source = if context.config.pools.contains_key(name) {
@@ -510,14 +631,19 @@ fn effective_pool(context: &RoutingContext<'_>, name: &str) -> Option<Vec<RouteP
     } else {
         AutomaticModelSource::ShippedPool
     };
+    let permitted: Vec<_> = members
+        .iter()
+        .filter(|member| {
+            context
+                .config
+                .permits_automatic_model(&member.model, source)
+        })
+        .cloned()
+        .collect();
     Some(
-        members
+        permitted
             .iter()
-            .filter(|member| {
-                context
-                    .config
-                    .permits_automatic_model(&member.model, source)
-            })
+            .filter(|member| pool_member_retained_by_offerings(member, source, context))
             .map(|member| member.reconciled(context.catalogue.model(&member.model)).0)
             .collect(),
     )
@@ -2133,6 +2259,7 @@ fn candidate(
     context: &ValidatedContext<'_>,
     avoid_cooling: bool,
     intent: RouteIntent,
+    for_pool: bool,
 ) -> Result<RouteAlternative, RoutingError> {
     let (effort, dropped_effort) = normalised_effort(model, effort, context);
     let entry = admissible(model, effort, context)?;
@@ -2153,14 +2280,26 @@ fn candidate(
     // the most pacing headroom, so exhausted accounts are skipped rather than
     // chosen by registration order. A stale reading that showed the account
     // spent cannot refuse it, but it ranks the account behind every other.
+    let any_explicit_serving_account = !for_pool
+        && context
+            .availability
+            .iter()
+            .any(|a| account_serves_model(a, model, context.catalogue, true));
     let mut policy_refused = false;
     let evaluated: Vec<_> = context
         .availability
         .iter()
         .filter(|a| {
-            a.adapter == model.adapter()
-                && provenant_records::AdapterSpec::get(model.adapter())
-                    .is_none_or(|spec| spec.account_serves_model(a.plan.as_deref(), model.model()))
+            if for_pool {
+                account_serves_model(a, model, context.catalogue, false)
+            } else if any_explicit_serving_account {
+                account_serves_model(a, model, context.catalogue, true)
+            } else {
+                a.adapter == model.adapter()
+                    && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
+                        spec.account_serves_model(a.plan.as_deref(), model.model())
+                    })
+            }
         })
         .filter(|a| {
             let permitted = context
@@ -2672,12 +2811,10 @@ impl Excluded<'_> {
         if let Some(reason) = self.family_reason(model) {
             return Some(reason);
         }
-        let serving_accounts_remain = context.availability.iter().any(|record| {
-            record.adapter == model.adapter()
-                && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
-                    spec.account_serves_model(record.plan.as_deref(), model.model())
-                })
-        });
+        let serving_accounts_remain = context
+            .availability
+            .iter()
+            .any(|record| account_serves_model(record, model, context.catalogue, false));
         if let Some(rule) = self
             .rules
             .iter()
@@ -2731,6 +2868,7 @@ fn resolve_inner(
                     context,
                     false,
                     request.intent,
+                    false,
                 )?,
                 None,
             )
@@ -2840,6 +2978,7 @@ fn resolve_inner(
                         context,
                         false,
                         request.intent,
+                        false,
                     )?,
                     None,
                 )
@@ -2917,6 +3056,7 @@ fn resolve_inner(
                 context,
                 false,
                 request.intent,
+                false,
             )
         })
         .filter_map(|candidate| match candidate {
@@ -3118,12 +3258,7 @@ fn classify_pool(
         let spent = context
             .availability
             .iter()
-            .filter(|a| {
-                a.adapter == member.model.adapter()
-                    && provenant_records::AdapterSpec::get(member.model.adapter()).is_none_or(
-                        |spec| spec.account_serves_model(a.plan.as_deref(), member.model.model()),
-                    )
-            })
+            .filter(|a| account_serves_model(a, &member.model, context.catalogue, false))
             .map(|a| latest_reading(&member.model, a, context, false))
             .collect::<Vec<_>>();
         let is_spent = |q: &QuotaObservation| {
@@ -3215,6 +3350,7 @@ fn classify_pool(
                 context,
                 avoid_cooling,
                 request.intent,
+                true,
             ) {
                 Ok(resolved) => {
                     effort = resolved.effort.clone();
@@ -3797,7 +3933,7 @@ pub fn depletion_facts(
     let mut facts = Vec::new();
     for model in &models {
         for record in context.availability.iter().filter(|record| {
-            record.adapter == model.adapter()
+            account_serves_model(record, model, context.catalogue, true)
                 && record.observed_unix_seconds <= now
                 && now.saturating_sub(record.observed_unix_seconds) <= 3600
         }) {
@@ -3806,7 +3942,7 @@ pub fn depletion_facts(
                 availability: one,
                 ..context.0
             });
-            let Ok(route) = candidate(model, None, &scoped, false, intent) else {
+            let Ok(route) = candidate(model, None, &scoped, false, intent, false) else {
                 continue;
             };
             let state = match route.readiness {
