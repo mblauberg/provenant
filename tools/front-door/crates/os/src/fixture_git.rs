@@ -79,6 +79,49 @@ pub fn fixture_git_settings() -> [(OsString, OsString); 12] {
     .map(|(key, value)| (key.into(), value.into()))
 }
 
+/// Drop a command-scope `core.hooksPath` override from a Git fixture
+/// environment. Host hardening sets it to `/dev/null`, but the lane-bound Git
+/// shim warns on any command-scope hook-path override. Fixtures that drive the
+/// shim must supply identity and signing settings without it; fixture
+/// repositories carry no hooks, so dropping the override changes no behaviour.
+pub fn without_hook_override(env: &mut Vec<(OsString, OsString)>) {
+    let count = env
+        .iter()
+        .find(|(key, _)| key == "GIT_CONFIG_COUNT")
+        .and_then(|(_, value)| value.to_str())
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut kept: Vec<(OsString, OsString)> = Vec::new();
+    for index in 0..count {
+        let key_name = format!("GIT_CONFIG_KEY_{index}");
+        let value_name = format!("GIT_CONFIG_VALUE_{index}");
+        let key = env
+            .iter()
+            .find(|(name, _)| name.to_str() == Some(key_name.as_str()))
+            .map(|(_, value)| value.clone());
+        let value = env
+            .iter()
+            .find(|(name, _)| name.to_str() == Some(value_name.as_str()))
+            .map(|(_, value)| value.clone());
+        if let (Some(key), Some(value)) = (key, value)
+            && key != "core.hooksPath"
+        {
+            kept.push((key, value));
+        }
+    }
+    env.retain(|(key, _)| {
+        let key = key.to_string_lossy();
+        key != "GIT_CONFIG_COUNT"
+            && !key.starts_with("GIT_CONFIG_KEY_")
+            && !key.starts_with("GIT_CONFIG_VALUE_")
+    });
+    env.push(("GIT_CONFIG_COUNT".into(), kept.len().to_string().into()));
+    for (index, (key, value)) in kept.into_iter().enumerate() {
+        env.push((format!("GIT_CONFIG_KEY_{index}").into(), key));
+        env.push((format!("GIT_CONFIG_VALUE_{index}").into(), value));
+    }
+}
+
 /// Environment for a fixture that runs Git through the executor: the inherited
 /// environment without any `GIT_*` setting, with global and system Git config off,
 /// and with the native Git directory first on `PATH`.

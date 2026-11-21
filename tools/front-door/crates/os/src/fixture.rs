@@ -5,7 +5,7 @@ use std::{io, path::Path};
 mod fixture_git;
 pub use fixture_git::{
     fixture_git_settings, git_command, git_command_at, git_env, reexec_with_clean_git, run_git,
-    scrub_git_env,
+    scrub_git_env, without_hook_override,
 };
 
 /// Run once on this thread after an existing lock has contended and before

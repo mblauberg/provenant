@@ -806,12 +806,18 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
             }
         }
         let lane_git = |args: &[&std::ffi::OsStr]| {
+            // The lane shim warns on command-scope hook-path overrides. Keep the
+            // fixture identity and signing settings, but drop the host's
+            // `core.hooksPath=/dev/null` hardening so normal shimmed commands do
+            // not look like a lane bypass.
+            let mut git_env = provenant_os::fixture::fixture_git_settings().to_vec();
+            provenant_os::fixture::without_hook_override(&mut git_env);
             let output = Command::new("/bin/sh")
                 .args(["-c", "exec git \"$@\"", "lane-git"])
                 .current_dir(&linked)
                 .env_clear()
                 .envs(spec.env.iter().cloned())
-                .envs(provenant_os::fixture::fixture_git_settings())
+                .envs(git_env)
                 .args(args)
                 .output()
                 .unwrap();

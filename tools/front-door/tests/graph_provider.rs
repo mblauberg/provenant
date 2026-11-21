@@ -5409,11 +5409,16 @@ fn writer_shell_edits_instructions_and_keeps_private_logs(adapter: &str) -> Resu
         return Ok(());
     }
     {
-        let rig = if adapter == "claude" {
+        let mut rig = if adapter == "claude" {
             claude_fixture()?
         } else {
             policy_codex_fixture()?
         };
+        // The lane shim warns on command-scope hook-path overrides. The rig's
+        // fixture Git settings include the host's `core.hooksPath=/dev/null`
+        // hardening; drop it so the shell's ordinary Git calls are not mistaken
+        // for a lane bypass. This fixture installs no hooks of its own.
+        provenant_os::fixture::without_hook_override(&mut rig.env);
         let cleanup = rig.process_cleanup();
         let git = provenant_os::git::resolve_git_executable(None).ok_or("Git unavailable")?;
         for name in ["AGENTS.md", "CLAUDE.md", "GLOBAL-AGENTS.md"] {
