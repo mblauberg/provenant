@@ -588,6 +588,120 @@ fn peer_hosted_lane_launches_a_local_child_and_collects_its_result() -> TestResu
     Ok(())
 }
 
+// Spec: docs/specs/fabric.md#publication-boundary
+#[test]
+fn peer_review_base_submission_dispatches_with_the_senders_schema() -> TestResult {
+    if host_test(
+        "fabric::peer_tests::peer_graph_tests::peer_review_base_submission_dispatches_with_the_senders_schema",
+    )? {
+        return Ok(());
+    }
+    let (rig, factory) = receiver()?;
+    let cancel = CancelToken::new();
+    let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    // A review or explore launch names a base. The sender stamps its document
+    // schema 2 because a review base is a version-2 field; the peer rebuilds
+    // the document from the task and must derive the same schema or its own
+    // dispatch admits version 1 carrying version-2 fields and refuses with
+    // GraphSchema (#3752).
+    let input: SubmitInput = serde_json::from_value(json!({
+        "op":"submit", "operation_id":"peer-review-base-schema",
+        "origin_work_key":origin_key(),
+        "task":{"prompt":"Inspect the parser", "access":"read_only",
+            "base": head,
+            "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
+            "timeout_seconds":30,
+            "context":{"graph_id":"origin-graph", "node_id":"parent", "attempt":1, "graph_template_launch":true}}
+    }))?;
+    let receipt = provenant_cli::run::with_deferred_provider_launch(|| {
+        super::super::peer::peer_submit_graph(
+            &factory,
+            input,
+            factory.context.identity.inbox.actor,
+            Default::default(),
+            None,
+            None,
+            WaitBudget::cli(factory.clock.mono_now(), 30).unwrap(),
+            &cancel,
+        )
+    })
+    .map_err(|error| format!("peer submission with a review base: {error:?}"))?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
+    let execution = FileJournal::execution(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph,
+    )?
+    .ok_or("receiver graph document")?;
+    assert_eq!(execution.document.review_base.as_deref(), Some(head.as_str()));
+    assert_eq!(
+        execution.document.schema_version,
+        u64::from(graph::minimum_schema_version(&execution.document)),
+        "the peer must stamp the schema its rebuilt document requires"
+    );
+    assert_eq!(execution.document.schema_version, 2);
+
+    // The submission went through the peer's real dispatch, not decode alone,
+    // and reached a launched node. Fixture-run that node to settlement here.
+    let running = advance_receiver(&factory, graph, &cancel)?;
+    let node = running
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "parent")
+        .ok_or("launched parent node")?;
+    let attempt_ref = node.attempts[0]
+        .attempt_ref
+        .as_deref()
+        .ok_or("launched attempt reference")?;
+    let (host, id) = attempt_ref.split_once('/').ok_or("attempt reference")?;
+    assert_eq!(host, factory.context.identity.host.to_string());
+    let attempt: AttemptId = id.parse()?;
+
+    let owner = BinaryRunOwner {
+        factory: &factory,
+        allow_remote: false,
+        actor: None,
+        chair: None,
+    };
+    let store = owner.store(&cancel)?;
+    let call = owner.call(&cancel);
+    store.mark_starting_for_fixture(
+        attempt,
+        &provenant_run::RouteRecord {
+            provider: Some("fixture".into()),
+            model: Some("fixture/model".into()),
+            ..Default::default()
+        },
+        &call,
+    )?;
+    let directory =
+        provenant_os::fs::Directory::open_anchor(&rig.state.join(format!("attempts/{attempt}")))?;
+    // Admission moves the attempt to Running and bumps its revision. Publish
+    // against the record admission returns, not the pre-admission one, or the
+    // terminal commit conflicts on the stale revision.
+    let record = store.admit(
+        attempt,
+        &directory,
+        &provenant_run::SystemResources,
+        &factory.clock,
+        &cancel,
+    )?;
+    publish_success(&rig, &store, &record, head.parse()?, &call)?;
+    let settled = advance_receiver(&factory, graph, &cancel)?;
+    assert_eq!(
+        settled.checkpoint.nodes[0].state,
+        graph::NodeState::Succeeded,
+        "{settled:?}"
+    );
+    Ok(())
+}
+
 #[test]
 fn peer_hosted_lane_cancellation_stops_parent_and_child() -> TestResult {
     if host_test(

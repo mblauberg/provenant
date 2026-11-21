@@ -417,9 +417,14 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                     });
                 }
             }
+            let mut warnings = crate::pool_effort_warnings(&roots);
+            warnings.extend(provenant_config::port_declaration_warnings(
+                Some(&project),
+                roots.state.as_path(),
+            ));
             Ok(provenant_cli::check::config_page(
                 inspection,
-                crate::pool_effort_warnings(&roots),
+                warnings,
                 ("config", selector),
                 &page,
             )?)
