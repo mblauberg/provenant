@@ -34,6 +34,30 @@ fn read(roots: &Roots, adapter: &str) -> Option<DiscoverySnapshot> {
     (snapshot.adapter == adapter).then_some(snapshot)
 }
 
+fn canonical_snapshot_models(snapshot: &DiscoverySnapshot) -> Vec<String> {
+    snapshot
+        .models
+        .iter()
+        .filter(|row| {
+            row.controls_known
+                || !snapshot.models.iter().any(|other| {
+                    other.controls_known
+                        && other
+                            .efforts
+                            .iter()
+                            .any(|effort| row.model.model() == format!("{}-{effort}", other.model.model()))
+                })
+        })
+        .map(|row| row.model.model().to_owned())
+        .collect()
+}
+
+pub(crate) fn discovered_canonical_models(roots: &Roots, adapter: &str) -> Vec<String> {
+    read(roots, adapter)
+        .map(|snapshot| canonical_snapshot_models(&snapshot))
+        .unwrap_or_default()
+}
+
 #[allow(
     clippy::print_stderr,
     reason = "warn that the discovery cache is unusable"
@@ -247,6 +271,19 @@ fn refresh_with(
             )
             .and_then(|p| p.require_durable())
             .map_err(|e| e.to_string())?;
+            if harness.spec().offered_models
+                && let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from)
+            {
+                let models = canonical_snapshot_models(&snapshot);
+                if !models.is_empty() {
+                    let _ = provenant_providers::agy::remember_models(
+                        roots.state.as_path(),
+                        &home,
+                        now,
+                        &models,
+                    );
+                }
+            }
             Ok(format!(
                 "model discovery: {adapter}: new [{}]; retired [{}]",
                 added.join(", "),

@@ -611,10 +611,20 @@ pub(super) fn observe_account(
             unavailable()
         )));
     }
-    // An adapter flagged `offered_models` reads the offer list its usage probe cached.
+    // An adapter flagged `offered_models` reads the offer list its usage probe cached,
+    // falling back for the HOME login to the last model-discovery snapshot when needed.
     let observed_models =
         if AdapterSpec::get(&entry.adapter).is_some_and(|spec| spec.offered_models) {
-            provenant_providers::agy::cached_models(executor.root(), &directory)
+            let cached = provenant_providers::agy::cached_models(executor.root(), &directory);
+            if cached.is_empty() && directory == home {
+                roots
+                    .map(|roots| {
+                        crate::model_discovery::discovered_canonical_models(roots, &entry.adapter)
+                    })
+                    .unwrap_or_default()
+            } else {
+                cached
+            }
         } else {
             Vec::new()
         };

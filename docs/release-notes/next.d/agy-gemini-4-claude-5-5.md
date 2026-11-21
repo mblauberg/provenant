@@ -1,0 +1,3 @@
+### Added
+
+- Bundled `agy` catalogue and pool support for the Gemini 4 family (`agy/gemini-4-hydrogen` in `junior`, `agy/gemini-4-neon` in `senior` and `principal`, `agy/gemini-4-argon` in `principal`) and Claude 5.5 (`agy/claude-sonnet-5-5` in `senior`, `writing` and `design`; `agy/claude-opus-5-5` in `principal` and `design`), with lower default pool weights and efforts for usage pacing, family aliases (`agy/hydrogen`, `agy/neon`, `agy/argon`, `agy/sonnet`, `agy/opus`), and per-account `superseded_by` filtering so accounts offering Gemini 4 or Claude 5.5 omit `agy/gemini-3.8-flash` and Claude 4.6 from automatic pools while accounts on older model sets retain them.

@@ -1287,6 +1287,10 @@ pub struct ModelEntry {
     /// are grouped (`group.window`). Unset applies every window.
     #[serde(default)]
     pub quota_pool: Option<String>,
+    /// Newer catalogued models on the same adapter that supersede this model
+    /// in automatic pools when an account offers any of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded_by: Vec<ModelId>,
 }
 fn bundled_source() -> String {
     "bundled".into()
@@ -1530,13 +1534,16 @@ impl BundledWriterAdvisory {
 #[serde(deny_unknown_fields)]
 struct BundledPoolMember {
     selector: String,
-    #[serde(default = "default_weight")]
+    #[serde(default = "default_bundled_weight")]
     weight: u8,
     effort: Option<String>,
     #[serde(default)]
     efforts: Vec<String>,
     #[serde(default)]
     free: bool,
+}
+fn default_bundled_weight() -> u8 {
+    2
 }
 
 // A selector has one wildcard around the version. Comparing numeric components
@@ -1637,6 +1644,7 @@ pub fn fixture_models(rows: &[(&str, &str)]) -> Result<FixtureFamilyOverride, Ro
             trains_on_prompts: None,
             monthly_allowance_usd: None,
             quota_pool: None,
+            superseded_by: Vec::new(),
         });
     }
     catalogue.validate()?;
@@ -1784,6 +1792,7 @@ impl Catalogue {
                         trains_on_prompts: None,
                         monthly_allowance_usd: None,
                         quota_pool: None,
+                        superseded_by: Vec::new(),
                     });
                 }
             }
@@ -1836,8 +1845,15 @@ impl Catalogue {
                 .pool_selectors
                 .get(name)
                 .ok_or(RoutingError::Catalogue)?;
-            for (member, selector) in members.iter_mut().zip(selectors) {
-                if let Some(entry) = latest_in_family(selector, &active_models) {
+            let mut assigned: Vec<ModelId> = members.iter().map(|m| m.model.clone()).collect();
+            for (index, (member, selector)) in members.iter_mut().zip(selectors).enumerate() {
+                if let Some(entry) = latest_in_family(selector, &active_models)
+                    && !assigned
+                        .iter()
+                        .enumerate()
+                        .any(|(other, id)| other != index && *id == entry.model)
+                {
+                    assigned[index] = entry.model.clone();
                     member.model = entry.model.clone();
                     *member = member.reconciled(Some(entry)).0;
                 }
@@ -1913,50 +1929,63 @@ impl Catalogue {
             .cloned()
             .collect();
         latest_in_family(selector, &candidates)
+            .or_else(|| latest_in_family(selector, &self.models))
             .and_then(|selected| self.models.iter().find(|row| row.model == selected.model))
             .map(|row| &row.model)
     }
-    /// Resolve a provider family alias such as `claude/sonnet` against the
-    /// catalogue. An exact ID wins. Otherwise the alias must name exactly one
-    /// family for that adapter, as a whole hyphen-delimited segment of its
-    /// models' IDs; the latest version of that family is the exact model the
-    /// alias resolves to. An unknown or ambiguous alias stays unresolved.
+    /// Resolve a provider family alias such as `claude/sonnet` or `agy/neon`
+    /// against the catalogue. An exact ID wins. Otherwise the alias must name
+    /// a whole hyphen-delimited segment of a versioned family on that adapter,
+    /// either before the version (`<prefix>-<alias>-*`) or after the version
+    /// (`<prefix>-*-<alias>`), and resolve to a single latest versioned model.
+    /// An unknown or ambiguous alias stays unresolved.
     pub fn resolve_family_alias<'a>(&'a self, id: &'a ModelId) -> Option<&'a ModelId> {
         if self.model(id).is_some() {
             return Some(id);
         }
         let alias = id.model();
-        let mut families: Vec<String> = Vec::new();
+        let is_version_segment = |part: &str| {
+            !part.is_empty()
+                && part.chars().any(|c| c.is_ascii_digit())
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, '.'))
+        };
+        let mut selectors: Vec<String> = Vec::new();
         for row in self
             .models
             .iter()
             .filter(|row| row.model.adapter() == id.adapter())
         {
             let name = row.model.model();
-            // The family ends where the first whole hyphen-delimited segment
-            // equal to the alias ends, never at a substring hit inside another
-            // segment.
-            let mut offset = 0;
-            let mut end = None;
-            for part in name.split('-') {
-                if part == alias {
-                    end = Some(offset + part.len());
-                    break;
-                }
-                offset += part.len() + 1;
-            }
-            let Some(end) = end else {
+            let parts: Vec<&str> = name.split('-').collect();
+            let Some(pos) = parts.iter().position(|part| *part == alias) else {
                 continue;
             };
-            let family = name[..end].to_owned();
-            if !families.contains(&family) {
-                families.push(family);
+            let selector = if pos + 1 < parts.len() && is_version_segment(parts[pos + 1]) {
+                let prefix = parts[..=pos].join("-");
+                Some(format!("{}/{prefix}-*", id.adapter()))
+            } else if pos >= 2 && is_version_segment(parts[pos - 1]) {
+                let mut version_start = pos - 1;
+                while version_start > 1 && is_version_segment(parts[version_start - 1]) {
+                    version_start -= 1;
+                }
+                let prefix = parts[..version_start].join("-");
+                let suffix = parts[pos..].join("-");
+                Some(format!("{}/{prefix}-*-{suffix}", id.adapter()))
+            } else {
+                None
+            };
+            if let Some(selector) = selector
+                && !selectors.contains(&selector)
+            {
+                selectors.push(selector);
             }
         }
-        let [family] = families.as_slice() else {
+        let [selector] = selectors.as_slice() else {
             return None;
         };
-        self.latest_family(&format!("{}/{family}-*", id.adapter()))
+        self.latest_family(selector)
     }
     pub fn pool_models(&self) -> impl Iterator<Item = &ModelId> {
         self.pools.values().flatten().map(|member| &member.model)
@@ -1999,6 +2028,12 @@ impl Catalogue {
                     !identifier(pool)
                         || !provenant_records::AdapterSpec::get(row.model.adapter())
                             .is_some_and(|spec| spec.grouped_quota_pools)
+                })
+                || row.superseded_by.len() > 16
+                || row.superseded_by.iter().any(|newer| {
+                    newer == &row.model
+                        || newer.adapter() != row.model.adapter()
+                        || !self.models.iter().any(|candidate| &candidate.model == newer)
                 })
             {
                 return Err(RoutingError::Catalogue);
@@ -2223,32 +2258,35 @@ mod tests {
     fn family_aliases_resolve_to_the_latest_catalogued_model()
     -> Result<(), Box<dyn std::error::Error>> {
         let catalogue = Catalogue::bundled()?;
-        assert_eq!(
-            catalogue
-                .resolve_family_alias(&ModelId::parse("claude/sonnet")?)
-                .map(ModelId::as_str),
-            Some("claude/claude-sonnet-5-5")
-        );
-        assert_eq!(
-            catalogue
-                .resolve_family_alias(&ModelId::parse("claude/opus")?)
-                .map(ModelId::as_str),
-            Some("claude/claude-opus-5-5")
-        );
-        assert_eq!(
-            catalogue
-                .resolve_family_alias(&ModelId::parse("claude/claude-sonnet-5")?)
-                .map(ModelId::as_str),
-            Some("claude/claude-sonnet-5")
-        );
-        assert_eq!(
-            catalogue.resolve_family_alias(&ModelId::parse("claude/unicorn")?),
-            None
-        );
-        assert_eq!(
-            catalogue.resolve_family_alias(&ModelId::parse("claude/claude")?),
-            None
-        );
+        for (alias, expected) in [
+            ("claude/sonnet", "claude/claude-sonnet-5-5"),
+            ("claude/opus", "claude/claude-opus-5-5"),
+            ("claude/claude-sonnet-5", "claude/claude-sonnet-5"),
+            ("agy/sonnet", "agy/claude-sonnet-5-5"),
+            ("agy/opus", "agy/claude-opus-5-5"),
+            ("agy/hydrogen", "agy/gemini-4-hydrogen"),
+            ("agy/neon", "agy/gemini-4-neon"),
+            ("agy/argon", "agy/gemini-4-argon"),
+            ("agy/flash", "agy/gemini-3.8-flash"),
+            ("codex/luna", "codex/gpt-6-luna"),
+            ("codex/terra", "codex/gpt-6.1-terra"),
+            ("codex/sol", "codex/gpt-6.1-sol"),
+        ] {
+            assert_eq!(
+                catalogue
+                    .resolve_family_alias(&ModelId::parse(alias)?)
+                    .map(ModelId::as_str),
+                Some(expected),
+                "{alias}"
+            );
+        }
+        for unknown in ["claude/unicorn", "claude/claude", "agy/gemini", "agy/claude"] {
+            assert_eq!(
+                catalogue.resolve_family_alias(&ModelId::parse(unknown)?),
+                None,
+                "{unknown}"
+            );
+        }
         Ok(())
     }
 
@@ -2617,18 +2655,23 @@ mod tests {
         Ok(())
     }
 
-    /// Bundled pools carry no owner, account, plan or provider annotations:
-    /// every weight stays at the neutral default and the source rows have no
-    /// comments or per-member weight overrides.
+    /// Bundled pools carry no owner, account or plan annotations: every
+    /// standard member uses `default_bundled_weight()` while usage-constrained
+    /// routes (`agy`, `cursor`) use weight `1`, and the source rows have no
+    /// comments.
     #[test]
     fn bundled_pools_have_no_owner_or_plan_annotations() -> Result<(), Box<dyn std::error::Error>> {
         let catalogue = Catalogue::bundled()?;
         for (pool, members) in &catalogue.pools {
             for member in members {
+                let expected = match member.model.adapter() {
+                    "agy" | "cursor" => 1,
+                    _ => default_bundled_weight(),
+                };
                 assert_eq!(
                     member.weight,
-                    default_weight(),
-                    "bundled pool {pool} member {} has a non-neutral weight",
+                    expected,
+                    "bundled pool {pool} member {} has unexpected weight",
                     member.model.as_str()
                 );
             }
@@ -2644,10 +2687,6 @@ mod tests {
         assert!(
             rows.iter().all(|row| !row.contains('#')),
             "bundled [pools] rows must not carry owner or plan comments"
-        );
-        assert!(
-            rows.iter().all(|row| !row.contains("weight")),
-            "bundled [pools] rows must not override the neutral weight"
         );
         Ok(())
     }

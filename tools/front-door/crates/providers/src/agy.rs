@@ -204,8 +204,40 @@ pub fn cached_models(state: &std::path::Path, directory: &std::path::Path) -> Ve
         return Vec::new();
     };
     read_identity_probe(&root, directory)
+        .filter(|probe| probe.stamp == keychain_stamp(directory))
         .map(|probe| probe.models)
         .unwrap_or_default()
+}
+
+pub fn remember_models(
+    state: &std::path::Path,
+    directory: &std::path::Path,
+    now: i64,
+    models: &[String],
+) -> bool {
+    let current_stamp = keychain_stamp(directory);
+    let publish = || -> Result<(), Box<dyn std::error::Error>> {
+        let root = provenant_os::fs::Directory::open_anchor(state)?;
+        let mut probe = read_identity_probe(&root, directory).unwrap_or_else(|| IdentityProbe {
+            key: String::new(),
+            observed: now,
+            stamp: current_stamp,
+            models: Vec::new(),
+            extra: Default::default(),
+        });
+        probe.stamp = current_stamp;
+        probe.models = models.to_vec();
+        let bytes = provenant_records::encode(&probe)?;
+        root.atomic_write(
+            identity_file(directory).as_ref(),
+            ".agy-identity-",
+            &bytes,
+            provenant_os::fs::PublishMode::Replace,
+        )?
+        .require_durable()?;
+        Ok(())
+    };
+    publish().is_ok()
 }
 
 pub(crate) fn forget_identity(state: &std::path::Path, directory: &std::path::Path) {
@@ -999,6 +1031,43 @@ mod identity_tests {
         ));
         forget_identity(temp.path(), &directory);
         assert!(cached_identity(temp.path(), &directory, 103).is_none());
+    }
+
+    #[test]
+    fn agy_cached_models_invalidate_when_keychain_changes_and_remember_models_updates_stamp() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("home");
+        let keychain = directory.join(KEYCHAIN);
+        std::fs::create_dir_all(keychain.parent().unwrap()).unwrap();
+        std::fs::write(&keychain, "synthetic-v1").unwrap();
+        let stamp = keychain_stamp(&directory);
+        assert!(remember_identity(
+            temp.path(),
+            &directory,
+            "agy-google-0123456789ab",
+            100,
+            stamp,
+            &["gemini-3.8-flash".into()],
+        ));
+        assert_eq!(
+            cached_models(temp.path(), &directory),
+            vec!["gemini-3.8-flash".to_owned()]
+        );
+        std::fs::write(&keychain, "synthetic-v2-changed").unwrap();
+        assert!(cached_models(temp.path(), &directory).is_empty());
+        assert!(remember_models(
+            temp.path(),
+            &directory,
+            105,
+            &["gemini-4-hydrogen".into(), "claude-sonnet-5-5".into()],
+        ));
+        assert_eq!(
+            cached_models(temp.path(), &directory),
+            vec![
+                "gemini-4-hydrogen".to_owned(),
+                "claude-sonnet-5-5".to_owned()
+            ]
+        );
     }
 
     #[test]

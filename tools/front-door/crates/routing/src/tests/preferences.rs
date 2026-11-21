@@ -523,3 +523,155 @@ fn alias_with_only_stale_spent_members_and_no_reset_still_launches()
     }
     Ok(())
 }
+
+// Spec: docs/specs/routing.md#provider-model-discovery
+#[test]
+fn agy_account_offered_models_supersede_legacy_models_in_pools_and_select_capable_accounts()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    config.provider_scopes.insert(
+        "agy".into(),
+        provenant_config::ProviderSettings {
+            models: Some(vec!["*".into()]),
+            ..provenant_config::ProviderSettings::default()
+        },
+    );
+    for (adapter, settings) in &mut config.provider_scopes {
+        if adapter != "agy" {
+            settings.models = Some(Vec::new());
+        }
+    }
+    let michael = AvailabilityRecord {
+        observed_models: vec![
+            "gemini-4-hydrogen".into(),
+            "gemini-4-neon".into(),
+            "gemini-4-argon".into(),
+            "claude-sonnet-5-5".into(),
+            "claude-opus-5-5".into(),
+            "gemini-3.8-flash".into(),
+        ],
+        ..agy_account("michael-agy")
+    };
+    let anese = AvailabilityRecord {
+        observed_models: vec![
+            "Gemini 3.8 Flash".into(),
+            "Claude Sonnet 4.6".into(),
+            "Claude Opus 4.6 (Thinking)".into(),
+        ],
+        ..agy_account("anese-agy")
+    };
+    let access = readiness_access();
+    let pool_models = |records: &[AvailabilityRecord], pool: &str| {
+        let ctx = RoutingContext {
+            availability: records,
+            access: &access,
+            ..context(&catalogue, &config, now().unwrap())
+        };
+        let listed = list(
+            &RouteListQuery {
+                adapter: Some("agy".into()),
+                pool: Some(pool.into()),
+                valid: false,
+            },
+            &ctx,
+        )
+        .unwrap();
+        listed.pools[pool]
+            .iter()
+            .map(|m| m.model.as_str().to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    // Account with Gemini 4 and Claude 5.5 excludes Flash 3.8 and Claude 4.6 from pools.
+    let michael_only = [michael.clone()];
+    assert_eq!(
+        pool_models(&michael_only, "junior"),
+        vec!["agy/gemini-4-hydrogen"]
+    );
+    assert_eq!(
+        pool_models(&michael_only, "senior"),
+        vec!["agy/gemini-4-neon", "agy/claude-sonnet-5-5"]
+    );
+    assert_eq!(
+        pool_models(&michael_only, "principal"),
+        vec![
+            "agy/gemini-4-neon",
+            "agy/gemini-4-argon",
+            "agy/claude-opus-5-5"
+        ]
+    );
+    assert_eq!(
+        pool_models(&michael_only, "writing"),
+        vec!["agy/claude-sonnet-5-5"]
+    );
+    assert_eq!(
+        pool_models(&michael_only, "design"),
+        vec!["agy/claude-sonnet-5-5", "agy/claude-opus-5-5"]
+    );
+
+    // Account with older models retains Flash 3.8 and Claude 4.6 in pools.
+    let anese_only = [anese.clone()];
+    assert_eq!(
+        pool_models(&anese_only, "junior"),
+        vec!["agy/gemini-3.8-flash", "agy/claude-sonnet-4-6"]
+    );
+    assert_eq!(
+        pool_models(&anese_only, "senior"),
+        vec!["agy/gemini-3.8-flash", "agy/claude-opus-4-6-thinking"]
+    );
+    assert!(pool_models(&anese_only, "principal").is_empty());
+    assert_eq!(
+        pool_models(&anese_only, "writing"),
+        vec!["agy/gemini-3.8-flash", "agy/claude-sonnet-4-6"]
+    );
+    assert_eq!(
+        pool_models(&anese_only, "design"),
+        vec!["agy/gemini-3.8-flash"]
+    );
+
+    // With both accounts present, resolving a pool routes each model only to the account that serves it.
+    let both = [anese, michael];
+    let ctx = RoutingContext {
+        availability: &both,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    for pool in ["junior", "senior", "principal", "writing", "design"] {
+        let req = RouteRequest {
+            choice: RouteChoice::NamedRoute(RouteName::parse(pool)?),
+            ..request("agy/gemini-4-neon")?
+        };
+        for seed in 0..16 {
+            let resolved = resolve_with_seed(&req, &ctx, "multi-agy", seed)?;
+            match resolved.model.as_str() {
+                "gemini-4-hydrogen"
+                | "gemini-4-neon"
+                | "gemini-4-argon"
+                | "claude-sonnet-5-5"
+                | "claude-opus-5-5" => {
+                    assert_eq!(
+                        resolved.account_key.as_deref(),
+                        Some("michael-agy"),
+                        "pool {pool} model {} should select michael-agy",
+                        resolved.model
+                    );
+                }
+                "gemini-3.8-flash" | "claude-sonnet-4-6" | "claude-opus-4-6-thinking" => {
+                    assert_eq!(
+                        resolved.account_key.as_deref(),
+                        Some("anese-agy"),
+                        "pool {pool} model {} should select anese-agy",
+                        resolved.model
+                    );
+                }
+                other => panic!("unexpected agy model {other}"),
+            }
+        }
+    }
+
+    // Explicit pin of a Gemini 4 model selects the account that offers it even if listed second.
+    let pin = resolve(&request("agy/gemini-4-argon")?, &ctx)?;
+    assert_eq!(pin.account_key.as_deref(), Some("michael-agy"));
+    Ok(())
+}

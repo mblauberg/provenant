@@ -17,6 +17,7 @@ fn synthetic_catalogue() -> Result<Catalogue, Box<dyn std::error::Error>> {
             trains_on_prompts: None,
             monthly_allowance_usd: None,
             quota_pool: None,
+            superseded_by: Vec::new(),
         },
         ModelEntry {
             capability: Default::default(),
@@ -32,6 +33,7 @@ fn synthetic_catalogue() -> Result<Catalogue, Box<dyn std::error::Error>> {
             trains_on_prompts: None,
             monthly_allowance_usd: None,
             quota_pool: None,
+            superseded_by: Vec::new(),
         },
         ModelEntry {
             capability: Default::default(),
@@ -47,6 +49,7 @@ fn synthetic_catalogue() -> Result<Catalogue, Box<dyn std::error::Error>> {
             trains_on_prompts: None,
             monthly_allowance_usd: None,
             quota_pool: None,
+            superseded_by: Vec::new(),
         },
     ];
     Ok(catalogue)
@@ -138,6 +141,7 @@ fn missing_provider_segment_lists_candidates_and_respects_namespace_declaration(
             trains_on_prompts: None,
             monthly_allowance_usd: None,
             quota_pool: None,
+            superseded_by: Vec::new(),
         })
     };
     let mut catalogue = Catalogue::bundled()?;
