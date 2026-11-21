@@ -1204,13 +1204,23 @@ mod tests {
         let input = with_model("claude-haiku-5-5").unwrap();
         assert_eq!(input["model"], "claude/claude-haiku-5-5");
         // Several providers offer it: refused as ambiguous, naming each ADAPTER/ID.
-        let ambiguous = with_model("claude-sonnet-5-5").unwrap_err();
-        assert_eq!(ambiguous.code, "invalid_input");
-        let detail = ambiguous.detail.unwrap_or_default();
-        assert!(
-            detail.contains("claude/claude-sonnet-5-5") && detail.contains("agy/claude-sonnet-5-5"),
-            "{detail}"
-        );
+        for (bare, expected) in [
+            (
+                "claude-sonnet-5-5",
+                ["claude/claude-sonnet-5-5", "agy/claude-sonnet-5-5"],
+            ),
+            (
+                "claude-opus-5-5",
+                ["claude/claude-opus-5-5", "agy/claude-opus-5-5"],
+            ),
+        ] {
+            let ambiguous = with_model(bare).unwrap_err();
+            assert_eq!(ambiguous.code, "invalid_input");
+            let detail = ambiguous.detail.unwrap_or_default();
+            for candidate in expected {
+                assert!(detail.contains(candidate), "{detail}");
+            }
+        }
         // The provider-qualified form is passed through unchanged.
         let input = with_model("codex/gpt-6.1-terra").unwrap();
         assert_eq!(input["model"], "codex/gpt-6.1-terra");

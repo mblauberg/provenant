@@ -509,16 +509,17 @@ fn offered_list_serves_model(
     catalogue: &Catalogue,
     allow_superseded: bool,
 ) -> bool {
+    if offered.is_empty() {
+        return true;
+    }
     if !provenant_providers::model_matches_offered(model.model(), offered) {
         return false;
     }
     allow_superseded
-        || !catalogue.model(model).is_some_and(|entry| {
-            entry
-                .superseded_by
-                .iter()
-                .any(|newer| provenant_providers::model_matches_offered(newer.model(), offered))
-        })
+        || !catalogue
+            .transitively_superseded_by(model)
+            .into_iter()
+            .any(|newer| provenant_providers::model_matches_offered(newer.model(), offered))
 }
 fn account_serves_model(
     record: &AvailabilityRecord,
@@ -533,7 +534,6 @@ fn account_serves_model(
         return false;
     }
     if provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|spec| spec.offered_models)
-        && !record.observed_models.is_empty()
     {
         return offered_list_serves_model(
             &record.observed_models,
@@ -606,34 +606,23 @@ fn adapter_offered_lists<'a>(context: &'a RoutingContext<'_>, adapter: &str) -> 
 }
 fn pool_member_retained_by_offerings(
     member: &RoutePoolMember,
-    pool_members: &[RoutePoolMember],
     source: AutomaticModelSource,
     context: &RoutingContext<'_>,
 ) -> bool {
+    if source == AutomaticModelSource::OwnerConfiguration {
+        return true;
+    }
     let adapter = member.model.adapter();
     if !provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| spec.offered_models) {
         return true;
     }
     let lists = adapter_offered_lists(context, adapter);
-    if !lists.is_empty() {
-        return lists
-            .into_iter()
-            .any(|list| offered_list_serves_model(list, &member.model, context.catalogue, false));
+    if lists.is_empty() {
+        return offered_list_serves_model(&[], &member.model, context.catalogue, false);
     }
-    match source {
-        AutomaticModelSource::ShippedPool => context
-            .catalogue
-            .model(&member.model)
-            .is_none_or(|entry| entry.superseded_by.is_empty()),
-        AutomaticModelSource::OwnerConfiguration => {
-            context.catalogue.model(&member.model).is_none_or(|entry| {
-                !entry
-                    .superseded_by
-                    .iter()
-                    .any(|newer| pool_members.iter().any(|other| &other.model == newer))
-            })
-        }
-    }
+    lists
+        .into_iter()
+        .any(|list| offered_list_serves_model(list, &member.model, context.catalogue, false))
 }
 fn effective_pool(context: &RoutingContext<'_>, name: &str) -> Option<Vec<RoutePoolMember>> {
     let members = raw_pool(context, name)?;
@@ -654,7 +643,7 @@ fn effective_pool(context: &RoutingContext<'_>, name: &str) -> Option<Vec<RouteP
     Some(
         permitted
             .iter()
-            .filter(|member| pool_member_retained_by_offerings(member, &permitted, source, context))
+            .filter(|member| pool_member_retained_by_offerings(member, source, context))
             .map(|member| member.reconciled(context.catalogue.model(&member.model)).0)
             .collect(),
     )

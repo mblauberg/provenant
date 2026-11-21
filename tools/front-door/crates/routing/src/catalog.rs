@@ -1534,7 +1534,7 @@ impl BundledWriterAdvisory {
 #[serde(deny_unknown_fields)]
 struct BundledPoolMember {
     selector: String,
-    #[serde(default = "default_bundled_weight")]
+    #[serde(default = "default_weight")]
     weight: u8,
     effort: Option<String>,
     #[serde(default)]
@@ -1542,8 +1542,11 @@ struct BundledPoolMember {
     #[serde(default)]
     free: bool,
 }
-fn default_bundled_weight() -> u8 {
-    2
+
+fn is_version_segment(part: &str) -> bool {
+    !part.is_empty()
+        && part.chars().any(|c| c.is_ascii_digit())
+        && part.chars().all(|c| c.is_ascii_digit() || matches!(c, '.'))
 }
 
 // A selector has one wildcard around the version. Comparing numeric components
@@ -1566,12 +1569,10 @@ fn latest_in_family<'a>(selector: &str, models: &'a [ModelEntry]) -> Option<&'a 
             id.starts_with(prefix)
                 && id.ends_with(suffix)
                 && id.len() >= prefix.len() + suffix.len()
+                && !id[prefix.len()..id.len() - suffix.len()].is_empty()
                 && id[prefix.len()..id.len() - suffix.len()]
-                    .chars()
-                    .any(|c| c.is_ascii_digit())
-                && id[prefix.len()..id.len() - suffix.len()]
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-'))
+                    .split('-')
+                    .all(is_version_segment)
         })
         .max_by_key(|entry| (version(entry.model.as_str()), entry.model.as_str()))
 }
@@ -1929,7 +1930,6 @@ impl Catalogue {
             .cloned()
             .collect();
         latest_in_family(selector, &candidates)
-            .or_else(|| latest_in_family(selector, &self.models))
             .and_then(|selected| self.models.iter().find(|row| row.model == selected.model))
             .map(|row| &row.model)
     }
@@ -1944,11 +1944,6 @@ impl Catalogue {
             return Some(id);
         }
         let alias = id.model();
-        let is_version_segment = |part: &str| {
-            !part.is_empty()
-                && part.chars().any(|c| c.is_ascii_digit())
-                && part.chars().all(|c| c.is_ascii_digit() || matches!(c, '.'))
-        };
         let mut selectors: Vec<String> = Vec::new();
         for row in self
             .models
@@ -2036,6 +2031,7 @@ impl Catalogue {
                             .iter()
                             .any(|candidate| &candidate.model == newer)
                 })
+                || self.supersedence_has_cycle(&row.model)
             {
                 return Err(RoutingError::Catalogue);
             }
@@ -2082,6 +2078,43 @@ impl Catalogue {
 
     pub fn model(&self, id: &ModelId) -> Option<&ModelEntry> {
         self.models.iter().find(|row| row.model == *id)
+    }
+    /// All catalogued models that directly or transitively supersede `id`.
+    pub fn transitively_superseded_by<'a>(&'a self, id: &ModelId) -> Vec<&'a ModelId> {
+        let mut visited = BTreeSet::new();
+        let mut queue: Vec<&ModelId> = self
+            .model(id)
+            .map(|entry| entry.superseded_by.iter().collect())
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        while let Some(next) = queue.pop() {
+            if next == id || !visited.insert(next) {
+                continue;
+            }
+            out.push(next);
+            if let Some(entry) = self.model(next) {
+                queue.extend(entry.superseded_by.iter());
+            }
+        }
+        out
+    }
+    fn supersedence_has_cycle(&self, start: &ModelId) -> bool {
+        let mut visited = BTreeSet::new();
+        let mut queue: Vec<&ModelId> = self
+            .model(start)
+            .map(|entry| entry.superseded_by.iter().collect())
+            .unwrap_or_default();
+        while let Some(next) = queue.pop() {
+            if next == start {
+                return true;
+            }
+            if visited.insert(next)
+                && let Some(entry) = self.model(next)
+            {
+                queue.extend(entry.superseded_by.iter());
+            }
+        }
+        false
     }
     /// Resolve a model named without its adapter, such as `claude-sonnet-5-5`.
     /// Exactly one catalogued model must carry that ID. Several offers name
@@ -2293,6 +2326,95 @@ mod tests {
                 "{unknown}"
             );
         }
+        // Ambiguous suffix across two distinct families on the same adapter stays unresolved.
+        let mut synthetic = catalogue.clone();
+        for id in ["agy/alpha-1-shared", "agy/beta-2-shared"] {
+            synthetic.models.push(ModelEntry {
+                capability: Default::default(),
+                free: false,
+                model: ModelId::parse(id)?,
+                efforts: Vec::new(),
+                effort_suffix: false,
+                evidence_ref: "fixture".into(),
+                source: "fixture".into(),
+                service_tiers: Vec::new(),
+                policy_rules: Vec::new(),
+                family: None,
+                trains_on_prompts: None,
+                monthly_allowance_usd: None,
+                quota_pool: None,
+                superseded_by: Vec::new(),
+            });
+        }
+        assert_eq!(
+            synthetic.resolve_family_alias(&ModelId::parse("agy/shared")?),
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validate_rejects_invalid_and_cyclic_superseded_by_edges()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let base = Catalogue::bundled()?;
+        let flash = ModelId::parse("agy/gemini-3.8-flash")?;
+        let neon = ModelId::parse("agy/gemini-4-neon")?;
+
+        // Self-reference is rejected.
+        let mut self_ref = base.clone();
+        self_ref
+            .models
+            .iter_mut()
+            .find(|m| m.model == flash)
+            .unwrap()
+            .superseded_by = vec![flash.clone()];
+        assert!(self_ref.validate().is_err());
+
+        // Cross-adapter target is rejected.
+        let mut cross_adapter = base.clone();
+        cross_adapter
+            .models
+            .iter_mut()
+            .find(|m| m.model == flash)
+            .unwrap()
+            .superseded_by = vec![ModelId::parse("claude/claude-sonnet-5-5")?];
+        assert!(cross_adapter.validate().is_err());
+
+        // Uncatalogued target is rejected.
+        let mut unknown_target = base.clone();
+        unknown_target
+            .models
+            .iter_mut()
+            .find(|m| m.model == flash)
+            .unwrap()
+            .superseded_by = vec![ModelId::parse("agy/not-in-catalogue")?];
+        assert!(unknown_target.validate().is_err());
+
+        // Cycle (flash -> neon -> flash) is rejected.
+        let mut cyclic = base.clone();
+        cyclic
+            .models
+            .iter_mut()
+            .find(|m| m.model == neon)
+            .unwrap()
+            .superseded_by = vec![flash.clone()];
+        assert!(cyclic.validate().is_err());
+
+        // Transitive supersedence (sonnet-4-6 -> sonnet-5-5 -> opus-5-5) is reported.
+        let mut chain = base.clone();
+        let sonnet46 = ModelId::parse("agy/claude-sonnet-4-6")?;
+        let sonnet55 = ModelId::parse("agy/claude-sonnet-5-5")?;
+        let opus55 = ModelId::parse("agy/claude-opus-5-5")?;
+        chain
+            .models
+            .iter_mut()
+            .find(|m| m.model == sonnet55)
+            .unwrap()
+            .superseded_by = vec![opus55.clone()];
+        assert!(chain.validate().is_ok());
+        let transitive = chain.transitively_superseded_by(&sonnet46);
+        assert!(transitive.contains(&&sonnet55));
+        assert!(transitive.contains(&&opus55));
         Ok(())
     }
 
@@ -2662,17 +2784,17 @@ mod tests {
     }
 
     /// Bundled pools carry no owner, account or plan annotations: every
-    /// standard member uses `default_bundled_weight()` while usage-constrained
-    /// routes (`agy`, `cursor`) use weight `1`, and the source rows have no
-    /// comments.
+    /// standard member carries explicit weight `2` while usage-constrained
+    /// routes (`agy`, `cursor`) use `default_weight()` (`1`), and the source
+    /// rows have no comments.
     #[test]
     fn bundled_pools_have_no_owner_or_plan_annotations() -> Result<(), Box<dyn std::error::Error>> {
         let catalogue = Catalogue::bundled()?;
         for (pool, members) in &catalogue.pools {
             for member in members {
                 let expected = match member.model.adapter() {
-                    "agy" | "cursor" => 1,
-                    _ => default_bundled_weight(),
+                    "agy" | "cursor" => default_weight(),
+                    _ => 2,
                 };
                 assert_eq!(
                     member.weight,

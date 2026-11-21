@@ -82,7 +82,9 @@ such as `agy`), catalogued `superseded_by` edges withhold an older pool member o
 an account that offers any of its superseding models (so an account offering
 Gemini 4 or Claude 5.5 omits `gemini-3.8-flash` or Claude 4.6 from its automatic
 pools while an account offering only the older models keeps them), and pool
-candidate resolution only assigns an account to models it actually offers.
+candidate resolution only assigns an account to models it actually offers. When no account offer list is observed yet, unknown offerings retain shipped pool
+members without applying supersedence; owner-configured pools stay pinned
+regardless of supersedence.
 Discovery messages are transient command
 output, not part of the persisted quota report. Route listings name the source of
 model, valid pair, named route and pool entries, and the configuration layer that

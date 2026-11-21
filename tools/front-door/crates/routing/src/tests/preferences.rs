@@ -670,5 +670,60 @@ fn agy_account_offered_models_supersede_legacy_models_in_pools_and_select_capabl
     // Explicit pin of a Gemini 4 model selects the account that offers it even if listed second.
     let pin = resolve(&request("agy/gemini-4-argon")?, &ctx)?;
     assert_eq!(pin.account_key.as_deref(), Some("michael-agy"));
+
+    // With no offer list observed yet, unknown offerings retain shipped pool members without
+    // withholding legacy models.
+    let unknown = [agy_account("unprobed-agy")];
+    assert_eq!(
+        pool_models(&unknown, "junior"),
+        vec![
+            "agy/gemini-4-hydrogen",
+            "agy/gemini-3.8-flash",
+            "agy/claude-sonnet-4-6"
+        ]
+    );
+
+    // Owner-configured pools stay pinned even when an account offers superseding models.
+    let mut owner_config = config.clone();
+    owner_config.pools.insert(
+        "pinned-legacy".into(),
+        vec![
+            RoutePoolMember {
+                model: ModelId::parse("agy/gemini-3.8-flash")?,
+                weight: 1,
+                effort: None,
+                efforts: Vec::new(),
+                free: false,
+            },
+            RoutePoolMember {
+                model: ModelId::parse("agy/claude-sonnet-4-6")?,
+                weight: 1,
+                effort: None,
+                efforts: Vec::new(),
+                free: false,
+            },
+        ],
+    );
+    let owner_ctx = RoutingContext {
+        availability: &michael_only,
+        access: &access,
+        ..context(&catalogue, &owner_config, now()?)
+    };
+    let listed = list(
+        &RouteListQuery {
+            adapter: Some("agy".into()),
+            pool: Some("pinned-legacy".into()),
+            valid: false,
+        },
+        &owner_ctx,
+    )?;
+    let pinned_models: Vec<_> = listed.pools["pinned-legacy"]
+        .iter()
+        .map(|m| m.model.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        pinned_models,
+        vec!["agy/gemini-3.8-flash", "agy/claude-sonnet-4-6"]
+    );
     Ok(())
 }

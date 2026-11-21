@@ -199,14 +199,34 @@ pub(crate) fn remember_identity(
     publish().is_ok()
 }
 
-pub fn cached_models(state: &std::path::Path, directory: &std::path::Path) -> Vec<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CachedModels {
+    /// Cached offer list bound to the current keychain stamp.
+    Valid(Vec<String>),
+    /// A previous probe existed, but its keychain stamp no longer matches.
+    Invalidated,
+    /// No identity probe record exists yet for this account directory.
+    Missing,
+}
+
+pub fn cached_models_status(state: &std::path::Path, directory: &std::path::Path) -> CachedModels {
     let Ok(root) = provenant_os::fs::Directory::open_anchor(state) else {
-        return Vec::new();
+        return CachedModels::Missing;
     };
-    read_identity_probe(&root, directory)
-        .filter(|probe| probe.stamp == keychain_stamp(directory))
-        .map(|probe| probe.models)
-        .unwrap_or_default()
+    match read_identity_probe(&root, directory) {
+        Some(probe) if probe.stamp == keychain_stamp(directory) => {
+            CachedModels::Valid(probe.models)
+        }
+        Some(_) => CachedModels::Invalidated,
+        None => CachedModels::Missing,
+    }
+}
+
+pub fn cached_models(state: &std::path::Path, directory: &std::path::Path) -> Vec<String> {
+    match cached_models_status(state, directory) {
+        CachedModels::Valid(models) => models,
+        CachedModels::Invalidated | CachedModels::Missing => Vec::new(),
+    }
 }
 
 pub fn remember_models(
@@ -225,6 +245,10 @@ pub fn remember_models(
             models: Vec::new(),
             extra: Default::default(),
         });
+        if probe.stamp != current_stamp {
+            probe.key.clear();
+            probe.observed = now;
+        }
         probe.stamp = current_stamp;
         probe.models = models.to_vec();
         let bytes = provenant_records::encode(&probe)?;
@@ -1050,10 +1074,14 @@ mod identity_tests {
             &["gemini-3.8-flash".into()],
         ));
         assert_eq!(
-            cached_models(temp.path(), &directory),
-            vec!["gemini-3.8-flash".to_owned()]
+            cached_models_status(temp.path(), &directory),
+            CachedModels::Valid(vec!["gemini-3.8-flash".to_owned()])
         );
         std::fs::write(&keychain, "synthetic-v2-changed").unwrap();
+        assert_eq!(
+            cached_models_status(temp.path(), &directory),
+            CachedModels::Invalidated
+        );
         assert!(cached_models(temp.path(), &directory).is_empty());
         assert!(remember_models(
             temp.path(),
@@ -1068,6 +1096,15 @@ mod identity_tests {
                 "claude-sonnet-5-5".to_owned()
             ]
         );
+        // Keychain changed, so remember_models must clear the pre-change identity key
+        // rather than making it valid under the new stamp for the remaining TTL.
+        assert!(cached_identity(temp.path(), &directory, 105).is_none());
+        assert!(!remember_models(
+            &temp.path().join("missing-state-dir"),
+            &directory,
+            106,
+            &["gemini-4-neon".into()],
+        ));
     }
 
     #[test]
@@ -1108,6 +1145,22 @@ mod identity_tests {
         assert_eq!(
             rewritten.get("models"),
             Some(&serde_json::json!(["fixture-model"]))
+        );
+        assert!(remember_models(
+            temp.path(),
+            &directory,
+            102,
+            &["gemini-4-neon".into()],
+        ));
+        let bytes = std::fs::read(temp.path().join(identity_file(&directory))).unwrap();
+        let rewritten_models: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            rewritten_models.get("future_identity_evidence"),
+            Some(&serde_json::json!({ "epoch": 2 }))
+        );
+        assert_eq!(
+            rewritten_models.get("models"),
+            Some(&serde_json::json!(["gemini-4-neon"]))
         );
         assert_eq!(
             read_identity_probe(

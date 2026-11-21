@@ -440,4 +440,25 @@ mod tests {
         assert_eq!(read(&roots, "codex").unwrap().observed_at, 3);
         Ok(())
     }
+
+    // Spec: docs/specs/routing.md#provider-model-discovery
+    #[test]
+    fn canonical_snapshot_models_deduplicate_effort_suffixed_variants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = provenant_routing::parse_text_models(
+            "agy",
+            "gemini-4-neon\ngemini-4-neon-low\ngemini-4-neon-medium\ngemini-4-neon-high\ngemini-4-neon-xhigh\nclaude-sonnet-5-5\nclaude-sonnet-5-5-low\nclaude-sonnet-5-5-medium\nclaude-sonnet-5-5-high\nclaude-opus-4-6-thinking\n",
+            10,
+        )?;
+        let canonical = canonical_snapshot_models(&snapshot);
+        assert_eq!(
+            canonical,
+            vec![
+                "claude-opus-4-6-thinking".to_owned(),
+                "claude-sonnet-5-5".to_owned(),
+                "gemini-4-neon".to_owned(),
+            ]
+        );
+        Ok(())
+    }
 }
