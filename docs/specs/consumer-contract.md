@@ -98,6 +98,7 @@ locations may also differ from `HOME`.
 | `PROVENANT_ADMISSION_EPOCH` | port_command | evolving | The worktree lease epoch the admission holds. | admission port commands |
 | `PROVENANT_PORT_OPERATION` | port_command | evolving | The typed forge operation requested from the repository adapter. | forge port commands |
 | `PROVENANT_PORT_SOURCE` | port_command | evolving | Source of the selected build admission wrapper. | build admission port commands |
+| `PROVENANT_SEED_ORIGIN` | port_command | evolving | The absolute path of the origin checkout a standalone seed clone was made from. | build.prepare children of a standalone seed clone |
 | `PROVENANT_PORT_REQUEST_PATH` | port_command | evolving | The forge request path, such as `repos/{owner}/{repo}`. | CI observation and repository discovery port commands |
 | `PROVENANT_PORT_IF_NONE_MATCH` | port_command | evolving | The cached validator to send, or empty when none is sent. | CI observation and repository discovery port commands |
 | `PROVENANT_VERIFY_SELECTION` | port_command | internal | The affected package selection for the verify engine. | verify port commands |

@@ -1720,6 +1720,42 @@ struct AttemptSeparation {
     prior_attempts: Vec<String>,
 }
 
+/// Settle a writer failure that happens before any attempt is recorded. A
+/// transient contention gets the same bounded retry as a launch; every other
+/// preparation failure fails the node now, so `wait` and `status` observe a
+/// terminal node instead of one that looks live until the wait budget expires.
+fn settle_writer_binding_failure<R: AttemptOwner, J: GraphJournal>(
+    checkpoint: &mut GraphCheckpoint,
+    journal: &mut J,
+    node_index: usize,
+    node_id: &str,
+    owner: &R,
+    error: &R::Error,
+) -> Result<LoopStep, GraphError<R::Error, J::Error>> {
+    if defer_launch_contention(
+        checkpoint,
+        node_index,
+        error,
+        owner.wall_now(),
+        owner.admission_timeout_seconds().unwrap_or(3600),
+        owner.launch_retry_policy(),
+    )
+    .map_err(GraphError::Refused)?
+    {
+        journal.save(&*checkpoint).map_err(GraphError::Journal)?;
+        return Ok(LoopStep::Break);
+    }
+    transitions::writer_binding_failed(
+        &mut checkpoint.nodes[node_index],
+        node_id,
+        &next_attempt::writer_binding_reason(node_id, error),
+    );
+    checkpoint.nodes[node_index].advance_owner_code =
+        Some(next_attempt::launch_diagnostic(error).code);
+    journal.save(&*checkpoint).map_err(GraphError::Journal)?;
+    Ok(LoopStep::Break)
+}
+
 /// Bind an expanded writer's worktree before its first attempt. Each phase of
 /// the attempt loop has its own frame so a debug build does not pool their
 /// temporaries into one large frame (#3542).
@@ -1871,16 +1907,36 @@ fn bind_expanded_writer<R: AttemptOwner, J: GraphJournal>(
             let base = match checkpoint.nodes[node_index].new_worktree_base.as_deref() {
                 Some(base) => base.to_owned(),
                 None => {
-                    let base = owner
-                        .resolve_creation_base(&spec.branch, &spec.base, spec.default_base)
-                        .map_err(GraphError::Run)?
-                        .filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
-                        .ok_or_else(|| {
-                            GraphError::Refused(format!(
-                                "node {}: writer base could not be resolved",
-                                node.id
-                            ))
-                        })?;
+                    // A failed base resolution used to `?` straight out of this
+                    // function. The node then stayed live with no attempt row,
+                    // so `wait` reported "still running at timeout" for a launch
+                    // that had already failed to prepare (#3748). Settle it here.
+                    let base = match owner.resolve_creation_base(
+                        &spec.branch,
+                        &spec.base,
+                        spec.default_base,
+                    ) {
+                        Ok(Some(base)) if base.parse::<provenant_core::GitOid>().is_ok() => base,
+                        Ok(_) => {
+                            transitions::fail_with(
+                                &mut checkpoint.nodes[node_index],
+                                "writer_base_unresolvable",
+                                format!("node {}: writer base could not be resolved", node.id),
+                            );
+                            journal.save(&*checkpoint).map_err(GraphError::Journal)?;
+                            return Ok(LoopStep::Break);
+                        }
+                        Err(error) => {
+                            return settle_writer_binding_failure(
+                                &mut *checkpoint,
+                                journal,
+                                node_index,
+                                &node.id,
+                                owner,
+                                &error,
+                            );
+                        }
+                    };
                     transitions::record_creation_base(&mut checkpoint.nodes[node_index], &base);
                     journal.save(&*checkpoint).map_err(GraphError::Journal)?;
                     base
@@ -1901,28 +1957,14 @@ fn bind_expanded_writer<R: AttemptOwner, J: GraphJournal>(
         let binding = match binding_result {
             Ok(binding) => binding,
             Err(error) => {
-                if defer_launch_contention(
+                return settle_writer_binding_failure(
                     &mut *checkpoint,
+                    journal,
                     node_index,
-                    &error,
-                    owner.wall_now(),
-                    owner.admission_timeout_seconds().unwrap_or(3600),
-                    owner.launch_retry_policy(),
-                )
-                .map_err(GraphError::Refused)?
-                {
-                    journal.save(&*checkpoint).map_err(GraphError::Journal)?;
-                    return Ok(LoopStep::Break);
-                }
-                transitions::writer_binding_failed(
-                    &mut checkpoint.nodes[node_index],
                     &node.id,
-                    &next_attempt::writer_binding_reason(&node.id, &error),
+                    owner,
+                    &error,
                 );
-                checkpoint.nodes[node_index].advance_owner_code =
-                    Some(next_attempt::launch_diagnostic(&error).code);
-                journal.save(&*checkpoint).map_err(GraphError::Journal)?;
-                return Ok(LoopStep::Break);
             }
         };
         transitions::apply_writer_binding(
