@@ -2004,6 +2004,16 @@ fn warn_branch_config(detail: impl std::fmt::Display) {
     let _ = writeln!(std::io::stderr().lock(), "warning: {detail}");
 }
 
+/// A named config read's `Display` names only its context. A warning that
+/// formats the error directly drops the underlying timeout, cancellation or
+/// truncation, so render the context and its single bounded leaf cause here as
+/// every other Display-only boundary does.
+fn config_read_failure<E: std::error::Error + 'static>(
+    error: &provenant_os::git_config::ConfigError<E>,
+) -> String {
+    provenant_os::git_config::failure_detail(error)
+}
+
 /// One branch remote or merge value from the verified repository config.
 /// Missing values are normal; other failures are reported before falling back.
 fn branch_config_value(
@@ -2035,7 +2045,7 @@ fn branch_config_value(
     ) {
         Ok(out) => out,
         Err(error) => {
-            warn_branch_config(format!("read branch Git configuration failed: {error}"));
+            warn_branch_config(config_read_failure(&error));
             return None;
         }
     };
@@ -2496,5 +2506,47 @@ mod alias_tests {
         assert_eq!(env[1].1, alias.join("zsh").as_os_str());
         assert_eq!(env[2].1, scratch.join("target").as_os_str());
         assert_eq!(env[3].1, scratch.as_os_str());
+    }
+}
+
+#[cfg(test)]
+mod config_read_failure_tests {
+    #[derive(Debug)]
+    struct RepeatingWrapper(std::io::Error);
+
+    impl std::fmt::Display for RepeatingWrapper {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "wrapper repeats its source: {}", self.0)
+        }
+    }
+
+    impl std::error::Error for RepeatingWrapper {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn config_warning_keeps_context_and_one_leaf_cause() {
+        let error = provenant_os::git_config::ConfigError {
+            context: provenant_os::git_config::ConfigContext::new(
+                "read branch Git configuration",
+                "/p/.git/config",
+                Some("branch tracking key"),
+            ),
+            source: RepeatingWrapper(std::io::Error::other("deadline marker")),
+        };
+        let rendered = super::config_read_failure(&error);
+        assert!(
+            rendered.contains(
+                "read branch Git configuration on /p/.git/config for key branch tracking key"
+            ),
+            "{rendered}"
+        );
+        assert_eq!(rendered.matches("deadline marker").count(), 1, "{rendered}");
+        assert!(
+            !rendered.contains("wrapper repeats its source"),
+            "{rendered}"
+        );
     }
 }
