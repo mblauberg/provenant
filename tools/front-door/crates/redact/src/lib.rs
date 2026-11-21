@@ -2009,7 +2009,10 @@ pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
     if !mode().masks_local() {
         return Ok(bytes.to_vec());
     }
-    filter_with(Redactor::for_local_disclosure().map_err(|_| FilterError)?, bytes)
+    filter_with(
+        Redactor::for_local_disclosure().map_err(|_| FilterError)?,
+        bytes,
+    )
 }
 /// Filter credential literals and token shapes at an egress boundary.
 pub fn egress_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
@@ -2551,7 +2554,10 @@ mod tests {
         let _scope = publication_scope([secret.to_vec()]).unwrap();
         let input = b"before split-secret-4472 after";
         let expected = b"before [REDACTED] after";
-        let start = input.windows(secret.len()).position(|window| window == secret).unwrap();
+        let start = input
+            .windows(secret.len())
+            .position(|window| window == secret)
+            .unwrap();
         for split in start..=start + secret.len() {
             let mut redactor = Redactor::for_local_disclosure().unwrap();
             assert_eq!(

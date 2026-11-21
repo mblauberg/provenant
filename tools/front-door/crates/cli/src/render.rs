@@ -638,7 +638,10 @@ mod tests {
         render(&result, human_mode(), &mut human)?;
         let text = String::from_utf8(human)?;
         assert!(text.starts_with("provenant: WORKTREE: target seed build:"));
-        assert!(text.contains("  npm ERR! Cannot find package 'zod'\n"), "{text}");
+        assert!(
+            text.contains("  npm ERR! Cannot find package 'zod'\n"),
+            "{text}"
+        );
         assert!(text.contains("  next line of output\n"), "{text}");
         // The cause sits between the message and the one typed next command.
         let message_at = text.find("target seed build:").ok_or("message")?;
@@ -653,7 +656,12 @@ mod tests {
 
         // Owners that set cause to the message must not show the same detail
         // twice in human output.
-        let message = result.error.as_ref().ok_or("missing error")?.message.clone();
+        let message = result
+            .error
+            .as_ref()
+            .ok_or("missing error")?
+            .message
+            .clone();
         result.error.as_mut().ok_or("missing error")?.cause = Some(message.clone());
         let mut human = Vec::new();
         render(&result, human_mode(), &mut human)?;
@@ -687,14 +695,22 @@ mod tests {
         )?;
         let compact = String::from_utf8(compact)?;
         assert_eq!(
-            compact.lines().filter(|line| line.starts_with("  ")).count(),
+            compact
+                .lines()
+                .filter(|line| line.starts_with("  "))
+                .count(),
             1,
             "{compact}"
         );
         assert!(compact.contains("--full"), "{compact}");
         assert!(!compact.contains("second line"), "{compact}");
         assert!(!compact.contains("third line"), "{compact}");
-        assert!(compact.lines().all(|line| line.len() <= limits::FALLBACK_ROW_BYTES + 24), "{compact}");
+        assert!(
+            compact
+                .lines()
+                .all(|line| line.len() <= limits::FALLBACK_ROW_BYTES + 24),
+            "{compact}"
+        );
 
         let mut human = Vec::new();
         render(
@@ -707,7 +723,10 @@ mod tests {
             &mut human,
         )?;
         let human = String::from_utf8(human)?;
-        assert!(human.contains("second line") && human.contains("third line"), "{human}");
+        assert!(
+            human.contains("second line") && human.contains("third line"),
+            "{human}"
+        );
         Ok(())
     }
     #[test]
@@ -742,13 +761,18 @@ mod tests {
             &mut human,
         )?;
         let human = String::from_utf8(human)?;
-        assert!(human.contains(end), "the failure at the end was clipped: {human}");
+        assert!(
+            human.contains(end),
+            "the failure at the end was clipped: {human}"
+        );
         assert!(
             human.contains("bytes omitted; use --full"),
             "no omission marker: {human}"
         );
         assert!(
-            human.lines().all(|line| line.len() <= ERROR_CAUSE_BYTES + 80),
+            human
+                .lines()
+                .all(|line| line.len() <= ERROR_CAUSE_BYTES + 80),
             "cause exceeded its bound: {human}"
         );
         Ok(())

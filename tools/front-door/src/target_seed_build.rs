@@ -385,10 +385,7 @@ fn run(cwd: &Path, argv: &[OsString], overrides: &[(OsString, OsString)]) -> Res
         } else {
             String::from_utf8_lossy(&result.stderr.bytes).into_owned()
         };
-        return Err(io::Error::other(format!(
-            "command failed: {argv:?}: {stderr}"
-        ))
-        .into());
+        return Err(io::Error::other(format!("command failed: {argv:?}: {stderr}")).into());
     }
     Ok(result.stdout.bytes)
 }
@@ -3025,13 +3022,20 @@ mod tests {
         // This is the field tick stores in seed-result.json: the capture-time
         // filter must leave only masked text in the persisted tail.
         let prepare = prepare_failed_of(error.as_ref()).expect("prepare failure");
-        assert!(prepare.tail.contains("install the missing dependency"), "{}", prepare.tail);
+        assert!(
+            prepare.tail.contains("install the missing dependency"),
+            "{}",
+            prepare.tail
+        );
         assert!(!prepare.tail.contains(secret), "{}", prepare.tail);
         assert!(prepare.tail.contains("[REDACTED]"), "{}", prepare.tail);
 
         // The recorded refresh reason carries that same masked tail.
         let reason = refresh_failure_reason(error.as_ref());
-        assert!(reason.contains("install the missing dependency"), "{reason}");
+        assert!(
+            reason.contains("install the missing dependency"),
+            "{reason}"
+        );
         assert!(!reason.contains(secret), "{reason}");
         assert!(reason.contains("[REDACTED]"), "{reason}");
 

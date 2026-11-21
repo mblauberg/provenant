@@ -189,13 +189,9 @@ pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
     } else {
         globals.render_mode(human, read_only, summary)
     };
-    let rendered = provenant_cli::render_or_publish(
-        result,
-        mode,
-        stdout,
-        stderr,
-        |value| overflow::publish(value, globals),
-    );
+    let rendered = provenant_cli::render_or_publish(result, mode, stdout, stderr, |value| {
+        overflow::publish(value, globals)
+    });
     match rendered {
         Ok(status) => provenant_cli::exit_status(&status),
         Err(RenderError::TooLarge) => fail(

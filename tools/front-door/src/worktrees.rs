@@ -186,7 +186,8 @@ impl Error {
 pub(crate) fn seed_build_failure(error: &(dyn std::error::Error + 'static)) -> Error {
     Error::SeedBuild {
         message: error.to_string(),
-        tail: crate::target_seed_build::prepare_failed_of(error).map(|prepare| prepare.tail.clone()),
+        tail: crate::target_seed_build::prepare_failed_of(error)
+            .map(|prepare| prepare.tail.clone()),
     }
 }
 
@@ -246,11 +247,13 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
         Err(error) => crate::fail_with_command_error(
             name,
             error.outcome(),
-            error.command_error(if matches!(error, Error::Worktree(WorktreeError::LockBusy)) {
-                "WORKTREE_LOCK_BUSY"
-            } else {
-                "WORKTREE"
-            }),
+            error.command_error(
+                if matches!(error, Error::Worktree(WorktreeError::LockBusy)) {
+                    "WORKTREE_LOCK_BUSY"
+                } else {
+                    "WORKTREE"
+                },
+            ),
             globals,
         ),
     }
