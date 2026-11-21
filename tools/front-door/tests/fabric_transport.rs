@@ -733,9 +733,11 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         // are isolated, sandboxed behaviour: host access uses native login and
         // proceeds with warnings, and the managed token refresh that inspects
         // the credential source only runs under a sandbox. The quota scenario
-        // now launches the exact pinned route to pin the advisory warning, so
-        // it must not demand a sandbox the platform cannot enforce: host access
-        // launches without one on every CI platform.
+        // prepares the exact pinned route to pin the advisory warning, so it
+        // must not demand a sandbox the platform cannot enforce: host access
+        // prepares without one on every CI platform. Provider custody itself
+        // is macOS-only, so on Linux the prepared launch is refused before
+        // spawn with the typed platform cause; the warning is still persisted.
         {
             let config = rig.state.join("config.toml");
             let mut settings: toml_edit::DocumentMut = std::fs::read_to_string(&config)?.parse()?;
@@ -799,8 +801,6 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
                 .as_str()
                 .ok_or("reference")?;
             let record = run_attempt_record(&rig, &identity, reference)?;
-            assert_eq!(record.preparation_failure, None, "{record:?}");
-            assert_eq!(record.provider_launched, Some(true), "{record:?}");
             let applied = record.applied_route.as_ref().ok_or("applied route")?;
             assert!(
                 applied.launch_warnings.iter().any(|warning| {
@@ -808,6 +808,26 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
                 }),
                 "the advisory warning must persist its source and expiry: {applied:?}"
             );
+            if cfg!(target_os = "macos") {
+                assert_eq!(record.preparation_failure, None, "{record:?}");
+                assert_eq!(record.provider_launched, Some(true), "{record:?}");
+            } else {
+                // A host that cannot hold provider custody refuses before the
+                // handoff, with the typed platform cause rather than a usage
+                // refusal (docs/specs/run-launch.md). The pinned route above
+                // still won preparation and carried the advisory warning.
+                assert_eq!(
+                    record.preparation_failure,
+                    Some(provenant_records::run::PreparationFailure::AdapterUnavailable),
+                    "{record:?}"
+                );
+                assert_eq!(record.provider_launched, Some(false), "{record:?}");
+                assert_eq!(
+                    record.state.terminal_cause(),
+                    Some(provenant_records::run::TerminalCause::UnsupportedPlatform),
+                    "{record:?}"
+                );
+            }
             cleanup.disarm();
             continue;
         }
