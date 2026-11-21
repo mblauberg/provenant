@@ -1287,16 +1287,23 @@ fn every_capture_uses_the_default_mask_unless_it_names_a_reason() -> Result<(), 
     );
 
     let mut violations = Vec::new();
+    let policy_source = root.join(file!());
     for source_root in source_roots() {
         let mut sources = Vec::new();
         rust_sources(&source_root, &mut sources)?;
         for path in sources {
+            // This policy test names the tokens it checks; it is not a capture
+            // site. Skip only its own source, not the other test fixtures.
+            if path == policy_source {
+                continue;
+            }
             let redaction_owner = path.starts_with(root.join("crates/redact"));
             let executor = path == root.join("crates/os/src/exec.rs")
                 || path == root.join("crates/os/src/capture.rs");
             let text = fs::read_to_string(&path)?;
             for (index, line) in text.lines().enumerate() {
-                if !redaction_owner && !executor && line.contains("for_local_disclosure") {
+                let code = line.split("//").next().unwrap_or(line);
+                if !redaction_owner && !executor && code.contains("for_local_disclosure") {
                     violations.push(format!(
                         "{}:{}: capture site builds its own for_local_disclosure filter \
                          instead of using the executor default",
@@ -1304,12 +1311,17 @@ fn every_capture_uses_the_default_mask_unless_it_names_a_reason() -> Result<(), 
                         index + 1
                     ));
                 }
-                if line.contains("CaptureMask::Raw") && !line.contains("RawCaptureReason::") {
-                    violations.push(format!(
-                        "{}:{}: CaptureMask::Raw must name a RawCaptureReason",
-                        path.display(),
-                        index + 1
-                    ));
+                // A named reason is required where the variant is built. The
+                // enum's wildcard match arm and prose are not opt-out sites.
+                if let Some(start) = code.find("CaptureMask::Raw(") {
+                    let argument = code[start + "CaptureMask::Raw(".len()..].trim_start();
+                    if !argument.starts_with('_') && !argument.contains("RawCaptureReason::") {
+                        violations.push(format!(
+                            "{}:{}: CaptureMask::Raw must name a RawCaptureReason",
+                            path.display(),
+                            index + 1
+                        ));
+                    }
                 }
             }
         }
