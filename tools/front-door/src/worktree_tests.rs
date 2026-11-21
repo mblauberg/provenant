@@ -677,7 +677,8 @@ fn lane_git(
     Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
 }
 
-/// Crash only this fixture guardian after durable exit, before Run publication.
+/// Crash only this fixture guardian after durable exit, before settlement
+/// publishes the terminal record and Git-import receipt.
 struct FixtureHolder<'a>(&'a dyn provenant_supervisor::Holder);
 impl provenant_supervisor::Holder for FixtureHolder<'_> {
     fn admit(
@@ -723,6 +724,21 @@ impl provenant_supervisor::Holder for FixtureHolder<'_> {
         exit: &provenant_supervisor::custody::ExitObservation,
         recovery: Option<&provenant_supervisor::custody::Recovery>,
     ) -> provenant_supervisor::custody::Result<()> {
+        let parsed: provenant_run::HolderContext = serde_json::from_slice(context)
+            .map_err(|_| provenant_supervisor::custody::CustodyError::InvalidRecord)?;
+        // Crash at the settlement handoff, not in `terminal`: `outcome` is where
+        // the terminal record and the `git_import=Done` receipt are published.
+        // Crashing there leaves the attempt non-terminal with an unstarted
+        // import, which is the state reconciliation must judge.
+        if recovery.is_some()
+            && parsed
+                .roots
+                .checkout
+                .join(".fixture-crash-before-settlement")
+                .exists()
+        {
+            std::process::exit(70);
+        }
         self.0.outcome(context, attempt, exit, recovery)
     }
     fn terminal(
@@ -732,16 +748,6 @@ impl provenant_supervisor::Holder for FixtureHolder<'_> {
         exit: &provenant_supervisor::custody::ExitObservation,
         recovery: &provenant_supervisor::custody::Recovery,
     ) -> provenant_supervisor::custody::Result<()> {
-        let parsed: provenant_run::HolderContext = serde_json::from_slice(context)
-            .map_err(|_| provenant_supervisor::custody::CustodyError::InvalidRecord)?;
-        if parsed
-            .roots
-            .checkout
-            .join(".fixture-crash-terminal")
-            .exists()
-        {
-            std::process::exit(70);
-        }
         self.0.terminal(context, attempt, exit, recovery)
     }
 }
