@@ -4628,8 +4628,30 @@ mod tests {
                     provenant_run::review_diff_context_at(&git_path, &rig.project, &base, &head)?;
                 assert_eq!(context.paths, ["feature.txt"]);
             }
+            // `--pr` against a template with no review range is advisory
+            // (issue #3551): it warns with its source and proceeds with the
+            // host's default review shape instead of refusing the submission.
+            {
+                let mut advisory = json!({"template":"task","pr":7});
+                advisory["op"] = json!("run");
+                advisory["explain"] = json!(true);
+                let response = factory.graph_document(advisory, budget, &cancel)?;
+                assert!(
+                    response["warnings"]
+                        .as_array()
+                        .ok_or("warnings")?
+                        .iter()
+                        .any(|warning| {
+                            warning.as_str().is_some_and(|warning| {
+                                warning.contains("--pr was ignored")
+                                    && warning.contains("source: template review range")
+                            })
+                        }),
+                    "warnings: {}",
+                    response["warnings"]
+                );
+            }
             for invalid in [
-                json!({"template":"task","pr":7}),
                 json!({"template":"review","pr":0}),
                 json!({"template":"review","pr":7,"set":{"subject":head,"review_base":base}}),
             ] {

@@ -6737,9 +6737,25 @@ mod candidate_walk_regressions {
                 warning: "allowance spent".into(),
                 source: "quota:fixture".into(),
             });
+        // The expiry is read from the matching availability record, so the
+        // fixture must supply one for the route's adapter and account key.
+        let availability = [provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "cursor".into(),
+            executable: "/fixture/cursor".into(),
+            version: "fixture".into(),
+            last_update: None,
+            fixture_ref: "fixture".into(),
+            catalogue_revision: "fixture".into(),
+            account_key: Some("spent".into()),
+            plan: None,
+            observed_models: vec![],
+            observed_unix_seconds: 0,
+            expires_unix_seconds: 3700,
+        }];
         let (warning, expiry) = pinned_refusal_warning(
             &pinned,
-            &[],
+            &availability,
             &provenant_records::RouteExclusionReason::Exhausted,
             1000,
         );
