@@ -177,7 +177,8 @@ warns with the full path of unknown keys and keeps them when publishing an edit
 atomically. `config set` accepts every documented editable domain setting
 through the same typed schema as `config apply`. `config show` reports
 `redaction` and its source on one line. In `off` mode configuration history
-is raw; `secrets` and `full` mask credential-shaped values in history.
+is raw; `secrets` masks credential-shaped values in history. A retired `full`
+value is accepted as `secrets` with a warning naming its source.
 Metadata and paths remain visible.
 Project binding directories must be directories owned by the current user and
 private from group and other users. Permission or ownership failures have a

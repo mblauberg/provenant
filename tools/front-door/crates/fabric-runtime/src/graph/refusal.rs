@@ -441,7 +441,7 @@ mod tests {
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     #[test]
     fn secret_shaped_identifiers_remain_visible_in_cycle_causes() {
-        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         let example = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
         let graph: super::super::GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":2,"graph_id":"shape-cycle","nodes":[

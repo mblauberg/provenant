@@ -111,7 +111,7 @@ fn masked_child_command(program: &OsStr, args: &[OsString]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ");
-    provenant_redact::bounded_line(&joined, MAX_CHILD_COMMAND_CHARS)
+    provenant_core::bounded_line(&joined, MAX_CHILD_COMMAND_CHARS)
 }
 
 #[derive(Debug, PartialEq, Eq)]

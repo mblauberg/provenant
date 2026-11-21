@@ -2233,7 +2233,7 @@ impl RunStore {
                         } else {
                             160
                         };
-                        let host_message = provenant_redact::bounded_line(host_message, limit);
+                        let host_message = provenant_core::bounded_line(host_message, limit);
                         Some(match terminal_note {
                             Some(note) => format!("{host_message}; {note}"),
                             None => host_message,
