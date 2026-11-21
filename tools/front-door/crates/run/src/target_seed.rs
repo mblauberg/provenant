@@ -615,6 +615,9 @@ pub fn rustc_metadata(worktree: &Path) -> io::Result<(String, String)> {
         .filter(|(key, _)| !cleared.iter().any(|name| OsStr::new(name) == key))
         .collect();
     env.retain(|(key, _)| key != "RUSTUP_AUTO_INSTALL");
+    // The seed-origin marker belongs only to seed-clone prepare children; an
+    // ambient value must never reach this verify-base compiler probe.
+    env.retain(|(key, _)| key != provenant_core::consumer_env::SEED_ORIGIN);
     env.push(("RUSTUP_AUTO_INSTALL".into(), "0".into()));
     let mut options = ExecOptions::new(&argv, worktree, std::time::Duration::from_secs(30));
     options.env = Some(&env);

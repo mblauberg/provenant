@@ -104,7 +104,8 @@ eligibility check warns and leaves that lane cold.
 checked out and before the first Cargo command, every command runs in order with
 the checkout root as its working directory (not the selected workspace
 subdirectory), in the same sanitised child environment as the seed build's
-Cargo commands. The runner reads the live project and host port tables; the
+Cargo commands plus `PROVENANT_SEED_ORIGIN` for seed-generation prepares.
+The runner reads the live project and host port tables; the
 repository only declares the command, nothing is added to it, and an unreadable
 or invalid table warns and runs no prepare command. A failing command fails that
 build: the project's outcome is `prepare_failed` with the command and the last
@@ -118,6 +119,8 @@ indented cause in human output and in `error.cause` under `--json`, so the
 operator need not reproduce the failed command to see why it failed. The same prepare
 list runs before every seed generation build; the slot path runs it after
 snapshot sync, as specified in [Build strategy](#build-strategy). Writer selection uses matching generations and Cargo's normal per-unit freshness checks before reusing artifacts.
+
+Each prepare child also receives `PROVENANT_SEED_ORIGIN`, the absolute path of the origin checkout the standalone seed clone was made from. Provenant sets this marker only for seed-clone preparation; the verify-base Cargo path that sets `CARGO_TARGET_DIR`, and a caller's shell, never carry it. A consumer can therefore tell a seed clone from an ambient target directory and share tool caches with the origin checkout.
 
 A generation holds dependency units only. After `cargo build`, `cargo test --no-run` and `cargo check --workspace --all-targets --locked`, the seed build enumerates the checkout with `cargo metadata --format-version 1 --locked` using the same child environment and target overrides, and runs `cargo clean -p` for every path package it finds (packages with no `source`): workspace members and non-member path packages alike. Registry and other non-path dependencies stay in the seed, including build and check-mode units that clippy can reuse. The manifest records this as `contents: "deps"`; older generations without the marker (or with another value) hold a full build. Those older full generations are not current: refresh builds a deps-only replacement for the same identity, and lane selection skips them with the stable `full_generation` fallback instead of reusing member units whose sources can move with a lane. Collection removes full generations as obsolete outside the keep-count and whatever the keep-count is; they never displace a deps generation from a retained slot, and the removal is reported with a distinguishing `obsolete_full_generation` reason.
 

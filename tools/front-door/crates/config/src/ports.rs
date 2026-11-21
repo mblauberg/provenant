@@ -1389,6 +1389,134 @@ pub fn port_source_layer(source: PortSource) -> &'static str {
     }
 }
 
+/// Every dotted leaf of a port table, derived from the compiled declaration so
+/// a new port key is covered without editing this list. Synthetic `source`
+/// labels and `schema_version` are not configuration leaves.
+fn port_leaf_paths(value: &serde_json::Value, prefix: &str, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                if key == "schema_version" || (key == "source" && !prefix.contains('.')) {
+                    continue;
+                }
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                port_leaf_paths(child, &path, out);
+            }
+        }
+        _ => {
+            if !prefix.is_empty() {
+                out.push(prefix.to_owned());
+            }
+        }
+    }
+}
+
+/// Read at most `MAX_PORTS_BYTES` from a path, mirroring the port layer
+/// reader's bound. Missing, unreadable and oversized files are treated as
+/// absent so an advisory warning never has to read an unbounded file.
+fn read_bounded(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let file = fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_PORTS_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= MAX_PORTS_BYTES).then_some(bytes)
+}
+
+/// Whether a dotted port-leaf path is present in a parsed TOML document. Both
+/// implicit tables and inline tables are followed, and numeric segments are
+/// valid keys: `verify.tiers` is keyed `"0".."3"`.
+fn toml_has_path(table: &toml_edit::Table, dotted: &str) -> bool {
+    let parts: Vec<&str> = dotted.split('.').collect();
+    let Some((first, rest)) = parts.split_first() else {
+        return false;
+    };
+    table
+        .get(first)
+        .is_some_and(|item| toml_item_has_path(item, rest))
+}
+
+/// Continue a `toml_has_path` walk from a `toml_edit::Item`. `as_table_like`
+/// covers ordinary tables, implicit dotted-key tables and inline tables; a
+/// value at the final segment is itself a present leaf.
+fn toml_item_has_path(item: &toml_edit::Item, rest: &[&str]) -> bool {
+    let Some((part, tail)) = rest.split_first() else {
+        return item.is_value() || item.as_table_like().is_some();
+    };
+    item.as_table_like()
+        .and_then(|table| table.get(part))
+        .is_some_and(|child| toml_item_has_path(child, tail))
+}
+
+/// Advisory warnings for port declarations an operator placed where no port
+/// reader will ever see them. A port table in `config.toml`, or a host-project
+/// layer filed under the obsolete 64-digit target-seed key rather than the
+/// ProjectId binding directory, is silently ignored today. Both cases warn and
+/// name the file and the key; neither refuses the command that asked for the check.
+pub fn port_declaration_warnings(project: Option<&Path>, host_state: &Path) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let Some(project) = project else {
+        return warnings;
+    };
+
+    let config_path = project.join(".provenant").join("config.toml");
+    if let Some(bytes) = read_bounded(&config_path)
+        && let Ok(text) = std::str::from_utf8(&bytes)
+        && let Ok(document) = toml_edit::Document::parse(text)
+    {
+        let table = serde_json::to_value(PortTable::builtin()).unwrap_or_default();
+        let mut leaves = Vec::new();
+        port_leaf_paths(&table, "", &mut leaves);
+        for leaf in leaves {
+            if toml_has_path(document.as_table(), &leaf) {
+                warnings.push(format!(
+                    "{}: {leaf}: port declarations are read from {PORTS_CONFIG} (or a host ports layer), not from .provenant/config.toml; the key is ignored",
+                    config_path.display(),
+                ));
+            }
+        }
+    }
+
+    // The host-project ports layer is read from the ProjectId binding
+    // directory reported by `config path` (host_project_dir), not from the
+    // obsolete 64-digit target-seed key used by older releases. A ports.json
+    // filed under that key is never read. Resolve the correct directory through
+    // the single binding helper rather than recomputing the layout here, and
+    // name it in the warning so an operator can move the file.
+    if let Some(dir) = crate::host_project_dir(host_state, project)
+        && let Some(key) = project_key_for(project)
+    {
+        let misplaced = host_state.join("projects").join(&key).join("ports.json");
+        if misplaced.is_file() {
+            let keys = read_bounded(&misplaced)
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .map(|value| {
+                    let mut leaves = Vec::new();
+                    port_leaf_paths(&value, "", &mut leaves);
+                    leaves
+                })
+                .unwrap_or_default();
+            let declared = if keys.is_empty() {
+                "port declarations".to_owned()
+            } else {
+                keys.join(", ")
+            };
+            warnings.push(format!(
+                "{}: {declared} (target-seed key {key}): host-project ports layers use the binding directory {}; move this file to {} (config path --project prints it)",
+                misplaced.display(),
+                dir.display(),
+                dir.join("ports.json").display(),
+            ));
+        }
+    }
+    warnings
+}
+
 /// Infer an unset `verify.base` from the symbolic target of
 /// `refs/remotes/<remote>/HEAD`. Returns the `<remote>/<branch>` base and a
 /// source string naming the ref it came from.
@@ -2721,5 +2849,113 @@ mod tests {
             "e76e734a733dbce36a72e56fc8d5cff62d989351bb7e0aa357eb627686706354"
         );
         assert_eq!(project_key(fixed), project_key(fixed));
+    }
+
+    #[test]
+    fn port_declaration_warnings_rule_over_every_port_leaf() {
+        let temp = tempfile::tempdir().unwrap();
+        let (host, project, binding) = checkout_with_key(temp.path());
+        let config = project.join(".provenant/config.toml");
+        let config_text = config.display().to_string();
+
+        // A clean config.toml declares no port leaves, so nothing is warned.
+        std::fs::write(&config, "# no port declarations here\n").unwrap();
+        assert!(
+            port_declaration_warnings(Some(&project), &host).is_empty(),
+            "a config with no port declarations must not warn"
+        );
+
+        // Rule: every compiled PortTable leaf, placed in config.toml, warns
+        // naming its own dotted key and no other. The leaves come from the
+        // declaration, so a new port key is covered without editing this test.
+        let table = serde_json::to_value(PortTable::builtin()).unwrap_or_default();
+        let mut leaves = Vec::new();
+        port_leaf_paths(&table, "", &mut leaves);
+        assert!(!leaves.is_empty(), "the compiled port table has leaves");
+        for leaf in &leaves {
+            std::fs::write(&config, format!("{leaf} = true\n")).unwrap();
+            let warnings = port_declaration_warnings(Some(&project), &host);
+            let config_warnings: Vec<_> = warnings
+                .iter()
+                .filter(|warning| warning.contains(&config_text))
+                .collect();
+            assert!(
+                config_warnings
+                    .iter()
+                    .any(|warning| warning.contains(leaf.as_str())),
+                "leaf {leaf} did not warn: {warnings:?}"
+            );
+            assert_eq!(
+                config_warnings.len(),
+                1,
+                "leaf {leaf} should warn exactly once: {config_warnings:?}"
+            );
+        }
+
+        // An inline table is a declaration too, and must warn on its leaf.
+        std::fs::write(&config, "build = { prepare = [[\"node\", \"gen.mjs\"]] }\n").unwrap();
+        let warnings = port_declaration_warnings(Some(&project), &host);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains(&config_text) && warning.contains("build.prepare")),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            PortTable::read_for(Some(&project), &host)
+                .unwrap()
+                .build
+                .prepare,
+            Vec::<Vec<String>>::new(),
+            "a misplaced declaration is advisory and leaves the table untouched"
+        );
+
+        // A host-project layer under the obsolete 64-digit target-seed key
+        // names the file and the keys it actually holds, not a hard-coded leaf,
+        // and points at the binding directory as the correct path.
+        std::fs::write(&config, "# no port declarations here\n").unwrap();
+        let key = project_key_for(&project).unwrap();
+        let obsolete = host.join("projects").join(&key);
+        std::fs::create_dir_all(&obsolete).unwrap();
+        std::fs::write(
+            obsolete.join("ports.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "build": {"prepare": [["node", "tools/ensure-generated.mjs"]]},
+                "verify": {"base": "origin/main"},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let warnings = port_declaration_warnings(Some(&project), &host);
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.contains("ports.json")
+                    && warning.contains(&key)
+                    && warning.contains(&binding.display().to_string())
+                    && warning.contains("build.prepare")
+                    && warning.contains("verify.base")
+            }),
+            "{warnings:?}"
+        );
+
+        // The binding directory is the correct path: a layer there has no
+        // misplacement warning and is read.
+        std::fs::create_dir_all(&binding).unwrap();
+        std::fs::rename(obsolete.join("ports.json"), binding.join("ports.json")).unwrap();
+        let warnings = port_declaration_warnings(Some(&project), &host);
+        let misplaced_path = obsolete.join("ports.json").display().to_string();
+        assert!(
+            !warnings
+                .iter()
+                .any(|warning| warning.contains(&misplaced_path)),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            PortTable::read_for(Some(&project), &host)
+                .unwrap()
+                .build
+                .source,
+            PortSource::HostProject
+        );
     }
 }

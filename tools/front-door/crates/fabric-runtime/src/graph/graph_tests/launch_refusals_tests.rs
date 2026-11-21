@@ -691,3 +691,51 @@ fn order_only_edge_waits_for_failure_without_hiding_it() {
     );
     assert_eq!(run.checkpoint.outcome(), GraphOutcome::Failed);
 }
+
+/// A launch that fails while resolving its writer base must settle the node as
+/// failed in the persisted checkpoint. Before this, the `?` returned from
+/// `bind_expanded_writer` with no attempt row and no terminal node, so `wait`
+/// kept reporting the launch as still running until its budget expired (#3748).
+#[test]
+fn failed_creation_base_settles_the_node_as_failed_for_wait() {
+    use crate::coordination::facade::{FacadeError, InvalidInputDetail};
+    for error in [
+        FacadeError::invalid(InvalidInputDetail::UnresolvableBase("origin/main".into())),
+        FacadeError::invalid(InvalidInputDetail::Field("base".into())),
+    ] {
+        let mut writer = node("writer", route("first"));
+        writer.access = AccessMode::WorktreeWrite;
+        writer.worktree = Some(".worktrees/topic-fix".into());
+        writer.attempt = Some(
+            serde_json::from_value(serde_json::json!({
+                "new_worktree":{"branch":"topic/fix","base":"origin/main"}
+            }))
+            .unwrap(),
+        );
+        let mut document = graph(vec![writer]);
+        document.schema_version = 2;
+        let mut owner = ErrorLauncher {
+            now: Some(at(0)),
+            creation_base_error: Some(error),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let progress = &run.checkpoint.nodes[0];
+        assert_eq!(progress.state, NodeState::Failed, "a failed preparation must settle failed: {progress:?}");
+        assert!(progress.attempts.is_empty(), "no attempt was ever launched");
+        assert!(
+            progress
+                .advance_error
+                .as_deref()
+                .is_some_and(|reason| reason.contains("invalid_input")
+                    || reason.contains("unresolvable base")),
+            "the reason must be visible in status: {progress:?}"
+        );
+        // The saved checkpoint is what `wait` and `status` actually read.
+        assert_eq!(
+            journal.0.as_ref().map(|saved| saved.nodes[0].state),
+            Some(NodeState::Failed)
+        );
+    }
+}

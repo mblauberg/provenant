@@ -36,7 +36,16 @@ Provenance is tracked per dotted leaf (for example `build.prepare`,
 `verify.base`, `verify.tiers.0.commands`): each leaf reports the highest layer
 that set it, and a port's label is derived from those leaves. `provenant config
 show --full` lists every effective leaf, including build and tier values, with
-the layer or inferred ref that supplied it.
+the layer or inferred ref that supplied it, and `config ports --json` reports
+the effective `build.prepare` with its own leaf source.
+
+A port declaration in the wrong place is easy to miss because an absent layer
+is skipped silently. `provenant config check` warns, naming the file and dotted
+key, when a port leaf such as `build.prepare` sits in `.provenant/config.toml`
+instead of a ports layer, or when a host-project `ports.json` sits under the
+obsolete 64-digit target-seed key instead of the ProjectId binding directory.
+`provenant config path --project` prints the exact binding path; the warnings
+are advisory and never refuse a command.
 
 When no layer sets `verify.base`, Provenant infers it from
 `refs/remotes/<remote>/HEAD` for the effective `verify.remote` and marks the
@@ -101,8 +110,10 @@ The `verify.affected` port controls affected-package selection for verify tiers:
 `build.prepare` is
 an ordered list of argv arrays: each command runs in order with the checkout
 root as its working directory before every seed generation build and after a
-slot's snapshot is checked out, before its first step, in the same sanitised
-child environment as the Cargo steps. A failing command fails that build with
+slot's snapshot is checked out, before its first step. Seed-generation prepares
+run in the same sanitised child environment as the Cargo steps plus
+`PROVENANT_SEED_ORIGIN`, the absolute path of the origin checkout; other
+prepares use the Cargo environment alone. A failing command fails that build with
 a `prepare_failed` outcome that records the
 command and the last 2 KiB of the combined output; an unreadable or invalid
 table warns and runs no prepare command. Arrays replace rather than concatenate

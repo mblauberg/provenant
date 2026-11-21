@@ -1812,6 +1812,14 @@ pub(crate) fn peer_submit_graph(
         provenant_cli::Switch::On => provenant_fabric_runtime::graph::GraphNetwork::On,
         provenant_cli::Switch::Off => provenant_fabric_runtime::graph::GraphNetwork::Off,
     });
+    // The sender stamps this document's schema from its fields before it
+    // crosses. The peer rebuilds the document from the submitted task and sets
+    // a review base (a schema-2 field) on it, so it must derive the same schema
+    // or its own dispatch admits a version-1 document carrying version-2
+    // fields and refuses with GraphSchema (#3752).
+    document.schema_version = document.schema_version.max(u64::from(
+        provenant_fabric_runtime::graph::minimum_schema_version(&document),
+    ));
     provenant_fabric_runtime::graph::patch::submission(
         &mut document,
         &operation_id.to_string(),
