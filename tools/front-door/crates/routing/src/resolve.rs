@@ -471,7 +471,10 @@ fn in_model_scope(model: &ModelId, context: &RoutingContext<'_>) -> bool {
     context.config.model_in_provider_scope(model)
 }
 
-fn check_pin_scope(model: &ModelId, context: &RoutingContext<'_>) -> Result<(), RoutingError> {
+/// An out-of-scope explicit pin is advisory (issue #3551). A configured
+/// `refuse` still names its source, but the model is attempted and the warning
+/// rides on the route's launch diagnostics instead of stopping the launch.
+fn check_pin_scope(model: &ModelId, context: &RoutingContext<'_>) -> Option<String> {
     if !in_model_scope(model, context)
         && context
             .config
@@ -481,14 +484,14 @@ fn check_pin_scope(model: &ModelId, context: &RoutingContext<'_>) -> Result<(), 
                 settings.out_of_scope_pin == provenant_config::OutOfScopePin::Refuse
             })
     {
-        return Err(RoutingError::UnsupportedLaunch(format!(
-            "{} is outside providers.{}.models (providers.{}.out_of_scope_pin = refuse)",
+        return Some(format!(
+            "warning: {} is outside providers.{}.models (providers.{}.out_of_scope_pin = refuse); the pin is advisory and will be attempted",
             model.as_str(),
             model.adapter(),
             model.adapter()
-        )));
+        ));
     }
-    Ok(())
+    None
 }
 
 fn effective_pool_names(context: &RoutingContext<'_>) -> BTreeSet<String> {
@@ -2849,7 +2852,7 @@ fn resolve_inner(
 ) -> Result<ResolvedRoute, RoutingError> {
     let (primary, pool_selection) = match &request.choice {
         RouteChoice::Model(model) => {
-            check_pin_scope(model, context)?;
+            let scope_warning = check_pin_scope(model, context);
             if let Some(detail) = excluded_members.family_reason(model) {
                 return Err(RoutingError::NoEligiblePoolMember {
                     cause: None,
@@ -2861,17 +2864,18 @@ fn resolve_inner(
             if !privacy_allowed(model, request.confidential, context.catalogue) {
                 return Err(RoutingError::ConfidentialModel);
             }
-            (
-                candidate(
-                    model,
-                    request.effort.as_deref(),
-                    context,
-                    false,
-                    request.intent,
-                    false,
-                )?,
-                None,
-            )
+            let mut route = candidate(
+                model,
+                request.effort.as_deref(),
+                context,
+                false,
+                request.intent,
+                false,
+            )?;
+            if let Some(warning) = scope_warning {
+                route.diagnostics.launch_warnings.push(warning);
+            }
+            (route, None)
         }
         RouteChoice::NamedRoute(name) => {
             let name = name.as_str();

@@ -617,11 +617,53 @@ fn peer_frames_a_local_run_event_failure() -> Result {
     rig.assert_v1_root_untouched()
 }
 
+fn run_attempt_record(
+    rig: &TestRig,
+    identity: &Value,
+    reference: &str,
+) -> Result<provenant_run::AttemptRecord> {
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let context = provenant_run::ExecutionContext {
+        state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
+        project_id: identity["data"]["project"]
+            .as_str()
+            .ok_or("project")?
+            .parse()?,
+        actor_id: identity["data"]["inbox"]["actor"]
+            .as_str()
+            .ok_or("actor")?
+            .parse()?,
+        read_prompts: false,
+    };
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = provenant_run::RunStore::open(&context, &call)?;
+    let (_, id) = reference.split_once('/').ok_or("reference")?;
+    Ok(store.record(id.parse()?, &call)?)
+}
+
 #[test]
 fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
-    for scenario in ["authority", "refresh", "quota"] {
+    for scenario in [
+        "authority",
+        "refresh",
+        "quota",
+        "refusal",
+        "quota-model-only",
+    ] {
         let mut rig = TestRig::new()?;
         let cleanup = rig.process_cleanup();
+        // Quota exhaustion and a persisted provider refusal are both advisory
+        // for the exact pin; the other scenarios pin credential refusals.
+        let advisory = matches!(scenario, "quota" | "refusal" | "quota-model-only");
+        // A model-only pin has one account here, so it cannot redraw and must
+        // still be attempted (issue #3551).
+        let model_only = scenario == "quota-model-only";
         let bin = rig.root.join("bin");
         std::fs::create_dir(&bin)?;
         let executable = bin.join("claude");
@@ -640,13 +682,20 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         let credential = directory.join(".credentials.json");
         if scenario == "authority" {
             std::fs::create_dir(&credential)?;
-        } else if scenario != "refresh" {
-            std::fs::write(&credential, b"{}")?;
+        } else if advisory {
+            // Issue #3551: the pinned Claude route is now attempted despite a
+            // recorded exhaustion, so it needs a valid host-read token. An
+            // invalid credential would be refused during token refresh and
+            // mask the advisory warning this scenario pins.
+            std::fs::write(
+                &credential,
+                br#"{"claudeAiOauth":{"accessToken":"fixture-token","expiresAt":4102444800000}}"#,
+            )?;
         }
         let key = provenant_providers::identity::fingerprint("fixture@example.test")
             .ok_or("account key")?;
         support::register_account(&rig, "claude", "pro", &key, &directory)?;
-        if scenario == "quota" {
+        if advisory {
             #[allow(
                 clippy::disallowed_methods,
                 reason = "the quota record must be fresh against the CLI's live clock"
@@ -663,24 +712,38 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
                 label: "pro".into(),
             };
             let mut record = provenant_quota::AccountRecord::empty(scope.clone());
-            record.snapshot = Some(provenant_quota::QuotaSnapshot {
-                extra: Default::default(),
-                schema_version: 1,
-                account: scope,
-                revision: 0,
-                status: provenant_quota::QuotaStatus::Exhausted,
-                observed_unix_seconds: now,
-                source_ref: "fixture".into(),
-                authority_ref: None,
-                windows: vec![provenant_quota::QuotaWindow {
+            if scenario == "refusal" {
+                // Persist the same record shape the refusal writer publishes.
+                record = provenant_quota::record_refusal(
+                    None,
+                    &scope,
+                    "claude/claude-sonnet-5-5",
+                    None,
+                    now,
+                    Some(now + 9000),
+                )?
+                .replacement
+                .ok_or("provider refusal record")?;
+            } else {
+                record.snapshot = Some(provenant_quota::QuotaSnapshot {
                     extra: Default::default(),
-                    pool: "five_hour".into(),
-                    window_seconds: Some(18_000),
-                    used_basis_points: 10_000,
-                    resets_unix_seconds: Some(now + 9000),
-                }],
-                details: None,
-            });
+                    schema_version: 1,
+                    account: scope,
+                    revision: 0,
+                    status: provenant_quota::QuotaStatus::Exhausted,
+                    observed_unix_seconds: now,
+                    source_ref: "fixture".into(),
+                    authority_ref: None,
+                    windows: vec![provenant_quota::QuotaWindow {
+                        extra: Default::default(),
+                        pool: "five_hour".into(),
+                        window_seconds: Some(18_000),
+                        used_basis_points: 10_000,
+                        resets_unix_seconds: Some(now + 9000),
+                    }],
+                    details: None,
+                });
+            }
             let quota = rig.state.join("quota").join(&key);
             std::fs::create_dir_all(&quota)?;
             std::fs::set_permissions(
@@ -692,35 +755,123 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
             std::fs::write(&path, serde_json::to_vec(&record)?)?;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         }
-        // These credential and usage refusals are isolated, sandboxed
-        // behaviour: host access uses native login and proceeds with warnings,
-        // and the managed token refresh that inspects the credential source
-        // only runs under a sandbox.
+        // The authority and refresh scenarios pin credential refusals, which
+        // are isolated, sandboxed behaviour: host access uses native login and
+        // proceeds with warnings, and the managed token refresh that inspects
+        // the credential source only runs under a sandbox. The advisory
+        // scenarios prepare the exact pinned route to pin the warning, so they
+        // must not demand a sandbox the platform cannot enforce: host access
+        // prepares without one on every CI platform. Provider custody itself
+        // is macOS-only, so on Linux the prepared launch is refused before
+        // spawn with the typed platform cause; the warning is still persisted.
         {
             let config = rig.state.join("config.toml");
             let mut settings: toml_edit::DocumentMut = std::fs::read_to_string(&config)?.parse()?;
-            settings["knobs"]["lanes.access"] = toml_edit::value("isolated");
-            settings["knobs"]["lanes.sandbox"] = toml_edit::value("on");
+            settings["knobs"]["lanes.access"] =
+                toml_edit::value(if advisory { "host" } else { "isolated" });
+            if !advisory {
+                settings["knobs"]["lanes.sandbox"] = toml_edit::value("on");
+            }
             std::fs::write(config, settings.to_string())?;
         }
+        let pinned_route = if model_only {
+            json!({"adapter":"claude","model":"claude/claude-sonnet-5-5"})
+        } else {
+            json!({"adapter":"claude","model":"claude/claude-sonnet-5-5","account":"pro"})
+        };
         std::fs::write(
             rig.project.join("graph.json"),
             serde_json::to_vec(&json!({
                 "schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"typed-refusal","nodes":[{"id":"one","prompt":"work","access":"read_only","routes":[
-                    {"adapter":"claude","model":"claude/claude-sonnet-5-5","account":"pro"},
+                    pinned_route,
                     {"adapter":"fixture","model":"two","account":"pro"}
                 ]}]
             }))?,
         )?;
-        let run = rig.command(&["run", "--file", "graph.json", "--json"])?;
+        let run_output = rig.command(&["run", "--file", "graph.json", "--json"])?;
+        let run: Value = serde_json::from_slice(&run_output.stdout.bytes)?;
+        let identity = rig.command(&["fabric", "identity", "--json"])?;
+        let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+        if advisory {
+            // Issue #3551: a recorded exhaustion or provider refusal on an
+            // exact model pin is advisory. The pinned Claude route is attempted
+            // first with a warning naming the record's source and expiry,
+            // rather than refused before launch, so no typed usage_limited
+            // refusal is recorded and no fallback is promoted ahead of the pin.
+            // Unlike a pre-launch refusal, a launch is asynchronous: wait for
+            // the node to settle before reading its checkpoint and attempt
+            // record.
+            let checkpoint = provenant_test_support::wait_for(
+                "quota pin settlement",
+                std::time::Duration::from_secs(30),
+                || rig.checkpoint("typed-refusal"),
+                |c| {
+                    c.as_ref()
+                        .is_ok_and(|c| c["nodes"][0]["state"] != "running")
+                },
+            )??;
+            let node = &checkpoint["nodes"][0];
+            let attempts = node["attempts"].as_array().ok_or("attempts")?;
+            let pinned = attempts
+                .iter()
+                .position(|attempt| attempt["route"]["adapter"] == "claude")
+                .ok_or("the pinned Claude route must still be selected")?;
+            assert_eq!(
+                attempts[pinned]["key"]["route_index"], 0,
+                "the pinned route must be attempted before any fallback: {checkpoint}"
+            );
+            assert!(
+                attempts
+                    .iter()
+                    .all(|attempt| attempt["outcome"] != "usage_limited"),
+                "pinned exhaustion must not be a pre-launch refusal: {checkpoint}"
+            );
+            let reference = attempts[pinned]["attempt_ref"]
+                .as_str()
+                .ok_or("reference")?;
+            let record = run_attempt_record(&rig, &identity, reference)?;
+            let applied = record.applied_route.as_ref().ok_or("applied route")?;
+            let source = if scenario == "refusal" {
+                "source: provider refusal observed unix seconds"
+            } else {
+                "source: fixture"
+            };
+            assert!(
+                applied.launch_warnings.iter().any(|warning| {
+                    warning.contains(source) && warning.contains("expiry unix seconds:")
+                }),
+                "the advisory warning must persist its source and expiry: {applied:?}"
+            );
+            if cfg!(target_os = "macos") {
+                assert_eq!(record.preparation_failure, None, "{record:?}");
+                assert_eq!(record.provider_launched, Some(true), "{record:?}");
+            } else {
+                // A host that cannot hold provider custody refuses before the
+                // handoff, with the typed platform cause rather than a usage
+                // refusal (docs/specs/run-launch.md). The pinned route above
+                // still won preparation and carried the advisory warning.
+                assert_eq!(
+                    record.preparation_failure,
+                    Some(provenant_records::run::PreparationFailure::AdapterUnavailable),
+                    "{record:?}"
+                );
+                assert_eq!(record.provider_launched, Some(false), "{record:?}");
+                assert_eq!(
+                    record.state.terminal_cause(),
+                    Some(provenant_records::run::TerminalCause::UnsupportedPlatform),
+                    "{record:?}"
+                );
+            }
+            cleanup.disarm();
+            continue;
+        }
         assert_eq!(
-            code(&run),
+            code(&run_output),
             1,
             "{scenario}: stdout={} stderr={}",
-            String::from_utf8_lossy(&run.stdout.bytes),
-            String::from_utf8_lossy(&run.stderr.bytes)
+            String::from_utf8_lossy(&run_output.stdout.bytes),
+            String::from_utf8_lossy(&run_output.stderr.bytes)
         );
-        let run: Value = serde_json::from_slice(&run.stdout.bytes)?;
         assert_eq!(run["status"], "failed", "{run}");
         assert_eq!(run["data"]["outcome"], "failed", "{run}");
         let node = &run["data"]["checkpoint"]["nodes"][0];
@@ -739,16 +890,12 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
                 .find(|attempt| attempt["route"]["adapter"] == "claude")
                 .ok_or("missing Claude credential refusal")?
         } else {
-            let expected = if scenario == "quota" {
-                "usage_limited"
-            } else {
-                "auth_required"
-            };
+            let expected = "auth_required";
             assert!(
                 attempts
                     .iter()
                     .any(|attempt| attempt["route"]["adapter"] == "fixture"),
-                "typed auth/quota refusal must permit the configured fallback: {run}"
+                "typed auth refusal must permit the configured fallback: {run}"
             );
             attempts
                 .iter()
@@ -756,35 +903,8 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
                 .ok_or("missing typed auth/quota refusal")?
         };
         assert_eq!(refusal_attempt["launched"], false);
-        let identity = rig.command(&["fabric", "identity", "--json"])?;
-        let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
-        let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
-        inputs.state_dir = Some(rig.state.clone());
-        let context = provenant_run::ExecutionContext {
-            state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
-            project_id: identity["data"]["project"]
-                .as_str()
-                .ok_or("project")?
-                .parse()?,
-            actor_id: identity["data"]["inbox"]["actor"]
-                .as_str()
-                .ok_or("actor")?
-                .parse()?,
-            read_prompts: false,
-        };
-        let clock = provenant_os::clock::SystemClock::new();
-        let cancel = provenant_core::CancelToken::new();
-        let call = provenant_run::Request {
-            clock: &clock,
-            cancel: &cancel,
-        };
-        let store = provenant_run::RunStore::open(&context, &call)?;
-        let (_, id) = refusal_attempt["attempt_ref"]
-            .as_str()
-            .ok_or("reference")?
-            .split_once('/')
-            .ok_or("reference")?;
-        let record = store.record(id.parse()?, &call)?;
+        let reference = refusal_attempt["attempt_ref"].as_str().ok_or("reference")?;
+        let record = run_attempt_record(&rig, &identity, reference)?;
         if scenario == "authority" {
             assert_eq!(record.preparation_failure, None, "{record:?}");
             assert!(record.skipped_routes.iter().any(|route| {
@@ -800,11 +920,7 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
             cleanup.disarm();
             continue;
         }
-        let failure = if scenario == "quota" {
-            provenant_records::run::PreparationFailure::UsageLimited
-        } else {
-            provenant_records::run::PreparationFailure::AuthRequired
-        };
+        let failure = provenant_records::run::PreparationFailure::AuthRequired;
         assert_eq!(
             record.preparation_failure,
             Some(failure),
@@ -822,19 +938,11 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
             .iter()
             .find(|route| route.route.starts_with("claude/"))
             .ok_or("missing Claude preparation refusal")?;
-        if scenario == "quota" {
-            assert_eq!(skipped.kind, provenant_records::run::SkipKind::Unavailable);
-            assert_eq!(
-                skipped.cause,
-                Some(provenant_records::RouteExclusionReason::Exhausted)
-            );
-        } else {
-            assert_eq!(skipped.kind, provenant_records::run::SkipKind::AuthRequired);
-            assert_eq!(
-                skipped.cause,
-                Some(provenant_records::RouteExclusionReason::AuthRequired)
-            );
-        }
+        assert_eq!(skipped.kind, provenant_records::run::SkipKind::AuthRequired);
+        assert_eq!(
+            skipped.cause,
+            Some(provenant_records::RouteExclusionReason::AuthRequired)
+        );
         let diagnostic = skipped.diagnostic();
         assert_eq!(diagnostic.code, "REFUSED");
         assert!(diagnostic.next.is_some());

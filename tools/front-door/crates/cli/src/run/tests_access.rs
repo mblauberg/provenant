@@ -628,7 +628,9 @@ fn opencode_unavailable_model_reaches_the_decoded_outcome() {
     let reason = decoded.reason.as_deref().unwrap();
     assert!(reason.starts_with("provider model unavailable"), "{reason}");
     assert!(!reason.contains("opencode/misspelt-free"), "{reason}");
-    assert!(reason.contains("nearest catalogued IDs:"));
+    // Issue #3551: a provider refusal for a model that is not catalogued is
+    // classified as usual; the provider's words stand without a special note.
+    assert!(!reason.contains("nearest catalogued IDs"), "{reason}");
     assert!(decoded.observed_route.is_none());
 }
 #[test]

@@ -181,9 +181,13 @@ preferences, fallbacks and depletion hand-offs. Any provider can set `models` to
 a list of model-name patterns: `*` matches zero or more characters, and other
 characters are literal. An empty list excludes every model from automatic
 routing. Providers without a compiled or configured list are unrestricted. Set
-`out_of_scope_pin` to `"warn"` (default), `"refuse"`, or `"allow"` to control
-explicit primary pins outside the effective scope. Fallback models are automatic
-alternatives and do not use this pin policy. Warnings name the model and setting.
+`out_of_scope_pin` to `"warn"` (default), `"refuse"`, or `"allow"`; all three
+are advisory for explicit primary pins outside the effective scope and launch
+the pin. `"warn"` and `"refuse"` warn with the setting's source (`"refuse"` no
+longer stops the launch); `"allow"` stays silent. Fallback models are automatic
+alternatives and do not use this pin policy; they keep their own recorded
+readiness and are not promoted by the advisory rule. Warnings name the model
+and setting.
 Host settings replace the provider's default list; `provenant config show --full`
 displays the values and sources, and `provenant check config` reports invalid
 settings.

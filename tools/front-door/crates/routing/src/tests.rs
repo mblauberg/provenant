@@ -648,8 +648,8 @@ fn monthly_quota(model: &str, account: &str, used: u64) -> QuotaObservation {
 
 // Spec: docs/specs/routing.md#provider-model-scope
 #[test]
-fn provider_scope_filters_pools_and_refuses_explicit_pins() -> Result<(), Box<dyn std::error::Error>>
-{
+fn provider_scope_filters_pools_and_warns_on_explicit_pins()
+-> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let mut config = RoutingConfig::default();
     let cursor = provenant_config::ProviderSettings {
@@ -709,10 +709,16 @@ fn provider_scope_filters_pools_and_refuses_explicit_pins() -> Result<(), Box<dy
     assert!(route.alternatives.as_slice().iter().any(|alternative| {
         alternative.adapter == "cursor" && alternative.model == legacy.model()
     }));
-    assert!(matches!(
-        resolve(&request(legacy.as_str())?, &ctx),
-        Err(RoutingError::UnsupportedLaunch(_))
-    ));
+    // An explicit pin outside the provider scope warns with its setting source
+    // and proceeds; `refuse` is advisory, not a launch gate (issue #3551).
+    let pinned = resolve(&request(legacy.as_str())?, &ctx)?;
+    assert!(
+        pinned
+            .diagnostics
+            .launch_warnings
+            .iter()
+            .any(|warning| warning.contains("providers.cursor.out_of_scope_pin = refuse"))
+    );
 
     config.provider_scopes.insert(
         "cursor".into(),
@@ -752,7 +758,14 @@ fn provider_scope_filters_pools_and_refuses_explicit_pins() -> Result<(), Box<dy
         .unwrap()
         .out_of_scope_pin = provenant_config::OutOfScopePin::Refuse;
     let ctx = context(&catalogue, &config, now()?);
-    assert!(resolve(&pin, &ctx).is_err());
+    let pinned = resolve(&pin, &ctx)?;
+    assert!(
+        pinned
+            .diagnostics
+            .launch_warnings
+            .iter()
+            .any(|warning| warning.contains("providers.cursor.out_of_scope_pin"))
+    );
     Ok(())
 }
 
