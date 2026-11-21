@@ -25,6 +25,20 @@ output_excluding_reasoning = 25000000
 
 [[models]]
 provider = "agy"
+model = "agy/claude-opus-5-5"
+billing = "subscription"
+openrouter_id = "anthropic/claude-opus-5.5"
+litellm_id = "claude-opus-5-5"
+sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
+# Google subscription route; Anthropic Claude Opus 5.5 API prices as the equivalent.
+[models.rates]
+uncached_input = 4000000
+cache_read = 200000
+cache_write = 5000000
+output_excluding_reasoning = 20000000
+
+[[models]]
+provider = "agy"
 model = "agy/claude-sonnet-4-6"
 billing = "subscription"
 openrouter_id = "anthropic/claude-sonnet-4.6"
@@ -39,10 +53,54 @@ output_excluding_reasoning = 15000000
 
 [[models]]
 provider = "agy"
+model = "agy/claude-sonnet-5-5"
+billing = "subscription"
+openrouter_id = "anthropic/claude-sonnet-5.5"
+litellm_id = "claude-sonnet-5-5"
+sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
+# Google subscription route; Anthropic Claude Sonnet 5.5 API prices as the equivalent.
+[models.rates]
+uncached_input = 2000000
+cache_read = 200000
+cache_write = 2500000
+output_excluding_reasoning = 10000000
+
+[[models]]
+provider = "agy"
 model = "agy/gemini-3.8-flash"
 billing = "subscription"
 openrouter_id = "google/gemini-3.8-flash"
 litellm_id = "gemini-3.8-flash"
+sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only; no verified price)"]
+# No official Google price was verified for this model.
+[models.rates]
+
+[[models]]
+provider = "agy"
+model = "agy/gemini-4-argon"
+billing = "subscription"
+openrouter_id = "google/gemini-4-argon"
+litellm_id = "gemini-4-argon"
+sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only; no verified price)"]
+# No official Google price was verified for this model.
+[models.rates]
+
+[[models]]
+provider = "agy"
+model = "agy/gemini-4-hydrogen"
+billing = "subscription"
+openrouter_id = "google/gemini-4-hydrogen"
+litellm_id = "gemini-4-hydrogen"
+sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only; no verified price)"]
+# No official Google price was verified for this model.
+[models.rates]
+
+[[models]]
+provider = "agy"
+model = "agy/gemini-4-neon"
+billing = "subscription"
+openrouter_id = "google/gemini-4-neon"
+litellm_id = "gemini-4-neon"
 sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only; no verified price)"]
 # No official Google price was verified for this model.
 [models.rates]

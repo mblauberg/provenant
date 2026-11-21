@@ -191,6 +191,9 @@ fn profile_preview_with_status(
     record.adapter = id.adapter().into();
     record.account_key = Some(account.into());
     record.plan = fixture_plan(&id);
+    if provenant_records::AdapterSpec::get(id.adapter()).is_some_and(|spec| spec.offered_models) {
+        record.observed_models = Vec::new();
+    }
     let records = [record];
     let access = [AccessContext {
         adapter: id.adapter(),
@@ -392,6 +395,7 @@ fn agy_account(key: &str) -> AvailabilityRecord {
         adapter: "agy".into(),
         account_key: Some(key.into()),
         plan: Some(key.into()),
+        observed_models: Vec::new(),
         ..availability()
     }
 }
