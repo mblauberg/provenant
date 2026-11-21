@@ -65,6 +65,102 @@ fn submit_parent(
     })?)
 }
 
+// Spec: docs/specs/fabric.md#publication-boundary
+#[test]
+fn peer_document_and_journal_withhold_sender_local_attempt_paths() -> TestResult {
+    if host_test(
+        "fabric::peer_tests::peer_graph_tests::peer_document_and_journal_withhold_sender_local_attempt_paths",
+    )? {
+        return Ok(());
+    }
+    let (rig, factory) = receiver()?;
+    let cancel = CancelToken::new();
+    let sender = rig.root.join("sender");
+    let checkout = sender.join("checkout");
+    let brief = sender.join("private-brief.md");
+    let write_root = sender.join("writes");
+    std::fs::create_dir_all(&checkout)?;
+    std::fs::create_dir_all(&write_root)?;
+    std::fs::write(&brief, "Inspect the parser")?;
+    let sealed = provenant_records::run::LaunchPolicy {
+        confidential: true,
+        sources: vec![
+            ".provenant/config.toml [launch_policy].protected_paths: inputs/brief".into(),
+        ],
+        repository_config: Some(".provenant/config.toml".into()),
+    };
+    let attempt = provenant_fabric_runtime::graph::AttemptSpec {
+        directory: Some(checkout.to_string_lossy().into_owned()),
+        host: Some("workshop".into()),
+        confidential: true,
+        policy_inputs: vec![brief.clone()],
+        write_roots: vec![write_root.to_string_lossy().into_owned()],
+        extra: [(
+            "sender_note".into(),
+            json!(sender.join("note.md").to_string_lossy()),
+        )]
+        .into(),
+        admitted_by: Some("parent".into()),
+        parent_sandboxed: true,
+        launch_policy: Some(sealed.clone()),
+        ..Default::default()
+    };
+    let input = serde_json::from_value(json!({
+        "op":"submit", "operation_id":"peer-path-projection",
+        "origin_work_key":origin_key(),
+        "task":{"prompt":"Launch a child and collect its answer", "access":"read_only",
+            "route":{"kind":"model","provider":"fixture","model":"fixture/model"},
+            "timeout_seconds":30,
+            "context":{"graph_id":"origin-graph", "node_id":"parent", "attempt":1, "graph_template_launch":true}}
+    }))?;
+    let receipt = provenant_cli::run::with_deferred_provider_launch(|| {
+        super::super::peer::peer_submit_graph(
+            &factory,
+            input,
+            factory.context.identity.inbox.actor,
+            attempt,
+            None,
+            None,
+            WaitBudget::cli(factory.clock.mono_now(), 30).unwrap(),
+            &cancel,
+        )
+    })?;
+    let graph = receipt
+        .peer_graph
+        .as_ref()
+        .ok_or("graph pointer")?
+        .graph_id
+        .as_str();
+    let execution = FileJournal::execution(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph,
+    )?
+    .ok_or("receiver graph missing")?;
+    let document = serde_json::to_string(&execution.document)?;
+    for path in [&checkout, &brief, &write_root, &sender.join("note.md")] {
+        let path = path.to_string_lossy().into_owned();
+        assert!(
+            !document.contains(&path),
+            "sender path {path} reached the peer document"
+        );
+    }
+    let stored = execution.document.nodes[0]
+        .attempt
+        .as_ref()
+        .ok_or("stored attempt")?;
+    assert!(stored.directory.is_none());
+    assert!(stored.host.is_none());
+    assert!(stored.policy_inputs.is_empty());
+    assert!(stored.write_roots.is_empty());
+    assert!(stored.extra.is_empty());
+    assert_eq!(stored.launch_policy, Some(sealed));
+    assert!(stored.confidential);
+    assert!(stored.parent_sandboxed);
+    assert_eq!(stored.admitted_by.as_deref(), Some("parent"));
+    Ok(())
+}
+
 fn advance_receiver(
     factory: &Factory,
     id: &str,

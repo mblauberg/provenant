@@ -1706,6 +1706,9 @@ pub(crate) fn peer_submit_graph(
 ) -> Result<SubmissionReceipt, FacadeError> {
     use provenant_fabric_runtime::graph::{FileJournal, GraphDocument, GraphExecution};
     use provenant_records::run::RequestedRoute;
+    // Even an older sender's document is embedded only through the peer-bound
+    // projection: host-local paths never reach this host's journal (#3744).
+    let attempt = attempt.peer_bound();
     let facts = provenant_confinement::worktrees::RepoFacts::default();
     let submission_digest = provenant_records::CanonicalV1::record_digest(
         "peer-submission",
