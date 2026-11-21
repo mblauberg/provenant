@@ -152,16 +152,13 @@ pub(crate) fn observation_settings(
     origin.observation(&settings)
 }
 
-/// The declared failure policy for reading wait settings. A configuration file
-/// that cannot be read leaves the wait on its compiled defaults, with a warning
-/// and the reason in every reported source. A file that is present but
-/// malformed is a typed error. A single out-of-range value is not a read
-/// failure: the loader recovers it with a warning and its origin is compiled.
-fn read_failure(error: ConfigError) -> Result<String, ConfigError> {
-    match error {
-        ConfigError::Read { .. } | ConfigError::PathEncoding { .. } => Ok(error.to_string()),
-        error => Err(error),
-    }
+/// The declared failure policy for reading wait settings. Any configuration the
+/// waiter cannot use — unreadable, misplaced or malformed — leaves the wait on
+/// its compiled defaults, with a warning naming the source and the reason in
+/// every reported source. A single out-of-range value is not a read failure:
+/// the loader recovers it with a warning and its origin is compiled.
+fn read_failure(error: ConfigError) -> String {
+    error.to_string()
 }
 
 impl Settings {
@@ -170,7 +167,7 @@ impl Settings {
         match crate::config_reads::read_for(roots, "wait") {
             Ok(resolved) => Ok(Self::resolved(&resolved)),
             Err(error) => {
-                let reason = read_failure(error)?;
+                let reason = read_failure(error);
                 use std::io::Write;
                 let _ = writeln!(
                     std::io::stderr().lock(),
@@ -325,14 +322,13 @@ mod tests {
         enum Expect {
             Configured,
             Default { unavailable: bool },
-            Refused,
         }
         let configured = "schema_version=1\n[domains.wait]\nlocal_interval_ms=750\n";
         for (shape, expect) in [
             ("absent", Expect::Default { unavailable: false }),
             ("configured", Expect::Configured),
             ("out of range", Expect::Default { unavailable: false }),
-            ("malformed", Expect::Refused),
+            ("malformed", Expect::Default { unavailable: true }),
             ("unreadable", Expect::Default { unavailable: true }),
         ] {
             let temporary = tempfile::tempdir().expect("temporary directory");
@@ -367,7 +363,7 @@ mod tests {
                 _ => {}
             }
             let observed = match Settings::resolve(&roots) {
-                Err(_) => Expect::Refused,
+                Err(error) => panic!("wait settings warn and default; never refuse: {error}"),
                 Ok((settings, origin)) => {
                     let user = matches!(
                         origin.of(LOCAL_OBSERVATION_INTERVAL_KEY),

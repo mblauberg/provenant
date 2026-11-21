@@ -2227,21 +2227,61 @@ pub fn from_lane(
     )
 }
 
+/// Which child settlements end a lane-side wait. This mirrors the `wait`
+/// verb's `--all` / `--any` / `--fail-fast` selection without importing the
+/// facade's private `WaitMode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChildWaitMode {
+    All,
+    Any,
+    FailFast,
+}
+
+impl ChildWaitMode {
+    /// Whether the children observed in one poll satisfy this wait's ending
+    /// condition. A failed child is one that settled without `succeeded`.
+    fn done(self, children: &[Value]) -> bool {
+        let settled = |child: &Value| child["settled"] == true;
+        let failed = |child: &Value| settled(child) && child["state"] != "succeeded";
+        match self {
+            Self::All => children.iter().all(settled),
+            Self::Any => children.iter().any(settled),
+            Self::FailFast => children.iter().any(failed) || children.iter().all(settled),
+        }
+    }
+}
+
 /// Wait for this lane's children, yielding its graph concurrency slot. Intake
-/// calls this after adding children when a wait is requested. Returns terminal
-/// child states, including failures, for the caller to report.
+/// calls this after adding children when a wait is requested. Returns the
+/// child states at the point the mode's ending condition was met, including
+/// failures, for the caller to report. `observe` sees each poll's children so
+/// the caller can stream transitions under `--follow`.
 pub fn wait_for_children(
     cancel: &CancelToken,
     within: std::time::Duration,
     interval: std::time::Duration,
+    mode: ChildWaitMode,
+    observe: &mut impl FnMut(&[Value]),
 ) -> Result<Value, ServiceError> {
     let clock = provenant_os::clock::SystemClock::new();
     let started = clock.mono_now();
     while_waiting(cancel, within, || {
-        poll_children(cancel, within, &clock, started, interval, |remaining| {
-            from_lane(&RelayOp::Children, cancel, remaining)
-        })
+        poll_children(
+            cancel,
+            PollTiming { within, interval },
+            &clock,
+            started,
+            mode,
+            observe,
+            |remaining| from_lane(&RelayOp::Children, cancel, remaining),
+        )
     })
+}
+
+/// The shared deadline and paced-reread interval for one child poll loop.
+struct PollTiming {
+    within: std::time::Duration,
+    interval: std::time::Duration,
 }
 
 pub fn child_wait_observation(cadence: &crate::wait::LocalCadence) -> String {
@@ -2271,17 +2311,19 @@ fn pause_child_poll(cancel: &CancelToken, delay: std::time::Duration) {
 
 fn poll_children(
     cancel: &CancelToken,
-    within: std::time::Duration,
+    timing: PollTiming,
     clock: &dyn Clock,
     started: provenant_core::MonoTime,
-    interval: std::time::Duration,
+    mode: ChildWaitMode,
+    observe: &mut impl FnMut(&[Value]),
     mut poll: impl FnMut(std::time::Duration) -> Result<Value, ServiceError>,
 ) -> Result<Value, ServiceError> {
     loop {
         if cancel.is_cancelled() {
             return Err(refused("cancelled", "child wait cancelled"));
         }
-        let remaining = within
+        let remaining = timing
+            .within
             .checked_sub(std::time::Duration::from_micros(
                 clock
                     .mono_now()
@@ -2294,7 +2336,8 @@ fn poll_children(
         let children = value["children"]
             .as_array()
             .ok_or_else(|| refused("invalid_reply", "missing child states"))?;
-        if children.iter().all(|child| child["settled"] == true) {
+        observe(children);
+        if mode.done(children) {
             return Ok(value);
         }
         let elapsed = std::time::Duration::from_micros(
@@ -2303,8 +2346,8 @@ fn poll_children(
                 .as_micros()
                 .saturating_sub(started.as_micros()),
         );
-        let remaining = within.saturating_sub(elapsed);
-        pause_child_poll(cancel, remaining.min(interval));
+        let remaining = timing.within.saturating_sub(elapsed);
+        pause_child_poll(cancel, remaining.min(timing.interval));
     }
 }
 
@@ -2527,10 +2570,14 @@ mod child_wait_tests {
                 || {
                     poll_children(
                         &cancel,
-                        std::time::Duration::from_secs(2),
+                        PollTiming {
+                            within: std::time::Duration::from_secs(2),
+                            interval: std::time::Duration::from_millis(1),
+                        },
                         &provenant_os::clock::SystemClock::new(),
                         provenant_os::clock::SystemClock.mono_now(),
-                        std::time::Duration::from_millis(1),
+                        ChildWaitMode::All,
+                        &mut |_| {},
                         |_| {
                             polls += 1;
                             if cancelled {
@@ -2544,6 +2591,45 @@ mod child_wait_tests {
             assert_eq!(frames, [true, false]);
             assert_eq!(result.is_ok(), !cancelled);
             assert_eq!(polls, if cancelled { 1 } else { 2 });
+        }
+    }
+
+    #[test]
+    fn child_wait_stops_on_the_mode_ending_condition() {
+        let child = |node: &str, state: &str| json!({"node":node,"state":state,"settled":state != "running"});
+        let ok = child("a", "succeeded");
+        let failed = child("b", "failed");
+        let running = child("b", "running");
+        assert!(!ChildWaitMode::All.done(&[ok.clone(), running.clone()]));
+        assert!(ChildWaitMode::Any.done(&[ok.clone(), running.clone()]));
+        assert!(!ChildWaitMode::FailFast.done(&[ok.clone(), running]));
+        assert!(ChildWaitMode::FailFast.done(&[ok.clone(), failed.clone()]));
+        assert!(ChildWaitMode::All.done(&[ok, failed]));
+
+        for (mode, expected_polls) in [
+            (ChildWaitMode::Any, 1),
+            (ChildWaitMode::FailFast, 2),
+            (ChildWaitMode::All, 2),
+        ] {
+            let mut polls = 0;
+            let result = poll_children(
+                &CancelToken::new(),
+                PollTiming {
+                    within: std::time::Duration::from_secs(2),
+                    interval: std::time::Duration::from_millis(1),
+                },
+                &provenant_os::clock::SystemClock::new(),
+                provenant_os::clock::SystemClock.mono_now(),
+                mode,
+                &mut |_| {},
+                |_| {
+                    polls += 1;
+                    let state = if polls == 1 { "running" } else { "failed" };
+                    Ok(json!({"children":[child("a", "succeeded"), child("b", state)]}))
+                },
+            );
+            assert!(result.is_ok(), "mode={mode:?}");
+            assert_eq!(polls, expected_polls, "mode={mode:?}");
         }
     }
 
@@ -2583,10 +2669,14 @@ mod child_wait_tests {
             || {
                 poll_children(
                     &CancelToken::new(),
-                    std::time::Duration::from_secs(1),
+                    PollTiming {
+                        within: std::time::Duration::from_secs(1),
+                        interval: std::time::Duration::from_millis(1),
+                    },
                     &clock,
                     started,
-                    std::time::Duration::from_millis(1),
+                    ChildWaitMode::All,
+                    &mut |_| {},
                     |_| panic!("must not poll after yield consumed the deadline"),
                 )
             },

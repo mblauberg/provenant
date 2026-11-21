@@ -211,13 +211,14 @@ pub fn run(command: Tracker, globals: &Globals) -> u8 {
     let ports = match PortTable::read_for(Some(&root), resolved.roots.state.as_path()) {
         Ok(ports) => ports,
         Err(error) => {
-            return crate::fail(
-                "tracker lint",
-                Outcome::Invalid,
-                "PORT_CONFIG",
-                &format!("cannot read tracker port: {error}"),
-                globals,
+            use std::io::Write;
+            let source = resolved.roots.state.as_path().join("ports.json");
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: [PORT_CONFIG] cannot read tracker port: {error} (source: {}); using compiled defaults",
+                source.display()
             );
+            PortTable::builtin()
         }
     };
     let mut port =

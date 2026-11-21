@@ -82,7 +82,8 @@ fn human_report(mut value: serde_json::Value) -> String {
 }
 
 // Deliberately use the bounded renderer directly: overflow publication creates
-// state and is forbidden for this command, even on its failure paths.
+// state and is forbidden for this command, even on its failure paths. An
+// oversized report is bounded and warned about, never refused.
 fn render(
     result: &CommandResult<Option<DiskReport>>,
     globals: &provenant_cli::Globals,
@@ -91,36 +92,58 @@ fn render(
     stderr: &mut impl io::Write,
 ) -> u8 {
     let json = globals.json;
-    let mode = globals.render_mode(human, true, None);
+    let full_bytes = serde_json::to_vec(result)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
     // The result's size is a bound on the result, not on how it is presented:
     // a compact view of an oversized result is still an oversized result.
-    let oversized = !json
-        && serde_json::to_vec(result)
-            .is_ok_and(|bytes| bytes.len() > provenant_cli::MAX_RESULT_BYTES);
-    let rendered = if oversized {
-        Err(RenderError::TooLarge)
-    } else if !json && result.error.is_some() {
+    let oversized = !json && full_bytes > provenant_cli::MAX_RESULT_BYTES;
+    const SOURCE: &str = "COMMAND_RESULT_MAX_BYTES";
+    // `disk report` takes no narrowing flags; point at a real, read-only
+    // command that previews reclaim candidates instead of naming flags it
+    // does not have.
+    const REPAIR: &str = "preview reclaim candidates with `provenant gc --dry-run`";
+    let clipped;
+    let mode = if oversized {
+        let (text, omitted) =
+            provenant_cli::clip_for_output(human, provenant_cli::MAX_RESULT_BYTES);
+        clipped = text;
+        warn_capped(omitted, stderr);
+        globals.render_mode(&clipped, true, None)
+    } else {
+        globals.render_mode(human, true, None)
+    };
+    let rendered = if !json && result.error.is_some() {
         provenant_cli::render(result, mode, stderr)
     } else {
         provenant_cli::render(result, mode, stdout)
     };
     match rendered {
         Ok(()) => provenant_cli::exit_status(&result.status),
+        Err(RenderError::TooLarge) => {
+            // JSON cannot be clipped mid-object: page a bounded marker instead.
+            let omitted = full_bytes.saturating_sub(provenant_cli::MAX_RESULT_BYTES);
+            warn_capped(omitted, stderr);
+            let marker = serde_json::json!({
+                "truncated": true,
+                "omitted_bytes": omitted,
+                "source": SOURCE,
+                "repair": REPAIR,
+            });
+            let mut bounded = CommandResult::new("disk report", result.status, Some(marker));
+            bounded.error = result
+                .error
+                .as_ref()
+                .map(|error| provenant_cli::bounded_error(error, 512));
+            let _ = provenant_cli::render(&bounded, RenderMode::Json, stdout);
+            provenant_cli::exit_status(&result.status)
+        }
         Err(error) => {
             let mut failure = CommandResult::new("disk report", Outcome::Error, ());
             failure.error = Some(CommandError {
                 diagnostic: None,
-                code: if matches!(error, RenderError::TooLarge) {
-                    "RESULT_TOO_LARGE"
-                } else {
-                    "IO"
-                }
-                .into(),
-                message: if matches!(error, RenderError::TooLarge) {
-                    "disk report exceeds 1 MiB; no artefact was written".into()
-                } else {
-                    error.to_string()
-                },
+                code: "IO".into(),
+                message: error.to_string(),
                 cause: None,
                 repair: None,
             });
@@ -140,6 +163,15 @@ fn render(
             3
         }
     }
+}
+
+/// The one warning for a capped disk report: names the rule, the source that
+/// set the cap, the omitted size and the way to narrow the report.
+fn warn_capped(omitted: usize, stderr: &mut impl io::Write) {
+    let _ = writeln!(
+        stderr,
+        "warning: [RESULT_TOO_LARGE] disk report exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); showing a bounded view with {omitted} bytes omitted; preview reclaim candidates with `provenant gc --dry-run`"
+    );
 }
 
 fn collect(globals: &Globals) -> Result<DiskReport, Box<dyn std::error::Error>> {
@@ -657,12 +689,13 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn disk_overflow_returns_envelope_without_publishing() -> Result<(), Box<dyn std::error::Error>>
+    fn disk_overflow_warns_and_bounds_without_publishing() -> Result<(), Box<dyn std::error::Error>>
     {
         let mut report = DiskReport::new("/fixture".into(), 0);
         report.error("/fixture", "x".repeat(provenant_cli::MAX_RESULT_BYTES));
         let result = CommandResult::new("disk report", Outcome::Ok, Some(report));
         let mut output = Vec::new();
+        let mut errors = Vec::new();
         assert_eq!(
             render(
                 &result,
@@ -673,14 +706,16 @@ mod tests {
                 },
                 "",
                 &mut output,
-                &mut Vec::new()
+                &mut errors
             ),
-            3
+            0
         );
         let value: serde_json::Value = serde_json::from_slice(&output)?;
         assert_eq!(value["command"], "disk report");
-        assert_eq!(value["error"]["code"], "RESULT_TOO_LARGE");
-        assert!(value["data"].is_null());
+        assert_eq!(value["data"]["truncated"], true);
+        assert!(value["data"]["omitted_bytes"].as_u64().unwrap() > 0);
+        assert!(value["error"].is_null());
+        assert!(String::from_utf8(errors)?.contains("warning: [RESULT_TOO_LARGE]"));
         Ok(())
     }
 }

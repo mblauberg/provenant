@@ -1214,6 +1214,8 @@ impl Factory {
                     cancel,
                     std::time::Duration::from_micros(remaining),
                     cadence.interval,
+                    provenant_cli::fabric::graph_relay::ChildWaitMode::All,
+                    &mut |_| {},
                 ) {
                     Ok(children) => {
                         json!({"receipt":receipt,"children":children,"observation":observation})

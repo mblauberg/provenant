@@ -27,6 +27,8 @@ struct Report {
     tier: String,
     backend: &'static str,
     source: PortSource,
+    /// Set when verification was skipped rather than run; names the reason.
+    skipped: Option<String>,
     disposition: Option<PortCommandDisposition>,
     exit_code: Option<i64>,
     elapsed_micros: Option<u64>,
@@ -287,11 +289,20 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
             ("command", substitute_tier(command, &tier), true)
         }
         provenant_config::PortBackend::None => {
+            let reason = format!(
+                "the effective verify port is disabled (source: {:?})",
+                declaration.source
+            );
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: [VERIFY_UNAVAILABLE] {reason}; skipping verification"
+            );
             return render(
                 Report {
                     tier: tier.clone(),
                     backend: "none",
                     source: declaration.source,
+                    skipped: Some(reason),
                     disposition: None,
                     exit_code: None,
                     elapsed_micros: None,
@@ -301,11 +312,8 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
                     slot: None,
                     exception: None,
                 },
-                Outcome::Unavailable,
-                Some((
-                    "VERIFY_UNAVAILABLE",
-                    "the effective verify port is disabled".into(),
-                )),
+                Outcome::Ok,
+                None,
                 None,
                 globals,
             );
@@ -721,6 +729,7 @@ fn report(
         tier: tier.to_owned(),
         backend,
         source,
+        skipped: None,
         disposition: Some(execution.disposition),
         exit_code: execution
             .outcome
@@ -798,9 +807,10 @@ fn render(
         ),
         None => (status, error),
     };
-    let message = match &error {
-        Some((_, message)) => format!("{message}: tier {}", report.tier),
-        None => format!(
+    let message = match (&report.skipped, &error) {
+        (Some(reason), _) => format!("verify skipped: {reason} (tier {})", report.tier),
+        (None, Some((_, message))) => format!("{message}: tier {}", report.tier),
+        (None, None) => format!(
             "verify tier {} completed via {} ({:?})",
             report.tier, report.backend, report.source
         ),

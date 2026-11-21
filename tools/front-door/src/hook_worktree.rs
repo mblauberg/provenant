@@ -62,6 +62,19 @@ fn abstain(hook: &str, reason: &dyn std::fmt::Display) -> u8 {
     0
 }
 
+/// Report an adoption that has actually happened, naming what was different so
+/// the owner can see why the tree was taken over. Callers emit it only after
+/// the tree is known clean and idle (create) or is confirmed removed (remove);
+/// a tree the hook only hoped to adopt is never claimed as adopted. Dirty trees
+/// and trees with a live writer stay refused by `fail`.
+fn warn_adopt(hook: &str, reason: &dyn std::fmt::Display) {
+    let _ = writeln!(
+        io::stderr().lock(),
+        "{hook}: warning: adopting clean worktree: {}",
+        reason.to_string().chars().take(512).collect::<String>()
+    );
+}
+
 /// Claude's suggested slug becomes the branch `claude/<slug>`. Anything outside
 /// a plain slug is refused, since the name reaches a branch and a directory.
 fn branch_for(name: &str) -> Result<String, Error> {
@@ -88,12 +101,12 @@ fn entry_path(entry: &serde_json::Value) -> Option<PathBuf> {
     Some(Path::new(root).join(relative.trim_start_matches('/')))
 }
 
-/// The worktree an earlier call of this hook made for `branch`, if it can be
-/// reused. Only the linked worktree at the exact path `worktree create` gives
-/// the branch qualifies, and only when it is clean, has no live writer and
-/// carries this hook's ownership record for this creation, with HEAD still
-/// where the hook made it. The primary checkout never qualifies. `Err(None)` means no worktree holds
-/// the branch, so the create failure stands alone.
+/// The worktree already holding `branch` that this hook can reuse. A clean,
+/// idle worktree is adopted with a warning even when it is off the hook's usual
+/// path or carries no ownership record: those are preferences, not boundaries.
+/// The primary checkout, a live or held writer, uncommitted files and an unknown
+/// path or layout stay refused. `Err(None)` means no worktree holds the branch,
+/// so the create failure stands alone.
 fn reusable(
     state: &Path,
     list: &serde_json::Value,
@@ -118,21 +131,29 @@ fn reusable(
         Ok(relative) => primary.join(relative),
         Err(_) => return refuse("the repository worktree layout is unavailable"),
     };
-    if path != expected {
-        return refuse("it is not at the path this hook creates for that name");
-    }
     // `unknown` is common (any process the owner cannot inspect makes every
-    // writer unknown), so only a live writer refuses here; ownership is the
-    // hook's own record below.
-    if holder["writer"] == "live" {
-        return refuse("a writer is live in it");
+    // writer unknown), so only an actually occupied writer refuses here.
+    // `Observed` renders as `live` and `Held` (an active writer lease) as
+    // `busy`; both mean another writer owns the tree, a real boundary.
+    // Ownership and path are the hook's own preferences, adopted below.
+    if matches!(holder["writer"].as_str(), Some("live" | "busy")) {
+        return refuse("a writer is live or holds a lease in it");
     }
     if holder["dirty"] != "clean" {
         return refuse("it has uncommitted or ignored files");
     }
+    if path != expected {
+        warn_adopt(
+            "worktree-create",
+            &format!("{path:?} is off the hook's usual path ({expected:?})"),
+        );
+    }
     let head = holder["head"].as_str().unwrap_or_default();
     if !hook_owned(state, &path, branch, head) {
-        return refuse("it was not created by this hook");
+        warn_adopt(
+            "worktree-create",
+            &format!("{path:?} carries no ownership record from this hook"),
+        );
     }
     Ok(path)
 }
@@ -321,8 +342,11 @@ pub fn remove(globals: &Globals) -> u8 {
         let cli = Cli::new(globals, &cwd, &executor)?;
         let deadline = cli.deadline_after(WORK_TIME);
         let list = cli.data(&["worktree", "list"], LIST_TIME, deadline)?;
-        // Only a linked worktree this project's owner lists is removable; the
-        // first entry is the primary checkout.
+        // The target must be a worktree this repository lists. Besides being
+        // an identity check, this keeps the basename-based `worktree remove`
+        // below from resolving an unlisted path to a different listed tree
+        // that happens to share the name. A person-created tree is listed by
+        // Git, so adoption still works; ownership alone stays a preference.
         let listed = list
             .as_array()
             .map_or(&[][..], Vec::as_slice)
@@ -333,12 +357,12 @@ pub fn remove(globals: &Globals) -> u8 {
         if !listed {
             return Err("not a linked worktree that Provenant lists for this project".into());
         }
-        // Only a tree this hook made: a clean, idle tree a person created is
-        // theirs. HEAD may have moved on, so only the records are checked.
+        // HEAD may have moved on, so only the records are checked. Whether the
+        // tree is unowned is decided before removal, but the adoption warning
+        // is only emitted once the removal is confirmed: a dirty or held tree
+        // is kept, and calling that an adoption would be a lie.
         let state = state_root(globals, &cwd)?;
-        if owned_record(&state, &target).is_none() {
-            return Err("it was not created by this hook".into());
-        }
+        let unowned = owned_record(&state, &target).is_none();
         let name = target
             .file_name()
             .and_then(|name| name.to_str())
@@ -346,6 +370,12 @@ pub fn remove(globals: &Globals) -> u8 {
         let outcome = cli.data(&["worktree", "remove", name], WORK_TIME, deadline)?;
         if !target.exists() {
             forget(&state, &target);
+            if unowned {
+                warn_adopt(
+                    "worktree-remove",
+                    &"the worktree was not created by this hook",
+                );
+            }
         }
         if target.exists() {
             let reason = outcome["retained"][0]["reason"].as_str().unwrap_or("kept");
@@ -392,5 +422,50 @@ mod tests {
         let entry = json!({"path":{"kind":"path","root":"/","relative":{"encoding":"utf8","path":"p/.worktrees/a"}}});
         assert_eq!(entry_path(&entry), Some(PathBuf::from("/p/.worktrees/a")));
         assert_eq!(entry_path(&json!({"path":"/bare"})), None);
+    }
+
+    #[test]
+    fn reusable_adopts_a_clean_idle_tree_and_refuses_dirty_or_occupied() {
+        use super::*;
+        use serde_json::json;
+        fn entry(path: &str, branch: &str, dirty: &str, writer: &str) -> serde_json::Value {
+            json!({
+                "path": {"kind":"path","root":"/","relative":{"encoding":"utf8","path":path}},
+                "branch": format!("refs/heads/{branch}"),
+                "dirty": dirty,
+                "writer": writer,
+                "head": "abc123",
+            })
+        }
+        let branch = "claude/bright-fox-3";
+        let primary = entry("primary", "main", "clean", "unknown");
+        let state = Path::new("/unused-state");
+        let clean = json!([
+            primary.clone(),
+            entry("adopted", branch, "clean", "unknown")
+        ]);
+        assert_eq!(
+            reusable(state, &clean, branch).unwrap(),
+            PathBuf::from("/adopted"),
+            "a clean, idle tree is adopted even off-path and unowned"
+        );
+        // "dirty" is the real WorktreeCondition label in `worktree list`.
+        let dirty = json!([
+            primary.clone(),
+            entry("adopted", branch, "dirty", "unknown")
+        ]);
+        assert!(
+            reusable(state, &dirty, branch).is_err(),
+            "dirty tree stays refused"
+        );
+        // "live" is Observed; "busy" is Held, an active writer lease. Both
+        // mean another writer owns the tree and must stay refused.
+        for writer in ["live", "busy"] {
+            let occupied = json!([primary.clone(), entry("adopted", branch, "clean", writer)]);
+            assert!(
+                reusable(state, &occupied, branch).is_err(),
+                "writer={writer} stays refused"
+            );
+        }
     }
 }

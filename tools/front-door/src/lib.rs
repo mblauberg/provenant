@@ -189,18 +189,18 @@ pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
     } else {
         globals.render_mode(human, read_only, summary)
     };
-    let rendered = provenant_cli::render_or_publish(result, mode, stdout, stderr, |value| {
-        overflow::publish(value, globals)
-    });
+    let rendered = provenant_cli::render_or_publish(
+        result,
+        mode,
+        stdout,
+        stderr,
+        |value| overflow::publish(value, globals),
+        // A published overflow keeps the result's status in its envelope, so
+        // the exit code matches it; only a real render/IO failure exits 3.
+        provenant_cli::OverflowPolicy::Proceed,
+    );
     match rendered {
         Ok(status) => provenant_cli::exit_status(&status),
-        Err(RenderError::TooLarge) => fail(
-            &result.command,
-            Outcome::Error,
-            "RESULT_TOO_LARGE",
-            "result exceeds 1 MiB; request a smaller page or read the owner-published artifact",
-            globals,
-        ),
         Err(_) => {
             let _ = io::stderr().write_all(b"provenant: IO: cannot write command result\n");
             3
@@ -273,7 +273,7 @@ fn land_explanation(
     ))
 }
 /// `emit_summarised` for a result the caller narrows rather than reads from an
-/// artefact: oversize is `RESULT_TOO_LARGE` with a repair, never published, so
+/// artefact: an oversized result is bounded with a warning, never published, so
 /// no file is left in the results area on any path.
 fn emit_unpublished<T: Serialize>(
     result: &CommandResult<T>,
@@ -292,23 +292,54 @@ fn emit_unpublished<T: Serialize>(
         &mut io::stdout().lock(),
         &mut io::stderr().lock(),
     );
+    const REPAIR: &str = "narrow it with --since and --until";
     match rendered {
-        Ok(()) => provenant_cli::exit_status(&result.status),
-        Err(RenderError::TooLarge) => fail_with_repair(
-            &result.command,
-            Outcome::Error,
-            "RESULT_TOO_LARGE",
-            "result exceeds 1 MiB; no artefact was written",
-            Some("narrow it with --since and --until"),
-            globals,
-        ),
+        Ok(omitted) => {
+            if omitted > 0 {
+                let _ = writeln!(
+                    io::stderr().lock(),
+                    "warning: [RESULT_TOO_LARGE] {} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); showing a bounded view with {omitted} bytes omitted; {REPAIR}",
+                    result.command
+                );
+            }
+            provenant_cli::exit_status(&result.status)
+        }
+        Err(RenderError::TooLarge) => {
+            // JSON cannot be clipped mid-object: emit a bounded marker instead.
+            let omitted = serde_json::to_vec(result)
+                .map(|bytes| bytes.len().saturating_sub(provenant_cli::MAX_RESULT_BYTES))
+                .unwrap_or_default();
+            let _ = writeln!(
+                io::stderr().lock(),
+                "warning: [RESULT_TOO_LARGE] {} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); showing a bounded view with {omitted} bytes omitted; {REPAIR}",
+                result.command
+            );
+            let marker = serde_json::json!({
+                "truncated": true,
+                "omitted_bytes": omitted,
+                "source": "COMMAND_RESULT_MAX_BYTES",
+                "repair": REPAIR,
+            });
+            let mut bounded = CommandResult::new(&result.command, result.status, marker);
+            // The marker replaces the oversized data, not the refusal. Keep the
+            // original typed error so an oversized failure still carries its
+            // code, repair and diagnostic, as the console and disk edges do.
+            bounded.error = result
+                .error
+                .as_ref()
+                .map(|error| provenant_cli::bounded_error(error, 512));
+            let _ = provenant_cli::render(&bounded, RenderMode::Json, &mut io::stdout().lock());
+            provenant_cli::exit_status(&result.status)
+        }
         Err(_) => {
             let _ = io::stderr().write_all(b"provenant: IO: cannot write command result\n");
             3
         }
     }
 }
-/// Render a result no larger than `limit`, writing nothing when it is larger.
+/// Render a result within `limit`, bounding the human view with an explicit
+/// omitted-size marker when it is larger. Returns the bytes omitted from the
+/// owner's text (zero when the result fit).
 #[allow(clippy::too_many_arguments)]
 fn render_unpublished<T: Serialize>(
     result: &CommandResult<T>,
@@ -319,19 +350,29 @@ fn render_unpublished<T: Serialize>(
     limit: usize,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
-) -> Result<(), RenderError> {
-    let mode = globals.render_mode(human, read_only, summary);
+) -> Result<usize, RenderError> {
+    let full_bytes = serde_json::to_vec(result)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
     // The size bounds the result, not its presentation: a compact view of an
     // oversized result is still an oversized result.
-    let oversized =
-        !globals.json && serde_json::to_vec(result).is_ok_and(|bytes| bytes.len() > limit);
-    if oversized {
-        Err(RenderError::TooLarge)
-    } else if !globals.json && result.error.is_some() {
-        provenant_cli::render_within(result, mode, stderr, limit)
+    let oversized = !globals.json && full_bytes > limit;
+    let clipped;
+    let mut omitted = 0;
+    let mode = if oversized {
+        let (text, count) = provenant_cli::clip_for_output(human, limit);
+        clipped = text;
+        omitted = count;
+        globals.render_mode(&clipped, read_only, summary)
     } else {
-        provenant_cli::render_within(result, mode, stdout, limit)
+        globals.render_mode(human, read_only, summary)
+    };
+    if !globals.json && result.error.is_some() {
+        provenant_cli::render_within(result, mode, stderr, limit)?;
+    } else {
+        provenant_cli::render_within(result, mode, stdout, limit)?;
     }
+    Ok(omitted)
 }
 /// Accounts by adapter, then the registered rows; none needs action.
 fn accounts_summary(settings: &provenant_providers::accounts::Settings) -> provenant_cli::Summary {
@@ -518,8 +559,8 @@ fn run_edge_workspace(
 ) -> u8 {
     run_edge_emitting(leaf, globals, workspace, true, action)
 }
-/// `run_edge_workspace`; with `publish` false an oversized result is refused
-/// with `RESULT_TOO_LARGE` and nothing is written to the results area.
+/// `run_edge_workspace`; with `publish` false an oversized result is bounded
+/// with a warning and nothing is written to the results area.
 fn run_edge_emitting(
     leaf: &str,
     globals: &provenant_cli::Globals,
@@ -2281,28 +2322,46 @@ mod unpublished_result_tests {
     }
 
     #[test]
-    fn an_oversized_result_is_refused_and_writes_nothing() {
+    fn an_oversized_human_result_is_bounded_and_json_signals_too_large() {
+        let text = "x".repeat(4096);
+        let limit = 1024;
         let result = provenant_records::CommandResult::new(
             "telemetry stats",
             provenant_records::Outcome::Ok,
-            "x".repeat(4096),
+            text.clone(),
         );
-        for json in [true, false] {
-            let globals = provenant_cli::Globals {
-                json,
-                full: true,
-                ..Default::default()
-            };
-            let (mut out, mut err) = (Vec::new(), Vec::new());
-            let rendered = super::render_unpublished(
-                &result, &globals, "", false, None, 1024, &mut out, &mut err,
-            );
-            assert!(
-                matches!(rendered, Err(provenant_cli::RenderError::TooLarge)),
-                "json={json}"
-            );
-            assert!(out.is_empty() && err.is_empty(), "json={json}");
-        }
+        // Human output is bounded with an explicit omitted count so the caller
+        // can warn and proceed; it never refuses the whole result.
+        let globals = provenant_cli::Globals {
+            json: false,
+            full: true,
+            ..Default::default()
+        };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let rendered = super::render_unpublished(
+            &result, &globals, &text, false, None, limit, &mut out, &mut err,
+        );
+        let omitted = rendered.expect("an oversized human result is bounded, not refused");
+        assert!(omitted > 0, "the omitted bytes are reported to the caller");
+        assert!(!out.is_empty());
+        assert!(out.len() <= limit, "{} exceeds {limit}", out.len());
+        assert!(err.is_empty());
+
+        // JSON cannot be clipped mid-object, so this helper signals TooLarge
+        // for the caller to page a bounded marker instead of a refusal.
+        let globals = provenant_cli::Globals {
+            json: true,
+            ..Default::default()
+        };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let rendered = super::render_unpublished(
+            &result, &globals, &text, false, None, limit, &mut out, &mut err,
+        );
+        assert!(
+            matches!(rendered, Err(provenant_cli::RenderError::TooLarge)),
+            "JSON oversize must reach the caller's bounded-marker path"
+        );
+        assert!(out.is_empty() && err.is_empty());
     }
 
     #[test]

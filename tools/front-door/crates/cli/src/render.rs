@@ -1,4 +1,6 @@
-//! Encode completely before delivery; never clip a result or repeat an owner call.
+//! Encode completely before delivery; never repeat an owner call. A result over
+//! the cap is bounded with a warning and an omission marker, or paged once to
+//! a published artefact whose pointer keeps the result's original status.
 use crate::limits;
 pub use crate::limits::MAX_RESULT_BYTES;
 use provenant_records::{CommandResult, Outcome};
@@ -81,6 +83,18 @@ pub enum RenderMode<'a> {
         summary: Option<&'a Summary>,
     },
 }
+
+/// How a published overflow is presented. The envelope status must always
+/// agree with the process exit code; the policy decides which one changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverflowPolicy {
+    /// Page the complete result once, warn on stderr and keep the result's
+    /// status. The envelope and the exit code both stay with the result.
+    Proceed,
+    /// Refuse with a typed `RESULT_TOO_LARGE` Error envelope and exit 3.
+    Refuse,
+}
+
 impl crate::Globals {
     /// JSON is an independent transport; --full only affects human output.
     pub fn render_mode<'a>(
@@ -121,8 +135,16 @@ pub fn bounded_text(text: &str, max: usize) -> String {
 /// Whole text up to `max` bytes; above it, the head and the tail with a marker
 /// that names how many bytes were left out and how to read them.
 pub fn head_and_tail(text: &str, max: usize) -> String {
+    head_and_tail_counted(text, max).0
+}
+
+/// `head_and_tail` together with the exact number of *original* bytes omitted.
+/// The count is the bytes between head and tail, which is what the in-text
+/// marker names; it is not `text.len() - result.len()`, because the result
+/// contains the inserted marker.
+fn head_and_tail_counted(text: &str, max: usize) -> (String, usize) {
     if text.len() <= max {
-        return text.into();
+        return (text.into(), 0);
     }
     let half = max / 2;
     let mut head = half.min(text.len());
@@ -146,14 +168,73 @@ pub fn head_and_tail(text: &str, max: usize) -> String {
         }
     }
     let tail = tail.min(text.len());
-    format!(
+    let omitted = tail - head;
+    let bounded = format!(
         "{}[... {} bytes omitted; use --full for all of it ...]\n{}",
         &text[..head],
-        tail - head,
+        omitted,
         &text[tail..]
-    )
+    );
+    (bounded, omitted)
 }
 
+/// A bounded presentation for surfaces that warn and proceed on an oversized
+/// result: keep both ends of the owner's text and an explicit marker naming the
+/// omitted bytes, rather than refusing the whole result. `limit` includes the
+/// marker. Returns the clipped text and how many bytes were left out.
+pub fn clip_for_output(text: &str, limit: usize) -> (String, usize) {
+    const RESERVE: usize = 96;
+    let (clipped, omitted) = head_and_tail_counted(text, limit.saturating_sub(RESERVE));
+    if clipped.len() <= limit {
+        (clipped, omitted)
+    } else {
+        bounded_head_with_marker(text, limit)
+    }
+}
+
+/// A head-only clip for the case the two-ended view cannot fit the limit. The
+/// marker names the omitted bytes and the count is exactly the number of
+/// original bytes no longer present, so a tiny limit never under-reports or
+/// silently drops the omission marker.
+fn bounded_head_with_marker(text: &str, limit: usize) -> (String, usize) {
+    if text.len() <= limit {
+        return (text.into(), 0);
+    }
+    const PREFIX: &str = "...[";
+    const SUFFIX: &str = " bytes omitted; use --full for all of it]";
+    // Reserve for the widest possible count so the marker always fits when the
+    // limit can hold it; the real count needs the same or fewer digits.
+    let fixed = PREFIX.len() + SUFFIX.len() + text.len().to_string().len();
+    if limit <= fixed {
+        // No room for a marker: keep the bounded head and report exactly how
+        // many original bytes its ellipsis replaced.
+        let clipped = bounded_text(text, limit);
+        let shown = clipped.len().saturating_sub(3);
+        return (clipped, text.len().saturating_sub(shown));
+    }
+    let mut end = limit - fixed;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let omitted = text.len() - end;
+    let marker = format!("{PREFIX}{omitted}{SUFFIX}");
+    (format!("{}{marker}", &text[..end]), omitted)
+}
+/// A bounded copy of an error for a capped result view: it keeps the typed
+/// code, repair and diagnostic while shortening the free-form text so a large
+/// failure is still reported without reintroducing the overflow.
+pub fn bounded_error(
+    error: &provenant_records::CommandError,
+    max: usize,
+) -> provenant_records::CommandError {
+    let mut bounded = error.clone();
+    bounded.message = head_and_tail(&error.message, max);
+    bounded.cause = error
+        .cause
+        .as_deref()
+        .map(|cause| head_and_tail(cause, max));
+    bounded
+}
 /// The generic fallback for an owner with no summary: small text is shown
 /// whole; larger text keeps its first rows and says how much was left out.
 fn fallback_text(command: &str, text: &str) -> String {
@@ -597,6 +678,23 @@ mod tests {
         assert!(bounded.contains("bytes omitted"), "{bounded}");
     }
     #[test]
+    fn clip_for_output_reports_the_exact_bytes_the_in_text_marker_names() {
+        let text = format!("{}{}", "a".repeat(4096), "z".repeat(4096));
+        let (clipped, omitted) = clip_for_output(&text, 512);
+        assert!(clipped.len() <= 512, "{} exceeds the cap", clipped.len());
+        let named = clipped
+            .split("[... ")
+            .nth(1)
+            .and_then(|rest| rest.split(" bytes omitted;").next())
+            .and_then(|count| count.parse::<usize>().ok())
+            .expect("the bounded view carries an in-text omission marker");
+        assert_eq!(
+            omitted, named,
+            "the caller's count must match the marker, not text.len() - clipped.len()"
+        );
+        assert!(omitted > 0 && omitted < text.len());
+    }
+    #[test]
     fn full_shows_the_owner_text_then_the_typed_next() -> Result<(), Box<dyn std::error::Error>> {
         let summary = Summary::next_only(Some("provenant output aaaa".into()));
         let result = CommandResult::new("lanes", Outcome::Ok, ());
@@ -989,6 +1087,7 @@ pub fn render_or_publish<T: Serialize>(
     writer: &mut impl Write,
     stderr: &mut impl Write,
     publish: impl FnOnce(&CommandResult<T>) -> io::Result<provenant_records::AbsolutePath>,
+    policy: OverflowPolicy,
 ) -> Result<Outcome, RenderError> {
     let launch_receipt = result.error.is_some()
         && matches!(
@@ -1030,55 +1129,143 @@ pub fn render_or_publish<T: Serialize>(
     match first {
         Ok(()) => Ok(result.status),
         Err(RenderError::TooLarge) => {
-            let (code, message, artifact) = match publish(result) {
-                Ok(path) => (
-                    "RESULT_TOO_LARGE",
-                    "result exceeds 1 MiB; read the published artifact",
-                    Some(path),
-                ),
-                Err(_) => (
-                    "IO",
-                    "cannot publish oversized result; the recorded operation must not be repeated",
-                    None,
-                ),
-            };
             #[derive(Serialize)]
             struct Overflow {
                 artifact: Option<provenant_records::AbsolutePath>,
             }
-            let mut failure =
-                CommandResult::new(&result.command, Outcome::Error, Overflow { artifact });
-            failure.error = Some(provenant_records::CommandError {
-                diagnostic: None,
-                code: code.into(),
-                message: message.into(),
-                cause: None,
-                repair: None,
-            });
-            // Human transport includes the pointer using the same typed path
-            // record, escaped as JSON. JSON carries it in data.artifact.
-            let human = match &failure.data.artifact {
-                Some(path) => format!(
-                    "provenant: {code}: {message}; {}\n",
-                    serde_json::to_string(path).map_err(RenderError::Encode)?
-                ),
-                None => format!("provenant: {code}: {message}\n"),
-            };
-            let fallback_mode = match mode {
-                RenderMode::Json => RenderMode::Json,
-                RenderMode::Human { .. } | RenderMode::Compact { .. } => RenderMode::Human {
-                    text: &human,
-                    read_only: false,
-                    summary: None,
+            let published = publish(result);
+            match policy {
+                OverflowPolicy::Refuse => {
+                    let (code, message, artifact) = match &published {
+                        Ok(path) => (
+                            "RESULT_TOO_LARGE",
+                            "result exceeds 1 MiB; read the published artifact",
+                            Some(path.clone()),
+                        ),
+                        Err(_) => (
+                            "IO",
+                            "cannot publish oversized result; the recorded operation must not be repeated",
+                            None,
+                        ),
+                    };
+                    let mut failure =
+                        CommandResult::new(&result.command, Outcome::Error, Overflow { artifact });
+                    failure.error = Some(provenant_records::CommandError {
+                        diagnostic: None,
+                        code: code.into(),
+                        message: message.into(),
+                        cause: None,
+                        repair: None,
+                    });
+                    // Human transport includes the pointer using the same typed
+                    // path record, escaped as JSON; JSON carries it in data.
+                    let human = match &failure.data.artifact {
+                        Some(path) => format!(
+                            "provenant: {code}: {message}; {}\n",
+                            serde_json::to_string(path).map_err(RenderError::Encode)?
+                        ),
+                        None => format!("provenant: {code}: {message}\n"),
+                    };
+                    let fallback_mode = match mode {
+                        RenderMode::Json => RenderMode::Json,
+                        RenderMode::Human { .. } | RenderMode::Compact { .. } => {
+                            RenderMode::Human {
+                                text: &human,
+                                read_only: false,
+                                summary: None,
+                            }
+                        }
+                    };
+                    if matches!(fallback_mode, RenderMode::Json) {
+                        render(&failure, fallback_mode, writer)?;
+                    } else {
+                        let text_result = CommandResult::new(&result.command, Outcome::Error, ());
+                        render(&text_result, fallback_mode, stderr)?;
+                    }
+                    // A published overflow is handed back so a Refuse caller
+                    // exits 3, matching the Error envelope; a failed publication
+                    // is already an Error envelope and exits 3 either way.
+                    if published.is_ok() {
+                        Err(RenderError::TooLarge)
+                    } else {
+                        Ok(Outcome::Error)
+                    }
+                }
+                OverflowPolicy::Proceed => match published {
+                    Ok(path) => {
+                        // The complete result is paged once. The pointer keeps
+                        // the result's ORIGINAL status so the envelope status
+                        // and the exit code agree: a published overflow is not
+                        // a command failure.
+                        let path_text =
+                            serde_json::to_string(&path).map_err(RenderError::Encode)?;
+                        let _ = writeln!(
+                            stderr,
+                            "warning: [RESULT_TOO_LARGE] {} exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); paged to the owner-published artefact; proceeding",
+                            result.command
+                        );
+                        let paged = CommandResult::new(
+                            &result.command,
+                            result.status,
+                            Overflow {
+                                artifact: Some(path),
+                            },
+                        );
+                        // Human transport names the pointer in the same typed
+                        // path record; JSON carries it in data.artifact.
+                        let human =
+                            format!("provenant: result exceeds 1 MiB; paged to {path_text}\n");
+                        let fallback_mode = match mode {
+                            RenderMode::Json => RenderMode::Json,
+                            RenderMode::Human { .. } | RenderMode::Compact { .. } => {
+                                RenderMode::Human {
+                                    text: &human,
+                                    read_only: false,
+                                    summary: None,
+                                }
+                            }
+                        };
+                        render(&paged, fallback_mode, writer)?;
+                        Ok(result.status)
+                    }
+                    Err(_) => {
+                        // A failed publication is a real IO failure: the
+                        // recorded operation must not be repeated and the
+                        // command exits 3 with its Error envelope.
+                        let mut failure = CommandResult::new(
+                            &result.command,
+                            Outcome::Error,
+                            Overflow { artifact: None },
+                        );
+                        failure.error = Some(provenant_records::CommandError {
+                            diagnostic: None,
+                            code: "IO".into(),
+                            message:
+                                "cannot publish oversized result; the recorded operation must not be repeated"
+                                    .into(),
+                            cause: None,
+                            repair: None,
+                        });
+                        let human = "provenant: IO: cannot publish oversized result; the recorded operation must not be repeated\n";
+                        let fallback_mode = match mode {
+                            RenderMode::Json => RenderMode::Json,
+                            RenderMode::Human { .. } | RenderMode::Compact { .. } => {
+                                RenderMode::Human {
+                                    text: human,
+                                    read_only: false,
+                                    summary: None,
+                                }
+                            }
+                        };
+                        if matches!(fallback_mode, RenderMode::Json) {
+                            render(&failure, fallback_mode, writer)?;
+                        } else {
+                            render(&failure, fallback_mode, stderr)?;
+                        }
+                        Ok(Outcome::Error)
+                    }
                 },
-            };
-            if matches!(fallback_mode, RenderMode::Json) {
-                render(&failure, fallback_mode, writer)?;
-            } else {
-                let text_result = CommandResult::new(&result.command, Outcome::Error, ());
-                render(&text_result, fallback_mode, stderr)?;
             }
-            Ok(Outcome::Error)
         }
         Err(error) => Err(error),
     }
@@ -1111,6 +1298,7 @@ mod overflow_tests {
             &mut output,
             &mut errors,
             |_| unreachable!("bounded receipt does not need publication"),
+            OverflowPolicy::Refuse,
         )?;
         assert_eq!(status, Outcome::Refused);
         assert_eq!(String::from_utf8(output)?, receipt);
@@ -1122,7 +1310,7 @@ mod overflow_tests {
         let mut output = Vec::new();
         let mut errors = Vec::new();
         let mut published = 0;
-        let status = render_or_publish(
+        let outcome = render_or_publish(
             &result,
             RenderMode::Human {
                 text: receipt,
@@ -1136,8 +1324,9 @@ mod overflow_tests {
                 provenant_records::AbsolutePath::new(std::path::Path::new("/fixture/result.json"))
                     .map_err(io::Error::other)
             },
-        )?;
-        assert_eq!(status, Outcome::Error);
+            OverflowPolicy::Refuse,
+        );
+        assert!(matches!(outcome, Err(RenderError::TooLarge)), "{outcome:?}");
         assert_eq!(published, 1);
         assert!(output.is_empty());
         assert!(String::from_utf8(errors)?.contains("RESULT_TOO_LARGE"));
@@ -1150,7 +1339,7 @@ mod overflow_tests {
         let result = CommandResult::new("dispatch", Outcome::Ok, "x".repeat(MAX_RESULT_BYTES));
         let mut output = Vec::new();
         let mut published = 0;
-        let status = render_or_publish(
+        let outcome = render_or_publish(
             &result,
             RenderMode::Json,
             &mut output,
@@ -1160,8 +1349,9 @@ mod overflow_tests {
                 provenant_records::AbsolutePath::new(std::path::Path::new("/fixture/result.json"))
                     .map_err(io::Error::other)
             },
-        )?;
-        assert_eq!(status, Outcome::Error);
+            OverflowPolicy::Refuse,
+        );
+        assert!(matches!(outcome, Err(RenderError::TooLarge)), "{outcome:?}");
         assert_eq!(published, 1);
         let value: serde_json::Value = serde_json::from_slice(&output)?;
         assert_eq!(value["error"]["code"], "RESULT_TOO_LARGE");
@@ -1173,10 +1363,40 @@ mod overflow_tests {
             &mut output,
             &mut Vec::new(),
             |_| Err(io::ErrorKind::StorageFull.into()),
+            OverflowPolicy::Refuse,
         )?;
         let value: serde_json::Value = serde_json::from_slice(&output)?;
         assert_eq!(value["error"]["code"], "IO");
         assert!(value["data"]["artifact"].is_null());
+        Ok(())
+    }
+
+    #[test]
+    fn published_overflow_proceeds_with_the_envelope_status()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let result = CommandResult::new("dispatch", Outcome::Ok, "x".repeat(MAX_RESULT_BYTES));
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let outcome = render_or_publish(
+            &result,
+            RenderMode::Json,
+            &mut output,
+            &mut errors,
+            |_| {
+                provenant_records::AbsolutePath::new(std::path::Path::new("/fixture/result.json"))
+                    .map_err(io::Error::other)
+            },
+            OverflowPolicy::Proceed,
+        );
+        // The paged envelope keeps `ok`; the caller exits with this same status
+        // so a script's exit code can never disagree with its envelope.
+        assert!(matches!(outcome, Ok(Outcome::Ok)), "{outcome:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output)?;
+        assert_eq!(value["status"], "ok");
+        assert!(value["error"].is_null());
+        assert!(value["data"]["artifact"].is_object());
+        let warning = String::from_utf8(errors)?;
+        assert!(warning.contains("warning: [RESULT_TOO_LARGE]"), "{warning}");
         Ok(())
     }
 }

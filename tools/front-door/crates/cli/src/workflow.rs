@@ -1308,6 +1308,7 @@ pub fn run(
         &mut io::stdout().lock(),
         &mut io::stderr().lock(),
         |_| Err(io::Error::other("result too large")),
+        crate::OverflowPolicy::Refuse,
     ) {
         Ok(status) => crate::exit_status(&status),
         Err(_) => 3,

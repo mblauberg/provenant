@@ -327,11 +327,13 @@ fn oversized_catalogue_never_publishes() -> Result {
     }
     let before = snapshot(&rig.state)?;
     let human = rig.command(&["console", "projects"])?;
-    assert_eq!(code(&human), 3);
-    assert!(human.stdout.bytes.is_empty());
-    assert!(String::from_utf8(human.stderr.bytes)?.contains("RESULT_TOO_LARGE"));
-    let json = call(&rig, &["console", "projects"], 3)?;
-    assert_eq!(json["error"]["code"], "RESULT_TOO_LARGE");
+    assert_eq!(code(&human), 0);
+    assert!(!human.stdout.bytes.is_empty());
+    assert!(human.stdout.bytes.len() <= 1024 * 1024);
+    assert!(String::from_utf8(human.stderr.bytes)?.contains("warning: [RESULT_TOO_LARGE]"));
+    let json = call(&rig, &["console", "projects"], 0)?;
+    assert_eq!(json["data"]["truncated"], true);
+    assert!(json["data"]["omitted_bytes"].as_u64().unwrap() > 0);
     assert_eq!(snapshot(&rig.state)?, before);
     Ok(())
 }

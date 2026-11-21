@@ -818,17 +818,27 @@ fn made_tree(rig: &TestRig, name: &str) -> Result<PathBuf> {
 }
 
 #[test]
-fn worktree_remove_keeps_a_listed_clean_tree_the_hook_did_not_make() -> Result {
+fn worktree_remove_adopts_a_clean_idle_tree_without_a_hook_record() -> Result {
     let rig = TestRig::new()?;
     commit_file(&rig)?;
     let path = made_tree(&rig, "mine")?;
     let record = state_record(&rig)?;
-    // Same tree, but with no state record: it reads as a person's own.
+    // Same tree, but with no state record: it reads as a person's own. A clean,
+    // idle tree is adopted with a warning and removed; the owner still refuses
+    // dirty, live-writer and primary trees (covered elsewhere).
     fs::remove_file(&record)?;
     let output = run_hook(&rig, "worktree-remove", &removal_input(&rig, &path))?;
-    assert_eq!(code(&output), 2);
-    assert!(path.is_dir());
-    // A tree made by hand and listed by the owner is kept too.
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr.bytes).contains("warning: adopting clean worktree")
+    );
+    assert!(!path.exists());
+    // A tree made by hand and listed by the owner is adopted and removed too.
     let hand = rig.project.join(".worktrees").join("by-hand");
     let hand = hand.to_str().ok_or("path")?;
     git(&rig, &["worktree", "add", "-q", "-b", "by-hand", hand])?;
@@ -837,8 +847,16 @@ fn worktree_remove_keeps_a_listed_clean_tree_the_hook_did_not_make() -> Result {
         "worktree-remove",
         &removal_input(&rig, Path::new(hand)),
     )?;
-    assert_eq!(code(&output), 2);
-    assert!(Path::new(hand).is_dir());
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr.bytes).contains("warning: adopting clean worktree")
+    );
+    assert!(!Path::new(hand).is_dir());
     Ok(())
 }
 
@@ -879,7 +897,7 @@ fn state_record(rig: &TestRig) -> Result<PathBuf> {
 }
 
 #[test]
-fn ownership_is_specific_to_one_creation_and_ends_with_the_tree() -> Result {
+fn ownership_records_a_creation_and_lost_records_are_adopted_with_a_warning() -> Result {
     // A recorded tree can be reused and removed; these state changes are the
     // ownership contract at the hook boundary.
     let rig = TestRig::new()?;
@@ -897,7 +915,10 @@ fn ownership_is_specific_to_one_creation_and_ends_with_the_tree() -> Result {
     assert!(!record.exists());
     assert!(!path.exists());
 
-    // A stale path, changed owner token, or moved HEAD cannot be adopted.
+    // A stale path, changed owner token or moved HEAD leaves the ownership
+    // record no longer describing the tree. Ownership is a preference, not a
+    // boundary: a clean, idle tree that lost its record is adopted with a
+    // warning at the same path, not refused or duplicated.
     #[derive(Clone, Copy)]
     enum Alteration {
         RecreatedTree,
@@ -957,7 +978,8 @@ fn ownership_is_specific_to_one_creation_and_ends_with_the_tree() -> Result {
                 )?;
             }
         }
-        refused_create(&rig, name)?;
+        let adopted = adopted_create(&rig, name)?;
+        assert_eq!(adopted, path, "{name}");
         assert!(path.is_dir(), "{name}");
     }
     Ok(())
@@ -970,8 +992,23 @@ fn refused_create(rig: &TestRig, name: &str) -> Result {
     Ok(())
 }
 
+/// A clean, idle tree is taken over with a warning naming the difference, and
+/// its path is returned so the caller can use it rather than make a duplicate.
+fn adopted_create(rig: &TestRig, name: &str) -> Result<PathBuf> {
+    let output = run_hook(rig, "worktree-create", &worktree_input(rig, name))?;
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes).into_owned();
+    assert_eq!(code(&output), 0, "{name}: {stderr}");
+    assert!(
+        stderr.contains("warning: adopting clean worktree"),
+        "{name}: expected an adoption warning: {stderr}"
+    );
+    Ok(PathBuf::from(
+        String::from_utf8(output.stdout.bytes)?.trim_end(),
+    ))
+}
+
 #[test]
-fn worktree_create_never_reuses_primary_unowned_misplaced_or_dirty_trees() -> Result {
+fn worktree_create_refuses_primary_and_dirty_but_adopts_unowned_or_misplaced_trees() -> Result {
     #[derive(Clone, Copy)]
     enum Candidate {
         PrimaryBranch,
@@ -989,11 +1026,14 @@ fn worktree_create_never_reuses_primary_unowned_misplaced_or_dirty_trees() -> Re
         commit_file(&rig)?;
         match candidate {
             Candidate::PrimaryBranch => {
+                // The primary checkout is a real boundary and stays refused.
                 git(&rig, &["checkout", "-q", "-b", "claude/primary-held"])?;
                 refused_create(&rig, name)?;
                 git(&rig, &["checkout", "-q", "-"])?;
             }
             Candidate::UnownedTree => {
+                // A clean, idle tree without this hook's record is adopted with
+                // a warning rather than refused for being unowned.
                 let path = rig.project.join(".worktrees/claude-unowned");
                 git(
                     &rig,
@@ -1006,10 +1046,11 @@ fn worktree_create_never_reuses_primary_unowned_misplaced_or_dirty_trees() -> Re
                         path.to_str().ok_or("path")?,
                     ],
                 )?;
-                refused_create(&rig, name)?;
+                assert_eq!(adopted_create(&rig, name)?, path);
                 assert!(path.is_dir());
             }
             Candidate::MisplacedTree => {
+                // Off-path is a preference, not a boundary: adopt with a warning.
                 let path = rig.root.join("elsewhere");
                 git(
                     &rig,
@@ -1022,10 +1063,11 @@ fn worktree_create_never_reuses_primary_unowned_misplaced_or_dirty_trees() -> Re
                         path.to_str().ok_or("path")?,
                     ],
                 )?;
-                refused_create(&rig, name)?;
+                assert_eq!(adopted_create(&rig, name)?, path);
                 assert!(path.is_dir());
             }
             Candidate::DirtyOwnedTree => {
+                // Uncommitted files are a real boundary and stay refused.
                 let path = made_tree(&rig, name)?;
                 fs::write(path.join("scratch.txt"), "work")?;
                 refused_create(&rig, name)?;
