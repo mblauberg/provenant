@@ -57,7 +57,7 @@ impl SystemSmoke {
     ) -> io::Result<SmokeEnvelope<T>> {
         let mut argv = vec![executable.as_os_str().to_owned()];
         argv.extend(args.iter().map(OsString::from));
-        let mut options = ExecOptions::new(
+        let mut options = ExecOptions::exact(
             &argv,
             executable
                 .parent()

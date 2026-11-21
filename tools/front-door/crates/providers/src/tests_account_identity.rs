@@ -867,7 +867,7 @@ fn host_preparation_never_uses_prepopulated_child_scratch_or_temporary_directori
         claude::refresh_for_account(&executor, &login, &account, &|| now, now + 60_000).unwrap();
         let argv = [login.executable.into(), "--version".into()];
         executor
-            .execute(ExecOptions::new(
+            .execute(ExecOptions::diagnostic(
                 &argv,
                 supplied_cwd,
                 Duration::from_secs(4),

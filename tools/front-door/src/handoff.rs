@@ -103,7 +103,7 @@ fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), R
                 .map(OsString::from),
         )
         .collect();
-    let mut options = ExecOptions::new(&argv, dir, timeout);
+    let mut options = ExecOptions::exact(&argv, dir, timeout);
     options.env = Some(&environment);
     options.stdin = Some(b"");
     let limit = provenant_os::git::fact_capture_limit(args, 64 * 1024);

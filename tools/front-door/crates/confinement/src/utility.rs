@@ -6,10 +6,7 @@ use crate::repo::{
 use crate::transport::{self, ConfigEntry, LaneRoots, TransportError};
 use provenant_core::{CancelToken, DurationMicros, GitOid, Pause, ThreadPause};
 use provenant_os::{
-    exec::{
-        CaptureMask, ExecError, ExecOptions, ExecOutcome, Executor, RawCaptureReason, StreamPolicy,
-        Termination,
-    },
+    exec::{ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination},
     fs::{Directory, FileKind, FsError, Metadata, canonicalize, effective_uid},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -1748,12 +1745,11 @@ pub(crate) fn exec_options<'a>(
     stdin: Option<&'a [u8]>,
     cancel: Option<&'a CancelToken>,
 ) -> ExecOptions<'a> {
-    let mut options = ExecOptions::new(argv, cwd, budget.timeout);
     // Every utility stdout is parsed byte-for-byte (object ids, patches,
     // porcelain fields) and checked against `total_bytes` by
-    // `validate_outcome`. Keep it raw so masking cannot rewrite Git bytes;
-    // stderr stays masked by the executor's default stream filter.
-    options.stdout_mask = CaptureMask::Raw(RawCaptureReason::ByteExactParse);
+    // `validate_outcome`, so it is exact. Stderr reaches diagnostics and is
+    // masked on the stream.
+    let mut options = ExecOptions::exact(argv, cwd, budget.timeout);
     options.env = Some(env);
     options.stdin = stdin;
     options.stop_on_output_limit = true;
@@ -3663,7 +3659,7 @@ pub(crate) mod tests {
         std::os::unix::fs::symlink(&target, &link)?;
         let pin = ExecutablePin::new(&link, "git")?;
         let argv = [link.as_os_str().to_owned()];
-        let options = || ExecOptions::new(&argv, &root, Duration::from_secs(1));
+        let options = || ExecOptions::diagnostic(&argv, &root, Duration::from_secs(1));
 
         let executor = VanishesOnce(Default::default());
         pin.execute(&executor, options)?;

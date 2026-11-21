@@ -223,7 +223,9 @@ pub fn repository_path_with_cancel(
     ]
     .map(|(k, v)| (k.into(), v.into()))
     .into();
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(10));
+    // The path is parsed byte-for-byte, so stdout is exact; stderr is a
+    // masked diagnostic that may reach an error.
+    let mut options = ExecOptions::exact(&argv, cwd, Duration::from_secs(10));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture {
         limit: REPO_FACT_SCALAR_LIMIT,

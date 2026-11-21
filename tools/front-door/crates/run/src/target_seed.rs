@@ -619,7 +619,7 @@ pub fn rustc_metadata(worktree: &Path) -> io::Result<(String, String)> {
     // ambient value must never reach this verify-base compiler probe.
     env.retain(|(key, _)| key != provenant_core::consumer_env::SEED_ORIGIN);
     env.push(("RUSTUP_AUTO_INSTALL".into(), "0".into()));
-    let mut options = ExecOptions::new(&argv, worktree, std::time::Duration::from_secs(30));
+    let mut options = ExecOptions::exact(&argv, worktree, std::time::Duration::from_secs(30));
     options.env = Some(&env);
     let output = SystemExecutor::new(1)
         .and_then(|executor| executor.execute(options))
@@ -753,7 +753,7 @@ pub(crate) fn lane_rustc_metadata_cancellable(
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
     let argv = [resolved.into_os_string(), "-vV".into()];
     let env = [("HOME".into(), home.as_os_str().into())];
-    let mut options = ExecOptions::new(&argv, home, std::time::Duration::from_secs(2));
+    let mut options = ExecOptions::exact(&argv, home, std::time::Duration::from_secs(2));
     options.cancel = cancel;
     options.process_group = true;
     options.env = Some(&env);

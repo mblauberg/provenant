@@ -579,7 +579,7 @@ impl RepoFacts {
             "--porcelain".into(),
             "-z".into(),
         ]);
-        let mut options = ExecOptions::new(&argv, query.cwd, query.timeout);
+        let mut options = ExecOptions::exact(&argv, query.cwd, query.timeout);
         options.env = Some(query.environment);
         options.stdin = Some(b"");
         options.cancel = Some(query.cancel);
@@ -1392,8 +1392,11 @@ mod path_tests {
             let argv: Vec<OsString> = words.into_iter().map(OsString::from).collect();
             let result: Result<(), WorktreeError> =
                 facts.with_executor(&Truncated { expected }, &cancellation, |executor| {
-                    let mut options =
-                        ExecOptions::new(&argv, Path::new("/"), std::time::Duration::from_secs(1));
+                    let mut options = ExecOptions::diagnostic(
+                        &argv,
+                        Path::new("/"),
+                        std::time::Duration::from_secs(1),
+                    );
                     options.stdout = StreamPolicy::Capture { limit: caller_cap };
                     let _ = executor.execute(options);
                     Ok(()) // Resolver's own error mapping cannot discard fact evidence.
@@ -1449,7 +1452,7 @@ mod path_tests {
             let result: Result<(), WorktreeError> =
                 facts.with_executor(&StderrOverflow { stdout_truncated }, &cancel, |executor| {
                     let output = executor
-                        .execute(ExecOptions::new(
+                        .execute(ExecOptions::diagnostic(
                             &argv,
                             Path::new("/"),
                             std::time::Duration::from_secs(1),

@@ -147,7 +147,8 @@ pub fn run_git(cwd: &Path, args: &[&str]) -> io::Result<Vec<u8>> {
         .chain(args.iter().map(OsString::from))
         .collect();
     let env = git_env();
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(60));
+    // Fixtures consume stdout byte-for-byte; stderr is a masked diagnostic.
+    let mut options = ExecOptions::exact(&argv, cwd, Duration::from_secs(60));
     options.env = Some(&env);
     let outcome = fixture_executor()?
         .execute(options)

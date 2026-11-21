@@ -2167,7 +2167,7 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         .into_iter()
         .map(|(k, v)| (k.into(), v))
         .collect();
-        let mut options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(10));
+        let mut options = ExecOptions::diagnostic(&argv, temp.path(), Duration::from_secs(10));
         options.env = Some(&env);
         options.stdout = StreamPolicy::Capture { limit: 8192 };
         options.stderr = StreamPolicy::Capture { limit: 8192 };

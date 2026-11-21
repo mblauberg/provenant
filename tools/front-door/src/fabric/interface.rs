@@ -4886,7 +4886,7 @@ mod tests {
                 "--nocapture".into(),
             ];
             let cwd = std::env::current_dir()?;
-            let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(60));
+            let mut options = ExecOptions::diagnostic(&argv, &cwd, Duration::from_secs(60));
             options.env = Some(&environment);
             options.stdout = StreamPolicy::Capture { limit: 65_536 };
             options.stderr = StreamPolicy::Capture { limit: 65_536 };

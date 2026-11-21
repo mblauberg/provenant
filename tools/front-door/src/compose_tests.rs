@@ -17,7 +17,10 @@ fn guardian_capture_preserves_raw_provider_frames_for_settlement() {
             _: &[std::ffi::OsString],
             hooks: provenant_supervisor::GuardianHooks<'_>,
         ) -> provenant_supervisor::custody::Result<()> {
-            use provenant_os::{capture::StreamCapture, exec::StreamPolicy};
+            use provenant_os::{
+                capture::StreamCapture,
+                exec::{CapturePurpose, StreamPolicy},
+            };
             assert!(hooks.stdout_filter.is_none());
             assert!(hooks.stderr_filter.is_none());
             let frames = [
@@ -35,12 +38,14 @@ fn guardian_capture_preserves_raw_provider_frames_for_settlement() {
             let mut stdout = StreamCapture::new(
                 StreamPolicy::Capture { limit: 4096 },
                 None,
+                CapturePurpose::Exact,
                 hooks.stdout_filter,
             )
             .map_err(std::io::Error::other)?;
             let mut stderr = StreamCapture::new(
                 StreamPolicy::Capture { limit: 4096 },
                 None,
+                CapturePurpose::Exact,
                 hooks.stderr_filter,
             )
             .map_err(std::io::Error::other)?;

@@ -28,7 +28,7 @@ pub(super) fn reexec_test_in_lane(name: &str) -> Result<bool, Box<dyn std::error
         "run::tests::dispatch_reuses_only_free_lane_or_unowned_worktree" => 90,
         _ => 30,
     };
-    let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(timeout));
+    let mut options = ExecOptions::diagnostic(&argv, &cwd, Duration::from_secs(timeout));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 65_536 };
     options.stderr = StreamPolicy::Capture { limit: 65_536 };
@@ -73,7 +73,7 @@ fn linked_fixture() -> Result<LinkedFixture, Box<dyn std::error::Error>> {
         let argv: Vec<_> = std::iter::once(git.as_os_str().to_owned())
             .chain(args.into_iter().map(std::ffi::OsString::from))
             .collect();
-        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(10));
+        let mut options = ExecOptions::diagnostic(&argv, &project, Duration::from_secs(10));
         options.env = Some(&env);
         let output = executor.execute(options)?;
         assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
@@ -393,7 +393,7 @@ fn invalid_sealed_root_never_writes_to_registry_root() -> Result<(), Box<dyn std
             .collect();
         env.push((OsString::from(MARKER), OsString::from("1")));
         let cwd = std::env::current_dir()?;
-        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+        let mut options = ExecOptions::diagnostic(&argv, &cwd, Duration::from_secs(30));
         options.env = Some(&env);
         options.stdout = StreamPolicy::Capture { limit: 65_536 };
         options.stderr = StreamPolicy::Capture { limit: 65_536 };
@@ -513,7 +513,7 @@ fn nested_capacity_settlement_does_not_write_shared_cooldown()
             OsString::from("nested"),
         ));
         let cwd = std::env::current_dir()?;
-        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+        let mut options = ExecOptions::diagnostic(&argv, &cwd, Duration::from_secs(30));
         options.env = Some(&env);
         options.stdout = StreamPolicy::Capture { limit: 65_536 };
         options.stderr = StreamPolicy::Capture { limit: 65_536 };
@@ -586,7 +586,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
             .filter(|(key, _)| !removed.contains(&key.as_os_str()))
             .collect();
         let cwd = std::env::current_dir()?;
-        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+        let mut options = ExecOptions::diagnostic(&argv, &cwd, Duration::from_secs(30));
         options.env = Some(&env);
         options.stdout = StreamPolicy::Capture { limit: 65536 };
         options.stderr = StreamPolicy::Capture { limit: 65536 };
@@ -612,7 +612,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
             .chain(args.iter().map(OsString::from))
             .collect();
         let env = provenant_os::fixture::fixture_git_settings();
-        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(10));
+        let mut options = ExecOptions::diagnostic(&argv, &cwd, Duration::from_secs(10));
         options.env = Some(&env);
         options.stdout = StreamPolicy::Capture { limit: 65536 };
         options.stderr = StreamPolicy::Capture { limit: 65536 };

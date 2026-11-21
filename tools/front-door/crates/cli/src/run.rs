@@ -2095,7 +2095,12 @@ fn price_document(
         .iter()
         .map(std::ffi::OsString::from)
         .collect();
-        let mut options = ExecOptions::new(&argv, home, Duration::from_secs(65));
+        // The fetched document is parsed byte-for-byte with serde_json. A
+        // credential-shaped key with a non-string value (the LiteLLM price
+        // sheet's `input_cost_per_token`) would become `[REDACTED]` under a
+        // diagnostic mask and fail to parse, so stdout stays exact; stderr is
+        // discarded.
+        let mut options = ExecOptions::exact(&argv, home, Duration::from_secs(65));
         options.stdin = Some(b"");
         options.stdout = StreamPolicy::Capture { limit: LIMIT };
         options.stderr = StreamPolicy::Discard;

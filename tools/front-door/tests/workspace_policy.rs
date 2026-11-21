@@ -504,7 +504,7 @@ struct ExecutorUse {
 // helper. With `env` unset the child inherits the lane's GIT_DIR and GIT_WORK_TREE,
 // so a fixture commits into the lane. An explicit `env` does not inherit them.
 // Judged per function body: a function that names the Git executable must give
-// every `ExecOptions::new` an explicit `env`, or call `git_env`, within itself.
+// every `ExecOptions` construction an explicit `env`, or call `git_env`, within itself.
 // Works on tokens, so comments and string literals cannot trigger or hide a use.
 fn executor_git_violation(source: &str, test_file: bool) -> bool {
     let tokens: Vec<&str> = test_scopes(source, test_file)
@@ -546,7 +546,13 @@ fn executor_git_violation(source: &str, test_file: bool) -> bool {
             }
             "git_executable" => functions[owner].git_executable = true,
             "git_env" if next == Some("(") => functions[owner].git_env = true,
-            "ExecOptions" if next == Some("::") && after == Some("new") => {
+            "ExecOptions"
+                if next == Some("::")
+                    && matches!(
+                        after,
+                        Some("new" | "diagnostic" | "exact" | "exact_both" | "with_purposes")
+                    ) =>
+            {
                 functions[owner].option_sites += 1;
             }
             "env" if matches!(next, Some("=") | Some(":")) && after == Some("Some") => {
@@ -1255,109 +1261,124 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Rule: every `ExecOptions` capture is masked on the stream by the executor
-/// unless the site opts out with a typed, named reason. Pin the structural
-/// halves in the executor and capture, and reject a capture site that builds
-/// its own `for_local_disclosure` filter now that the default owns that job.
+/// Rule: purpose is mandatory. There is no default mask and no opt-out
+/// allowlist; every capture declares `Exact` or `Diagnostic` where it is
+/// built, and only the executor installs a stream mask. Pin that structure so
+/// a silent return to an implicit default cannot reintroduce the JSON and
+/// porcelain corruption this fixed.
 #[test]
-fn every_capture_uses_the_default_mask_unless_it_names_a_reason() -> Result<(), Box<dyn Error>> {
+fn every_capture_states_its_purpose() -> Result<(), Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let exec = fs::read_to_string(root.join("crates/os/src/exec.rs"))?;
     let capture = fs::read_to_string(root.join("crates/os/src/capture.rs"))?;
 
-    for field in ["stdout_mask", "stderr_mask"] {
-        let default = format!("{field}: CaptureMask::default()");
+    assert!(
+        exec.contains("pub enum CapturePurpose"),
+        "the purpose must be a typed choice"
+    );
+    for (constructor, purpose) in [
+        ("pub fn exact(", "Exact"),
+        ("pub fn diagnostic(", "Diagnostic"),
+        ("pub fn exact_both(", "Exact"),
+        ("pub fn with_purposes(", "Exact"),
+    ] {
         assert!(
-            exec.contains(&default),
-            "ExecOptions::new must default {field} to the mask"
+            exec.contains(constructor),
+            "ExecOptions must offer a named constructor for {purpose}"
         );
-        let wire = format!("Some(options.{field})");
+    }
+    for field in ["stdout_purpose", "stderr_purpose"] {
         assert!(
-            exec.contains(&wire),
+            exec.contains(&format!("{field}: CapturePurpose")),
+            "ExecOptions must require {field} at construction"
+        );
+        assert!(
+            exec.contains(&format!("options.{field}")),
             "run_inner must pass {field} into the capture"
         );
     }
     assert!(
-        exec.contains("StreamCapture::new_with_mask("),
-        "the executor must install the default mask on captured streams"
+        exec.contains("StreamCapture::new_with_writer("),
+        "the executor must install the declared purpose on captured streams"
+    );
+    assert!(
+        capture.contains("CapturePurpose::Exact") && capture.contains("CapturePurpose::Diagnostic"),
+        "the capture must honour both purposes"
     );
     assert!(
         capture.contains("Redactor::for_local_disclosure()"),
-        "the default mask must use local-disclosure redaction"
+        "a diagnostic capture must use local-disclosure redaction"
     );
 
     let mut violations = Vec::new();
     let policy_source = root.join(file!());
+    let mut sources = Vec::new();
     for source_root in source_roots() {
-        let mut sources = Vec::new();
         rust_sources(&source_root, &mut sources)?;
-        for path in sources {
-            // This policy test names the tokens it checks; it is not a capture
-            // site. Skip only its own source, not the other test fixtures.
-            if path == policy_source {
-                continue;
-            }
-            let redaction_owner = path.starts_with(root.join("crates/redact"));
-            let executor = path == root.join("crates/os/src/exec.rs")
-                || path == root.join("crates/os/src/capture.rs");
-            let text = fs::read_to_string(&path)?;
-            for (index, line) in text.lines().enumerate() {
-                let code = line.split("//").next().unwrap_or(line);
-                if !redaction_owner && !executor && code.contains("for_local_disclosure") {
-                    violations.push(format!(
-                        "{}:{}: capture site builds its own for_local_disclosure filter \
-                         instead of using the executor default",
-                        path.display(),
-                        index + 1
-                    ));
-                }
-                // A named reason is required where the variant is built. The
-                // enum's wildcard match arm and prose are not opt-out sites.
-                if let Some(start) = code.find("CaptureMask::Raw(") {
-                    let argument = code[start + "CaptureMask::Raw(".len()..].trim_start();
-                    if !argument.starts_with('_') && !argument.contains("RawCaptureReason::") {
-                        violations.push(format!(
-                            "{}:{}: CaptureMask::Raw must name a RawCaptureReason",
-                            path.display(),
-                            index + 1
-                        ));
-                    }
-                }
+    }
+    for path in sources {
+        if path == policy_source {
+            continue;
+        }
+        let redaction_owner = path.starts_with(root.join("crates/redact"));
+        let executor = path == root.join("crates/os/src/exec.rs")
+            || path == root.join("crates/os/src/capture.rs");
+        for (index, line) in fs::read_to_string(&path)?.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or(line);
+            if !redaction_owner && !executor && code.contains("for_local_disclosure") {
+                violations.push(format!(
+                    "{}:{}: capture site builds its own for_local_disclosure filter \
+                     instead of using the executor purpose",
+                    path.display(),
+                    index + 1
+                ));
             }
         }
     }
     assert!(
         violations.is_empty(),
-        "capture masking rule:\n{}",
+        "capture purpose rule:\n{}",
         violations.join("\n")
     );
     Ok(())
 }
 
-/// Rule: a site that consumes captured bytes byte-for-byte must opt out of the
-/// executor's default stream mask with a reason that names what it owns. A
-/// parser keeps its bytes with `ByteExactParse`; a site whose bytes are the
-/// credential itself keeps them with `CallerOwnsRedaction`, because nothing is
-/// parsed and the caller owns the redaction boundary.
+/// Rule: a site that consumes captured bytes byte-for-byte declares an exact
+/// purpose, and so does a site that captures the credential itself. A
+/// diagnostic mask would rewrite credential-shaped keys and `-z` path bytes
+/// before the caller parses them: the LiteLLM price document's
+/// `input_cost_per_token` and git porcelain's `config/token=abc/one` are the
+/// concrete regressions this pins.
 #[test]
-fn byte_exact_capture_sites_opt_out_of_the_default_mask() -> Result<(), Box<dyn Error>> {
+fn byte_exact_and_credential_captures_declare_exact() -> Result<(), Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    // Parsers: stdout is a byte-level protocol or response checked against
-    // `total_bytes`, where a rewrite would corrupt what the caller reads.
+    let declares_exact = |source: &str| {
+        source.contains("ExecOptions::exact(")
+            || source.contains("ExecOptions::exact_both(")
+            || source.contains("CapturePurpose::Exact")
+            || source.contains("command_exact(")
+    };
+
+    // Parsers: stdout is a byte-level protocol, document or path list that is
+    // checked against `total_bytes` or parsed; a rewrite would corrupt it.
     for path in [
         "crates/confinement/src/utility.rs",
         "crates/config/src/ports.rs",
         "crates/config/src/ports/forge.rs",
         "crates/run/src/delivery.rs",
+        "crates/cli/src/run.rs", // price_document (serde_json document)
+        "crates/cli/src/run/launch_policy.rs", // `-z` git porcelain paths
+        "crates/cli/src/run/output.rs", // `-z` git porcelain paths
+        "crates/cli/src/model_discovery.rs", // model-listing JSON
+        "crates/cli/src/workflow.rs", // `gh pr view` JSON
     ] {
         let source = fs::read_to_string(root.join(path))?;
         assert!(
-            source.contains("CaptureMask::Raw(RawCaptureReason::ByteExactParse)"),
-            "{path} parses captured bytes byte-for-byte and must opt out of the default mask"
+            declares_exact(&source),
+            "{path} parses captured stdout byte-for-byte and must declare an exact purpose"
         );
     }
     // Credentials: the captured bytes are the secret, not a value being parsed.
-    // The higher layer owns redaction and needs the token intact for the wire.
     for path in [
         "crates/cli/src/run/provider/gh_auth.rs",
         "crates/providers/src/claude.rs",
@@ -1365,18 +1386,16 @@ fn byte_exact_capture_sites_opt_out_of_the_default_mask() -> Result<(), Box<dyn 
     ] {
         let source = fs::read_to_string(root.join(path))?;
         assert!(
-            source.contains("CaptureMask::Raw(RawCaptureReason::CallerOwnsRedaction)"),
-            "{path} captures a credential it owns and must opt out of the default mask"
+            declares_exact(&source),
+            "{path} captures a credential it owns and must declare an exact purpose"
         );
     }
 
-    // Derive the credential-capture sites from the tree rather than trusting
-    // the list above: any source that asks the Keychain for a password with
-    // `-w` and then consumes the captured stdout holds a token the default
-    // mask would silently rewrite to `[REDACTED]` (which may still parse but
-    // cannot authenticate). A new site of this shape must name a Raw reason
-    // where it reads the credential, so the allowlist cannot go stale for this
-    // class of defect.
+    // Derive Keychain readers from the tree so a newly added reader cannot
+    // silently revert to a masked capture. Any source that asks the Keychain
+    // for a password with `-w` and consumes captured stdout holds a token the
+    // diagnostic mask would rewrite to `[REDACTED]`: it would parse cleanly
+    // but could not authenticate.
     let policy_source = root.join(file!());
     let mut sources = Vec::new();
     for source_root in source_roots() {
@@ -1396,17 +1415,16 @@ fn byte_exact_capture_sites_opt_out_of_the_default_mask() -> Result<(), Box<dyn 
         if !keychain_read || !code.contains(".stdout.bytes") {
             continue;
         }
-        if !code.contains("CaptureMask::Raw(RawCaptureReason::") {
+        if !declares_exact(&code) {
             violations.push(format!(
-                "{}: reads a Keychain credential into captured stdout without a \
-                 named raw opt-out",
+                "{}: reads a Keychain credential into captured stdout without an exact purpose",
                 path.display()
             ));
         }
     }
     assert!(
         violations.is_empty(),
-        "credential capture masking rule:\n{}",
+        "credential capture purpose rule:\n{}",
         violations.join("\n")
     );
     Ok(())

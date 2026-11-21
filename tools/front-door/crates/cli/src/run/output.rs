@@ -868,7 +868,9 @@ fn residual_tree_evidence(
             let argv: Vec<std::ffi::OsString> = std::iter::once(git.as_os_str().to_owned())
                 .chain(args.iter().map(|arg| std::ffi::OsString::from(*arg)))
                 .collect();
-            let mut options = ExecOptions::new(&argv, &worktree, Duration::from_secs(5));
+            // `-z` porcelain paths are parsed on NUL and recorded as evidence;
+            // keep stdout exact so a credential-shaped path is not rewritten.
+            let mut options = ExecOptions::exact(&argv, &worktree, Duration::from_secs(5));
             options.stdout = StreamPolicy::Capture { limit: 65536 };
             options.stderr = StreamPolicy::Discard;
             options.stop_on_output_limit = true;
@@ -949,7 +951,9 @@ fn changed_paths(
         head.to_string().into(),
         "--".into(),
     ];
-    let mut options = ExecOptions::new(&argv, project, Duration::from_secs(5));
+    // `-z` porcelain paths are parsed on NUL and recorded as evidence; keep
+    // stdout exact so a credential-shaped path is not rewritten.
+    let mut options = ExecOptions::exact(&argv, project, Duration::from_secs(5));
     options.stdout = StreamPolicy::Capture { limit: 65536 };
     options.stderr = StreamPolicy::Discard;
     options.stop_on_output_limit = true;

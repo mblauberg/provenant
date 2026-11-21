@@ -332,7 +332,7 @@ fn local_branch_tip(cwd: &Path, branch: &str) -> Option<String> {
             OsString::from(reference.as_str()),
         ]
         .into();
-        let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(10));
+        let mut options = ExecOptions::exact(&argv, cwd, Duration::from_secs(10));
         options.env = Some(&environment);
         options.stdin = Some(b"");
         options.stdout = StreamPolicy::Capture { limit: 128 };

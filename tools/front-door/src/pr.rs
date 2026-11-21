@@ -96,7 +96,7 @@ fn raw_execute_cancellable(
     cancel: Option<&provenant_core::CancelToken>,
 ) -> Result<ExecOutcome> {
     let argv: Vec<OsString> = argv.iter().map(OsString::from).collect();
-    let mut options = ExecOptions::new(&argv, project, timeout);
+    let mut options = ExecOptions::exact(&argv, project, timeout);
     options.stdin = stdin;
     options.cancel = cancel;
     options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };

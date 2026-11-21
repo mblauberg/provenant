@@ -148,7 +148,7 @@ pub(crate) fn execute_bounded(
     let retry_cancel = cancel.cloned().unwrap_or_default();
     let mut incomplete = None;
     let mut run_attempt = |timeout| {
-        let mut options = ExecOptions::new(&argv, cwd, timeout);
+        let mut options = ExecOptions::exact(&argv, cwd, timeout);
         options.env = Some(&env);
         options.cancel = Some(&retry_cancel);
         options.process_group = true;

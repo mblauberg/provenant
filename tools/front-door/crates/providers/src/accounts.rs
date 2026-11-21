@@ -513,7 +513,7 @@ fn detect_with_org_inner(
         ("PATH".into(), "/usr/bin:/bin".into()),
         ("CLAUDE_CONFIG_DIR".into(), directory.into()),
     ];
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(4));
+    let mut options = ExecOptions::exact(&argv, cwd, Duration::from_secs(4));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 65536 };
     options.stderr = StreamPolicy::Capture { limit: 65536 };
@@ -593,7 +593,7 @@ fn detect_agy(
         ("USER".into(), user.into()),
         ("PATH".into(), "/usr/bin:/bin".into()),
     ];
-    let mut options = ExecOptions::new(
+    let mut options = ExecOptions::exact(
         &argv,
         cwd,
         Duration::from_secs(crate::agy::REGISTRATION.quota.probe_seconds),

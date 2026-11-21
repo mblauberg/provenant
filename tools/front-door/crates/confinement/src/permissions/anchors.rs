@@ -293,7 +293,7 @@ impl ConfinedCommand {
         self.profile
             .verify_command(&self.argv)
             .map_err(PermissionError::ProfileTransport)?;
-        let mut options = provenant_os::exec::ExecOptions::new(&self.argv, cwd, timeout);
+        let mut options = provenant_os::exec::ExecOptions::diagnostic(&self.argv, cwd, timeout);
         options.inherited_profile = Some(&self.profile);
         Ok(options)
     }

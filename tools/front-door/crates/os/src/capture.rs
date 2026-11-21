@@ -3,7 +3,7 @@
 #[cfg(test)]
 use crate::exec::NonblockingSink;
 use crate::exec::{
-    CaptureFilter, CaptureMask, CapturedStream, ExecError, FRAME_LIMIT, FilterError, FrameSink,
+    CaptureFilter, CapturePurpose, CapturedStream, ExecError, FRAME_LIMIT, FilterError, FrameSink,
     MAX_CAPTURE_LIMIT, QueueLoss, StreamPolicy,
 };
 use std::io::{self, Read, Write};
@@ -120,16 +120,16 @@ pub(crate) struct Frames {
     partial_terminal_sent: bool,
 }
 
-/// The executor-owned default mask. It is the first filter stage, so masking
-/// happens before a caller filter and before the retention bound. If the
-/// redactor cannot be built, the whole stream is withheld rather than passing
-/// raw bytes through.
+/// The diagnostic capture's owned mask. It is the first filter stage, so
+/// masking happens before a caller filter and before the retention bound. If
+/// the redactor cannot be built, the whole stream is withheld rather than
+/// passing raw bytes through.
 enum DefaultMask {
     Active(Box<provenant_redact::Redactor>),
     Withheld,
 }
 
-/// Compose the owned default mask with the caller filter for one pump turn.
+/// Compose the owned diagnostic mask with the caller filter for one pump turn.
 fn compose_filter<'m, 'c>(
     mask: &'m mut Option<DefaultMask>,
     caller: &'m mut Option<&'c mut dyn CaptureFilter>,
@@ -141,7 +141,7 @@ fn compose_filter<'m, 'c>(
     }
 }
 
-/// Composes the executor-owned mask ahead of a caller filter without forcing
+/// Composes the capture's mask ahead of a caller filter without forcing
 /// either into a `'static` trait object. Mask frames are staged before being
 /// forwarded, so masking always decides bytes before the caller sees them.
 struct MaskedFilter<'m, 'c> {
@@ -213,30 +213,23 @@ pub struct StreamCapture<'a, 'f> {
     outcome: CapturedStream,
 }
 impl<'a, 'f> StreamCapture<'a, 'f> {
+    /// Construct a capture with its purpose stated at the call site. A
+    /// diagnostic capture owns a local-disclosure mask installed as the first
+    /// filter stage, ahead of any caller filter and ahead of the retention
+    /// bound; an exact capture installs no mask and keeps raw bytes.
     pub fn new(
         policy: StreamPolicy<'a>,
         decoder: Option<FrameDelivery<'a>>,
+        purpose: CapturePurpose,
         filter: Option<&'f mut dyn CaptureFilter>,
     ) -> Result<Self, ExecError> {
-        Self::new_with_writer(policy, decoder, filter, None)
+        Self::new_with_writer(policy, decoder, purpose, filter, None)
     }
 
     pub fn new_with_writer(
         policy: StreamPolicy<'a>,
         decoder: Option<FrameDelivery<'a>>,
-        filter: Option<&'f mut dyn CaptureFilter>,
-        writer: Option<&'f mut dyn Write>,
-    ) -> Result<Self, ExecError> {
-        Self::new_with_mask(policy, decoder, None, filter, writer)
-    }
-
-    /// Construct a capture with an executor-owned default mask. `None` means
-    /// the site opted out of masking with a named `CaptureMask::Raw` reason;
-    /// non-executor callers use [`Self::new_with_writer`] and install no mask.
-    pub fn new_with_mask(
-        policy: StreamPolicy<'a>,
-        decoder: Option<FrameDelivery<'a>>,
-        mask: Option<CaptureMask>,
+        purpose: CapturePurpose,
         filter: Option<&'f mut dyn CaptureFilter>,
         writer: Option<&'f mut dyn Write>,
     ) -> Result<Self, ExecError> {
@@ -250,14 +243,14 @@ impl<'a, 'f> StreamCapture<'a, 'f> {
         if limit > MAX_CAPTURE_LIMIT {
             return Err(ExecError::InvalidLimit);
         }
-        let mask = mask.and_then(|policy| match policy {
-            CaptureMask::Raw(_) => None,
-            CaptureMask::Mask => Some(
+        let mask = match purpose {
+            CapturePurpose::Exact => None,
+            CapturePurpose::Diagnostic => Some(
                 provenant_redact::Redactor::for_local_disclosure()
                     .map(|redactor| DefaultMask::Active(Box::new(redactor)))
                     .unwrap_or(DefaultMask::Withheld),
             ),
-        });
+        };
         Ok(Self {
             policy,
             decoder,
@@ -819,6 +812,7 @@ mod tests {
             let mut capture = StreamCapture::new(
                 StreamPolicy::Discard,
                 Some(provider(&decoder, &events)),
+                CapturePurpose::Exact,
                 None,
             )
             .unwrap();
@@ -839,6 +833,7 @@ mod tests {
         let mut capture = StreamCapture::new(
             StreamPolicy::Discard,
             Some(provider(&decoder, &events)),
+            CapturePurpose::Exact,
             None,
         )
         .unwrap();
@@ -862,7 +857,13 @@ mod tests {
 
     #[test]
     fn tail_retains_latest_bytes_across_chunks() {
-        let mut capture = StreamCapture::new(StreamPolicy::Tail { limit: 4 }, None, None).unwrap();
+        let mut capture = StreamCapture::new(
+            StreamPolicy::Tail { limit: 4 },
+            None,
+            CapturePurpose::Exact,
+            None,
+        )
+        .unwrap();
         capture.push(b"abc").unwrap();
         capture.push(b"def").unwrap();
         assert_eq!(capture.outcome().bytes, b"cdef");
@@ -870,7 +871,13 @@ mod tests {
         capture.push(b"123456").unwrap();
         assert_eq!(capture.outcome().bytes, b"3456");
         assert_eq!(capture.outcome().total_bytes, 12);
-        let mut empty = StreamCapture::new(StreamPolicy::Tail { limit: 0 }, None, None).unwrap();
+        let mut empty = StreamCapture::new(
+            StreamPolicy::Tail { limit: 0 },
+            None,
+            CapturePurpose::Exact,
+            None,
+        )
+        .unwrap();
         empty.push(b"x").unwrap();
         assert!(empty.outcome().bytes.is_empty());
         assert!(empty.outcome().truncated);
@@ -883,6 +890,7 @@ mod tests {
         let capture = StreamCapture::new(
             StreamPolicy::Capture { limit: 0 },
             Some(provider(&decoder, &events)),
+            CapturePurpose::Exact,
             None,
         );
         assert!(capture.is_ok());
@@ -904,6 +912,7 @@ mod tests {
         let mut capture = StreamCapture::new(
             StreamPolicy::Capture { limit: 0 },
             Some(provider(&decoder, &events)),
+            CapturePurpose::Exact,
             None,
         )
         .unwrap();
@@ -923,6 +932,7 @@ mod tests {
         let capture = StreamCapture::new(
             StreamPolicy::Capture { limit: 8 },
             Some(provider(&decoder, &events)),
+            CapturePurpose::Exact,
             None,
         );
         assert!(capture.is_ok());
@@ -945,6 +955,7 @@ mod tests {
         let capture = StreamCapture::new(
             StreamPolicy::Capture { limit: 0 },
             Some(provider(&decoder, &events)),
+            CapturePurpose::Exact,
             None,
         );
         assert!(capture.is_ok());
@@ -970,6 +981,7 @@ mod tests {
         let capture = StreamCapture::new(
             StreamPolicy::Capture { limit: 64 },
             Some(provider(&decoder, &events)),
+            CapturePurpose::Exact,
             None,
         );
         assert!(capture.is_ok());
@@ -986,8 +998,12 @@ mod tests {
     #[test]
     fn filter_runs_before_retention_and_filter_failure_discards_output() {
         let mut filter = ReplacingFilter;
-        let capture =
-            StreamCapture::new(StreamPolicy::Capture { limit: 10 }, None, Some(&mut filter));
+        let capture = StreamCapture::new(
+            StreamPolicy::Capture { limit: 10 },
+            None,
+            CapturePurpose::Exact,
+            Some(&mut filter),
+        );
         assert!(capture.is_ok());
         let Ok(mut capture) = capture else {
             return;
@@ -998,8 +1014,12 @@ mod tests {
         let _outcome = capture.into_outcome();
 
         let mut filter = FailingFilter;
-        let capture =
-            StreamCapture::new(StreamPolicy::Capture { limit: 16 }, None, Some(&mut filter));
+        let capture = StreamCapture::new(
+            StreamPolicy::Capture { limit: 16 },
+            None,
+            CapturePurpose::Exact,
+            Some(&mut filter),
+        );
         assert!(capture.is_ok());
         let Ok(mut capture) = capture else {
             return;
@@ -1031,6 +1051,7 @@ mod tests {
                 limit: FRAME_LIMIT * 3 + 1,
             },
             None,
+            CapturePurpose::Exact,
             Some(&mut filter),
         )
         .expect("valid capture");
@@ -1055,8 +1076,12 @@ mod tests {
         let mut filter = FinishingFilter {
             pending: Vec::new(),
         };
-        let capture =
-            StreamCapture::new(StreamPolicy::Capture { limit: 16 }, None, Some(&mut filter));
+        let capture = StreamCapture::new(
+            StreamPolicy::Capture { limit: 16 },
+            None,
+            CapturePurpose::Exact,
+            Some(&mut filter),
+        );
         assert!(capture.is_ok());
         let Ok(mut capture) = capture else {
             return;
@@ -1080,6 +1105,7 @@ mod tests {
                 sink: &tee,
             },
             None,
+            CapturePurpose::Exact,
             None,
         );
         assert!(capture.is_ok());
@@ -1102,11 +1128,13 @@ mod tests {
                 limit: MAX_CAPTURE_LIMIT + 1,
             },
             None,
+            CapturePurpose::Exact,
             None,
         );
         assert!(matches!(too_large, Err(ExecError::InvalidLimit)));
 
-        let capture = StreamCapture::new(StreamPolicy::default(), None, None);
+        let capture =
+            StreamCapture::new(StreamPolicy::default(), None, CapturePurpose::Exact, None);
         assert!(capture.is_ok());
         let Ok(mut capture) = capture else {
             return;

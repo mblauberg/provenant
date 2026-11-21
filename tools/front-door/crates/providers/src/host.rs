@@ -44,7 +44,7 @@ pub fn local_signin(
         LoginReprobe::Cursor if account_dir == home => argv.push("status".into()),
         _ => return None,
     }
-    let mut options = ExecOptions::new(&argv, cwd, std::time::Duration::from_secs(4));
+    let mut options = ExecOptions::exact(&argv, cwd, std::time::Duration::from_secs(4));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 4096 };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
@@ -362,8 +362,8 @@ impl Executor for HostProbeExecutor<'_> {
             group_watchdog: options.group_watchdog,
             stdout: options.stdout,
             stderr: options.stderr,
-            stdout_mask: options.stdout_mask,
-            stderr_mask: options.stderr_mask,
+            stdout_purpose: options.stdout_purpose,
+            stderr_purpose: options.stderr_purpose,
             stdout_decoder: options.stdout_decoder,
             stderr_decoder: options.stderr_decoder,
             stdout_filter: options
@@ -452,7 +452,7 @@ mod tests {
         let executor = HostProbeExecutor::new(&Fail, host_root.path()).unwrap();
         let argv = ["provider".into(), "--version".into()];
         assert!(matches!(
-            executor.execute(ExecOptions::new(
+            executor.execute(ExecOptions::diagnostic(
                 &argv,
                 Path::new("/child/scratch"),
                 std::time::Duration::from_secs(1),
@@ -488,7 +488,8 @@ mod tests {
             .with_search_path(&path);
         let argv = [provider.into_os_string(), "--version".into()];
         let env = [("HOME".into(), root.path().as_os_str().to_owned())];
-        let mut options = ExecOptions::new(&argv, root.path(), std::time::Duration::from_secs(2));
+        let mut options =
+            ExecOptions::diagnostic(&argv, root.path(), std::time::Duration::from_secs(2));
         options.env = Some(&env);
 
         let output = executor.execute(options).unwrap();

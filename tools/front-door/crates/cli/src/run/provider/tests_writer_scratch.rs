@@ -1565,7 +1565,7 @@ printf 'agy 1.0.0\n'
                 ("GH_CONFIG_DIR".into(), gh_config.as_os_str().to_owned()),
                 ("GH_TOKEN".into(), "fixture-host-token".into()),
             ];
-            let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+            let mut options = ExecOptions::diagnostic(&argv, &project, Duration::from_secs(5));
             options.env = Some(&environment);
             let actual = executor.execute(options)?;
             assert_eq!(actual.termination, Termination::Exit(0));
@@ -1793,7 +1793,7 @@ printf 'agy 1.0.0\n'
         let argv: Vec<_> = std::iter::once(git_shim.as_os_str().to_owned())
             .chain(args.iter().map(Into::into))
             .collect();
-        let mut options = ExecOptions::new(&argv, worktree, Duration::from_secs(5));
+        let mut options = ExecOptions::diagnostic(&argv, worktree, Duration::from_secs(5));
         options.env = Some(&env);
         executor.execute(options)
     };
@@ -1831,7 +1831,7 @@ printf 'agy 1.0.0\n'
             "-l".into(),
             label.into(),
         ];
-        let mut options = ExecOptions::new(
+        let mut options = ExecOptions::diagnostic(
             &argv,
             &attempt,
             std::time::Duration::from_secs(5),
@@ -2020,7 +2020,7 @@ printf 'agy 1.0.0\n'
             .any(|(key, value)| key == "PROVENANT_LANE_BASE" && value == review_oid.as_str())
     );
     phase("launch and spilled prompt");
-    let executed = executor.execute(ExecOptions::new(
+    let executed = executor.execute(ExecOptions::diagnostic(
         &launch.argv,
         &project,
         Duration::from_secs(2),

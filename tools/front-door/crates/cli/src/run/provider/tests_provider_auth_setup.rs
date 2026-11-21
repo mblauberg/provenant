@@ -394,7 +394,7 @@ fn cleared_preparation_injects_host_recorded_github_credentials()
         ];
         let cwd = std::env::current_dir()?;
         let environment = [(CHILD.into(), "1".into())];
-        let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(60));
+        let mut options = ExecOptions::diagnostic(&argv, &cwd, std::time::Duration::from_secs(60));
         options.env = Some(&environment);
         let result = SystemExecutor::new(1)?.execute(options)?;
         assert!(

@@ -569,7 +569,7 @@ pub(super) fn observe_account(
     }
     let argv = [executable.as_os_str().to_owned(), "--version".into()];
     let mut options =
-        provenant_os::exec::ExecOptions::new(&argv, scratch, std::time::Duration::from_secs(4));
+        provenant_os::exec::ExecOptions::exact(&argv, scratch, std::time::Duration::from_secs(4));
     let env = [
         ("HOME".into(), home.as_os_str().to_owned()),
         ("PATH".into(), "/usr/bin:/bin".into()),

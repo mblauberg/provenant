@@ -2051,7 +2051,7 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
             .chain(args.into_iter().map(Into::into))
             .collect();
         let env = provenant_os::fixture::git_env();
-        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+        let mut options = ExecOptions::diagnostic(&argv, &project, Duration::from_secs(5));
         options.env = Some(&env);
         assert_eq!(executor.execute(options)?.termination, Termination::Exit(0));
     }
@@ -2095,7 +2095,7 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
         ]
         .into();
         let env = provenant_os::fixture::git_env();
-        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+        let mut options = ExecOptions::diagnostic(&argv, &project, Duration::from_secs(5));
         options.env = Some(&env);
         assert_eq!(executor.execute(options)?.termination, Termination::Exit(0));
 
@@ -2138,7 +2138,7 @@ fn source_cwd_matches_declared_admission_for_registered_worktree_locations()
     ]
     .into();
     let env = provenant_os::fixture::git_env();
-    let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+    let mut options = ExecOptions::diagnostic(&argv, &project, Duration::from_secs(5));
     options.env = Some(&env);
     assert_eq!(executor.execute(options)?.termination, Termination::Exit(0));
     task.access.source_root = Some(protected.clone());
@@ -2180,7 +2180,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
             .chain(args.into_iter().map(Into::into))
             .collect();
         let env = provenant_os::fixture::git_env();
-        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+        let mut options = ExecOptions::diagnostic(&argv, &project, Duration::from_secs(5));
         options.env = Some(&env);
         let result = executor.execute(options)?;
         assert_eq!(result.termination, Termination::Exit(0));
@@ -2196,7 +2196,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         source.clone().into_os_string(),
         head.clone().into(),
     ];
-    let added = executor.execute(ExecOptions::new(
+    let added = executor.execute(ExecOptions::diagnostic(
         &added_args,
         &project,
         Duration::from_secs(5),
@@ -2287,7 +2287,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         separate_git.clone().into_os_string(),
         separate.clone().into_os_string(),
     ];
-    let init = executor.execute(ExecOptions::new(&init_args, &base, Duration::from_secs(5)))?;
+    let init = executor.execute(ExecOptions::diagnostic(&init_args, &base, Duration::from_secs(5)))?;
     assert_eq!(init.termination, Termination::Exit(0));
     let separate_repo = utility.open_repo(&executor, &separate, budget, &cancel)?;
     assert_eq!(separate_repo.common_git_dir(), separate_git);
@@ -2459,7 +2459,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
             ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ];
         env.extend(provenant_os::fixture::fixture_git_settings());
-        let mut options = ExecOptions::new(&args, &live_source, Duration::from_secs(5));
+        let mut options = ExecOptions::diagnostic(&args, &live_source, Duration::from_secs(5));
         options.env = Some(&env);
         let result = provenant_os::exec::SystemExecutor::new(1)
             .map_err(std::io::Error::other)?
@@ -2475,7 +2475,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         ("SOURCE_GO".into(), proceed.into_os_string()),
         ("PATH".into(), "/usr/bin:/bin".into()),
     ];
-    let mut options = ExecOptions::new(&launch.argv, &launch.cwd, Duration::from_secs(10));
+    let mut options = ExecOptions::diagnostic(&launch.argv, &launch.cwd, Duration::from_secs(10));
     options.env = Some(&env);
     let output = executor.execute(options)?;
     move_while_running
@@ -2488,7 +2488,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
             .into_iter()
             .map(ToOwned::to_owned)
             .collect();
-    let status = executor.execute(ExecOptions::new(
+    let status = executor.execute(ExecOptions::diagnostic(
         &status_args,
         &launch.cwd,
         Duration::from_secs(5),
@@ -2510,7 +2510,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     .map(ToOwned::to_owned)
     .collect();
     let env = provenant_os::fixture::git_env();
-    let mut options = ExecOptions::new(&moved_args, &source, Duration::from_secs(5));
+    let mut options = ExecOptions::diagnostic(&moved_args, &source, Duration::from_secs(5));
     options.env = Some(&env);
     let moved = executor.execute(options)?;
     assert_eq!(moved.termination, Termination::Exit(0));
@@ -2566,13 +2566,13 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         source.clone().into_os_string(),
         moved_path.into_os_string(),
     ];
-    let moved = executor.execute(ExecOptions::new(
+    let moved = executor.execute(ExecOptions::diagnostic(
         &move_args,
         &project,
         Duration::from_secs(5),
     ))?;
     assert_eq!(moved.termination, Termination::Exit(0));
-    let added = executor.execute(ExecOptions::new(
+    let added = executor.execute(ExecOptions::diagnostic(
         &added_args,
         &project,
         Duration::from_secs(5),

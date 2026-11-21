@@ -111,7 +111,10 @@ fn refresh_resolving(
                 if remaining.is_zero() {
                     return None;
                 }
-                let mut options = ExecOptions::new(&argv, &cwd, remaining);
+                // The model listing is parsed byte-for-byte with serde_json;
+                // keep stdout exact so a credential-shaped key with a
+                // non-string value is not rewritten before parsing.
+                let mut options = ExecOptions::exact(&argv, &cwd, remaining);
                 options.stdout = StreamPolicy::Capture {
                     limit: LIMIT as usize,
                 };

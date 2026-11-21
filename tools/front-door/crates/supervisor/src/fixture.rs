@@ -1083,7 +1083,7 @@ pub fn dispatch() -> io::Result<bool> {
             let root = std::env::current_dir()?;
             let env = environment(&root);
             let executor = provenant_os::exec::SystemExecutor::new(1).map_err(io::Error::other)?;
-            let mut options = provenant_os::exec::ExecOptions::new(
+            let mut options = provenant_os::exec::ExecOptions::diagnostic(
                 &argv,
                 &root,
                 std::time::Duration::from_secs(2),

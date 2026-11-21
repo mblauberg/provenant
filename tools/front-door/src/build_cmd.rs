@@ -35,7 +35,7 @@ fn git_command(args: &[String]) -> bool {
         return false;
     };
     let cwd = std::env::current_dir().unwrap_or_default();
-    let options = ExecOptions::new(&argv, &cwd, Duration::from_secs(120));
+    let options = ExecOptions::diagnostic(&argv, &cwd, Duration::from_secs(120));
     executor
         .execute(options)
         .is_ok_and(|outcome| outcome.termination == Termination::Exit(0))

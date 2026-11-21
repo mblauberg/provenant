@@ -452,7 +452,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
             OsString::from(program.as_os_str()),
         ];
         argv.extend(args.iter().map(|path| path.as_os_str().to_owned()));
-        let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(3));
+        let mut options = ExecOptions::diagnostic(&argv, Path::new("/"), Duration::from_secs(3));
         options.env = Some(&env);
         options.cancel = Some(&cancel);
         options.stdout = StreamPolicy::Capture { limit: 1024 };
@@ -648,7 +648,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         clone_baseline.as_os_str().to_owned(),
         "allow".into(),
     ];
-    let clone_outcome = executor.execute(ExecOptions::new(
+    let clone_outcome = executor.execute(ExecOptions::diagnostic(
         &baseline_argv,
         &root,
         Duration::from_secs(3),
@@ -1228,7 +1228,7 @@ semop($sem, pack("s!3", 0, 1, 0)) or die "semop: $!\n";
             let argv = [OsString::from(SANDBOX_EXEC), "-p".into(), sbpl.clone().into(), executables[6].as_os_str().to_owned(), "-e".into(),
                 "open(my $f, '>>', $ARGV[0]) or die $!; flock($f, 2) or die $!; open(my $r, '>', $ARGV[1]) or die $!; close($r); open(my $g, '>>', $ARGV[2]) or die $!; flock($g, 2) or die $!;".into(),
                 lane_lock.as_os_str().to_owned(), lane_ready.as_os_str().to_owned(), release_path.as_os_str().to_owned()];
-            let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(20));
+            let mut options = ExecOptions::diagnostic(&argv, Path::new("/"), Duration::from_secs(20));
             options.env = Some(&env);
             options.stderr = StreamPolicy::Capture { limit: 1024 };
             executor.execute(options)
@@ -1251,7 +1251,7 @@ semop($sem, pack("s!3", 0, 1, 0)) or die "semop: $!\n";
             let argv = [executables[6].as_os_str().to_owned(), "-e".into(),
                 "open(my $f, '>>', $ARGV[0]) or die $!; open(my $s, '>', $ARGV[1]) or die $!; close($s); flock($f, 2) or die $!; open(my $a, '>', $ARGV[2]) or die $!;".into(),
                 lane_lock.as_os_str().to_owned(), host_started.as_os_str().to_owned(), host_acquired.as_os_str().to_owned()];
-            let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(20));
+            let mut options = ExecOptions::diagnostic(&argv, Path::new("/"), Duration::from_secs(20));
             options.stderr = StreamPolicy::Capture { limit: 1024 };
             executor.execute(options)
         });

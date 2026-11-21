@@ -81,7 +81,7 @@ fn lane_command_with_launch(
     } else {
         None
     };
-    let mut options = provenant_os::exec::ExecOptions::new(
+    let mut options = provenant_os::exec::ExecOptions::diagnostic(
         confined.as_ref().map(|c| &c.argv[..]).unwrap_or(&argv),
         &rig.project,
         std::time::Duration::from_secs(30),

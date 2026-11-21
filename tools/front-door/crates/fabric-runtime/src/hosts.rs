@@ -1587,7 +1587,7 @@ impl SshTransport<'_> {
         if let Some(socket) = std::env::var_os("SSH_AUTH_SOCK") {
             env.push(("SSH_AUTH_SOCK".into(), socket));
         }
-        let mut options = ExecOptions::new(&argv, self.cwd, timeout);
+        let mut options = ExecOptions::exact(&argv, self.cwd, timeout);
         options.env = Some(&env);
         options.stdin = Some(&input);
         options.stdout = StreamPolicy::Capture { limit: MAX_FRAME };

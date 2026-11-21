@@ -107,7 +107,7 @@ impl Command {
             None => std::env::current_dir()?,
         };
         let executor = SystemExecutor::new(4).map_err(exec_error)?;
-        let mut options = ExecOptions::new(&argv, &cwd, self.timeout);
+        let mut options = ExecOptions::exact(&argv, &cwd, self.timeout);
         if let Some(env) = self.env.as_deref() {
             options.env = Some(env);
         }

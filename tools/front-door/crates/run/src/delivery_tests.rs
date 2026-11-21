@@ -260,7 +260,8 @@ impl PrepareFixture {
         let argv: Vec<OsString> = std::iter::once(git.into_os_string())
             .chain(args.iter().map(OsString::from))
             .collect();
-        let mut options = ExecOptions::new(&argv, &self.writer.project, Duration::from_secs(5));
+        let mut options =
+            ExecOptions::diagnostic(&argv, &self.writer.project, Duration::from_secs(5));
         options.env = Some(&self.environment);
         let output = SystemExecutor::new(1)?.execute(options)?;
         assert_eq!(

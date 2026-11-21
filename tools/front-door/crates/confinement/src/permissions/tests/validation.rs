@@ -799,7 +799,7 @@ fn directory_discovery_keeps_literal_scope_and_refuses_symlinks()
                 "/bin/cat".into(),
                 grant.path.join("config.json").into_os_string(),
             ];
-            let mut options = ExecOptions::new(&argv, &scratch, Duration::from_secs(2));
+            let mut options = ExecOptions::diagnostic(&argv, &scratch, Duration::from_secs(2));
             options.stderr = StreamPolicy::Capture { limit: 1024 };
             let outcome = fixture.executor.execute(options)?;
             if String::from_utf8_lossy(&outcome.stderr.bytes)

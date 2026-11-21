@@ -94,7 +94,11 @@ fn process_arguments_are_private_across_sandbox_boundaries()
         "-o".into(),
         helper.as_os_str().to_owned(),
     ];
-    let compiled = executor.execute(ExecOptions::new(&compile, &root, Duration::from_secs(30)))?;
+    let compiled = executor.execute(ExecOptions::diagnostic(
+        &compile,
+        &root,
+        Duration::from_secs(30),
+    ))?;
     assert!(
         successful_probe(&compiled),
         "compile sysctl process probe: {}",
@@ -165,7 +169,8 @@ fn process_arguments_are_private_across_sandbox_boundaries()
         ];
         std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
             let peer_worker = scope.spawn(|| {
-                let mut options = ExecOptions::new(&peer_argv, &root, Duration::from_secs(20));
+                let mut options =
+                    ExecOptions::diagnostic(&peer_argv, &root, Duration::from_secs(20));
                 options.env = Some(&env);
                 options.cancel = Some(&peer_cancel);
                 options.process_group = true;
@@ -189,7 +194,8 @@ fn process_arguments_are_private_across_sandbox_boundaries()
                 host_pid.into(),
                 peer_pid.trim().into(),
             ];
-            let mut options = ExecOptions::new(&probe_argv, Path::new("/"), Duration::from_secs(5));
+            let mut options =
+                ExecOptions::diagnostic(&probe_argv, Path::new("/"), Duration::from_secs(5));
             options.env = Some(&env);
             options.cancel = Some(&cancel);
             options.process_group = true;

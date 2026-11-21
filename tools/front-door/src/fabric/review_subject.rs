@@ -254,7 +254,7 @@ fn local_git(git: &Path, cwd: &Path, args: &[&str]) -> Option<String> {
         .chain(args.iter().map(|arg| std::ffi::OsString::from(*arg)))
         .collect();
     let executor = SystemExecutor::new(1).ok()?;
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(5));
+    let mut options = ExecOptions::exact(&argv, cwd, Duration::from_secs(5));
     options.stdout = StreamPolicy::Capture { limit: 4096 };
     options.stderr = StreamPolicy::Discard;
     let outcome = executor.execute(options).ok()?;

@@ -199,7 +199,7 @@ pub(super) fn probe_exec_options<'a>(
     argv: &'a [OsString],
     context: &'a BackendContext<'_>,
 ) -> ExecOptions<'a> {
-    let mut options = ExecOptions::new(argv, Path::new("/"), PROBE_TIMEOUT);
+    let mut options = ExecOptions::diagnostic(argv, Path::new("/"), PROBE_TIMEOUT);
     options.env = Some(context.env);
     options.cancel = Some(context.cancel);
     options.stdout = StreamPolicy::Capture {

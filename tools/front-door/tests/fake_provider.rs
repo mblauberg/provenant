@@ -60,7 +60,8 @@ fn scenario(name: &str) -> Result<u8> {
             let argv = [std::env::current_exe()?.into_os_string(), "barrier".into()];
             let environment: Vec<_> = std::env::vars_os().collect();
             let cwd = std::env::current_dir()?;
-            let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(3));
+            let mut options =
+                ExecOptions::diagnostic(&argv, &cwd, std::time::Duration::from_secs(3));
             options.env = Some(&environment);
             options.stdin = Some(b"R");
             let child = SystemExecutor::new(1)?.execute(options)?;
@@ -308,7 +309,7 @@ fn account_placement() -> Result {
                         return Err("missing stdin".into());
                     };
                     let mut options =
-                        ExecOptions::new(&spec.argv, &spec.cwd, Duration::from_secs(8));
+                        ExecOptions::diagnostic(&spec.argv, &spec.cwd, Duration::from_secs(8));
                     options.env = Some(&spec.env);
                     options.stdin = Some(input);
                     let out = SystemExecutor::new(1)

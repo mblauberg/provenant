@@ -805,7 +805,7 @@ fn many_linked_worktrees_do_not_block_protection_checks()
         "list".into(),
         "--porcelain".into(),
     ];
-    let mut options = ExecOptions::new(&argv, project, Duration::from_secs(5));
+    let mut options = ExecOptions::diagnostic(&argv, project, Duration::from_secs(5));
     options.env = Some(&fixture.environment);
     let listing = SystemExecutor::new(1)?.execute(options)?;
     assert_eq!(listing.termination, Termination::Exit(0));

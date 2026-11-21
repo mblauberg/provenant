@@ -1352,7 +1352,7 @@ fn native_provider_preparation_uses_requester_path_without_supervisor_rustup()
             ("PATH".into(), "/usr/bin:/bin".into()),
         ];
         let cwd = std::env::current_dir()?;
-        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(60));
+        let mut options = ExecOptions::diagnostic(&argv, &cwd, Duration::from_secs(60));
         options.env = Some(&env);
         options.stdout = StreamPolicy::Capture { limit: 65536 };
         options.stderr = StreamPolicy::Capture { limit: 65536 };

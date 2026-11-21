@@ -323,7 +323,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
             let argv: Vec<OsString> = std::iter::once(git_executable.as_os_str().to_owned())
                 .chain(args.iter().map(OsString::from))
                 .collect();
-            let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(5));
+            let mut options = ExecOptions::diagnostic(&argv, cwd, Duration::from_secs(5));
             options.env = Some(&environment);
             let output = executor.execute(options)?;
             assert_eq!(
@@ -911,7 +911,7 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
             let argv: Vec<OsString> = std::iter::once(git_executable.as_os_str().to_owned())
                 .chain(args.iter().map(OsString::from))
                 .collect();
-            let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(5));
+            let mut options = ExecOptions::diagnostic(&argv, cwd, Duration::from_secs(5));
             options.env = Some(&environment);
             let output = executor.execute(options)?;
             assert_eq!(

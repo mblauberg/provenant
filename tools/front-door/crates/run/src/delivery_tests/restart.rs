@@ -1173,8 +1173,11 @@ fn terminal_verifies_private_objects_before_publication()
                     "GIT_INDEX_FILE".into(),
                     scratch.join("git-common/index").into_os_string(),
                 ));
-                let mut options =
-                    ExecOptions::new(&argv, &fixture.writer.worktree, Duration::from_secs(5));
+                let mut options = ExecOptions::diagnostic(
+                    &argv,
+                    &fixture.writer.worktree,
+                    Duration::from_secs(5),
+                );
                 options.env = Some(&environment);
                 let output = SystemExecutor::new(1)?.execute(options)?;
                 assert_eq!(

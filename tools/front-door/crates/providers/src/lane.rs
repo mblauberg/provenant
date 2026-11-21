@@ -558,7 +558,7 @@ fn probe_host_exec_path(
         .cloned()
         .collect();
     let argv = [git.as_os_str().to_owned(), "--exec-path".into()];
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(4));
+    let mut options = ExecOptions::exact(&argv, cwd, Duration::from_secs(4));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
     options.stderr = StreamPolicy::Capture { limit: 16 * 1024 };
@@ -1454,7 +1454,7 @@ mod tests {
             OsString::from("-c"),
             OsString::from(format!("printf %s {}", shell_quote_os(value)?)),
         ];
-        let output = SystemExecutor::new(1)?.execute(ExecOptions::new(
+        let output = SystemExecutor::new(1)?.execute(ExecOptions::diagnostic(
             &argv,
             &std::env::current_dir()?,
             Duration::from_secs(5),
@@ -2526,7 +2526,7 @@ mod tests {
             ("XDG_CONFIG_HOME".into(), private_xdg),
             ("EXPECTED_GH_CONFIG_DIR".into(), host_gh.into_os_string()),
         ];
-        let mut options = ExecOptions::new(&argv, &root, Duration::from_secs(5));
+        let mut options = ExecOptions::diagnostic(&argv, &root, Duration::from_secs(5));
         options.env = Some(&environment);
         let outcome = SystemExecutor::new(1)?.execute(options)?;
         assert_eq!(outcome.termination, Termination::Exit(0));
@@ -2579,7 +2579,11 @@ mod tests {
             let argv: Vec<_> = std::iter::once(shim.as_os_str().to_owned())
                 .chain(args.iter().map(OsString::from))
                 .collect();
-            executor.execute(ExecOptions::new(&argv, temp.path(), Duration::from_secs(5)))
+            executor.execute(ExecOptions::diagnostic(
+                &argv,
+                temp.path(),
+                Duration::from_secs(5),
+            ))
         };
         for args in [
             vec!["pr", "edit", "42", "--add-label", "ci"],
@@ -2653,7 +2657,11 @@ mod tests {
             let argv: Vec<_> = std::iter::once(shim.as_os_str().to_owned())
                 .chain(args.iter().map(OsString::from))
                 .collect();
-            executor.execute(ExecOptions::new(&argv, temp.path(), Duration::from_secs(5)))
+            executor.execute(ExecOptions::diagnostic(
+                &argv,
+                temp.path(),
+                Duration::from_secs(5),
+            ))
         };
         let mut warned_over_budget = false;
         for _ in 0..5 {
@@ -2699,7 +2707,11 @@ mod tests {
             let argv: Vec<_> = std::iter::once(shim.as_os_str().to_owned())
                 .chain(args.iter().map(OsString::from))
                 .collect();
-            Ok(executor.execute(ExecOptions::new(&argv, temp.path(), Duration::from_secs(5)))?)
+            Ok(executor.execute(ExecOptions::diagnostic(
+                &argv,
+                temp.path(),
+                Duration::from_secs(5),
+            ))?)
         };
         let output = run("labelled", true, &["pr", "edit", "1", "--add-label", "x"])?;
         assert_eq!(output.termination, Termination::Exit(0));
@@ -2886,7 +2898,7 @@ mod tests {
             let argv: Vec<_> = std::iter::once(tool.as_os_str().to_owned())
                 .chain(args.iter().map(OsString::from))
                 .collect();
-            let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(5));
+            let mut options = ExecOptions::diagnostic(&argv, cwd, Duration::from_secs(5));
             options.env = Some(env);
             options.stdin = stdin;
             Ok::<_, Box<dyn std::error::Error>>(executor.execute(options)?)

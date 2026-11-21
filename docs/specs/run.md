@@ -110,10 +110,13 @@ repository only declares the command, nothing is added to it, and an unreadable
 or invalid table warns and runs no prepare command. A failing command fails that
 build: the project's outcome is `prepare_failed` with the command and the last
 2 KiB of the combined output in `seed-result.json` and the refresh record, while
-the operator note gives a repair and never echoes the output. Under local
-`redaction` the stream is masked at capture, on the executor's `CaptureFilter`,
-before that window bounds it, so a secret straddling the cut cannot reach either
-store or any display; long human causes keep the end and mark the omitted bytes.
+the operator note gives a repair and never echoes the output. The prepare output is a
+diagnostic capture: under local `redaction` the stream is masked at capture, on
+the executor's `CaptureFilter`, before that window bounds it, so a secret
+straddling the cut cannot reach either store or any display; long human causes
+keep the end and mark the omitted bytes. Byte-exact captures (Git evidence, seed
+identity, JSON envelopes) are not masked at capture; text from them is masked
+only where it becomes a diagnostic.
 The manual `provenant worktree seed-build` path shows that bounded output as an
 indented cause in human output and in `error.cause` under `--json`, so the
 operator need not reproduce the failed command to see why it failed. The same prepare

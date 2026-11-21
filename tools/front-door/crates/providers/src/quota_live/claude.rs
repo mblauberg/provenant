@@ -274,19 +274,16 @@ impl LiveQuota {
                 service.push('-');
                 service.push_str(&crate::claude::keychain_suffix(dir.as_os_str().as_bytes()));
             }
-            // The Keychain item is a credential, not a value being parsed: the
-            // caller owns its redaction boundary and needs the access token
-            // intact for the Bearer header. A masked token would still parse
-            // (expiresAt survives) but would be `[REDACTED]` on the wire.
+            // The Keychain item is a credential the caller owns: stdout is exact
+            // so the access token stays intact for the Bearer header.
             let out = self
-                .command_with_mask(
+                .command_exact(
                     "/usr/bin/security",
                     &["find-generic-password", "-s", &service, "-w"],
                     None,
                     None,
                     deadline,
                     10,
-                    CaptureMask::Raw(RawCaptureReason::CallerOwnsRedaction),
                 )
                 .map_err(|error| match error {
                     ProbeFailure::ProbeDirectory => error,

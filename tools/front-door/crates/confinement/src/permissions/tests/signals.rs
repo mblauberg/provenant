@@ -63,7 +63,7 @@ fn same_sandbox_signals_reach_parents_but_cannot_reach_host_processes()
         "-o".into(),
         helper.as_os_str().to_owned(),
     ];
-    let compiled = executor.execute(ExecOptions::new(
+    let compiled = executor.execute(ExecOptions::diagnostic(
         &compile,
         &scratch,
         Duration::from_secs(30),
@@ -109,7 +109,7 @@ fn same_sandbox_signals_reach_parents_but_cannot_reach_host_processes()
             argument,
         ]
         .map(OsString::from);
-        let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(3));
+        let mut options = ExecOptions::diagnostic(&argv, Path::new("/"), Duration::from_secs(3));
         options.env = Some(&env);
         options.cancel = Some(&cancel);
         options.stdout = StreamPolicy::Capture { limit: 1024 };
@@ -205,7 +205,8 @@ test "$notified" = yes
                     peer_pid_file.to_str().expect("UTF-8 peer PID path"),
                 ]
                 .map(OsString::from);
-                let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(65));
+                let mut options =
+                    ExecOptions::diagnostic(&argv, Path::new("/"), Duration::from_secs(65));
                 options.env = Some(&env);
                 options.cancel = Some(&peer_stop);
                 options.stdout = StreamPolicy::Capture { limit: 1024 };
@@ -239,7 +240,8 @@ test "$notified" = yes
                 helper.as_os_str().to_owned(),
                 peer_pid.into(),
             ];
-            let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(3));
+            let mut options =
+                ExecOptions::diagnostic(&argv, Path::new("/"), Duration::from_secs(3));
             options.env = Some(&env);
             options.cancel = Some(&cancel);
             options.process_group = true;

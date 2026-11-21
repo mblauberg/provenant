@@ -417,7 +417,7 @@ fn claude_account_key(
         ("PATH".into(), "/usr/bin:/bin".into()),
         ("CLAUDE_CONFIG_DIR".into(), directory.into()),
     ];
-    let mut options = ExecOptions::new(&argv, root, Duration::from_secs(10));
+    let mut options = ExecOptions::diagnostic(&argv, root, Duration::from_secs(10));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
     options.stderr = StreamPolicy::Discard;
@@ -735,7 +735,7 @@ fn observe(
     command_prefix.profile.verify()?;
     let mut argv = command_prefix.to_vec();
     argv.extend(item.argv.iter().cloned());
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(20));
+    let mut options = ExecOptions::diagnostic(&argv, cwd, Duration::from_secs(20));
     options.inherited_profile = Some(&command_prefix.profile);
     options.env = Some(env);
     options.stdin = item.stdin;

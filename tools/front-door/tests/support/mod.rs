@@ -554,7 +554,7 @@ impl TestRig {
         argv.extend_from_slice(args);
         // Only a backstop for a hung child: commands carry their own `--wait`
         // budgets, and nextest bounds the whole test.
-        let mut options = ExecOptions::new(&argv, &self.project, Duration::from_secs(60));
+        let mut options = ExecOptions::diagnostic(&argv, &self.project, Duration::from_secs(60));
         options.env = Some(&self.env);
         options.stdin = stdin;
         options.stdout = StreamPolicy::Capture {

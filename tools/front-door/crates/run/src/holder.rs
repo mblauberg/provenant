@@ -4707,7 +4707,7 @@ mod writer_recovery_tests {
                             candidate.join("git-objects").into_os_string(),
                         ),
                     ]);
-                    let mut options = ExecOptions::new(
+                    let mut options = ExecOptions::diagnostic(
                         &argv,
                         &fixture.writer.worktree,
                         std::time::Duration::from_secs(5),
@@ -4945,8 +4945,11 @@ mod writer_recovery_tests {
                         candidate.join("git-objects").into_os_string(),
                     ),
                 ]);
-                let mut options =
-                    ExecOptions::new(&argv, &fixture.writer.worktree, Duration::from_secs(5));
+                let mut options = ExecOptions::diagnostic(
+                    &argv,
+                    &fixture.writer.worktree,
+                    Duration::from_secs(5),
+                );
                 options.env = Some(&environment);
                 let output = SystemExecutor::new(1)?.execute(options)?;
                 assert!(
@@ -4980,7 +4983,7 @@ mod writer_recovery_tests {
             ]
             .into();
             let mut options =
-                ExecOptions::new(&argv, &fixture.writer.project, Duration::from_secs(5));
+                ExecOptions::diagnostic(&argv, &fixture.writer.project, Duration::from_secs(5));
             options.env = Some(&fixture.environment);
             let output = SystemExecutor::new(1)?.execute(options)?;
             assert!(

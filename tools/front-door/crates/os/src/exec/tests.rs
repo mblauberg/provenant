@@ -356,7 +356,7 @@ fn pipe_read_failure_is_observable_and_closes_the_failed_stream() {
 fn bounds_and_pre_cancel_refuse_without_spawn() {
     let executor = SystemExecutor::new(1).unwrap();
     let argv = ["/must/not/spawn".into()];
-    let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::ZERO);
+    let mut options = ExecOptions::diagnostic(&argv, Path::new("/"), Duration::ZERO);
     options.stdout = StreamPolicy::Capture {
         limit: MAX_CAPTURE_LIMIT + 1,
     };
@@ -366,14 +366,14 @@ fn bounds_and_pre_cancel_refuse_without_spawn() {
     ));
     let token = CancelToken::new();
     token.cancel();
-    let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::ZERO);
+    let mut options = ExecOptions::diagnostic(&argv, Path::new("/"), Duration::ZERO);
     options.cancel = Some(&token);
     assert!(matches!(
         executor.execute(options),
         Err(ExecError::Cancelled)
     ));
     assert!(matches!(
-        executor.execute(ExecOptions::new(&[], Path::new("/"), Duration::ZERO)),
+        executor.execute(ExecOptions::diagnostic(&[], Path::new("/"), Duration::ZERO)),
         Err(ExecError::EmptyArgv)
     ));
 }
@@ -393,7 +393,7 @@ fn secret_input_arrives_by_descriptor_with_eof_and_no_token_environment() {
         descriptor_env: "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR".into(),
         bytes: b"synthetic-oauth-token".to_vec(),
     };
-    let mut options = ExecOptions::new(&argv, root.path(), Duration::from_secs(2));
+    let mut options = ExecOptions::diagnostic(&argv, root.path(), Duration::from_secs(2));
     options.env = Some(&env);
     options.secret_input = Some(&secret);
     let outcome = SystemExecutor::new(1).unwrap().execute(options).unwrap();
@@ -428,7 +428,7 @@ fn timeout_and_cancel_kill_the_whole_process_group() -> Result<(), Box<dyn std::
         let token = CancelToken::new();
         let canceller = token.clone();
         let timeout = Duration::from_secs(if cancel { 60 } else { 1 });
-        let mut options = ExecOptions::new(&argv, temp.path(), timeout);
+        let mut options = ExecOptions::diagnostic(&argv, temp.path(), timeout);
         options.process_group = true;
         options.cancel = Some(&token);
         let outcome = std::thread::scope(|scope| {
@@ -485,7 +485,7 @@ fn normal_and_failed_exit_clean_the_process_group_before_reaping()
             format!("exit {code}")
         };
         let argv = [OsString::from("/bin/sh"), "-c".into(), script.into()];
-        let mut options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(5));
+        let mut options = ExecOptions::diagnostic(&argv, temp.path(), Duration::from_secs(5));
         options.cleanup_process_group = true;
         let outcome = executor.execute(options)?;
         assert_eq!(outcome.termination, Termination::Exit(code));
@@ -513,7 +513,7 @@ fn non_interruptible_transaction_finishes_after_its_soft_deadline() {
         OsString::from("printf committed"),
     ];
     let executor = SystemExecutor::new(1).unwrap();
-    let mut options = ExecOptions::new(&argv, temp.path(), Duration::ZERO);
+    let mut options = ExecOptions::diagnostic(&argv, temp.path(), Duration::ZERO);
     options.wait_for_completion = true;
     options.stdout = StreamPolicy::Capture { limit: 100 };
     let outcome = executor.execute(options).unwrap();
@@ -533,7 +533,7 @@ fn prepared_ref_transaction_commits_or_aborts_after_prepare_ack()
             OsString::from("-c"),
             OsString::from(script),
         ];
-        let options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(2));
+        let options = ExecOptions::diagnostic(&argv, temp.path(), Duration::from_secs(2));
         let mut called = false;
         let mut decide = || {
             called = true;
@@ -609,7 +609,7 @@ fn prepared_ref_transaction_keeps_ref_when_callback_expires_or_is_cancelled()
         } else {
             Duration::from_secs(10)
         };
-        let mut options = ExecOptions::new(&argv, temp.path(), timeout);
+        let mut options = ExecOptions::diagnostic(&argv, temp.path(), timeout);
         options.env = Some(&env);
         options.cancel = Some(&cancel);
         let mut called = false;
@@ -643,11 +643,11 @@ fn prepared_ref_transaction_keeps_ref_when_callback_expires_or_is_cancelled()
     Ok(())
 }
 
-/// The default mask runs ahead of the capture bound, so a secret that straddles
-/// the bound cannot leave a fragment in the retained bytes. A named raw opt-out
-/// is the only way to keep the unmasked bytes.
+/// A diagnostic capture masks on the stream ahead of the capture bound, so a
+/// secret that straddles the bound cannot leave a fragment in the retained
+/// bytes. An exact capture keeps those bytes intact.
 #[test]
-fn default_mask_masks_a_secret_straddling_the_capture_bound()
+fn diagnostic_mask_masks_a_secret_straddling_the_capture_bound()
 -> Result<(), Box<dyn std::error::Error>> {
     let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
     let secret = b"straddling-secret-4472";
@@ -664,7 +664,7 @@ fn default_mask_masks_a_secret_straddling_the_capture_bound()
     let limit = b"prefix-stradd".len();
 
     let executor = SystemExecutor::new(1)?;
-    let mut options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(10));
+    let mut options = ExecOptions::diagnostic(&argv, temp.path(), Duration::from_secs(10));
     options.stdout = StreamPolicy::Capture { limit };
     let masked = executor.execute(options)?;
     // The whole secret is replaced before the bound cuts the stream; the bound
@@ -673,7 +673,7 @@ fn default_mask_masks_a_secret_straddling_the_capture_bound()
     assert_eq!(
         masked.stdout.bytes.as_slice(),
         expected,
-        "the default mask must run ahead of the capture bound"
+        "a diagnostic capture must mask ahead of the capture bound"
     );
     assert!(
         !masked
@@ -683,14 +683,82 @@ fn default_mask_masks_a_secret_straddling_the_capture_bound()
             .any(|window| window == b"stradd")
     );
 
-    let mut options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(10));
+    let mut options = ExecOptions::with_purposes(
+        &argv,
+        temp.path(),
+        Duration::from_secs(10),
+        CapturePurpose::Exact,
+        CapturePurpose::Diagnostic,
+    );
     options.stdout = StreamPolicy::Capture { limit };
-    options.stdout_mask = CaptureMask::Raw(RawCaptureReason::ByteExactParse);
     let raw = executor.execute(options)?;
     assert_eq!(
         raw.stdout.bytes,
         b"prefix-stradd".to_vec(),
-        "a named raw opt-out must preserve the unmasked bytes"
+        "an exact capture must preserve the unmasked bytes"
     );
+    Ok(())
+}
+
+/// Byte-exact data whose text contains a credential-shaped literal must survive
+/// an exact capture unchanged. Git diffs and logs are parsed, hashed and
+/// written to disk as evidence; rewriting their bytes corrupts them.
+#[test]
+fn exact_capture_round_trips_a_git_diff_byte_exact() -> Result<(), Box<dyn std::error::Error>> {
+    let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
+    let secret = b"ghp_abcdefghijklmnopqrstuvwxyz";
+    let _scope = provenant_redact::publication_scope([secret.to_vec()])?;
+
+    let payload = format!(
+        "diff --git a/src/config.rs b/src/config.rs\n\
+         index 1111111..2222222 100644\n\
+         --- a/src/config.rs\n\
+         +++ b/src/config.rs\n\
+         @@ -1,2 +1,2 @@\n\
+         -const TOKEN: &str = \"old\";\n\
+         +const TOKEN: &str = \"{}\";\n",
+        String::from_utf8_lossy(secret)
+    );
+    let temp = tempfile::tempdir()?;
+    let file = temp.path().join("diff.patch");
+    std::fs::write(&file, payload.as_bytes())?;
+    let argv = [OsString::from("/bin/cat"), file.into_os_string()];
+
+    let mut options = ExecOptions::exact(&argv, temp.path(), Duration::from_secs(10));
+    options.stdout = StreamPolicy::Capture {
+        limit: payload.len(),
+    };
+    let outcome = SystemExecutor::new(1)?.execute(options)?;
+    assert_eq!(outcome.stdout.bytes, payload.as_bytes());
+    assert!(!outcome.stdout.truncated);
+    Ok(())
+}
+
+/// A JSON envelope is byte-exact content: a credential-shaped field name or
+/// value must not be rewritten to `[REDACTED]` before the caller parses it.
+#[test]
+fn exact_capture_round_trips_a_json_envelope_byte_exact() -> Result<(), Box<dyn std::error::Error>>
+{
+    let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
+    let secret = b"authorization: token ghp_abcdefghijklmnopqrstuvwxyz";
+    let _scope = provenant_redact::publication_scope([secret.to_vec()])?;
+
+    let payload = format!(
+        "{{\"status\":\"ok\",\"data\":{{\"lane_token\":true,\"note\":\"{}\"}}}}\n",
+        String::from_utf8_lossy(secret)
+    );
+    let temp = tempfile::tempdir()?;
+    let file = temp.path().join("envelope.json");
+    std::fs::write(&file, payload.as_bytes())?;
+    let argv = [OsString::from("/bin/cat"), file.into_os_string()];
+
+    let mut options = ExecOptions::exact(&argv, temp.path(), Duration::from_secs(10));
+    options.stdout = StreamPolicy::Capture {
+        limit: payload.len(),
+    };
+    let outcome = SystemExecutor::new(1)?.execute(options)?;
+    assert_eq!(outcome.stdout.bytes, payload.as_bytes());
+    let envelope: serde_json::Value = serde_json::from_slice(&outcome.stdout.bytes)?;
+    assert_eq!(envelope["data"]["lane_token"], true);
     Ok(())
 }

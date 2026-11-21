@@ -1342,15 +1342,19 @@ impl Driver<'_> {
                     decoder,
                     events: &err_events,
                 });
+        // Provider custody streams are decoded and redacted by the caller's
+        // hooks, so they stay exact here; the filters own that boundary.
         let mut out = provenant_os::capture::StreamCapture::new(
             stream_policy(plan.stdout, hooks.stdout_tee),
             out_decoder,
+            provenant_os::exec::CapturePurpose::Exact,
             hooks.stdout_filter,
         )
         .map_err(|_| CustodyError::InvalidRecord)?;
         let mut err = provenant_os::capture::StreamCapture::new(
             stream_policy(plan.stderr, hooks.stderr_tee),
             err_decoder,
+            provenant_os::exec::CapturePurpose::Exact,
             hooks.stderr_filter,
         )
         .map_err(|_| CustodyError::InvalidRecord)?;

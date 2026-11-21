@@ -342,7 +342,7 @@ fn init_fixture_repository(
             ("PATH".into(), "/usr/bin:/bin".into()),
         ];
         env.extend(provenant_os::fixture::fixture_git_settings());
-        let mut options = ExecOptions::new(&argv, project, Duration::from_secs(5));
+        let mut options = ExecOptions::diagnostic(&argv, project, Duration::from_secs(5));
         options.env = Some(&env);
         let output = executor.execute(options)?;
         assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
@@ -1140,7 +1140,7 @@ fn requester_path_uses_registered_primary_with_external_git_dir()
         ("PATH".into(), "/usr/bin:/bin".into()),
     ];
     environment.extend(provenant_os::fixture::fixture_git_settings());
-    let mut options = ExecOptions::new(&init_argv, &root, Duration::from_secs(5));
+    let mut options = ExecOptions::diagnostic(&init_argv, &root, Duration::from_secs(5));
     options.env = Some(&environment);
     assert_eq!(executor.execute(options)?.termination, Termination::Exit(0));
     let commit_argv = [
@@ -1153,7 +1153,7 @@ fn requester_path_uses_registered_primary_with_external_git_dir()
         "-m".into(),
         "Initial".into(),
     ];
-    let mut options = ExecOptions::new(&commit_argv, &root, Duration::from_secs(5));
+    let mut options = ExecOptions::diagnostic(&commit_argv, &root, Duration::from_secs(5));
     options.env = Some(&environment);
     assert_eq!(executor.execute(options)?.termination, Termination::Exit(0));
     let linked_text = linked.to_str().ok_or("linked worktree path")?;
@@ -1243,7 +1243,7 @@ fn opencode_signout_expires_then_prepares_with_an_unverified_warning()
             .collect();
         env.push((CHILD.into(), "1".into()));
         let cwd = std::env::current_dir()?;
-        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(60));
+        let mut options = ExecOptions::diagnostic(&argv, &cwd, Duration::from_secs(60));
         options.env = Some(&env);
         options.stdout = StreamPolicy::Capture { limit: 65536 };
         options.stderr = StreamPolicy::Capture { limit: 65536 };
@@ -1424,7 +1424,7 @@ fn rerun_in_clean_environment(test: &str) -> Result<bool, Box<dyn std::error::Er
         .collect();
     env.push((CHILD.into(), "1".into()));
     let cwd = std::env::current_dir()?;
-    let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(60));
+    let mut options = ExecOptions::diagnostic(&argv, &cwd, std::time::Duration::from_secs(60));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 65536 };
     options.stderr = StreamPolicy::Capture { limit: 65536 };

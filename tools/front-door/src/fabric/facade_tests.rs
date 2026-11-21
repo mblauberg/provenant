@@ -906,7 +906,7 @@ pub(crate) mod peer_tests {
         // A hang ceiling, not a latency budget: the fixtures provision real
         // repositories, so their duration scales with host load. A per-test
         // table of longer ceilings only moved the flake to the next test.
-        let mut options = ExecOptions::new(&argv, &cwd, HOST_TEST_CEILING);
+        let mut options = ExecOptions::diagnostic(&argv, &cwd, HOST_TEST_CEILING);
         options.env = Some(&environment);
         let output = SystemExecutor::new(1)?.execute(options)?;
         // Keep native-backend skip evidence visible through host isolation.

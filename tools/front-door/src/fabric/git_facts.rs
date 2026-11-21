@@ -96,7 +96,7 @@ pub(crate) fn remote_base(
                 .map(std::ffi::OsString::from),
             )
             .collect();
-        let mut options = ExecOptions::new(&argv, project, remaining);
+        let mut options = ExecOptions::exact(&argv, project, remaining);
         options.env = Some(&environment);
         options.cancel = Some(cancel);
         options.stdin = Some(b"");
@@ -235,7 +235,7 @@ pub(crate) fn fetch_base_from_origin(cwd: &Path, cancel: &CancelToken) -> String
             .map(std::ffi::OsString::from),
         )
         .collect();
-    let mut options = ExecOptions::new(&argv, cwd, BASE_FETCH_TIMEOUT);
+    let mut options = ExecOptions::diagnostic(&argv, cwd, BASE_FETCH_TIMEOUT);
     options.env = Some(&environment);
     options.cancel = Some(cancel);
     options.stdin = Some(b"");

@@ -917,7 +917,7 @@ fn resolve_git_commit(git: &Path, project: &Path, reference: &str) -> Option<Str
     .map(|(key, value)| (key.into(), value.into()))
     .collect();
     let executor = SystemExecutor::new(1).ok()?;
-    let mut options = ExecOptions::new(&argv, project, Duration::from_secs(10));
+    let mut options = ExecOptions::exact(&argv, project, Duration::from_secs(10));
     options.env = Some(&clean_env);
     options.stdout = StreamPolicy::Capture { limit: 4096 };
     options.stderr = StreamPolicy::Capture { limit: 4096 };

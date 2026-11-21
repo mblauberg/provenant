@@ -127,7 +127,7 @@ fn exec(
     stdin: Option<&[u8]>,
     seconds: u64,
 ) -> Result<Output, Error> {
-    let mut options = ExecOptions::new(argv, cwd, Duration::from_secs(seconds));
+    let mut options = ExecOptions::exact(argv, cwd, Duration::from_secs(seconds));
     options.stdin = stdin;
     options.process_group = true;
     options.stdout = StreamPolicy::Capture {

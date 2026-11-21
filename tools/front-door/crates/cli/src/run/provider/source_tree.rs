@@ -862,7 +862,8 @@ pub(super) fn snapshot_source(
         ("GIT_TERMINAL_PROMPT".into(), "0".into()),
         ("GIT_ATTR_NOSYSTEM".into(), "1".into()),
     ];
-    let mut options = ExecOptions::new(&argv, host_home.path(), remaining(Step::IndexBuild)?);
+    let mut options =
+        ExecOptions::diagnostic(&argv, host_home.path(), remaining(Step::IndexBuild)?);
     options.env = Some(&env);
     options.cancel = Some(cancel);
     let index = SourceViewError::utility(Step::IndexBuild);

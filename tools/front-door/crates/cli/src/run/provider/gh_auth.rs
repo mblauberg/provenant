@@ -13,9 +13,7 @@
 //! (a minted, repository-scoped GitHub App installation token); a configured
 //! source that cannot produce its credential must refuse the launch visibly,
 //! never fall back to the user's login.
-use provenant_os::exec::{
-    CaptureMask, ExecOptions, Executor, RawCaptureReason, StreamPolicy, Termination,
-};
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
 use std::{ffi::OsString, path::Path, time::Duration};
 
 /// GitHub CLI's token inputs, including enterprise hosts.
@@ -335,7 +333,10 @@ fn attempt_token(
     cancel: &provenant_core::CancelToken,
 ) -> Result<OsString, Failure> {
     let argv = [gh.as_os_str().to_owned(), "auth".into(), "token".into()];
-    let mut options = ExecOptions::new(&argv, home, ATTEMPT_LIMIT);
+    // The captured stdout *is* the credential, not a value being parsed: it
+    // must stay exact so the token can authenticate, and this caller owns its
+    // redaction boundary.
+    let mut options = ExecOptions::exact(&argv, home, ATTEMPT_LIMIT);
     let host_environment = [
         ("HOME".into(), home.as_os_str().to_owned()),
         ("GH_CONFIG_DIR".into(), config.as_os_str().to_owned()),
@@ -347,11 +348,6 @@ fn attempt_token(
     options.process_group = true;
     options.cleanup_process_group = true;
     options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
-    // The captured bytes *are* the credential, not a value being parsed: the
-    // caller owns its redaction boundary and needs the token intact to
-    // authenticate. The executor's default mask would replace it with
-    // `[REDACTED]`, which the check below would accept as a usable token.
-    options.stdout_mask = CaptureMask::Raw(RawCaptureReason::CallerOwnsRedaction);
     options.stderr = StreamPolicy::Discard;
     // The selected store and host home survive a cleared guardian environment.
     // A missing login does not prevent other ordinary lane work.

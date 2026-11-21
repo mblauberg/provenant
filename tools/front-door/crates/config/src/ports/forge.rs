@@ -4,8 +4,7 @@ use super::{
     PortCommandDisposition, PortEvidenceError, PortSource,
 };
 use provenant_os::exec::{
-    CaptureMask, ExecOptions, ExecOutcome, Executor, RawCaptureReason, StreamPolicy,
-    SystemExecutor, Termination,
+    ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -1003,7 +1002,10 @@ fn run_gh(
     budget: Duration,
     cancel: &provenant_core::CancelToken,
 ) -> io::Result<ExecOutcome> {
-    let mut options = ExecOptions::new(argv, project, budget);
+    // The response body is parsed byte-for-byte and checked against
+    // `total_bytes` by `capture_complete`, so stdout is exact; stderr is a
+    // masked diagnostic tail.
+    let mut options = ExecOptions::exact(argv, project, budget);
     let mut inherited: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
     for (name, value) in environment {
         inherited.insert(name.clone(), value.clone());
@@ -1014,9 +1016,6 @@ fn run_gh(
     options.stdout = StreamPolicy::Capture {
         limit: 8 * 1024 * 1024,
     };
-    // The response body is parsed byte-for-byte and checked against
-    // `total_bytes` by `capture_complete`, so keep stdout raw.
-    options.stdout_mask = CaptureMask::Raw(RawCaptureReason::ByteExactParse);
     options.stderr = StreamPolicy::Tail { limit: 64 * 1024 };
     options.process_group = true;
     options.cleanup_process_group = true;
@@ -1231,7 +1230,7 @@ esac
         Box::new(move |argv, input, environment, budget| {
             let mut actual = argv.to_vec();
             actual[0] = fake.clone().into_os_string();
-            let mut options = ExecOptions::new(&actual, fake.parent().unwrap(), budget);
+            let mut options = ExecOptions::diagnostic(&actual, fake.parent().unwrap(), budget);
             options.env = Some(environment);
             options.stdin = input;
             options.stdout = StreamPolicy::Capture {

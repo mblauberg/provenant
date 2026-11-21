@@ -224,7 +224,7 @@ fn execute_configured(
         };
         let remaining =
             Duration::from_micros(deadline_micros.saturating_sub(clock.mono_now().as_micros()));
-        let mut options = ExecOptions::new(&argv, &cwd, remaining);
+        let mut options = ExecOptions::diagnostic(&argv, &cwd, remaining);
         options.env = Some(&env);
         options.inherited_lease = intent_lease;
         options.process_group = true;

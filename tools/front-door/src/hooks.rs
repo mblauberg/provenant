@@ -1449,7 +1449,7 @@ fn run_local_gate_with(
     for command in &settings.commands {
         let script = format!("exec 2>&1\n{command}");
         let argv = ["sh".into(), "-c".into(), script.into()];
-        let mut options = ExecOptions::new(
+        let mut options = ExecOptions::diagnostic(
             &argv,
             project,
             Duration::from_secs(settings.timeout_seconds),

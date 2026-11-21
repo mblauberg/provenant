@@ -231,7 +231,7 @@ fn execute_herdr(args: &[OsString]) -> Result<Value, Error> {
         .chain(args.iter().cloned())
         .collect::<Vec<_>>();
     let cwd = std::env::current_dir()?;
-    let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(1));
+    let mut options = ExecOptions::exact(&argv, &cwd, Duration::from_secs(1));
     options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
     options.stderr = StreamPolicy::Discard;
     let out = SystemExecutor::new(1)?.execute(options)?;
@@ -1229,7 +1229,7 @@ mod tests {
             } else {
                 vec![shell.into(), "-c".into(), command.clone().into()]
             };
-            let mut options = ExecOptions::new(&argv, &home, Duration::from_secs(2));
+            let mut options = ExecOptions::diagnostic(&argv, &home, Duration::from_secs(2));
             options.env = Some(env.as_slice());
             options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
             let output = SystemExecutor::new(1)?.execute(options)?;
@@ -1270,7 +1270,8 @@ mod tests {
             } else {
                 vec![shell.into(), "-c".into(), hook.into()]
             };
-            let mut hook_options = ExecOptions::new(&hook_argv, &home, Duration::from_secs(2));
+            let mut hook_options =
+                ExecOptions::diagnostic(&hook_argv, &home, Duration::from_secs(2));
             hook_options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
             let hook_output = SystemExecutor::new(1)?.execute(hook_options)?;
             assert_eq!(hook_output.termination, Termination::Exit(0));

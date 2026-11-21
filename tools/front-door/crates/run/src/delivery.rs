@@ -8,7 +8,7 @@ use crate::{
 use provenant_confinement::repo::GitRefName;
 use provenant_core::GitOid;
 use provenant_os::{
-    exec::{CaptureMask, ExecOptions, RawCaptureReason, StreamPolicy, SystemExecutor, Termination},
+    exec::{ExecOptions, StreamPolicy, SystemExecutor, Termination},
     fs::Directory,
 };
 use serde::{Deserialize, Serialize};
@@ -710,7 +710,10 @@ impl HostDeliveryContext {
                             bound.host_cwd.as_os_str().to_owned(),
                         ));
                     }
-                    let mut options = ExecOptions::new(&argv, project, budget);
+                    // The port parses gh's stdout byte-for-byte and checks it
+                    // against `total_bytes`, so stdout is exact. Stderr remains
+                    // a masked diagnostic.
+                    let mut options = ExecOptions::exact(&argv, project, budget);
                     options.cancel = self.cancellation.as_ref();
                     options.process_group = true;
                     options.env = Some(&env);
@@ -718,10 +721,6 @@ impl HostDeliveryContext {
                     options.stdout = StreamPolicy::Capture {
                         limit: stdout_limit(false, args),
                     };
-                    // The port parses gh's stdout byte-for-byte and checks it
-                    // against `total_bytes`, so keep it out of the default
-                    // mask. Stderr remains masked as a diagnostic.
-                    options.stdout_mask = CaptureMask::Raw(RawCaptureReason::ByteExactParse);
                     options.stderr = if stage == Stage::Prepare {
                         StreamPolicy::Capture { limit: 4096 }
                     } else {
@@ -1985,9 +1984,10 @@ impl HostDeliveryContext {
             }))
             .collect();
         let executor = SystemExecutor::new(1).map_err(|error| failure(error.to_string()))?;
-        // Captured stderr is masked on the executor's default stream filter,
-        // ahead of the capture bound; no per-site redactor is needed here.
-        let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(30));
+        // Git facts (object ids, config values, porcelain lines) and PR bodies
+        // are consumed byte-for-byte, so stdout is exact. Stderr is a masked
+        // diagnostic installed on the stream ahead of the capture bound.
+        let mut options = ExecOptions::exact(&argv, cwd, Duration::from_secs(30));
         options.cancel = self.cancellation.as_ref();
         options.process_group = true;
         options.env = Some(&environment);
@@ -1999,10 +1999,6 @@ impl HostDeliveryContext {
             stdout_limit(commit_log, args)
         };
         options.stdout = StreamPolicy::Capture { limit };
-        // Git facts (object ids, config values, porcelain lines) and PR bodies
-        // are consumed byte-for-byte. Keep stdout raw; stderr stays masked by
-        // the executor's default stream filter.
-        options.stdout_mask = CaptureMask::Raw(RawCaptureReason::ByteExactParse);
         options.stop_on_output_limit = commit_log;
         options.stderr = if stage == Stage::Prepare {
             StreamPolicy::Capture { limit: 4096 }
@@ -2062,12 +2058,19 @@ impl HostDeliveryContext {
                 && args.first() == Some(&"merge-tree")
                 && output.termination == Termination::Exit(1)
             {
+                // stdout is an exact capture, so mask each file name at this
+                // disclosure point before it becomes an operator-visible error.
                 let stdout_str = String::from_utf8_lossy(&output.stdout.bytes);
                 let conflicting_files: Vec<String> = stdout_str
                     .lines()
                     .skip(1)
-                    .map(|s| s.trim().to_string())
+                    .map(str::trim)
                     .filter(|s| !s.is_empty())
+                    .map(|name| {
+                        provenant_redact::known_shapes(name.as_bytes())
+                            .map(|masked| String::from_utf8_lossy(&masked).into_owned())
+                            .unwrap_or_else(|_| "[REDACTED]".to_owned())
+                    })
                     .collect();
                 return Err(RunError::MergeConflict { conflicting_files });
             }

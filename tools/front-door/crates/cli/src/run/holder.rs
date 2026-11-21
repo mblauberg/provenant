@@ -1026,7 +1026,7 @@ mod tests {
             let mut env: Vec<_> = std::env::vars_os().collect();
             env.push((CHILD.into(), state.clone().into_os_string()));
             let cwd = std::env::current_dir()?;
-            let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+            let mut options = ExecOptions::diagnostic(&argv, &cwd, Duration::from_secs(30));
             options.env = Some(&env);
             options.stdout = StreamPolicy::Capture { limit: 65536 };
             options.stderr = StreamPolicy::Capture { limit: 65536 };

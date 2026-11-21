@@ -47,7 +47,11 @@ fn native_attempt_mach_lookups_preserve_custody_membership()
         "-o".into(),
         helper.clone().into_os_string(),
     ];
-    let compiled = executor.execute(ExecOptions::new(&compile, &root, Duration::from_secs(30)))?;
+    let compiled = executor.execute(ExecOptions::diagnostic(
+        &compile,
+        &root,
+        Duration::from_secs(30),
+    ))?;
     assert!(
         successful_probe(&compiled),
         "{}",

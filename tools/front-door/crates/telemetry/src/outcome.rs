@@ -202,7 +202,7 @@ impl GitRunner for SystemGitRunner {
             .map(OsString::from),
         );
         argv.extend(args.iter().map(OsString::from));
-        let mut options = ExecOptions::new(&argv, repo, Duration::from_secs(30));
+        let mut options = ExecOptions::exact(&argv, repo, Duration::from_secs(30));
         options.env = Some(&env);
         options.stdout = StreamPolicy::Capture {
             limit: 64 * 1024 * 1024,

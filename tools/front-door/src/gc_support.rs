@@ -143,7 +143,7 @@ fn host_git_with_cancel(
                 })),
             )
             .collect();
-    let mut options = ExecOptions::new(&argv, repo, timeout);
+    let mut options = ExecOptions::exact(&argv, repo, timeout);
     options.env = Some(&environment);
     options.stdin = Some(b"");
     options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
@@ -973,7 +973,13 @@ mod tests {
                 env.retain(|(key, _)| key != "HOME" && !key.to_string_lossy().starts_with("GIT_"));
                 env.push(("HOME".into(), self.home.as_os_str().to_owned()));
                 env.extend(provenant_os::fixture::fixture_git_settings());
-                let mut adjusted = ExecOptions::new(options.argv, options.cwd, options.timeout);
+                let mut adjusted = ExecOptions::with_purposes(
+                    options.argv,
+                    options.cwd,
+                    options.timeout,
+                    options.stdout_purpose,
+                    options.stderr_purpose,
+                );
                 adjusted.env = Some(&env);
                 adjusted.stdin = options.stdin;
                 adjusted.stdout = options.stdout;

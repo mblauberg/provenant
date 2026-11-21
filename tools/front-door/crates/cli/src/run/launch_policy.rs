@@ -159,7 +159,11 @@ fn diff_paths(checkout: &Path, base: Option<&str>, head: Option<&str>) -> Option
         .into_iter()
         .chain(args.into_iter().map(std::ffi::OsString::from))
         .collect::<Vec<_>>();
-        let mut options = ExecOptions::new(&argv, checkout, Duration::from_secs(5));
+        // `-z` porcelain paths are split on NUL and fed to the protected-path
+        // check and recorded as evidence. A diagnostic mask would rewrite a
+        // credential-shaped path (`config/token=abc/one`) into
+        // `config/token=[REDACTED]`, losing the real path, so stdout is exact.
+        let mut options = ExecOptions::exact(&argv, checkout, Duration::from_secs(5));
         options.env = Some(&environment);
         options.stdin = Some(b"");
         options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };

@@ -220,7 +220,7 @@ exit "$status"
 fn xcode_select_path() -> Option<PathBuf> {
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     let argv: Vec<OsString> = vec!["/usr/bin/xcode-select".into(), "-p".into()];
-    let mut options = ExecOptions::new(&argv, Path::new("/"), std::time::Duration::from_secs(5));
+    let mut options = ExecOptions::exact(&argv, Path::new("/"), std::time::Duration::from_secs(5));
     options.env = Some(&[]);
     options.stdout = StreamPolicy::Capture { limit: 4096 };
     options.stderr = StreamPolicy::Discard;
@@ -575,7 +575,7 @@ mod tests {
             ("FAKE_STATUS".into(), status.into()),
             ("TMPDIR".into(), "/lane/tmp".into()),
         ];
-        let mut options = ExecOptions::new(&argv, &root, std::time::Duration::from_secs(10));
+        let mut options = ExecOptions::diagnostic(&argv, &root, std::time::Duration::from_secs(10));
         options.env = Some(&env);
         let output = SystemExecutor::new(1).unwrap().execute(options).unwrap();
         (

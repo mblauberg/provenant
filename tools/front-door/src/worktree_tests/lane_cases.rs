@@ -553,7 +553,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 );
             }
         }
-        let mut options = provenant_os::exec::ExecOptions::new(
+        let mut options = provenant_os::exec::ExecOptions::diagnostic(
             &launch.argv,
             &launch.cwd,
             Duration::from_secs(10),
@@ -674,7 +674,7 @@ pub(crate) fn lane_provider() -> Result {
     ];
     let env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     let cwd = std::env::current_dir()?;
-    let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(8));
+    let mut options = ExecOptions::diagnostic(&argv, &cwd, Duration::from_secs(8));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
     options.stderr = StreamPolicy::Capture { limit: 64 * 1024 };

@@ -95,7 +95,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
             ("PATH".into(), "/usr/bin:/bin".into()),
         ];
         env.extend(provenant_os::fixture::fixture_git_settings());
-        let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(5));
+        let mut options = ExecOptions::diagnostic(&argv, cwd, Duration::from_secs(5));
         options.env = Some(&env);
         executor.execute(options)
     };
@@ -219,7 +219,7 @@ fn read_only_checkout_warning_reports_a_local_read_for_an_unpinned_checkout()
         let argv: Vec<_> = std::iter::once(executable.as_os_str().to_owned())
             .chain(args.iter().map(std::ffi::OsString::from))
             .collect();
-        let mut options = ExecOptions::new(&argv, repo, std::time::Duration::from_secs(10));
+        let mut options = ExecOptions::diagnostic(&argv, repo, std::time::Duration::from_secs(10));
         options.env = Some(env);
         let output = executor.execute(options)?;
         if output.termination != Termination::Exit(0) {
@@ -338,7 +338,7 @@ fn read_only_source_ref_names_the_fetched_upstream_head_of_a_behind_checkout()
         let argv: Vec<_> = std::iter::once(executable.as_os_str().to_owned())
             .chain(args.iter().map(std::ffi::OsString::from))
             .collect();
-        let mut options = ExecOptions::new(&argv, repo, std::time::Duration::from_secs(10));
+        let mut options = ExecOptions::diagnostic(&argv, repo, std::time::Duration::from_secs(10));
         options.env = Some(env);
         let output = executor.execute(options)?;
         if output.termination != Termination::Exit(0) {
@@ -434,7 +434,7 @@ fn read_only_source_ref_uses_the_checked_out_branch_upstream_not_the_default_bra
         let argv: Vec<_> = std::iter::once(executable.as_os_str().to_owned())
             .chain(args.iter().map(std::ffi::OsString::from))
             .collect();
-        let mut options = ExecOptions::new(&argv, repo, std::time::Duration::from_secs(10));
+        let mut options = ExecOptions::diagnostic(&argv, repo, std::time::Duration::from_secs(10));
         options.env = Some(env);
         let output = executor.execute(options)?;
         if output.termination != Termination::Exit(0) {

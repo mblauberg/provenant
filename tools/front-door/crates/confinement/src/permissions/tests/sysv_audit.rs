@@ -120,7 +120,7 @@ impl<'a> SysvAudit<'a> {
             "-o".into(),
             library.clone().into_os_string(),
         ];
-        let result = self.executor.execute(ExecOptions::new(
+        let result = self.executor.execute(ExecOptions::diagnostic(
             &argv,
             Path::new("/"),
             Duration::from_secs(30),
@@ -139,7 +139,7 @@ impl<'a> SysvAudit<'a> {
         executor: &SystemExecutor,
     ) -> Result<(ObjectIds, Vec<u8>), Box<dyn std::error::Error>> {
         let argv = ["/usr/bin/ipcs", "-m", "-s", "-q"].map(OsString::from);
-        let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(3));
+        let mut options = ExecOptions::diagnostic(&argv, Path::new("/"), Duration::from_secs(3));
         options.stdout = StreamPolicy::Capture { limit: 256 * 1024 };
         let env = [("LC_ALL".into(), "C".into())];
         options.env = Some(&env);
@@ -210,7 +210,7 @@ impl<'a> SysvAudit<'a> {
                 .into(),
                 id.to_string().into(),
             ];
-            let result = self.executor.execute(ExecOptions::new(
+            let result = self.executor.execute(ExecOptions::diagnostic(
                 &argv,
                 Path::new("/"),
                 Duration::from_secs(3),

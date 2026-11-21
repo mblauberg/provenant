@@ -81,7 +81,7 @@ fn host_swap(
         "-n".into(),
         "vm.swapusage".into(),
     ];
-    let result = executor.execute(ExecOptions::new(&argv, root, Duration::from_secs(2)))?;
+    let result = executor.execute(ExecOptions::diagnostic(&argv, root, Duration::from_secs(2)))?;
     assert!(successful_probe(&result), "host vm.swapusage failed");
     let text = std::str::from_utf8(&result.stdout.bytes)?;
     let fields = text.split_whitespace().collect::<Vec<_>>();
@@ -120,7 +120,7 @@ fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
     std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
         let worker = scope.spawn(|| {
             let argv = [helper.clone(), root.join("children").into_os_string()];
-            let mut options = ExecOptions::new(&argv, &root, Duration::from_secs(20));
+            let mut options = ExecOptions::diagnostic(&argv, &root, Duration::from_secs(20));
             options.cancel = Some(&cancel);
             options.process_group = true;
             executor.execute(options)
@@ -284,8 +284,11 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
             "-o".into(),
             helper.as_os_str().to_owned(),
         ];
-        let compiled =
-            executor.execute(ExecOptions::new(&compile, &root, Duration::from_secs(30)))?;
+        let compiled = executor.execute(ExecOptions::diagnostic(
+            &compile,
+            &root,
+            Duration::from_secs(30),
+        ))?;
         assert!(
             successful_probe(&compiled),
             "tree helper: {}",
@@ -400,7 +403,7 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
                     (ROLE.into(), "peer".into()),
                     (ROOT.into(), root.as_os_str().to_owned()),
                 ];
-                let mut options = ExecOptions::new(&argv, &root, Duration::from_secs(20));
+                let mut options = ExecOptions::diagnostic(&argv, &root, Duration::from_secs(20));
                 options.env = Some(&env);
                 options.cancel = Some(&peer_stop);
                 options.process_group = true;
@@ -426,7 +429,7 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
                     ),
                 ];
                 let mut options =
-                    ExecOptions::new(reader_argv, reader_root, Duration::from_secs(15));
+                    ExecOptions::diagnostic(reader_argv, reader_root, Duration::from_secs(15));
                 options.env = Some(&env);
                 options.cancel = Some(reader_cancel);
                 options.process_group = true;

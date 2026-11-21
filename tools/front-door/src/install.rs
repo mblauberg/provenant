@@ -2255,7 +2255,7 @@ impl UpgradeRunner {
         seconds: u64,
     ) -> Result<Vec<u8>, String> {
         use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
-        let mut options = ExecOptions::new(argv, cwd, std::time::Duration::from_secs(seconds));
+        let mut options = ExecOptions::exact(argv, cwd, std::time::Duration::from_secs(seconds));
         options.env = Some(&self.environment);
         options.stdin = input;
         options.stdout = StreamPolicy::Capture { limit };
@@ -2274,10 +2274,15 @@ impl UpgradeRunner {
             || result.stdout.read_failed
             || result.stderr.read_failed
         {
+            // stdout is an exact capture returned as data on success, so mask
+            // it here where it becomes part of an error message.
+            let stdout = provenant_redact::known_shapes(&result.stdout.bytes)
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_else(|_| "[REDACTED]".to_owned());
             return Err(format!(
                 "Command failed ({:?}): {}{}",
                 result.termination,
-                String::from_utf8_lossy(&result.stdout.bytes),
+                stdout,
                 String::from_utf8_lossy(&result.stderr.bytes)
             ));
         }

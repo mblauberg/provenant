@@ -179,7 +179,7 @@ fn postgres_case(database: bool) -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&postgres_wrapper, std::fs::Permissions::from_mode(0o700))?;
         let argv = [bin.join("pg_config").into_os_string(), "--sharedir".into()];
-        let sharedir = executor.execute(ExecOptions::new(
+        let sharedir = executor.execute(ExecOptions::diagnostic(
             &argv,
             Path::new("/"),
             Duration::from_secs(3),
@@ -241,7 +241,7 @@ grep -q 'Operation not permitted' "$TMPDIR/denial"
             ("OUTSIDE".into(), outside.clone().into_os_string()),
         ];
         let argv = [SANDBOX_EXEC, "-p", &source, "/bin/sh", "-c", lifecycle].map(OsString::from);
-        let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(30));
+        let mut options = ExecOptions::diagnostic(&argv, Path::new("/"), Duration::from_secs(30));
         options.env = Some(&env);
         options.cleanup_process_group = true;
         options.terminate_grace = Duration::from_secs(5);
@@ -312,7 +312,7 @@ semctl($sem, 0, IPC_RMID, 0) or die "database-on sem removal: $!\n";
             script.into(),
             audit.journal().as_os_str().to_owned(),
         ];
-        let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(5));
+        let mut options = ExecOptions::diagnostic(&argv, Path::new("/"), Duration::from_secs(5));
         options.process_group = true;
         options.stderr = StreamPolicy::Capture { limit: 2048 };
         let outcome = executor.execute(options)?;
@@ -385,7 +385,7 @@ die "removed semaphore still exists\n" if defined semctl($ARGV[1], 0, GETVAL, 0)
             audit.journal().to_str().ok_or("journal path")?,
         ]
         .map(OsString::from);
-        let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(3));
+        let mut options = ExecOptions::diagnostic(&argv, Path::new("/"), Duration::from_secs(3));
         options.stdout = StreamPolicy::Capture { limit: 1024 };
         options.stderr = StreamPolicy::Capture { limit: 1024 };
         let allocated = executor.execute(options)?;
@@ -411,7 +411,7 @@ die "removed semaphore still exists\n" if defined semctl($ARGV[1], 0, GETVAL, 0)
             &ids[1],
         ]
         .map(OsString::from);
-        let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(5));
+        let mut options = ExecOptions::diagnostic(&argv, Path::new("/"), Duration::from_secs(5));
         options.process_group = true;
         options.stderr = StreamPolicy::Capture { limit: 2048 };
         let outcome = executor.execute(options)?;
@@ -424,7 +424,7 @@ die "removed semaphore still exists\n" if defined semctl($ARGV[1], 0, GETVAL, 0)
             &ids[1],
         ]
         .map(OsString::from);
-        let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(3));
+        let mut options = ExecOptions::diagnostic(&argv, Path::new("/"), Duration::from_secs(3));
         options.stderr = StreamPolicy::Capture { limit: 1024 };
         let removed = executor.execute(options)?;
         // The host audit guard removes only journalled test allocations and

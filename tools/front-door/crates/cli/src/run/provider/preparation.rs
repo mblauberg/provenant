@@ -409,7 +409,7 @@ pub(super) fn login_dependency_path(
             "-lc".into(),
             r#"printf '\0provenant-path\0%s\0' "$PATH""#.into(),
         ];
-        let mut options = ExecOptions::new(&argv, home, std::time::Duration::from_secs(10));
+        let mut options = ExecOptions::exact(&argv, home, std::time::Duration::from_secs(10));
         options.cancel = Some(cancel);
         options.process_group = true;
         options.cleanup_process_group = true;
@@ -586,7 +586,7 @@ pub(super) fn prepare_writer_dependencies(
     let executor = provenant_os::exec::SystemExecutor::new(1)
         .map_err(|error| format!("{command} failed: {error}"))?;
     let mut options =
-        provenant_os::exec::ExecOptions::new(&argv, worktree, DEPENDENCY_INSTALL_TIMEOUT);
+        provenant_os::exec::ExecOptions::diagnostic(&argv, worktree, DEPENDENCY_INSTALL_TIMEOUT);
     options.env = Some(&env);
     options.process_group = true;
     options.cleanup_process_group = true;

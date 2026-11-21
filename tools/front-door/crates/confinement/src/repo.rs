@@ -1181,7 +1181,7 @@ fn parse_common_config(git: &Path, bytes: &[u8]) -> Result<Vec<u8>, RepoError> {
     ];
     // Parsing needs no repository; running outside the worktree keeps Git's
     // discovery from failing on the damaged metadata this check exists to report.
-    let mut options = ExecOptions::new(&argv, Path::new("/"), std::time::Duration::from_secs(2));
+    let mut options = ExecOptions::exact(&argv, Path::new("/"), std::time::Duration::from_secs(2));
     options.stdin = Some(bytes);
     options.env = Some(&[]);
     options.stdout = StreamPolicy::Capture {

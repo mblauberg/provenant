@@ -285,7 +285,7 @@ fn command(provider: &str, executable: &Path, setting: &ProviderUpdate) -> Optio
 
 fn version(executor: &dyn Executor, executable: &Path, cwd: &Path) -> Option<String> {
     let argv = [executable.into(), "--version".into()];
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(4));
+    let mut options = ExecOptions::exact(&argv, cwd, Duration::from_secs(4));
     options.stdout = StreamPolicy::Capture { limit: 128 };
     options.stderr = StreamPolicy::Discard;
     let result = executor.execute(options).ok()?;
@@ -412,7 +412,7 @@ fn check_inner(
         record.new_version = Some(old_version);
     }
     save(&dir, &attempt_name(provider), &record)?;
-    let mut options = ExecOptions::new(
+    let mut options = ExecOptions::diagnostic(
         &argv,
         state,
         Duration::from_secs(settings.update_timeout_seconds),
@@ -1077,8 +1077,11 @@ mod tests {
         assert!(!temp.path().join("injected").exists());
         let _lane = provenant_os::provider_fence::acquire(temp.path(), "claude", LockMode::Shared)?;
         let argv = [executable.into_os_string(), "--version".into()];
-        let result =
-            executor.execute(ExecOptions::new(&argv, temp.path(), Duration::from_secs(2)))?;
+        let result = executor.execute(ExecOptions::diagnostic(
+            &argv,
+            temp.path(),
+            Duration::from_secs(2),
+        ))?;
         assert_eq!(result.termination, Termination::Exit(0));
         assert!(
             check(

@@ -953,7 +953,7 @@ mod tests {
                 script.as_os_str().to_owned(),
                 tools.join("write-probe").into_os_string(),
             ];
-            let mut options = ExecOptions::new(&argv, &root, Duration::from_secs(10));
+            let mut options = ExecOptions::diagnostic(&argv, &root, Duration::from_secs(10));
             options.stderr = StreamPolicy::Capture { limit: 2048 };
             let result = executor.execute(options)?;
             assert_eq!(
@@ -1116,7 +1116,7 @@ mod tests {
                 let argv = [OsString::from("/usr/bin/sandbox-exec"), "-p".into(), sbpl.into(), "/usr/bin/perl".into(), "-e".into(),
                     "open(my $f, '>>', $ARGV[0]) or die $!; flock($f, 2) or die $!; open(my $r, '>', $ARGV[1]) or die $!; close($r); open(my $g, '>>', $ARGV[2]) or die $!; flock($g, 2) or die $!;".into(),
                     lock.as_os_str().to_owned(), ready.as_os_str().to_owned(), release_path.as_os_str().to_owned()];
-                let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(20));
+                let mut options = ExecOptions::diagnostic(&argv, Path::new("/"), Duration::from_secs(20));
                 options.stderr = StreamPolicy::Capture { limit: 1024 };
                 executor.execute(options)
             });
@@ -1138,7 +1138,7 @@ mod tests {
                 let argv = [OsString::from("/usr/bin/perl"), "-e".into(),
                     "open(my $f, '>>', $ARGV[0]) or die $!; open(my $s, '>', $ARGV[1]) or die $!; close($s); flock($f, 2) or die $!; open(my $a, '>', $ARGV[2]) or die $!;".into(),
                     lock.as_os_str().to_owned(), started.as_os_str().to_owned(), acquired.as_os_str().to_owned()];
-                let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(20));
+                let mut options = ExecOptions::diagnostic(&argv, Path::new("/"), Duration::from_secs(20));
                 options.stderr = StreamPolicy::Capture { limit: 1024 };
                 executor.execute(options)
             });

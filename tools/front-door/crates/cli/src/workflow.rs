@@ -705,7 +705,7 @@ fn closed_reference(cwd: &Path, number: u64) -> bool {
         .iter()
         .map(OsString::from)
         .collect();
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(2));
+    let mut options = ExecOptions::exact(&argv, cwd, Duration::from_secs(2));
     options.stdout = StreamPolicy::Capture { limit: 128 };
     options.stderr = StreamPolicy::Discard;
     SystemExecutor::new(1)
@@ -814,7 +814,10 @@ fn forge_pull_request(cwd: &Path, number: u64) -> Result<ForgePullRequest, Error
     .iter()
     .map(OsString::from)
     .collect();
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(30));
+    // The `gh pr view` JSON is parsed byte-for-byte; keep stdout exact so a
+    // credential-shaped field is not rewritten before parsing. Stderr is a
+    // masked diagnostic.
+    let mut options = ExecOptions::exact(&argv, cwd, Duration::from_secs(30));
     options.stdout = StreamPolicy::Capture { limit: 4096 };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
     let out = executor

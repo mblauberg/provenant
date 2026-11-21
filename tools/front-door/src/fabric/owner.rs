@@ -1149,7 +1149,7 @@ impl BoundGraphOwner<'_> {
                 .as_micros(),
         )
         .min(std::time::Duration::from_secs(30));
-        let mut options = ExecOptions::new(&argv, directory, remaining);
+        let mut options = ExecOptions::exact(&argv, directory, remaining);
         options.cancel = Some(self.cancel);
         let output = self
             .factory

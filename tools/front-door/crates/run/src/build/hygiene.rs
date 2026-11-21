@@ -643,7 +643,7 @@ fn git_text(git: &Path, project: &Path, args: &[&str]) -> Option<String> {
     .map(|(key, value)| (OsString::from(key), OsString::from(value)))
     .collect();
     let executor = SystemExecutor::new(1).ok()?;
-    let mut options = ExecOptions::new(&argv, project, Duration::from_secs(10));
+    let mut options = ExecOptions::exact(&argv, project, Duration::from_secs(10));
     options.env = Some(&clean);
     options.stdout = StreamPolicy::Capture { limit: 4096 };
     options.stderr = StreamPolicy::Capture { limit: 4096 };

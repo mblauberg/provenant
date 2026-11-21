@@ -1431,7 +1431,7 @@ fn agy_probe_refuses_a_keychain_that_changes_between_selection_and_execution()
     let env = [("HOME".into(), isolated.clone().into_os_string())];
     let run = |executor: &dyn Executor| {
         let mut options =
-            ExecOptions::new(&argv, Path::new("/"), std::time::Duration::from_secs(5));
+            ExecOptions::diagnostic(&argv, Path::new("/"), std::time::Duration::from_secs(5));
         options.env = Some(&env);
         executor.execute(options).map(|_| ())
     };

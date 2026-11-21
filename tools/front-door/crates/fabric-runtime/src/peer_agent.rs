@@ -226,7 +226,7 @@ fn relay(
         "peer".into(),
         "--in-process".into(),
     ];
-    let mut options = ExecOptions::new(&argv, cwd, REQUEST);
+    let mut options = ExecOptions::exact(&argv, cwd, REQUEST);
     options.stdin = Some(&request);
     options.stdout = StreamPolicy::Capture { limit: MAX_FRAME };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
@@ -454,7 +454,7 @@ fn service_tool(
 ) -> Result<(bool, String), AgentError> {
     let mut argv: Vec<OsString> = vec![program.into()];
     argv.extend(args.iter().map(|arg| arg.to_os_string()));
-    let mut options = ExecOptions::new(&argv, home, Duration::from_secs(10));
+    let mut options = ExecOptions::exact(&argv, home, Duration::from_secs(10));
     options.env = Some(env);
     options.stdout = StreamPolicy::Capture { limit: 65_536 };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
@@ -478,9 +478,14 @@ fn service_tool(
     } else {
         stderr.trim()
     };
+    // stdout is an exact capture, so mask at this disclosure point before it
+    // becomes an operator-visible diagnostic.
     if !output.is_empty() {
+        let masked = provenant_redact::known_shapes(output.as_bytes())
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_else(|_| "[REDACTED]".to_owned());
         detail.push_str(": ");
-        detail.push_str(output);
+        detail.push_str(&masked);
     }
     Ok((false, detail))
 }

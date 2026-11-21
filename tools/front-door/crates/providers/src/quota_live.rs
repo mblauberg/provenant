@@ -12,8 +12,8 @@ use crate::host::PROBE_DIR_OPERATION;
 use provenant_core::Clock;
 use provenant_os::clock::SystemClock;
 use provenant_os::exec::{
-    CaptureMask, ExecError, ExecOptions, ExecOutcome, Executor, RawCaptureReason, StreamPolicy,
-    SystemExecutor, Termination,
+    CapturePurpose, ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor,
+    Termination,
 };
 use provenant_quota::{
     AccountRecord, AccountScope, ProbeCapture, ProbeFailure, QuotaDetails, QuotaEffects,
@@ -212,15 +212,14 @@ impl LiveQuota {
             stdin,
             deadline,
             max_seconds,
-            CaptureMask::default(),
+            CapturePurpose::Diagnostic,
         )
     }
-    /// Runs a probe whose stdout is a credential the caller owns. The default
-    /// stream mask would rewrite an `sk-ant-` token to `[REDACTED]` before
-    /// `claude_token` could use it, so this scoped helper is the only path that
-    /// keeps a probe's captured stdout raw.
+    /// Runs a probe whose stdout is a credential the caller owns. It stays
+    /// exact so an `sk-ant-` token is not rewritten to `[REDACTED]` before it
+    /// reaches the wire; this is the only probe path that keeps stdout raw.
     #[allow(clippy::too_many_arguments)]
-    fn command_with_mask(
+    fn command_exact(
         &self,
         program: &str,
         args: &[&str],
@@ -228,7 +227,6 @@ impl LiveQuota {
         stdin: Option<&[u8]>,
         deadline: i64,
         max_seconds: u64,
-        mask: CaptureMask,
     ) -> Result<ExecOutcome, ProbeFailure> {
         self.command_as(
             &self.home,
@@ -239,7 +237,7 @@ impl LiveQuota {
             stdin,
             deadline,
             max_seconds,
-            mask,
+            CapturePurpose::Exact,
         )
     }
     /// Runs a probe with `home` as its `HOME`.
@@ -254,7 +252,7 @@ impl LiveQuota {
         stdin: Option<&[u8]>,
         deadline: i64,
         max_seconds: u64,
-        mask: CaptureMask,
+        purpose: CapturePurpose,
     ) -> Result<ExecOutcome, ProbeFailure> {
         let remaining = deadline.saturating_sub(self.now());
         if remaining <= 0 {
@@ -289,15 +287,16 @@ impl LiveQuota {
             env.push((key.into(), path.as_os_str().to_owned()));
         }
         // HostProbeExecutor replaces this `/` cwd with a fresh private directory.
-        let mut options = ExecOptions::new(
+        let mut options = ExecOptions::with_purposes(
             &argv,
             Path::new("/"),
             Duration::from_secs((remaining as u64).min(max_seconds)),
+            purpose,
+            CapturePurpose::Diagnostic,
         );
         options.env = Some(&env);
         options.stdin = stdin;
         options.stdout = StreamPolicy::Capture { limit: LIMIT };
-        options.stdout_mask = mask;
         options.stderr = StreamPolicy::Discard;
         options.stop_on_output_limit = true;
         match executor.execute(options) {
@@ -324,6 +323,7 @@ impl LiveQuota {
         deadline: i64,
         seconds: u64,
     ) -> Result<Value, ProbeFailure> {
+        // The JSON document is parsed byte-for-byte, so stdout stays exact.
         let out = self.command_as(
             home.path(),
             Some(home),
@@ -333,7 +333,7 @@ impl LiveQuota {
             None,
             deadline,
             seconds,
-            CaptureMask::default(),
+            CapturePurpose::Exact,
         )?;
         if !clean(&out) || out.termination != Termination::Exit(0) {
             return Err(ProbeFailure::Network);

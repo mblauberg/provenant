@@ -199,7 +199,9 @@ fn read_git_within(
                 .map(OsString::from),
         )
         .collect();
-    let mut options = ExecOptions::new(&argv, cwd, timeout);
+    // Git log, diff and fact output is content consumed byte-for-byte, so
+    // stdout is exact. Stderr reaches diagnostics and is masked on the stream.
+    let mut options = ExecOptions::exact(&argv, cwd, timeout);
     options.env = Some(env);
     options.stdout = StreamPolicy::Capture {
         limit: provenant_os::git::fact_capture_limit(args, limit),
@@ -852,7 +854,9 @@ fn fetch_tracking_ref_once(
                 .map(OsString::from),
         )
         .collect();
-    let mut options = ExecOptions::new(&argv, cwd, FETCH_TIMEOUT);
+    // The fetch advertisement is parsed byte-for-byte, so stdout is exact;
+    // stderr is a masked diagnostic used to classify ref-lock collisions.
+    let mut options = ExecOptions::exact(&argv, cwd, FETCH_TIMEOUT);
     options.env = Some(env);
     options.stdout = StreamPolicy::Capture {
         limit: CONTEXT_LIMIT,
@@ -2147,7 +2151,13 @@ mod tests {
             let mut env = options.env.unwrap_or_default().to_vec();
             env.retain(|(key, _)| key != "HOME");
             env.push(("HOME".into(), self.home.as_os_str().to_owned()));
-            let mut isolated = ExecOptions::new(options.argv, options.cwd, options.timeout);
+            let mut isolated = ExecOptions::with_purposes(
+                options.argv,
+                options.cwd,
+                options.timeout,
+                options.stdout_purpose,
+                options.stderr_purpose,
+            );
             isolated.env = Some(&env);
             isolated.stdout = options.stdout;
             isolated.stderr = options.stderr;

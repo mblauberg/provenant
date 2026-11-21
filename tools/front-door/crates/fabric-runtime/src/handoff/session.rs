@@ -286,7 +286,7 @@ impl Launcher for Terminal {
             script.as_os_str().to_owned(),
         ];
         let dir = script.parent().unwrap_or(Path::new("/"));
-        let mut options = ExecOptions::new(&argv, dir, Duration::from_secs(10));
+        let mut options = ExecOptions::diagnostic(&argv, dir, Duration::from_secs(10));
         options.stdout = StreamPolicy::Discard;
         options.stderr = StreamPolicy::Capture { limit: 4096 };
         let out = SystemExecutor::new(1)

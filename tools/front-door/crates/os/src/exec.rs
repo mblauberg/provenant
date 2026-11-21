@@ -139,29 +139,21 @@ impl StreamPolicy<'_> {
     }
 }
 
-/// Why a call site keeps raw captured bytes instead of the executor's default
-/// local-disclosure mask. The reason is part of the type so an opt-out is
-/// auditable; a bare boolean would let a site disable masking silently.
+/// Why a stream is retained. Required at every construction site: there is no
+/// default and no way to stay silent, so the type system forces each site to
+/// decide whether its bytes are data or diagnostics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RawCaptureReason {
-    /// The captured bytes are parsed byte-for-byte (paths, object ids,
-    /// protocol fields), so a mask could change their meaning.
-    ByteExactParse,
-    /// A higher layer owns the redaction boundary for these bytes.
-    CallerOwnsRedaction,
-}
-
-/// Per-stream masking policy for captured bytes. Masking runs on the stream,
-/// before the capture bound, so a secret that straddles the bound cannot leave
-/// a fragment in the retained bytes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CaptureMask {
-    /// Mask captured bytes with local-disclosure redaction. This applies to
-    /// every capture by default.
-    #[default]
-    Mask,
-    /// Keep raw bytes for the named reason.
-    Raw(RawCaptureReason),
+pub enum CapturePurpose {
+    /// Raw bytes, for parsing, hashing or content that must stay byte-exact.
+    /// A mask could rewrite a value the caller consumes as data, so no stream
+    /// masking is installed. If these bytes are later shown in an error or a
+    /// log, the caller masks them at that disclosure point.
+    Exact,
+    /// Diagnostic bytes for error messages, warnings, logs and user-visible
+    /// tails. Masked on the stream with local-disclosure redaction before any
+    /// capture bound, so a secret straddling the bound leaves no fragment in
+    /// the retained bytes.
+    Diagnostic,
 }
 
 /// Frames are decoded before retention and redaction; full queues are loss,
@@ -212,10 +204,10 @@ pub struct ExecOptions<'a> {
     pub group_watchdog: bool,
     pub stdout: StreamPolicy<'a>,
     pub stderr: StreamPolicy<'a>,
-    /// Masking policy for retained stdout bytes. Defaults to `CaptureMask::Mask`.
-    pub stdout_mask: CaptureMask,
-    /// Masking policy for retained stderr bytes. Defaults to `CaptureMask::Mask`.
-    pub stderr_mask: CaptureMask,
+    /// Why stdout is retained. Chosen at construction, never defaulted.
+    pub stdout_purpose: CapturePurpose,
+    /// Why stderr is retained. Chosen at construction, never defaulted.
+    pub stderr_purpose: CapturePurpose,
     pub stdout_decoder: Option<&'a dyn FrameSink>,
     pub stderr_decoder: Option<&'a dyn FrameSink>,
     pub stdout_filter: Option<&'a mut dyn CaptureFilter>,
@@ -235,7 +227,13 @@ pub struct ExecOptions<'a> {
     pub stop_on_output_limit: bool,
 }
 impl<'a> ExecOptions<'a> {
-    pub fn new(argv: &'a [OsString], cwd: &'a Path, timeout: Duration) -> Self {
+    fn build(
+        argv: &'a [OsString],
+        cwd: &'a Path,
+        timeout: Duration,
+        stdout_purpose: CapturePurpose,
+        stderr_purpose: CapturePurpose,
+    ) -> Self {
         Self {
             argv,
             env: None,
@@ -249,8 +247,8 @@ impl<'a> ExecOptions<'a> {
             group_watchdog: false,
             stdout: StreamPolicy::default(),
             stderr: StreamPolicy::default(),
-            stdout_mask: CaptureMask::default(),
-            stderr_mask: CaptureMask::default(),
+            stdout_purpose,
+            stderr_purpose,
             stdout_decoder: None,
             stderr_decoder: None,
             stdout_filter: None,
@@ -265,6 +263,53 @@ impl<'a> ExecOptions<'a> {
             reap_timeout: Duration::from_millis(250),
             stop_on_output_limit: false,
         }
+    }
+
+    /// Both captured streams reach diagnostics: errors, warnings, logs or
+    /// user-visible tails. Each is masked on the stream before the bound.
+    pub fn diagnostic(argv: &'a [OsString], cwd: &'a Path, timeout: Duration) -> Self {
+        Self::build(
+            argv,
+            cwd,
+            timeout,
+            CapturePurpose::Diagnostic,
+            CapturePurpose::Diagnostic,
+        )
+    }
+
+    /// Stdout is data (parsed, hashed or retained as content) and stays raw;
+    /// stderr still reaches diagnostics and is masked on the stream.
+    pub fn exact(argv: &'a [OsString], cwd: &'a Path, timeout: Duration) -> Self {
+        Self::build(
+            argv,
+            cwd,
+            timeout,
+            CapturePurpose::Exact,
+            CapturePurpose::Diagnostic,
+        )
+    }
+
+    /// Both streams are raw data. Use only when no captured byte can reach a
+    /// diagnostic; mask at the disclosure point if that changes.
+    pub fn exact_both(argv: &'a [OsString], cwd: &'a Path, timeout: Duration) -> Self {
+        Self::build(
+            argv,
+            cwd,
+            timeout,
+            CapturePurpose::Exact,
+            CapturePurpose::Exact,
+        )
+    }
+
+    /// An explicit purpose for each stream, for the rare asymmetric case.
+    pub fn with_purposes(
+        argv: &'a [OsString],
+        cwd: &'a Path,
+        timeout: Duration,
+        stdout_purpose: CapturePurpose,
+        stderr_purpose: CapturePurpose,
+    ) -> Self {
+        Self::build(argv, cwd, timeout, stdout_purpose, stderr_purpose)
     }
 }
 #[derive(Debug, Error)]
@@ -694,7 +739,7 @@ fn run_inner<'a>(
         options.stdout_decoder.map(FrameDelivery::Raw)
     };
     // Credentials handed to the child can be echoed in its output. Register
-    // them with the default mask as well as the host's ambient values, so a
+    // them with the diagnostic mask as well as the host's ambient values, so a
     // capture site never has to rebuild a redactor from its own environment.
     let _credential_scope = if provenant_redact::mode().masks_egress() {
         let environment = options
@@ -716,19 +761,20 @@ fn run_inner<'a>(
         None
     };
 
-    // The default mask is owned by the capture so it runs as the first filter
-    // stage, ahead of any caller filter and ahead of the retention bound.
-    let mut out_pump = StreamCapture::new_with_mask(
+    // A diagnostic capture owns a mask installed as the first filter stage,
+    // ahead of any caller filter and ahead of the retention bound. An exact
+    // capture installs none; its caller owns any later disclosure boundary.
+    let mut out_pump = StreamCapture::new_with_writer(
         options.stdout,
         stdout_decoder,
-        Some(options.stdout_mask),
+        options.stdout_purpose,
         options.stdout_filter,
         options.stdout_writer,
     )?;
-    let mut err_pump = StreamCapture::new_with_mask(
+    let mut err_pump = StreamCapture::new_with_writer(
         options.stderr,
         options.stderr_decoder.map(FrameDelivery::Raw),
-        Some(options.stderr_mask),
+        options.stderr_purpose,
         options.stderr_filter,
         options.stderr_writer,
     )?;

@@ -1632,7 +1632,7 @@ mod predicate_tests {
                 "-c".into(),
                 super::LANE_NEXTEST_PROBE.into(),
             ];
-            let mut options = ExecOptions::new(&argv, &root, super::Duration::from_secs(3));
+            let mut options = ExecOptions::diagnostic(&argv, &root, super::Duration::from_secs(3));
             options.env = Some(&env);
             options.stdout = StreamPolicy::Capture { limit: 4096 };
             options.stderr = StreamPolicy::Capture { limit: 4096 };
@@ -1676,7 +1676,8 @@ mod predicate_tests {
                     "-ec".into(),
                     super::LANE_NODE_PNPM_PROBE.into(),
                 ];
-                let mut options = ExecOptions::new(&argv, &root, super::Duration::from_secs(3));
+                let mut options =
+                    ExecOptions::diagnostic(&argv, &root, super::Duration::from_secs(3));
                 options.env = Some(&env);
                 options.stdout = provenant_os::exec::StreamPolicy::Capture { limit: 4096 };
                 options.stderr = provenant_os::exec::StreamPolicy::Capture { limit: 4096 };

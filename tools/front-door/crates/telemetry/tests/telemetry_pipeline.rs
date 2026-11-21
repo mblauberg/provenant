@@ -58,7 +58,7 @@ fn git(repo: &Path, args: &[&str], day: u32) -> Result<String> {
             .into_os_string(),
     ];
     argv.extend(args.iter().map(OsString::from));
-    let mut options = ExecOptions::new(&argv, repo, Duration::from_secs(10));
+    let mut options = ExecOptions::diagnostic(&argv, repo, Duration::from_secs(10));
     options.env = Some(&env);
     let output = SystemExecutor::new(1)?.execute(options)?;
     if output.termination != Termination::Exit(0)

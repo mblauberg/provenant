@@ -634,7 +634,7 @@ fn call_in(rig: &TestRig, cwd: &std::path::Path, args: &[&str], expected: i64) -
     argv.extend(["--state-dir".into(), rig.state.clone().into_os_string()]);
     argv.push("--json".into());
     argv.extend(args.iter().map(OsString::from));
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(10));
+    let mut options = ExecOptions::diagnostic(&argv, cwd, Duration::from_secs(10));
     options.env = Some(&rig.env);
     options.stdout = StreamPolicy::Capture { limit: 1 << 20 };
     options.stderr = StreamPolicy::Capture { limit: 1 << 16 };

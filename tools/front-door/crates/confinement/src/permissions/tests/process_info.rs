@@ -90,7 +90,11 @@ fn same_sandbox_process_info_is_open_and_host_process_info_is_private()
         "-o".into(),
         helper.as_os_str().to_owned(),
     ];
-    let compiled = executor.execute(ExecOptions::new(&compile, &root, Duration::from_secs(30)))?;
+    let compiled = executor.execute(ExecOptions::diagnostic(
+        &compile,
+        &root,
+        Duration::from_secs(30),
+    ))?;
     assert!(
         successful_probe(&compiled),
         "compile libproc probe: {}",
@@ -122,7 +126,7 @@ fn same_sandbox_process_info_is_open_and_host_process_info_is_private()
     let run = |source: &str, args: &[OsString]| {
         let mut argv = [SANDBOX_EXEC, "-p", source].map(OsString::from).to_vec();
         argv.extend_from_slice(args);
-        let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(8));
+        let mut options = ExecOptions::diagnostic(&argv, Path::new("/"), Duration::from_secs(8));
         options.env = Some(&env);
         options.cancel = Some(&cancel);
         options.process_group = true;
@@ -374,7 +378,7 @@ fn ambient_profiles_deny_host_task_memory_ptrace_and_keychain_ipc()
             "launch".into(),
             policy.into(),
         ];
-        let mut options = ExecOptions::new(&argv, &root, Duration::from_secs(8));
+        let mut options = ExecOptions::diagnostic(&argv, &root, Duration::from_secs(8));
         options.env = Some(&env);
         options.cancel = Some(&cancel);
         options.process_group = true;
@@ -460,7 +464,11 @@ pub(super) fn compile_native_boundary_helper(
         "-o".into(),
         helper.as_os_str().to_owned(),
     ];
-    let compiled = executor.execute(ExecOptions::new(&compile, root, Duration::from_secs(30)))?;
+    let compiled = executor.execute(ExecOptions::diagnostic(
+        &compile,
+        root,
+        Duration::from_secs(30),
+    ))?;
     assert!(
         successful_probe(&compiled),
         "compile host memory helper: {compiled:?}"
@@ -537,7 +545,7 @@ fn ambient_pty_creation_keeps_host_terminals_private() -> Result<(), Box<dyn std
             "pty-launch".into(),
             source.into(),
         ];
-        let mut options = ExecOptions::new(&argv, &root, Duration::from_secs(8));
+        let mut options = ExecOptions::diagnostic(&argv, &root, Duration::from_secs(8));
         options.env = Some(&env);
         options.cancel = Some(&cancel);
         options.process_group = true;

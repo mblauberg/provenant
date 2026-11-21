@@ -6,9 +6,7 @@ use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::
 use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
 use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
 use provenant_os::clock::SystemClock;
-use provenant_os::exec::{
-    CaptureMask, ExecOptions, Executor, RawCaptureReason, StreamPolicy, Termination,
-};
+use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
 use provenant_os::fs::{Directory, LockMode};
 use provenant_records::CanonicalV1;
 use serde::{Deserialize, Serialize};
@@ -522,15 +520,12 @@ fn refresh_with_clock_and_lock_observer(
         ]
         .map(OsString::from)
         .to_vec();
-        let mut options = ExecOptions::new(&argv, Path::new(PROBE_CWD), timeout);
+        // These bytes are a credential, not a value being parsed: stdout is
+        // exact so the access token stays intact for the Bearer header, and
+        // the caller owns its redaction boundary.
+        let mut options = ExecOptions::exact(&argv, Path::new(PROBE_CWD), timeout);
         options.env = Some(&env);
-        // These bytes are a credential, not a value being parsed: the caller
-        // owns its redaction boundary and needs the access token intact for
-        // the Bearer header. The default stream mask would turn an `sk-ant-`
-        // token into `[REDACTED]`, which parses cleanly but authenticates
-        // nowhere.
         options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
-        options.stdout_mask = CaptureMask::Raw(RawCaptureReason::CallerOwnsRedaction);
         options.stderr = StreamPolicy::Discard;
         let out = executor.execute(options).map_err(|_| {
             ProviderError::CredentialReadFailed("cannot execute keychain read".into())
@@ -627,7 +622,7 @@ fn refresh_with_clock_and_lock_observer(
     ]
     .map(OsString::from)
     .to_vec();
-    let mut options = ExecOptions::new(
+    let mut options = ExecOptions::diagnostic(
         &argv,
         Path::new(PROBE_CWD),
         Duration::from_millis(minimum_budget_ms.max(60_000)),
@@ -784,7 +779,7 @@ fn refresh_account_with_clock_and_lock_observer(
             ("PATH".into(), "/usr/bin:/bin".into()),
             ("CLAUDE_CONFIG_DIR".into(), login.config_dir.into()),
         ];
-        let mut options = ExecOptions::new(
+        let mut options = ExecOptions::exact(
             &argv,
             Path::new(PROBE_CWD),
             Duration::from_millis(remaining.min(4000)),

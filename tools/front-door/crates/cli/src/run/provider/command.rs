@@ -908,7 +908,7 @@ fn resolve_build_verify_base(
         OsString::from(commit_expression),
     ];
     let executor = SystemExecutor::new(1).ok()?;
-    let mut options = ExecOptions::new(&argv, project, Duration::from_secs(5));
+    let mut options = ExecOptions::exact(&argv, project, Duration::from_secs(5));
     options.env = Some(&[]);
     options.process_group = true;
     options.stdout = StreamPolicy::Capture { limit: 4096 };

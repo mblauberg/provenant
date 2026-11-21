@@ -228,7 +228,7 @@ fn run_system(argv: &[&str], seconds: u64) -> Option<provenant_os::exec::ExecOut
     let argv: Vec<std::ffi::OsString> = argv.iter().map(Into::into).collect();
     provenant_os::exec::SystemExecutor::new(1)
         .and_then(|executor| {
-            executor.execute(provenant_os::exec::ExecOptions::new(
+            executor.execute(provenant_os::exec::ExecOptions::exact(
                 &argv,
                 std::path::Path::new("/"),
                 std::time::Duration::from_secs(seconds),

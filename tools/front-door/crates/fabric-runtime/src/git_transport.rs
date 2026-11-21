@@ -417,7 +417,7 @@ impl<'a> GitTransport<'a> {
                 socket.as_os_str().to_owned(),
             ));
         }
-        let mut options = ExecOptions::new(&argv, cwd, timeout);
+        let mut options = ExecOptions::exact(&argv, cwd, timeout);
         options.env = Some(&env);
         options.stdin = stdin;
         options.stdout = StreamPolicy::Capture {

@@ -420,11 +420,11 @@ fn seed_build_flags(environment: &[(OsString, OsString)]) -> Vec<String> {
 fn run(cwd: &Path, argv: &[OsString], overrides: &[(OsString, OsString)]) -> Result<Vec<u8>> {
     let inherited = std::env::vars_os().collect::<Vec<_>>();
     let env = seed_build_child_environment(&inherited, overrides);
-    let mut options = ExecOptions::new(argv, cwd, Duration::from_secs(4 * 60 * 60));
+    // stdout feeds seed identity and must stay byte-exact; stderr reaches the
+    // error below, so it is masked on the stream ahead of any bound.
+    let mut options = ExecOptions::exact(argv, cwd, Duration::from_secs(4 * 60 * 60));
     options.env = Some(&env);
     options.process_group = true;
-    // The executor masks captured output on the stream by default, ahead of
-    // any bound, so stderr reaching the error below carries no raw secret.
     let executor = SystemExecutor::new(1)?;
     let result = executor
         .execute(options)
@@ -453,10 +453,10 @@ const WITHHELD_TAIL: &str = "[REDACTED]";
 /// Like [`run`], but keeps the combined output tail when a command fails. Both
 /// streams use a tail policy: a long prepare log cannot grow the error without
 /// bound, and the retained bytes are enough to explain a failed generation step.
-/// The executor's default local-disclosure mask runs on each stream ahead of
-/// the Tail window: a secret that straddles the window start is masked before
-/// the cut can leave part of it behind. A tail stream's `truncated` flag is
-/// expected, so unlike `run` it is not a failure on its own.
+/// Both streams are diagnostic captures, so the local-disclosure mask runs on
+/// each ahead of the Tail window: a secret that straddles the window start is
+/// masked before the cut can leave part of it behind. A tail stream's
+/// `truncated` flag is expected, so unlike `run` it is not a failure on its own.
 fn run_with_tail(
     cwd: &Path,
     argv: &[OsString],
@@ -464,7 +464,7 @@ fn run_with_tail(
 ) -> std::result::Result<Vec<u8>, CommandFailure> {
     let inherited = std::env::vars_os().collect::<Vec<_>>();
     let env = seed_build_child_environment(&inherited, overrides);
-    let mut options = ExecOptions::new(argv, cwd, Duration::from_secs(4 * 60 * 60));
+    let mut options = ExecOptions::exact(argv, cwd, Duration::from_secs(4 * 60 * 60));
     options.env = Some(&env);
     options.process_group = true;
     options.stdout = provenant_os::exec::StreamPolicy::Tail {
@@ -2090,7 +2090,7 @@ mod tests {
     ) -> Result<String> {
         let inherited = std::env::vars_os().collect::<Vec<_>>();
         let env = seed_build_child_environment(&inherited, overrides);
-        let mut options = ExecOptions::new(argv, cwd, Duration::from_secs(4 * 60 * 60));
+        let mut options = ExecOptions::diagnostic(argv, cwd, Duration::from_secs(4 * 60 * 60));
         options.env = Some(&env);
         options.process_group = true;
         let result = SystemExecutor::new(1)?.execute(options)?;

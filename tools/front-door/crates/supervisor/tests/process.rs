@@ -46,7 +46,7 @@ fn captures_bytes_and_text_validation(root: &Path) -> Result<()> {
     let args = fixture::argv("bytes")?;
     let decoder = Decoder(Mutex::new(Vec::new()));
     let (sink, _receiver) = tee_queue(1)?;
-    let mut options = ExecOptions::new(&args, root, Duration::from_secs(3));
+    let mut options = ExecOptions::diagnostic(&args, root, Duration::from_secs(3));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Tee {
         limit: 3,
@@ -61,7 +61,7 @@ fn captures_bytes_and_text_validation(root: &Path) -> Result<()> {
     assert_eq!(outcome.stderr.bytes, b"err\r\n");
     assert!(!outcome.timed_out);
 
-    let mut options = ExecOptions::new(&args, root, Duration::from_secs(3));
+    let mut options = ExecOptions::diagnostic(&args, root, Duration::from_secs(3));
     options.env = Some(&env);
     assert!(matches!(
         run_text(&executor, options),
@@ -82,7 +82,7 @@ fn captures_bytes_and_text_validation(root: &Path) -> Result<()> {
     // A flood retains no more than the bound, and the total still counts it all.
     let limit = 128;
     let args = fixture::argv("flood")?;
-    let mut options = ExecOptions::new(&args, root, Duration::from_secs(5));
+    let mut options = ExecOptions::diagnostic(&args, root, Duration::from_secs(5));
     options.env = Some(&env);
     options.stderr = StreamPolicy::Discard;
     options.stdout = StreamPolicy::Capture { limit };
@@ -98,7 +98,7 @@ fn large_stdin_round_trip(root: &Path) -> Result<()> {
     let executor = SystemExecutor::new(4)?;
     let bytes = vec![0x9a; 256 * 1024];
     let args = fixture::argv("echo")?;
-    let mut options = ExecOptions::new(&args, root, Duration::from_secs(5));
+    let mut options = ExecOptions::diagnostic(&args, root, Duration::from_secs(5));
     options.env = Some(&env);
     options.stdin = Some(&bytes);
     let outcome = executor.execute(options)?;
@@ -111,7 +111,7 @@ fn timeout_escalates_to_kill(root: &Path) -> Result<()> {
     let env = fixture_environment(root);
     let executor = SystemExecutor::new(4)?;
     let args = fixture::argv("blocked")?;
-    let mut options = ExecOptions::new(&args, root, Duration::from_secs(1));
+    let mut options = ExecOptions::diagnostic(&args, root, Duration::from_secs(1));
     options.env = Some(&env);
     options.terminate_grace = Duration::from_millis(20);
     let outcome = executor.execute(options)?;
@@ -134,7 +134,7 @@ fn cleanup_guard_kills_a_guardian_recorded_in_a_nested_store(root: &Path) -> Res
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let worker = thread::spawn(move || {
         let result = (|| {
-            let mut options = ExecOptions::new(&args, &cwd, Duration::from_secs(30));
+            let mut options = ExecOptions::diagnostic(&args, &cwd, Duration::from_secs(30));
             options.env = Some(&env);
             SystemExecutor::new(1)?.execute(options)
         })();
@@ -212,7 +212,7 @@ fn run_fixture_scenario(root: &Path, scenario: &str) -> Result<()> {
     let env = fixture_environment(root);
     let executor = SystemExecutor::new(4)?;
     let argv = fixture::argv(scenario)?;
-    let mut options = ExecOptions::new(&argv, root, Duration::from_secs(5));
+    let mut options = ExecOptions::diagnostic(&argv, root, Duration::from_secs(5));
     options.env = Some(&env);
     let outcome = executor.execute(options)?;
     assert_eq!(
@@ -236,7 +236,7 @@ fn inherited_wait_policy_preserves_pid_reservation(
     ] {
         let marker = root.join(policy);
         let argv = fixture::argv_with_args(policy, &[fixture_arg(&marker)])?;
-        let mut options = ExecOptions::new(&argv, root, Duration::from_secs(5));
+        let mut options = ExecOptions::diagnostic(&argv, root, Duration::from_secs(5));
         options.env = Some(env);
         let outcome = executor.execute(options)?;
         assert_eq!(outcome.termination, Termination::Exit(0));
@@ -255,7 +255,7 @@ fn tee_loss_does_not_stall_capture(
 ) -> Result<()> {
     let args = fixture::argv("flood")?;
     let (sink, _receiver) = tee_queue(1)?;
-    let mut options = ExecOptions::new(&args, root, Duration::from_secs(5));
+    let mut options = ExecOptions::diagnostic(&args, root, Duration::from_secs(5));
     options.env = Some(env);
     options.stderr = StreamPolicy::Discard;
     options.stdout = StreamPolicy::Tee {
@@ -272,7 +272,7 @@ fn tee_loss_does_not_stall_capture(
 
     let (closed_sink, receiver) = tee_queue(1)?;
     drop(receiver);
-    let mut options = ExecOptions::new(&args, root, Duration::from_secs(5));
+    let mut options = ExecOptions::diagnostic(&args, root, Duration::from_secs(5));
     options.env = Some(env);
     options.stderr = StreamPolicy::Discard;
     options.stdout = StreamPolicy::Tee {
@@ -309,7 +309,7 @@ fn cancellation_is_scoped_to_the_owned_child(
     });
     let args = fixture::argv_with_args("socket-blocked", &[fixture_arg(&socket)])?;
     let executor = SystemExecutor::new(1)?;
-    let mut options = ExecOptions::new(&args, root, Duration::from_secs(5));
+    let mut options = ExecOptions::diagnostic(&args, root, Duration::from_secs(5));
     options.env = Some(env);
     options.cancel = Some(&token);
     options.terminate_grace = Duration::from_millis(25);
@@ -329,7 +329,7 @@ fn cancellation_is_scoped_to_the_owned_child(
         let args = fixture::argv("exit")?;
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         loop {
-            let mut options = ExecOptions::new(&args, root, Duration::from_secs(1));
+            let mut options = ExecOptions::diagnostic(&args, root, Duration::from_secs(1));
             options.env = Some(env);
             match executor.execute(options) {
                 Err(ExecError::Busy) if std::time::Instant::now() < deadline => thread::yield_now(),
@@ -362,7 +362,7 @@ fn natural_exit_beats_pipe_drain_expiry(root: &Path, env: &[(OsString, OsString)
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let worker = thread::spawn(move || {
         let result = (|| {
-            let mut options = ExecOptions::new(&args, &root, Duration::from_secs(30));
+            let mut options = ExecOptions::diagnostic(&args, &root, Duration::from_secs(30));
             options.env = Some(&env);
             options.stdout = StreamPolicy::Capture { limit: 32 };
             SystemExecutor::new(1)?.execute(options)

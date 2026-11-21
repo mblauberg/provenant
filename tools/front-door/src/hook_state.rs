@@ -18,6 +18,12 @@ use std::{
 };
 
 const OUTPUT_CAP: usize = 512 * 1024;
+/// Mask text read from an exact capture at the point it becomes a diagnostic.
+fn masked_diagnostic(text: &str) -> String {
+    provenant_redact::known_shapes(text.as_bytes())
+        .map(|masked| String::from_utf8_lossy(&masked).into_owned())
+        .unwrap_or_else(|_| "[REDACTED]".to_owned())
+}
 const LANE_PAGE: &str = "100";
 const LISTING_TIME: Duration = Duration::from_secs(3);
 const COLLECTION_EXECUTOR_CONCURRENCY: usize = 4;
@@ -92,7 +98,10 @@ impl<'a> Cli<'a> {
             return Err("hook deadline reached".into());
         }
         let argv = self.argv(args);
-        let mut options = ExecOptions::new(&argv, self.cwd, time);
+        // stdout is a JSON envelope parsed byte-for-byte; masking a
+        // credential-shaped field (for example `"lane_token":true`) would
+        // corrupt the document. stderr is a masked diagnostic.
+        let mut options = ExecOptions::exact(&argv, self.cwd, time);
         options.stdout = StreamPolicy::Capture { limit: OUTPUT_CAP };
         options.stderr = StreamPolicy::Capture { limit: 2048 };
         let out = self
@@ -118,7 +127,10 @@ impl<'a> Cli<'a> {
             return Ok(envelope["data"].clone());
         }
         let message = envelope["error"]["message"].as_str().unwrap_or("refused");
-        Err(provenant_workflow::session::clean(message, 120))
+        Err(provenant_workflow::session::clean(
+            &masked_diagnostic(message),
+            120,
+        ))
     }
 
     /// Preserve complete inventory records even when the child hits its budget.
@@ -128,7 +140,8 @@ impl<'a> Cli<'a> {
             return Err("hook deadline reached".into());
         }
         let argv = self.argv(&["worktree", "session-list"]);
-        let mut options = ExecOptions::new(&argv, self.cwd, time);
+        // Inventory records are parsed byte-for-byte, so stdout is exact.
+        let mut options = ExecOptions::exact(&argv, self.cwd, time);
         options.stdout = StreamPolicy::Capture { limit: OUTPUT_CAP };
         options.stderr = StreamPolicy::Capture { limit: 2048 };
         let out = self
@@ -158,7 +171,8 @@ impl<'a> Cli<'a> {
             args.push("--all");
         }
         let argv = self.argv(&args);
-        let mut options = ExecOptions::new(&argv, self.cwd, time);
+        // The session stream is parsed byte-for-byte, so stdout is exact.
+        let mut options = ExecOptions::exact(&argv, self.cwd, time);
         options.stdout = StreamPolicy::Capture { limit: OUTPUT_CAP };
         options.stderr = StreamPolicy::Capture { limit: 2048 };
         let out = self

@@ -182,7 +182,7 @@ mod tests {
             ("HOME".into(), home.as_os_str().to_owned()),
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         ];
-        let mut options = ExecOptions::new(&argv, &base, Duration::from_secs(10));
+        let mut options = ExecOptions::diagnostic(&argv, &base, Duration::from_secs(10));
         options.env = Some(&env);
         assert_eq!(executor.execute(options)?.termination, Termination::Exit(0));
         let runtime = UtilityRuntime::new(&git, &home, context.state_root.as_path())?;
