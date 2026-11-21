@@ -1389,7 +1389,7 @@ mod tests {
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     #[test]
     fn compact_run_prints_field_only_policy_warnings() {
-        let input = json!({"brief":"password=example-compact-3391"});
+        let input = json!({"brief":"ghp_abcdefghijklmnopqrstuvwxyz0123456789"});
         {
             let _mode = provenant_redact::scoped(provenant_redact::Mode::Off);
             assert!(
@@ -1408,7 +1408,7 @@ mod tests {
             let output = run_human(&data, &json!({"op":"run"}), announced);
             assert!(output.contains("warning: [SECRET_SHAPED_INPUT]"));
             assert!(output.contains("brief looks like a credential"));
-            assert!(!output.contains("example-compact-3391"));
+            assert!(!output.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
         }
     }
 

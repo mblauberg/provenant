@@ -490,8 +490,8 @@ mod tests {
     fn schema_paths_never_resume_schema_names_inside_caller_maps() {
         let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
         for value in [
-            serde_json::json!({"nodes":[{"CALLER_MARKER":{"brief":"password=fixture-secret-3391"}}]}),
-            serde_json::json!({"context":{"brief":{"prompt":"password=fixture-secret-3391"}}}),
+            serde_json::json!({"nodes":[{"CALLER_MARKER":{"brief":"ghp_abcdefghijklmnopqrstuvwxyz0123456789"}}]}),
+            serde_json::json!({"context":{"brief":{"prompt":"ghp_abcdefghijklmnopqrstuvwxyz0123456789"}}}),
         ] {
             let policy = provenant_records::policy::Policy::default();
             let warnings = input_warnings(&value, &policy);
@@ -509,8 +509,8 @@ mod tests {
         use provenant_records::policy::{Policy, Source, Strength};
         use std::collections::BTreeMap;
 
-        let marker = "fixture-secret-3391";
-        let input = serde_json::json!({"nodes":[{"prompt":format!("password={marker}")}]});
+        let marker = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let input = serde_json::json!({"nodes":[{"prompt":format!("use {marker}")}]});
         let warnings = input_warnings(&input, &Policy::default());
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("nodes[0].prompt"));
