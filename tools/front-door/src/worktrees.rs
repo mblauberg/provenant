@@ -109,10 +109,9 @@ pub(crate) fn local_worktree_message(error: &WorktreeError) -> String {
             let scope = path.display();
             format!("{error}: {scope}: {}", safe_text(detail))
         }
-        // A named config read's `Display` names only its context. Render the
-        // bounded leaf cause here so a timeout or truncation is not dropped at
-        // the CLI edge, which formats errors with `Display` only.
-        WorktreeError::GitConfigRead(error) => provenant_os::git_config::failure_detail(error),
+        // The config error's `Display` carries its context and bounded leaf
+        // cause, so a timeout or truncation is not dropped at the CLI edge.
+        WorktreeError::GitConfigRead(error) => error.to_string(),
         _ => error.to_string(),
     }
 }
@@ -121,7 +120,7 @@ impl Error {
     pub(crate) fn local_message(&self) -> String {
         match self {
             Self::Worktree(error) => local_worktree_message(error),
-            Self::GitConfigRead(error) => provenant_os::git_config::failure_detail(error),
+            Self::GitConfigRead(error) => error.to_string(),
             _ => self.to_string(),
         }
     }

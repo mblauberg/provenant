@@ -2004,16 +2004,6 @@ fn warn_branch_config(detail: impl std::fmt::Display) {
     let _ = writeln!(std::io::stderr().lock(), "warning: {detail}");
 }
 
-/// A named config read's `Display` names only its context. A warning that
-/// formats the error directly drops the underlying timeout, cancellation or
-/// truncation, so render the context and its single bounded leaf cause here as
-/// every other Display-only boundary does.
-fn config_read_failure<E: std::error::Error + 'static>(
-    error: &provenant_os::git_config::ConfigError<E>,
-) -> String {
-    provenant_os::git_config::failure_detail(error)
-}
-
 /// One branch remote or merge value from the verified repository config.
 /// Missing values are normal; other failures are reported before falling back.
 fn branch_config_value(
@@ -2045,7 +2035,7 @@ fn branch_config_value(
     ) {
         Ok(out) => out,
         Err(error) => {
-            warn_branch_config(config_read_failure(&error));
+            warn_branch_config(error.to_string());
             return None;
         }
     };
@@ -2510,7 +2500,7 @@ mod alias_tests {
 }
 
 #[cfg(test)]
-mod config_read_failure_tests {
+mod config_warning_tests {
     #[derive(Debug)]
     struct RepeatingWrapper(std::io::Error);
 
@@ -2536,7 +2526,7 @@ mod config_read_failure_tests {
             ),
             source: RepeatingWrapper(std::io::Error::other("deadline marker")),
         };
-        let rendered = super::config_read_failure(&error);
+        let rendered = error.to_string();
         assert!(
             rendered.contains(
                 "read branch Git configuration on /p/.git/config for key branch tracking key"

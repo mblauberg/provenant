@@ -2771,13 +2771,22 @@ fn retry_git_lock_contention(
             });
         };
         let outcome = execute(attempt_budget)?;
+        let contention = git_lock_contention(&outcome.stderr.bytes);
         if !git_lock_retry_capture_complete(&outcome)
             || !matches!(outcome.termination, Termination::Exit(status) if status != 0)
-            || !git_lock_contention(&outcome.stderr.bytes)
-            || attempt == GIT_LOCK_MAX_ATTEMPTS
+            || !contention
             || !retry_allowed()
         {
             return Ok(outcome);
+        }
+        // Exhausting the attempts on a lock collision is a named lock timeout,
+        // never the raw non-zero outcome: callers need a cause that says why
+        // the read or mutation did not complete.
+        if attempt == GIT_LOCK_MAX_ATTEMPTS {
+            return Err(UtilityError::GitLockTimedOut {
+                operation,
+                attempts: attempt,
+            });
         }
         if cancel.is_cancelled() {
             return Err(UtilityError::Cancelled);
@@ -5190,15 +5199,13 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
             &CancelToken::new(),
         )
         .expect_err("eternal contention must report lock contention");
-        let UtilityError::ConfigFailed {
-            status,
-            lock_contention,
-        } = error
-        else {
+        let UtilityError::ConfigLockTimedOut { attempts } = error else {
             return Err(format!("unexpected error: {error}").into());
         };
-        assert_eq!(status, 255);
-        assert!(lock_contention);
+        assert_eq!(
+            attempts, GIT_LOCK_MAX_ATTEMPTS,
+            "the exhaustion error must name every attempt it spent"
+        );
         assert_eq!(
             fake.calls(),
             GIT_LOCK_MAX_ATTEMPTS,

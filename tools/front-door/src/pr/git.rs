@@ -16,16 +16,6 @@ pub(super) fn plain_ref(name: &str) -> bool {
             .any(|c| c.is_control() || c.is_whitespace() || "~^:?*[\\@{".contains(c))
 }
 
-/// The PR edge renders boxed errors with `Display` only, so a config error's
-/// context-only `Display` would drop the underlying timeout or truncation.
-/// Render the named context and its single bounded leaf cause into the boxed
-/// error's display text instead.
-fn config_read_failure<E: std::error::Error + 'static>(
-    error: provenant_os::git_config::ConfigError<E>,
-) -> Box<dyn std::error::Error> {
-    provenant_os::git_config::failure_detail(&error).into()
-}
-
 pub(super) struct Git {
     executable: String,
     facts: provenant_confinement::worktrees::RepoFacts,
@@ -270,8 +260,11 @@ impl Git {
                 file: repo.common_git_dir().join("config"),
                 key,
             };
+            // Exit 1 means an absent key; a broken config (or any other failed
+            // read) is a named config error, never an absent value. The config
+            // error's `Display` already carries its context and leaf cause.
             let output = provenant_os::git_config::read(context, request, |command| {
-                provenant_confinement::run_verified_git_read_command(
+                let output = provenant_confinement::run_verified_git_read_command(
                     &self.executor,
                     command,
                     repo,
@@ -279,10 +272,19 @@ impl Git {
                     self.budget,
                     &self.cancel,
                 )
-            })
-            .map_err(config_read_failure)?;
-            Ok((output.termination == Termination::Exit(0))
-                .then(|| String::from_utf8_lossy(&output.stdout.bytes).into_owned()))
+                .map_err(std::io::Error::other)?;
+                match output.termination {
+                    Termination::Exit(0) => Ok(Some(output)),
+                    Termination::Exit(1) => Ok(None),
+                    Termination::Exit(status) => Err(std::io::Error::other(format!(
+                        "Git configuration read failed with exit status {status}"
+                    ))),
+                    Termination::Signal(signal) => Err(std::io::Error::other(format!(
+                        "Git configuration read was signalled by signal {signal}"
+                    ))),
+                }
+            })?;
+            Ok(output.map(|output| String::from_utf8_lossy(&output.stdout.bytes).into_owned()))
         })
     }
     /// Drop the branch's tracking section after a successful delete. The core
@@ -403,18 +405,18 @@ pub(super) fn diff_content(dir: &Path, from: &str, to: &str) -> Result<String> {
 }
 
 #[cfg(test)]
-mod config_read_failure_tests {
+mod config_failure_tests {
     #[test]
     fn boxed_config_failure_keeps_context_and_leaf_cause() {
-        let error = provenant_os::git_config::ConfigError {
+        let error: Box<dyn std::error::Error> = Box::new(provenant_os::git_config::ConfigError {
             context: provenant_os::git_config::ConfigContext::new(
                 "read remote URL configuration",
                 "/p/.git/config",
                 Some("remote URL"),
             ),
             source: std::io::Error::other("deadline marker"),
-        };
-        let rendered = super::config_read_failure(error).to_string();
+        });
+        let rendered = error.to_string();
         assert!(
             rendered.contains("read remote URL configuration on /p/.git/config for key remote URL"),
             "{rendered}"

@@ -373,7 +373,7 @@ fn check_transport(
             read_git_with_env(executor, git, cwd, &args, CONTEXT_LIMIT, transport_env)
         },
     )
-    .map_err(|error| refusal(transport::unreadable(&ctx, error.source)))?;
+    .map_err(|error| refusal(transport::unreadable(&ctx, error)))?;
     if timed_out || listing.truncated {
         return Err(refusal(transport::unreadable(
             &ctx,

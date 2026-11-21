@@ -881,7 +881,7 @@ impl RunError {
                 });
             }
             Self::Writer(WorktreeError::GitConfigRead(error)) => {
-                diagnostic = diagnostic.detail(provenant_os::git_config::failure_detail(error));
+                diagnostic = diagnostic.detail(error.to_string());
             }
             Self::Writer(error) => {
                 if let Some(action) = error.repair() {
@@ -968,7 +968,7 @@ impl RunError {
             }
             Self::DeliveryConfigRead { stage, source } => {
                 diagnostic = diagnostic
-                    .detail(crate::delivery::delivery_config_failure_detail(source))
+                    .detail(crate::delivery::prepare_reason(source))
                     .fact(DiagnosticFact::DeliveryStage(*stage));
             }
             Self::DeliveryTransport { stage, reason, .. } => {

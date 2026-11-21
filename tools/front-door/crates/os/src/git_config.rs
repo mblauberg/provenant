@@ -54,46 +54,34 @@ impl fmt::Display for ConfigContext {
 }
 
 /// The one error type for a failed Git configuration command. Its `Display`
-/// names only the context; the underlying failure is reached through
-/// `std::error::Error::source`, so printing an error chain shows the cause once.
+/// names the context and the bounded leaf cause in a single message, and it
+/// exposes no `source`, so a chain-walking printer cannot repeat the cause.
+/// The typed `context` and `source` fields remain available to callers that
+/// convert the failure into another error type.
 #[derive(Debug)]
 pub struct ConfigError<E> {
     pub context: ConfigContext,
     pub source: E,
 }
 
-impl<E: fmt::Display> fmt::Display for ConfigError<E> {
+impl<E: std::error::Error + 'static> fmt::Display for ConfigError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.context.fmt(f)
+        // A wrapper's `Display` may interpolate its own source. Render only the
+        // leaf so the underlying timeout, cancellation or truncation appears
+        // once, in this one self-contained message.
+        let mut leaf: &dyn std::error::Error = &self.source;
+        while let Some(next) = leaf.source() {
+            leaf = next;
+        }
+        let detail = provenant_core::bounded_line(&format!("{}: {}", self.context, leaf), 512);
+        write!(f, "{detail}")
     }
 }
 
 impl<E: std::error::Error + 'static> std::error::Error for ConfigError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.source)
+        None
     }
-}
-
-/// The bounded innermost failure of a named config command.
-///
-/// Wrappers in a source chain can interpolate their own source into `Display`;
-/// walking to the leaf and rendering only it reports the underlying timeout,
-/// cancellation or truncation once, without repeating a wrapper's text.
-pub fn leaf_cause<E: std::error::Error + 'static>(error: &ConfigError<E>) -> String {
-    let mut leaf: &dyn std::error::Error = &error.source;
-    while let Some(next) = leaf.source() {
-        leaf = next;
-    }
-    provenant_core::bounded_line(&leaf.to_string(), 512)
-}
-
-/// A config failure's named context followed by its single bounded leaf cause.
-///
-/// `ConfigError`'s own `Display` names only the context. Use this at any
-/// boundary that renders a wrapper with `Display` and cannot walk `source()`,
-/// so the cause is not dropped. Delivery keeps its own redacting renderer.
-pub fn failure_detail<E: std::error::Error + 'static>(error: &ConfigError<E>) -> String {
-    provenant_core::bounded_line(&format!("{}: {}", error.context, leaf_cause(error)), 512)
 }
 
 /// The supported config read shapes. Argument construction stays private.
@@ -392,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn error_display_omits_the_source_the_chain_reports() {
+    fn error_display_carries_context_and_leaf_once() {
         let error = ConfigError {
             context: ConfigContext::new(
                 "set branch tracking",
@@ -403,8 +391,9 @@ mod tests {
         };
         assert_eq!(
             error.to_string(),
-            "set branch tracking on /repo/.git/config for key branch tracking"
+            "set branch tracking on /repo/.git/config for key branch tracking: cause marker"
         );
+        assert!(std::error::Error::source(&error).is_none());
         let mut rendered = error.to_string();
         let mut next = std::error::Error::source(&error);
         while let Some(source) = next {
@@ -430,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn failure_detail_renders_context_and_leaf_once() {
+    fn error_display_renders_leaf_not_the_repeating_wrapper() {
         let error = ConfigError {
             context: ConfigContext::new(
                 "read local core.bare",
@@ -439,13 +428,16 @@ mod tests {
             ),
             source: RepeatingWrapper(std::io::Error::other("leaf marker")),
         };
-        let detail = failure_detail(&error);
+        let rendered = error.to_string();
         assert_eq!(
-            detail,
+            rendered,
             "read local core.bare on /repo/.git/config for key core.bare: leaf marker"
         );
-        assert_eq!(detail.matches("leaf marker").count(), 1, "{detail}");
-        assert!(!detail.contains("wrapper repeats its source"), "{detail}");
+        assert_eq!(rendered.matches("leaf marker").count(), 1, "{rendered}");
+        assert!(
+            !rendered.contains("wrapper repeats its source"),
+            "{rendered}"
+        );
     }
 
     #[test]
