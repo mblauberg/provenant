@@ -163,6 +163,30 @@ pub fn select(
     project_key: &str,
     now: SystemTime,
 ) -> Result<Selection, Error> {
+    select_with_object_dir(
+        workspace,
+        base,
+        head,
+        policy,
+        state_dir,
+        project_key,
+        now,
+        None,
+    )
+}
+
+/// Select with an explicit object directory for a lane-private snapshot.
+#[allow(clippy::too_many_arguments)]
+pub fn select_with_object_dir(
+    workspace: &Path,
+    base: &str,
+    head: &str,
+    policy: &Policy,
+    state_dir: &Path,
+    project_key: &str,
+    now: SystemTime,
+    object_dir: Option<&Path>,
+) -> Result<Selection, Error> {
     let now_millis = to_unix_millis(now)?;
     let state_path = state_path(state_dir, project_key)?;
     let loaded = state::load(&state_path);
@@ -178,7 +202,7 @@ pub fn select(
 
     // The head graph defines the output package set and is always available.
     let head_graph = git_support::load_metadata(workspace, "head")?;
-    let changed = git_support::changed_paths(workspace, base, head)?;
+    let changed = git_support::changed_paths(workspace, base, head, object_dir)?;
     let (globals, invalid_pattern) = global_paths(&policy.global_paths);
 
     if reason.is_none() {

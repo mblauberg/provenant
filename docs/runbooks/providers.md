@@ -86,22 +86,24 @@ A lane on the shared login account can read the host `login.keychain-db`
 
 ## OpenCode
 
-`providers.opencode.profile` selects the profile used for lane launches. It
-defaults to `host`, which points OpenCode at the host's real XDG data, config,
-state and cache directories. OpenCode attaches to the host service when it is
-running. Sessions are stored by that service and resumed by session ID. If the prior session is unavailable in the selected host store, the lane warns
-and starts a fresh session. If no service is available, it warns and starts standalone with the host
-profile. Launch output records the effective profile and its source.
+`lanes.access` selects the profile used for OpenCode lane launches. It defaults
+to `host`, which points OpenCode at the host's real XDG data, config, state and
+cache directories. OpenCode attaches to the host service when it is running.
+Sessions are stored by that service and resumed by session ID. If the prior
+session is unavailable in the selected host store, the lane warns and starts a
+fresh session. If no service is available, it warns and starts standalone with
+the host profile. Launch output records the effective profile and its source.
 
-Host mode grants the lane access to those OpenCode directories, including the
+Host access grants the lane access to those OpenCode directories, including the
 credential stores they contain. When attached, OpenCode tools execute in the
 host service process with the attempt worktree as their directory; the lane's
 sandbox confines the client process, not those service-side tools. Without a
 service, OpenCode runs standalone in the lane and the sandbox applies to its
 tools.
 
-Set `providers.opencode.profile = "lane"` to use the isolated per-attempt
-profile instead. The Console's free models use the derived `zen` account,
+Set `lanes.access = "isolated"` to use the isolated per-attempt profile
+instead. A stored `providers.opencode.profile` is ignored with a warning that
+names `lanes.access`. The Console's free models use the derived `zen` account,
 separate from the `go` subscription account and paced from their own quota
 observations; a `[domains.routing.pacing.accounts.go]` profile applies to Go
 lanes only.

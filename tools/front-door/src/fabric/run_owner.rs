@@ -21,7 +21,7 @@ pub(super) fn restore_graph_lane_path(
 
 struct SubmissionPolicy<'a> {
     facts: &'a provenant_confinement::worktrees::RepoFacts,
-    access: provenant_records::run::LaneAccess,
+    access: provenant_records::run::LaneAccessRequest,
     settlement_retry_limit: Option<u8>,
     attempt: Option<provenant_fabric_runtime::graph::AttemptSpec>,
     refusal: provenant_run::RefusalContext,
@@ -1358,7 +1358,7 @@ impl BinaryRunOwner<'_> {
         input: SubmitInput,
         budget: WaitBudget,
         cancel: &CancelToken,
-        access: provenant_records::run::LaneAccess,
+        access: provenant_records::run::LaneAccessRequest,
         settlement_retry_limit: Option<u8>,
         attempt: Option<provenant_fabric_runtime::graph::AttemptSpec>,
         facts: &provenant_confinement::worktrees::RepoFacts,
@@ -1541,8 +1541,11 @@ impl BinaryRunOwner<'_> {
             {
                 return Err(FacadeError::ConfinementRefused { resource: None });
             }
-            let mut attempt = attempt.unwrap_or_default();
-            attempt.host = None;
+            // A cross-host launch carries only the peer-bound projection. It
+            // omits host-local paths (`directory`, `policy_inputs`,
+            // `write_roots`) and arbitrary extension state by construction, so
+            // no sender checkout or input file can reach the receiver (#3744).
+            let mut attempt = attempt.unwrap_or_default().peer_bound();
             attempt.parent_sandboxed |= floored;
             // Local admission stamps graph provenance from this host's work
             // key. That stamp is not evidence on the wire: the peer refuses a

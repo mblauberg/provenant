@@ -7,7 +7,7 @@ pub fn seal_launch_policy(
     attempt: &mut provenant_fabric_runtime::graph::AttemptSpec,
     cwd: &Path,
     prompt: &str,
-    access: &run::LaneAccess,
+    access: &run::LaneAccessRequest,
     base: Option<&str>,
     head: Option<&str>,
 ) -> Result<(), Fail> {
@@ -204,7 +204,7 @@ mod tests {
                 &mut attempt,
                 &root,
                 prompt,
-                &run::LaneAccess::default(),
+                &run::LaneAccessRequest::default(),
                 None,
                 None,
             )

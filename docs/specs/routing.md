@@ -108,8 +108,15 @@ When `provenant run review-panel` or a review leaf supplies `--pr N`, the host
 pins the PR's base and head, independently of the launching checkout. Supplying
 both `subject` and `review_base` pins an explicit range instead. The host uses
 base...head (three-dot) for diff evidence and selection, including branches with
-merges from main. Without a subject, the host warns which checkout-derived range
-it chose and why. Nested review launches retain the same pins. A retry whose
+merges from main. Because the forge can still report the previous head seconds
+after a push, `--pr N --head SHA` pins the expected head: the host re-reads the
+forge within a bounded wait when its head differs and refuses with both SHAs
+named if the mismatch persists. Without `--head`, when the local remote-tracking
+ref for the PR head branch is ahead of the forge's head, the launch warns and
+names both commits rather than refusing. Every pinned launch receipt reports the
+base and head it selected. Without a subject, the host warns which
+checkout-derived range it chose and why. Nested review launches retain the same
+pins. A retry whose
 canonical raw-request identity matches a stored child receipt replays that
 receipt and its admitted pins before host preparation, whether the parent is
 active or inactive. The relay rechecks the stored identity under the journal
@@ -379,7 +386,8 @@ the attempt-bound host relay.
 A child launch is journalled and launched by the host, bound to the calling
 attempt rather than a lane-written record. Children share the graph's budget
 and cancellation and may use another adapter and account within the user's
-authority; ordinary launch policy still refuses credential and state roots.
+authority; ordinary launch policy still refuses state roots, while
+credential-root overlap follows the resolved lane access.
 Parent settlement closes attached children, never detached ones.
 - Why: cross-family delegation must not make lane-controlled identity
   authoritative.

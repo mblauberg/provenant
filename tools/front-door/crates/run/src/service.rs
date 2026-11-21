@@ -290,8 +290,8 @@ impl<'a> Service<'a> {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 deliver: Option<&'a WriterDeliveryRequest>,
                 cwd: &'a Path,
-                #[serde(skip_serializing_if = "LaneAccess::is_default")]
-                access: &'a LaneAccess,
+                #[serde(skip_serializing_if = "LaneAccessRequest::is_default")]
+                access: &'a LaneAccessRequest,
             }
             let authority = CanonicalV1::record_digest(
                 "run-authority",
@@ -994,7 +994,7 @@ pub struct DispatchTask {
     pub delivery_id: Option<provenant_core::DeliveryId>,
     pub deliver: Option<WriterDeliveryRequest>,
     pub worktree: Option<std::path::PathBuf>,
-    pub access: LaneAccess,
+    pub access: LaneAccessRequest,
 }
 pub struct DispatchRequest {
     pub chair: Option<Chair>,

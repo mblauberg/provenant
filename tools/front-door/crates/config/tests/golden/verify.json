@@ -1,4 +1,10 @@
 {
+  "affected": {
+    "enabled": false,
+    "global_paths": [],
+    "full_every": 10,
+    "full_after": "24h"
+  },
   "source": "project",
   "backend": {
     "kind": "command",

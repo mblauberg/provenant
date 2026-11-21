@@ -719,26 +719,55 @@ impl Diagnostic {
     }
 }
 
-fn terminal_control(character: char) -> bool {
+/// Characters that could hide, reorder or break text on a terminal: Cc
+/// controls plus the Cf, Zl and Zp categories and emoji tag characters
+/// (U+E0001 and U+E0020..U+E007F), not the variation-selector ranges.
+pub fn unsafe_display_character(character: char) -> bool {
     character.is_control()
-        || matches!(character, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        || matches!(character,
+            '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' | '\u{180e}'
+            | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}'
+            | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
 }
 
-/// Escape terminal controls and truncate at a UTF-8 boundary after escaping.
-pub fn safe_text(value: &str) -> String {
+/// The one display-sanitisation core: escape characters that could hide,
+/// reorder or break text, then truncate on a UTF-8 boundary after escaping.
+/// `preserve_lines` keeps `\n` and `\t` for multi-line operator causes; the
+/// single-line form escapes them instead.
+fn safe_display_text(value: &str, preserve_lines: bool, max_bytes: usize) -> String {
     let mut output = String::new();
     for character in value.chars() {
-        let part = if terminal_control(character) {
+        let part = if preserve_lines && matches!(character, '\n' | '\t') {
+            character.to_string()
+        } else if unsafe_display_character(character) {
             character.escape_default().to_string()
         } else {
             character.to_string()
         };
-        if output.len() + part.len() > MAX_DIAGNOSTIC_BYTES {
+        if output.len() + part.len() > max_bytes {
             break;
         }
         output.push_str(&part);
     }
     output
+}
+
+/// Escape terminal controls and truncate at a UTF-8 boundary after escaping.
+pub fn safe_text(value: &str) -> String {
+    safe_display_text(value, false, MAX_DIAGNOSTIC_BYTES)
+}
+
+/// Multi-line form for an operator cause: keeps line breaks and tabs while
+/// escaping terminal controls, bounded at a UTF-8 boundary after escaping.
+pub fn safe_multiline_text(value: &str, max_bytes: usize) -> String {
+    safe_display_text(value, true, max_bytes)
+}
+
+/// Escape terminal controls without applying a bound, for callers that bound
+/// the text afterwards and need to keep its tail (where a failure usually is).
+/// Uses the same one display-sanitisation core as [`safe_text`].
+pub fn escape_display_text(value: &str) -> String {
+    safe_display_text(value, true, usize::MAX)
 }
 
 /// Destination is selected by the audience, not the transport. Local includes
@@ -759,7 +788,9 @@ pub trait PublicationProjection {
 
 /// Quote a path as one shell argument after applying destination disclosure.
 pub fn shell_path(path: &Path, destination: Destination) -> Option<String> {
-    if !matches!(destination, Destination::Local) || path.to_str()?.chars().any(terminal_control) {
+    if !matches!(destination, Destination::Local)
+        || path.to_str()?.chars().any(unsafe_display_character)
+    {
         return None;
     }
     let path = path.to_str()?;
@@ -906,6 +937,19 @@ mod tests {
         assert!(bidi.contains("\\u{202e}"));
         assert!(!bidi.contains('\u{202e}'));
     }
+
+    #[test]
+    fn safe_multiline_text_preserves_lines_but_escapes_controls_and_bounds() {
+        let input = "first\u{1b}[31m\n\tsecond\u{202e}third\nfourth";
+        let safe = safe_multiline_text(input, MAX_DIAGNOSTIC_BYTES);
+        assert!(safe.starts_with("first\\u{1b}[31m\n\tsecond\\u{202e}third\n"));
+        assert!(safe.contains("fourth"));
+        assert!(!safe.chars().any(|c| c == '\u{1b}' || c == '\u{202e}'));
+        assert!(safe.len() <= MAX_DIAGNOSTIC_BYTES);
+        // The single-line core escapes the same characters instead.
+        assert!(!safe_text("a\nb").contains('\n'));
+    }
+
     #[test]
     fn shell_paths_are_local_and_safely_quoted() {
         assert_eq!(

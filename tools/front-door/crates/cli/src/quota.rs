@@ -3322,6 +3322,7 @@ mod tests {
             selection_context: Default::default(),
             diagnostics: Default::default(),
             user_skills: true,
+            access: Default::default(),
             extra: Default::default(),
             adapter: "cursor".into(),
             model: "composer-2.5".into(),

@@ -1186,6 +1186,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("model_policy.defaults.lane.max_turns", 1, i64::MAX),
     FieldMetadata::new("model_policy.defaults.lane.stop_early_ok", "bool"),
     FieldMetadata::new("model_policy.defaults.lane.read_only", "bool"),
+    FieldMetadata::enumeration("model_policy.defaults.lane.access", &["host", "isolated"]),
     FieldMetadata::enumeration(
         "model_policy.defaults.lane.user_skills",
         &["discover", "off"],

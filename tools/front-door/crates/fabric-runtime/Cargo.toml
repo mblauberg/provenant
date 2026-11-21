@@ -1,6 +1,6 @@
 [package]
 name = "provenant-fabric-runtime"
-version = "2.5.2"
+version = "2.6.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

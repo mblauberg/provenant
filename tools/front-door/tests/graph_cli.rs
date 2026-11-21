@@ -1646,7 +1646,10 @@ fn upgrade_verify_dry_run_explains_a_scratch_project() -> Result {
         .ok_or("source admission")?;
     assert!(!rows.is_empty(), "{preview}");
     for row in rows {
-        assert_eq!(row["status"], "admitted", "{row}");
+        // Source admission is settled now; the credential decision stays
+        // pending until route selection, even for an admitted source root.
+        assert_eq!(row["status"], "pending_route", "{row}");
+        assert_eq!(row["credential_admission"], "pending_route", "{row}");
         let path = Path::new(row["path"].as_str().ok_or("source path")?);
         assert!(path.starts_with(scratch.canonicalize()?), "{row}");
         assert!(!path.starts_with(home.canonicalize()?), "{row}");
@@ -1682,7 +1685,10 @@ fn smoke_explanation_uses_selected_project_from_credential_containing_cwd() -> R
         );
     }
     for row in rows {
-        assert_eq!(row["status"], "admitted", "{row}");
+        // The source root is admitted, but its credential decision is resolved
+        // only when the route is selected.
+        assert_eq!(row["status"], "pending_route", "{row}");
+        assert_eq!(row["credential_admission"], "pending_route", "{row}");
         assert_eq!(
             Path::new(row["path"].as_str().ok_or("source path")?).canonicalize()?,
             rig.project.canonicalize()?

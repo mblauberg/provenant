@@ -149,9 +149,36 @@ impl PreparedLaunch {
         };
         if confinement.sandbox.requires_backend() {
             let availability = confinement.bind_backend(cancel, policy)?;
-            // An inherited OS sandbox is not proof that the selected mandatory
-            // credential, Git and authority boundaries are already present.
-            confinement.sandbox.resolve_backend(availability)?;
+            let access = self.route.lane_access.as_ref();
+            let isolated = access.is_some_and(|receipt| receipt.access.is_isolated());
+            confinement
+                .sandbox
+                .resolve_backend(availability, isolated)?;
+            if !confinement.sandbox.effective {
+                let source = access.map_or("default", |receipt| receipt.source.as_str());
+                let detail = format!(
+                    "{} (lanes.access=host, source: {source})",
+                    confinement
+                        .sandbox
+                        .warning
+                        .as_deref()
+                        .unwrap_or("sandbox unavailable")
+                );
+                confinement.sandbox.warning = Some(detail.clone());
+                if let Some(message) = policy
+                    .check(
+                        "LAUNCH_SANDBOX_UNAVAILABLE_NONE",
+                        provenant_records::policy::Facts::violation(detail),
+                    )
+                    .message()
+                {
+                    let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+                }
+                self.environment.retain(|(name, _)| name != SANDBOX);
+                self.environment
+                    .push((SANDBOX.into(), confinement.sandbox.env_value().into()));
+                self.route.sandbox = Some(sandbox_mode_receipt(&confinement.sandbox));
+            }
         }
         if !confinement.sandbox.effective {
             return Ok(());

@@ -771,6 +771,12 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                 &writer.branch,
                 &self.home,
                 &provenant_core::CredentialRoots::for_home(&self.home),
+                &provenant_records::LaneAccessReceipt {
+                    access: provenant_records::LaneAccess::Isolated,
+                    source: provenant_records::LaneAccessSource::Default,
+                    key: "lanes.access".into(),
+                    extra: Default::default(),
+                },
             )
             .map_err(|error| crate::fixture_refusal(error.to_string()))?;
             let grant = |path: std::path::PathBuf| PathGrant {

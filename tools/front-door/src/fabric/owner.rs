@@ -112,10 +112,9 @@ impl GraphRefusalScope {
 
 /// A selected read-only checkout uses the ordinary launch root policy.
 fn bind_child_directory(
-    grants: &mut provenant_records::run::LaneAccess,
+    grants: &mut provenant_records::run::LaneAccessRequest,
     directory: &str,
     state: &Path,
-    credentials: &provenant_core::CredentialRoots,
     network: Option<provenant_cli::Switch>,
 ) -> Result<(), FacadeError> {
     let directory = PathBuf::from(directory);
@@ -136,7 +135,6 @@ fn bind_child_directory(
             no_capability: Vec::new(),
         },
         state,
-        credentials,
     )
     .map_err(dispatch_refused)?;
     let source = checked
@@ -178,14 +176,13 @@ fn selected_writer_project(
             selected,
         )));
     }
-    let mut checked = provenant_records::run::LaneAccess::default();
+    let mut checked = provenant_records::run::LaneAccessRequest::default();
     bind_child_directory(
         &mut checked,
         selected
             .to_str()
             .ok_or_else(|| FacadeError::field("worktree"))?,
         factory.context.roots.state.as_path(),
-        &factory.credential_roots()?,
         None,
     )?;
     let directory = checked.source_root.ok_or(FacadeError::StateCorrupt)?;
@@ -852,16 +849,23 @@ pub(crate) fn decode_graph_document(
             .maximum_u64(),
         ..Default::default()
     };
-    let header: Header =
-        provenant_records::decode(bytes, limits).map_err(|_| FacadeError::field("document"))?;
+    // Keep the parser's field path and message: a bare `document` hides the
+    // field that actually failed, on the peer as much as on the host.
+    let header: Header = provenant_records::decode(bytes, limits).map_err(|error| {
+        FacadeError::invalid(InvalidInputDetail::graph_reason(format!(
+            "document header: {error}"
+        )))
+    })?;
     match header
         .schema_version
         .as_ref()
         .and_then(serde_json::Value::as_u64)
     {
-        Some(1 | 2) => {
-            provenant_records::decode(bytes, limits).map_err(|_| FacadeError::field("document"))
-        }
+        Some(1 | 2) => provenant_records::decode(bytes, limits).map_err(|error| {
+            FacadeError::invalid(InvalidInputDetail::graph_reason(format!(
+                "document: {error}"
+            )))
+        }),
         Some(version) if version > 2 => Err(FacadeError::UpgradeRequired {
             reader_release: env!("CARGO_PKG_VERSION").into(),
             writer_release: "unknown".into(),
@@ -3645,9 +3649,9 @@ impl BoundGraphOwner<'_> {
         access: provenant_fabric_runtime::graph::AccessMode,
         worktree: Option<&str>,
         accepted: bool,
-        accepted_access: Option<provenant_records::run::LaneAccess>,
+        accepted_access: Option<provenant_records::run::LaneAccessRequest>,
         source_commit: Option<&str>,
-    ) -> Result<provenant_records::run::LaneAccess, FacadeError> {
+    ) -> Result<provenant_records::run::LaneAccessRequest, FacadeError> {
         let mut grants = if accepted {
             accepted_access.ok_or(FacadeError::StateCorrupt)?
         } else {
@@ -3748,7 +3752,6 @@ impl BoundGraphOwner<'_> {
                     no_capability: Vec::new(),
                 },
                 self.factory.context.roots.state.as_path(),
-                &self.factory.credential_roots()?,
             )
             .map_err(dispatch_refused)?;
             if !capabilities.is_empty() {
@@ -3785,7 +3788,6 @@ impl BoundGraphOwner<'_> {
                     &mut grants,
                     directory,
                     self.factory.context.roots.state.as_path(),
-                    &self.factory.credential_roots()?,
                     self.network,
                 )?;
             }
@@ -4517,7 +4519,7 @@ mod journal_error_tests {
     }
 
     #[test]
-    fn child_directory_preserves_scratch_and_refuses_state_and_credentials()
+    fn child_directory_preserves_scratch_defers_credentials_and_refuses_state()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
         let root = tempfile::tempdir()?;
@@ -4528,13 +4530,11 @@ mod journal_error_tests {
         for path in [&home, &state, &scratch, &credentials] {
             std::fs::create_dir_all(path)?;
         }
-        let mut grants = provenant_records::run::LaneAccess::default();
-        let declared = provenant_core::CredentialRoots::for_home(&home);
+        let mut grants = provenant_records::run::LaneAccessRequest::default();
         bind_child_directory(
             &mut grants,
             scratch.to_str().ok_or("scratch")?,
             &state,
-            &declared,
             None,
         )?;
         assert_eq!(
@@ -4542,18 +4542,19 @@ mod journal_error_tests {
             Some(provenant_os::fs::canonicalize(&scratch)?)
         );
         assert!(grants.source_live);
-        for path in [&state, &credentials] {
-            assert!(
-                bind_child_directory(
-                    &mut grants,
-                    path.to_str().ok_or("root")?,
-                    &state,
-                    &declared,
-                    None
-                )
-                .is_err()
-            );
-        }
+        assert!(
+            bind_child_directory(&mut grants, state.to_str().ok_or("root")?, &state, None).is_err()
+        );
+        bind_child_directory(
+            &mut grants,
+            credentials.to_str().ok_or("credential root")?,
+            &state,
+            None,
+        )?;
+        assert_eq!(
+            grants.source_root,
+            Some(provenant_os::fs::canonicalize(&credentials)?)
+        );
         Ok(())
     }
 

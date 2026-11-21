@@ -28,8 +28,10 @@ fn seed_build_stderr(line: impl std::fmt::Display) {
 
 /// A failing `build.prepare` command. It travels as the error of `refresh` or
 /// `build`, so a caller tells it from a generic failure by type. The public
-/// fields let the tick record the command and its bounded output tail without
-/// echoing either in an operator diagnostic.
+/// fields let the tick record the command and its bounded output tail. The
+/// tail is masked on the capture stream before the window bounds it, so every
+/// later store and display sees only masked text; the manual
+/// `worktree seed-build` path shows it as a cause, never as the refusal message.
 #[derive(Debug)]
 pub struct PrepareFailed {
     pub index: usize,
@@ -359,6 +361,15 @@ fn run(cwd: &Path, argv: &[OsString], overrides: &[(OsString, OsString)]) -> Res
     let mut options = ExecOptions::new(argv, cwd, Duration::from_secs(4 * 60 * 60));
     options.env = Some(&env);
     options.process_group = true;
+    // Captured stderr becomes part of an io::Error that reaches tick's seed
+    // records and seed-build output with no later redaction boundary. Mask it
+    // on the stream, ahead of any bound, as run_with_tail does. If the filter
+    // cannot be built or fails mid-stream, withhold the whole stderr rather
+    // than passing raw bytes on.
+    let mut stderr_filter = provenant_redact::Redactor::for_local_disclosure().ok();
+    options.stderr_filter = stderr_filter
+        .as_mut()
+        .map(|filter| filter as &mut dyn provenant_os::exec::CaptureFilter);
     let executor = SystemExecutor::new(1)?;
     let result = executor
         .execute(options)
@@ -367,21 +378,30 @@ fn run(cwd: &Path, argv: &[OsString], overrides: &[(OsString, OsString)]) -> Res
         || result.timed_out
         || result.stdout.truncated
         || result.stdout.read_failed
+        || result.stderr.filter_failed
     {
-        return Err(io::Error::other(format!(
-            "command failed: {argv:?}: {}",
-            String::from_utf8_lossy(&result.stderr.bytes)
-        ))
-        .into());
+        let stderr = if stderr_filter.is_none() || result.stderr.filter_failed {
+            WITHHELD_TAIL.to_owned()
+        } else {
+            String::from_utf8_lossy(&result.stderr.bytes).into_owned()
+        };
+        return Err(io::Error::other(format!("command failed: {argv:?}: {stderr}")).into());
     }
     Ok(result.stdout.bytes)
 }
 
+/// Withheld text when local redaction cannot filter captured output. Never pass
+/// the raw stream on in that case: withhold the whole tail instead.
+const WITHHELD_TAIL: &str = "[REDACTED]";
+
 /// Like [`run`], but keeps the combined output tail when a command fails. Both
 /// streams use a tail policy: a long prepare log cannot grow the error without
 /// bound, and the retained bytes are enough to explain a failed generation step.
-/// A tail stream's `truncated` flag is expected, so unlike `run` it is not a
-/// failure on its own.
+/// Local redaction masks each stream at capture, on the executor's
+/// `CaptureFilter`, ahead of the Tail window: a secret that straddles the
+/// window start is masked before the cut can leave part of it behind. A tail
+/// stream's `truncated` flag is expected, so unlike `run` it is not a failure on
+/// its own.
 fn run_with_tail(
     cwd: &Path,
     argv: &[OsString],
@@ -399,24 +419,34 @@ fn run_with_tail(
         limit: OUTPUT_TAIL_BYTES,
     };
     let failed = |tail: String, exit: Option<i32>| CommandFailure { exit, tail };
+    let mut stdout_filter = provenant_redact::Redactor::for_local_disclosure()
+        .map_err(|_| failed(WITHHELD_TAIL.to_owned(), None))?;
+    let mut stderr_filter = provenant_redact::Redactor::for_local_disclosure()
+        .map_err(|_| failed(WITHHELD_TAIL.to_owned(), None))?;
+    options.stdout_filter = Some(&mut stdout_filter);
+    options.stderr_filter = Some(&mut stderr_filter);
     let executor = SystemExecutor::new(1)
         .map_err(|error| failed(seed_error("running seed command", &error).to_string(), None))?;
     let result = executor
         .execute(options)
         .map_err(|error| failed(seed_error("running seed command", &error).to_string(), None))?;
+    let filter_failed = result.stdout.filter_failed || result.stderr.filter_failed;
     if result.termination != Termination::Exit(0)
         || result.timed_out
         || result.stdout.read_failed
         || result.stderr.read_failed
+        || filter_failed
     {
         let exit = match result.termination {
             Termination::Exit(code) => i32::try_from(code).ok(),
             Termination::Signal(_) => None,
         };
-        return Err(failed(
-            output_tail(&result.stdout.bytes, &result.stderr.bytes),
-            exit,
-        ));
+        let tail = if filter_failed {
+            WITHHELD_TAIL.to_owned()
+        } else {
+            output_tail(&result.stdout.bytes, &result.stderr.bytes)
+        };
+        return Err(failed(tail, exit));
     }
     Ok(result.stdout.bytes)
 }
@@ -909,9 +939,10 @@ fn record_refresh_outcome(state: &Path, project_key: &str, outcome: &str, reason
     }
 }
 
-/// A short, bounded cause for a recorded refresh failure. Prepare failures name
-/// the command and its output tail; skips name their typed reason; everything
-/// else keeps the error text, which `record_refresh` caps at 2 KiB.
+/// A short, bounded cause for a recorded refresh failure. A prepare failure's
+/// output tail is already masked on the capture stream, so it is safe to store
+/// and print as-is; skips name their typed reason and everything else keeps the
+/// error text, which `record_refresh` caps at 2 KiB.
 fn refresh_failure_reason(error: &(dyn Error + 'static)) -> String {
     if let Some(prepare) = prepare_failed_of(error) {
         format!("{}: {}", prepare.argv.join(" "), prepare.tail)
@@ -3034,6 +3065,151 @@ mod tests {
             fs::read_dir(stage.join("target")).is_ok_and(|mut entries| entries.next().is_none()),
             "cargo never runs after a failed prepare command"
         );
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed, docs/specs/cli.md#results
+    #[test]
+    fn failing_prepare_cause_is_masked_in_json_under_full_redaction() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
+        let secret = "seed-build-credential-3391";
+        let _scope = provenant_redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (project, commit, _) = prepared_project(temp.path());
+        let script = temp.path().join("fail.sh");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"npm ERR! registry rejected {secret} (Cannot find package 'zod')\" >&2\necho 'install the missing dependency' >&2\nexit 7\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        write_prepare(&project, vec![vec![script.to_string_lossy().into_owned()]]);
+        let stage = temp.path().join("stage");
+        fs::create_dir(&stage).unwrap();
+        let identity = identity("prepare-key", &commit);
+        let error = build_into(
+            state.path(),
+            &stage,
+            &project,
+            Path::new("."),
+            &commit,
+            "prepare-key",
+            &identity.cargo_profile,
+        )
+        .unwrap_err();
+
+        // This is the field tick stores in seed-result.json: the capture-time
+        // filter must leave only masked text in the persisted tail.
+        let prepare = prepare_failed_of(error.as_ref()).expect("prepare failure");
+        assert!(
+            prepare.tail.contains("install the missing dependency"),
+            "{}",
+            prepare.tail
+        );
+        assert!(!prepare.tail.contains(secret), "{}", prepare.tail);
+        assert!(prepare.tail.contains("[REDACTED]"), "{}", prepare.tail);
+
+        // The recorded refresh reason carries that same masked tail.
+        let reason = refresh_failure_reason(error.as_ref());
+        assert!(
+            reason.contains("install the missing dependency"),
+            "{reason}"
+        );
+        assert!(!reason.contains(secret), "{reason}");
+        assert!(reason.contains("[REDACTED]"), "{reason}");
+
+        // A manual `seed-build --json` drives the same production emission path
+        // as `worktrees::run`: the one `Error::command_error` mapping through
+        // `fail_with_command_error_with_writers`. It renders the masked tail as
+        // error.cause, after the message and before the one typed next.
+        let failure = crate::worktrees::seed_build_failure(error.as_ref());
+        let globals = provenant_cli::Globals {
+            json: true,
+            ..Default::default()
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        crate::fail_with_command_error_with_writers(
+            "worktree seed-build",
+            failure.outcome(),
+            failure.command_error("WORKTREE"),
+            &globals,
+            &mut stdout,
+            &mut stderr,
+        );
+        let value: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        let cause = value["error"]["cause"].as_str().expect("error.cause");
+        assert!(cause.contains("Cannot find package 'zod'"), "{cause}");
+        assert!(cause.contains("install the missing dependency"), "{cause}");
+        assert!(!cause.contains(secret), "{cause}");
+        assert!(cause.contains("[REDACTED]"), "{cause}");
+        let message = value["error"]["message"].as_str().expect("error.message");
+        assert!(message.contains("build.prepare[0]"), "{message}");
+        assert!(!message.contains(secret), "{message}");
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed, docs/specs/cli.md#results
+    #[test]
+    fn failing_prepare_secret_straddling_the_window_start_is_masked_before_the_cut() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
+        let secret = "seed-build-credential-4472";
+        let _scope = provenant_redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (project, commit, _) = prepared_project(temp.path());
+        // The secret starts inside the raw 2 KiB window and extends past its
+        // start: cutting first would leave a long, still-recognisable suffix.
+        // Masking on the stream before the Tail window must hide the whole value.
+        let prefix = "A".repeat(100);
+        let suffix = format!("{}\nFATAL-MARKER\n", "B".repeat(2020));
+        let prefix_path = temp.path().join("prefix.bin");
+        let suffix_path = temp.path().join("suffix.bin");
+        fs::write(&prefix_path, &prefix).unwrap();
+        fs::write(&suffix_path, &suffix).unwrap();
+        let script = temp.path().join("fail.sh");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ncat '{}' >&2\nprintf '%s' '{}' >&2\ncat '{}' >&2\nexit 7\n",
+                prefix_path.display(),
+                secret,
+                suffix_path.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        write_prepare(&project, vec![vec![script.to_string_lossy().into_owned()]]);
+        let stage = temp.path().join("stage");
+        fs::create_dir(&stage).unwrap();
+        let identity = identity("prepare-key", &commit);
+        let error = build_into(
+            state.path(),
+            &stage,
+            &project,
+            Path::new("."),
+            &commit,
+            "prepare-key",
+            &identity.cargo_profile,
+        )
+        .unwrap_err();
+
+        let prepare = prepare_failed_of(error.as_ref()).expect("prepare failure");
+        let tail = &prepare.tail;
+        assert!(tail.len() <= OUTPUT_TAIL_BYTES, "{tail}");
+        // The failure site at the end of the log survives the window.
+        assert!(tail.contains("FATAL-MARKER"), "{tail}");
+        // No slice long enough to be a known exact value leaks from the cut.
+        for start in 0..=secret.len() - provenant_redact::MIN_EXACT_BYTES {
+            assert!(
+                !tail.contains(&secret[start..start + provenant_redact::MIN_EXACT_BYTES]),
+                "secret suffix leaked: {tail}"
+            );
+        }
+        assert!(tail.contains("[REDACTED]"), "{tail}");
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed

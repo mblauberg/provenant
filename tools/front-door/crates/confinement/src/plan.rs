@@ -184,6 +184,36 @@ fn plan_permission_error(error: PermissionError) -> PlanError {
     }
 }
 
+fn validate_noncredential_for_plan(
+    grant: &PathGrant,
+    permissions: &PlanPermissions,
+) -> Result<(), PermissionError> {
+    match permissions.policy.as_ref() {
+        Some(policy) => crate::permissions::validate_noncredential_grant_for_access(
+            grant,
+            &permissions.credential_roots,
+            policy.mandatory().lane_access(),
+        ),
+        None => {
+            crate::permissions::validate_noncredential_grant(grant, &permissions.credential_roots)
+        }
+    }
+}
+
+fn validate_read_exec_for_plan(
+    grant: &PathGrant,
+    permissions: &PlanPermissions,
+) -> Result<(), PermissionError> {
+    match permissions.policy.as_ref() {
+        Some(policy) => crate::permissions::validate_read_exec_grant_for_access(
+            grant,
+            &permissions.credential_roots,
+            policy.mandatory().lane_access(),
+        ),
+        None => crate::permissions::validate_read_exec_grant(grant, &permissions.credential_roots),
+    }
+}
+
 /// No deserialisation, environment values, prompt, credential bytes or mutable
 /// policy escape. This is policy, not proof of an enforcing backend: compile
 /// immediately before handoff, retaining verified anchors and writer exclusion.
@@ -235,9 +265,9 @@ impl ConfinedPlan {
                         plan_boundary_error(code, error.into())
                     })?;
             }
-            crate::permissions::validate_noncredential_grant(grant, &p.credential_roots).map_err(
-                |error| plan_permission_error(error.with_credential_path(&grant.path, None)),
-            )?;
+            validate_noncredential_for_plan(grant, p).map_err(|error| {
+                plan_permission_error(error.with_credential_path(&grant.path, None))
+            })?;
             if p.secret_roots.iter().any(|root| grant.overlaps(root)) {
                 return Err(plan_boundary_error(
                     "PLAN_CONFINEDPLAN_NEW_CREDENTIALS",
@@ -257,14 +287,14 @@ impl ConfinedPlan {
             }
         }
         for grant in &p.read_roots {
-            crate::permissions::validate_read_exec_grant(grant, &p.credential_roots).map_err(
-                |error| plan_permission_error(error.with_credential_path(&grant.path, None)),
-            )?;
+            validate_read_exec_for_plan(grant, p).map_err(|error| {
+                plan_permission_error(error.with_credential_path(&grant.path, None))
+            })?;
         }
         for grant in &p.protected_roots {
-            crate::permissions::validate_noncredential_grant(grant, &p.credential_roots).map_err(
-                |error| plan_permission_error(error.with_credential_path(&grant.path, None)),
-            )?;
+            validate_noncredential_for_plan(grant, p).map_err(|error| {
+                plan_permission_error(error.with_credential_path(&grant.path, None))
+            })?;
         }
         for secret in &p.secret_roots {
             secret.validate().map_err(plan_permission_error)?;
@@ -280,10 +310,9 @@ impl ConfinedPlan {
             }
         }
         for private in std::iter::once(&p.scratch).chain(&p.private_state) {
-            crate::permissions::validate_noncredential_grant(private, &p.credential_roots)
-                .map_err(|error| {
-                    plan_permission_error(error.with_credential_path(&private.path, None))
-                })?;
+            validate_noncredential_for_plan(private, p).map_err(|error| {
+                plan_permission_error(error.with_credential_path(&private.path, None))
+            })?;
             if private.scope != PathScope::Subtree
                 || p.read_roots
                     .iter()
