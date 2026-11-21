@@ -842,7 +842,7 @@ fn receipt(
 }
 
 pub(super) fn outcome_complete(outcome: &ExecOutcome) -> bool {
-    let stream_complete = |stream: &provenant_os::exec::CapturedStream| {
+    let stream_complete = |stream: &provenant_os::exec::CapturedStream, byte_exact: bool| {
         !stream.truncated
             && stream.sink_lost_bytes == 0
             && !stream.sink_failed
@@ -850,11 +850,15 @@ pub(super) fn outcome_complete(outcome: &ExecOutcome) -> bool {
             && stream.decoder_lost_frames == 0
             && !stream.read_failed
             && !stream.filter_failed
-        // `total_bytes` counts source bytes; `bytes` is masked on the stream
-        // before the bound, so equal lengths are no longer an invariant.
+            // Port stdout is parsed byte-for-byte and opts out of the
+            // executor's default mask, so its retained length must still match
+            // the source byte count. Stderr is masked diagnostics, whose
+            // rewritten length may legitimately differ.
+            && (!byte_exact
+                || u64::try_from(stream.bytes.len()).ok() == Some(stream.total_bytes))
     };
-    stream_complete(&outcome.stdout)
-        && stream_complete(&outcome.stderr)
+    stream_complete(&outcome.stdout, true)
+        && stream_complete(&outcome.stderr, false)
         && !outcome.timed_out
         && !outcome.drain_truncated
         && !outcome.overflow_stopped
@@ -943,6 +947,20 @@ mod tests {
         .unwrap();
         assert_eq!(value["outcome"], "unknown");
         assert_eq!(value["capture_complete"], false);
+    }
+
+    /// Byte-exact port stdout must reconcile with its source byte count, while
+    /// masked diagnostic stderr may be rewritten to a different length.
+    #[test]
+    fn capture_complete_requires_byte_exact_stdout_length() {
+        let mut rewritten = execution(b"[REDACTED]", false).outcome.unwrap();
+        rewritten.stdout.total_bytes = b"secret-value".len() as u64;
+        assert!(!outcome_complete(&rewritten));
+
+        rewritten.stdout.total_bytes = rewritten.stdout.bytes.len() as u64;
+        rewritten.stderr.bytes = b"[REDACTED]".to_vec();
+        rewritten.stderr.total_bytes = b"secret-value".len() as u64;
+        assert!(outcome_complete(&rewritten));
     }
 
     #[test]

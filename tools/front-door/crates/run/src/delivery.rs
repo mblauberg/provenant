@@ -8,7 +8,7 @@ use crate::{
 use provenant_confinement::repo::GitRefName;
 use provenant_core::GitOid;
 use provenant_os::{
-    exec::{ExecOptions, StreamPolicy, SystemExecutor, Termination},
+    exec::{CaptureMask, ExecOptions, RawCaptureReason, StreamPolicy, SystemExecutor, Termination},
     fs::Directory,
 };
 use serde::{Deserialize, Serialize};
@@ -718,6 +718,10 @@ impl HostDeliveryContext {
                     options.stdout = StreamPolicy::Capture {
                         limit: stdout_limit(false, args),
                     };
+                    // The port parses gh's stdout byte-for-byte and checks it
+                    // against `total_bytes`, so keep it out of the default
+                    // mask. Stderr remains masked as a diagnostic.
+                    options.stdout_mask = CaptureMask::Raw(RawCaptureReason::ByteExactParse);
                     options.stderr = if stage == Stage::Prepare {
                         StreamPolicy::Capture { limit: 4096 }
                     } else {
@@ -1995,6 +1999,10 @@ impl HostDeliveryContext {
             stdout_limit(commit_log, args)
         };
         options.stdout = StreamPolicy::Capture { limit };
+        // Git facts (object ids, config values, porcelain lines) and PR bodies
+        // are consumed byte-for-byte. Keep stdout raw; stderr stays masked by
+        // the executor's default stream filter.
+        options.stdout_mask = CaptureMask::Raw(RawCaptureReason::ByteExactParse);
         options.stop_on_output_limit = commit_log;
         options.stderr = if stage == Stage::Prepare {
             StreamPolicy::Capture { limit: 4096 }

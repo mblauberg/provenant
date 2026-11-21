@@ -4,7 +4,8 @@ use super::{
     PortCommandDisposition, PortEvidenceError, PortSource,
 };
 use provenant_os::exec::{
-    ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
+    CaptureMask, ExecOptions, ExecOutcome, Executor, RawCaptureReason, StreamPolicy,
+    SystemExecutor, Termination,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -1013,6 +1014,9 @@ fn run_gh(
     options.stdout = StreamPolicy::Capture {
         limit: 8 * 1024 * 1024,
     };
+    // The response body is parsed byte-for-byte and checked against
+    // `total_bytes` by `capture_complete`, so keep stdout raw.
+    options.stdout_mask = CaptureMask::Raw(RawCaptureReason::ByteExactParse);
     options.stderr = StreamPolicy::Tail { limit: 64 * 1024 };
     options.process_group = true;
     options.cleanup_process_group = true;

@@ -6,7 +6,10 @@ use crate::repo::{
 use crate::transport::{self, ConfigEntry, LaneRoots, TransportError};
 use provenant_core::{CancelToken, DurationMicros, GitOid, Pause, ThreadPause};
 use provenant_os::{
-    exec::{ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination},
+    exec::{
+        CaptureMask, ExecError, ExecOptions, ExecOutcome, Executor, RawCaptureReason, StreamPolicy,
+        Termination,
+    },
     fs::{Directory, FileKind, FsError, Metadata, canonicalize, effective_uid},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -1725,12 +1728,13 @@ pub(crate) fn validate_outcome(outcome: ExecOutcome) -> Result<ExecOutcome, Util
         || outcome.stderr.read_failed
         || outcome.stdout.filter_failed
         || outcome.stderr.filter_failed
+        // Utility stdout is byte-exact (`exec_options` opts it out of the
+        // executor's default mask), so a length mismatch is the early size
+        // signal that would otherwise reach a blob-batch parser as a corrupt
+        // payload. Stderr stays masked for diagnostics, so its masked length
+        // may legitimately differ from the source byte count.
+        || outcome.stdout.total_bytes != outcome.stdout.bytes.len() as u64
     {
-        // `total_bytes` counts source bytes while `bytes` holds the masked,
-        // bounded result, so their lengths intentionally differ when the
-        // executor's default mask replaces a secret. Loss is reported by the
-        // truncation, frame, sink, read and filter flags above.
-
         return Err(UtilityError::Incomplete);
     }
     Ok(outcome)
@@ -1745,6 +1749,11 @@ pub(crate) fn exec_options<'a>(
     cancel: Option<&'a CancelToken>,
 ) -> ExecOptions<'a> {
     let mut options = ExecOptions::new(argv, cwd, budget.timeout);
+    // Every utility stdout is parsed byte-for-byte (object ids, patches,
+    // porcelain fields) and checked against `total_bytes` by
+    // `validate_outcome`. Keep it raw so masking cannot rewrite Git bytes;
+    // stderr stays masked by the executor's default stream filter.
+    options.stdout_mask = CaptureMask::Raw(RawCaptureReason::ByteExactParse);
     options.env = Some(env);
     options.stdin = stdin;
     options.stop_on_output_limit = true;
@@ -4177,6 +4186,25 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
             validate_outcome(outcome),
             Err(UtilityError::Truncated { stream: "stdout" })
         ));
+    }
+
+    /// Utility stdout is byte-exact, so a source/retained length mismatch is
+    /// refused before a parser can read a rewritten payload. Masked diagnostic
+    /// stderr is allowed to differ in length.
+    #[test]
+    fn byte_exact_stdout_length_mismatch_is_incomplete() {
+        let mut rewritten = exit_outcome(0, "");
+        rewritten.stdout.bytes = b"[REDACTED]".to_vec();
+        rewritten.stdout.total_bytes = b"secret-value".len() as u64;
+        assert!(matches!(
+            validate_outcome(rewritten),
+            Err(UtilityError::Incomplete)
+        ));
+
+        let mut masked_stderr = exit_outcome(0, "");
+        masked_stderr.stderr.bytes = b"[REDACTED]".to_vec();
+        masked_stderr.stderr.total_bytes = b"secret-value".len() as u64;
+        assert!(validate_outcome(masked_stderr).is_ok());
     }
 
     /// Answers every config spawn with the next scripted outcome instead of

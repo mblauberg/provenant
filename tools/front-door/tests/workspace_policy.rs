@@ -1333,3 +1333,26 @@ fn every_capture_uses_the_default_mask_unless_it_names_a_reason() -> Result<(), 
     );
     Ok(())
 }
+
+/// Rule: a site that parses captured bytes byte-for-byte must opt out of the
+/// executor's default stream mask with a named reason, or full local redaction
+/// rewrites the bytes it parses (blobs, patches, tokens and port responses).
+#[test]
+fn byte_exact_capture_sites_opt_out_of_the_default_mask() -> Result<(), Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let opt_out = "CaptureMask::Raw(RawCaptureReason::ByteExactParse)";
+    for path in [
+        "crates/confinement/src/utility.rs",
+        "crates/cli/src/run/provider/gh_auth.rs",
+        "crates/config/src/ports.rs",
+        "crates/config/src/ports/forge.rs",
+        "crates/run/src/delivery.rs",
+    ] {
+        let source = fs::read_to_string(root.join(path))?;
+        assert!(
+            source.contains(opt_out),
+            "{path} parses captured bytes byte-for-byte and must opt out of the default mask"
+        );
+    }
+    Ok(())
+}

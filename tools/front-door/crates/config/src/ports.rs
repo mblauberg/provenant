@@ -165,7 +165,9 @@ pub fn execute_port_command_with_input(
     timeout: Duration,
     cancel: &provenant_core::CancelToken,
 ) -> PortCommandExecution {
-    use provenant_os::exec::{ExecOptions, StreamPolicy, Termination};
+    use provenant_os::exec::{
+        CaptureMask, ExecOptions, RawCaptureReason, StreamPolicy, Termination,
+    };
     let command_digest = command.digest();
     if !command.is_valid() {
         return PortCommandExecution {
@@ -186,6 +188,10 @@ pub fn execute_port_command_with_input(
     options.stdout = StreamPolicy::Capture {
         limit: 8 * 1024 * 1024,
     };
+    // Port stdout is parsed byte-for-byte into typed responses (HTTP status,
+    // headers and JSON) and checked against `total_bytes` by `outcome_complete`.
+    // Keep it raw; stderr stays masked as a diagnostic tail.
+    options.stdout_mask = CaptureMask::Raw(RawCaptureReason::ByteExactParse);
     options.stderr = StreamPolicy::Tail { limit: 64 * 1024 };
     options.process_group = true;
     options.cleanup_process_group = true;
