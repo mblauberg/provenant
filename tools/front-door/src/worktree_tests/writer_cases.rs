@@ -606,20 +606,32 @@ pub(super) fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> 
         provenant_run::AttemptState::Terminal { .. }
     ));
     // The exit record is published before the guardian crashes at the
-    // settlement handoff. Wait until that guardian is observed gone: its locks
-    // are then released while the crashed attempt's reservation is still
-    // retained, so reconciliation sees a settled slot rather than a live,
-    // stalled guardian.
+    // settlement handoff. Wait until that guardian process has actually gone:
+    // the kernel then releases its locks while the crashed attempt's
+    // reservation is still retained, so reconciliation sees a settled slot
+    // rather than a live, stalled guardian. `fence.live` cannot decide this:
+    // the fixture records the synthetic fixture boot while the fence listing
+    // observes the real boot, so `live` is false from the boot mismatch before
+    // the guardian exits. Observe the guardian pid recorded in the reservation;
+    // it is a real host process.
+    let guardian_pid = {
+        let fence = store
+            .writer_fences()?
+            .into_iter()
+            .find(|fence| fence.scope.attempt == attempt)
+            .ok_or("crashed writer guardian reservation missing")?;
+        let slot = fence
+            .custody_directory()
+            .ok_or("crashed writer guardian custody slot missing")?;
+        let slot = provenant_os::fs::Directory::open_anchor(slot)?;
+        provenant_supervisor::custody::reservation_guardian(&slot, fence.scope)?
+            .ok_or("crashed writer guardian identity missing")?
+            .pid
+    };
     provenant_test_support::wait_for(
         "crashed writer guardian gone",
         Duration::from_secs(8),
-        || {
-            store.writer_fences().is_ok_and(|fences| {
-                fences
-                    .iter()
-                    .any(|fence| fence.scope.attempt == attempt && fence.live == Some(false))
-            })
-        },
+        || provenant_test_support::process_is_gone(&guardian_pid.to_string()).unwrap_or(false),
         |gone| *gone,
     )?;
     // The operation remains unfinished when the durable exit is recovered.
