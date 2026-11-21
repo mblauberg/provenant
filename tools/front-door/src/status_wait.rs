@@ -1196,38 +1196,57 @@ fn child_settle(child: &Value) -> Settle {
     }
 }
 
+/// The verdict for a child wait is drawn from exactly the children the mode
+/// decided on: the first settled child under `--any`, the first failed child
+/// under `--fail-fast`, and every child otherwise. A child still running when
+/// the wait ends early is not a failure.
+fn child_wait_outcome(children: &[Value], mode: WaitMode, settled_order: &[usize]) -> Outcome {
+    let verdicts: Vec<Settle> = match mode {
+        WaitMode::Any => settled_order
+            .iter()
+            .take(1)
+            .filter_map(|&index| children.get(index).map(child_settle))
+            .collect(),
+        WaitMode::FailFast => match settled_order.iter().copied().find(|&index| {
+            children
+                .get(index)
+                .is_some_and(|child| child_settle(child) == Settle::Unsuccessful)
+        }) {
+            Some(index) => vec![child_settle(&children[index])],
+            None => children.iter().map(child_settle).collect(),
+        },
+        WaitMode::All => children.iter().map(child_settle).collect(),
+    };
+    if verdicts.contains(&Settle::Unsuccessful) {
+        Outcome::Failed
+    } else {
+        Outcome::Ok
+    }
+}
+
 /// A wait inside a lane that names no targets observes the parent's children
 /// through the owner relay. Those terminal child states are the wait's targets:
 /// emit the same settlement events and terminal envelope a named-target wait
 /// emits. Discarding them would read a failed child as success and leave
-/// `wait --json` with no terminal result at all.
+/// `wait --json` with no terminal result at all. Settlement events are streamed
+/// by the polling callback so `--follow` sees transitions as they happen; this
+/// builds only the terminal envelope and its final rows.
 fn emit_child_wait(
     children: &[Value],
     cadence: &LocalCadence,
     mode: WaitMode,
     globals: &Globals,
+    settled_order: &[usize],
+    write_error: Option<std::io::Error>,
 ) -> u8 {
     let observation = provenant_cli::fabric::graph_relay::child_wait_observation(cadence);
     let mut human = mode_heading(mode);
     let mut rows = Vec::new();
     let mut summary_lines = Vec::new();
-    let mut write_error = None;
-    let mut unsuccessful = false;
     for child in children {
         let label = child["node"].as_str().unwrap_or("child").to_owned();
         let settle = child_settle(child);
-        if settle == Settle::Unsuccessful {
-            unsuccessful = true;
-        }
         let line = format!("{label} {}", settle_phrase(settle, true));
-        if write_error.is_none() {
-            let event = if globals.json {
-                json!({"event":"settled","target":label,"settle":settle,"line":line}).to_string()
-            } else {
-                line.clone()
-            };
-            write_error = write_line(&event).err();
-        }
         human.push_str(&line);
         human.push('\n');
         summary_lines.push(line.clone());
@@ -1250,11 +1269,7 @@ fn emit_child_wait(
     if let Some(error) = write_error {
         return crate::fail("wait", Outcome::Error, "IO", &error.to_string(), globals);
     }
-    let outcome = if unsuccessful {
-        Outcome::Failed
-    } else {
-        Outcome::Ok
-    };
+    let outcome = child_wait_outcome(children, mode, settled_order);
     let summary = provenant_cli::Summary::new(
         mode_heading(mode).trim_end().to_owned(),
         summary_lines,
@@ -1481,19 +1496,74 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             // The local project journal is unavailable inside a lane and the
             // project-wide unsettled set would include this lane's own pending
             // graph, so an all-mode wait could never settle. Discover the
-            // lane's children through the relay and wait for those instead.
+            // lane's children through the relay and wait for those instead,
+            // ending on and reporting exactly the mode the caller selected.
             let within = deadline.saturating_duration_since(Instant::now());
-            return match provenant_cli::fabric::graph_relay::wait_for_children(
+            let child_mode = match mode {
+                WaitMode::Any => provenant_cli::fabric::graph_relay::ChildWaitMode::Any,
+                WaitMode::FailFast => provenant_cli::fabric::graph_relay::ChildWaitMode::FailFast,
+                WaitMode::All => provenant_cli::fabric::graph_relay::ChildWaitMode::All,
+            };
+            let mut announced: std::collections::HashMap<String, Settle> = Default::default();
+            let mut settled_order: Vec<usize> = Vec::new();
+            let mut write_error = None;
+            let mut observe = |children: &[Value]| {
+                for (index, child) in children.iter().enumerate() {
+                    let settle = child_settle(child);
+                    // Without --follow only settlements are events; with it,
+                    // every newly observed state is a transition, as for named
+                    // targets.
+                    if !command.follow && settle == Settle::Pending {
+                        continue;
+                    }
+                    let label = child["node"].as_str().unwrap_or("child").to_owned();
+                    if announced.get(&label) == Some(&settle) {
+                        continue;
+                    }
+                    announced.insert(label.clone(), settle);
+                    if settle != Settle::Pending && !settled_order.contains(&index) {
+                        settled_order.push(index);
+                    }
+                    if write_error.is_some() {
+                        continue;
+                    }
+                    let line = format!("{label} {}", settle_phrase(settle, true));
+                    let event = if settle == Settle::Pending {
+                        "transition"
+                    } else {
+                        "settled"
+                    };
+                    let event = if globals.json {
+                        json!({"event":event,"target":label,"settle":settle,"line":line})
+                            .to_string()
+                    } else {
+                        line
+                    };
+                    write_error = write_line(&event).err();
+                }
+            };
+            let waited = provenant_cli::fabric::graph_relay::wait_for_children(
                 &stop.cancel,
                 within,
                 cadence.interval,
-            ) {
+                child_mode,
+                &mut observe,
+            );
+            drop(observe);
+            return match waited {
                 Ok(settled_children) => {
                     let children = settled_children["children"]
                         .as_array()
                         .cloned()
                         .unwrap_or_default();
-                    emit_child_wait(&children, &cadence, mode, globals)
+                    emit_child_wait(
+                        &children,
+                        &cadence,
+                        mode,
+                        globals,
+                        &settled_order,
+                        write_error,
+                    )
                 }
                 Err(error) => match error.code() {
                     "cancelled" => crate::fail(
@@ -2873,6 +2943,46 @@ mod tests {
             );
         }
         assert_eq!(super::child_settle(&child("a", "running")), Settle::Pending);
+    }
+
+    #[test]
+    fn a_child_wait_takes_its_verdict_from_the_selected_mode() {
+        let child = |node: &str, state: &str| json!({"node":node,"state":state,"settled":state != "running"});
+        let ok = child("a", "succeeded");
+        let failed = child("b", "failed");
+        let running = child("c", "running");
+        let children = [ok.clone(), failed.clone(), running.clone()];
+
+        // Under `all`, any failed child fails the wait.
+        assert_eq!(
+            super::child_wait_outcome(&children, WaitMode::All, &[0, 1, 2]),
+            Outcome::Failed
+        );
+        // Under `any`, only the first settled child decides the verdict, even
+        // when a later child in the same snapshot failed.
+        assert_eq!(
+            super::child_wait_outcome(&children, WaitMode::Any, &[0]),
+            Outcome::Ok
+        );
+        assert_eq!(
+            super::child_wait_outcome(&children, WaitMode::Any, &[1]),
+            Outcome::Failed
+        );
+        // Under `fail-fast`, the first failed child decides the verdict.
+        assert_eq!(
+            super::child_wait_outcome(&children, WaitMode::FailFast, &[1]),
+            Outcome::Failed
+        );
+        let all_ok = [child("a", "succeeded"), child("b", "succeeded")];
+        assert_eq!(
+            super::child_wait_outcome(&all_ok, WaitMode::FailFast, &[0, 1]),
+            Outcome::Ok
+        );
+        // A child still running when the wait ends early is not a failure.
+        assert_eq!(
+            super::child_wait_outcome(&[running], WaitMode::All, &[]),
+            Outcome::Ok
+        );
     }
 
     #[test]

@@ -320,7 +320,14 @@ fn emit_unpublished<T: Serialize>(
                 "source": "COMMAND_RESULT_MAX_BYTES",
                 "repair": REPAIR,
             });
-            let bounded = CommandResult::new(&result.command, result.status, marker);
+            let mut bounded = CommandResult::new(&result.command, result.status, marker);
+            // The marker replaces the oversized data, not the refusal. Keep the
+            // original typed error so an oversized failure still carries its
+            // code, repair and diagnostic, as the console and disk edges do.
+            bounded.error = result
+                .error
+                .as_ref()
+                .map(|error| provenant_cli::bounded_error(error, 512));
             let _ = provenant_cli::render(&bounded, RenderMode::Json, &mut io::stdout().lock());
             provenant_cli::exit_status(&result.status)
         }

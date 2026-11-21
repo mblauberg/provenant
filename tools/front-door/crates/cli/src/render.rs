@@ -188,8 +188,37 @@ pub fn clip_for_output(text: &str, limit: usize) -> (String, usize) {
     if clipped.len() <= limit {
         (clipped, omitted)
     } else {
-        (bounded_text(text, limit), text.len().saturating_sub(limit))
+        bounded_head_with_marker(text, limit)
     }
+}
+
+/// A head-only clip for the case the two-ended view cannot fit the limit. The
+/// marker names the omitted bytes and the count is exactly the number of
+/// original bytes no longer present, so a tiny limit never under-reports or
+/// silently drops the omission marker.
+fn bounded_head_with_marker(text: &str, limit: usize) -> (String, usize) {
+    if text.len() <= limit {
+        return (text.into(), 0);
+    }
+    const PREFIX: &str = "...[";
+    const SUFFIX: &str = " bytes omitted; use --full for all of it]";
+    // Reserve for the widest possible count so the marker always fits when the
+    // limit can hold it; the real count needs the same or fewer digits.
+    let fixed = PREFIX.len() + SUFFIX.len() + text.len().to_string().len();
+    if limit <= fixed {
+        // No room for a marker: keep the bounded head and report exactly how
+        // many original bytes its ellipsis replaced.
+        let clipped = bounded_text(text, limit);
+        let shown = clipped.len().saturating_sub(3);
+        return (clipped, text.len().saturating_sub(shown));
+    }
+    let mut end = limit - fixed;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let omitted = text.len() - end;
+    let marker = format!("{PREFIX}{omitted}{SUFFIX}");
+    (format!("{}{marker}", &text[..end]), omitted)
 }
 /// A bounded copy of an error for a capped result view: it keeps the typed
 /// code, repair and diagnostic while shortening the free-form text so a large

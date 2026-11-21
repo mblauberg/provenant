@@ -99,7 +99,11 @@ emit a typed `RESULT_TOO_LARGE` Error envelope and exit 3. Either way the
 envelope status and the process exit code agree. Paged reads bind the cursor to
 the input, and terminal text escapes control sequences. Unknown facts stay
 unknown. Compact output uses semantic owner summaries and a detail command;
-JSON preserves the envelope and its paging pointer, never a truncated object.
+JSON always preserves the envelope. A paged result carries its paging pointer
+and never a truncated object; a surface that cannot publish a result instead
+carries an explicit bounded marker in `data` (`truncated`, `omitted_bytes`,
+`source`, `repair`) with a warning, never a silently truncated object, and keeps
+the result's typed error beside the marker.
 
 - Why: a script branches on the exit code, and an operator must see that output
   was bounded rather than mistake a clipped view for the whole result.
