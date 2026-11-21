@@ -1201,8 +1201,26 @@ mod tests {
             run_input_fixture(request)
         };
         // One provider offers it: the bare name becomes ADAPTER/ID.
-        let input = with_model("claude-sonnet-5-5").unwrap();
-        assert_eq!(input["model"], "claude/claude-sonnet-5-5");
+        let input = with_model("claude-haiku-5-5").unwrap();
+        assert_eq!(input["model"], "claude/claude-haiku-5-5");
+        // Several providers offer it: refused as ambiguous, naming each ADAPTER/ID.
+        for (bare, expected) in [
+            (
+                "claude-sonnet-5-5",
+                ["claude/claude-sonnet-5-5", "agy/claude-sonnet-5-5"],
+            ),
+            (
+                "claude-opus-5-5",
+                ["claude/claude-opus-5-5", "agy/claude-opus-5-5"],
+            ),
+        ] {
+            let ambiguous = with_model(bare).unwrap_err();
+            assert_eq!(ambiguous.code, "invalid_input");
+            let detail = ambiguous.detail.unwrap_or_default();
+            for candidate in expected {
+                assert!(detail.contains(candidate), "{detail}");
+            }
+        }
         // The provider-qualified form is passed through unchanged.
         let input = with_model("codex/gpt-6.1-terra").unwrap();
         assert_eq!(input["model"], "codex/gpt-6.1-terra");
@@ -1389,7 +1407,7 @@ mod tests {
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     #[test]
     fn compact_run_prints_field_only_policy_warnings() {
-        let input = json!({"brief":"password=example-compact-3391"});
+        let input = json!({"brief":"ghp_abcdefghijklmnopqrstuvwxyz0123456789"});
         {
             let _mode = provenant_redact::scoped(provenant_redact::Mode::Off);
             assert!(
@@ -1408,7 +1426,7 @@ mod tests {
             let output = run_human(&data, &json!({"op":"run"}), announced);
             assert!(output.contains("warning: [SECRET_SHAPED_INPUT]"));
             assert!(output.contains("brief looks like a credential"));
-            assert!(!output.contains("example-compact-3391"));
+            assert!(!output.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
         }
     }
 

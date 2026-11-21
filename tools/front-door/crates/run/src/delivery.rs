@@ -12,7 +12,6 @@ use provenant_os::{
     exec::{ExecOptions, StreamPolicy, SystemExecutor, Termination},
     fs::Directory,
 };
-use provenant_redact::Redactor;
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::{OsStr, OsString},
@@ -2058,22 +2057,6 @@ impl HostDeliveryContext {
             }))
             .collect();
         let executor = SystemExecutor::new(1).map_err(|error| failure(error.to_string()))?;
-        let mut redactor = if stage == Stage::Prepare && provenant_redact::mode().masks_local() {
-            Some(
-                Redactor::new(
-                    self.environment
-                        .iter()
-                        .filter(|(key, value)| {
-                            matches!(key.as_slice(), b"GH_TOKEN" | b"GITHUB_TOKEN")
-                                && !value.is_empty()
-                        })
-                        .map(|(_, value)| value.clone()),
-                )
-                .map_err(|error| failure(format!("diagnostic redaction unavailable: {error}")))?,
-            )
-        } else {
-            None
-        };
         let commit_log = tool == "git" && args.first() == Some(&"log");
         let limit = if tool == "git" && provenant_os::git::fact_capture_limit(args, 0) != 0 {
             host_output_limit(HostOutputClass::FactCapture)
@@ -2083,7 +2066,6 @@ impl HostDeliveryContext {
         // A config mutation on the shared `.git/config` can lose a lock race to
         // a sibling settlement. Capture a bounded stderr tail so that collision
         // is detectable, and give every attempt a share of one 30s deadline.
-        // The failure path below still withholds all config diagnostics.
         let make_options = |timeout: Duration| {
             let mut options = ExecOptions::new(&argv, cwd, timeout);
             options.cancel = self.cancellation.as_ref();
@@ -2104,8 +2086,6 @@ impl HostDeliveryContext {
         let cancel = provenant_core::CancelToken::new();
         let attempt_cancel = self.cancellation.as_ref().unwrap_or(&cancel);
         let output = if mode.retry_config_lock {
-            // Config writes run outside Prepare, so no redactor is active here.
-            debug_assert!(redactor.is_none());
             self.facts
                 .with_executor(&executor, attempt_cancel, |executor| {
                     provenant_confinement::utility::execute_with_git_lock_retry(
@@ -2129,10 +2109,7 @@ impl HostDeliveryContext {
                     other => other,
                 })?
         } else {
-            let mut options = make_options(Duration::from_secs(30));
-            options.stderr_filter = redactor
-                .as_mut()
-                .map(|redactor| redactor as &mut dyn provenant_os::exec::CaptureFilter);
+            let options = make_options(Duration::from_secs(30));
             self.facts
                 .with_executor(&executor, attempt_cancel, |executor| {
                     executor
@@ -2192,15 +2169,7 @@ impl HostDeliveryContext {
                     .collect();
                 return Err(RunError::MergeConflict { conflicting_files });
             }
-            let stderr = if tool == "git" && args.first() == Some(&"config") {
-                "Git config diagnostics withheld".into()
-            } else if output.stderr.filter_failed {
-                "diagnostic redaction failed".into()
-            } else {
-                provenant_redact::delivery_diagnostics(&String::from_utf8_lossy(
-                    &output.stderr.bytes,
-                ))
-            };
+            let stderr = String::from_utf8_lossy(&output.stderr.bytes).into_owned();
             return Err(failure(format!(
                 "{tool} {:?} (timed out: {}): {stderr}",
                 output.termination, output.timed_out
@@ -3522,8 +3491,7 @@ fn transport_config_cause(error: provenant_os::git_config::ConfigError<RunError>
 
 pub(crate) fn prepare_reason(detail: impl std::fmt::Display) -> String {
     let detail = detail.to_string();
-    let redacted = provenant_redact::delivery_diagnostics(&detail);
-    let mut reason = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut reason = detail.split_whitespace().collect::<Vec<_>>().join(" ");
     if reason.len() > PREPARE_REASON_LIMIT {
         reason.truncate(reason.floor_char_boundary(PREPARE_REASON_LIMIT));
         reason.push_str(PREPARE_REASON_TRUNCATION_MARKER);
@@ -4187,8 +4155,7 @@ mod stored_format_tests {
                 None,
             ),
             source: RunError::ConfigCommandFailed {
-                reason: "git \"Exit(128)\" (timed out: false): Git config diagnostics withheld"
-                    .into(),
+                reason: "git \"Exit(128)\" (timed out: false): fatal: bad config line 3".into(),
             },
         };
         let refusal = RunError::DeliveryTransport {
@@ -4206,7 +4173,7 @@ mod stored_format_tests {
             "{rendered}"
         );
         assert_eq!(
-            rendered.matches("Git config diagnostics withheld").count(),
+            rendered.matches("fatal: bad config line 3").count(),
             1,
             "{rendered}"
         );

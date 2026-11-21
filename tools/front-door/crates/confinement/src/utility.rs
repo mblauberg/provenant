@@ -1911,7 +1911,7 @@ pub(crate) fn fetch_missing_remote_branch(
 
 /// Bounded, sanitised Git stderr, shared by fetches and mutations.
 fn git_stderr_excerpt(bytes: &[u8]) -> String {
-    provenant_redact::bounded_line(&String::from_utf8_lossy(bytes), MAX_FETCH_STDERR)
+    provenant_core::bounded_line(&String::from_utf8_lossy(bytes), MAX_FETCH_STDERR)
 }
 
 /// Run a read for the release scan, where shallow boundaries must not hide
@@ -4557,7 +4557,6 @@ pub(crate) mod tests {
 
     #[test]
     fn missing_remote_fetch_reports_bounded_sanitised_stderr() -> Result<(), Box<dyn Error>> {
-        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
         let mut fixture = Fixture::new()?;
         add_missing_test_remote(&mut fixture)?;
 
@@ -4603,14 +4602,12 @@ pub(crate) mod tests {
         let UtilityError::FetchFailed { stderr, .. } = error else {
             return Err(format!("unexpected error: {error}").into());
         };
-        assert!(!stderr.contains("secret"));
-        assert!(stderr.contains("[REDACTED]"));
+        assert!(stderr.contains("secret"));
         assert!(!stderr.chars().any(char::is_control));
         assert!(!stderr.contains('\u{202e}'));
         let long_secret = format!("{}https://user:secret@example.invalid/", "x".repeat(990));
         let excerpt = git_stderr_excerpt(long_secret.as_bytes());
-        assert!(!excerpt.contains("secret"));
-        assert!(excerpt.contains("[REDACTED]"));
+        assert!(excerpt.contains("secret"));
         assert!(excerpt.chars().count() <= MAX_FETCH_STDERR);
         Ok(())
     }

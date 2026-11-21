@@ -798,9 +798,7 @@ fn provider_error_from_result(bytes: &[u8]) -> Option<String> {
     if joined.is_empty() {
         return None;
     }
-    let redacted =
-        String::from_utf8(provenant_redact::known_shapes(joined.as_bytes()).ok()?).ok()?;
-    Some(crate::bounded_text(&redacted, PROVIDER_ERROR_BYTES))
+    Some(crate::bounded_text(&joined, PROVIDER_ERROR_BYTES))
 }
 
 /// Select a cause from captured stderr without promoting known Codex skill
@@ -811,8 +809,7 @@ fn provider_error_from_stderr(bytes: &[u8]) -> Option<String> {
         .lines()
         .rev()
         .find(|line| !line.trim().is_empty() && !warning_level_stderr_line(line))?;
-    let redacted = String::from_utf8(provenant_redact::known_shapes(line.as_bytes()).ok()?).ok()?;
-    Some(crate::bounded_text(&redacted, 160))
+    Some(crate::bounded_text(line, 160))
 }
 
 /// Warning-level lines start with `warn`/`warning` (optionally bracketed or
@@ -1265,35 +1262,31 @@ mod tests {
         }
     }
 
-    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
     #[test]
-    fn provider_errors_mask_credential_shapes_and_registered_values() {
-        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
-        let secret = b"descriptor-credential-3391";
-        let _scope = provenant_redact::publication_scope([secret.to_vec()]).unwrap();
-        let text = b"provider failed: descriptor-credential-3391 sk-abcdefghijklmnopqrstuvwxyz password=\"printed-value\"";
-        for reason in [
-            provider_error_from_result(text),
-            provider_error_from_stderr(text),
-        ] {
-            let reason = reason.unwrap();
-            assert!(reason.contains("[REDACTED]"));
-            assert!(!reason.contains("descriptor-credential-3391"));
-            assert!(!reason.contains("sk-abcdefghijklmnopqrstuvwxyz"));
-            assert!(!reason.contains("printed-value"));
+    fn local_provider_errors_keep_credential_shapes_and_assignments_raw() {
+        let text = b"provider failed: sk-abcdefghijklmnopqrstuvwxyz password=\"printed-value\"";
+        for mode in [provenant_redact::Mode::Off, provenant_redact::Mode::Secrets] {
+            let _mode = provenant_redact::scoped(mode);
+            for reason in [
+                provider_error_from_result(text),
+                provider_error_from_stderr(text),
+            ] {
+                let reason = reason.unwrap();
+                assert!(reason.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+                assert!(reason.contains("printed-value"));
+            }
         }
     }
 
     #[test]
-    fn provider_error_keeps_multiline_context_while_masking_assignments() {
-        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
+    fn provider_error_keeps_multiline_context() {
         let message = provider_error_from_result(
             b"Model not recognized: gemini-3.8-pro\npass: fix the code\nAvailable models:\nGemini 2.5 Flash\nGPT-OSS 120B (Medium)\n",
         )
         .unwrap();
         assert!(message.starts_with("Model not recognized: gemini-3.8-pro; "));
         assert!(message.ends_with("GPT-OSS 120B (Medium)"));
-        assert!(message.contains("pass: [REDACTED] the code"));
+        assert!(message.contains("pass: fix the code"));
         assert_eq!(provider_error_from_result(b"\n  \n"), None);
     }
 

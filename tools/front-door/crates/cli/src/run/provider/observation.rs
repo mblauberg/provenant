@@ -611,13 +611,8 @@ pub(super) fn observe_account(
             unavailable()
         )));
     }
-    // An adapter flagged `offered_models` reads the offer list its usage probe cached.
     let observed_models =
-        if AdapterSpec::get(&entry.adapter).is_some_and(|spec| spec.offered_models) {
-            provenant_providers::agy::cached_models(executor.root(), &directory)
-        } else {
-            Vec::new()
-        };
+        observed_models_for_account(&entry.adapter, executor.root(), &directory, home, roots);
     Ok(provenant_providers::AvailabilityRecord {
         schema_version: 1,
         adapter: entry.adapter.clone(),
@@ -846,4 +841,115 @@ pub(super) fn launch_prompt(
         Err(error) => return Err(error.to_string().into()),
     }
     Ok(prompt)
+}
+
+/// An adapter flagged `offered_models` reads the offer list its usage probe
+/// cached, falling back for the HOME login to the last model-discovery
+/// snapshot only when no identity probe exists yet. A stamp-invalidated probe
+/// (login change) never falls back to a pre-change HOME discovery snapshot.
+fn observed_models_for_account(
+    adapter: &str,
+    state_root: &Path,
+    directory: &Path,
+    home: &Path,
+    roots: Option<&provenant_core::Roots>,
+) -> Vec<String> {
+    if !AdapterSpec::get(adapter).is_some_and(|spec| spec.offered_models) {
+        return Vec::new();
+    }
+    match provenant_providers::agy::cached_models_status(state_root, directory) {
+        provenant_providers::agy::CachedModels::Valid(models) if !models.is_empty() => models,
+        provenant_providers::agy::CachedModels::Missing if directory == home => roots
+            .map(|roots| crate::model_discovery::discovered_canonical_models(roots, adapter))
+            .unwrap_or_default(),
+        provenant_providers::agy::CachedModels::Valid(_)
+        | provenant_providers::agy::CachedModels::Invalidated
+        | provenant_providers::agy::CachedModels::Missing => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn test_roots(path: &Path) -> Result<provenant_core::Roots, Box<dyn std::error::Error>> {
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
+                Ok(path.into())
+            }
+        }
+        let mut inputs = provenant_core::RootInputs::new(path.join("home"), path.join("checkout"));
+        inputs.state_dir = Some(path.join("state"));
+        Ok(inputs.resolve(&Resolver)?)
+    }
+
+    fn write_agy_snapshot(roots: &provenant_core::Roots, models: &[&str]) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = roots.state.as_path().join("model-discovery");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let snapshot = provenant_routing::DiscoverySnapshot {
+            adapter: "agy".into(),
+            observed_at: 100,
+            models: models
+                .iter()
+                .map(|id| provenant_routing::DiscoveredModel {
+                    model: provenant_routing::ModelId::parse(id).unwrap(),
+                    efforts: Vec::new(),
+                    service_tiers: Vec::new(),
+                    controls_known: true,
+                    effort_suffix: false,
+                })
+                .collect(),
+        };
+        let path = dir.join("agy.json");
+        std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn agy_home_discovery_fallback_respects_keychain_invalidation_and_isolation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let roots = test_roots(temp.path())?;
+        let state = roots.state.as_path();
+        std::fs::create_dir_all(state)?;
+        let home = temp.path().join("home");
+        let isolated = temp.path().join("home-isolated");
+        let keychain = home.join("Library/Keychains/login.keychain-db");
+        std::fs::create_dir_all(keychain.parent().unwrap())?;
+        std::fs::write(&keychain, "login-v1")?;
+        std::fs::create_dir_all(&isolated)?;
+
+        write_agy_snapshot(&roots, &["agy/gemini-4-neon", "agy/claude-sonnet-5-5"]);
+
+        // Never probed yet: HOME falls back to discovery snapshot; isolated account does not.
+        assert_eq!(
+            observed_models_for_account("agy", state, &home, &home, Some(&roots)),
+            vec!["gemini-4-neon".to_owned(), "claude-sonnet-5-5".to_owned()]
+        );
+        assert!(
+            observed_models_for_account("agy", state, &isolated, &home, Some(&roots)).is_empty()
+        );
+        assert!(observed_models_for_account("agy", state, &home, &home, None).is_empty());
+
+        // Populate cached models bound to login-v1 keychain stamp.
+        assert!(provenant_providers::agy::remember_models(
+            state,
+            &home,
+            100,
+            &["gemini-4-hydrogen".into()],
+        ));
+        assert_eq!(
+            observed_models_for_account("agy", state, &home, &home, Some(&roots)),
+            vec!["gemini-4-hydrogen".to_owned()]
+        );
+
+        // Login/keychain change invalidates cached models; must NOT fall back to the stale HOME snapshot.
+        std::fs::write(&keychain, "login-v2-different-account")?;
+        assert!(observed_models_for_account("agy", state, &home, &home, Some(&roots)).is_empty());
+        Ok(())
+    }
 }

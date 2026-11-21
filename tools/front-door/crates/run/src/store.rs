@@ -1315,12 +1315,7 @@ impl RunStore {
         let raw_refusal = provenant_records::wire::lane::LaneRow::state_and_reason(&safe_state)
             .1
             .unwrap_or_default();
-        let refusal_result = provenant_redact::bounded_line(&raw_refusal, 256);
-        let unmasked_refusal = {
-            let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
-            provenant_redact::bounded_line(&raw_refusal, 256)
-        };
-        let refusal_redacted = refusal_result != unmasked_refusal;
+        let refusal_result = provenant_core::bounded_line(&raw_refusal, 256);
         let publication = TerminalPublication {
             handoff: Ok(None),
             terminal_cause,
@@ -1332,7 +1327,7 @@ impl RunStore {
             reason,
             result: &refusal_result,
             complete: true,
-            redacted: refusal_redacted,
+            redacted: false,
             resolved_route: old.resolved_route.clone(),
             applied_route: old.applied_route.clone(),
             observed_route: old.observed_route.clone(),

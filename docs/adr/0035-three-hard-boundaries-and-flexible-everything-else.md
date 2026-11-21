@@ -56,7 +56,7 @@ step when one is needed.
 Local execution data, provider histories and graph text remain lossless in
 host-owned private state. File modes are defence in depth, not isolation from
 same-user processes; lanes receive only authorised state. The `redaction` knob
-defaults to `off`; `secrets` and `full` opt into masking. The owner decided on
+defaults to `off`; `secrets` opts into masking at publication. The owner decided on
 20 November 2026 that modern models are aligned enough not to post credentials,
 and masking is hard to make reliable and causes more issues than it guards
 against. The modes and their destinations are specified in the

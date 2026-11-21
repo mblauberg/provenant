@@ -34,6 +34,29 @@ fn read(roots: &Roots, adapter: &str) -> Option<DiscoverySnapshot> {
     (snapshot.adapter == adapter).then_some(snapshot)
 }
 
+fn canonical_snapshot_models(snapshot: &DiscoverySnapshot) -> Vec<String> {
+    snapshot
+        .models
+        .iter()
+        .filter(|row| {
+            row.controls_known
+                || !snapshot.models.iter().any(|other| {
+                    other.controls_known
+                        && other.efforts.iter().any(|effort| {
+                            row.model.model() == format!("{}-{effort}", other.model.model())
+                        })
+                })
+        })
+        .map(|row| row.model.model().to_owned())
+        .collect()
+}
+
+pub(crate) fn discovered_canonical_models(roots: &Roots, adapter: &str) -> Vec<String> {
+    read(roots, adapter)
+        .map(|snapshot| canonical_snapshot_models(&snapshot))
+        .unwrap_or_default()
+}
+
 #[allow(
     clippy::print_stderr,
     reason = "warn that the discovery cache is unusable"
@@ -247,6 +270,19 @@ fn refresh_with(
             )
             .and_then(|p| p.require_durable())
             .map_err(|e| e.to_string())?;
+            if harness.spec().offered_models
+                && let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from)
+            {
+                let models = canonical_snapshot_models(&snapshot);
+                if !models.is_empty() {
+                    let _ = provenant_providers::agy::remember_models(
+                        roots.state.as_path(),
+                        &home,
+                        now,
+                        &models,
+                    );
+                }
+            }
             Ok(format!(
                 "model discovery: {adapter}: new [{}]; retired [{}]",
                 added.join(", "),
@@ -402,6 +438,27 @@ mod tests {
         let report = refresh_with(&roots, Some("codex"), 2, |_, _| Some(old.to_vec()));
         assert!(report[0].contains("newer snapshot"));
         assert_eq!(read(&roots, "codex").unwrap().observed_at, 3);
+        Ok(())
+    }
+
+    // Spec: docs/specs/routing.md#provider-model-discovery
+    #[test]
+    fn canonical_snapshot_models_deduplicate_effort_suffixed_variants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = provenant_routing::parse_text_models(
+            "agy",
+            "gemini-4-neon\ngemini-4-neon-low\ngemini-4-neon-medium\ngemini-4-neon-high\ngemini-4-neon-xhigh\nclaude-sonnet-5-5\nclaude-sonnet-5-5-low\nclaude-sonnet-5-5-medium\nclaude-sonnet-5-5-high\nclaude-opus-4-6-thinking\n",
+            10,
+        )?;
+        let canonical = canonical_snapshot_models(&snapshot);
+        assert_eq!(
+            canonical,
+            vec![
+                "claude-opus-4-6-thinking".to_owned(),
+                "claude-sonnet-5-5".to_owned(),
+                "gemini-4-neon".to_owned(),
+            ]
+        );
         Ok(())
     }
 }

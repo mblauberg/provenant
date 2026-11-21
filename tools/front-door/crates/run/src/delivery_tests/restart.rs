@@ -428,7 +428,6 @@ fn prepare_reports_missing_git_with_git_code() -> std::result::Result<(), Box<dy
 #[test]
 fn prepare_reports_common_git_dir_discovery_failure()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
     let fixture = PrepareFixture::new()?;
     let git = fixture.root.join("failing-git");
     fixture.executable(
@@ -441,7 +440,7 @@ fn prepare_reports_common_git_dir_discovery_failure()
         Err(RunError::DeliveryPrepare { step, reason, .. }) => {
             assert_eq!(step, DeliveryPrepareStep::Head);
             assert!(reason.contains("example.com"), "{reason}");
-            assert!(!reason.contains("secret"), "{reason}");
+            assert!(reason.contains("secret"), "{reason}");
         }
         other => panic!("expected a prepare failure, got {other:?}"),
     }

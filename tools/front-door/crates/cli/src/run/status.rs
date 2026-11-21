@@ -473,7 +473,7 @@ fn project_lane_inner(
     {
         projected.reason = Some(format!(
             "{}; inspect the cause and retry the lane",
-            provenant_redact::bounded_line(reason, 256)
+            provenant_core::bounded_line(reason, 256)
         ));
     }
     if host_artifacts

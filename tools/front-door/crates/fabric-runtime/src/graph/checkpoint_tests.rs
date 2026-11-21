@@ -43,7 +43,6 @@ fn deepest_stored_checkpoint_round_trips_on_a_512kib_debug_thread() {
 // Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
 #[test]
 fn deployed_2_0_5_checkpoint_and_external_prompts_still_read() {
-    let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
     const CHECKPOINT: &[u8] = include_bytes!("../fixtures/checkpoint-2.0.5/graph-smoke205-ro.json");
     let value: Value = serde_json::from_slice(CHECKPOINT).unwrap();
     let graph_id = value["checkpoint"]["graph_id"].as_str().unwrap();
@@ -59,17 +58,15 @@ fn deployed_2_0_5_checkpoint_and_external_prompts_still_read() {
         if blobs.insert(digest.to_owned()) {
             let name = format!("graph-{graph_id}.prompt-{digest}");
             let bytes = std::fs::read(fixture_dir.join(&name)).unwrap();
-            assert_eq!(
-                provenant_redact::known_shapes(&bytes).unwrap(),
-                bytes,
+            assert!(
+                !provenant_redact::has_token_shape(&bytes).unwrap(),
                 "fixture blob contains credential-shaped text"
             );
             std::fs::write(temp.path().join(name), bytes).unwrap();
         }
     }
-    assert_eq!(
-        provenant_redact::known_shapes(CHECKPOINT).unwrap(),
-        CHECKPOINT,
+    assert!(
+        !provenant_redact::has_token_shape(CHECKPOINT).unwrap(),
         "fixture checkpoint contains credential-shaped text"
     );
 
