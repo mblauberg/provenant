@@ -48,8 +48,6 @@ pub enum RepoError {
     ConfigNormalisationExecution(#[source] provenant_os::exec::ExecError),
     #[error("Git configuration normalisation failed: {0}")]
     ConfigNormalisation(&'static str),
-    #[error(transparent)]
-    ConfigRead(#[from] Box<provenant_os::git_config::ConfigError<RepoError>>),
     #[error("alternate Git object stores are not accepted for protected history")]
     AlternateObjects,
     #[error("verified repository path or Git metadata changed")]
@@ -81,7 +79,6 @@ impl RepoError {
             Self::ForeignProject { .. }
             | Self::ConfigNormalisationExecution(_)
             | Self::ConfigNormalisation(_)
-            | Self::ConfigRead(_)
             | Self::Fs(_) => return None,
         })
     }
@@ -96,7 +93,6 @@ impl RepoError {
             Self::InvalidGitDirectory => "InvalidGitDirectory",
             Self::ConfigNormalisationExecution(_) => "ConfigNormalisationExecution",
             Self::ConfigNormalisation(_) => "ConfigNormalisation",
-            Self::ConfigRead(_) => "ConfigRead",
             Self::AlternateObjects => "AlternateObjects",
             Self::IdentityChanged => "IdentityChanged",
             Self::MetadataTooLarge => "MetadataTooLarge",
@@ -1193,7 +1189,11 @@ fn parse_common_config(git: &Path, bytes: &[u8]) -> Result<Vec<u8>, RepoError> {
             SystemExecutor::new(1).and_then(|executor| executor.execute(options)),
         )
     })
-    .map_err(|error| RepoError::ConfigRead(Box::new(error)))
+    // The core's context adds nothing beyond the specific, secret-free
+    // normalisation diagnosis in `source`. Surface that diagnosis instead of
+    // hiding it behind a context-only transparent wrapper whose `Display`
+    // drops the reason a caller needs.
+    .map_err(|error| error.source)
 }
 
 // Operational parser failures say nothing about the directory's ownership,

@@ -953,9 +953,11 @@ impl RunError {
                     .detail(format!("host writer delivery failed at {stage:?}"))
                     .fact(DiagnosticFact::DeliveryStage(*stage));
             }
-            Self::DeliveryConfigRead { stage, .. } => {
+            Self::DeliveryConfigRead { stage, source } => {
                 diagnostic = diagnostic
-                    .detail(self.to_string())
+                    .detail(crate::delivery::delivery_config_failure_detail(
+                        *stage, source,
+                    ))
                     .fact(DiagnosticFact::DeliveryStage(*stage));
             }
             Self::DeliveryFact { stage, source } => {

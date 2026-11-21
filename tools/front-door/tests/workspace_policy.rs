@@ -739,7 +739,7 @@ fn git_config_violations(source: &str, test_file: bool) -> Vec<String> {
         ),
         (
             "Git helper config argv",
-            r#"(?s)\b(?:git|host_git\w*|execute_for)\s*\([^;]*?"config""#,
+            r#"(?s)\b(?:git|host_git\w*|execute_for|local_git)\s*\([^;]*?"config""#,
         ),
         (
             "Git helper closure config argv",
@@ -795,6 +795,7 @@ fn git_config_rule_detects_raw_argv_and_spares_test_scopes() {
         r#"fn f(repo: &Path, git: &Git) { git.full(repo, &["config", "--get", "core.worktree"]); }"#,
         r#"fn f(repo: &Path, git: &Git) { git.run(repo, &["config", "--list"]); }"#,
         r#"fn f() { execute_for(repo, &["git", "config"], timeout, false); }"#,
+        r#"fn f() { local_git(git, cwd, &["config", "--get", "branch.lane.remote"]); }"#,
         r#"fn f() { let run = |args| host_git_with_cancel(repo, executor, args, timeout, false, None); run(&["config", "--get", "remote.origin.url"]); }"#,
         r#"fn f(tail: &[OsString]) { provenant_os::git_config::write(&tail, |args| run(args)); }"#,
         concat!(

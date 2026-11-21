@@ -1659,11 +1659,7 @@ impl HostDeliveryContext {
         .map_err(|error| RunError::DeliveryTransport {
             stage,
             kind: crate::TransportRefusal::Unreadable,
-            reason: transport_config_cause(
-                "read transport helper settings",
-                &writer.worktree,
-                error,
-            ),
+            reason: transport_config_cause(error),
         })?;
         for line in helpers.lines() {
             let (key, value) = line.split_once(' ').unwrap_or((line, ""));
@@ -1865,6 +1861,18 @@ impl HostDeliveryContext {
     ) -> Result<String> {
         self.command_with_input(cwd, tool, args, stage, b"")
     }
+    /// A config mutation against the shared `.git/config` can lose a lock race
+    /// with a sibling settlement. Run it with the same bounded, shared-deadline
+    /// lock retry as core Git mutations; ordinary host commands run once.
+    pub(super) fn command_with_config_lock_retry(
+        &self,
+        cwd: &Path,
+        tool: &str,
+        args: &[&str],
+        stage: Stage,
+    ) -> Result<String> {
+        self.command_with_input_uncached(cwd, tool, args, stage, b"", true)
+    }
     fn command_with_input(
         &self,
         cwd: &Path,
@@ -1877,7 +1885,7 @@ impl HostDeliveryContext {
         // Reuse listings only for preparation; mutation checks need fresh facts.
         if stage == Stage::Prepare && tool == "git" && git_subcommand(args) == "worktree list" {
             let bytes = self.facts.cached_worktree_listing(cwd, || {
-                self.command_with_input_uncached(cwd, tool, args, stage, input)
+                self.command_with_input_uncached(cwd, tool, args, stage, input, false)
                     .map(String::into_bytes)
             })?;
             return String::from_utf8(bytes).map_err(|_| RunError::DeliveryFact {
@@ -1885,7 +1893,7 @@ impl HostDeliveryContext {
                 source: provenant_confinement::worktrees::WorktreeError::InvalidOutput,
             });
         }
-        self.command_with_input_uncached(cwd, tool, args, stage, input)
+        self.command_with_input_uncached(cwd, tool, args, stage, input, false)
     }
 
     fn command_with_input_uncached(
@@ -1895,6 +1903,7 @@ impl HostDeliveryContext {
         args: &[&str],
         stage: Stage,
         input: &[u8],
+        retry_config_lock: bool,
     ) -> Result<String> {
         if tool == "gh" {
             return self.forge_command_with_input(cwd, args, stage, input);
@@ -2017,53 +2026,88 @@ impl HostDeliveryContext {
         } else {
             None
         };
-        let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(30));
-        options.cancel = self.cancellation.as_ref();
-        options.process_group = true;
-        options.env = Some(&environment);
-        options.stdin = Some(input);
         let commit_log = tool == "git" && args.first() == Some(&"log");
         let limit = if tool == "git" && provenant_os::git::fact_capture_limit(args, 0) != 0 {
             host_output_limit(HostOutputClass::FactCapture)
         } else {
             stdout_limit(commit_log, args)
         };
-        options.stdout = StreamPolicy::Capture { limit };
-        options.stop_on_output_limit = commit_log;
-        options.stderr = if stage == Stage::Prepare {
-            StreamPolicy::Capture { limit: 4096 }
-        } else {
-            StreamPolicy::Discard
+        // A config mutation on the shared `.git/config` can lose a lock race to
+        // a sibling settlement. Capture a bounded stderr tail so that collision
+        // is detectable, and give every attempt a share of one 30s deadline.
+        // The failure path below still withholds all config diagnostics.
+        let make_options = |timeout: Duration| {
+            let mut options = ExecOptions::new(&argv, cwd, timeout);
+            options.cancel = self.cancellation.as_ref();
+            options.process_group = true;
+            options.env = Some(&environment);
+            options.stdin = Some(input);
+            options.stdout = StreamPolicy::Capture { limit };
+            options.stop_on_output_limit = commit_log;
+            options.stderr = if stage == Stage::Prepare {
+                StreamPolicy::Capture { limit: 4096 }
+            } else if retry_config_lock {
+                StreamPolicy::Tail { limit: 4096 }
+            } else {
+                StreamPolicy::Discard
+            };
+            options
         };
-        options.stderr_filter = redactor
-            .as_mut()
-            .map(|redactor| redactor as &mut dyn provenant_os::exec::CaptureFilter);
         let cancel = provenant_core::CancelToken::new();
-        let output = self
-            .facts
-            .with_executor(
-                &executor,
-                self.cancellation.as_ref().unwrap_or(&cancel),
-                |executor| {
+        let attempt_cancel = self.cancellation.as_ref().unwrap_or(&cancel);
+        let output = if retry_config_lock {
+            // Config writes run outside Prepare, so no redactor is active here.
+            debug_assert!(redactor.is_none());
+            self.facts
+                .with_executor(&executor, attempt_cancel, |executor| {
+                    provenant_confinement::utility::execute_with_git_lock_retry(
+                        "Git config mutation",
+                        Duration::from_secs(30),
+                        attempt_cancel,
+                        |timeout| {
+                            executor
+                                .execute(make_options(timeout))
+                                .map_err(provenant_confinement::utility::UtilityError::from)
+                        },
+                    )
+                    .map_err(|error| {
+                        RunError::Writer(provenant_confinement::worktrees::WorktreeError::Utility(
+                            error,
+                        ))
+                    })
+                })
+                .map_err(|error: RunError| match error {
+                    RunError::Writer(source) => RunError::DeliveryFact { stage, source },
+                    other => other,
+                })?
+        } else {
+            let mut options = make_options(Duration::from_secs(30));
+            options.stderr_filter = redactor
+                .as_mut()
+                .map(|redactor| redactor as &mut dyn provenant_os::exec::CaptureFilter);
+            self.facts
+                .with_executor(&executor, attempt_cancel, |executor| {
                     executor
                         .execute(options)
                         .map_err(|error| failure(format!("{}: {error}", executable.display())))
-                },
-            )
-            .map_err(|error: RunError| match error {
-                RunError::Writer(provenant_confinement::worktrees::WorktreeError::Utility(
-                    provenant_confinement::utility::UtilityError::Truncated { stream: "stdout" },
-                )) if tool == "git" && git_subcommand(args) == "worktree list" => {
-                    RunError::DeliveryLimit {
-                        stage,
-                        tool: "git",
-                        command: "worktree list".into(),
-                        limit: self.facts.inventory_limit(),
+                })
+                .map_err(|error: RunError| match error {
+                    RunError::Writer(provenant_confinement::worktrees::WorktreeError::Utility(
+                        provenant_confinement::utility::UtilityError::Truncated {
+                            stream: "stdout",
+                        },
+                    )) if tool == "git" && git_subcommand(args) == "worktree list" => {
+                        RunError::DeliveryLimit {
+                            stage,
+                            tool: "git",
+                            command: "worktree list".into(),
+                            limit: self.facts.inventory_limit(),
+                        }
                     }
-                }
-                RunError::Writer(source) => RunError::DeliveryFact { stage, source },
-                other => other,
-            })?;
+                    RunError::Writer(source) => RunError::DeliveryFact { stage, source },
+                    other => other,
+                })?
+        };
         let absent_helpers = args.starts_with(&["config", "--get-regexp"])
             && output.termination == Termination::Exit(1)
             && output.stdout.bytes.is_empty();
@@ -2934,7 +2978,7 @@ impl HostDeliveryContext {
                     replace: false,
                 },
                 |args| {
-                    self.command(
+                    self.command_with_config_lock_retry(
                         cwd,
                         "git",
                         &git_config_args(args, Stage::Upstream)?,
@@ -3341,9 +3385,15 @@ pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
         RunError::IntegrationParentBusy { .. } | RunError::IntegrationConflict { .. } => {
             (Stage::Integrate, Some(prepare_reason(error)))
         }
-        RunError::DeliveryLimit { stage, .. }
-        | RunError::DeliveryFact { stage, .. }
-        | RunError::DeliveryConfigRead { stage, .. } => (*stage, Some(prepare_reason(error))),
+        RunError::DeliveryLimit { stage, .. } | RunError::DeliveryFact { stage, .. } => {
+            (*stage, Some(prepare_reason(error)))
+        }
+        RunError::DeliveryConfigRead { stage, source } => (
+            *stage,
+            Some(prepare_reason(delivery_config_failure_detail(
+                *stage, source,
+            ))),
+        ),
         RunError::DeliveryPrepare { .. } => (Stage::Prepare, Some(prepare_reason(error))),
         _ => (Stage::Push, None),
     };
@@ -3387,6 +3437,27 @@ fn delivery_config_read_error(
     }
 }
 
+/// A bounded, redacted explanation of a failed named config command. It names
+/// the operation, file and static key that failed plus the underlying cause, so
+/// a refusal says what could not be read instead of only naming the stage. The
+/// config error's `Display` is its context; the cause lives in its source
+/// chain, which is why both are rendered here for operator-visible surfaces.
+pub(crate) fn delivery_config_failure_detail(
+    stage: Stage,
+    error: &provenant_os::git_config::ConfigError<RunError>,
+) -> String {
+    let mut rendered = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        rendered.push_str(": ");
+        rendered.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    let detail =
+        provenant_core::bounded_line(&provenant_redact::delivery_diagnostics(&rendered), 512);
+    format!("host writer delivery failed at {stage:?}: {detail}")
+}
+
 fn delivery_stage_error(error: RunError, stage: Stage) -> RunError {
     match error {
         RunError::DeliveryLimit {
@@ -3414,14 +3485,13 @@ fn git_config_args(args: &[OsString], stage: Stage) -> Result<Vec<&str>> {
         .collect()
 }
 
-fn transport_config_cause(
-    operation: &'static str,
-    base: &Path,
-    error: impl std::fmt::Display,
-) -> String {
-    let context = provenant_confinement::transport::ConfigContext::new(operation, base, None);
+fn transport_config_cause(error: provenant_os::git_config::ConfigError<RunError>) -> String {
+    // The config error's `Display` is already the operation and file; pass only
+    // its underlying cause to the transport cause, which renders that operation
+    // and file itself. Passing the whole `Display` would print both twice.
     prepare_reason(provenant_confinement::transport::unreadable(
-        &context, error,
+        &error.context,
+        error.source,
     ))
 }
 

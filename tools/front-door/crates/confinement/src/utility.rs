@@ -1016,8 +1016,7 @@ impl UtilityRuntime {
                 )
                 .map_err(core_config_error)
             },
-        )
-        .map_err(|error| config_context_error(context, error))?;
+        )?;
         match outcome.termination {
             Termination::Exit(0) => crate::worktrees::classify_bare_origins_at_root(
                 common,
