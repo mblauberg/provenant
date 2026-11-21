@@ -36,6 +36,22 @@ pub(crate) type LaunchStateForTest = (
 #[derive(Serialize, Deserialize)]
 pub struct HostDeliveryContext {
     environment: Vec<(Vec<u8>, Vec<u8>)>,
+    #[serde(default)]
+    lane_access: Option<provenant_records::LaneAccessReceipt>,
+    #[serde(default)]
+    lane_sandboxed: Option<bool>,
+    #[serde(default)]
+    trusted_worktree: Option<PathBuf>,
+    /// The host-owned repository a host lane's worktree was linked from: the
+    /// primary checkout, or a bare/relocated common Git directory whose config
+    /// is host-owned rather than another lane's writable area.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_project: Option<PathBuf>,
+    /// Consulted while preparing delivery on the host, never by the guardian.
+    /// Serialising the compiled rule table would overflow the handoff's holder
+    /// context limit and turn a launched lane into an unconfirmed handoff.
+    #[serde(skip)]
+    policy: provenant_records::policy::Policy,
     tools: Option<HostTools>,
     bound: Option<BoundDelivery>,
     /// Separate launch-bound destination for stop preservation. It never shares
@@ -119,7 +135,7 @@ impl LaunchBinding {
             extra: Default::default(),
             schema_version: 1,
             scope,
-            push_url: bound.push_url.clone(),
+            push_url: provenant_records::custody::endpoint_identity(&bound.push_url),
             lane_branch: bound.lane_branch.clone(),
             pull_request_repo: bound.pull_request_repo.clone(),
             destination: bound.destination.clone(),
@@ -315,6 +331,11 @@ impl Clone for HostDeliveryContext {
     fn clone(&self) -> Self {
         Self {
             environment: self.environment.clone(),
+            lane_access: self.lane_access.clone(),
+            lane_sandboxed: self.lane_sandboxed,
+            trusted_worktree: self.trusted_worktree.clone(),
+            host_project: self.host_project.clone(),
+            policy: self.policy.clone(),
             tools: self.tools.clone(),
             bound: self.bound.clone(),
             stop_publish_bound: self.stop_publish_bound.clone(),
@@ -330,6 +351,11 @@ impl Clone for HostDeliveryContext {
 impl PartialEq for HostDeliveryContext {
     fn eq(&self, other: &Self) -> bool {
         self.environment == other.environment
+            && self.lane_access == other.lane_access
+            && self.lane_sandboxed == other.lane_sandboxed
+            && self.trusted_worktree == other.trusted_worktree
+            && self.host_project == other.host_project
+            && self.policy == other.policy
             && self.tools == other.tools
             && self.bound == other.bound
             && self.stop_publish_bound == other.stop_publish_bound
@@ -664,7 +690,7 @@ impl HostDeliveryContext {
                     let executable = tools.gh.as_deref().ok_or_else(|| {
                         std::io::Error::other("the builtin forge executable was not sealed during delivery preparation")
                     })?;
-                    let argv: Vec<OsString> = std::iter::once(executable.as_os_str().to_owned())
+        let argv: Vec<OsString> = std::iter::once(executable.as_os_str().to_owned())
                         .chain(forge_args.iter().skip(1).cloned())
                         .collect();
                     let mut env: Vec<_> = self
@@ -1074,6 +1100,11 @@ impl HostDeliveryContext {
                 .into_iter()
                 .map(|(k, v)| (k.into_vec(), v.into_vec()))
                 .collect(),
+            lane_access: None,
+            lane_sandboxed: None,
+            trusted_worktree: None,
+            host_project: None,
+            policy: Default::default(),
             bound: None,
             stop_publish_bound: None,
             stop_publish_host: None,
@@ -1083,6 +1114,41 @@ impl HostDeliveryContext {
             cancellation: None,
             facts: Default::default(),
             host_state: None,
+        }
+    }
+    pub(crate) fn with_lane_access(
+        mut self,
+        access: Option<provenant_records::LaneAccessReceipt>,
+        sandboxed: Option<bool>,
+    ) -> Self {
+        self.lane_access = access;
+        self.lane_sandboxed = sandboxed;
+        self
+    }
+    pub(crate) fn with_policy(mut self, policy: provenant_records::policy::Policy) -> Self {
+        self.policy = policy;
+        self
+    }
+    fn isolated(&self) -> bool {
+        self.lane_access
+            .as_ref()
+            .is_some_and(|receipt| receipt.access.is_isolated())
+    }
+    fn transport_warning(&self, detail: &str) {
+        use std::io::Write as _;
+        let source = self
+            .lane_access
+            .as_ref()
+            .map_or("default", |receipt| receipt.source.as_str());
+        let facts = provenant_records::policy::Facts::violation(format!(
+            "{detail} (lanes.access=host, source: {source})"
+        ));
+        if let Some(message) = self
+            .policy
+            .check("DELIVERY_HOST_TRANSPORT_NONE", facts)
+            .message()
+        {
+            let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
         }
     }
     /// Preserve normal host credential/config discovery without Git's ambient
@@ -1170,6 +1236,7 @@ impl HostDeliveryContext {
         };
         self.tools = Some(HostTools { git, gh });
         let common_git_dir = self.trusted_common_git_dir(writer, stage)?;
+        self.set_host_project(&common_git_dir);
         self.refuse_protected_target(writer, &request.branch, stage)?;
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) && request.remote.is_empty() {
             let branch = self.command(
@@ -1230,10 +1297,13 @@ impl HostDeliveryContext {
                         .next()
                         .is_some_and(|user| user.contains(':')))
         {
-            return Err(prepare_error(
-                DeliveryPrepareStep::RemoteUrl,
-                "embedded credentials, query or fragment refused",
-            ));
+            if self.isolated() {
+                return Err(prepare_error(
+                    DeliveryPrepareStep::RemoteUrl,
+                    "embedded credentials, query or fragment refused",
+                ));
+            }
+            self.transport_warning("delivery uses a remote URL with userinfo, query or fragment");
         }
         let branch = self.command(
             &writer.worktree,
@@ -1294,8 +1364,12 @@ impl HostDeliveryContext {
         host_state: &Path,
         cancel: &provenant_core::CancelToken,
         facts: &provenant_confinement::worktrees::RepoFacts,
+        access: (Option<&provenant_records::LaneAccessReceipt>, Option<bool>),
+        policy: &provenant_records::policy::Policy,
     ) -> Result<()> {
         let mut host = Self::capture()
+            .with_lane_access(access.0.cloned(), access.1)
+            .with_policy(policy.clone())
             .with_repo_facts(facts)
             .with_host_state(host_state);
         host.cancellation = Some(cancel.clone());
@@ -1329,11 +1403,12 @@ impl HostDeliveryContext {
         if !remotes.lines().any(|line| line == "origin") {
             return Ok(());
         }
-        host.validate_transport_helpers(writer)?;
         // A refresh completed since this request began also satisfies it,
         // including one which started during transport validation. The fetch
         // lock is independent of the short upstream-config lock.
         let common = host.common_git_dir(&writer.project, Stage::Prepare)?;
+        host.set_host_project(&common);
+        host.validate_transport_helpers(writer)?;
         let common = Directory::open_anchor(&common)?;
         let cancel = provenant_core::CancelToken::new();
         coalesced_origin_refresh(
@@ -1594,59 +1669,76 @@ impl HostDeliveryContext {
             if value.trim().is_empty() {
                 continue;
             }
-            if key.eq_ignore_ascii_case("core.sshcommand") {
+            if let Err(error) = self.validate_transport_helper(writer, key, value) {
+                if self.isolated() {
+                    return Err(error);
+                }
+                self.transport_warning("delivery uses a host-configured transport command");
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_transport_helper(
+        &self,
+        writer: &WriterRequest,
+        key: &str,
+        value: &str,
+    ) -> Result<()> {
+        if key.eq_ignore_ascii_case("core.sshcommand") {
+            return Err(credential_helper_refusal(
+                HelperSafety::UnsupportedSshCommand,
+                "delivery does not support core.sshCommand; use host SSH config",
+            ));
+        }
+        if let Some(command) = value.strip_prefix('!') {
+            let parts: Vec<_> = command.split_whitespace().collect();
+            if parts.len() != 3
+                || parts[1..] != ["auth", "git-credential"]
+                || (parts[0] != "gh" && !Path::new(parts[0]).is_absolute())
+                || !parts[0]
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"/_-.=~:@".contains(&b))
+            {
                 return Err(credential_helper_refusal(
-                    HelperSafety::UnsupportedSshCommand,
-                    "delivery does not support core.sshCommand; use host SSH config",
+                    HelperSafety::OpaqueShellCommand,
+                    "delivery refuses an opaque shell credential helper",
                 ));
             }
-            if let Some(command) = value.strip_prefix('!') {
-                let parts: Vec<_> = command.split_whitespace().collect();
-                if parts.len() != 3
-                    || parts[1..] != ["auth", "git-credential"]
-                    || (parts[0] != "gh" && !Path::new(parts[0]).is_absolute())
-                    || !parts[0]
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"/_-.=~:@".contains(&b))
-                {
-                    return Err(credential_helper_refusal(
-                        HelperSafety::OpaqueShellCommand,
-                        "delivery refuses an opaque shell credential helper",
-                    ));
-                }
-                if Path::new(parts[0]).is_absolute() {
-                    credential_helper(Path::new(parts[0]), writer)?;
-                } else {
-                    self.executable("gh", writer).map_err(|error| {
-                        credential_helper_refusal(HelperSafety::Unavailable, error)
-                    })?;
-                }
+            if Path::new(parts[0]).is_absolute() {
+                credential_helper(Path::new(parts[0]), writer)?;
             } else {
-                let parts: Vec<_> = value.split_whitespace().collect();
-                if !value
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b" /_-.=~:@".contains(&b))
-                {
-                    return Err(credential_helper_refusal(
-                        HelperSafety::NonPlainExecutable,
-                        "delivery credential helper needs a plain executable",
-                    ));
-                }
-                if Path::new(parts[0]).is_absolute() {
-                    credential_helper(Path::new(parts[0]), writer)?;
-                } else if parts[0].contains('/') {
-                    return Err(credential_helper_refusal(
-                        HelperSafety::LaneLocalPath,
-                        "delivery credential helper must resolve outside the lane",
-                    ));
-                }
+                self.executable("gh", writer)
+                    .map_err(|error| credential_helper_refusal(HelperSafety::Unavailable, error))?;
+            }
+        } else {
+            let parts: Vec<_> = value.split_whitespace().collect();
+            if !value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b" /_-.=~:@".contains(&b))
+            {
+                return Err(credential_helper_refusal(
+                    HelperSafety::NonPlainExecutable,
+                    "delivery credential helper needs a plain executable",
+                ));
+            }
+            if Path::new(parts[0]).is_absolute() {
+                credential_helper(Path::new(parts[0]), writer)?;
+            } else if parts[0].contains('/') {
+                return Err(credential_helper_refusal(
+                    HelperSafety::LaneLocalPath,
+                    "delivery credential helper must resolve outside the lane",
+                ));
             }
         }
         Ok(())
     }
     fn host_environment(&mut self, writer: &WriterRequest) -> Result<()> {
-        // A graph delivery runs in the project checkout itself, which is not a
-        // lane.
+        // A host lane reads the host's own Git configuration and uses ordinary
+        // transport. Its worktree and the primary checkout it was linked from
+        // are its own, not another lane's writable area, whether or not the
+        // lane is sandboxed; sandboxing still confines the lane's writes.
+        self.trusted_worktree = (!self.isolated()).then(|| writer.worktree.clone());
         let host_state = self.host_state().ok_or_else(|| {
             prepare_error(DeliveryPrepareStep::LaneRoots, "host state root unknown")
         })?;
@@ -1676,13 +1768,20 @@ impl HostDeliveryContext {
             self.environment.push((b"PATH".to_vec(), path_bytes));
         }
         self.lane_path = Some(lane_path);
+        let isolated = self.isolated();
+        let mut ssh_command_warning = false;
+        let mut own_config_warning = false;
+        let trusted_worktree = self.trusted_worktree.clone();
         for (key, value) in &mut self.environment {
             let name = std::str::from_utf8(key).unwrap_or_default();
             if name == "GIT_SSH_COMMAND" && !value.is_empty() {
-                return Err(prepare_error(
-                    DeliveryPrepareStep::Environment,
-                    "GIT_SSH_COMMAND is not supported; use host SSH config",
-                ));
+                if isolated {
+                    return Err(prepare_error(
+                        DeliveryPrepareStep::Environment,
+                        "GIT_SSH_COMMAND is not supported; use host SSH config",
+                    ));
+                }
+                ssh_command_warning = true;
             }
             let path = OsString::from_vec(value.clone());
             if name != "PATH"
@@ -1699,13 +1798,32 @@ impl HostDeliveryContext {
                 )
                 && !value.is_empty()
             {
-                *value = host_path(Path::new(&path), writer)
-                    .map_err(|error| {
-                        prepare_error(DeliveryPrepareStep::Environment, format!("{name}: {error}"))
-                    })?
-                    .into_os_string()
-                    .into_vec();
+                if matches!(name, "GIT_CONFIG_GLOBAL" | "GIT_CONFIG_SYSTEM")
+                    && trusted_worktree
+                        .as_ref()
+                        .is_some_and(|root| Path::new(&path).starts_with(root))
+                {
+                    // The transport check verifies the resolved config and any
+                    // includes against every other lane before remote use.
+                    own_config_warning = true;
+                } else {
+                    *value = host_path(Path::new(&path), writer)
+                        .map_err(|error| {
+                            prepare_error(
+                                DeliveryPrepareStep::Environment,
+                                format!("{name}: {error}"),
+                            )
+                        })?
+                        .into_os_string()
+                        .into_vec();
+                }
             }
+        }
+        if ssh_command_warning {
+            self.transport_warning("delivery uses host GIT_SSH_COMMAND");
+        }
+        if own_config_warning {
+            self.transport_warning("delivery uses the unsandboxed lane's Git configuration");
         }
         Ok(())
     }
@@ -1831,7 +1949,7 @@ impl HostDeliveryContext {
         // protocol limits everywhere, and a refusal to run when the effective
         // configuration or a transport program lives where a lane can write.
         let network = tool == "git" && reaches_remote(args);
-        if network {
+        if network || (!self.isolated() && tool == "git" && git_subcommand(args) == "push") {
             self.check_transport(cwd, &environment, stage)?;
         }
         let transport = if network {
@@ -1839,10 +1957,47 @@ impl HostDeliveryContext {
         } else {
             Vec::new()
         };
+        // Use a one-command Git configuration entry to keep URL userinfo out
+        // of argv without re-reading a mutable named remote after binding.
+        let secret_url = args.iter().copied().find(|url| {
+            url.split_once("://").is_some_and(|(_, rest)| {
+                rest.split('/')
+                    .next()
+                    .is_some_and(|authority| authority.contains('@'))
+            })
+        });
+        let alias = if let Some(url) = secret_url {
+            let unique =
+                provenant_os::fs::temporary_name().map_err(|error| failure(error.to_string()))?;
+            let alias = format!("provenant-bound-{}", unique.to_string_lossy());
+            let count = environment
+                .iter()
+                .find(|(name, _)| name == "GIT_CONFIG_COUNT")
+                .map(|(_, value)| value.to_string_lossy().parse::<usize>())
+                .transpose()
+                .map_err(|error| failure(error.to_string()))?
+                .unwrap_or(0);
+            environment.retain(|(name, _)| name != "GIT_CONFIG_COUNT");
+            environment.push(("GIT_CONFIG_COUNT".into(), (count + 1).to_string().into()));
+            environment.push((
+                format!("GIT_CONFIG_KEY_{count}").into(),
+                format!("remote.{alias}.url").into(),
+            ));
+            environment.push((format!("GIT_CONFIG_VALUE_{count}").into(), url.into()));
+            Some(alias)
+        } else {
+            None
+        };
         let argv: Vec<OsString> = std::iter::once(executable.as_os_str().to_owned())
             .chain(git_options.iter().map(OsString::from))
             .chain(transport)
-            .chain(args.iter().map(OsString::from))
+            .chain(args.iter().map(|arg| {
+                if secret_url == Some(*arg) {
+                    OsString::from(alias.as_deref().unwrap_or_default())
+                } else {
+                    OsString::from(arg)
+                }
+            }))
             .collect();
         let executor = SystemExecutor::new(1).map_err(|error| failure(error.to_string()))?;
         let mut redactor = if stage == Stage::Prepare && provenant_redact::mode().masks_local() {
@@ -2002,11 +2157,43 @@ impl HostDeliveryContext {
             kind: (&error).into(),
             reason: prepare_reason(error),
         };
-        let roots = transport::LaneRoots::new(self.lane_roots.iter().cloned());
         let base = self
             .bound
             .as_ref()
             .map_or(cwd, |bound| bound.host_cwd.as_path());
+        let mut protected = self.lane_roots.clone();
+        if let Some(worktree) = &self.trusted_worktree {
+            let tools = self.tools.as_ref().ok_or(RunError::Delivery(stage))?;
+            let executor = SystemExecutor::new(1).map_err(|_| RunError::Delivery(stage))?;
+            let cancel = provenant_core::CancelToken::new();
+            let own = std::fs::canonicalize(worktree).ok();
+            let others = self
+                .facts
+                .discover_worktree_paths(
+                    base,
+                    &tools.git,
+                    environment,
+                    &executor,
+                    Duration::from_secs(30),
+                    self.cancellation.as_ref().unwrap_or(&cancel),
+                )
+                .map_err(|source| RunError::DeliveryFact { stage, source })?;
+            protected.extend(others.into_iter().filter(|path| {
+                path != worktree && (own.is_none() || std::fs::canonicalize(path).ok() != own)
+            }));
+        }
+        let mut roots = transport::LaneRoots::new(protected);
+        // A host lane reads the host's own Git configuration. Its own worktree
+        // (also the Git process's base) and the primary checkout it was linked
+        // from are host-owned; other lanes' worktrees stay protected above.
+        if let Some(worktree) = &self.trusted_worktree {
+            roots = roots
+                .except_owned_worktree(worktree)
+                .except_owned_worktree(base);
+            if let Some(project) = &self.host_project {
+                roots = roots.except_owned_worktree(project);
+            }
+        }
         let ctx = transport::ConfigRead::new("check delivery transport configuration", base, None);
         transport::check_environment(environment, base, &roots, &ctx).map_err(refuse)?;
         let context = provenant_os::git_config::ConfigRead {
@@ -2099,6 +2286,25 @@ impl HostDeliveryContext {
     }
     fn trusted_common_git_dir(&self, writer: &WriterRequest, stage: Stage) -> Result<PathBuf> {
         self.discover_common_git_dir(&writer.project, stage)
+    }
+
+    /// A host lane reads the host-owned Git configuration; that is not another
+    /// lane's worktree. A regular checkout keeps its metadata in a `.git`
+    /// directory, so the host-owned project is its parent. A bare repository
+    /// (or a relocated common directory) has no such parent checkout: the
+    /// common directory itself holds the host's config and the lanes'
+    /// worktrees, and Git's own inventory reports it as a worktree. Exempt it
+    /// too, while `LaneRoots::contains` still protects other lanes' worktrees
+    /// beneath it.
+    fn set_host_project(&mut self, common_git_dir: &Path) {
+        if self.isolated() {
+            return;
+        }
+        self.host_project = if common_git_dir.file_name() == Some(std::ffi::OsStr::new(".git")) {
+            common_git_dir.parent().map(Path::to_path_buf)
+        } else {
+            Some(common_git_dir.to_path_buf())
+        };
     }
 
     pub(super) fn common_git_dir(&self, project: &Path, stage: Stage) -> Result<PathBuf> {
@@ -2279,7 +2485,8 @@ impl HostDeliveryContext {
         let integration = |integrated| WriterIntegration {
             extra: Default::default(),
             remote: bound.destination.remote.clone(),
-            push_url: remote.then(|| bound.push_url.clone()),
+            push_url: remote
+                .then(|| provenant_records::custody::endpoint_identity(&bound.push_url)),
             target: destination.clone(),
             previous: Some(expected_oid),
             integrated,
@@ -2699,7 +2906,9 @@ impl HostDeliveryContext {
         let integration = Some(WriterIntegration {
             extra: Default::default(),
             remote: bound.destination.remote.clone(),
-            push_url: Some(bound.push_url.clone()),
+            push_url: Some(provenant_records::custody::endpoint_identity(
+                &bound.push_url,
+            )),
             target: destination.clone(),
             previous,
             integrated: head,
@@ -3299,7 +3508,11 @@ fn pull_request_repo(url: &str) -> Result<String> {
             .ok_or(RunError::Delivery(Stage::Prepare))?;
         (authority.rsplit('@').next().unwrap_or_default(), path)
     };
-    let path = path.trim_end_matches('/');
+    let path = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(path)
+        .trim_end_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
     if host.is_empty()
         || !host
@@ -3823,6 +4036,23 @@ pub(crate) fn deliver_once(
 #[cfg(test)]
 mod stored_format_tests {
     use super::*;
+
+    #[test]
+    fn compiled_policy_stays_off_the_guardian_handoff_wire() {
+        // Delivery consults the compiled policy on the host, before the context
+        // is sealed into the holder handoff. Serialising it would repeat the
+        // whole rule table into every launch message and overflow the guardian's
+        // holder-context limit, turning a launched lane into an unknown handoff.
+        let host = HostDeliveryContext::new(Vec::new())
+            .with_policy(provenant_records::policy::Policy::default());
+        let encoded = serde_json::to_vec(&host).expect("host delivery encodes");
+        assert!(
+            !encoded
+                .windows(b"\"rules\"".len())
+                .any(|window| window == b"\"rules\""),
+            "the compiled rule table must not reach the handoff wire"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

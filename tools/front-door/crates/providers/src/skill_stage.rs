@@ -35,6 +35,7 @@ impl StagedUserSkills {
 
 struct Capture<'a> {
     credential_roots: &'a provenant_core::CredentialRoots,
+    isolated: bool,
     root: &'a Path,
     source: &'a Path,
     budget: u64,
@@ -100,10 +101,11 @@ impl Capture<'_> {
                 continue;
             }
             let child_path = current.join(&name);
-            if self
-                .credential_roots
-                .skill_entry_refusal(&child_path, self.source)
-                .is_some()
+            if self.isolated
+                && self
+                    .credential_roots
+                    .skill_entry_refusal(&child_path, self.source)
+                    .is_some()
             {
                 self.warn(&path, "credential_root");
                 continue;
@@ -157,10 +159,11 @@ impl Capture<'_> {
             self.warn(relative, "changed_during_copy");
             return;
         };
-        if self
-            .credential_roots
-            .skill_entry_refusal(&target, self.source)
-            .is_some()
+        if self.isolated
+            && self
+                .credential_roots
+                .skill_entry_refusal(&target, self.source)
+                .is_some()
         {
             self.warn(relative, "credential_root");
             return;
@@ -238,14 +241,14 @@ impl Capture<'_> {
     }
 }
 
-/// Capture ordinary skills beneath an enclosing adapter store. Independently
-/// declared credentials and resolved link targets are always checked.
+/// Capture skills and linked references, filtering credential roots only for isolation.
 pub(crate) fn capture(
     source: &Path,
     destination: &Path,
     home: &Path,
     credential_roots: &provenant_core::CredentialRoots,
     max_bytes: u64,
+    isolated: bool,
 ) -> StagedUserSkills {
     let skipped = |reason| StagedUserSkills {
         warnings: vec![SkillWarning {
@@ -261,11 +264,12 @@ pub(crate) fn capture(
             StagedUserSkills::default()
         };
     };
-    if credential_roots
-        .skill_entry_refusal(&canonical, &canonical)
-        .is_some()
-        || (canonical != source
-            && provenant_confinement::refuses_lane_root(&canonical, true, credential_roots))
+    if isolated
+        && (credential_roots
+            .skill_entry_refusal(&canonical, &canonical)
+            .is_some()
+            || (canonical != source
+                && provenant_confinement::refuses_lane_root(&canonical, true, credential_roots)))
     {
         return skipped("credential_root");
     }
@@ -277,6 +281,7 @@ pub(crate) fn capture(
     }
     let mut capture = Capture {
         credential_roots,
+        isolated,
         root: destination,
         source: &canonical,
         budget: max_bytes,
@@ -348,7 +353,7 @@ mod tests {
         }
         let roots =
             roots.with_aliases(provenant_confinement::permissions::resolve_boundary_path)?;
-        let staged = capture(&source, &destination, &home, &roots, 4096);
+        let staged = capture(&source, &destination, &home, &roots, 4096, true);
         for name in ["ordinary/SKILL.md", "linked-directory/SKILL.md"] {
             assert!(staged.setup().iter().any(|step| matches!(step,
                 SetupStep::WriteFile { path, bytes }
@@ -403,7 +408,7 @@ mod tests {
         symlink(&source, external.join("cycle"))?;
         let destination = home.join("attempt/skills");
         let roots = provenant_core::CredentialRoots::for_home(&home);
-        let staged = capture(&source, &destination, &home, &roots, 1024);
+        let staged = capture(&source, &destination, &home, &roots, 1024, true);
         assert_eq!(staged.file_count, 4);
         for (path, expected) in [
             ("internal", b"local".as_slice()),
@@ -425,6 +430,17 @@ mod tests {
                 .iter()
                 .any(|w| w.path == Path::new("linked/cycle") && w.reason == "cycle")
         );
+        let host = capture(
+            &source,
+            &home.join("host-stage"),
+            &home,
+            &roots,
+            1024,
+            false,
+        );
+        assert!(host.setup().iter().any(|step| matches!(step,
+            SetupStep::WriteFile { path, bytes } if path == &home.join("host-stage/credential") && bytes == b"secret-sentinel")));
+
         for step in &staged.setup {
             match step {
                 SetupStep::WriteFile { path, bytes } => {
@@ -449,7 +465,14 @@ mod tests {
         std::fs::create_dir_all(&source)?;
         std::fs::write(source.join("large"), b"12345")?;
         let roots = provenant_core::CredentialRoots::for_home(temp.path());
-        let staged = capture(&source, &temp.path().join("staged"), temp.path(), &roots, 4);
+        let staged = capture(
+            &source,
+            &temp.path().join("staged"),
+            temp.path(),
+            &roots,
+            4,
+            true,
+        );
         assert_eq!(staged.file_count, 0);
         assert!(
             staged
@@ -490,7 +513,7 @@ mod tests {
         }
 
         let roots = provenant_core::CredentialRoots::for_home(&home);
-        let staged = capture(&source, &destination, &home, &roots, 16 * 1024);
+        let staged = capture(&source, &destination, &home, &roots, 16 * 1024, true);
         for (adapter, relative, bytes) in expected {
             assert!(
                 staged.setup.iter().any(|step| matches!(
@@ -525,7 +548,7 @@ mod tests {
             provenant_core::CredentialKind::Store,
         );
         let roots = roots.with_lane_roots(vec![lane]);
-        let staged = capture(&source, &home.join("stage"), &home, &roots, 1024);
+        let staged = capture(&source, &home.join("stage"), &home, &roots, 1024, true);
         assert_eq!(staged.file_count, 0);
         assert!(
             staged
@@ -550,7 +573,7 @@ mod tests {
         let source = home.join("skills");
         symlink(&credential_root, &source)?;
         let roots = provenant_core::CredentialRoots::for_home(&home);
-        let staged = capture(&source, &home.join("stage"), &home, &roots, 1024);
+        let staged = capture(&source, &home.join("stage"), &home, &roots, 1024, true);
         assert!(staged.root.is_none());
         assert_eq!(staged.file_count, 0);
         assert!(
@@ -559,6 +582,17 @@ mod tests {
                 .iter()
                 .any(|warning| warning.reason == "credential_root")
         );
+        let host = capture(
+            &source,
+            &home.join("host-stage"),
+            &home,
+            &roots,
+            1024,
+            false,
+        );
+        assert_eq!(host.file_count, 1);
+        assert!(host.setup().iter().any(|step| matches!(step,
+            SetupStep::WriteFile { bytes, .. } if bytes == b"sentinel")));
         Ok(())
     }
 
@@ -582,6 +616,7 @@ mod tests {
         let credential_roots = provenant_core::CredentialRoots::for_home(&home);
         let mut capture = Capture {
             credential_roots: &credential_roots,
+            isolated: true,
             root: &destination,
             source: &source,
             budget: 1024,

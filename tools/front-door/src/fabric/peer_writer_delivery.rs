@@ -653,7 +653,6 @@ fn submit_lane_refusal_maps_to_dispatch_refused() -> Result<(), Box<dyn std::err
             no_capability: Vec::new(),
         },
         Path::new("never-opened-state"),
-        &provenant_core::CredentialRoots::for_home(Path::new("/fixture/host-home")),
     )
     .err()
     .ok_or("missing root refuses")?;

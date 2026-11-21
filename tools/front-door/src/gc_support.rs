@@ -23,7 +23,27 @@ pub(crate) fn host_git_with_stderr(
     timeout: Duration,
     capture_stderr: bool,
 ) -> Result<ExecOutcome, Error> {
-    host_git_with_cancel(repo, executor, args, timeout, capture_stderr, None)
+    host_git_with_cancel(repo, executor, args, timeout, capture_stderr, None, None)
+}
+
+/// Execute against a resolved endpoint without placing credentials in argv.
+pub(crate) fn host_git_with_endpoint(
+    repo: &Path,
+    executor: &dyn Executor,
+    args: &[&str],
+    timeout: Duration,
+    capture_stderr: bool,
+    endpoint: &str,
+) -> Result<ExecOutcome, Error> {
+    host_git_with_cancel(
+        repo,
+        executor,
+        args,
+        timeout,
+        capture_stderr,
+        None,
+        Some(endpoint),
+    )
 }
 
 fn host_git_with_cancel(
@@ -33,9 +53,10 @@ fn host_git_with_cancel(
     timeout: Duration,
     capture_stderr: bool,
     cancel: Option<&CancelToken>,
+    endpoint: Option<&str>,
 ) -> Result<ExecOutcome, Error> {
     let args: Vec<OsString> = args.iter().map(OsString::from).collect();
-    host_git_with_tail(repo, executor, &args, timeout, capture_stderr, cancel)
+    host_git_with_tail(repo, executor, &args, timeout, capture_stderr, cancel, endpoint)
 }
 
 fn host_git_config_with_cancel(
@@ -53,7 +74,7 @@ fn host_git_config_with_cancel(
         key,
     };
     provenant_os::git_config::read(context, request, |command| {
-        host_git_with_tail(repo, executor, command.as_ref(), timeout, false, cancel)
+        host_git_with_tail(repo, executor, command.as_ref(), timeout, false, cancel, None)
     })
     .map_err(|error| Error::GitConfigRead(Box::new(error)))
 }
@@ -65,9 +86,10 @@ fn host_git_with_tail(
     timeout: Duration,
     capture_stderr: bool,
     cancel: Option<&CancelToken>,
+    endpoint: Option<&str>,
 ) -> Result<ExecOutcome, Error> {
     let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
-    let environment: Vec<(OsString, OsString)> = [
+    let mut environment: Vec<(OsString, OsString)> = [
         "HOME",
         "SSH_AUTH_SOCK",
         "GH_CONFIG_DIR",
@@ -93,34 +115,61 @@ fn host_git_with_tail(
     ])
     .collect();
 
-    let mut argv = vec![git.as_os_str().to_owned()];
-    argv.extend(
-        [
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.sshCommand=/usr/bin/ssh -oBatchMode=yes -oConnectTimeout=5 -oConnectionAttempts=1",
-            "-c",
-            "protocol.allow=never",
-            "-c",
-            "protocol.file.allow=always",
-            "-c",
-            "protocol.https.allow=always",
-            "-c",
-            "protocol.http.allow=always",
-            "-c",
-            "protocol.ssh.allow=always",
-            "-c",
-            "maintenance.auto=false",
-            "-c",
-            "gc.auto=0",
-        ]
-        .into_iter()
-        .map(OsString::from),
-    );
-    argv.extend(args.iter().cloned());
+    let alias = if let Some(url) = endpoint {
+        let name = provenant_os::fs::temporary_name()?;
+        let alias = format!("provenant-cleanup-{}", name.to_string_lossy());
+        environment.retain(|(key, _)| key != "GIT_CONFIG_COUNT");
+        environment.extend([
+            ("GIT_CONFIG_COUNT".into(), "1".into()),
+            (
+                "GIT_CONFIG_KEY_0".into(),
+                format!("remote.{alias}.url").into(),
+            ),
+            ("GIT_CONFIG_VALUE_0".into(), url.into()),
+        ]);
+        Some(alias)
+    } else {
+        None
+    };
+
+    let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
+            .chain(
+                [
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-c",
+                    "core.sshCommand=/usr/bin/ssh -oBatchMode=yes -oConnectTimeout=5 -oConnectionAttempts=1",
+                    "-c",
+                    "protocol.allow=never",
+                    "-c",
+                    "protocol.file.allow=always",
+                    "-c",
+                    "protocol.https.allow=always",
+                    "-c",
+                    "protocol.http.allow=always",
+                    "-c",
+                    "protocol.ssh.allow=always",
+                    "-c",
+                    "maintenance.auto=false",
+                    "-c",
+                    "gc.auto=0",
+                ]
+                .into_iter()
+                .map(OsString::from)
+                .chain(args.iter().map(|arg| {
+                    if arg.to_str() == Some("provenant-cleanup") {
+                        match alias.as_deref() {
+                            Some(alias) => OsString::from(alias),
+                            None => arg.clone(),
+                        }
+                    } else {
+                        arg.clone()
+                    }
+                })),
+            )
+            .collect();
     let mut options = ExecOptions::new(&argv, repo, timeout);
     options.env = Some(&environment);
     options.stdin = Some(b"");
@@ -217,6 +266,7 @@ pub(crate) fn fetch_default(
             timeout,
             false,
             Some(cancel),
+            None,
         )
     };
     let remote = host_git_config_with_cancel(

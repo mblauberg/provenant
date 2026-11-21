@@ -163,6 +163,7 @@ pub(crate) fn filter_optional_grants(
     grants: &mut Vec<PathGrant>,
     start: usize,
     credential_roots: &provenant_core::CredentialRoots,
+    access: Option<&provenant_records::LaneAccessReceipt>,
     policy: &Policy,
     source: OmissionSource,
     omitted: &mut Vec<OmittedGrant>,
@@ -179,7 +180,35 @@ pub(crate) fn filter_optional_grants(
                 provenant_confinement::refuses_lane_root(candidate, true, credential_roots)
                     .then_some(candidate)
             });
+        if let (Some(path), Some(receipt)) = (credential_path, access)
+            && !receipt.access.is_isolated()
+        {
+            let root = credential_roots.refusal(
+                path,
+                if path.is_dir() {
+                    provenant_core::CredentialScope::Subtree
+                } else {
+                    provenant_core::CredentialScope::Exact
+                },
+                true,
+            );
+            let root_description = root
+                .map(|root| format!("{} ({})", root.path.display(), root.source))
+                .unwrap_or_else(|| path.display().to_string());
+            policy_warning(
+                policy,
+                "LAUNCH_FILTER_OPTIONAL_GRANTS_NONE",
+                format!(
+                    "discovered path {} overlaps credential root {} (lanes.access={}, source: {})",
+                    candidate.display(),
+                    root_description,
+                    receipt.access.as_str(),
+                    receipt.source.as_str()
+                ),
+            )?;
+        }
         let omitted_path = credential_path
+            .filter(|_| access.is_none_or(|receipt| receipt.access.is_isolated()))
             .or_else(|| {
                 (!provenant_confinement::permissions::profile_path_representable(candidate))
                     .then_some(candidate)
@@ -386,8 +415,6 @@ impl LaunchSpec {
 /// Frozen confinement policy and launch facts, compiled before launch by the
 /// composition edge. Paths must be canonical: providers never resolve them.
 pub struct PrepareInput<'a> {
-    /// Selected OpenCode profile for this launch.
-    pub opencode_profile: provenant_config::OpenCodeProfile,
     pub route: &'a ResolvedRoute,
     /// Provider-facing spelling for the invocation only. Route identity and
     /// continuation validation always use the canonical `route.model`.
@@ -496,12 +523,23 @@ impl PrepareInput<'_> {
         (self.host_var)(provenant_core::consumer_env::SANDBOX).is_none_or(|value| value != "off")
     }
 
+    pub fn access(&self) -> provenant_records::LaneAccess {
+        self.route.access()
+    }
+
+    /// Whether the lane's view of the host is isolated: today's sandboxed behaviour (private environment, provider home, Git configuration and credential denies). Under the default host access a sandboxed lane still sees the host environment, provider home and Git configuration; the sandbox confines writes, network and explicit denies only.
+    pub(crate) fn isolated(&self) -> bool {
+        self.sandboxed() && self.access().is_isolated()
+    }
+
     pub fn user_skills(&self) -> bool {
         self.route.user_skills()
     }
 
     pub(crate) fn stage_user_skills(&self) -> crate::StagedUserSkills {
-        if !self.sandboxed() {
+        // Host access uses the native provider home and skill discovery; only
+        // isolated launches need a staged copy of the user's skills.
+        if !self.isolated() {
             return crate::StagedUserSkills::default();
         }
         let Some(source) = self
@@ -524,6 +562,7 @@ impl PrepareInput<'_> {
             self.home,
             &self.credential_roots,
             self.skill_stage_max_bytes,
+            self.isolated(),
         )
     }
 }
@@ -801,33 +840,48 @@ pub(crate) fn tool_search_path(
     Ok(path)
 }
 
-/// Native launches inherit the host environment in memory; provider selectors
-/// are applied by each adapter. Sandboxed launches use a minimal environment:
-/// the user's identity, filtered requester PATH followed by fixed tool-search
-/// fallbacks, and TMPDIR under the attempt's private tmp directory. Required
-/// private wrappers are prepended during finalisation. zsh ignores TMPDIR for the
-/// temporary files behind here-documents and here-strings and defaults
-/// TMPPREFIX to `/tmp/zsh`, which a lane cannot write, so TMPPREFIX points
-/// into the same directory. Repository-specific Git object configuration
-/// belongs to the private directory.
-/// Callers append provider keys.
+/// Host access inherits the host environment; adapters apply provider selectors.
+/// Isolated sandboxed launches reconstruct the prior minimal environment.
+/// Sandboxes use private temporary paths because host temporary directories may
+/// not be writable; zsh also needs TMPPREFIX for here-documents.
 pub(crate) fn base_env(
     input: &PrepareInput<'_>,
     scratch: &Path,
     path: impl AsRef<std::ffi::OsStr>,
 ) -> Result<Vec<(OsString, OsString)>, ProviderError> {
-    if !input.sandboxed() {
-        let mut env: Vec<_> = std::env::vars_os()
-            .filter(|(name, _)| name != provenant_core::consumer_env::SANDBOX && name != "HOME")
+    base_env_with_host(input, scratch, path, std::env::vars_os())
+}
+
+pub(crate) fn base_env_with_host(
+    input: &PrepareInput<'_>,
+    scratch: &Path,
+    path: impl AsRef<std::ffi::OsStr>,
+    host: impl Iterator<Item = (OsString, OsString)>,
+) -> Result<Vec<(OsString, OsString)>, ProviderError> {
+    if !input.isolated() {
+        let sandboxed = input.sandboxed();
+        let mut env: Vec<_> = host
+            .filter(|(name, _)| {
+                name != provenant_core::consumer_env::SANDBOX
+                    && name != "HOME"
+                    && !(sandboxed && (name == "TMPDIR" || name == "TMPPREFIX"))
+            })
             .collect();
         // Apply the requester's path before adapters add their own wrappers.
         if let Some(path) = (input.host_var)("PATH") {
             env.retain(|(name, _)| name != "PATH");
             env.push(("PATH".into(), path));
         }
-        // Establish the host's selected home before an adapter may isolate it.
         env.push(("HOME".into(), input.home.into()));
-        env.push((provenant_core::consumer_env::SANDBOX.into(), "off".into()));
+        env.push((
+            provenant_core::consumer_env::SANDBOX.into(),
+            if sandboxed { "on" } else { "off" }.into(),
+        ));
+        if sandboxed {
+            // The sandbox may deny writes to the inherited temporary directory.
+            env.push(("TMPDIR".into(), scratch.into()));
+            env.push(("TMPPREFIX".into(), scratch.join("zsh").into()));
+        }
         return Ok(env);
     }
     let fallbacks = path.as_ref();
@@ -862,66 +916,12 @@ pub(crate) fn base_env(
     Ok(env)
 }
 
-/// Repository lanes use a complete private Git directory, including its index
-/// and operation state. Shared metadata is read-only. The Git launcher applies
-/// this binding inside the worktree, even when a provider's subprocess clears
-/// its environment, and nowhere else.
-pub(crate) fn private_git_objects(
+/// Bind the host global files into the lane's private Git configuration.
+fn bind_host_git_config(
     input: &PrepareInput<'_>,
     spec: &mut LaunchSpec,
-) -> Result<(), ProviderError> {
-    spec.git_wrapper.hooks_path_reader = Some(input.provenant.executable.to_owned());
-    if matches!(input.confined.permissions().mode, AccessMode::ReadOnly)
-        && input.confined.permissions().read_only.is_none()
-    {
-        let git = input.provenant.git;
-        let bin = input
-            .confined
-            .permissions()
-            .scratch
-            .path
-            .join("read-only-git");
-        spec.setup.push(SetupStep::CreateDir(bin.clone()));
-        spec.setup.push(SetupStep::WriteExecutable {
-            path: bin.join("git"),
-            bytes: crate::lane::git_wrapper(
-                git,
-                &crate::lane::GitWrapper::with_hooks_path_reader(
-                    input.provenant.executable.to_owned(),
-                ),
-            )?,
-        });
-        spec.env
-            .retain(|(key, _)| key != provenant_core::consumer_env::GIT);
-        spec.env.push((
-            provenant_core::consumer_env::GIT.into(),
-            bin.join("git").into(),
-        ));
-        grant_exec_path(git, spec);
-        spec.profile.spec.tool_exec_roots.push(subtree(&bin));
-        spec.profile
-            .spec
-            .process_executables
-            .extend([exact("/bin/sh"), exact(git)]);
-        if let Some((_, path)) = spec.env.iter_mut().find(|(key, _)| key == "PATH") {
-            match std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&*path))) {
-                Ok(value) => *path = value,
-                Err(_) => {
-                    policy_warning(
-                        input.policy,
-                        "LAUNCH_PRIVATE_GIT_OBJECTS_NONE",
-                        "the optional read-only Git launcher cannot be encoded in PATH; the selected Git remains explicitly granted",
-                    )?;
-                }
-            }
-        }
-        return Ok(());
-    }
+) -> Result<PathBuf, ProviderError> {
     let scratch = &input.confined.permissions().scratch.path;
-    // Every provider writes to its attempt's Git metadata. Settlement imports
-    // and compare-and-swaps that private history into the host worktree.
-    let git_common = scratch.join("git-common");
-    let git_objects = scratch.join("git-objects");
     let config = scratch.join("gitconfig");
     // Git normally reads the XDG file before ~/.gitconfig. An explicit host
     // override replaces both, just as it does for Git itself.
@@ -973,6 +973,74 @@ pub(crate) fn private_git_objects(
         path: config.clone(),
         bytes: config_text.into_bytes(),
     });
+    spec.env.retain(|(name, _)| name != "GIT_CONFIG_GLOBAL");
+    spec.env
+        .push(("GIT_CONFIG_GLOBAL".into(), config.as_os_str().to_owned()));
+    Ok(config)
+}
+
+/// Repository lanes use a private Git directory with read-only shared metadata.
+/// The launcher binds it inside the worktree, even after environment clearing.
+pub(crate) fn private_git_objects(
+    input: &PrepareInput<'_>,
+    spec: &mut LaunchSpec,
+) -> Result<(), ProviderError> {
+    spec.git_wrapper.hooks_path_reader = Some(input.provenant.executable.to_owned());
+    if matches!(input.confined.permissions().mode, AccessMode::ReadOnly)
+        && input.confined.permissions().read_only.is_none()
+    {
+        let git = input.provenant.git;
+        let bin = input
+            .confined
+            .permissions()
+            .scratch
+            .path
+            .join("read-only-git");
+        spec.setup.push(SetupStep::CreateDir(bin.clone()));
+        spec.setup.push(SetupStep::WriteExecutable {
+            path: bin.join("git"),
+            bytes: crate::lane::git_wrapper(
+                git,
+                &crate::lane::GitWrapper::with_hooks_path_reader(
+                    input.provenant.executable.to_owned(),
+                ),
+            )?,
+        });
+        spec.env
+            .retain(|(key, _)| key != provenant_core::consumer_env::GIT);
+        spec.env.push((
+            provenant_core::consumer_env::GIT.into(),
+            bin.join("git").into(),
+        ));
+        grant_exec_path(git, spec);
+        spec.profile.spec.tool_exec_roots.push(subtree(&bin));
+        spec.profile
+            .spec
+            .process_executables
+            .extend([exact("/bin/sh"), exact(git)]);
+        if let Some((_, path)) = spec.env.iter_mut().find(|(key, _)| key == "PATH") {
+            match std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&*path))) {
+                Ok(value) => *path = value,
+                Err(_) => {
+                    policy_warning(
+                        input.policy,
+                        "LAUNCH_PRIVATE_GIT_OBJECTS_NONE",
+                        "the optional read-only Git launcher cannot be encoded in PATH; the selected Git remains explicitly granted",
+                    )?;
+                }
+            }
+        }
+        if !input.access().is_isolated() {
+            bind_host_git_config(input, spec)?;
+        }
+        return Ok(());
+    }
+    let scratch = &input.confined.permissions().scratch.path;
+    // Every provider writes to its attempt's Git metadata. Settlement imports
+    // and compare-and-swaps that private history into the host worktree.
+    let git_common = scratch.join("git-common");
+    let git_objects = scratch.join("git-objects");
+    let config = bind_host_git_config(input, spec)?;
     // Only a sandboxed lane gets the lane's own token helper; a host-native
     // lane keeps the host's own Git environment. The entries are appended on
     // top of the host configuration so pushing keeps working.
@@ -986,16 +1054,6 @@ pub(crate) fn private_git_objects(
                 error,
             )
         })?;
-    }
-    if let Some((_, current)) = spec
-        .env
-        .iter_mut()
-        .find(|(name, _)| name == "GIT_CONFIG_GLOBAL")
-    {
-        *current = config.as_os_str().to_owned();
-    } else {
-        spec.env
-            .push(("GIT_CONFIG_GLOBAL".into(), config.as_os_str().to_owned()));
     }
     // The repository binding stays out of the ambient environment.
     // Git's private global config carries the host
@@ -1199,6 +1257,18 @@ pub(crate) fn finalise_provider_env(
         ("TMPDIR".into(), scratch.into()),
         ("TMPPREFIX".into(), scratch.join("zsh").into()),
     ]);
+    // Agent access follows the resolved lane access, independently of sandboxing.
+    if !input.access().is_isolated()
+        && let Some(value) = (input.host_var)("SSH_AUTH_SOCK")
+    {
+        spec.env.retain(|(key, _)| key != "SSH_AUTH_SOCK");
+        if input.sandboxed()
+            && let Ok(path) = std::fs::canonicalize(&value)
+        {
+            spec.profile.spec.ssh_agent_socket = Some(exact(path));
+        }
+        spec.env.push(("SSH_AUTH_SOCK".into(), value));
+    }
     rebind_worktree_state_env(input.cwd, scratch, spec);
     if !input.sandboxed() {
         crate::package_cache::bind_native(input.home, input.cwd, input.host_var, &mut spec.env);
@@ -1264,12 +1334,11 @@ pub(crate) fn finalise_provider_env(
 }
 
 /// Project the instruction content bound into this product build into each
-/// sandboxed harness's private configuration home, using only its install data.
+/// private harness configuration home, using only its install data. Host access
+/// uses the native home and must not require (or rewrite) a provider config
+/// variable that is no longer set; isolated launches receive the projection.
 fn lane_instructions(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<(), ProviderError> {
-    if !input.sandboxed()
-        || (input.route.adapter == "opencode"
-            && input.opencode_profile == provenant_config::OpenCodeProfile::Host)
-    {
+    if !input.isolated() {
         return Ok(());
     }
     let Some(install) = provenant_records::AdapterSpec::get(&input.route.adapter)
@@ -1308,13 +1377,14 @@ fn lane_instructions(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<
     Ok(())
 }
 
-/// Render Provenant's declared hooks into the isolated harness configuration.
-/// Native Claude uses its explicit settings file in scratch. OpenCode host
-/// mode and other native harnesses keep their
-/// install-managed host configuration untouched.
+/// Render Provenant's declared hooks into the lane-owned harness configuration.
+/// Native Claude uses its explicit settings file in scratch. OpenCode under
+/// host access and other native harnesses keep their install-managed host
+/// configuration untouched.
 fn lane_hooks(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<bool, ProviderError> {
-    if input.route.adapter == "opencode"
-        && input.opencode_profile == provenant_config::OpenCodeProfile::Host
+    if !input.access().is_isolated()
+        && provenant_records::AdapterSpec::get(&input.route.adapter)
+            .is_some_and(|spec| spec.id == provenant_records::Harness::Opencode)
     {
         return Ok(true);
     }
@@ -1356,7 +1426,7 @@ fn lane_hooks(input: &PrepareInput<'_>, spec: &mut LaunchSpec) -> Result<bool, P
     }
 
     let config_home =
-        if input.sandboxed() || protocol == provenant_records::HookProtocol::OpenCodePlugin {
+        if input.isolated() || protocol == provenant_records::HookProtocol::OpenCodePlugin {
             let (home_variable, suffix) = install.lane_home;
             let Some(home) = spec
                 .env
@@ -1478,6 +1548,12 @@ impl LaunchSpec {
         if self.native_environment() {
             return Ok(());
         }
+        let access = plan
+            .permissions()
+            .policy
+            .as_ref()
+            .map(|policy| policy.mandatory().lane_access());
+        let isolated = access.is_none_or(|receipt| receipt.access.is_isolated());
         let spec = self;
         use provenant_confinement::permissions::PathScope;
 
@@ -1490,6 +1566,7 @@ impl LaunchSpec {
                 &mut reads,
                 0,
                 &spec.credential_roots,
+                access,
                 &spec.policy,
                 OmissionSource::Toolchain,
                 &mut spec.omitted_discovery,
@@ -1502,6 +1579,7 @@ impl LaunchSpec {
                         &mut one,
                         0,
                         &spec.credential_roots,
+                        access,
                         &spec.policy,
                         OmissionSource::Toolchain,
                         &mut spec.omitted_discovery,
@@ -1511,13 +1589,37 @@ impl LaunchSpec {
             }
             let omitted_before_writes = spec.omitted_discovery.len();
             for candidate in &spec.tool_requirements.writes {
-                match std::fs::canonicalize(&candidate.path) {
+                let resolved = std::fs::canonicalize(&candidate.path);
+                let classified_path = resolved.as_deref().unwrap_or(&candidate.path);
+                if !isolated
+                    && let Some(root) = spec.credential_roots.refusal(
+                        classified_path,
+                        provenant_core::CredentialScope::Subtree,
+                        false,
+                    )
+                    && let Some(receipt) = access
+                {
+                    policy_warning(
+                        &spec.policy,
+                        "LAUNCH_FILTER_OPTIONAL_GRANTS_NONE",
+                        format!(
+                            "discovered path {} overlaps credential root {} ({}) (lanes.access={}, source: {})",
+                            candidate.path.display(),
+                            root.path.display(),
+                            root.source,
+                            receipt.access.as_str(),
+                            receipt.source.as_str()
+                        ),
+                    )?;
+                }
+                match resolved {
                     Ok(path)
-                        if provenant_confinement::refuses_lane_root(
-                            &path,
-                            false,
-                            &spec.credential_roots,
-                        ) =>
+                        if isolated
+                            && provenant_confinement::refuses_lane_root(
+                                &path,
+                                false,
+                                &spec.credential_roots,
+                            ) =>
                     {
                         if !spec.omitted_discovery.iter().any(|entry| {
                             entry.path == path && entry.source == OmissionSource::Toolchain
@@ -1529,11 +1631,12 @@ impl LaunchSpec {
                         }
                     }
                     Err(_)
-                        if provenant_confinement::refuses_lane_root(
-                            &candidate.path,
-                            false,
-                            &spec.credential_roots,
-                        ) =>
+                        if isolated
+                            && provenant_confinement::refuses_lane_root(
+                                &candidate.path,
+                                false,
+                                &spec.credential_roots,
+                            ) =>
                     {
                         if !spec.omitted_discovery.iter().any(|entry| {
                             entry.path == candidate.path
@@ -1640,7 +1743,9 @@ impl LaunchSpec {
             }
             let closure = crate::dylib::dependency_closure(&executable, |path| {
                 use crate::dylib::LibraryAccess;
-                if provenant_confinement::refuses_lane_root(path, true, &spec.credential_roots) {
+                if isolated
+                    && provenant_confinement::refuses_lane_root(path, true, &spec.credential_roots)
+                {
                     LibraryAccess::OmitCredential
                 } else if plan
                     .permissions()

@@ -248,7 +248,7 @@ cases! {
     canonical_request_preserves_digest: run::CanonicalRequest => request();
     harness_profile_preserves_digest: run::HarnessProfile => profile();
     task_request_preserves_digest: run::TaskRequest => task();
-    lane_access_preserves_digest: run::LaneAccess => json!({});
+    lane_access_preserves_digest: run::LaneAccessRequest => json!({});
     writer_request_preserves_digest: run::WriterRequest => json!({"project":"/repo","worktree":"/repo/work"});
     writer_delivery_request_preserves_digest: run::WriterDeliveryRequest => writer_delivery_request();
     writer_review_acceptance_preserves_digest: run::WriterReviewAcceptance => review_acceptance();
@@ -567,4 +567,24 @@ fn stored_records_decode_with_a_future_field() -> TestResult {
     let decoded: landing::RepositoryCommand = serde_json::from_value(publisher)?;
     assert_eq!(decoded.unknown_exit_code, 3);
     Ok(())
+}
+
+#[test]
+fn lane_access_receipt_round_trips_and_old_route_defaults_to_host() {
+    use provenant_records::{LaneAccess, LaneAccessReceipt, LaneAccessSource, ResolvedRoute};
+    let receipt = LaneAccessReceipt {
+        access: LaneAccess::Isolated,
+        source: LaneAccessSource::RoutePolicy,
+        key: "defaults.lane.access".into(),
+        extra: Default::default(),
+    };
+    let encoded = serde_json::to_value(&receipt).unwrap();
+    assert_eq!(
+        serde_json::from_value::<LaneAccessReceipt>(encoded).unwrap(),
+        receipt
+    );
+    let mut value = resolved_route();
+    value.as_object_mut().unwrap().remove("access");
+    let route: ResolvedRoute = serde_json::from_value(value).unwrap();
+    assert_eq!(route.access(), LaneAccess::Host);
 }

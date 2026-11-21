@@ -981,6 +981,7 @@ fn registered_accounts_have_distinct_quota_keys() -> Result {
             selection_context: Default::default(),
             diagnostics: Default::default(),
             user_skills: true,
+            access: Default::default(),
             extra: Default::default(),
             adapter: provider.into(),
             model: "fixture-model".into(),

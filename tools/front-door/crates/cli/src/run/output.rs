@@ -179,6 +179,18 @@ pub(super) fn output_summary(
             plain_text(fallback["reason"].as_str().unwrap_or_default(), 160)
         ));
     }
+    if headed
+        && let Ok(access) = serde_json::from_value::<provenant_records::LaneAccessReceipt>(
+            data["applied_route"]["lane_access"].clone(),
+        )
+    {
+        lines.push(format!(
+            "access: {} ({} {})",
+            access.access.as_str(),
+            access.key,
+            access.source.as_str()
+        ));
+    }
     if headed {
         let availability = data["applied_route"]["availability_warning"].as_str();
         let launch = data["applied_route"]["launch_warnings"].as_array();
@@ -430,10 +442,12 @@ fn output_read(
                 }
             }
             if let Some(route) = row.get("applied_route") {
-                grants.insert(
-                    "user_skills".into(),
-                    route.get("user_skills").cloned().unwrap_or(Value::Null),
-                );
+                for field in ["user_skills", "lane_access"] {
+                    grants.insert(
+                        field.into(),
+                        route.get(field).cloned().unwrap_or(Value::Null),
+                    );
+                }
             }
         }
         data.extend(row.clone());

@@ -137,6 +137,27 @@ pub(super) fn prepare_command(
     let home = canonical(registry.home.ok_or("home directory is unavailable")?)?;
     let assets = registry.assets.ok_or("product assets are unavailable")?;
     let launch_policy = run::launch_policy(roots.state.as_path(), &project.to_string(), task);
+    let policy_model = provenant_routing::ModelId::parse(&format!("{provider}/{name}"));
+    let now = provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new());
+    let catalogue = provenant_routing::Catalogue::bundled();
+    let mut access_policy_warning = None;
+    let model_policy = match (policy_model, now, catalogue) {
+        (Ok(model), Ok(now), Ok(catalogue)) => {
+            config
+                .domains
+                .routing
+                .model_policy
+                .effective(&catalogue, &model, None, now)
+                .policy
+        }
+        _ => {
+            access_policy_warning = Some(
+                "command route policy unavailable; resolving lanes.access from knobs".to_owned(),
+            );
+            Default::default()
+        }
+    };
+    let lane_access = super::preparation::resolve_lane_access(task, &model_policy);
     let (scratch_directory, scratch_name) =
         super::preparation::fresh_scratch_directory(&paths.temporary, provider, None)?;
     let scratch = scratch_directory
@@ -147,7 +168,17 @@ pub(super) fn prepare_command(
         &home,
         &config.domains.accounts,
         &[&source, &cwd, &scratch],
+        Some(&lane_access),
+        &launch_policy,
     )?;
+    if let Some(error) = super::confinement::credential_access_grant_refusal(
+        &task.access,
+        &credential_roots,
+        &lane_access,
+        &launch_policy,
+    ) {
+        return Err(error.into());
+    }
     let github_roots = github_roots(registry);
     let protected_worktrees = protected_worktrees(registry, &source, &git)?;
     let mut access = task.access.clone();
@@ -178,7 +209,7 @@ pub(super) fn prepare_command(
         &config.domains.run,
         provider,
         false,
-        InventoryContext::Launch(task, &format!("{provider}/{name}")),
+        InventoryContext::Launch(task, &format!("{provider}/{name}"), &lane_access),
     )?;
     let (mut plan, mut observed_head, repository, mut worktree_gitdir) = read_only_plan(
         roots,
@@ -206,6 +237,7 @@ pub(super) fn prepare_command(
         selection_context: Default::default(),
         diagnostics: Default::default(),
         user_skills: true,
+        access: lane_access.access,
         extra: Default::default(),
         adapter: provider.into(),
         model: String::new(),
@@ -237,7 +269,6 @@ pub(super) fn prepare_command(
     let prompt = Prompt::new(String::new());
     let mut spec = adapter
         .prepare(PrepareInput {
-            opencode_profile: provenant_config::OpenCodeProfile::Lane,
             credential_roots: credential_roots.clone(),
             images: &[],
             policy: &launch_policy,
@@ -261,7 +292,7 @@ pub(super) fn prepare_command(
                 } else if key == "PATH" {
                     Some(lane_path.path().to_os_string())
                 } else {
-                    host_provider_var(registry, key)
+                    lane_provider_var(registry, key, lane_access.access)
                 }
             },
             skill_stage_max_bytes: config.domains.lanes.skill_stage_max_bytes,
@@ -294,6 +325,8 @@ pub(super) fn prepare_command(
         roots.state.as_path(),
     ));
     launch_warnings.extend(spec.warnings.iter().cloned());
+    launch_warnings.extend(access_policy_warning);
+    launch_warnings.extend(super::preparation::lane_access_warning(task, &lane_access));
     apply_lane_capabilities(&mut spec.profile.spec, &task.access);
     let common_git_path = repository
         .as_ref()
@@ -308,6 +341,7 @@ pub(super) fn prepare_command(
             cwd: &cwd,
             home: &home,
             credential_roots: &credential_roots,
+            lane_access: &lane_access,
             common_git: common_git_path.as_deref(),
             state_root: roots.state.as_path(),
             worktree_gitdir: worktree_gitdir.as_deref(),
@@ -355,6 +389,12 @@ pub(super) fn prepare_command(
         );
     }
     spec.complete_tool_requirements(&plan, &cwd)?;
+    super::confinement::warn_profile_credential_grants(
+        &spec.profile.spec,
+        &credential_roots,
+        &lane_access,
+        &launch_policy,
+    );
     if isolated {
         super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)?;
         super::source_tree::ensure_view_read_only(
@@ -389,6 +429,7 @@ pub(super) fn prepare_command(
     );
     let mut route = RouteRecord {
         provider: Some(provider.into()),
+        lane_access: Some(lane_access),
         source: Some(format!("domains.fabric.commands.{name}")),
         extra: Default::default(),
         cargo_home: serde_json::from_value(spec.cargo_home_receipt())

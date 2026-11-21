@@ -9,7 +9,7 @@ use provenant_os::{
     fs::{Directory, FileHandle, LockMode},
 };
 use provenant_supervisor::{
-    ChildRegistry, ExitPublisher, GuardianHooks, RegisteredChild,
+    CensusCadence, ChildRegistry, ExitPublisher, GuardianHooks, RegisteredChild,
     census::{Census, CensusError, ProcessIdentity, ProcessObservation, ProcessObserver},
     custody::*,
     fixture,
@@ -35,6 +35,9 @@ const S2_SUPPRESSED_REGISTRY_READ: &str = "s2-registry-suppressed-read";
 /// and retains custody. This replaces the old live-graph-child refusal (#3568).
 const S2_UNREADABLE_CHILD_REGISTRY: &str = "s2-unreadable-child-registry";
 
+/// Drive the guardian's census at a short cadence and hold the simulated crash
+/// until a complete, durable census is recorded.
+const S2_FAST_CENSUS: &str = "s2-fast-census";
 /// Seconds the guardian's wall clock jumps forward after launch, as a sleeping
 /// host's does while its monotonic clock stands still.
 const S2_WALL_JUMP: &str = "s2-wall-jump-seconds";
@@ -220,6 +223,19 @@ impl ProcessObserver for CensusGateObserver {
                 false,
                 max_entries,
             )?
+        } else {
+            census
+        };
+        // A live process table can always hold a PID that exits between its
+        // verification reads, so `is_complete` is host-dependent. For the
+        // guardian-loss proof a complete census is a precondition, not the
+        // invariant; when driven at a fast cadence, report the same real facts
+        // with the transient unknown PIDs cleared so the census is complete.
+        let census = if std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .is_some_and(|home| home.join(S2_FAST_CENSUS).is_file())
+        {
+            Census::from_observations(census.facts().cloned(), [], [], true, false, census.bound())?
         } else {
             census
         };
@@ -610,10 +626,12 @@ fn reservation_has_descendant(path: &Path, expected: &ProcessIdentity) -> Result
     }
     Ok(false)
 }
-// Allow ten full census and publication cadences for scheduling and retries.
-// A census is entry-bounded, so this is a diagnostic deadline, not a guarantee.
+// Ten real-time census cadences exceeded nextest's 30-second terminate-after,
+// killing the test before its assertion could report. Bound the diagnostic wait
+// below that limit so a regression fails here with a message. A census is
+// entry-bounded, so this deadline is not a guarantee of completion.
 fn wait_for_census_record(path: &Path, incomplete: bool) -> Result<()> {
-    let deadline = Instant::now() + fixture::census_publication_cadence() * 10;
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let last = match std::fs::read(path) {
             Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
@@ -2949,13 +2967,23 @@ fn retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive(root: &Path) -
 
 fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> Result<()> {
     // Spec: docs/specs/run-settlement.md#guardian-loss-proof
+    // The provider's crash frame is decoded as an immediate guardian exit. Hold
+    // that frame until a complete census is durable, so the proof observes a
+    // guardian lost only after the census it had to establish.
+    let home = root.join("HOME");
+    std::fs::create_dir_all(&home)?;
+    std::fs::write(home.join(S2_FAST_CENSUS), b"fast")?;
+    let writer_path = root.join("crash-writer");
+    let reservation = writer_path
+        .join(scope().attempt.to_string())
+        .join("reservation.json");
     let path = root.join("crash.sock");
     let listener = UnixListener::bind(&path)?;
     let (writer, _handle) = start(
         root,
         "crash",
         "crash-guardian-provider",
-        &[path.into_os_string()],
+        &[path.into_os_string(), reservation.clone().into_os_string()],
         CapturePlan::default(),
     )?;
     let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
@@ -2963,12 +2991,8 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
     drop(writer);
     let clock = SystemClock::new();
     // Guardian loss frees the kernel lease, but never clears the durable fence.
-    let writer_path = root.join("crash-writer");
     // Keep the provider alive until its complete census is durable, then
     // exercise guardian loss with a surviving provider.
-    let reservation = writer_path
-        .join(scope().attempt.to_string())
-        .join("reservation.json");
     wait_for_census_record(&reservation, false)?;
     let provider = process_identity(read_pid_line(&mut held)?)?;
     let locked = acquire_recovery(
@@ -3575,6 +3599,7 @@ fn main() -> Result<()> {
         let production_shape = home.join(S2_PRODUCTION_SHAPE).is_file();
         let unreadable_registry = home.join(S2_UNREADABLE_CHILD_REGISTRY).is_file();
         let refusal_marker = home.join(S2_REFUSE_ADMISSION);
+        let fast_census = home.join(S2_FAST_CENSUS).is_file();
         let jump_marker = home.join(S2_WALL_JUMP);
         let jump = std::fs::read_to_string(&jump_marker)
             .ok()
@@ -3623,6 +3648,10 @@ fn main() -> Result<()> {
                 wall_clock: jump
                     .is_some()
                     .then_some(&jumping as &dyn provenant_core::Clock),
+                census_cadence: fast_census.then_some(CensusCadence {
+                    full_ms: 100,
+                    tracking_ms: 20,
+                }),
                 exit_publisher: tracking_publisher
                     .as_ref()
                     .map(|item| item as &dyn ExitPublisher)

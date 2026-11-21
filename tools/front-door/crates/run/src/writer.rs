@@ -330,6 +330,7 @@ pub(crate) struct StopWorkPolicy<'a> {
     pub trigger: provenant_records::run::StopWorkTrigger,
     pub publish: Option<&'a crate::HostDeliveryContext>,
     pub writer: &'a provenant_records::run::WriterRequest,
+    pub route: Option<&'a provenant_records::run::RouteRecord>,
     pub publish_granted: bool,
 }
 
@@ -1816,6 +1817,7 @@ impl LaunchConfinement {
         &mut self,
         cancel: &CancelToken,
         policy: &provenant_records::policy::Policy,
+        access: Option<&provenant_records::LaneAccessReceipt>,
     ) -> Result<()> {
         let Some(writer) = self.writer.as_mut() else {
             return Ok(());
@@ -1832,13 +1834,23 @@ impl LaunchConfinement {
         let AccessMode::WorktreeWrite(authority) = &self.plan.permissions().mode else {
             return Ok(());
         };
+        let isolated_access;
+        let lane_access = match self.plan.permissions().policy.as_ref() {
+            Some(policy) => policy.mandatory().lane_access(),
+            None => {
+                isolated_access = isolated_lane_access_receipt();
+                &isolated_access
+            }
+        };
         prepare_writer_git(
             writer,
             &self.state_root,
             &self.home,
             Some((authority, &self.plan.permissions().credential_roots)),
+            lane_access,
             cancel,
             policy,
+            (access, Some(self.sandbox.effective)),
         )
     }
     /// Prepare a private target from host-built output while writer custody is held.
@@ -2072,12 +2084,21 @@ impl LaunchConfinement {
         if let (Some(writer), AccessMode::WorktreeWrite(authority)) =
             (&self.writer, &self.plan.permissions().mode)
         {
+            let isolated_access;
+            let lane_access = match self.plan.permissions().policy.as_ref() {
+                Some(policy) => policy.mandatory().lane_access(),
+                None => {
+                    isolated_access = isolated_lane_access_receipt();
+                    &isolated_access
+                }
+            };
             prepare_writer_directories(
                 &writer.worktree,
                 &writer.branch,
                 authority,
                 &self.home,
                 &self.plan.permissions().credential_roots,
+                lane_access,
             )
             .map_err(RunError::Confinement)?;
             // Custom targets need directories now; private targets are created
@@ -2126,6 +2147,16 @@ impl LaunchConfinement {
     }
 }
 
+fn isolated_lane_access_receipt() -> provenant_records::LaneAccessReceipt {
+    provenant_records::LaneAccessReceipt {
+        access: provenant_records::LaneAccess::Isolated,
+        source: provenant_records::LaneAccessSource::Default,
+        key: "lanes.access".into(),
+        extra: Default::default(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // Writer custody, access and policy stay explicit at this boundary.
 fn prepare_writer_git(
     writer: &mut WriterLaunch,
     state: &Path,
@@ -2134,8 +2165,10 @@ fn prepare_writer_git(
         &provenant_confinement::permissions::WorktreeWriteAuthority,
         &provenant_core::CredentialRoots,
     )>,
+    lane_access: &provenant_records::LaneAccessReceipt,
     cancel: &CancelToken,
-    _policy: &provenant_records::policy::Policy,
+    policy: &provenant_records::policy::Policy,
+    access: (Option<&provenant_records::LaneAccessReceipt>, Option<bool>),
 ) -> Result<()> {
     let utility = runtime(state)?;
     let root_identity = writer.worktree.identity();
@@ -2182,6 +2215,7 @@ fn prepare_writer_git(
             authority,
             home,
             credentials,
+            lane_access,
         )
         .map_err(RunError::Confinement)?;
     }
@@ -2199,6 +2233,8 @@ fn prepare_writer_git(
         state,
         cancel,
         &writer.facts,
+        access,
+        policy,
     )?;
     // Fetch may race with sibling config writes. Reopen after it and let Git's
     // config.lock serialize the independent upstream updates.
@@ -2736,8 +2772,10 @@ mod cargo_setup_tests {
                 &self.state,
                 &self.root,
                 None,
+                &isolated_lane_access_receipt(),
                 &CancelToken::new(),
                 &provenant_records::policy::Policy::default(),
+                (None, None),
             )?;
             Ok(())
         }
@@ -4744,6 +4782,14 @@ impl WriterLaunch {
                         crate::HostDeliveryContext::destination(crate::DeliveryMode::Push, branch)?
                             .ok_or(RunError::Validation("stop publication destination missing"))?;
                     crate::HostDeliveryContext::capture()
+                        .with_lane_access(
+                            policy.route.and_then(|route| route.lane_access.clone()),
+                            policy
+                                .route
+                                .and_then(|route| route.sandbox.as_ref())
+                                .map(|sandbox| sandbox.effective),
+                        )
+                        .with_policy(enforcement.clone())
                         .with_repo_facts(&self.facts)
                         .with_host_state(state)
                         .prepare_stop_publish_recovery(

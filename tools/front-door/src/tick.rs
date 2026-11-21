@@ -2585,6 +2585,59 @@ mod tests {
 
     /// Spec: docs/specs/run.md#cargo-target-seed
     #[test]
+    fn seed_result_stores_only_the_masked_prepare_tail() {
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
+        let secret = "seed-result-secret-3391";
+        let _scope = provenant_redact::publication_scope([secret.as_bytes().to_vec()]).unwrap();
+        let raw_tail = format!("npm ERR! rejected {secret} (Cannot find package 'zod')\n");
+        // run_with_tail masks on the capture stream, so the tail tick receives
+        // is already masked. Mirror that with the same known-shapes core, then
+        // assert the persisted seed-result holds only that masked form.
+        let masked_tail =
+            String::from_utf8(provenant_redact::known_shapes(raw_tail.as_bytes()).unwrap())
+                .unwrap();
+        assert!(masked_tail.contains("[REDACTED]"));
+        assert!(!masked_tail.contains(secret));
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let directory = provenant_config::private_directory(&root, true).unwrap();
+        let project = seed_project(&root, "masked", true);
+        seed_pass(
+            &directory,
+            &root,
+            &seed_clock(),
+            true,
+            &SeedRequest::full(),
+            || Ok(SeedDiscovery::from_paths(vec![project.clone()])),
+            |_| {
+                Err(Box::new(crate::target_seed_build::PrepareFailed {
+                    index: 0,
+                    argv: vec!["node".into(), "generate.mjs".into()],
+                    exit: Some(7),
+                    tail: masked_tail.clone(),
+                }))
+            },
+        )
+        .unwrap();
+
+        let stored = directory
+            .read_bounded(SEED_RESULT.as_ref(), MAX_SEED_RESULT_BYTES)
+            .unwrap();
+        let stored = String::from_utf8(stored).unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(stored.as_bytes()).unwrap();
+        assert_eq!(wire["projects"][0]["state"], "prepare_failed");
+        assert!(stored.contains("[REDACTED]"), "{stored}");
+        assert!(!stored.contains(secret), "{stored}");
+        let records = seed_records(&directory);
+        assert!(matches!(
+            &records[0].outcome,
+            SeedProjectOutcome::PrepareFailed { tail, .. } if tail == &masked_tail
+        ));
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
     fn a_seed_result_stays_under_its_read_cap_and_keeps_its_omitted_count() {
         let fat = |index: usize| SeedProjectRecord {
             project: format!("/repo/{index}"),

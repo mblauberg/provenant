@@ -234,7 +234,7 @@ pub enum TransportError {
 /// Locations a lane can write. A path is inside when its lexical form or its
 /// symlink-resolved form falls under one of the roots.
 #[derive(Clone, Debug, Default)]
-pub struct LaneRoots(Vec<PathBuf>);
+pub struct LaneRoots(Vec<PathBuf>, Vec<PathBuf>);
 
 impl LaneRoots {
     pub fn new(roots: impl IntoIterator<Item = PathBuf>) -> Self {
@@ -248,7 +248,7 @@ impl LaneRoots {
                 }
             }
         }
-        Self(all)
+        Self(all, Vec::new())
     }
 
     /// The lane areas of a project checkout: its configured worktrees and scratch.
@@ -356,6 +356,15 @@ impl LaneRoots {
         self.0.is_empty()
     }
 
+    /// Exempt a verified unsandboxed lane's own checkout, never an alias
+    /// that resolves outside it. Other lane roots remain protected.
+    pub fn except_owned_worktree(mut self, worktree: &Path) -> Self {
+        let lexical = normalise(worktree);
+        let resolved = resolve(&lexical);
+        self.1.extend([lexical, resolved]);
+        self
+    }
+
     /// `path` must be absolute; a relative path is never inside.
     pub fn contains(&self, path: &Path) -> bool {
         if !path.is_absolute() {
@@ -367,6 +376,24 @@ impl LaneRoots {
         let lexical = normalise(path);
         let resolved = resolve(&lexical);
         let raw = resolve(path);
+        if self.1.iter().any(|owned| {
+            lexical.starts_with(owned)
+                && resolved.starts_with(owned)
+                && raw.starts_with(owned)
+                && !self.0.iter().any(|root| {
+                    root != owned
+                        && root.starts_with(owned)
+                        && (lexical.starts_with(root)
+                            || resolved.starts_with(root)
+                            || raw.starts_with(root))
+                })
+                && path
+                    .ancestors()
+                    .take_while(|parent| normalise(parent).starts_with(owned))
+                    .all(|parent| resolve(parent).starts_with(owned))
+        }) {
+            return false;
+        }
         self.0.iter().any(|root| {
             lexical.starts_with(root)
                 || resolved.starts_with(root)
@@ -685,6 +712,24 @@ mod tests {
             bytes.push(0);
         }
         bytes
+    }
+
+    #[test]
+    fn owned_worktree_exception_keeps_other_roots_and_aliases_protected() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let parent = std::fs::canonicalize(temp.path())?;
+        let own = parent.join("own");
+        let other = parent.join("other");
+        let nested = own.join("nested");
+        std::fs::create_dir_all(&nested)?;
+        std::fs::create_dir(&other)?;
+        std::os::unix::fs::symlink(&other, own.join("other-alias"))?;
+        let roots = LaneRoots::new([parent.clone(), nested.clone()]).except_owned_worktree(&own);
+        assert!(!roots.contains(&own.join("config")));
+        assert!(roots.contains(&nested.join("config")));
+        assert!(roots.contains(&other.join("config")));
+        assert!(roots.contains(&own.join("other-alias/config")));
+        Ok(())
     }
 
     #[test]

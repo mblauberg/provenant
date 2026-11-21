@@ -358,6 +358,11 @@ and model identity checks.
 
 ## Retention and disclosure
 
+`copy_state_classified` copies retained linked files by content for host access,
+with a warning; isolated access retains the hard-link refusal and symlink skip.
+Copies remain bounded by the configured entry, byte and depth budgets and the
+source filesystem boundary.
+
 Host-local stdout and stderr captures retain raw provider bytes for replay.
 Filtering JSONL before retention can destroy framing and hide the final answer.
 Local results and provider continuation state are retained without shape-based

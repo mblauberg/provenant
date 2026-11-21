@@ -237,7 +237,7 @@ pub(super) fn submission(prompt: &str) -> DispatchRequest {
             delivery_id: None,
             deliver: None,
             worktree: None,
-            access: LaneAccess::default(),
+            access: LaneAccessRequest::default(),
         },
         lane_depth: 1,
         parent_attempt: None,

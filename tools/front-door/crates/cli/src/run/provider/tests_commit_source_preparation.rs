@@ -92,7 +92,15 @@ impl CommitSourcePreparation {
             head: Some(head),
             source_head: None,
             base_ref: None,
-            profile: Default::default(),
+            profile: provenant_records::run::HarnessProfile {
+                knobs: [("lanes.access".into(), serde_json::json!("isolated"))].into(),
+                knob_sources: [(
+                    "lanes.access".into(),
+                    provenant_records::LimitSource::Launch,
+                )]
+                .into(),
+                ..Default::default()
+            },
             prompt_digest: provenant_records::CanonicalV1::file_digest(b"review fixture"),
             route: run::RequestedRoute::Model { required_family: None,
                 extra: Default::default(),
@@ -106,7 +114,7 @@ impl CommitSourcePreparation {
             deliver: None,
             provider_timeout_seconds: 20,
             delivery_id: None,
-            access: run::LaneAccess {
+            access: run::LaneAccessRequest {
                 source_root: Some(project.clone()),
                 source_identity: Some(source_identity(&project)?),
                 ..Default::default()
@@ -288,6 +296,12 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
             assert_eq!(refusal.boundary_class, BoundaryClass::None);
         } else {
             assert_eq!(refusal.boundary_class, boundary);
+        }
+        if plan_error == "resolver" {
+            // A route-resolution refusal precedes candidate preparation, so
+            // it carries no candidate-level credential diagnostic.
+            assert!(refusal.skipped_routes.is_empty(), "{refusal:?}");
+            continue;
         }
         let skipped = refusal
             .skipped_routes

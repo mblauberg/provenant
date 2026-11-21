@@ -7,6 +7,8 @@ pub struct ResolvedRoute {
     pub selection_context: RouteAttemptContext,
     #[serde(default = "user_skills_default")]
     pub user_skills: bool,
+    #[serde(default)]
+    pub access: crate::LaneAccess,
     pub diagnostics: RouteDiagnostics,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
@@ -32,6 +34,12 @@ fn user_skills_default() -> bool {
     true
 }
 impl ResolvedRoute {
+    pub fn access(&self) -> crate::LaneAccess {
+        self.access
+    }
+    pub fn set_access(&mut self, access: crate::LaneAccess) {
+        self.access = access;
+    }
     pub fn user_skills(&self) -> bool {
         self.user_skills
     }

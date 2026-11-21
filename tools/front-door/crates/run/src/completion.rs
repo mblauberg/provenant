@@ -329,13 +329,13 @@ pub fn route_label(
 }
 
 fn route_preamble(route: &provenant_records::run::RouteRecord) -> String {
-    let Some(label) = route_label(
+    let label = route_label(
         route.provider.as_deref(),
         route.model.as_deref(),
         route.effort.as_deref(),
-    ) else {
-        return String::new();
-    };
+    )
+    .or_else(|| route.host_native.clone())
+    .or_else(|| route.provider.clone());
     let account = route
         .account_label
         .as_ref()
@@ -346,7 +346,22 @@ fn route_preamble(route: &provenant_records::run::RouteRecord) -> String {
         .as_ref()
         .map(|source| format!(" (source {source})"))
         .unwrap_or_default();
-    format!("Route: {label}{account}{source}\n")
+    let access = route
+        .lane_access
+        .as_ref()
+        .map(|access| {
+            format!(
+                "Access: {} ({} {})\n",
+                access.access.as_str(),
+                access.key,
+                access.source.as_str()
+            )
+        })
+        .unwrap_or_default();
+    let route = label
+        .map(|label| format!("Route: {label}{account}{source}\n"))
+        .unwrap_or_default();
+    format!("{route}{access}")
 }
 
 fn slot_guidance(cap: Option<BuildCap>) -> String {
