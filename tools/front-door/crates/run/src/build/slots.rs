@@ -7,6 +7,7 @@ use super::{
 };
 use provenant_core::{Clock, MonoTime};
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode};
+use provenant_os::git_config::{ConfigContext, ConfigMutation, StoreSetting};
 use provenant_supervisor::census::{
     MAX_CENSUS_ENTRIES, ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver,
 };
@@ -809,8 +810,11 @@ fn ensure_slot_repo(paths: &SlotPaths, store: &Path) -> Result<(), Exception> {
             return Err(Exception::PoolUnavailable);
         }
     }
-    for (key, value) in [("core.hooksPath", "/dev/null"), ("gc.auto", "0")] {
-        if !git_config_status(&paths.repo, &[key, value]) {
+    for (setting, value) in [
+        (StoreSetting::HooksPath, "/dev/null"),
+        (StoreSetting::GcAuto, "0"),
+    ] {
+        if !git_config_status(&paths.repo, setting, value) {
             return Err(Exception::PoolUnavailable);
         }
     }
@@ -929,10 +933,21 @@ fn checkout_commit(repo: &Path, commit: &str) -> bool {
     )
 }
 
-fn git_config_status(repo: &Path, tail: &[&str]) -> bool {
-    let tail = tail.iter().map(OsString::from).collect::<Vec<_>>();
-    provenant_os::git_config::write(&tail, |args| git_status_os(repo, args))
-        .is_ok_and(|success| success)
+fn git_config_status(repo: &Path, setting: StoreSetting, value: &str) -> bool {
+    let context = ConfigContext::new(
+        "configure slot Git repository",
+        repo.join(".git/config"),
+        None,
+    );
+    provenant_os::git_config::write(
+        context,
+        ConfigMutation::SetStore {
+            setting,
+            value: value.into(),
+        },
+        |args| git_status_os(repo, args),
+    )
+    .is_ok_and(|success| success)
 }
 
 fn git_status(repo: &Path, args: &[&str]) -> bool {

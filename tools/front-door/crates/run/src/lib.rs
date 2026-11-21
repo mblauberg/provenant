@@ -464,11 +464,11 @@ pub enum RunError {
     Input { kind: ErrorKind, message: String },
     #[error("host writer delivery failed at {0:?}")]
     Delivery(WriterDeliveryStage),
-    #[error("host writer delivery failed at {stage:?}: {source}")]
+    #[error("host writer delivery failed at {stage:?}")]
     DeliveryConfigRead {
         stage: WriterDeliveryStage,
         #[source]
-        source: Box<provenant_os::git_config::ConfigReadError<RunError>>,
+        source: Box<provenant_os::git_config::ConfigError<RunError>>,
     },
     #[error("host writer delivery could not reconcile the pull request: {reason}; next: {next}")]
     DeliveryReconciliation { reason: String, next: String },

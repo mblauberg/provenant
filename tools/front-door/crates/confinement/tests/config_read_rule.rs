@@ -1,37 +1,83 @@
 //! Keep project-owned Git config command construction in one module.
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use syn::visit::{self, Visit};
     use syn::{Expr, ImplItemFn, ItemFn, ItemMod};
 
-    fn has_config(expr: &Expr) -> bool {
-        struct Literal(bool);
-        impl<'ast> Visit<'ast> for Literal {
+    /// The type names whose methods carry a raw Git argv. The scanner resolves
+    /// receivers through declared types, not through local variable names.
+    const GIT_ARGV_TYPES: &[&str] = &["Git", "HostGit", "Command", "Executor"];
+
+    fn literal(expr: &Expr, expected: &str) -> bool {
+        struct Match<'a>(&'a str, bool);
+        impl<'ast> Visit<'ast> for Match<'_> {
             fn visit_lit_str(&mut self, value: &'ast syn::LitStr) {
-                self.0 |= value.value() == "config";
+                self.1 |= value.value() == self.0;
             }
         }
-        let mut literal = Literal(false);
-        literal.visit_expr(expr);
-        literal.0
+        let mut found = Match(expected, false);
+        found.visit_expr(expr);
+        found.1
     }
 
-    fn git_command(expr: &Expr) -> bool {
+    fn has_config(expr: &Expr) -> bool {
+        literal(expr, "config")
+    }
+
+    /// Any of these flags with a `config` subcommand outside the core is a
+    /// mutation: reads are only ever constructed inside the core.
+    fn has_mutation_flag(expr: &Expr) -> bool {
+        [
+            "--local",
+            "--replace-all",
+            "--remove-section",
+            "--unset",
+            "--unset-all",
+            "--add",
+            "--set",
+        ]
+        .iter()
+        .any(|flag| literal(expr, flag))
+    }
+
+    fn path_ident(path: &syn::Path) -> Option<String> {
+        path.segments.last().map(|part| part.ident.to_string())
+    }
+
+    fn path_is_git_constructor(path: &syn::Path) -> bool {
+        let parts: Vec<String> = path
+            .segments
+            .iter()
+            .map(|part| part.ident.to_string())
+            .collect();
+        // `std::process::Command::new(...)` is identified by its type path;
+        // a variable merely named `command` or `git` is not a constructor.
+        parts.last().is_some_and(|last| last == "new")
+            && (parts.iter().any(|part| part == "Command")
+                || parts
+                    .first()
+                    .is_some_and(|first| GIT_ARGV_TYPES.contains(&first.as_str())))
+    }
+
+    /// Resolve a receiver to a Git/process type rather than to a variable name.
+    fn git_command(expr: &Expr, types: &HashMap<String, String>) -> bool {
         match expr {
-            Expr::Path(path) => path.path.segments.last().is_some_and(|part| {
-                matches!(
-                    part.ident.to_string().as_str(),
-                    "Command" | "command" | "cmd" | "git"
-                )
+            Expr::Path(path) => path_ident(&path.path).is_some_and(|name| {
+                types
+                    .get(&name)
+                    .is_some_and(|ty| GIT_ARGV_TYPES.contains(&ty.as_str()))
             }),
-            Expr::MethodCall(call) => {
-                (call.method == "new" && git_command(&call.receiver)) || git_command(&call.receiver)
-            }
-            Expr::Call(call) => matches!(call.func.as_ref(), Expr::Path(path)
-                if path.path.segments.iter().any(|part| part.ident == "Command")
-                    && path.path.segments.last().is_some_and(|part| part.ident == "new")
-                    || path.path.segments.last().is_some_and(|part| matches!(part.ident.to_string().as_str(), "git" | "command" | "cmd"))),
+            Expr::Call(call) => match call.func.as_ref() {
+                Expr::Path(path) => path_is_git_constructor(&path.path),
+                _ => false,
+            },
+            Expr::MethodCall(call) => git_command(&call.receiver, types),
+            Expr::Field(field) => git_command(&field.base, types),
+            Expr::Reference(reference) => git_command(&reference.expr, types),
+            Expr::Group(group) => git_command(&group.expr, types),
+            Expr::Paren(paren) => git_command(&paren.expr, types),
             _ => false,
         }
     }
@@ -41,39 +87,75 @@ mod tests {
             if path.path.segments.iter().any(|part| part.ident == "ExecOptions")))
     }
 
+    fn type_name(ty: &syn::Type) -> Option<String> {
+        match ty {
+            syn::Type::Reference(reference) => type_name(&reference.elem),
+            syn::Type::Path(path) => path_ident(&path.path),
+            _ => None,
+        }
+    }
+
+    /// Collect declared receiver types from function arguments and typed lets.
     #[derive(Default)]
-    struct Calls(Vec<String>);
+    struct TypeNames(HashMap<String, String>);
+    impl<'ast> Visit<'ast> for TypeNames {
+        fn visit_pat_type(&mut self, node: &'ast syn::PatType) {
+            if let syn::Pat::Ident(ident) = &*node.pat
+                && let Some(ty) = type_name(&node.ty)
+            {
+                self.0.insert(ident.ident.to_string(), ty);
+            }
+            visit::visit_pat_type(self, node);
+        }
+    }
+
+    #[derive(Default)]
+    struct Calls {
+        findings: Vec<String>,
+        types: HashMap<String, String>,
+    }
     impl<'ast> Visit<'ast> for Calls {
         fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
             if matches!(node.method.to_string().as_str(), "arg" | "args")
                 && node.args.iter().any(has_config)
-                && git_command(&node.receiver)
+                && git_command(&node.receiver, &self.types)
             {
-                self.0.push("std::process command".into());
+                self.findings.push("std::process command".into());
             }
             if node.method == "execute"
                 && node.args.iter().any(has_config)
                 && node.args.iter().any(exec_options)
             {
-                self.0.push("Executor argv".into());
+                self.findings.push("Executor argv".into());
             }
             if matches!(node.method.to_string().as_str(), "full" | "run")
                 && node.args.iter().any(has_config)
             {
-                self.0.push(format!("Git::{} argv", node.method));
+                self.findings.push(format!("Git::{} argv", node.method));
             }
             visit::visit_expr_method_call(self, node);
         }
 
         fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-            if matches!(node.func.as_ref(), Expr::Path(path)
-            if path.path.segments.last().is_some_and(|part| {
-                let name = part.ident.to_string();
-                    name.starts_with("host_git")
-                        || matches!(name.as_str(), "run" | "execute_for" | "git")
-            })) && node.args.iter().any(has_config)
-            {
-                self.0.push("Git helper argv".into());
+            if let Expr::Path(path) = node.func.as_ref() {
+                let name = path_ident(&path.path).unwrap_or_default();
+                let git_argv_function = name.starts_with("host_git")
+                    || matches!(name.as_str(), "run" | "execute_for" | "git");
+                if git_argv_function && node.args.iter().any(has_config) {
+                    self.findings.push("Git helper argv".into());
+                }
+                // A raw argv tail passed to git_config::write bypasses the
+                // core's typed mutation enum and is a write-path violation.
+                if name == "write"
+                    && path
+                        .path
+                        .segments
+                        .iter()
+                        .any(|part| part.ident == "git_config")
+                    && !node.args.first().is_some_and(is_context_arg)
+                {
+                    self.findings.push("raw git_config::write argv".into());
+                }
             }
             visit::visit_expr_call(self, node);
         }
@@ -93,6 +175,13 @@ mod tests {
                 visit::visit_item_mod(self, node);
             }
         }
+    }
+
+    /// A typed write starts with a `ConfigContext` value or constructor. A
+    /// raw argv tail (`&tail`, `&[OsString::from(..)]`) is a reference or array
+    /// and is caught here.
+    fn is_context_arg(expr: &Expr) -> bool {
+        matches!(expr, Expr::Path(_) | Expr::Call(_))
     }
 
     fn test_only(attrs: &[syn::Attribute]) -> bool {
@@ -131,27 +220,35 @@ mod tests {
         })
     }
 
-    fn check(source: &str) -> Vec<String> {
-        let file = syn::parse_file(source).expect("Rust source parses");
-        let mut calls = Calls::default();
-        calls.visit_file(&file);
-        calls.0
+    #[derive(Default)]
+    struct Findings(Vec<String>);
+    impl Findings {
+        fn of(source: &str) -> Self {
+            let file = syn::parse_file(source).expect("Rust source parses");
+            let mut names = TypeNames::default();
+            names.visit_file(&file);
+            let mut calls = Calls {
+                types: names.0,
+                ..Calls::default()
+            };
+            calls.visit_file(&file);
+            Self(calls.findings)
+        }
     }
 
-    #[test]
-    fn only_the_core_constructs_git_config_commands() {
+    fn workspace_files() -> (PathBuf, PathBuf, Vec<PathBuf>) {
         let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
-            .expect("crates root");
-        let workspace = crates.parent().expect("workspace root");
-        let core = crates.join("os/src/git_config.rs");
+            .expect("crates root")
+            .to_owned();
+        let workspace = crates.parent().expect("workspace root").to_owned();
         let mut files = Vec::new();
         for source_root in [workspace.join("src"), workspace.join("examples")] {
             if source_root.is_dir() {
                 sources(&source_root, &mut files);
             }
         }
-        for entry in std::fs::read_dir(crates).expect("crate directories") {
+        for entry in std::fs::read_dir(&crates).expect("crate directories") {
             let crate_dir = entry.expect("crate entry").path();
             for tree in ["src", "examples"] {
                 let source_root = crate_dir.join(tree);
@@ -160,16 +257,35 @@ mod tests {
                 }
             }
         }
+        (workspace, crates, files)
+    }
 
+    #[test]
+    fn only_the_core_constructs_git_config_commands() {
+        let (_workspace, crates, files) = workspace_files();
+        let core = crates.join("os/src/git_config.rs");
         let mut violations = Vec::new();
         for path in files {
             if path == core || test_only_source(&path) {
                 continue;
             }
-            // These .rs files are schema DSL passed to macros, not Rust modules.
-            if path.file_name().is_some_and(|name| {
-                name == "schema.rs" || name.to_string_lossy().ends_with("_schema.rs")
-            }) {
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            let findings = Findings::of(&source);
+            if !findings.0.is_empty() {
+                violations.push(format!("{}: {:?}", path.display(), findings.0));
+            }
+        }
+        assert!(violations.is_empty(), "{}", violations.join("\n"));
+    }
+
+    #[test]
+    fn no_code_outside_the_core_can_issue_a_config_write() {
+        let (_workspace, crates, files) = workspace_files();
+        let core = crates.join("os/src/git_config.rs");
+        let mut violations = Vec::new();
+        for path in files {
+            if path == core || test_only_source(&path) {
                 continue;
             }
             let source = std::fs::read_to_string(&path)
@@ -178,8 +294,42 @@ mod tests {
                 .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
             let mut calls = Calls::default();
             calls.visit_file(&file);
-            if !calls.0.is_empty() {
-                violations.push(format!("{}: {:?}", path.display(), calls.0));
+            for finding in calls.findings {
+                if finding == "raw git_config::write argv" {
+                    violations.push(format!("{}: {finding}", path.display()));
+                }
+            }
+            // A literal config argv carrying a mutation flag outside the core
+            // is a second path around the typed mutation enum.
+            #[derive(Default)]
+            struct RawWrite(Vec<String>);
+            impl<'ast> Visit<'ast> for RawWrite {
+                fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+                    if node.args.iter().any(has_config) && node.args.iter().any(has_mutation_flag) {
+                        self.0.push("raw config mutation argv".into());
+                    }
+                    visit::visit_expr_call(self, node);
+                }
+                fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+                    if !test_only(&node.attrs) {
+                        visit::visit_item_fn(self, node);
+                    }
+                }
+                fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
+                    if !test_only(&node.attrs) {
+                        visit::visit_impl_item_fn(self, node);
+                    }
+                }
+                fn visit_item_mod(&mut self, node: &'ast ItemMod) {
+                    if !test_only(&node.attrs) {
+                        visit::visit_item_mod(self, node);
+                    }
+                }
+            }
+            let mut raw = RawWrite(Vec::new());
+            raw.visit_file(&file);
+            for finding in raw.0 {
+                violations.push(format!("{}: {finding}", path.display()));
             }
         }
         assert!(violations.is_empty(), "{}", violations.join("\n"));
@@ -191,25 +341,44 @@ mod tests {
         let executor = r#"fn f(executor: &dyn Executor) { executor.execute(ExecOptions::new(&["git", "config"], cwd, timeout)); }"#;
         let host_git = r#"fn f() { host_git(repo, executor, &["config", "--list"], timeout); }"#;
         let git_helper = r#"fn f() { git(repo, home, &["config", "user.name", "Probe"]); }"#;
-        let git_full =
-            r#"fn f(git: &Git) { git.full(repo, &["config", "--get", "core.worktree"]); }"#;
-        let git_run = r#"fn f(git: &Git) { git.run(repo, &["config", "--list"]); }"#;
+        let git_full = r#"fn f(repo: &Path, git: &Git) { git.full(repo, &["config", "--get", "core.worktree"]); }"#;
+        let git_run = r#"fn f(repo: &Path, git: &Git) { git.run(repo, &["config", "--list"]); }"#;
         let execute_for = r#"fn f() { execute_for(repo, &["git", "config"], timeout, false); }"#;
         let wrapped_host_git = r#"fn f() { let run = |args| host_git_with_cancel(repo, executor, args, timeout, false, None); run(&["config", "--get", "remote.origin.url"]); }"#;
-        assert!(!check(process).is_empty());
-        assert!(!check(executor).is_empty());
-        assert!(!check(host_git).is_empty());
-        assert!(!check(git_helper).is_empty());
-        assert!(!check(git_full).is_empty());
-        assert!(!check(git_run).is_empty());
-        assert!(!check(execute_for).is_empty());
-        assert!(!check(wrapped_host_git).is_empty());
+        for source in [
+            process,
+            executor,
+            host_git,
+            git_helper,
+            git_full,
+            git_run,
+            execute_for,
+            wrapped_host_git,
+        ] {
+            assert!(!Findings::of(source).0.is_empty(), "missed: {source}");
+        }
+    }
+
+    #[test]
+    fn synthetic_raw_config_writes_are_caught_by_type() {
+        let process = r#"fn f(git: &str) { std::process::Command::new(git).args(["config", "--local", "branch.lane.remote", "origin"]).output(); }"#;
+        let helper = r#"fn f(repo: &Path, git: &Git) { git.full(repo, &["config", "--replace-all", "branch.lane.merge", "refs/heads/main"]); }"#;
+        let raw_tail = r#"fn f(tail: &[OsString]) { provenant_os::git_config::write(&tail, |args| run(args)); }"#;
+        let typed = r#"fn f() { provenant_os::git_config::write(context, ConfigMutation::SetStore { setting, value }, |args| run(args)); }"#;
+        assert!(has_raw_write(process));
+        assert!(has_raw_write(helper));
+        assert!(has_raw_write(raw_tail));
+        assert!(!has_raw_write(typed));
+    }
+
+    fn has_raw_write(source: &str) -> bool {
+        !Findings::of(source).0.is_empty()
     }
 
     #[test]
     fn unrelated_literals_and_test_only_calls_are_ignored() {
         let source = r#"const LABEL: &str = "config"; #[cfg(test)] fn fixture(git: &str) { std::process::Command::new(git).args(["config"]).output(); }"#;
-        assert!(check(source).is_empty());
+        assert!(Findings::of(source).0.is_empty());
     }
 
     // The syntax guard sees literal arguments at process construction sites. It

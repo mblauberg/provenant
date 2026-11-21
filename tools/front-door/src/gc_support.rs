@@ -56,7 +56,15 @@ fn host_git_with_cancel(
     endpoint: Option<&str>,
 ) -> Result<ExecOutcome, Error> {
     let args: Vec<OsString> = args.iter().map(OsString::from).collect();
-    host_git_with_tail(repo, executor, &args, timeout, capture_stderr, cancel, endpoint)
+    host_git_with_tail(
+        repo,
+        executor,
+        &args,
+        timeout,
+        capture_stderr,
+        cancel,
+        endpoint,
+    )
 }
 
 fn host_git_config_with_cancel(
@@ -68,13 +76,21 @@ fn host_git_config_with_cancel(
     timeout: Duration,
     cancel: Option<&CancelToken>,
 ) -> Result<ExecOutcome, Error> {
-    let context = provenant_os::git_config::ConfigRead {
+    let context = provenant_os::git_config::ConfigContext {
         operation,
         file: PathBuf::from("<effective Git configuration>"),
         key,
     };
     provenant_os::git_config::read(context, request, |command| {
-        host_git_with_tail(repo, executor, command.as_ref(), timeout, false, cancel, None)
+        host_git_with_tail(
+            repo,
+            executor,
+            command.as_ref(),
+            timeout,
+            false,
+            cancel,
+            None,
+        )
     })
     .map_err(|error| Error::GitConfigRead(Box::new(error)))
 }

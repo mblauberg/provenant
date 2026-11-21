@@ -7,6 +7,7 @@ use crate::{
 };
 use provenant_confinement::repo::GitRefName;
 use provenant_core::GitOid;
+use provenant_os::git_config::BranchField;
 use provenant_os::{
     exec::{ExecOptions, StreamPolicy, SystemExecutor, Termination},
     fs::Directory,
@@ -1636,7 +1637,7 @@ impl HostDeliveryContext {
         let stage = Stage::Prepare;
         // Free-form shell helpers can select writer code. Support normal
         // executable helpers and gh's standard helper, otherwise refuse early.
-        let context = provenant_os::git_config::ConfigRead {
+        let context = provenant_os::git_config::ConfigContext {
             operation: "read transport helper settings",
             file: writer.worktree.join(".git/config"),
             key: None,
@@ -2194,9 +2195,10 @@ impl HostDeliveryContext {
                 roots = roots.except_owned_worktree(project);
             }
         }
-        let ctx = transport::ConfigRead::new("check delivery transport configuration", base, None);
+        let ctx =
+            transport::ConfigContext::new("check delivery transport configuration", base, None);
         transport::check_environment(environment, base, &roots, &ctx).map_err(refuse)?;
-        let context = provenant_os::git_config::ConfigRead {
+        let context = provenant_os::git_config::ConfigContext {
             operation: "read effective Git configuration",
             file: base.to_owned(),
             key: None,
@@ -2206,14 +2208,14 @@ impl HostDeliveryContext {
             provenant_os::git_config::Read::Listing,
             |args| self.command_with_input(cwd, "git", &git_config_args(args, stage)?, stage, b""),
         )
-        .map_err(|error| refuse(ctx.unreadable(error)))?;
+        .map_err(|error| refuse(transport::unreadable(&ctx, error)))?;
         let entries = transport::parse_listing(listing.as_bytes(), &ctx).map_err(refuse)?;
         transport::check_listing(&entries, base, &roots, &ctx).map_err(refuse)?;
         // Git rereads configuration for the command itself, so refuse any
         // include directive that names a lane area, read or not: a lane could
         // otherwise create the target between this check and the command.
         let directives = provenant_os::git_config::read(
-            provenant_os::git_config::ConfigRead {
+            provenant_os::git_config::ConfigContext {
                 operation: "read configuration include directives",
                 file: base.to_owned(),
                 key: Some("include.path"),
@@ -2221,7 +2223,7 @@ impl HostDeliveryContext {
             provenant_os::git_config::Read::Directives,
             |args| self.command_with_input(cwd, "git", &git_config_args(args, stage)?, stage, b""),
         )
-        .map_err(|error| refuse(ctx.unreadable(error)))?;
+        .map_err(|error| refuse(transport::unreadable(&ctx, error)))?;
         let top = transport::parse_listing(directives.as_bytes(), &ctx).map_err(refuse)?;
         let home = environment
             .iter()
@@ -2231,7 +2233,7 @@ impl HostDeliveryContext {
             Option<Vec<transport::ConfigEntry>>,
             transport::TransportError,
         > {
-            let ctx = transport::ConfigRead::new(
+            let ctx = transport::ConfigContext::new(
                 "read included config file",
                 "<included config>",
                 Some("include.path"),
@@ -2240,12 +2242,12 @@ impl HostDeliveryContext {
                 Ok(metadata) if !metadata.is_file() => return Ok(None),
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(ctx.unreadable(error)),
+                Err(error) => return Err(transport::unreadable(&ctx, error)),
             }
             file.to_str()
-                .ok_or_else(|| ctx.unreadable("included config path is not UTF-8"))?;
+                .ok_or_else(|| transport::unreadable(&ctx, "included config path is not UTF-8"))?;
             let listing = provenant_os::git_config::read(
-                provenant_os::git_config::ConfigRead {
+                provenant_os::git_config::ConfigContext {
                     operation: "read included config file",
                     file: PathBuf::from("<included config>"),
                     key: Some("include.path"),
@@ -2255,7 +2257,7 @@ impl HostDeliveryContext {
                     self.command_with_input(cwd, "git", &git_config_args(args, stage)?, stage, b"")
                 },
             )
-            .map_err(|error| ctx.unreadable(error))?;
+            .map_err(|error| transport::unreadable(&ctx, error))?;
             transport::parse_listing(listing.as_bytes(), &ctx).map(Some)
         };
         transport::check_includes(&top, base, home, &roots, &mut read, &ctx).map_err(refuse)
@@ -2540,7 +2542,7 @@ impl HostDeliveryContext {
         } else {
             // A configured merge driver may execute arbitrary repository code.
             let config = provenant_os::git_config::read(
-                provenant_os::git_config::ConfigRead {
+                provenant_os::git_config::ConfigContext {
                     operation: "check configured merge drivers",
                     file: writer.worktree.join(".git/config"),
                     key: None,
@@ -2913,24 +2915,34 @@ impl HostDeliveryContext {
             previous,
             integrated: head,
         });
-        for (key, value) in [
-            ("remote", request.remote.as_str()),
-            ("merge", destination.as_str()),
-            ("pushRemote", request.remote.as_str()),
+        for (field, value) in [
+            (BranchField::Remote, request.remote.as_str()),
+            (BranchField::Merge, destination.as_str()),
+            (BranchField::PushRemote, request.remote.as_str()),
         ] {
-            let tail = [
-                OsString::from("--local"),
-                OsString::from(format!("branch.{}.{key}", bound.lane_branch)),
-                OsString::from(value),
-            ];
-            provenant_os::git_config::write(&tail, |args| {
-                self.command(
-                    cwd,
-                    "git",
-                    &git_config_args(args, Stage::Upstream)?,
-                    Stage::Upstream,
-                )
-            })?;
+            let context = provenant_os::git_config::ConfigContext::new(
+                "set branch upstream configuration",
+                cwd.join(".git/config"),
+                Some("branch tracking key"),
+            );
+            provenant_os::git_config::write(
+                context,
+                provenant_os::git_config::ConfigMutation::SetBranchTracking {
+                    branch: bound.lane_branch.as_str().to_owned(),
+                    field,
+                    value: value.to_owned(),
+                    replace: false,
+                },
+                |args| {
+                    self.command(
+                        cwd,
+                        "git",
+                        &git_config_args(args, Stage::Upstream)?,
+                        Stage::Upstream,
+                    )
+                },
+            )
+            .map_err(|error| delivery_config_read_error(Stage::Upstream, error))?;
         }
         // Read the upstream back from config: `@{upstream}` and `status -sb`
         // only resolve when the remote's fetch refspec covers the branch, and a
@@ -2942,7 +2954,7 @@ impl HostDeliveryContext {
         ] {
             let config_key = format!("branch.{}.{key}", bound.lane_branch);
             let stored = provenant_os::git_config::read(
-                provenant_os::git_config::ConfigRead {
+                provenant_os::git_config::ConfigContext {
                     operation: "verify upstream configuration",
                     file: cwd.to_owned(),
                     key: None,
@@ -3367,7 +3379,7 @@ pub(super) fn git_subcommand(args: &[&str]) -> String {
 
 fn delivery_config_read_error(
     stage: Stage,
-    error: provenant_os::git_config::ConfigReadError<RunError>,
+    error: provenant_os::git_config::ConfigError<RunError>,
 ) -> RunError {
     RunError::DeliveryConfigRead {
         stage,
@@ -3407,8 +3419,10 @@ fn transport_config_cause(
     base: &Path,
     error: impl std::fmt::Display,
 ) -> String {
-    let context = provenant_confinement::transport::ConfigRead::new(operation, base, None);
-    prepare_reason(context.unreadable(error))
+    let context = provenant_confinement::transport::ConfigContext::new(operation, base, None);
+    prepare_reason(provenant_confinement::transport::unreadable(
+        &context, error,
+    ))
 }
 
 fn prepare_reason(detail: impl std::fmt::Display) -> String {

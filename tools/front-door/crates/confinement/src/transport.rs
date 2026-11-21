@@ -7,6 +7,7 @@
 //! elsewhere stays allowed. What is refused is any configuration file or
 //! program that lives where a lane can write.
 use provenant_os::fs::canonicalize;
+pub use provenant_os::git_config::ConfigContext;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -92,52 +93,16 @@ impl fmt::Display for GitConfigCause {
 
 impl std::error::Error for GitConfigCause {}
 
-/// The identity of one Git configuration read. Every config-read function
-/// takes one, and builds every failure through it, so a refusal always names
-/// the operation, file and key it was reading — never a config value.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConfigRead {
-    /// Stable label for the read.
-    pub operation: &'static str,
-    /// The config file or directory being read.
-    pub file: PathBuf,
-    /// Static key or directive label, never a value from the config file.
-    pub key: Option<&'static str>,
+/// Build a contextual cause for a failure detail from the shared command
+/// context. The core owns the context type; transport only renders its failures.
+pub fn cause(context: &ConfigContext, detail: impl fmt::Display) -> GitConfigCause {
+    GitConfigCause::new(context.operation, Some(&context.file), context.key, detail)
 }
 
-impl ConfigRead {
-    pub fn new(
-        operation: &'static str,
-        file: impl Into<PathBuf>,
-        key: Option<&'static str>,
-    ) -> Self {
-        Self {
-            operation,
-            file: file.into(),
-            key,
-        }
-    }
-
-    /// Build a contextual cause for a failure detail.
-    pub fn cause(&self, detail: impl fmt::Display) -> GitConfigCause {
-        GitConfigCause::new(self.operation, Some(&self.file), self.key, detail)
-    }
-
-    /// Build an opaque-but-identified transport failure.
-    pub fn unreadable(&self, detail: impl fmt::Display) -> TransportError {
-        TransportError::Unreadable {
-            cause: self.cause(detail),
-        }
-    }
-}
-
-impl fmt::Display for ConfigRead {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{} on {}", self.operation, self.file.display())?;
-        if let Some(key) = self.key {
-            write!(formatter, " for key {key}")?;
-        }
-        Ok(())
+/// Build an opaque-but-identified transport failure from the same context.
+pub fn unreadable(context: &ConfigContext, detail: impl fmt::Display) -> TransportError {
+    TransportError::Unreadable {
+        cause: cause(context, detail),
     }
 }
 
@@ -208,7 +173,7 @@ pub enum TransportError {
     )]
     LaneConfig {
         file: &'static str,
-        context: ConfigRead,
+        context: ConfigContext,
     },
     // The program is a config *value* and is deliberately not carried: naming
     // it could leak a credential embedded in a helper command. The key names
@@ -219,7 +184,7 @@ pub enum TransportError {
     )]
     LaneProgram {
         key: &'static str,
-        context: ConfigRead,
+        context: ConfigContext,
     },
     #[error("Git configuration could not be read: {cause}")]
     Unreadable { cause: GitConfigCause },
@@ -464,9 +429,12 @@ impl ConfigEntry {
 /// Parse `git config --includes --show-origin -z --list` output. `ctx` names
 /// the read so a malformed listing fails as an identified config error rather
 /// than an opaque one.
-pub fn parse_listing(bytes: &[u8], ctx: &ConfigRead) -> Result<Vec<ConfigEntry>, TransportError> {
+pub fn parse_listing(
+    bytes: &[u8],
+    ctx: &ConfigContext,
+) -> Result<Vec<ConfigEntry>, TransportError> {
     if !bytes.is_empty() && !bytes.ends_with(&[0]) {
-        return Err(ctx.unreadable("git config listing is not NUL-terminated"));
+        return Err(unreadable(ctx, "git config listing is not NUL-terminated"));
     }
     let mut fields = bytes.split(|byte| *byte == 0);
     let mut entries = Vec::new();
@@ -476,7 +444,7 @@ pub fn parse_listing(bytes: &[u8], ctx: &ConfigRead) -> Result<Vec<ConfigEntry>,
         }
         let entry = fields
             .next()
-            .ok_or_else(|| ctx.unreadable("truncated git config listing"))?;
+            .ok_or_else(|| unreadable(ctx, "truncated git config listing"))?;
         let (key, value) = match entry.iter().position(|byte| *byte == b'\n') {
             Some(split) => (&entry[..split], Some(&entry[split + 1..])),
             None => (entry, None),
@@ -531,7 +499,7 @@ pub fn check_includes(
     home: &Path,
     roots: &LaneRoots,
     read: &mut ReadConfigFile<'_>,
-    ctx: &ConfigRead,
+    ctx: &ConfigContext,
 ) -> Result<(), TransportError> {
     let mut pending = Vec::new();
     let collect = |entries: &[ConfigEntry], origin: Option<&Path>, pending: &mut Vec<PathBuf>| {
@@ -561,7 +529,7 @@ pub fn check_includes(
             continue;
         }
         if visited.len() > MAX_INCLUDE_FILES {
-            return Err(ctx.unreadable("too many config include targets to verify"));
+            return Err(unreadable(ctx, "too many config include targets to verify"));
         }
         if let Some(entries) = read(&target)? {
             collect(&entries, Some(&target), &mut pending);
@@ -634,7 +602,7 @@ fn check_program(
     value: &str,
     base: &Path,
     roots: &LaneRoots,
-    ctx: &ConfigRead,
+    ctx: &ConfigContext,
 ) -> Result<(), TransportError> {
     for word in program_paths(value) {
         if roots.contains(&expand(&word, base)) {
@@ -654,7 +622,7 @@ pub fn check_listing(
     entries: &[ConfigEntry],
     base: &Path,
     roots: &LaneRoots,
-    ctx: &ConfigRead,
+    ctx: &ConfigContext,
 ) -> Result<(), TransportError> {
     for entry in entries {
         if let Some(file) = entry.file(base)
@@ -679,7 +647,7 @@ pub fn check_environment(
     env: &[(OsString, OsString)],
     base: &Path,
     roots: &LaneRoots,
-    ctx: &ConfigRead,
+    ctx: &ConfigContext,
 ) -> Result<(), TransportError> {
     for (name, value) in env {
         let Some(name) = name.to_str() else { continue };
@@ -699,8 +667,8 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    fn test_ctx() -> ConfigRead {
-        ConfigRead::new("test config read", Path::new("/project/.git/config"), None)
+    fn test_ctx() -> ConfigContext {
+        ConfigContext::new("test config read", Path::new("/project/.git/config"), None)
     }
 
     fn listing(entries: &[(&str, &str)]) -> Vec<u8> {

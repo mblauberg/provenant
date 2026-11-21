@@ -484,7 +484,7 @@ fn resolve_base(project: &Path, name: &str) -> Option<String> {
 
 /// The remote a landing candidate is published to, defaulting as landing does.
 fn candidate_remote(project: &Path) -> String {
-    let context = provenant_os::git_config::ConfigRead {
+    let context = provenant_os::git_config::ConfigContext {
         operation: "read candidate branch remote",
         file: project.join(".git/config"),
         key: Some("branch tracking key"),

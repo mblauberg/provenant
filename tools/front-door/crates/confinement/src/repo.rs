@@ -49,7 +49,7 @@ pub enum RepoError {
     #[error("Git configuration normalisation failed: {0}")]
     ConfigNormalisation(&'static str),
     #[error(transparent)]
-    ConfigRead(#[from] Box<provenant_os::git_config::ConfigReadError<RepoError>>),
+    ConfigRead(#[from] Box<provenant_os::git_config::ConfigError<RepoError>>),
     #[error("alternate Git object stores are not accepted for protected history")]
     AlternateObjects,
     #[error("verified repository path or Git metadata changed")]
@@ -1172,7 +1172,7 @@ fn config_parser_metadata(git: &Path) -> Result<Metadata, RepoError> {
 
 fn parse_common_config(git: &Path, bytes: &[u8]) -> Result<Vec<u8>, RepoError> {
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
-    let context = provenant_os::git_config::ConfigRead {
+    let context = provenant_os::git_config::ConfigContext {
         operation: "normalise common Git configuration",
         file: PathBuf::from("<common config>"),
         key: None,

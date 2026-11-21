@@ -63,7 +63,7 @@ pub enum GitTransportError {
     #[error("Git supervisor execution failed")]
     Execution(#[from] ExecError),
     #[error(transparent)]
-    ConfigRead(Box<provenant_os::git_config::ConfigReadError<GitTransportError>>),
+    ConfigRead(Box<provenant_os::git_config::ConfigError<GitTransportError>>),
 }
 
 impl GitTransportError {
@@ -673,7 +673,7 @@ impl<'a> GitTransport<'a> {
     }
 
     fn refuse_url_rewrites(&self, repository: &Path, cancel: &CancelToken) -> Result<()> {
-        let context = provenant_os::git_config::ConfigRead {
+        let context = provenant_os::git_config::ConfigContext {
             operation: "check Git URL rewrites",
             file: repository.join(".git/config"),
             key: Some("url rewrite"),

@@ -462,7 +462,7 @@ impl RepoFacts {
         cancel: &CancelToken,
     ) -> Result<Option<bool>, WorktreeError> {
         let scalar = budget.with_stdout_cap(self.scalar_limit)?;
-        let context = provenant_os::git_config::ConfigRead {
+        let context = provenant_os::git_config::ConfigContext {
             operation: "read local core.bare",
             file: repo.common_git_dir().join("config"),
             key: Some("core.bare"),

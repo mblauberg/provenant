@@ -2023,7 +2023,7 @@ fn branch_config_value(
         warn_branch_config("read branch Git configuration rejected an invalid key");
         return None;
     }
-    let context = provenant_os::git_config::ConfigRead {
+    let context = provenant_os::git_config::ConfigContext {
         operation: "read branch Git configuration",
         file: repo.common_git_dir().join("config"),
         key: Some("branch tracking key"),

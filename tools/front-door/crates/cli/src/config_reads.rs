@@ -3,17 +3,17 @@
 use provenant_config::{ConfigError, ResolvedConfig};
 use provenant_core::Roots;
 
-pub struct ConfigRead {
+pub struct CommandConfigDeclaration {
     pub command: &'static str,
     /// None means the configuration inspection command reads every owner.
     pub domains: Option<&'static [&'static str]>,
 }
 macro_rules! reads {
     ($($command:literal => [$($domain:literal),*]),* $(,)?) => {
-        pub const READS: &[ConfigRead] = &[
-            $(ConfigRead { command: $command, domains: Some(&[$($domain),*]) },)*
-            ConfigRead { command: "config", domains: None },
-            ConfigRead { command: "check config", domains: None },
+        pub const READS: &[CommandConfigDeclaration] = &[
+            $(CommandConfigDeclaration { command: $command, domains: Some(&[$($domain),*]) },)*
+            CommandConfigDeclaration { command: "config", domains: None },
+            CommandConfigDeclaration { command: "check config", domains: None },
         ];
     };
 }
@@ -56,7 +56,7 @@ reads! {
     "knobs" => [], "admit" => []
 }
 
-pub fn declaration(path: &str) -> Option<&'static ConfigRead> {
+pub fn declaration(path: &str) -> Option<&'static CommandConfigDeclaration> {
     let path = path.strip_prefix("provenant ").unwrap_or(path);
     READS
         .iter()
@@ -71,7 +71,7 @@ pub fn declaration(path: &str) -> Option<&'static ConfigRead> {
 
 pub fn domains_for(path: &str) -> Vec<&'static str> {
     match declaration(path) {
-        Some(ConfigRead {
+        Some(CommandConfigDeclaration {
             domains: Some(names),
             ..
         }) => names.to_vec(),

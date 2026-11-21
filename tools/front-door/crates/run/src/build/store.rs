@@ -1,8 +1,8 @@
 //! Bare object store and its fetch/GC lock.
 use super::process::Command;
 use super::{BuildError, InfraKind};
+use provenant_os::git_config::{ConfigContext, ConfigMutation, StoreSetting};
 use std::{
-    ffi::OsString,
     fs,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -83,18 +83,23 @@ pub fn ensure(state: &Path, project_key: &str) -> Result<PathBuf, BuildError> {
             return Err(error("git init --bare failed"));
         }
     }
-    for (key, value) in [
-        ("core.hooksPath", "/dev/null"),
-        ("gc.auto", "0"),
-        ("receive.denyDeletes", "false"),
+    for (setting, value) in [
+        (StoreSetting::HooksPath, "/dev/null"),
+        (StoreSetting::GcAuto, "0"),
+        (StoreSetting::ReceiveDenyDeletes, "false"),
     ] {
-        let tail = [OsString::from(key), OsString::from(value)];
-        let status = provenant_os::git_config::write(&tail, |args| {
-            git().arg("--git-dir").arg(&store).args(args).status()
-        })
-        .map_err(io_error)?;
+        let context = ConfigContext::new("configure bare Git store", store.join("config"), None);
+        let status = provenant_os::git_config::write(
+            context,
+            ConfigMutation::SetStore {
+                setting,
+                value: value.into(),
+            },
+            |args| git().arg("--git-dir").arg(&store).args(args).status(),
+        )
+        .map_err(|failure| io_error(failure.source))?;
         if !status.success() {
-            return Err(error(format!("git config {key} failed")));
+            return Err(error(format!("git config {} failed", setting.key())));
         }
     }
     Ok(store)

@@ -903,7 +903,7 @@ pub(crate) fn base_env_with_host(
     ];
     env.extend(
         provenant_os::git_config::identity(
-            provenant_os::git_config::ConfigRead {
+            provenant_os::git_config::ConfigContext {
                 operation: "read Git identity",
                 file: input.cwd.to_owned(),
                 key: None,
@@ -1889,7 +1889,7 @@ mod git_tests {
                     .success()
             );
         }
-        let context = provenant_os::git_config::ConfigRead {
+        let context = provenant_os::git_config::ConfigContext {
             operation: "read Git identity",
             file: dir.path().to_owned(),
             key: None,

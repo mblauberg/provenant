@@ -34,7 +34,7 @@ fn git_hooks_path_helper(arguments: Vec<OsString>) -> ExitCode {
     let Ok(cwd) = std::env::current_dir() else {
         return git_hooks_path_error();
     };
-    let context = provenant_os::git_config::ConfigRead {
+    let context = provenant_os::git_config::ConfigContext {
         operation: "read Git hooks path",
         file: PathBuf::from("<effective Git configuration>"),
         key: Some("core.hooksPath"),

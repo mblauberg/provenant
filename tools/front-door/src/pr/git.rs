@@ -255,7 +255,7 @@ impl Git {
         request: provenant_os::git_config::Read<'_>,
     ) -> Result<Option<String>> {
         self.with_repo(dir, |repo| {
-            let context = provenant_os::git_config::ConfigRead {
+            let context = provenant_os::git_config::ConfigContext {
                 operation,
                 file: repo.common_git_dir().join("config"),
                 key,
@@ -274,19 +274,33 @@ impl Git {
                 .then(|| String::from_utf8_lossy(&output.stdout.bytes).into_owned()))
         })
     }
-    pub(super) fn config_write(&self, dir: &Path, tail: &[&str]) -> Result<()> {
-        let tail: Vec<std::ffi::OsString> = tail.iter().map(std::ffi::OsString::from).collect();
-        provenant_os::git_config::write(&tail, |command| {
-            let args = command
-                .iter()
-                .map(|arg| {
-                    arg.to_str()
-                        .ok_or_else(|| "Git config argument is not UTF-8".to_owned())
-                })
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let (success, detail) = self.run(dir, &args)?;
-            if success { Ok(()) } else { Err(detail.into()) }
-        })
+    /// Drop the branch's tracking section after a successful delete. The core
+    /// builds the mutation; this method only supplies the process policy.
+    pub(super) fn config_remove_branch_section(&self, dir: &Path, branch: &str) -> Result<()> {
+        use provenant_os::git_config::{ConfigContext, ConfigMutation};
+        let context = ConfigContext::new(
+            "remove landed branch configuration",
+            dir.join(".git/config"),
+            Some("branch section"),
+        );
+        provenant_os::git_config::write(
+            context,
+            ConfigMutation::RemoveBranchSection {
+                branch: branch.to_owned(),
+            },
+            |command| {
+                let args = command
+                    .iter()
+                    .map(|arg| {
+                        arg.to_str()
+                            .ok_or_else(|| "Git config argument is not UTF-8".to_owned())
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let (success, detail) = self.run(dir, &args)?;
+                if success { Ok(()) } else { Err(detail.into()) }
+            },
+        )
+        .map_err(|failure| failure.source)
     }
     pub(super) fn full(&self, dir: &Path, args: &[&str]) -> Result<Option<String>> {
         let mut argv = vec![self.executable.as_str()];

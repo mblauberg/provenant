@@ -981,7 +981,7 @@ fn delete_branch(
                 // only when no other process has recreated the branch meanwhile.
                 let recreated = git.branch_ref(project, branch)?.is_some();
                 if !recreated {
-                    git.config_write(project, &["--remove-section", &format!("branch.{branch}")])?;
+                    git.config_remove_branch_section(project, branch)?;
                 }
                 Step::new("branch", Status::Done, format!("{branch} deleted"))
             }

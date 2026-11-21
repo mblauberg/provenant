@@ -221,9 +221,23 @@ fn git(cwd: &Path, home: &Path, args: &[&str]) -> Result<()> {
     git_command(cwd, home, &args)
 }
 
-fn git_config_write(cwd: &Path, home: &Path, tail: &[&str]) -> Result<()> {
-    let tail: Vec<std::ffi::OsString> = tail.iter().map(std::ffi::OsString::from).collect();
-    provenant_os::git_config::write(&tail, |args| git_command(cwd, home, args))
+fn git_config_identity(
+    cwd: &Path,
+    home: &Path,
+    field: provenant_os::git_config::IdentityField,
+    value: &str,
+) -> Result<()> {
+    use provenant_os::git_config::{ConfigContext, ConfigMutation};
+    let context = ConfigContext::new("set fixture Git identity", cwd.join(".git/config"), None);
+    provenant_os::git_config::write(
+        context,
+        ConfigMutation::SetIdentity {
+            field,
+            value: value.into(),
+        },
+        |args| git_command(cwd, home, args),
+    )
+    .map_err(|failure| failure.source)
 }
 
 struct Layout {
@@ -263,8 +277,18 @@ fn layout(root: &Path, writer: bool) -> Result<Layout> {
     std::fs::write(layout.repo.join("README.md"), "Probe repository.\n")?;
     let home = &layout.home_git;
     git(&layout.repo, home, &["init", "-q", "-b", "main"])?;
-    git_config_write(&layout.repo, home, &["user.name", "Probe"])?;
-    git_config_write(&layout.repo, home, &["user.email", "probe@example.invalid"])?;
+    git_config_identity(
+        &layout.repo,
+        home,
+        provenant_os::git_config::IdentityField::Name,
+        "Probe",
+    )?;
+    git_config_identity(
+        &layout.repo,
+        home,
+        provenant_os::git_config::IdentityField::Email,
+        "probe@example.invalid",
+    )?;
     git(&layout.repo, home, &["add", "."])?;
     git(&layout.repo, home, &["commit", "-q", "-m", "probe"])?;
     if writer {

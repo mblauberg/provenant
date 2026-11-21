@@ -316,7 +316,7 @@ pub enum WorktreeError {
     #[error(transparent)]
     Filesystem(#[from] FsError),
     #[error(transparent)]
-    GitConfigRead(Box<provenant_os::git_config::ConfigReadError<UtilityError>>),
+    GitConfigRead(Box<provenant_os::git_config::ConfigError<UtilityError>>),
     #[error(transparent)]
     Utility(#[from] UtilityError),
     #[error(transparent)]

@@ -349,8 +349,8 @@ fn check_transport(
         kind: (&error).into(),
         reason: error.to_string(),
     };
-    let ctx = transport::ConfigRead::new("check effective transport configuration", cwd, None);
-    let core_context = provenant_os::git_config::ConfigRead {
+    let ctx = transport::ConfigContext::new("check effective transport configuration", cwd, None);
+    let core_context = provenant_os::git_config::ConfigContext {
         operation: "check effective transport configuration",
         file: cwd.to_path_buf(),
         key: None,
@@ -373,9 +373,10 @@ fn check_transport(
             read_git_with_env(executor, git, cwd, &args, CONTEXT_LIMIT, transport_env)
         },
     )
-    .map_err(|error| refusal(ctx.unreadable(error.source)))?;
+    .map_err(|error| refusal(transport::unreadable(&ctx, error.source)))?;
     if timed_out || listing.truncated {
-        return Err(refusal(ctx.unreadable(
+        return Err(refusal(transport::unreadable(
+            &ctx,
             "Git configuration listing was incomplete or timed out",
         )));
     }
