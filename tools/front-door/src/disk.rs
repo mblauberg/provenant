@@ -99,7 +99,10 @@ fn render(
     // a compact view of an oversized result is still an oversized result.
     let oversized = !json && full_bytes > provenant_cli::MAX_RESULT_BYTES;
     const SOURCE: &str = "COMMAND_RESULT_MAX_BYTES";
-    const REPAIR: &str = "narrow it with --since and --until";
+    // `disk report` takes no narrowing flags; point at a real, read-only
+    // command that previews reclaim candidates instead of naming flags it
+    // does not have.
+    const REPAIR: &str = "preview reclaim candidates with `provenant gc --dry-run`";
     let clipped;
     let mode = if oversized {
         let (text, omitted) =
@@ -127,7 +130,11 @@ fn render(
                 "source": SOURCE,
                 "repair": REPAIR,
             });
-            let bounded = CommandResult::new("disk report", Outcome::Ok, Some(marker));
+            let mut bounded = CommandResult::new("disk report", result.status, Some(marker));
+            bounded.error = result
+                .error
+                .as_ref()
+                .map(|error| provenant_cli::bounded_error(error, 512));
             let _ = provenant_cli::render(&bounded, RenderMode::Json, stdout);
             provenant_cli::exit_status(&result.status)
         }
@@ -163,7 +170,7 @@ fn render(
 fn warn_capped(omitted: usize, stderr: &mut impl io::Write) {
     let _ = writeln!(
         stderr,
-        "warning: [RESULT_TOO_LARGE] disk report exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); showing a bounded view with {omitted} bytes omitted; narrow it with --since and --until"
+        "warning: [RESULT_TOO_LARGE] disk report exceeds 1 MiB (source: COMMAND_RESULT_MAX_BYTES); showing a bounded view with {omitted} bytes omitted; preview reclaim candidates with `provenant gc --dry-run`"
     );
 }
 

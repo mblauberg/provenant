@@ -566,7 +566,11 @@ fn render(
                 "source": source,
                 "repair": repair,
             });
-            let bounded = CommandResult::new(&result.command, Outcome::Ok, Some(marker));
+            let mut bounded = CommandResult::new(&result.command, result.status, Some(marker));
+            bounded.error = result
+                .error
+                .as_ref()
+                .map(|error| provenant_cli::bounded_error(error, 512));
             let _ = provenant_cli::render(&bounded, RenderMode::Json, stdout);
             provenant_cli::exit_status(&result.status)
         }

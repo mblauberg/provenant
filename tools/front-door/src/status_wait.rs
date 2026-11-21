@@ -1385,8 +1385,43 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             use std::io::Write;
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "warning: [TARGET_REQUIRED] wait inside a lane named no targets (source: owner relay); waiting on this lane's children and relay-discovered targets"
+                "warning: [TARGET_REQUIRED] wait inside a lane named no targets; waiting on this lane's children through the owner relay"
             );
+            // The local project journal is unavailable inside a lane and the
+            // project-wide unsettled set would include this lane's own pending
+            // graph, so an all-mode wait could never settle. Discover the
+            // lane's children through the relay and wait for those instead.
+            let within = deadline.saturating_duration_since(Instant::now());
+            return match provenant_cli::fabric::graph_relay::wait_for_children(
+                &stop.cancel,
+                within,
+                cadence.interval,
+            ) {
+                Ok(_settled_children) => 0,
+                Err(error) => match error.code() {
+                    "cancelled" => crate::fail(
+                        "wait",
+                        Outcome::Cancelled,
+                        "CANCELLED",
+                        "wait cancelled; the work continues",
+                        globals,
+                    ),
+                    "timeout" => crate::fail(
+                        "wait",
+                        Outcome::Timeout,
+                        "TIMEOUT",
+                        "wait timed out; the work continues",
+                        globals,
+                    ),
+                    _ => crate::fail(
+                        "wait",
+                        Outcome::Error,
+                        "CHILD_WAIT",
+                        &format!("cannot wait on this lane's children: {error}"),
+                        globals,
+                    ),
+                },
+            };
         }
         match provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
             crate::fabric::unsettled_graphs(&edge, deadline, &stop.cancel)

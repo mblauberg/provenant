@@ -102,9 +102,9 @@ fn entry_path(entry: &serde_json::Value) -> Option<PathBuf> {
 /// The worktree already holding `branch` that this hook can reuse. A clean,
 /// idle worktree is adopted with a warning even when it is off the hook's usual
 /// path or carries no ownership record: those are preferences, not boundaries.
-/// The primary checkout, a live writer, uncommitted files and an unknown path or
-/// layout stay refused. `Err(None)` means no worktree holds the branch, so the
-/// create failure stands alone.
+/// The primary checkout, a live or held writer, uncommitted files and an unknown
+/// path or layout stay refused. `Err(None)` means no worktree holds the branch,
+/// so the create failure stands alone.
 fn reusable(
     state: &Path,
     list: &serde_json::Value,
@@ -130,10 +130,12 @@ fn reusable(
         Err(_) => return refuse("the repository worktree layout is unavailable"),
     };
     // `unknown` is common (any process the owner cannot inspect makes every
-    // writer unknown), so only a live writer refuses here; ownership and path
-    // are the hook's own preferences, warned about and adopted below.
-    if holder["writer"] == "live" {
-        return refuse("a writer is live in it");
+    // writer unknown), so only an actually occupied writer refuses here.
+    // `Observed` renders as `live` and `Held` (an active writer lease) as
+    // `busy`; both mean another writer owns the tree, a real boundary.
+    // Ownership and path are the hook's own preferences, adopted below.
+    if matches!(holder["writer"].as_str(), Some("live" | "busy")) {
+        return refuse("a writer is live or holds a lease in it");
     }
     if holder["dirty"] != "clean" {
         return refuse("it has uncommitted or ignored files");
@@ -338,10 +340,11 @@ pub fn remove(globals: &Globals) -> u8 {
         let cli = Cli::new(globals, &cwd, &executor)?;
         let deadline = cli.deadline_after(WORK_TIME);
         let list = cli.data(&["worktree", "list"], LIST_TIME, deadline)?;
-        // A clean, idle tree a person created is adopted with a warning, not
-        // refused for lacking a hook record or a project listing. The owner's
-        // `worktree remove` below still refuses dirty, live-writer and primary
-        // trees, so the real boundaries stay enforced.
+        // The target must be a worktree this repository lists. Besides being
+        // an identity check, this keeps the basename-based `worktree remove`
+        // below from resolving an unlisted path to a different listed tree
+        // that happens to share the name. A person-created tree is listed by
+        // Git, so adoption still works; ownership alone stays a preference.
         let listed = list
             .as_array()
             .map_or(&[][..], Vec::as_slice)
@@ -350,10 +353,7 @@ pub fn remove(globals: &Globals) -> u8 {
             .filter_map(entry_path)
             .any(|path| std::fs::canonicalize(path).is_ok_and(|path| path == target));
         if !listed {
-            warn_adopt(
-                "worktree-remove",
-                &"Provenant does not list this worktree for the project",
-            );
+            return Err("not a linked worktree that Provenant lists for this project".into());
         }
         // HEAD may have moved on, so only the records are checked.
         let state = state_root(globals, &cwd)?;
@@ -419,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn reusable_adopts_a_clean_idle_tree_and_refuses_dirty_or_live() {
+    fn reusable_adopts_a_clean_idle_tree_and_refuses_dirty_or_occupied() {
         use super::*;
         use serde_json::json;
         fn entry(path: &str, branch: &str, dirty: &str, writer: &str) -> serde_json::Value {
@@ -443,18 +443,23 @@ mod tests {
             PathBuf::from("/adopted"),
             "a clean, idle tree is adopted even off-path and unowned"
         );
+        // "dirty" is the real WorktreeCondition label in `worktree list`.
         let dirty = json!([
             primary.clone(),
-            entry("adopted", branch, "staged", "unknown")
+            entry("adopted", branch, "dirty", "unknown")
         ]);
         assert!(
             reusable(state, &dirty, branch).is_err(),
             "dirty tree stays refused"
         );
-        let live = json!([primary, entry("adopted", branch, "clean", "live")]);
-        assert!(
-            reusable(state, &live, branch).is_err(),
-            "live writer stays refused"
-        );
+        // "live" is Observed; "busy" is Held, an active writer lease. Both
+        // mean another writer owns the tree and must stay refused.
+        for writer in ["live", "busy"] {
+            let occupied = json!([primary.clone(), entry("adopted", branch, "clean", writer)]);
+            assert!(
+                reusable(state, &occupied, branch).is_err(),
+                "writer={writer} stays refused"
+            );
+        }
     }
 }

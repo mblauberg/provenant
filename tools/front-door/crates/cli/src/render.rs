@@ -121,8 +121,16 @@ pub fn bounded_text(text: &str, max: usize) -> String {
 /// Whole text up to `max` bytes; above it, the head and the tail with a marker
 /// that names how many bytes were left out and how to read them.
 pub fn head_and_tail(text: &str, max: usize) -> String {
+    head_and_tail_counted(text, max).0
+}
+
+/// `head_and_tail` together with the exact number of *original* bytes omitted.
+/// The count is the bytes between head and tail, which is what the in-text
+/// marker names; it is not `text.len() - result.len()`, because the result
+/// contains the inserted marker.
+fn head_and_tail_counted(text: &str, max: usize) -> (String, usize) {
     if text.len() <= max {
-        return text.into();
+        return (text.into(), 0);
     }
     let half = max / 2;
     let mut head = half.min(text.len());
@@ -146,12 +154,14 @@ pub fn head_and_tail(text: &str, max: usize) -> String {
         }
     }
     let tail = tail.min(text.len());
-    format!(
+    let omitted = tail - head;
+    let bounded = format!(
         "{}[... {} bytes omitted; use --full for all of it ...]\n{}",
         &text[..head],
-        tail - head,
+        omitted,
         &text[tail..]
-    )
+    );
+    (bounded, omitted)
 }
 
 /// A bounded presentation for surfaces that warn and proceed on an oversized
@@ -160,13 +170,27 @@ pub fn head_and_tail(text: &str, max: usize) -> String {
 /// marker. Returns the clipped text and how many bytes were left out.
 pub fn clip_for_output(text: &str, limit: usize) -> (String, usize) {
     const RESERVE: usize = 96;
-    let clipped = head_and_tail(text, limit.saturating_sub(RESERVE));
+    let (clipped, omitted) = head_and_tail_counted(text, limit.saturating_sub(RESERVE));
     if clipped.len() <= limit {
-        let omitted = text.len().saturating_sub(clipped.len());
         (clipped, omitted)
     } else {
         (bounded_text(text, limit), text.len().saturating_sub(limit))
     }
+}
+/// A bounded copy of an error for a capped result view: it keeps the typed
+/// code, repair and diagnostic while shortening the free-form text so a large
+/// failure is still reported without reintroducing the overflow.
+pub fn bounded_error(
+    error: &provenant_records::CommandError,
+    max: usize,
+) -> provenant_records::CommandError {
+    let mut bounded = error.clone();
+    bounded.message = head_and_tail(&error.message, max);
+    bounded.cause = error
+        .cause
+        .as_deref()
+        .map(|cause| head_and_tail(cause, max));
+    bounded
 }
 /// The generic fallback for an owner with no summary: small text is shown
 /// whole; larger text keeps its first rows and says how much was left out.
@@ -611,6 +635,23 @@ mod tests {
         assert!(bounded.contains("bytes omitted"), "{bounded}");
     }
     #[test]
+    fn clip_for_output_reports_the_exact_bytes_the_in_text_marker_names() {
+        let text = format!("{}{}", "a".repeat(4096), "z".repeat(4096));
+        let (clipped, omitted) = clip_for_output(&text, 512);
+        assert!(clipped.len() <= 512, "{} exceeds the cap", clipped.len());
+        let named = clipped
+            .split("[... ")
+            .nth(1)
+            .and_then(|rest| rest.split(" bytes omitted;").next())
+            .and_then(|count| count.parse::<usize>().ok())
+            .expect("the bounded view carries an in-text omission marker");
+        assert_eq!(
+            omitted, named,
+            "the caller's count must match the marker, not text.len() - clipped.len()"
+        );
+        assert!(omitted > 0 && omitted < text.len());
+    }
+    #[test]
     fn full_shows_the_owner_text_then_the_typed_next() -> Result<(), Box<dyn std::error::Error>> {
         let summary = Summary::next_only(Some("provenant output aaaa".into()));
         let result = CommandResult::new("lanes", Outcome::Ok, ());
@@ -1044,11 +1085,12 @@ pub fn render_or_publish<T: Serialize>(
     match first {
         Ok(()) => Ok(result.status),
         Err(RenderError::TooLarge) => {
-            let (code, message, artifact) = match publish(result) {
+            let published = publish(result);
+            let (code, message, artifact) = match &published {
                 Ok(path) => (
                     "RESULT_TOO_LARGE",
                     "result exceeds 1 MiB; read the published artifact",
-                    Some(path),
+                    Some(path.clone()),
                 ),
                 Err(_) => (
                     "IO",
@@ -1092,7 +1134,14 @@ pub fn render_or_publish<T: Serialize>(
                 let text_result = CommandResult::new(&result.command, Outcome::Error, ());
                 render(&text_result, fallback_mode, stderr)?;
             }
-            Ok(Outcome::Error)
+            // A published overflow is not a command failure: hand TooLarge back
+            // so the composition root can warn and proceed with the original
+            // status. A failed publication is a real IO failure and still exits.
+            if published.is_ok() {
+                Err(RenderError::TooLarge)
+            } else {
+                Ok(Outcome::Error)
+            }
         }
         Err(error) => Err(error),
     }
@@ -1136,7 +1185,7 @@ mod overflow_tests {
         let mut output = Vec::new();
         let mut errors = Vec::new();
         let mut published = 0;
-        let status = render_or_publish(
+        let outcome = render_or_publish(
             &result,
             RenderMode::Human {
                 text: receipt,
@@ -1150,8 +1199,10 @@ mod overflow_tests {
                 provenant_records::AbsolutePath::new(std::path::Path::new("/fixture/result.json"))
                     .map_err(io::Error::other)
             },
-        )?;
-        assert_eq!(status, Outcome::Error);
+        );
+        // An oversized launch receipt is paged and handed back as TooLarge so
+        // the composition root can warn and proceed with the original status.
+        assert!(matches!(outcome, Err(RenderError::TooLarge)), "{outcome:?}");
         assert_eq!(published, 1);
         assert!(output.is_empty());
         assert!(String::from_utf8(errors)?.contains("RESULT_TOO_LARGE"));
@@ -1164,7 +1215,7 @@ mod overflow_tests {
         let result = CommandResult::new("dispatch", Outcome::Ok, "x".repeat(MAX_RESULT_BYTES));
         let mut output = Vec::new();
         let mut published = 0;
-        let status = render_or_publish(
+        let outcome = render_or_publish(
             &result,
             RenderMode::Json,
             &mut output,
@@ -1174,8 +1225,8 @@ mod overflow_tests {
                 provenant_records::AbsolutePath::new(std::path::Path::new("/fixture/result.json"))
                     .map_err(io::Error::other)
             },
-        )?;
-        assert_eq!(status, Outcome::Error);
+        );
+        assert!(matches!(outcome, Err(RenderError::TooLarge)), "{outcome:?}");
         assert_eq!(published, 1);
         let value: serde_json::Value = serde_json::from_slice(&output)?;
         assert_eq!(value["error"]["code"], "RESULT_TOO_LARGE");
