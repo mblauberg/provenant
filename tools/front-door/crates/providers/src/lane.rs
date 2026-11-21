@@ -2830,6 +2830,13 @@ mod tests {
         use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
         use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
+        // Captured output is masked by the executor's default stream filter,
+        // which applies local-disclosure redaction only under `Mode::Full`.
+        // This fixture used to install a `Redactor::new([])` filter of its own;
+        // opting into the mode is now what activates the equivalent masking at
+        // the capture boundary. The assertions below are unchanged.
+        let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
+
         let temp = tempfile::tempdir()?;
         let root = temp.path().canonicalize()?;
         let home = root.join("home fixture's directory");
