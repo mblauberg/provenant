@@ -729,15 +729,24 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
             std::fs::write(&path, serde_json::to_vec(&record)?)?;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         }
-        // These credential and usage refusals are isolated, sandboxed
-        // behaviour: host access uses native login and proceeds with warnings,
-        // and the managed token refresh that inspects the credential source
-        // only runs under a sandbox.
+        // The authority and refresh scenarios pin credential refusals, which
+        // are isolated, sandboxed behaviour: host access uses native login and
+        // proceeds with warnings, and the managed token refresh that inspects
+        // the credential source only runs under a sandbox. The quota scenario
+        // now launches the exact pinned route to pin the advisory warning, so
+        // it must not demand a sandbox the platform cannot enforce: host access
+        // launches without one on every CI platform.
         {
             let config = rig.state.join("config.toml");
             let mut settings: toml_edit::DocumentMut = std::fs::read_to_string(&config)?.parse()?;
-            settings["knobs"]["lanes.access"] = toml_edit::value("isolated");
-            settings["knobs"]["lanes.sandbox"] = toml_edit::value("on");
+            settings["knobs"]["lanes.access"] = toml_edit::value(if scenario == "quota" {
+                "host"
+            } else {
+                "isolated"
+            });
+            if scenario != "quota" {
+                settings["knobs"]["lanes.sandbox"] = toml_edit::value("on");
+            }
             std::fs::write(config, settings.to_string())?;
         }
         std::fs::write(
