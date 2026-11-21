@@ -50,8 +50,11 @@ fn peer_remote_base_pins_a_commit_reachable_from_the_remote()
     }
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
-    provenant_os::fixture::run_git(&remote, &["init", "--bare", "-q"])?;
-    provenant_os::fixture::run_git(&project, &["init", "-q"])?;
+    provenant_os::fixture::run_git(
+        &remote,
+        &["init", "--bare", "-q", "--initial-branch=main"],
+    )?;
+    provenant_os::fixture::run_git(&project, &["init", "-q", "--initial-branch=main"])?;
     provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
     provenant_os::fixture::run_git(
         &project,
@@ -323,7 +326,13 @@ fn peer_base_resolution_fetches_a_commit_missing_from_a_stale_clone()
     let origin = temp.path().join("origin.git");
     let upstream = temp.path().join("upstream");
     std::fs::create_dir_all(&origin)?;
-    provenant_os::fixture::run_git(&origin, &["init", "--bare", "-q"])?;
+    // Name the branch in the bare repo itself: a clone checks out the branch
+    // Git advertises as HEAD, and a clone on an unborn default branch would
+    // root its commit and then be rejected as non-fast-forward.
+    provenant_os::fixture::run_git(
+        &origin,
+        &["init", "--bare", "-q", "--initial-branch=main"],
+    )?;
     // Seed the peer clone's origin at the commit the peer already has.
     provenant_os::fixture::run_git(
         &rig.project,
@@ -335,12 +344,15 @@ fn peer_base_resolution_fetches_a_commit_missing_from_a_stale_clone()
         &["rev-parse", "HEAD"],
     )?)?;
     let base = base.trim().to_owned();
-    // Move the origin forward from a separate clone; the peer clone is behind.
+    // Move the origin forward from a separate clone of main; the peer clone is
+    // behind, and the advance is a descendant, so no push rewrites the origin.
     provenant_os::fixture::run_git(
         temp.path(),
         &[
             "clone",
             "-q",
+            "--branch",
+            "main",
             origin.to_str().ok_or("origin path")?,
             upstream.to_str().ok_or("upstream path")?,
         ],
@@ -348,6 +360,15 @@ fn peer_base_resolution_fetches_a_commit_missing_from_a_stale_clone()
     provenant_os::fixture::run_git(&upstream, &["config", "user.name", "Fixture"])?;
     provenant_os::fixture::run_git(&upstream, &["config", "user.email", "fixture@example.invalid"])?;
     provenant_os::fixture::run_git(&upstream, &["commit", "--allow-empty", "-qm", "ahead"])?;
+    let merge_base = String::from_utf8(provenant_os::fixture::run_git(
+        &upstream,
+        &["merge-base", &base, "HEAD"],
+    )?)?;
+    assert_eq!(
+        merge_base.trim(),
+        base,
+        "the advanced origin must descend from the peer's base"
+    );
     provenant_os::fixture::run_git(&upstream, &["push", "origin", "HEAD:refs/heads/main"])?;
     let ahead = String::from_utf8(provenant_os::fixture::run_git(&upstream, &["rev-parse", "HEAD"])?)?;
     let ahead = ahead.trim().to_owned();
