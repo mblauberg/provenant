@@ -735,7 +735,7 @@ fn git_config_violations(source: &str, test_file: bool) -> Vec<String> {
         ),
         (
             "Git method config argv",
-            r#"(?s)\bgit\s*\.\s*(?:full|run)\s*\([^;]*?"config""#,
+            r#"(?s)\b(?:git|self)\s*\.\s*(?:full|run)\s*\([^;]*?"config""#,
         ),
         (
             "Git helper config argv",
@@ -751,7 +751,7 @@ fn git_config_violations(source: &str, test_file: bool) -> Vec<String> {
         ),
         (
             "raw config mutation argv",
-            r#"(?s)"config"\s*,\s*"--(?:local|replace-all|remove-section|unset|unset-all|add|set)""#,
+            r#"(?s)"config"\s*,\s*"--(?:local|file|replace-all|remove-section|unset|unset-all|add|set)""#,
         ),
     ];
     let tests = selected_test_scopes(source, test_file, false);
@@ -794,6 +794,9 @@ fn git_config_rule_detects_raw_argv_and_spares_test_scopes() {
         r#"fn f() { git(repo, home, &["config", "user.name", "Probe"]); }"#,
         r#"fn f(repo: &Path, git: &Git) { git.full(repo, &["config", "--get", "core.worktree"]); }"#,
         r#"fn f(repo: &Path, git: &Git) { git.run(repo, &["config", "--list"]); }"#,
+        r#"fn f(dir: &Path) { self.full(dir, &["config", "--get", "core.worktree"]); }"#,
+        r#"fn f(dir: &Path) { self.run(dir, &["config", "user.name", "Probe"]); }"#,
+        r#"fn f() { mutate(&["config", "--file", "cfg", "user.name", "Probe"]); }"#,
         r#"fn f() { execute_for(repo, &["git", "config"], timeout, false); }"#,
         r#"fn f() { local_git(git, cwd, &["config", "--get", "branch.lane.remote"]); }"#,
         r#"fn f() { let run = |args| host_git_with_cancel(repo, executor, args, timeout, false, None); run(&["config", "--get", "remote.origin.url"]); }"#,
