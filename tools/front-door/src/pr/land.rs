@@ -254,8 +254,12 @@ fn discover_checkouts(git: &Git, project: &Path) -> Result<Vec<Checkout>> {
 
     // Git may list the separate Git directory instead of the primary path.
     // core.worktree, when configured, is relative to the Git directory.
-    if let Some(value) = git.full(project, &["config", "--path", "--get", "core.worktree"])?
-        && let Ok(candidate) = fs::canonicalize(common.join(value.trim_end_matches('\n')))
+    if let Some(value) = git.config_full(
+        project,
+        "read configured worktree path",
+        Some("core.worktree"),
+        provenant_os::git_config::Read::GetPath("core.worktree"),
+    )? && let Ok(candidate) = fs::canonicalize(common.join(value.trim_end_matches('\n')))
         && valid(&candidate)?
     {
         checkouts[0].path = candidate;
@@ -977,10 +981,7 @@ fn delete_branch(
                 // only when no other process has recreated the branch meanwhile.
                 let recreated = git.branch_ref(project, branch)?.is_some();
                 if !recreated {
-                    git.run(
-                        project,
-                        &["config", "--remove-section", &format!("branch.{branch}")],
-                    )?;
+                    git.config_remove_branch_section(project, branch)?;
                 }
                 Step::new("branch", Status::Done, format!("{branch} deleted"))
             }

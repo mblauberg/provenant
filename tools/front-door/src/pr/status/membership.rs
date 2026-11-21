@@ -484,11 +484,40 @@ fn resolve_base(project: &Path, name: &str) -> Option<String> {
 
 /// The remote a landing candidate is published to, defaulting as landing does.
 fn candidate_remote(project: &Path) -> String {
-    execute_for(
-        project,
-        &["config", "--get", "branch..remote"],
-        GIT_TIMEOUT,
-        false,
+    let context = provenant_os::git_config::ConfigContext {
+        operation: "read candidate branch remote",
+        file: project.join(".git/config"),
+        key: Some("branch tracking key"),
+    };
+    provenant_os::git_config::read(
+        context,
+        provenant_os::git_config::Read::Get("branch..remote"),
+        |command| {
+            let git = provenant_os::git::git_executable()
+                .ok_or_else(|| "Git executable is unavailable".to_owned())?;
+            let mut argv = vec![
+                git.to_str()
+                    .ok_or_else(|| "Git executable path is not UTF-8".to_owned())?
+                    .to_owned(),
+            ];
+            argv.extend(
+                command
+                    .iter()
+                    .map(|arg| {
+                        arg.to_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| "Git config argument is not UTF-8".to_owned())
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+            );
+            execute_for(
+                project,
+                &argv.iter().map(String::as_str).collect::<Vec<_>>(),
+                GIT_TIMEOUT,
+                false,
+            )
+            .map_err(|error| error.to_string())
+        },
     )
     .ok()
     .and_then(|out| successful(out).ok())

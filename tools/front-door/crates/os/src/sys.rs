@@ -12,32 +12,6 @@ use thiserror::Error;
 #[allow(unsafe_code)]
 pub(crate) mod build_group;
 
-/// Read the host's effective Git identity before preparing a lane.
-#[allow(clippy::disallowed_methods)]
-pub fn git_identity(git: &Path, cwd: &Path) -> Vec<(OsString, OsString)> {
-    let mut env = Vec::new();
-    for (config, author, committer) in [
-        ("user.name", "GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"),
-        ("user.email", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"),
-    ] {
-        let output = std::process::Command::new(git)
-            .current_dir(cwd)
-            .args(["config", "--get", config])
-            .output();
-        if let Ok(output) = output
-            && output.status.success()
-            && let Ok(value) = String::from_utf8(output.stdout)
-        {
-            let value = value.strip_suffix('\n').unwrap_or(&value);
-            if !value.is_empty() {
-                env.push((author.into(), value.into()));
-                env.push((committer.into(), value.into()));
-            }
-        }
-    }
-    env
-}
-
 #[derive(Debug, Error)]
 #[error("{operation} failed")]
 pub struct SysError {

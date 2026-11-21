@@ -62,6 +62,8 @@ pub enum GitTransportError {
     Store(#[from] StoreError),
     #[error("Git supervisor execution failed")]
     Execution(#[from] ExecError),
+    #[error(transparent)]
+    ConfigRead(Box<provenant_os::git_config::ConfigError<GitTransportError>>),
 }
 
 impl GitTransportError {
@@ -71,6 +73,7 @@ impl GitTransportError {
             Self::Store(error) => {
                 crate::coordination::facade::FacadeError::from(error).static_code()
             }
+            Self::ConfigRead(error) => error.source.code(),
             Self::Invalid(_) | Self::InvalidRemote => "invalid_input",
             Self::DirtyWorktree
             | Self::IncompleteRepository
@@ -670,21 +673,26 @@ impl<'a> GitTransport<'a> {
     }
 
     fn refuse_url_rewrites(&self, repository: &Path, cancel: &CancelToken) -> Result<()> {
-        let args = strings(&[
-            "config",
-            "--includes",
-            "--null",
-            "--get-regexp",
-            r"^url\..*\.(insteadof|pushinsteadof)$",
-        ]);
-        let outcome = self.run_git(
-            "check URL rewrites",
-            repository,
-            &args,
-            None,
-            MAX_TEXT_BYTES,
-            cancel,
-        )?;
+        let context = provenant_os::git_config::ConfigContext {
+            operation: "check Git URL rewrites",
+            file: repository.join(".git/config"),
+            key: Some("url rewrite"),
+        };
+        let outcome = provenant_os::git_config::read(
+            context,
+            provenant_os::git_config::Read::UrlRewrites,
+            |args| {
+                self.run_git(
+                    "check URL rewrites",
+                    repository,
+                    args,
+                    None,
+                    MAX_TEXT_BYTES,
+                    cancel,
+                )
+            },
+        )
+        .map_err(|error| GitTransportError::ConfigRead(Box::new(error)))?;
         if outcome.termination == Termination::Exit(1) && outcome.stdout.bytes.is_empty() {
             Ok(())
         } else {

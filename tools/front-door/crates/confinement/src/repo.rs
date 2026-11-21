@@ -1168,27 +1168,32 @@ fn config_parser_metadata(git: &Path) -> Result<Metadata, RepoError> {
 
 fn parse_common_config(git: &Path, bytes: &[u8]) -> Result<Vec<u8>, RepoError> {
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
-    let argv = [
-        git.as_os_str().to_owned(),
-        "config".into(),
-        "--file".into(),
-        "-".into(),
-        // Git refuses relative includes from stdin; included files have their
-        // own digest, so the snapshot is parsed without following them.
-        "--no-includes".into(),
-        "--null".into(),
-        "--list".into(),
-    ];
-    // Parsing needs no repository; running outside the worktree keeps Git's
-    // discovery from failing on the damaged metadata this check exists to report.
-    let mut options = ExecOptions::new(&argv, Path::new("/"), std::time::Duration::from_secs(2));
-    options.stdin = Some(bytes);
-    options.env = Some(&[]);
-    options.stdout = StreamPolicy::Capture {
-        limit: CONFIG_LIMIT as usize * 2,
+    let context = provenant_os::git_config::ConfigContext {
+        operation: "normalise common Git configuration",
+        file: PathBuf::from("<common config>"),
+        key: None,
     };
-    options.stop_on_output_limit = true;
-    normalised_config_output(SystemExecutor::new(1).and_then(|executor| executor.execute(options)))
+    provenant_os::git_config::read(context, provenant_os::git_config::Read::Snapshot, |args| {
+        let mut argv = vec![git.as_os_str().to_owned()];
+        argv.extend_from_slice(args);
+        // No repository discovery: this check also handles damaged metadata.
+        let mut options =
+            ExecOptions::new(&argv, Path::new("/"), std::time::Duration::from_secs(2));
+        options.stdin = Some(bytes);
+        options.env = Some(&[]);
+        options.stdout = StreamPolicy::Capture {
+            limit: CONFIG_LIMIT as usize * 2,
+        };
+        options.stop_on_output_limit = true;
+        normalised_config_output(
+            SystemExecutor::new(1).and_then(|executor| executor.execute(options)),
+        )
+    })
+    // The core's context adds nothing beyond the specific, secret-free
+    // normalisation diagnosis in `source`. Surface that diagnosis instead of
+    // hiding it behind a context-only transparent wrapper whose `Display`
+    // drops the reason a caller needs.
+    .map_err(|error| error.source)
 }
 
 // Operational parser failures say nothing about the directory's ownership,

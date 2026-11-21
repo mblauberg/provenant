@@ -257,10 +257,13 @@ fn remote_url_for_repo(
     target_repo: &str,
 ) -> Result<String> {
     let remote_name = git.remote_of(dir, branch)?;
+    let config_key = format!("remote.{remote_name}.url");
     let configured_url = git
-        .full(
+        .config_full(
             dir,
-            &["config", "--get", &format!("remote.{remote_name}.url")],
+            "read remote URL configuration",
+            Some("remote URL"),
+            provenant_os::git_config::Read::Get(&config_key),
         )?
         .map(|s| s.trim().to_owned());
     if let Some(url) = configured_url {

@@ -255,7 +255,9 @@ impl From<&provenant_confinement::transport::TransportError> for TransportRefusa
         match error {
             TransportError::LaneConfig { .. } => Self::LaneConfig,
             TransportError::LaneProgram { .. } => Self::LaneProgram,
-            TransportError::Unreadable | TransportError::UnreadablePorts { .. } => Self::Unreadable,
+            TransportError::Unreadable { .. }
+            | TransportError::UnreadablePorts { .. }
+            | TransportError::LaneRoots { .. } => Self::Unreadable,
         }
     }
 }
@@ -462,6 +464,22 @@ pub enum RunError {
     Input { kind: ErrorKind, message: String },
     #[error("host writer delivery failed at {0:?}")]
     Delivery(WriterDeliveryStage),
+    /// A host command run for a named config read failed. `reason` is the
+    /// bounded leaf cause. The stage is reported by the receipt's delivery
+    /// fact, and the file/key by the named config error that wraps this, so
+    /// `Display` renders only the cause — printing the stage again here would
+    /// repeat it in a transport refusal or a failed receipt.
+    #[error("{reason}")]
+    ConfigCommandFailed { reason: String },
+    /// A host command run for a named config read failed. `Display` names the
+    /// stage and the config error's own context and bounded cause in one
+    /// message, so a printer that only formats the error cannot drop either.
+    /// The stage is also reported as a delivery fact by the diagnostic.
+    #[error("host writer delivery failed at {stage:?}: {cause}")]
+    DeliveryConfigRead {
+        stage: WriterDeliveryStage,
+        cause: Box<provenant_os::git_config::ConfigError<RunError>>,
+    },
     #[error("host writer delivery could not reconcile the pull request: {reason}; next: {next}")]
     DeliveryReconciliation { reason: String, next: String },
     #[error(
@@ -492,8 +510,9 @@ pub enum RunError {
     ProtectedDeliveryBranch,
     #[error("host writer delivery failed at Prepare (origin refresh): {0}")]
     OriginNormalisationCollision(String),
-    #[error("host writer delivery failed at Prepare (transport): {reason}")]
+    #[error("host writer delivery failed at {stage:?} (transport): {reason}")]
     DeliveryTransport {
+        stage: WriterDeliveryStage,
         kind: TransportRefusal,
         reason: String,
     },
@@ -864,6 +883,9 @@ impl RunError {
                     None => "inspect worktree registration and select a verified checkout with --worktree".into(),
                 });
             }
+            Self::Writer(WorktreeError::GitConfigRead(error)) => {
+                diagnostic = diagnostic.detail(error.to_string());
+            }
             Self::Writer(error) => {
                 if let Some(action) = error.repair() {
                     diagnostic = diagnostic.next(action);
@@ -942,6 +964,21 @@ impl RunError {
             Self::Delivery(stage) => {
                 diagnostic = diagnostic
                     .detail(format!("host writer delivery failed at {stage:?}"))
+                    .fact(DiagnosticFact::DeliveryStage(*stage));
+            }
+            Self::ConfigCommandFailed { reason } => {
+                diagnostic = diagnostic.detail(reason.clone());
+            }
+            Self::DeliveryConfigRead { stage, cause } => {
+                diagnostic = diagnostic
+                    .detail(crate::delivery::prepare_reason(cause))
+                    .fact(DiagnosticFact::DeliveryStage(*stage));
+            }
+            Self::DeliveryTransport { stage, reason, .. } => {
+                diagnostic = diagnostic
+                    .detail(format!(
+                        "host writer delivery failed at {stage:?} (transport): {reason}"
+                    ))
                     .fact(DiagnosticFact::DeliveryStage(*stage));
             }
             Self::DeliveryFact { stage, source } => {
@@ -1114,6 +1151,80 @@ mod diagnostic_projection_tests {
     use super::*;
     use provenant_records::diagnostic::{BoundaryClass, Destination};
     use std::path::PathBuf;
+
+    #[test]
+    fn writer_config_read_diagnostic_keeps_context_and_leaf_cause() {
+        let error = RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::GitConfigRead(Box::new(
+                provenant_os::git_config::ConfigError {
+                    context: provenant_os::git_config::ConfigContext::new(
+                        "read local core.bare",
+                        "/p/.git/config",
+                        Some("core.bare"),
+                    ),
+                    source: provenant_confinement::utility::UtilityError::TimedOut,
+                },
+            )),
+        );
+        let diagnostic = error.diagnostic(Destination::Local);
+        let detail = diagnostic.detail.unwrap();
+        assert!(
+            detail.contains("read local core.bare on /p/.git/config for key core.bare"),
+            "{detail}"
+        );
+        assert!(detail.contains("utility command timed out"), "{detail}");
+    }
+
+    #[test]
+    fn delivery_config_read_display_names_stage_context_and_cause_once() {
+        let error = RunError::DeliveryConfigRead {
+            stage: WriterDeliveryStage::Push,
+            cause: Box::new(provenant_os::git_config::ConfigError {
+                context: provenant_os::git_config::ConfigContext::new(
+                    "read effective Git configuration",
+                    "/p/.git/config",
+                    None,
+                ),
+                source: RunError::ConfigCommandFailed {
+                    reason: "cause marker".into(),
+                },
+            }),
+        };
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(
+                "host writer delivery failed at Push: read effective Git configuration on /p/.git/config"
+            ),
+            "{rendered}"
+        );
+        assert_eq!(rendered.matches("cause marker").count(), 1, "{rendered}");
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn transport_refusal_diagnostic_keeps_stage_and_reason() {
+        let reason = "check delivery transport configuration on /p: leaf marker";
+        let error = RunError::DeliveryTransport {
+            stage: WriterDeliveryStage::Push,
+            kind: crate::TransportRefusal::Unreadable,
+            reason: reason.into(),
+        };
+        let diagnostic = error.diagnostic(Destination::Local);
+        assert_eq!(
+            diagnostic.detail.as_deref(),
+            Some(
+                "host writer delivery failed at Push (transport): check delivery transport configuration on /p: leaf marker"
+            )
+        );
+        assert_eq!(
+            diagnostic.fact,
+            Some(
+                provenant_records::diagnostic::DiagnosticFact::DeliveryStage(
+                    WriterDeliveryStage::Push
+                )
+            )
+        );
+    }
 
     #[test]
     fn stored_read_failure_keeps_context_and_underlying_kind() {

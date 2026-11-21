@@ -201,7 +201,7 @@ fn exact(path: &Path) -> PathGrant {
     }
 }
 
-fn git(cwd: &Path, home: &Path, args: &[&str]) -> Result<()> {
+fn git_command(cwd: &Path, home: &Path, args: &[std::ffi::OsString]) -> Result<()> {
     let status = provenant_os::fixture::git_command()
         .args(args)
         .current_dir(cwd)
@@ -214,6 +214,30 @@ fn git(cwd: &Path, home: &Path, args: &[&str]) -> Result<()> {
         return Err(format!("git {args:?} failed").into());
     }
     Ok(())
+}
+
+fn git(cwd: &Path, home: &Path, args: &[&str]) -> Result<()> {
+    let args: Vec<std::ffi::OsString> = args.iter().map(std::ffi::OsString::from).collect();
+    git_command(cwd, home, &args)
+}
+
+fn git_config_identity(
+    cwd: &Path,
+    home: &Path,
+    field: provenant_os::git_config::IdentityField,
+    value: &str,
+) -> Result<()> {
+    use provenant_os::git_config::{ConfigContext, ConfigMutation};
+    let context = ConfigContext::new("set fixture Git identity", cwd.join(".git/config"), None);
+    provenant_os::git_config::write(
+        context,
+        ConfigMutation::SetIdentity {
+            field,
+            value: value.into(),
+        },
+        |args| git_command(cwd, home, args),
+    )
+    .map_err(|failure| failure.source)
 }
 
 struct Layout {
@@ -253,11 +277,17 @@ fn layout(root: &Path, writer: bool) -> Result<Layout> {
     std::fs::write(layout.repo.join("README.md"), "Probe repository.\n")?;
     let home = &layout.home_git;
     git(&layout.repo, home, &["init", "-q", "-b", "main"])?;
-    git(&layout.repo, home, &["config", "user.name", "Probe"])?;
-    git(
+    git_config_identity(
         &layout.repo,
         home,
-        &["config", "user.email", "probe@example.invalid"],
+        provenant_os::git_config::IdentityField::Name,
+        "Probe",
+    )?;
+    git_config_identity(
+        &layout.repo,
+        home,
+        provenant_os::git_config::IdentityField::Email,
+        "probe@example.invalid",
     )?;
     git(&layout.repo, home, &["add", "."])?;
     git(&layout.repo, home, &["commit", "-q", "-m", "probe"])?;

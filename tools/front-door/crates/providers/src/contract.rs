@@ -60,6 +60,10 @@ pub enum ProviderError {
     IsolatedKeychainUnavailable(String),
     #[error("provider login token is unavailable")]
     CredentialUnavailable,
+    /// `Display` names the read and its bounded leaf cause in one message, and
+    /// it exposes no `source`, so a refusal printer cannot drop the cause.
+    #[error("Git identity configuration could not be read: {0}")]
+    GitConfigRead(provenant_os::git_config::ConfigError<std::io::Error>),
     #[error("provider token refresh is pending")]
     RefreshDeferred,
     #[error("provider login token was not found")]
@@ -102,7 +106,8 @@ impl ProviderError {
             | Self::InvalidPath
             | Self::UnsupportedPolicy => B::Authority,
             Self::IsolatedKeychainUnavailable(_) | Self::CredentialReadFailed(_) => B::Credentials,
-            Self::CapabilityUnavailable(_)
+            Self::GitConfigRead(_)
+            | Self::CapabilityUnavailable(_)
             | Self::InvalidInvocation(_)
             | Self::PromptTooLarge { .. }
             | Self::Malformed
@@ -585,6 +590,27 @@ pub trait Adapter: Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_config_read_display_names_context_and_cause_once() {
+        let error = ProviderError::GitConfigRead(provenant_os::git_config::ConfigError {
+            context: provenant_os::git_config::ConfigContext::new(
+                "read Git identity",
+                "/project",
+                Some("user.name"),
+            ),
+            source: std::io::Error::other("cause marker"),
+        });
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(
+                "Git identity configuration could not be read: read Git identity on /project for key user.name"
+            ),
+            "{rendered}"
+        );
+        assert_eq!(rendered.matches("cause marker").count(), 1, "{rendered}");
+        assert!(std::error::Error::source(&error).is_none());
+    }
 
     #[test]
     fn test_model_matches_offered() {

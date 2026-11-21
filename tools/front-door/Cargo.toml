@@ -103,6 +103,7 @@ fixture = [
 
 [dependencies]
 sha2 = { workspace = true }
+regex = { workspace = true }
 jiff = { workspace = true }
 provenant-os = { workspace = true }
 provenant-quota = { workspace = true }
@@ -223,6 +224,10 @@ harness = false
 [[test]]
 name = "integration"
 path = "tests/integration.rs"
+
+[[test]]
+name = "git_config_helper"
+path = "tests/git_config_helper.rs"
 
 [[test]]
 name = "command_adapter"

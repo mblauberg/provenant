@@ -901,10 +901,34 @@ pub(crate) fn base_env_with_host(
         ("TMPPREFIX".into(), scratch.join("zsh").into()),
         ("LANG".into(), "en_US.UTF-8".into()),
     ];
-    env.extend(provenant_os::sys::git_identity(
+    // Reading the host identity is best effort: the lane's private config sets
+    // `user.useConfigOnly`, so an absent identity cannot fall back to a
+    // generated hostname identity. An unavailable pinned Git or working
+    // directory is an environment availability gap, not a config-read failure,
+    // and must not refuse the launch. A real config-read failure still carries
+    // its named cause through ProviderError::GitConfigRead.
+    match provenant_os::git_config::identity(
+        provenant_os::git_config::ConfigContext {
+            operation: "read Git identity",
+            file: input.cwd.to_owned(),
+            key: None,
+        },
         input.provenant.git,
         input.cwd,
-    ));
+    ) {
+        Ok(values) => env.extend(values),
+        // A missing or non-executable pinned Git, or an inaccessible working
+        // directory, fails before Git reads any config. That is an environment
+        // availability gap rather than a config-read failure, so the identity
+        // stays absent; a Git that ran but could not read config still carries
+        // its named cause through ProviderError::GitConfigRead.
+        Err(error)
+            if matches!(
+                error.source.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) => {}
+        Err(error) => return Err(ProviderError::GitConfigRead(error)),
+    }
     Ok(env)
 }
 
@@ -977,6 +1001,7 @@ pub(crate) fn private_git_objects(
     input: &PrepareInput<'_>,
     spec: &mut LaunchSpec,
 ) -> Result<(), ProviderError> {
+    spec.git_wrapper.hooks_path_reader = Some(input.provenant.executable.to_owned());
     if matches!(input.confined.permissions().mode, AccessMode::ReadOnly)
         && input.confined.permissions().read_only.is_none()
     {
@@ -990,7 +1015,12 @@ pub(crate) fn private_git_objects(
         spec.setup.push(SetupStep::CreateDir(bin.clone()));
         spec.setup.push(SetupStep::WriteExecutable {
             path: bin.join("git"),
-            bytes: crate::lane::git_wrapper(git, &Default::default())?,
+            bytes: crate::lane::git_wrapper(
+                git,
+                &crate::lane::GitWrapper::with_hooks_path_reader(
+                    input.provenant.executable.to_owned(),
+                ),
+            )?,
         });
         spec.env
             .retain(|(key, _)| key != provenant_core::consumer_env::GIT);
@@ -1875,7 +1905,12 @@ mod git_tests {
                     .success()
             );
         }
-        let env = provenant_os::sys::git_identity(git, dir.path());
+        let context = provenant_os::git_config::ConfigContext {
+            operation: "read Git identity",
+            file: dir.path().to_owned(),
+            key: None,
+        };
+        let env = provenant_os::git_config::identity(context.clone(), git, dir.path()).unwrap();
         for (key, value) in [
             ("GIT_AUTHOR_NAME", "Lane O'Brien"),
             ("GIT_COMMITTER_NAME", "Lane O'Brien"),
@@ -1885,7 +1920,8 @@ mod git_tests {
             assert!(env.iter().any(|(k, v)| k == key && v == value));
         }
         assert!(
-            provenant_os::sys::git_identity(Path::new("/nonexistent/git"), dir.path()).is_empty()
+            provenant_os::git_config::identity(context, Path::new("/nonexistent/git"), dir.path())
+                .is_err()
         );
     }
 }

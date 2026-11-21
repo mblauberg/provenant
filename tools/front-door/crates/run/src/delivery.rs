@@ -7,6 +7,7 @@ use crate::{
 };
 use provenant_confinement::repo::GitRefName;
 use provenant_core::GitOid;
+use provenant_os::git_config::BranchField;
 use provenant_os::{
     exec::{ExecOptions, StreamPolicy, SystemExecutor, Termination},
     fs::Directory,
@@ -367,6 +368,29 @@ impl std::fmt::Debug for HostDeliveryContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("HostDeliveryContext([private handoff])")
     }
+}
+
+/// How a host command is run: config commands retry lock contention and keep
+/// their failure's leaf cause; ordinary commands do neither.
+#[derive(Clone, Copy)]
+struct CommandMode {
+    retry_config_lock: bool,
+    preserve_reason: bool,
+}
+
+impl CommandMode {
+    const ORDINARY: Self = Self {
+        retry_config_lock: false,
+        preserve_reason: false,
+    };
+    const CONFIG_READ: Self = Self {
+        retry_config_lock: false,
+        preserve_reason: true,
+    };
+    const CONFIG_WRITE: Self = Self {
+        retry_config_lock: true,
+        preserve_reason: true,
+    };
 }
 
 impl HostDeliveryContext {
@@ -1635,16 +1659,31 @@ impl HostDeliveryContext {
         let stage = Stage::Prepare;
         // Free-form shell helpers can select writer code. Support normal
         // executable helpers and gh's standard helper, otherwise refuse early.
-        let helpers = self.command(
-            &writer.worktree,
-            "git",
-            &[
-                "config",
-                "--get-regexp",
+        let context = provenant_os::git_config::ConfigContext {
+            operation: "read transport helper settings",
+            file: writer.worktree.join(".git/config"),
+            key: None,
+        };
+        let helpers = provenant_os::git_config::read(
+            context,
+            provenant_os::git_config::Read::GetRegexp(
                 "^(credential(\\..*)?\\.helper|core\\.sshcommand)$",
-            ],
+            ),
+            |args| {
+                self.command_for_config(
+                    &writer.worktree,
+                    "git",
+                    &git_config_args(args, stage)?,
+                    stage,
+                    b"",
+                )
+            },
+        )
+        .map_err(|error| RunError::DeliveryTransport {
             stage,
-        )?;
+            kind: crate::TransportRefusal::Unreadable,
+            reason: transport_config_cause(error),
+        })?;
         for line in helpers.lines() {
             let (key, value) = line.split_once(' ').unwrap_or((line, ""));
             if value.trim().is_empty() {
@@ -1845,6 +1884,31 @@ impl HostDeliveryContext {
     ) -> Result<String> {
         self.command_with_input(cwd, tool, args, stage, b"")
     }
+    /// A config mutation against the shared `.git/config` can lose a lock race
+    /// with a sibling settlement. Run it with the same bounded, shared-deadline
+    /// lock retry as core Git mutations; ordinary host commands run once.
+    pub(super) fn command_with_config_lock_retry(
+        &self,
+        cwd: &Path,
+        tool: &str,
+        args: &[&str],
+        stage: Stage,
+    ) -> Result<String> {
+        self.command_with_input_uncached(cwd, tool, args, stage, b"", CommandMode::CONFIG_WRITE)
+    }
+    /// A named config read keeps its failure's leaf cause. Ordinary commands
+    /// report only the stage; the config error needs the cause to render a
+    /// refusal that names the read once and carries what actually failed.
+    fn command_for_config(
+        &self,
+        cwd: &Path,
+        tool: &str,
+        args: &[&str],
+        stage: Stage,
+        input: &[u8],
+    ) -> Result<String> {
+        self.command_with_input_uncached(cwd, tool, args, stage, input, CommandMode::CONFIG_READ)
+    }
     fn command_with_input(
         &self,
         cwd: &Path,
@@ -1857,15 +1921,22 @@ impl HostDeliveryContext {
         // Reuse listings only for preparation; mutation checks need fresh facts.
         if stage == Stage::Prepare && tool == "git" && git_subcommand(args) == "worktree list" {
             let bytes = self.facts.cached_worktree_listing(cwd, || {
-                self.command_with_input_uncached(cwd, tool, args, stage, input)
-                    .map(String::into_bytes)
+                self.command_with_input_uncached(
+                    cwd,
+                    tool,
+                    args,
+                    stage,
+                    input,
+                    CommandMode::ORDINARY,
+                )
+                .map(String::into_bytes)
             })?;
             return String::from_utf8(bytes).map_err(|_| RunError::DeliveryFact {
                 stage,
                 source: provenant_confinement::worktrees::WorktreeError::InvalidOutput,
             });
         }
-        self.command_with_input_uncached(cwd, tool, args, stage, input)
+        self.command_with_input_uncached(cwd, tool, args, stage, input, CommandMode::ORDINARY)
     }
 
     fn command_with_input_uncached(
@@ -1875,12 +1946,17 @@ impl HostDeliveryContext {
         args: &[&str],
         stage: Stage,
         input: &[u8],
+        mode: CommandMode,
     ) -> Result<String> {
         if tool == "gh" {
             return self.forge_command_with_input(cwd, args, stage, input);
         }
         let failure = |reason: String| {
-            if stage == Stage::Prepare {
+            if mode.preserve_reason {
+                // A named config read needs the leaf cause for its refusal,
+                // not just the stage that an ordinary command reports.
+                RunError::ConfigCommandFailed { reason }
+            } else if stage == Stage::Prepare {
                 let step = match args.first().copied() {
                     Some("remote") => DeliveryPrepareStep::RemoteUrl,
                     Some("symbolic-ref") => DeliveryPrepareStep::Head,
@@ -1981,50 +2057,82 @@ impl HostDeliveryContext {
             }))
             .collect();
         let executor = SystemExecutor::new(1).map_err(|error| failure(error.to_string()))?;
-        let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(30));
-        options.cancel = self.cancellation.as_ref();
-        options.process_group = true;
-        options.env = Some(&environment);
-        options.stdin = Some(input);
         let commit_log = tool == "git" && args.first() == Some(&"log");
         let limit = if tool == "git" && provenant_os::git::fact_capture_limit(args, 0) != 0 {
             host_output_limit(HostOutputClass::FactCapture)
         } else {
             stdout_limit(commit_log, args)
         };
-        options.stdout = StreamPolicy::Capture { limit };
-        options.stop_on_output_limit = commit_log;
-        options.stderr = if stage == Stage::Prepare {
-            StreamPolicy::Capture { limit: 4096 }
-        } else {
-            StreamPolicy::Discard
+        // A config mutation on the shared `.git/config` can lose a lock race to
+        // a sibling settlement. Capture a bounded stderr tail so that collision
+        // is detectable, and give every attempt a share of one 30s deadline.
+        let make_options = |timeout: Duration| {
+            let mut options = ExecOptions::new(&argv, cwd, timeout);
+            options.cancel = self.cancellation.as_ref();
+            options.process_group = true;
+            options.env = Some(&environment);
+            options.stdin = Some(input);
+            options.stdout = StreamPolicy::Capture { limit };
+            options.stop_on_output_limit = commit_log;
+            options.stderr = if stage == Stage::Prepare {
+                StreamPolicy::Capture { limit: 4096 }
+            } else if mode.retry_config_lock {
+                StreamPolicy::Tail { limit: 4096 }
+            } else {
+                StreamPolicy::Discard
+            };
+            options
         };
         let cancel = provenant_core::CancelToken::new();
-        let output = self
-            .facts
-            .with_executor(
-                &executor,
-                self.cancellation.as_ref().unwrap_or(&cancel),
-                |executor| {
+        let attempt_cancel = self.cancellation.as_ref().unwrap_or(&cancel);
+        let output = if mode.retry_config_lock {
+            self.facts
+                .with_executor(&executor, attempt_cancel, |executor| {
+                    provenant_confinement::utility::execute_with_git_lock_retry(
+                        "Git config mutation",
+                        Duration::from_secs(30),
+                        attempt_cancel,
+                        |timeout| {
+                            executor
+                                .execute(make_options(timeout))
+                                .map_err(provenant_confinement::utility::UtilityError::from)
+                        },
+                    )
+                    .map_err(|error| {
+                        RunError::Writer(provenant_confinement::worktrees::WorktreeError::Utility(
+                            error,
+                        ))
+                    })
+                })
+                .map_err(|error: RunError| match error {
+                    RunError::Writer(source) => RunError::DeliveryFact { stage, source },
+                    other => other,
+                })?
+        } else {
+            let options = make_options(Duration::from_secs(30));
+            self.facts
+                .with_executor(&executor, attempt_cancel, |executor| {
                     executor
                         .execute(options)
                         .map_err(|error| failure(format!("{}: {error}", executable.display())))
-                },
-            )
-            .map_err(|error: RunError| match error {
-                RunError::Writer(provenant_confinement::worktrees::WorktreeError::Utility(
-                    provenant_confinement::utility::UtilityError::Truncated { stream: "stdout" },
-                )) if tool == "git" && git_subcommand(args) == "worktree list" => {
-                    RunError::DeliveryLimit {
-                        stage,
-                        tool: "git",
-                        command: "worktree list".into(),
-                        limit: self.facts.inventory_limit(),
+                })
+                .map_err(|error: RunError| match error {
+                    RunError::Writer(provenant_confinement::worktrees::WorktreeError::Utility(
+                        provenant_confinement::utility::UtilityError::Truncated {
+                            stream: "stdout",
+                        },
+                    )) if tool == "git" && git_subcommand(args) == "worktree list" => {
+                        RunError::DeliveryLimit {
+                            stage,
+                            tool: "git",
+                            command: "worktree list".into(),
+                            limit: self.facts.inventory_limit(),
+                        }
                     }
-                }
-                RunError::Writer(source) => RunError::DeliveryFact { stage, source },
-                other => other,
-            })?;
+                    RunError::Writer(source) => RunError::DeliveryFact { stage, source },
+                    other => other,
+                })?
+        };
         let absent_helpers = args.starts_with(&["config", "--get-regexp"])
             && output.termination == Termination::Exit(1)
             && output.stdout.bytes.is_empty();
@@ -2106,15 +2214,10 @@ impl HostDeliveryContext {
         stage: Stage,
     ) -> Result<()> {
         use provenant_confinement::transport;
-        let refuse = |error: transport::TransportError| {
-            if stage == Stage::Prepare {
-                RunError::DeliveryTransport {
-                    kind: (&error).into(),
-                    reason: prepare_reason(error),
-                }
-            } else {
-                RunError::Delivery(stage)
-            }
+        let refuse = |error: transport::TransportError| RunError::DeliveryTransport {
+            stage,
+            kind: (&error).into(),
+            reason: prepare_reason(error),
         };
         let base = self
             .bound
@@ -2153,16 +2256,36 @@ impl HostDeliveryContext {
                 roots = roots.except_owned_worktree(project);
             }
         }
-        transport::check_environment(environment, base, &roots).map_err(refuse)?;
-        let listing = self.command_with_input(cwd, "git", &transport::LISTING_ARGS, stage, b"")?;
-        let entries = transport::parse_listing(listing.as_bytes()).map_err(refuse)?;
-        transport::check_listing(&entries, base, &roots).map_err(refuse)?;
+        let ctx =
+            transport::ConfigContext::new("check delivery transport configuration", base, None);
+        transport::check_environment(environment, base, &roots, &ctx).map_err(refuse)?;
+        let context = provenant_os::git_config::ConfigContext {
+            operation: "read effective Git configuration",
+            file: base.to_owned(),
+            key: None,
+        };
+        let listing = provenant_os::git_config::read(
+            context.clone(),
+            provenant_os::git_config::Read::Listing,
+            |args| self.command_for_config(cwd, "git", &git_config_args(args, stage)?, stage, b""),
+        )
+        .map_err(|error| refuse(transport::unreadable(&ctx, error)))?;
+        let entries = transport::parse_listing(listing.as_bytes(), &ctx).map_err(refuse)?;
+        transport::check_listing(&entries, base, &roots, &ctx).map_err(refuse)?;
         // Git rereads configuration for the command itself, so refuse any
         // include directive that names a lane area, read or not: a lane could
         // otherwise create the target between this check and the command.
-        let directives =
-            self.command_with_input(cwd, "git", &transport::DIRECTIVE_ARGS, stage, b"")?;
-        let top = transport::parse_listing(directives.as_bytes()).map_err(refuse)?;
+        let directives = provenant_os::git_config::read(
+            provenant_os::git_config::ConfigContext {
+                operation: "read configuration include directives",
+                file: base.to_owned(),
+                key: Some("include.path"),
+            },
+            provenant_os::git_config::Read::Directives,
+            |args| self.command_for_config(cwd, "git", &git_config_args(args, stage)?, stage, b""),
+        )
+        .map_err(|error| refuse(transport::unreadable(&ctx, error)))?;
+        let top = transport::parse_listing(directives.as_bytes(), &ctx).map_err(refuse)?;
         let home = environment
             .iter()
             .find(|(name, _)| name == "HOME")
@@ -2171,20 +2294,34 @@ impl HostDeliveryContext {
             Option<Vec<transport::ConfigEntry>>,
             transport::TransportError,
         > {
-            if !file.is_file() {
-                return Ok(None);
+            let ctx = transport::ConfigContext::new(
+                "read included config file",
+                "<included config>",
+                Some("include.path"),
+            );
+            match std::fs::metadata(file) {
+                Ok(metadata) if !metadata.is_file() => return Ok(None),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(transport::unreadable(&ctx, error)),
             }
-            let file = file.to_str().ok_or(transport::TransportError::Unreadable)?;
-            let args = ["config", "--file", file]
-                .into_iter()
-                .chain(["--no-includes", "--show-origin", "-z", "--list"])
-                .collect::<Vec<_>>();
-            let listing = self
-                .command_with_input(cwd, "git", &args, stage, b"")
-                .map_err(|_| transport::TransportError::Unreadable)?;
-            transport::parse_listing(listing.as_bytes()).map(Some)
+            file.to_str()
+                .ok_or_else(|| transport::unreadable(&ctx, "included config path is not UTF-8"))?;
+            let listing = provenant_os::git_config::read(
+                provenant_os::git_config::ConfigContext {
+                    operation: "read included config file",
+                    file: PathBuf::from("<included config>"),
+                    key: Some("include.path"),
+                },
+                provenant_os::git_config::Read::File(file),
+                |args| {
+                    self.command_for_config(cwd, "git", &git_config_args(args, stage)?, stage, b"")
+                },
+            )
+            .map_err(|error| transport::unreadable(&ctx, error))?;
+            transport::parse_listing(listing.as_bytes(), &ctx).map(Some)
         };
-        transport::check_includes(&top, base, home, &roots, &mut read).map_err(refuse)
+        transport::check_includes(&top, base, home, &roots, &mut read, &ctx).map_err(refuse)
     }
     pub(super) fn head(&self, writer: &WriterRequest) -> Result<GitOid> {
         let head = self.command(
@@ -2465,15 +2602,25 @@ impl HostDeliveryContext {
             return Err(RunError::IntegrationHeadMoved);
         } else {
             // A configured merge driver may execute arbitrary repository code.
-            if !self
-                .command(
-                    &writer.worktree,
-                    "git",
-                    &["config", "--get-regexp", "^merge\\..*\\.driver$"],
-                    stage,
-                )?
-                .is_empty()
-            {
+            let config = provenant_os::git_config::read(
+                provenant_os::git_config::ConfigContext {
+                    operation: "check configured merge drivers",
+                    file: writer.worktree.join(".git/config"),
+                    key: None,
+                },
+                provenant_os::git_config::Read::GetRegexp("^merge\\..*\\.driver$"),
+                |args| {
+                    self.command_for_config(
+                        &writer.worktree,
+                        "git",
+                        &git_config_args(args, stage)?,
+                        stage,
+                        b"",
+                    )
+                },
+            )
+            .map_err(|error| delivery_config_read_error(stage, error))?;
+            if !config.is_empty() {
                 return Err(RunError::Delivery(stage));
             }
             let tree = self
@@ -2830,22 +2977,34 @@ impl HostDeliveryContext {
             previous,
             integrated: head,
         });
-        for (key, value) in [
-            ("remote", request.remote.as_str()),
-            ("merge", destination.as_str()),
-            ("pushRemote", request.remote.as_str()),
+        for (field, value) in [
+            (BranchField::Remote, request.remote.as_str()),
+            (BranchField::Merge, destination.as_str()),
+            (BranchField::PushRemote, request.remote.as_str()),
         ] {
-            self.command(
-                cwd,
-                "git",
-                &[
-                    "config",
-                    "--local",
-                    &format!("branch.{}.{key}", bound.lane_branch),
-                    value,
-                ],
-                Stage::Upstream,
-            )?;
+            let context = provenant_os::git_config::ConfigContext::new(
+                "set branch upstream configuration",
+                cwd.join(".git/config"),
+                Some("branch tracking key"),
+            );
+            provenant_os::git_config::write(
+                context,
+                provenant_os::git_config::ConfigMutation::SetBranchTracking {
+                    branch: bound.lane_branch.as_str().to_owned(),
+                    field,
+                    value: value.to_owned(),
+                    replace: false,
+                },
+                |args| {
+                    self.command_with_config_lock_retry(
+                        cwd,
+                        "git",
+                        &git_config_args(args, Stage::Upstream)?,
+                        Stage::Upstream,
+                    )
+                },
+            )
+            .map_err(|error| delivery_config_read_error(Stage::Upstream, error))?;
         }
         // Read the upstream back from config: `@{upstream}` and `status -sb`
         // only resolve when the remote's fetch refspec covers the branch, and a
@@ -2855,17 +3014,25 @@ impl HostDeliveryContext {
             ("merge", destination.as_str()),
             ("pushRemote", request.remote.as_str()),
         ] {
-            let stored = self.command(
-                cwd,
-                "git",
-                &[
-                    "config",
-                    "--local",
-                    "--get",
-                    &format!("branch.{}.{key}", bound.lane_branch),
-                ],
-                Stage::Verify,
-            )?;
+            let config_key = format!("branch.{}.{key}", bound.lane_branch);
+            let stored = provenant_os::git_config::read(
+                provenant_os::git_config::ConfigContext {
+                    operation: "verify upstream configuration",
+                    file: cwd.to_owned(),
+                    key: None,
+                },
+                provenant_os::git_config::Read::GetLocal(&config_key),
+                |args| {
+                    self.command_for_config(
+                        cwd,
+                        "git",
+                        &git_config_args(args, Stage::Verify)?,
+                        Stage::Verify,
+                        b"",
+                    )
+                },
+            )
+            .map_err(|error| delivery_config_read_error(Stage::Verify, error))?;
             if stored != value {
                 return Err(RunError::Delivery(Stage::Verify));
             }
@@ -3240,6 +3407,8 @@ pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
         RunError::DeliveryLimit { stage, .. } | RunError::DeliveryFact { stage, .. } => {
             (*stage, Some(prepare_reason(error)))
         }
+        RunError::DeliveryConfigRead { stage, cause } => (*stage, Some(prepare_reason(cause))),
+        RunError::DeliveryTransport { stage, reason, .. } => (*stage, Some(reason.clone())),
         RunError::DeliveryPrepare { .. } => (Stage::Prepare, Some(prepare_reason(error))),
         _ => (Stage::Push, None),
     };
@@ -3273,6 +3442,16 @@ pub(super) fn git_subcommand(args: &[&str]) -> String {
     }
 }
 
+fn delivery_config_read_error(
+    stage: Stage,
+    error: provenant_os::git_config::ConfigError<RunError>,
+) -> RunError {
+    RunError::DeliveryConfigRead {
+        stage,
+        cause: Box::new(error),
+    }
+}
+
 fn delivery_stage_error(error: RunError, stage: Stage) -> RunError {
     match error {
         RunError::DeliveryLimit {
@@ -3287,11 +3466,28 @@ fn delivery_stage_error(error: RunError, stage: Stage) -> RunError {
             limit,
         },
         RunError::DeliveryFact { source, .. } => RunError::DeliveryFact { stage, source },
+        RunError::DeliveryConfigRead { cause, .. } => RunError::DeliveryConfigRead { stage, cause },
         _ => RunError::Delivery(stage),
     }
 }
 
-fn prepare_reason(detail: impl std::fmt::Display) -> String {
+fn git_config_args(args: &[OsString], _stage: Stage) -> Result<Vec<&str>> {
+    args.iter()
+        .map(|arg| {
+            arg.to_str().ok_or_else(|| RunError::ConfigCommandFailed {
+                reason: "a Git config argument is not valid UTF-8".into(),
+            })
+        })
+        .collect()
+}
+
+fn transport_config_cause(error: provenant_os::git_config::ConfigError<RunError>) -> String {
+    // The config error's `Display` names the operation, file, key and the single
+    // bounded leaf cause. Redact that one formatted string at this edge.
+    prepare_reason(error)
+}
+
+pub(crate) fn prepare_reason(detail: impl std::fmt::Display) -> String {
     let detail = detail.to_string();
     let mut reason = detail.split_whitespace().collect::<Vec<_>>().join(" ");
     if reason.len() > PREPARE_REASON_LIMIT {
@@ -3302,29 +3498,25 @@ fn prepare_reason(detail: impl std::fmt::Display) -> String {
 }
 
 fn credential_helper(path: &Path, writer: &WriterRequest) -> Result<()> {
-    let name = path
-        .file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy();
     let helper = match host_path(path, writer) {
         Ok(helper) => helper,
         Err(error @ HostPathError::InsideWorktree) => {
             return Err(credential_helper_refusal(
                 HelperSafety::LaneLocalPath,
-                format!("{name}: {error}"),
+                format!("credential helper: {error}"),
             ));
         }
         Err(error @ HostPathError::NotFound) => {
             return Err(credential_helper_refusal(
                 HelperSafety::Unavailable,
-                format!("{name}: {error}"),
+                format!("credential helper: {error}"),
             ));
         }
     };
     if !helper.is_file() || !provenant_os::sys::is_executable(&helper) {
         return Err(credential_helper_refusal(
             HelperSafety::Unavailable,
-            format!("{name} is unavailable ({})", path.display()),
+            "configured credential helper is unavailable",
         ));
     }
     Ok(())
@@ -3919,6 +4111,88 @@ pub(crate) fn deliver_once(
 #[cfg(test)]
 mod stored_format_tests {
     use super::*;
+
+    #[test]
+    fn config_failure_from_a_fact_chain_is_rendered_once() {
+        use provenant_confinement::utility::UtilityError;
+        use provenant_confinement::worktrees::WorktreeError;
+
+        let cause_text =
+            "setting branch configuration failed with exit status 128 (lock contention: false)";
+        let error = provenant_os::git_config::ConfigError {
+            context: provenant_os::git_config::ConfigContext::new(
+                "set branch upstream configuration",
+                "/p/.git/config",
+                Some("branch tracking key"),
+            ),
+            source: RunError::DeliveryFact {
+                stage: Stage::Upstream,
+                source: WorktreeError::Utility(UtilityError::ConfigFailed {
+                    status: 128,
+                    lock_contention: false,
+                }),
+            },
+        };
+        let detail = error.to_string();
+        assert!(
+            detail.contains(
+                "set branch upstream configuration on /p/.git/config for key branch tracking key"
+            ),
+            "{detail}"
+        );
+        assert_eq!(detail.matches(cause_text).count(), 1, "{detail}");
+        assert!(!detail.contains("delivery failed at"), "{detail}");
+    }
+
+    #[test]
+    fn transport_config_refusal_names_the_read_once_and_carries_the_failure() {
+        let error = provenant_os::git_config::ConfigError {
+            context: provenant_os::git_config::ConfigContext::new(
+                "read effective Git configuration",
+                "/p/.git/config",
+                None,
+            ),
+            source: RunError::ConfigCommandFailed {
+                reason: "git \"Exit(128)\" (timed out: false): fatal: bad config line 3".into(),
+            },
+        };
+        let refusal = RunError::DeliveryTransport {
+            stage: Stage::Push,
+            kind: crate::TransportRefusal::Unreadable,
+            reason: transport_config_cause(error),
+        };
+        let rendered = refusal.to_string();
+        assert_eq!(rendered.matches("Push").count(), 1, "{rendered}");
+        assert_eq!(
+            rendered
+                .matches("read effective Git configuration on /p/.git/config")
+                .count(),
+            1,
+            "{rendered}"
+        );
+        assert_eq!(
+            rendered.matches("fatal: bad config line 3").count(),
+            1,
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn transport_refusal_receipt_keeps_the_stage_and_reason() {
+        let refusal = RunError::DeliveryTransport {
+            stage: Stage::Push,
+            kind: crate::TransportRefusal::Unreadable,
+            reason: prepare_reason("check delivery transport configuration on /p: leaf marker"),
+        };
+        let WriterDeliveryState::Failed { stage, reason, .. } = failed_state(&refusal) else {
+            panic!("a transport refusal must fail its receipt");
+        };
+        assert_eq!(stage, Stage::Push);
+        assert_eq!(
+            reason.as_deref(),
+            Some("check delivery transport configuration on /p: leaf marker")
+        );
+    }
 
     #[test]
     fn compiled_policy_stays_off_the_guardian_handoff_wire() {

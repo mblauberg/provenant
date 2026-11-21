@@ -268,6 +268,31 @@ fn local_git(git: &Path, cwd: &Path, args: &[&str]) -> Option<String> {
     )
 }
 
+/// Read one Git config value through the core's typed command builder, so the
+/// operation, file and static key are named and the argv cannot be assembled
+/// here. An absent key keeps the existing advisory default; no raw config argv
+/// escapes into this helper.
+fn local_config_get(git: &Path, cwd: &Path, key: &str) -> Option<String> {
+    let context = provenant_os::git_config::ConfigContext::new(
+        "read branch remote for stale-head warning",
+        cwd.join(".git/config"),
+        Some("branch remote"),
+    );
+    provenant_os::git_config::read(
+        context,
+        provenant_os::git_config::Read::Get(key),
+        |command| {
+            let args: Vec<&str> = command
+                .iter()
+                .map(|arg| arg.to_str().unwrap_or_default())
+                .collect();
+            Ok::<_, std::convert::Infallible>(local_git(git, cwd, &args))
+        },
+    )
+    .ok()
+    .flatten()
+}
+
 /// When the PR head branch's local remote-tracking tip has commits the forge
 /// head lacks, name both SHAs: a push may not have propagated to the forge yet.
 fn stale_head_warning(
@@ -278,14 +303,10 @@ fn stale_head_warning(
 ) -> Option<String> {
     let branch = head_ref_name?;
     provenant_confinement::repo::GitRefName::branch(branch).ok()?;
-    let configured = local_git(
-        git,
-        cwd,
-        &["config", "--get", &format!("branch.{branch}.remote")],
-    )
-    .filter(|name| {
-        !name.is_empty() && provenant_confinement::repo::GitRefName::branch(name).is_ok()
-    });
+    let configured =
+        local_config_get(git, cwd, &format!("branch.{branch}.remote")).filter(|name| {
+            !name.is_empty() && provenant_confinement::repo::GitRefName::branch(name).is_ok()
+        });
     let remote = configured.unwrap_or_else(|| "origin".to_owned());
     let reference = format!("refs/remotes/{remote}/{branch}");
     let tip = local_git(

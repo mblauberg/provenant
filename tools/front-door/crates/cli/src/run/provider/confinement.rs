@@ -1999,9 +1999,13 @@ fn current_branch(
         .map(str::to_owned)
 }
 
-/// One `branch.<name>.remote` or `branch.<name>.merge` value from the verified
-/// repository config. A missing or non-zero result is no upstream, never a
-/// reason to guess.
+fn warn_branch_config(detail: impl std::fmt::Display) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "warning: {detail}");
+}
+
+/// One branch remote or merge value from the verified repository config.
+/// Missing values are normal; other failures are reported before falling back.
 fn branch_config_value(
     executor: &dyn provenant_os::exec::Executor,
     repo: &provenant_confinement::ReadOnlyRepo,
@@ -2010,24 +2014,48 @@ fn branch_config_value(
     cancel: &provenant_core::CancelToken,
     key: &str,
 ) -> Option<String> {
-    use provenant_confinement::{GitRead, run_read_utility};
+    use provenant_confinement::{
+        run_verified_git_read_command, utility::validate_branch_config_key,
+    };
     use provenant_os::exec::Termination;
 
-    let out = run_read_utility(
-        executor,
-        GitRead::ConfigValue {
-            key: key.to_owned(),
-        },
-        repo,
-        utility,
-        budget,
-        cancel,
-    )
-    .ok()?;
-    if out.termination != Termination::Exit(0) {
+    if validate_branch_config_key(key).is_err() {
+        warn_branch_config("read branch Git configuration rejected an invalid key");
         return None;
     }
-    let value = std::str::from_utf8(&out.stdout.bytes).ok()?.trim();
+    let context = provenant_os::git_config::ConfigContext {
+        operation: "read branch Git configuration",
+        file: repo.common_git_dir().join("config"),
+        key: Some("branch tracking key"),
+    };
+    let out = match provenant_os::git_config::read(
+        context,
+        provenant_os::git_config::Read::GetAfterOptions(key),
+        |command| run_verified_git_read_command(executor, command, repo, utility, budget, cancel),
+    ) {
+        Ok(out) => out,
+        Err(error) => {
+            warn_branch_config(error.to_string());
+            return None;
+        }
+    };
+    match out.termination {
+        Termination::Exit(0) => {}
+        Termination::Exit(1) => return None,
+        termination => {
+            warn_branch_config(format!(
+                "read branch Git configuration ended with {termination:?}"
+            ));
+            return None;
+        }
+    }
+    let value = match std::str::from_utf8(&out.stdout.bytes) {
+        Ok(value) => value.trim(),
+        Err(error) => {
+            warn_branch_config(format!("parse branch Git configuration failed: {error}"));
+            return None;
+        }
+    };
     (!value.is_empty()).then(|| value.to_owned())
 }
 
@@ -2468,5 +2496,47 @@ mod alias_tests {
         assert_eq!(env[1].1, alias.join("zsh").as_os_str());
         assert_eq!(env[2].1, scratch.join("target").as_os_str());
         assert_eq!(env[3].1, scratch.as_os_str());
+    }
+}
+
+#[cfg(test)]
+mod config_warning_tests {
+    #[derive(Debug)]
+    struct RepeatingWrapper(std::io::Error);
+
+    impl std::fmt::Display for RepeatingWrapper {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "wrapper repeats its source: {}", self.0)
+        }
+    }
+
+    impl std::error::Error for RepeatingWrapper {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn config_warning_keeps_context_and_one_leaf_cause() {
+        let error = provenant_os::git_config::ConfigError {
+            context: provenant_os::git_config::ConfigContext::new(
+                "read branch Git configuration",
+                "/p/.git/config",
+                Some("branch tracking key"),
+            ),
+            source: RepeatingWrapper(std::io::Error::other("deadline marker")),
+        };
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(
+                "read branch Git configuration on /p/.git/config for key branch tracking key"
+            ),
+            "{rendered}"
+        );
+        assert_eq!(rendered.matches("deadline marker").count(), 1, "{rendered}");
+        assert!(
+            !rendered.contains("wrapper repeats its source"),
+            "{rendered}"
+        );
     }
 }

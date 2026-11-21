@@ -653,6 +653,8 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
         )?,
         Some(false)
     );
+    // The bounded config read now names its operation, but the underlying
+    // truncation is still the observable cause.
     assert!(matches!(
         limited.bare_setting(
             context.repo,
@@ -661,9 +663,8 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
             context.utility_budget,
             &cancel(),
         ),
-        Err(WorktreeError::Utility(UtilityError::Truncated {
-            stream: "stdout"
-        }))
+        Err(WorktreeError::GitConfigRead(error))
+            if matches!(&error.source, UtilityError::Truncated { stream: "stdout" })
     ));
     let read_only = context.utility.open_read_repo(
         context.executor,

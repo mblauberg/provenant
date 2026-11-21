@@ -61,6 +61,8 @@ pub(crate) enum Error {
     Fs(#[from] provenant_os::fs::FsError),
     #[error(transparent)]
     Exec(#[from] provenant_os::exec::ExecError),
+    #[error(transparent)]
+    GitConfigRead(Box<provenant_os::git_config::ConfigError<Error>>),
     #[error("Git executable unavailable")]
     GitUnavailable,
     #[error("cannot establish worktree lock budget")]
@@ -107,6 +109,9 @@ pub(crate) fn local_worktree_message(error: &WorktreeError) -> String {
             let scope = path.display();
             format!("{error}: {scope}: {}", safe_text(detail))
         }
+        // The config error's `Display` carries its context and bounded leaf
+        // cause, so a timeout or truncation is not dropped at the CLI edge.
+        WorktreeError::GitConfigRead(error) => error.to_string(),
         _ => error.to_string(),
     }
 }
@@ -115,6 +120,7 @@ impl Error {
     pub(crate) fn local_message(&self) -> String {
         match self {
             Self::Worktree(error) => local_worktree_message(error),
+            Self::GitConfigRead(error) => error.to_string(),
             _ => self.to_string(),
         }
     }
@@ -4568,6 +4574,29 @@ mod human_tests {
             }
             assert_eq!(Error::Worktree(error).local_message(), message);
         }
+    }
+
+    #[test]
+    fn local_config_read_refusal_keeps_context_and_leaf_cause() {
+        let error = WorktreeError::GitConfigRead(Box::new(provenant_os::git_config::ConfigError {
+            context: provenant_os::git_config::ConfigContext::new(
+                "read local core.bare",
+                "/project/.git/config",
+                Some("core.bare"),
+            ),
+            source: provenant_confinement::utility::UtilityError::TimedOut,
+        }));
+        let message = local_worktree_message(&error);
+        assert!(
+            message.contains("read local core.bare on /project/.git/config for key core.bare"),
+            "{message}"
+        );
+        assert!(message.contains("utility command timed out"), "{message}");
+        assert_eq!(
+            Error::Worktree(error).local_message(),
+            message,
+            "the CLI and worktree wrappers must render the same bounded cause"
+        );
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed

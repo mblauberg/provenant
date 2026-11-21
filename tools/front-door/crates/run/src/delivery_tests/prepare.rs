@@ -101,6 +101,11 @@ fn prepare_refuses_unavailable_and_unsafe_credential_helpers()
             &format!("!{} auth git-credential", helper.display()),
         ])?;
         let error = fixture.prepare().expect_err("unsafe helper");
+        let rendered = format!("{error} {error:?}");
+        assert!(
+            !rendered.contains(&helper.display().to_string()),
+            "helper value leaked: {rendered}"
+        );
         // Spec: docs/specs/routing.md#accounts-and-credentials
         assert_eq!(
             error.boundary_class(),

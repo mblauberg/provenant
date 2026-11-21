@@ -1024,14 +1024,27 @@ pub(super) fn execute_mutation(
         GitMutation::SetBranchConfig { .. } => GitMutationOperation::SetBranchConfig,
         GitMutation::DeleteRef { .. } => GitMutationOperation::DeleteRef,
     };
-    let outcome = execute_git_mutation(
+    let outcome = match execute_git_mutation(
         context.executor,
         context.repo,
         context.utility,
         mutation,
         context.mutation_budget,
         cancel,
-    )?;
+    ) {
+        Ok(outcome) => outcome,
+        Err(UtilityError::GitLockTimedOut { .. }) => {
+            // The bounded retry exhausted an observed Git lock collision. Keep
+            // the typed mutation cause: callers branch on `mutation_failure()`
+            // to tell a lock failure from other refusals, and the retry's named
+            // timeout carries neither the operation nor the lock fact.
+            return Err(WorktreeError::MutationFailed {
+                operation,
+                lock_failure: true,
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
     if exit_code(&outcome)? != 0 {
         // Classify bounded captured stderr, then discard it. Paths, config
         // values and credentials in Git's prose must never become error facts.

@@ -233,13 +233,99 @@ impl Git {
     }
     /// The remote `base` tracks, or `origin`.
     pub(super) fn remote_of(&self, dir: &Path, base: &str) -> Result<String> {
-        let configured = self.full(dir, &["config", "--get", &format!("branch.{base}.remote")])?;
+        let key = format!("branch.{base}.remote");
+        let configured = self.config_full(
+            dir,
+            "read branch remote configuration",
+            Some("branch tracking key"),
+            provenant_os::git_config::Read::Get(&key),
+        )?;
         Ok(configured
             .as_deref()
             .map(str::trim)
             .filter(|name| plain_ref(name) && *name != ".")
             .unwrap_or("origin")
             .to_owned())
+    }
+    pub(super) fn config_full(
+        &self,
+        dir: &Path,
+        operation: &'static str,
+        key: Option<&'static str>,
+        request: provenant_os::git_config::Read<'_>,
+    ) -> Result<Option<String>> {
+        self.with_repo(dir, |repo| {
+            let context = provenant_os::git_config::ConfigContext {
+                operation,
+                file: repo.common_git_dir().join("config"),
+                key,
+            };
+            // Exit 1 means an absent key; a broken config (or any other failed
+            // read) is a named config error, never an absent value. The config
+            // error's `Display` already carries its context and leaf cause.
+            let output = provenant_os::git_config::read(context, request, |command| {
+                let output = provenant_confinement::run_verified_git_read_command(
+                    &self.executor,
+                    command,
+                    repo,
+                    &self.utility,
+                    self.budget,
+                    &self.cancel,
+                )
+                .map_err(std::io::Error::other)?;
+                match output.termination {
+                    Termination::Exit(0) => Ok(Some(output)),
+                    Termination::Exit(1) => Ok(None),
+                    Termination::Exit(status) => Err(std::io::Error::other(format!(
+                        "Git configuration read failed with exit status {status}"
+                    ))),
+                    Termination::Signal(signal) => Err(std::io::Error::other(format!(
+                        "Git configuration read was signalled by signal {signal}"
+                    ))),
+                }
+            })?;
+            Ok(output.map(|output| String::from_utf8_lossy(&output.stdout.bytes).into_owned()))
+        })
+    }
+    /// Drop the branch's tracking section after a successful delete. The core
+    /// builds the mutation; this method only supplies the process policy. A
+    /// branch with no tracking config has no section to drop, which is a normal
+    /// cleanup outcome rather than a failed mutation.
+    pub(super) fn config_remove_branch_section(&self, dir: &Path, branch: &str) -> Result<()> {
+        use provenant_os::git_config::{ConfigContext, ConfigMutation};
+        let pattern = format!(r"^{}\.", regex::escape(&format!("branch.{branch}")));
+        let present = self.config_full(
+            dir,
+            "read landed branch configuration",
+            Some("branch section"),
+            provenant_os::git_config::Read::GetRegexpLocal(&pattern),
+        )?;
+        if present.is_none() {
+            return Ok(());
+        }
+        let context = ConfigContext::new(
+            "remove landed branch configuration",
+            dir.join(".git/config"),
+            Some("branch section"),
+        );
+        provenant_os::git_config::write(
+            context,
+            ConfigMutation::RemoveBranchSection {
+                branch: branch.to_owned(),
+            },
+            |command| {
+                let args = command
+                    .iter()
+                    .map(|arg| {
+                        arg.to_str()
+                            .ok_or_else(|| "Git config argument is not UTF-8".to_owned())
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let (success, detail) = self.run(dir, &args)?;
+                if success { Ok(()) } else { Err(detail.into()) }
+            },
+        )
+        .map_err(|failure| failure.source)
     }
     pub(super) fn full(&self, dir: &Path, args: &[&str]) -> Result<Option<String>> {
         let mut argv = vec![self.executable.as_str()];
@@ -316,6 +402,27 @@ pub(super) fn diff_content(dir: &Path, from: &str, to: &str) -> Result<String> {
         return Err("git diff content failed".into());
     }
     Ok(String::from_utf8_lossy(&output.stdout.bytes).into_owned())
+}
+
+#[cfg(test)]
+mod config_failure_tests {
+    #[test]
+    fn boxed_config_failure_keeps_context_and_leaf_cause() {
+        let error: Box<dyn std::error::Error> = Box::new(provenant_os::git_config::ConfigError {
+            context: provenant_os::git_config::ConfigContext::new(
+                "read remote URL configuration",
+                "/p/.git/config",
+                Some("remote URL"),
+            ),
+            source: std::io::Error::other("deadline marker"),
+        });
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("read remote URL configuration on /p/.git/config for key remote URL"),
+            "{rendered}"
+        );
+        assert_eq!(rendered.matches("deadline marker").count(), 1, "{rendered}");
+    }
 }
 
 #[cfg(test)]

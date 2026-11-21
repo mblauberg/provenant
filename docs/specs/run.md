@@ -497,6 +497,15 @@ settled-lane and path-based passes instead of skipping the project.
 Lane Git import runs with `-c advice.graftFileDeprecated=false`, and raw git advice
 (such as `hint:` lines) is filtered from stderr before warning so advice lines
 never surface as Provenant warnings.
+A Git configuration read that fails names its operation, the config file when
+it is independent of a config value, and a static key-class or include label,
+with a bounded underlying diagnostic. Config keys, config-derived include paths,
+values and Git config stderr are not carried into errors: subsections and values
+can contain credentials. A transient Git config-lock collision from a sibling
+writer is waited out within
+one deadline shared by all of the operation's attempts, using the same bounded
+retry as Git mutations; the hardened environment and post-read verification
+still apply to the retried output.
 
 The GitHub credential receipt governs token delivery even when sandboxing is
 off: `none` withholds host token environment variables, `injected` passes only

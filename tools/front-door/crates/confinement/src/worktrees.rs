@@ -71,7 +71,7 @@ use crate::repo::{
 use crate::status::{StatusKind, StatusPath, parse_index_entries, parse_porcelain_v2_z};
 use crate::utility::{
     GitMutation, GitRead, UtilityBudget, UtilityError, UtilityRuntime, execute_git_mutation,
-    execute_git_prepared_ref_delete, run_utility,
+    execute_git_prepared_ref_delete, run_utility, run_verified_git_command,
 };
 use provenant_config::ProjectBinding;
 use provenant_core::Clock;
@@ -315,6 +315,8 @@ pub enum WorktreeError {
     },
     #[error(transparent)]
     Filesystem(#[from] FsError),
+    #[error(transparent)]
+    GitConfigRead(Box<provenant_os::git_config::ConfigError<UtilityError>>),
     #[error(transparent)]
     Utility(#[from] UtilityError),
     #[error(transparent)]

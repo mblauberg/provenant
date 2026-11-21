@@ -16,15 +16,6 @@ use std::{
     time::Duration,
 };
 
-fn host_git(
-    repo: &Path,
-    executor: &dyn Executor,
-    args: &[&str],
-    timeout: Duration,
-) -> Result<ExecOutcome, Error> {
-    host_git_with_stderr(repo, executor, args, timeout, false)
-}
-
 pub(crate) fn host_git_with_stderr(
     repo: &Path,
     executor: &dyn Executor,
@@ -59,6 +50,55 @@ fn host_git_with_cancel(
     repo: &Path,
     executor: &dyn Executor,
     args: &[&str],
+    timeout: Duration,
+    capture_stderr: bool,
+    cancel: Option<&CancelToken>,
+    endpoint: Option<&str>,
+) -> Result<ExecOutcome, Error> {
+    let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+    host_git_with_tail(
+        repo,
+        executor,
+        &args,
+        timeout,
+        capture_stderr,
+        cancel,
+        endpoint,
+    )
+}
+
+fn host_git_config_with_cancel(
+    repo: &Path,
+    executor: &dyn Executor,
+    request: provenant_os::git_config::Read<'_>,
+    operation: &'static str,
+    key: Option<&'static str>,
+    timeout: Duration,
+    cancel: Option<&CancelToken>,
+) -> Result<ExecOutcome, Error> {
+    let context = provenant_os::git_config::ConfigContext {
+        operation,
+        file: PathBuf::from("<effective Git configuration>"),
+        key,
+    };
+    provenant_os::git_config::read(context, request, |command| {
+        host_git_with_tail(
+            repo,
+            executor,
+            command.as_ref(),
+            timeout,
+            false,
+            cancel,
+            None,
+        )
+    })
+    .map_err(|error| Error::GitConfigRead(Box::new(error)))
+}
+
+fn host_git_with_tail(
+    repo: &Path,
+    executor: &dyn Executor,
+    args: &[OsString],
     timeout: Duration,
     capture_stderr: bool,
     cancel: Option<&CancelToken>,
@@ -135,10 +175,13 @@ fn host_git_with_cancel(
                 .into_iter()
                 .map(OsString::from)
                 .chain(args.iter().map(|arg| {
-                    if *arg == "provenant-cleanup" {
-                        alias.as_deref().unwrap_or(arg).into()
+                    if arg.to_str() == Some("provenant-cleanup") {
+                        match alias.as_deref() {
+                            Some(alias) => OsString::from(alias),
+                            None => arg.clone(),
+                        }
                     } else {
-                        OsString::from(arg)
+                        arg.clone()
                     }
                 })),
             )
@@ -183,11 +226,14 @@ fn refresh_branch(repo: &Path, executor: &dyn Executor, branch: &str) -> Result<
     if branch == "HEAD" {
         return Err(Error::GcObservation("invalid writer branch"));
     }
-    let remote = host_git(
+    let remote = host_git_config_with_cancel(
         repo,
         executor,
-        &["config", "--get", "remote.origin.url"],
+        provenant_os::git_config::Read::Get("remote.origin.url"),
+        "read origin URL",
+        Some("remote URL"),
         Duration::from_secs(5),
+        None,
     )?;
     if remote.termination == Termination::Exit(1) {
         return Ok(());
@@ -239,9 +285,14 @@ pub(crate) fn fetch_default(
             None,
         )
     };
-    let remote = run(
-        &["config", "--get", "remote.origin.url"],
+    let remote = host_git_config_with_cancel(
+        context.repo.root_path(),
+        context.executor,
+        provenant_os::git_config::Read::Get("remote.origin.url"),
+        "read origin URL",
+        Some("remote URL"),
         Duration::from_secs(5),
+        Some(cancel),
     )?;
     if remote.termination == Termination::Exit(1) {
         return Ok(None);
@@ -990,7 +1041,7 @@ mod tests {
         let bare = temp.path().join("remote.git");
         let repo = temp.path().join("repo");
         let git = |cwd: &Path, args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
-            let out = host_git(cwd, &executor, args, Duration::from_secs(10))?;
+            let out = host_git_with_stderr(cwd, &executor, args, Duration::from_secs(10), false)?;
             if out.termination != Termination::Exit(0) {
                 return Err(format!("git failed: {args:?}").into());
             }
@@ -1032,7 +1083,7 @@ mod tests {
             git(&repo, &["rev-parse", "refs/remotes/origin/lane/test"])?,
             expected
         );
-        let other = host_git(
+        let other = host_git_with_stderr(
             &repo,
             &executor,
             &[
@@ -1042,6 +1093,7 @@ mod tests {
                 "refs/remotes/origin/other/secret",
             ],
             Duration::from_secs(10),
+            false,
         )?;
         assert_ne!(other.termination, Termination::Exit(0));
         refresh_branch(&repo, &executor, "missing")?;
