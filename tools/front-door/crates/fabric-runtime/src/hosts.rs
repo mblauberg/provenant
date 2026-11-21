@@ -1853,6 +1853,93 @@ mod tests {
         ));
     }
 
+    // Spec: docs/specs/fabric.md#publication-boundary
+    #[test]
+    fn peer_bound_attempt_withholds_sender_paths_and_keeps_sealed_policy() {
+        let root = Path::new("/sender/private");
+        let sealed = provenant_records::run::LaunchPolicy {
+            confidential: true,
+            sources: vec![
+                ".provenant/config.toml [launch_policy].protected_paths: inputs/brief".into(),
+            ],
+            repository_config: Some(".provenant/config.toml".into()),
+        };
+        let mut extra = provenant_records::ExtraFields::default();
+        extra.insert(
+            "sender_note".into(),
+            serde_json::json!(root.join("note.md").to_string_lossy()),
+        );
+        let attempt = crate::graph::AttemptSpec {
+            directory: Some(root.join("checkout").to_string_lossy().into_owned()),
+            host: Some("workshop".into()),
+            confidential: true,
+            budget_sources: [(
+                "token_budget".into(),
+                provenant_records::LimitSource::Launch,
+            )]
+            .into(),
+            token_budget: Some(500),
+            extra,
+            write_scope: vec!["src".into()],
+            account: Some("builder".into()),
+            capabilities: vec!["postgres".into()],
+            write_roots: vec![root.join("writes").to_string_lossy().into_owned()],
+            new_worktree: Some(crate::coordination::facade::NewWorktree {
+                extra: Default::default(),
+                default_base: false,
+                base: "HEAD".into(),
+                branch: "lane".into(),
+            }),
+            admitted_by: Some("parent".into()),
+            parent_sandboxed: true,
+            launch_policy: Some(sealed.clone()),
+            policy_inputs: vec![root.join("private/brief.md")],
+            policy_sealed: true,
+            ..Default::default()
+        };
+        let projected = attempt.peer_bound();
+        let encoded = serde_json::to_string(&projected).unwrap();
+        for path in [
+            root.join("checkout"),
+            root.join("private/brief.md"),
+            root.join("writes"),
+            root.join("note.md"),
+        ] {
+            let path = path.to_string_lossy().into_owned();
+            assert!(
+                !encoded.contains(&path),
+                "{path} reached the peer: {encoded}"
+            );
+        }
+        assert!(!encoded.contains("\"workshop\""));
+        assert!(projected.directory.is_none());
+        assert!(projected.policy_inputs.is_empty());
+        assert!(projected.write_roots.is_empty());
+        assert!(projected.write_scope.is_empty());
+        assert!(projected.new_worktree.is_none());
+        assert!(projected.extra.is_empty());
+        assert!(!projected.policy_sealed);
+        assert_eq!(projected.launch_policy, Some(sealed.clone()));
+        assert!(projected.confidential);
+        assert!(projected.parent_sandboxed);
+        assert_eq!(projected.admitted_by.as_deref(), Some("parent"));
+        assert_eq!(projected.token_budget, Some(500));
+
+        // The wire form keeps that classification and still carries no path.
+        let context = GraphSubmitContext {
+            launch_actor: ActorId::from_bytes([4; 16]),
+            attempt: projected,
+            retry_limit: None,
+            network: None,
+        };
+        let wire = serde_json::to_string(&context).unwrap();
+        assert!(!wire.contains(root.to_string_lossy().as_ref()));
+        let decoded: GraphSubmitContext = serde_json::from_str(&wire).unwrap();
+        assert_eq!(decoded.attempt.launch_policy, Some(sealed));
+        assert!(decoded.attempt.confidential);
+        assert!(decoded.attempt.policy_inputs.is_empty());
+    }
+
     #[test]
     fn graph_peer_contexts_round_trip_and_reject_malformed_values() {
         let submit = GraphSubmitContext {

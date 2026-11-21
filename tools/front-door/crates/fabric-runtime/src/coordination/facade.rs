@@ -589,6 +589,13 @@ pub enum FacadeError {
         "writer base is not reachable from the peer's remotes after a fetch; push it, or check the peer's Git access"
     )]
     BaseUnreachable,
+    /// A pinned launch base is still missing after fetching the clone's origin.
+    /// This is host state, not invalid input: name the clone and what the fetch
+    /// reported so the operator can repair the peer's Git access or upstream.
+    #[error(
+        "launch base is missing from peer clone {clone:?} after fetching from its origin ({fetch})"
+    )]
+    BaseFetchFailed { clone: String, fetch: String },
     #[error("writer branch already exists on the peer and was kept; choose another --branch")]
     BranchExists,
     #[error("artifact exceeds max_bytes; page it with an output read")]
@@ -1055,6 +1062,13 @@ impl FacadeError {
                     .next("upgrade both hosts to compatible protocol versions");
             }
             Self::DispatchUnobserved { .. } => projected = projected.detail("disk observation failed").next("restore the host disk observation before retrying"),
+            Self::BaseFetchFailed { clone, fetch } => {
+                projected = projected
+                    .detail(format!(
+                        "launch base is missing from peer clone {clone:?} after fetching from its origin: {fetch}"
+                    ))
+                    .next("push the base commit to the peer's origin or check the peer's Git access, then retry");
+            }
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::DetachedWriter), .. } => {
                 projected = projected.detail("writer needs a branch")
                     .next("create a branch for the worktree before retrying");
@@ -1240,7 +1254,7 @@ impl FacadeError {
             Self::HostDeliveryLimit { .. } => "io",
             Self::WorktreeMissing => "worktree_missing",
             Self::WorktreeUnregistered { .. } => "worktree_unregistered",
-            Self::BaseUnreachable => "base_unreachable",
+            Self::BaseUnreachable | Self::BaseFetchFailed { .. } => "base_unreachable",
             Self::BranchExists => "branch_exists",
             Self::OutputTooLarge => "output_too_large",
             Self::StateCorrupt | Self::StateCorruptDetail { .. } => "state_corrupt",

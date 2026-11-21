@@ -1480,8 +1480,8 @@ impl Factory {
             };
             let run = run.map_err(|error| match error {
                 provenant_fabric_runtime::graph::GraphError::Run(error) => error,
-                provenant_fabric_runtime::graph::GraphError::Invalid(_) => {
-                    FacadeError::field("document")
+                provenant_fabric_runtime::graph::GraphError::Invalid(reason) => {
+                    FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
                 }
                 provenant_fabric_runtime::graph::GraphError::Admission(reason) => match reason {
                     provenant_fabric_runtime::graph::AdmissionError::Schema(_) => {

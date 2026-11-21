@@ -177,13 +177,52 @@ impl Factory {
     ) -> Result<provenant_core::GitOid, FacadeError> {
         let git =
             provenant_os::git::git_executable().ok_or_else(|| FacadeError::io("locate git"))?;
-        provenant_run::resolve_git_base_with_facts(&git, directory, reference, facts, cancel)
-            .map_err(|error| match error {
-                provenant_run::RunError::Writer(error) => git_facts::repository_fact_error(error),
-                error => run_error(error),
-            })?
-            .parse()
-            .map_err(|_| FacadeError::StateCorrupt)
+        let resolve = || -> Result<provenant_core::GitOid, FacadeError> {
+            provenant_run::resolve_git_base_with_facts(&git, directory, reference, facts, cancel)
+                .map_err(|error| match error {
+                    provenant_run::RunError::Writer(error) => {
+                        git_facts::repository_fact_error(error)
+                    }
+                    error => run_error(error),
+                })?
+                .parse()
+                .map_err(|_| FacadeError::StateCorrupt)
+        };
+        self.resolve_base_with(directory, resolve, cancel)
+    }
+
+    /// The injected resolver is the seam the fetch-and-retry invariants pin.
+    /// A base missing locally is fetched once; only a retry that still reports
+    /// the base unresolvable becomes a host-state refusal. Cancellation and any
+    /// other retry failure are preserved unchanged.
+    fn resolve_base_with(
+        &self,
+        directory: &Path,
+        resolve: impl Fn() -> Result<provenant_core::GitOid, FacadeError>,
+        cancel: &CancelToken,
+    ) -> Result<provenant_core::GitOid, FacadeError> {
+        match resolve() {
+            Ok(oid) => Ok(oid),
+            Err(FacadeError::InvalidInput {
+                detail: Some(InvalidInputDetail::UnresolvableBase(_)),
+            }) => {
+                // A launch base can be pinned to a commit that exists on the
+                // clone's origin but is not local yet. Fetch before giving up
+                // so a stale peer clone does not refuse a valid launch.
+                let fetch = git_facts::fetch_base_from_origin(directory, cancel);
+                match resolve() {
+                    Ok(oid) => Ok(oid),
+                    Err(FacadeError::InvalidInput {
+                        detail: Some(InvalidInputDetail::UnresolvableBase(_)),
+                    }) => Err(FacadeError::BaseFetchFailed {
+                        clone: directory.to_string_lossy().into_owned(),
+                        fetch,
+                    }),
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Derive a review's comparison range from its bound inputs at launch.
