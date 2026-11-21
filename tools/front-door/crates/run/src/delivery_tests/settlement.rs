@@ -557,25 +557,6 @@ fn prepare_labels_unsupported_ssh_command() -> std::result::Result<(), Box<dyn s
 }
 
 #[test]
-fn delivery_diagnostics_redact_url_userinfo() {
-    let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
-    for (input, expected) in [
-        ("https://u:pa/ss@h/repo", "https://[REDACTED]@h/repo"),
-        ("https://u:pa?ss@h/repo", "https://[REDACTED]@h/repo"),
-        ("https://u:a@b@h/repo", "https://[REDACTED]@h/repo"),
-        ("u:pa/ss@h:repo", "[REDACTED]@h:repo"),
-        ("u:pa?ss@h:repo", "[REDACTED]@h:repo"),
-        ("u:a@b@h:repo", "[REDACTED]@h:repo"),
-        ("https://truncated-secret/path", "https://[REDACTED]/path"),
-    ] {
-        assert_eq!(provenant_redact::delivery_diagnostics(input), expected);
-        let error =
-            super::delivery::prepare_error(DeliveryPrepareStep::RemoteUrl, input).to_string();
-        assert!(error.ends_with(expected), "{error}");
-    }
-}
-
-#[test]
 fn prepare_refuses_remote_urls_with_embedded_credentials()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
@@ -733,7 +714,6 @@ fn prepare_accepts_absolute_shell_helper_outside_path()
 #[test]
 fn prepare_failures_name_step_and_bound_git_stderr()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
     for (pattern, step) in [
         ("remote get-url", DeliveryPrepareStep::RemoteUrl),
         ("symbolic-ref --quiet", DeliveryPrepareStep::Head),
@@ -764,15 +744,8 @@ fn prepare_failures_name_step_and_bound_git_stderr()
             panic!("unexpected failure class: {error:?}");
         };
         assert_eq!(actual_step, step);
-        for secret in [
-            "private-token",
-            "user:password",
-            "secret-user",
-            "scp-secret",
-            "malformed-secret",
-        ] {
-            assert!(!reason.contains(secret));
-        }
+        assert!(reason.contains("private-token"), "{reason}");
+        assert!(!reason.contains("[REDACTED]"), "{reason}");
         assert!(reason.len() <= PREPARE_REASON_LIMIT + PREPARE_REASON_TRUNCATION_MARKER.len());
     }
     Ok(())

@@ -650,7 +650,6 @@ dependencies = [
 name = "provenant-redact"
 version = "2.6.2"
 dependencies = [
- "provenant-core",
  "provenant-os",
  "serde_json",
  "thiserror",

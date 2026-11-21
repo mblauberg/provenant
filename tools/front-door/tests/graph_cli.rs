@@ -16,7 +16,7 @@ type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 fn secret_shaped_launch_inputs_warn_and_preserve_examples() -> Result {
     let rig = GraphProject::new()?;
     rig.enable_secret_redaction()?;
-    let example = "password=\"fixture-example-3391\"";
+    let example = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
     let templates = rig.project.join(".provenant/templates");
     std::fs::create_dir_all(&templates)?;
     std::fs::write(
@@ -52,13 +52,14 @@ fn secret_shaped_launch_inputs_warn_and_preserve_examples() -> Result {
                 && w.contains("looks like a credential")
                 && w.contains(position)
         )));
+        assert!(warnings.iter().all(|w| {
+            !w.to_string()
+                .contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789")
+        }));
         assert!(
-            warnings
-                .iter()
-                .all(|w| !w.to_string().contains("fixture-example-3391"))
-        );
-        assert!(
-            reply["data"].to_string().contains("fixture-example-3391"),
+            reply["data"]
+                .to_string()
+                .contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
             "example is retained: {reply}"
         );
     }
@@ -71,7 +72,7 @@ fn graph_metadata_warns_and_preserves_local_preview() -> Result {
     let rig = GraphProject::new()?;
     rig.enable_secret_redaction()?;
     let credential = "plain-registered-metadata-3391";
-    let example = "password=fixture-metadata-example-3391";
+    let example = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
     let path = rig.document(&json!({"schema_version":2,"graph_id":"metadata-test",
         "metadata_note":format!("{example} {credential}"),
         "nodes":[{"id":"task","prompt":"do the task","access":"read_only","route":{"alias":"junior"}}]}))?;
@@ -2484,7 +2485,7 @@ fn secret_shaped_retry_brief_proceeds_with_field_only_warning() -> Result {
         } else {
             id.clone()
         };
-        let brief = "line one\npassword=fixture-example-retry-3391\n";
+        let brief = "line one\nghp_abcdefghijklmnopqrstuvwxyz0123456789\n";
         let brief_path = rig.project.join("amended-brief.txt");
         std::fs::write(&brief_path, brief)?;
         let (output, retried) = if qualified {
@@ -2505,11 +2506,10 @@ fn secret_shaped_retry_brief_proceeds_with_field_only_warning() -> Result {
             w.as_str()
                 .is_some_and(|w| w.contains("brief") && w.contains("looks like a credential"))
         }));
-        assert!(
-            warnings
-                .iter()
-                .all(|w| !w.to_string().contains("fixture-example-retry-3391"))
-        );
+        assert!(warnings.iter().all(|w| {
+            !w.to_string()
+                .contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789")
+        }));
         let (prompt, previous) = stored_prompt(&rig, &id, "task")?;
         assert_eq!(prompt, brief, "{target}");
         assert!(previous > 0, "started attempts are kept: {target}");
@@ -2577,7 +2577,7 @@ fn shape_and_exact_retry_credential_warnings_allow_retry() -> Result {
         rig.state().join("config.toml"),
         "schema_version=1\n[knobs]\nredaction='secrets'\n'policy.SECRET_SHAPED_INPUT'='warn'\n",
     )?;
-    let shape = "password=fixture-shape-3391";
+    let shape = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
     let (output, reply) = rig.run(&["retry", &id, "--brief", shape])?;
     assert!(
         output.status.success(),
@@ -2592,7 +2592,7 @@ fn shape_and_exact_retry_credential_warnings_allow_retry() -> Result {
     assert!(
         !reply["data"]["warnings"]
             .to_string()
-            .contains("fixture-shape-3391")
+            .contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789")
     );
     let after_shape = snapshot()?;
     assert_ne!(

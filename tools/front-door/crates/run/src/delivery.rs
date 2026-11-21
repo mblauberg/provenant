@@ -11,7 +11,6 @@ use provenant_os::{
     exec::{ExecOptions, StreamPolicy, SystemExecutor, Termination},
     fs::Directory,
 };
-use provenant_redact::Redactor;
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::{OsStr, OsString},
@@ -1982,22 +1981,6 @@ impl HostDeliveryContext {
             }))
             .collect();
         let executor = SystemExecutor::new(1).map_err(|error| failure(error.to_string()))?;
-        let mut redactor = if stage == Stage::Prepare && provenant_redact::mode().masks_local() {
-            Some(
-                Redactor::new(
-                    self.environment
-                        .iter()
-                        .filter(|(key, value)| {
-                            matches!(key.as_slice(), b"GH_TOKEN" | b"GITHUB_TOKEN")
-                                && !value.is_empty()
-                        })
-                        .map(|(_, value)| value.clone()),
-                )
-                .map_err(|_| failure("diagnostic redaction unavailable".into()))?,
-            )
-        } else {
-            None
-        };
         let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(30));
         options.cancel = self.cancellation.as_ref();
         options.process_group = true;
@@ -2016,9 +1999,6 @@ impl HostDeliveryContext {
         } else {
             StreamPolicy::Discard
         };
-        options.stderr_filter = redactor
-            .as_mut()
-            .map(|redactor| redactor as &mut dyn provenant_os::exec::CaptureFilter);
         let cancel = provenant_core::CancelToken::new();
         let output = self
             .facts
@@ -2081,13 +2061,7 @@ impl HostDeliveryContext {
                     .collect();
                 return Err(RunError::MergeConflict { conflicting_files });
             }
-            let stderr = if output.stderr.filter_failed {
-                "diagnostic redaction failed".into()
-            } else {
-                provenant_redact::delivery_diagnostics(&String::from_utf8_lossy(
-                    &output.stderr.bytes,
-                ))
-            };
+            let stderr = String::from_utf8_lossy(&output.stderr.bytes).into_owned();
             return Err(failure(format!(
                 "{tool} {:?} (timed out: {}): {stderr}",
                 output.termination, output.timed_out
@@ -3319,8 +3293,7 @@ fn delivery_stage_error(error: RunError, stage: Stage) -> RunError {
 
 fn prepare_reason(detail: impl std::fmt::Display) -> String {
     let detail = detail.to_string();
-    let redacted = provenant_redact::delivery_diagnostics(&detail);
-    let mut reason = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut reason = detail.split_whitespace().collect::<Vec<_>>().join(" ");
     if reason.len() > PREPARE_REASON_LIMIT {
         reason.truncate(reason.floor_char_boundary(PREPARE_REASON_LIMIT));
         reason.push_str(PREPARE_REASON_TRUNCATION_MARKER);
