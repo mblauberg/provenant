@@ -880,6 +880,9 @@ impl RunError {
                     None => "inspect worktree registration and select a verified checkout with --worktree".into(),
                 });
             }
+            Self::Writer(WorktreeError::GitConfigRead(error)) => {
+                diagnostic = diagnostic.detail(provenant_os::git_config::failure_detail(error));
+            }
             Self::Writer(error) => {
                 if let Some(action) = error.repair() {
                     diagnostic = diagnostic.next(action);
@@ -966,6 +969,13 @@ impl RunError {
             Self::DeliveryConfigRead { stage, source } => {
                 diagnostic = diagnostic
                     .detail(crate::delivery::delivery_config_failure_detail(source))
+                    .fact(DiagnosticFact::DeliveryStage(*stage));
+            }
+            Self::DeliveryTransport { stage, reason, .. } => {
+                diagnostic = diagnostic
+                    .detail(format!(
+                        "host writer delivery failed at {stage:?} (transport): {reason}"
+                    ))
                     .fact(DiagnosticFact::DeliveryStage(*stage));
             }
             Self::DeliveryFact { stage, source } => {
@@ -1138,6 +1148,54 @@ mod diagnostic_projection_tests {
     use super::*;
     use provenant_records::diagnostic::{BoundaryClass, Destination};
     use std::path::PathBuf;
+
+    #[test]
+    fn writer_config_read_diagnostic_keeps_context_and_leaf_cause() {
+        let error = RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::GitConfigRead(Box::new(
+                provenant_os::git_config::ConfigError {
+                    context: provenant_os::git_config::ConfigContext::new(
+                        "read local core.bare",
+                        "/p/.git/config",
+                        Some("core.bare"),
+                    ),
+                    source: provenant_confinement::utility::UtilityError::TimedOut,
+                },
+            )),
+        );
+        let diagnostic = error.diagnostic(Destination::Local);
+        let detail = diagnostic.detail.unwrap();
+        assert!(
+            detail.contains("read local core.bare on /p/.git/config for key core.bare"),
+            "{detail}"
+        );
+        assert!(detail.contains("utility command timed out"), "{detail}");
+    }
+
+    #[test]
+    fn transport_refusal_diagnostic_keeps_stage_and_reason() {
+        let reason = "check delivery transport configuration on /p: leaf marker";
+        let error = RunError::DeliveryTransport {
+            stage: WriterDeliveryStage::Push,
+            kind: crate::TransportRefusal::Unreadable,
+            reason: reason.into(),
+        };
+        let diagnostic = error.diagnostic(Destination::Local);
+        assert_eq!(
+            diagnostic.detail.as_deref(),
+            Some(
+                "host writer delivery failed at Push (transport): check delivery transport configuration on /p: leaf marker"
+            )
+        );
+        assert_eq!(
+            diagnostic.fact,
+            Some(
+                provenant_records::diagnostic::DiagnosticFact::DeliveryStage(
+                    WriterDeliveryStage::Push
+                )
+            )
+        );
+    }
 
     #[test]
     fn stored_read_failure_keeps_context_and_underlying_kind() {

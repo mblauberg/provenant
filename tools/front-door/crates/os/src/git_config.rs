@@ -74,6 +74,28 @@ impl<E: std::error::Error + 'static> std::error::Error for ConfigError<E> {
     }
 }
 
+/// The bounded innermost failure of a named config command.
+///
+/// Wrappers in a source chain can interpolate their own source into `Display`;
+/// walking to the leaf and rendering only it reports the underlying timeout,
+/// cancellation or truncation once, without repeating a wrapper's text.
+pub fn leaf_cause<E: std::error::Error + 'static>(error: &ConfigError<E>) -> String {
+    let mut leaf: &dyn std::error::Error = &error.source;
+    while let Some(next) = leaf.source() {
+        leaf = next;
+    }
+    provenant_core::bounded_line(&leaf.to_string(), 512)
+}
+
+/// A config failure's named context followed by its single bounded leaf cause.
+///
+/// `ConfigError`'s own `Display` names only the context. Use this at any
+/// boundary that renders a wrapper with `Display` and cannot walk `source()`,
+/// so the cause is not dropped. Delivery keeps its own redacting renderer.
+pub fn failure_detail<E: std::error::Error + 'static>(error: &ConfigError<E>) -> String {
+    provenant_core::bounded_line(&format!("{}: {}", error.context, leaf_cause(error)), 512)
+}
+
 /// The supported config read shapes. Argument construction stays private.
 pub enum Read<'a> {
     Listing,
@@ -390,6 +412,40 @@ mod tests {
             next = source.source();
         }
         assert_eq!(rendered.matches("cause marker").count(), 1);
+    }
+
+    #[derive(Debug)]
+    struct RepeatingWrapper(std::io::Error);
+
+    impl fmt::Display for RepeatingWrapper {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "wrapper repeats its source: {}", self.0)
+        }
+    }
+
+    impl std::error::Error for RepeatingWrapper {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn failure_detail_renders_context_and_leaf_once() {
+        let error = ConfigError {
+            context: ConfigContext::new(
+                "read local core.bare",
+                "/repo/.git/config",
+                Some("core.bare"),
+            ),
+            source: RepeatingWrapper(std::io::Error::other("leaf marker")),
+        };
+        let detail = failure_detail(&error);
+        assert_eq!(
+            detail,
+            "read local core.bare on /repo/.git/config for key core.bare: leaf marker"
+        );
+        assert_eq!(detail.matches("leaf marker").count(), 1, "{detail}");
+        assert!(!detail.contains("wrapper repeats its source"), "{detail}");
     }
 
     #[test]

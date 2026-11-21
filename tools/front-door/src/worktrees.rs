@@ -109,6 +109,10 @@ pub(crate) fn local_worktree_message(error: &WorktreeError) -> String {
             let scope = path.display();
             format!("{error}: {scope}: {}", safe_text(detail))
         }
+        // A named config read's `Display` names only its context. Render the
+        // bounded leaf cause here so a timeout or truncation is not dropped at
+        // the CLI edge, which formats errors with `Display` only.
+        WorktreeError::GitConfigRead(error) => provenant_os::git_config::failure_detail(error),
         _ => error.to_string(),
     }
 }
@@ -117,6 +121,7 @@ impl Error {
     pub(crate) fn local_message(&self) -> String {
         match self {
             Self::Worktree(error) => local_worktree_message(error),
+            Self::GitConfigRead(error) => provenant_os::git_config::failure_detail(error),
             _ => self.to_string(),
         }
     }
@@ -4570,6 +4575,29 @@ mod human_tests {
             }
             assert_eq!(Error::Worktree(error).local_message(), message);
         }
+    }
+
+    #[test]
+    fn local_config_read_refusal_keeps_context_and_leaf_cause() {
+        let error = WorktreeError::GitConfigRead(Box::new(provenant_os::git_config::ConfigError {
+            context: provenant_os::git_config::ConfigContext::new(
+                "read local core.bare",
+                "/project/.git/config",
+                Some("core.bare"),
+            ),
+            source: provenant_confinement::utility::UtilityError::TimedOut,
+        }));
+        let message = local_worktree_message(&error);
+        assert!(
+            message.contains("read local core.bare on /project/.git/config for key core.bare"),
+            "{message}"
+        );
+        assert!(message.contains("utility command timed out"), "{message}");
+        assert_eq!(
+            Error::Worktree(error).local_message(),
+            message,
+            "the CLI and worktree wrappers must render the same bounded cause"
+        );
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed

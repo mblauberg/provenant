@@ -3442,6 +3442,7 @@ pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
             *stage,
             Some(prepare_reason(delivery_config_failure_detail(source))),
         ),
+        RunError::DeliveryTransport { stage, reason, .. } => (*stage, Some(reason.clone())),
         RunError::DeliveryPrepare { .. } => (Stage::Prepare, Some(prepare_reason(error))),
         _ => (Stage::Push, None),
     };
@@ -4255,6 +4256,23 @@ mod stored_format_tests {
             rendered.matches("Git config diagnostics withheld").count(),
             1,
             "{rendered}"
+        );
+    }
+
+    #[test]
+    fn transport_refusal_receipt_keeps_the_stage_and_reason() {
+        let refusal = RunError::DeliveryTransport {
+            stage: Stage::Push,
+            kind: crate::TransportRefusal::Unreadable,
+            reason: prepare_reason("check delivery transport configuration on /p: leaf marker"),
+        };
+        let WriterDeliveryState::Failed { stage, reason, .. } = failed_state(&refusal) else {
+            panic!("a transport refusal must fail its receipt");
+        };
+        assert_eq!(stage, Stage::Push);
+        assert_eq!(
+            reason.as_deref(),
+            Some("check delivery transport configuration on /p: leaf marker")
         );
     }
 
