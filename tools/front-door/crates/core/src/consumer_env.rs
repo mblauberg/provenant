@@ -99,6 +99,7 @@ pub const VERIFY_SELECTION: &str = "PROVENANT_VERIFY_SELECTION";
 pub const VERIFY_TIER: &str = "PROVENANT_VERIFY_TIER";
 pub const VERIFY_PROJECT_ROOT: &str = "PROVENANT_VERIFY_PROJECT_ROOT";
 pub const VERIFY_EFFECTIVE_CONFIG_JSON: &str = "PROVENANT_VERIFY_EFFECTIVE_CONFIG_JSON";
+pub const SEED_ORIGIN: &str = "PROVENANT_SEED_ORIGIN";
 pub const SESSION_ID: &str = "PROVENANT_SESSION_ID";
 
 const fn var(
@@ -124,6 +125,7 @@ const EVERY_LANE: &str = "every lane";
 const BUILD_SHIM: &str = "only for the cargo child of the lane's cargo shim";
 const ADMITTED_COMMAND: &str = "only for admitted commands";
 const ADMISSION: &str = "admission port commands";
+const SEED_PREPARE: &str = "build.prepare children of a standalone seed clone";
 
 /// Every declared variable. Order is presentation order only.
 pub const CONSUMER_ENV: &[EnvVar] = &[
@@ -322,6 +324,13 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         Evolving,
         "Source of the selected build admission wrapper.",
         "build admission port commands",
+    ),
+    var(
+        SEED_ORIGIN,
+        PortCommand,
+        Evolving,
+        "The absolute path of the origin checkout a standalone seed clone was made from.",
+        SEED_PREPARE,
     ),
     var(
         PORT_REQUEST_PATH,
