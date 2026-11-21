@@ -2542,6 +2542,27 @@ mod tests {
     }
 
     #[test]
+    fn local_disclosure_filter_masks_across_two_filter_calls() {
+        // The capture filter installed on the exec edge is a
+        // `for_local_disclosure` redactor. A stream split can land inside a
+        // registered literal on either side, so state must span the two calls.
+        let _mode = scoped(Mode::Full);
+        let secret = b"split-secret-4472";
+        let _scope = publication_scope([secret.to_vec()]).unwrap();
+        let input = b"before split-secret-4472 after";
+        let expected = b"before [REDACTED] after";
+        let start = input.windows(secret.len()).position(|window| window == secret).unwrap();
+        for split in start..=start + secret.len() {
+            let mut redactor = Redactor::for_local_disclosure().unwrap();
+            assert_eq!(
+                joined(&mut redactor, &[&input[..split], &input[split..]]),
+                expected,
+                "split {split} bisects the literal"
+            );
+        }
+    }
+
+    #[test]
     fn ordinary_urls_and_embedded_token_markers_are_preserved() {
         let _mode = scoped(Mode::Full);
         let mut redactor = Redactor::new([]).expect("empty secret set");

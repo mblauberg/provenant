@@ -361,6 +361,15 @@ fn run(cwd: &Path, argv: &[OsString], overrides: &[(OsString, OsString)]) -> Res
     let mut options = ExecOptions::new(argv, cwd, Duration::from_secs(4 * 60 * 60));
     options.env = Some(&env);
     options.process_group = true;
+    // Captured stderr becomes part of an io::Error that reaches tick's seed
+    // records and seed-build output with no later redaction boundary. Mask it
+    // on the stream, ahead of any bound, as run_with_tail does. If the filter
+    // cannot be built or fails mid-stream, withhold the whole stderr rather
+    // than passing raw bytes on.
+    let mut stderr_filter = provenant_redact::Redactor::for_local_disclosure().ok();
+    options.stderr_filter = stderr_filter
+        .as_mut()
+        .map(|filter| filter as &mut dyn provenant_os::exec::CaptureFilter);
     let executor = SystemExecutor::new(1)?;
     let result = executor
         .execute(options)
@@ -369,10 +378,15 @@ fn run(cwd: &Path, argv: &[OsString], overrides: &[(OsString, OsString)]) -> Res
         || result.timed_out
         || result.stdout.truncated
         || result.stdout.read_failed
+        || result.stderr.filter_failed
     {
+        let stderr = if stderr_filter.is_none() || result.stderr.filter_failed {
+            WITHHELD_TAIL.to_owned()
+        } else {
+            String::from_utf8_lossy(&result.stderr.bytes).into_owned()
+        };
         return Err(io::Error::other(format!(
-            "command failed: {argv:?}: {}",
-            String::from_utf8_lossy(&result.stderr.bytes)
+            "command failed: {argv:?}: {stderr}"
         ))
         .into());
     }
@@ -3008,15 +3022,23 @@ mod tests {
         )
         .unwrap_err();
 
-        // The recorded refresh reason carries the tail only after masking.
+        // This is the field tick stores in seed-result.json: the capture-time
+        // filter must leave only masked text in the persisted tail.
+        let prepare = prepare_failed_of(error.as_ref()).expect("prepare failure");
+        assert!(prepare.tail.contains("install the missing dependency"), "{}", prepare.tail);
+        assert!(!prepare.tail.contains(secret), "{}", prepare.tail);
+        assert!(prepare.tail.contains("[REDACTED]"), "{}", prepare.tail);
+
+        // The recorded refresh reason carries that same masked tail.
         let reason = refresh_failure_reason(error.as_ref());
         assert!(reason.contains("install the missing dependency"), "{reason}");
         assert!(!reason.contains(secret), "{reason}");
         assert!(reason.contains("[REDACTED]"), "{reason}");
 
-        // A manual `seed-build --json` drives the real `fail_with_cause`
-        // emission path and renders the same masked tail as error.cause, after
-        // the message and before the one typed next.
+        // A manual `seed-build --json` drives the same production emission path
+        // as `worktrees::run`: the one `Error::command_error` mapping through
+        // `fail_with_command_error_with_writers`. It renders the masked tail as
+        // error.cause, after the message and before the one typed next.
         let failure = crate::worktrees::seed_build_failure(error.as_ref());
         let globals = provenant_cli::Globals {
             json: true,
@@ -3024,13 +3046,10 @@ mod tests {
         };
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        crate::fail_with_cause_with_writers(
+        crate::fail_with_command_error_with_writers(
             "worktree seed-build",
             failure.outcome(),
-            "WORKTREE",
-            &failure.local_message(),
-            failure.cause(),
-            failure.repair(),
+            failure.command_error("WORKTREE"),
             &globals,
             &mut stdout,
             &mut stderr,

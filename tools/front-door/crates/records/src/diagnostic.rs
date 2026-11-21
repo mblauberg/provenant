@@ -720,7 +720,8 @@ impl Diagnostic {
 }
 
 /// Characters that could hide, reorder or break text on a terminal: Cc
-/// controls plus the Cf, Zl and Zp categories and emoji variation selectors.
+/// controls plus the Cf, Zl and Zp categories and emoji tag characters
+/// (U+E0001 and U+E0020..U+E007F), not the variation-selector ranges.
 pub fn unsafe_display_character(character: char) -> bool {
     character.is_control()
         || matches!(character,

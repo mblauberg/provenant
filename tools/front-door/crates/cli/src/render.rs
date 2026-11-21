@@ -138,7 +138,12 @@ pub fn head_and_tail(text: &str, max: usize) -> String {
         head = cut + 1;
     }
     if let Some(cut) = text[tail..].find('\n') {
-        tail += cut + 1;
+        let snap = tail + cut + 1;
+        // Only snap to the next whole line when one follows; otherwise the
+        // newline was the final byte and snapping would drop the last line.
+        if snap < text.len() {
+            tail = snap;
+        }
     }
     let tail = tail.min(text.len());
     format!(
@@ -580,6 +585,16 @@ mod tests {
         assert!(bounded.ends_with("zzz"));
         assert!(bounded.contains("bytes omitted; use --full"), "{bounded}");
         assert_eq!(head_and_tail("short", 60), "short");
+    }
+    #[test]
+    fn head_and_tail_keeps_a_last_line_whose_newline_ends_the_text() {
+        // The tail boundary lands inside a line whose trailing newline is the
+        // final byte. Snapping past it would leave an empty tail and lose that
+        // line — the very end where a failure usually sits.
+        let text = format!("{}{}", "a".repeat(100), "LAST-LINE\n");
+        let bounded = head_and_tail(&text, 40);
+        assert!(bounded.ends_with("LAST-LINE\n"), "{bounded}");
+        assert!(bounded.contains("bytes omitted"), "{bounded}");
     }
     #[test]
     fn full_shows_the_owner_text_then_the_typed_next() -> Result<(), Box<dyn std::error::Error>> {
