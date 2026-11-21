@@ -605,6 +605,22 @@ pub(super) fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> 
         store.record(attempt, &call)?.state,
         provenant_run::AttemptState::Terminal { .. }
     ));
+    // The exit record is published before the guardian's terminal callback
+    // crashes. Wait until that guardian is observed gone: its locks are then
+    // released while the crashed attempt's reservation is still retained, so
+    // reconciliation sees a settled slot rather than a live, stalled guardian.
+    provenant_test_support::wait_for(
+        "crashed writer guardian gone",
+        Duration::from_secs(8),
+        || {
+            store.writer_fences().is_ok_and(|fences| {
+                fences
+                    .iter()
+                    .any(|fence| fence.scope.attempt == attempt && fence.live == Some(false))
+            })
+        },
+        |gone| *gone,
+    )?;
     // The operation remains unfinished when the durable exit is recovered.
     fs::write(
         writer
