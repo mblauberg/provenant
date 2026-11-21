@@ -734,12 +734,30 @@ fn prepare_accepts_absolute_shell_helper_outside_path()
 fn prepare_failures_name_step_and_bound_git_stderr()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
-    for (pattern, step) in [
-        ("remote get-url", DeliveryPrepareStep::RemoteUrl),
-        ("symbolic-ref --quiet", DeliveryPrepareStep::Head),
-        ("rev-parse --absolute-git-dir", DeliveryPrepareStep::GitDir),
-        ("config --get-regexp", DeliveryPrepareStep::CredentialHelper),
-        ("fetch --no-auto-maintenance", DeliveryPrepareStep::Fetch),
+    enum Expected {
+        Prepare(DeliveryPrepareStep),
+        TransportConfigRead,
+    }
+    for (pattern, expected) in [
+        (
+            "remote get-url",
+            Expected::Prepare(DeliveryPrepareStep::RemoteUrl),
+        ),
+        (
+            "symbolic-ref --quiet",
+            Expected::Prepare(DeliveryPrepareStep::Head),
+        ),
+        (
+            "rev-parse --absolute-git-dir",
+            Expected::Prepare(DeliveryPrepareStep::GitDir),
+        ),
+        // Reading the helper settings is a named config read now: a failure is
+        // a transport-config refusal naming the operation, not a prepare step.
+        ("config --get-regexp", Expected::TransportConfigRead),
+        (
+            "fetch --no-auto-maintenance",
+            Expected::Prepare(DeliveryPrepareStep::Fetch),
+        ),
     ] {
         let mut fixture = PrepareFixture::new()?;
         let git = fixture.root.join("git");
@@ -755,15 +773,35 @@ fn prepare_failures_name_step_and_bound_git_stderr()
         // The remote must advertise a branch, or there is nothing to fetch.
         fixture.git(&["push", "-q", "origin", "HEAD:refs/heads/seed"])?;
         let error = fixture.prepare().expect_err("git must fail");
-        let RunError::DeliveryPrepare {
-            step: actual_step,
-            reason,
-            ..
-        } = error
-        else {
-            panic!("unexpected failure class: {error:?}");
+        let reason = match error {
+            RunError::DeliveryPrepare {
+                step: actual_step,
+                reason,
+                ..
+            } => {
+                let Expected::Prepare(step) = expected else {
+                    panic!("unexpected prepare failure for {pattern}: {actual_step}");
+                };
+                assert_eq!(actual_step, step);
+                reason
+            }
+            RunError::DeliveryTransport {
+                stage: provenant_records::run::WriterDeliveryStage::Prepare,
+                kind: TransportRefusal::Unreadable,
+                reason,
+            } => {
+                assert!(
+                    matches!(expected, Expected::TransportConfigRead),
+                    "unexpected transport refusal for {pattern}: {reason}"
+                );
+                assert!(
+                    reason.contains("read transport helper settings"),
+                    "{reason}"
+                );
+                reason
+            }
+            other => panic!("unexpected failure class: {other:?}"),
         };
-        assert_eq!(actual_step, step);
         for secret in [
             "private-token",
             "user:password",

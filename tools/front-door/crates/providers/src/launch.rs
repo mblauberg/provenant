@@ -917,7 +917,16 @@ pub(crate) fn base_env_with_host(
         input.cwd,
     ) {
         Ok(values) => env.extend(values),
-        Err(error) if error.source.kind() == std::io::ErrorKind::NotFound => {}
+        // A missing or non-executable pinned Git, or an inaccessible working
+        // directory, fails before Git reads any config. That is an environment
+        // availability gap rather than a config-read failure, so the identity
+        // stays absent; a Git that ran but could not read config still carries
+        // its named cause through ProviderError::GitConfigRead.
+        Err(error)
+            if matches!(
+                error.source.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) => {}
         Err(error) => return Err(ProviderError::GitConfigRead(error)),
     }
     Ok(env)

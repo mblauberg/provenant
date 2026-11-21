@@ -103,6 +103,7 @@ fixture = [
 
 [dependencies]
 sha2 = { workspace = true }
+regex = { workspace = true }
 jiff = { workspace = true }
 provenant-os = { workspace = true }
 provenant-quota = { workspace = true }

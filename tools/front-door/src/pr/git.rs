@@ -275,9 +275,21 @@ impl Git {
         })
     }
     /// Drop the branch's tracking section after a successful delete. The core
-    /// builds the mutation; this method only supplies the process policy.
+    /// builds the mutation; this method only supplies the process policy. A
+    /// branch with no tracking config has no section to drop, which is a normal
+    /// cleanup outcome rather than a failed mutation.
     pub(super) fn config_remove_branch_section(&self, dir: &Path, branch: &str) -> Result<()> {
         use provenant_os::git_config::{ConfigContext, ConfigMutation};
+        let pattern = format!(r"^{}\.", regex::escape(&format!("branch.{branch}")));
+        let present = self.config_full(
+            dir,
+            "read landed branch configuration",
+            Some("branch section"),
+            provenant_os::git_config::Read::GetRegexpLocal(&pattern),
+        )?;
+        if present.is_none() {
+            return Ok(());
+        }
         let context = ConfigContext::new(
             "remove landed branch configuration",
             dir.join(".git/config"),

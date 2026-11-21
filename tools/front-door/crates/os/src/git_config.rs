@@ -84,6 +84,7 @@ pub enum Read<'a> {
     GetAfterOptions(&'a str),
     GetLocal(&'a str),
     GetRegexp(&'a str),
+    GetRegexpLocal(&'a str),
     Snapshot,
     LocalBareOrigins,
     UrlRewrites,
@@ -141,6 +142,9 @@ pub fn read<T, E>(
         Read::GetLocal(key) => args.extend(["--local", "--get", "--", key].map(OsString::from)),
         Read::GetRegexp(pattern) => {
             args.extend(["--get-regexp", "--", pattern].map(OsString::from))
+        }
+        Read::GetRegexpLocal(pattern) => {
+            args.extend(["--local", "--get-regexp", "--", pattern].map(OsString::from))
         }
         Read::HooksPath => args.extend(["--path", "--get", "core.hooksPath"].map(OsString::from)),
         Read::UrlRewrites => args.extend(
@@ -498,11 +502,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::disallowed_methods)]
     fn option_shaped_key_cannot_become_a_git_option() {
         let context = ConfigContext::new("test config read", "<environment>", None);
         let output = read(context, Read::Get("--list"), |args| {
-            std::process::Command::new("/usr/bin/git")
+            crate::fixture::git_command_at("/usr/bin/git")
                 .env("GIT_CONFIG_COUNT", "1")
                 .env("GIT_CONFIG_KEY_0", "test.visible")
                 .env("GIT_CONFIG_VALUE_0", "sentinel")
