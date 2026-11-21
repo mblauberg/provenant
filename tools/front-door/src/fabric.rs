@@ -188,6 +188,19 @@ impl Factory {
                 .parse()
                 .map_err(|_| FacadeError::StateCorrupt)
         };
+        self.resolve_base_with(directory, resolve, cancel)
+    }
+
+    /// The injected resolver is the seam the fetch-and-retry invariants pin.
+    /// A base missing locally is fetched once; only a retry that still reports
+    /// the base unresolvable becomes a host-state refusal. Cancellation and any
+    /// other retry failure are preserved unchanged.
+    fn resolve_base_with(
+        &self,
+        directory: &Path,
+        resolve: impl Fn() -> Result<provenant_core::GitOid, FacadeError>,
+        cancel: &CancelToken,
+    ) -> Result<provenant_core::GitOid, FacadeError> {
         match resolve() {
             Ok(oid) => Ok(oid),
             Err(FacadeError::InvalidInput {
@@ -199,10 +212,13 @@ impl Factory {
                 let fetch = git_facts::fetch_base_from_origin(directory, cancel);
                 match resolve() {
                     Ok(oid) => Ok(oid),
-                    Err(_) => Err(FacadeError::BaseFetchFailed {
+                    Err(FacadeError::InvalidInput {
+                        detail: Some(InvalidInputDetail::UnresolvableBase(_)),
+                    }) => Err(FacadeError::BaseFetchFailed {
                         clone: directory.to_string_lossy().into_owned(),
                         fetch,
                     }),
+                    Err(error) => Err(error),
                 }
             }
             Err(error) => Err(error),

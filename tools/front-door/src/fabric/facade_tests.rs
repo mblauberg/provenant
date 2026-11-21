@@ -431,6 +431,91 @@ fn peer_base_resolution_fetches_a_commit_missing_from_a_stale_clone()
     Ok(())
 }
 
+// Spec: docs/specs/fabric.md#publication-boundary
+#[cfg(test)]
+#[test]
+fn cancelled_base_fetch_keeps_the_cancellation() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
+    use std::{
+        collections::BTreeMap,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|path| (path, Occupancy::Available))
+                .collect()
+        }
+    }
+    let rig = crate::worktree_tests::repository()?;
+    provenant_os::fixture::private_state_dir(&rig.state)?;
+    let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+    let factory = Factory {
+        context: Context::open(roots, &rig.home, &rig.project)?,
+        project_attribution: false,
+        clock: SystemClock::new(),
+        backoff: ThreadPause,
+        executor: SystemExecutor::new(1)?,
+        home: rig.home.clone(),
+        cwd: rig.project.clone(),
+        assets: rig.project.clone(),
+        host_launch: None,
+        workers: &Free,
+    };
+    let cancel = CancelToken::new();
+    let calls = AtomicUsize::new(0);
+    let resolve = || -> Result<provenant_core::GitOid, FacadeError> {
+        if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            // Cancellation arrives after the base was found unresolvable and
+            // while the origin fetch is in flight. The retry observes it.
+            cancel.cancel();
+            Err(FacadeError::invalid(InvalidInputDetail::UnresolvableBase(
+                "deadbeef".into(),
+            )))
+        } else {
+            assert!(
+                cancel.is_cancelled(),
+                "the retry must observe the cancellation raised during the fetch"
+            );
+            Err(FacadeError::Cancelled)
+        }
+    };
+    let error = factory
+        .resolve_base_with(&rig.project, resolve, &cancel)
+        .expect_err("a cancellation during the fetch must be preserved");
+    assert!(
+        matches!(error, FacadeError::Cancelled),
+        "cancellation must not be recast as a fetch refusal: {error:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    // The same holds for any other retry failure: only a still-unresolvable
+    // base becomes a host-state fetch refusal.
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let calls = AtomicUsize::new(0);
+    let resolve = || -> Result<provenant_core::GitOid, FacadeError> {
+        if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(FacadeError::invalid(InvalidInputDetail::UnresolvableBase(
+                "deadbeef".into(),
+            )))
+        } else {
+            Err(FacadeError::Timeout)
+        }
+    };
+    let error = factory
+        .resolve_base_with(&rig.project, resolve, &cancel)
+        .expect_err("other retry failures must be preserved");
+    assert!(
+        matches!(error, FacadeError::Timeout),
+        "an unrelated retry failure must pass through: {error:?}"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 #[test]
 fn graph_document_decoder_checks_header_before_typed_graph() {
