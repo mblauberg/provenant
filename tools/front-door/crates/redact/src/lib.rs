@@ -1449,6 +1449,25 @@ impl Redactor {
         Ok(Self::with_secrets(secrets, false))
     }
 
+    /// Build the streaming filter for local operator disclosure. It applies
+    /// the same masking as [`known_shapes`] — registered and ambient literal
+    /// values plus credential token and assignment shapes — but masks on the
+    /// stream, ahead of any downstream bound, so a cut can never leave part of
+    /// a secret behind. Under a mode that does not mask local text it passes
+    /// bytes through unchanged. Install it as an exec `CaptureFilter` to mask
+    /// output at capture rather than at a display boundary.
+    pub fn for_local_disclosure() -> Result<Self, RedactorError> {
+        if !mode().masks_local() {
+            let mut filter = Self::with_secrets(Vec::new(), true);
+            filter.passthrough = true;
+            return Ok(filter);
+        }
+        let secrets = ambient_values()?.into_iter().chain(scoped_values());
+        let mut redactor = Self::new(publication_secrets(secrets)?)?;
+        redactor.scan_assignments = true;
+        Ok(redactor)
+    }
+
     /// Filter for published text. Masks registered typed and ambient
     /// literal values, including JSON-escaped spellings, without rewriting
     /// merely secret-shaped examples.
@@ -1990,7 +2009,10 @@ pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
     if !mode().masks_local() {
         return Ok(bytes.to_vec());
     }
-    filter_shapes(bytes, true)
+    filter_with(
+        Redactor::for_local_disclosure().map_err(|_| FilterError)?,
+        bytes,
+    )
 }
 /// Filter credential literals and token shapes at an egress boundary.
 pub fn egress_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
@@ -2009,6 +2031,12 @@ fn filter_shapes(bytes: &[u8], assignments: bool) -> Result<Vec<u8>, FilterError
     .map_err(|_| FilterError)?;
     let mut redactor = Redactor::new(secrets).map_err(|_| FilterError)?;
     redactor.scan_assignments = assignments;
+    filter_with(redactor, bytes)
+}
+/// The one frame loop that drives a redactor over bounded input and collects
+/// its masked output. The same core backs whole-text filtering and the
+/// streaming `CaptureFilter` used at the exec edge.
+fn filter_with(mut redactor: Redactor, bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
     let mut safe = Vec::new();
     let mut sink = |frame: &[u8]| {
         safe.extend_from_slice(frame);
@@ -2514,6 +2542,30 @@ mod tests {
         let mut redactor =
             Redactor::new([b"abcde".to_vec(), b"cd".to_vec()]).expect("valid secrets");
         assert_eq!(joined(&mut redactor, &[b"ab", b"cd", b"e"]), REDACTED);
+    }
+
+    #[test]
+    fn local_disclosure_filter_masks_across_two_filter_calls() {
+        // The capture filter installed on the exec edge is a
+        // `for_local_disclosure` redactor. A stream split can land inside a
+        // registered literal on either side, so state must span the two calls.
+        let _mode = scoped(Mode::Full);
+        let secret = b"split-secret-4472";
+        let _scope = publication_scope([secret.to_vec()]).unwrap();
+        let input = b"before split-secret-4472 after";
+        let expected = b"before [REDACTED] after";
+        let start = input
+            .windows(secret.len())
+            .position(|window| window == secret)
+            .unwrap();
+        for split in start..=start + secret.len() {
+            let mut redactor = Redactor::for_local_disclosure().unwrap();
+            assert_eq!(
+                joined(&mut redactor, &[&input[..split], &input[split..]]),
+                expected,
+                "split {split} bisects the literal"
+            );
+        }
     }
 
     #[test]

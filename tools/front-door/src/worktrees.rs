@@ -75,8 +75,14 @@ pub(crate) enum Error {
     DiskSpace(std::io::Error),
     #[error("invalid worktree removal scope")]
     InvalidScope,
-    #[error("target seed build: {0}")]
-    SeedBuild(String),
+    #[error("target seed build: {message}")]
+    SeedBuild {
+        message: String,
+        /// Bounded output tail of a failed `build.prepare` command, when that
+        /// is the cause. The renderer shows it as an indented human cause and
+        /// as `error.cause` in JSON.
+        tail: Option<String>,
+    },
     #[error("{0}")]
     Settlement(String),
 }
@@ -106,21 +112,21 @@ pub(crate) fn local_worktree_message(error: &WorktreeError) -> String {
 }
 
 impl Error {
-    fn local_message(&self) -> String {
+    pub(crate) fn local_message(&self) -> String {
         match self {
             Self::Worktree(error) => local_worktree_message(error),
             _ => self.to_string(),
         }
     }
 
-    fn repair(&self) -> Option<&'static str> {
+    pub(crate) fn repair(&self) -> Option<&'static str> {
         match self {
             Self::Worktree(error) => error.repair(),
             _ => None,
         }
     }
 
-    fn outcome(&self) -> Outcome {
+    pub(crate) fn outcome(&self) -> Outcome {
         match self {
             Self::Root(roots::RootError::Checkout | roots::RootError::State(_))
             | Self::InvalidScope
@@ -154,6 +160,34 @@ impl Error {
             Self::Worktree(WorktreeError::Cancelled) => Outcome::Cancelled,
             _ => Outcome::Error,
         }
+    }
+
+    pub(crate) fn cause(&self) -> Option<&str> {
+        match self {
+            Self::SeedBuild {
+                tail: Some(tail), ..
+            } => Some(tail),
+            _ => None,
+        }
+    }
+
+    /// The one mapping from a worktree refusal to its transport facts. Used by
+    /// the production emit path and by the render tests, so the two cannot drift.
+    pub(crate) fn command_error(&self, code: &str) -> provenant_records::CommandError {
+        crate::command_error(code, &self.local_message(), self.cause(), self.repair())
+    }
+}
+
+/// Keep a failing `build.prepare` command's bounded output alongside its
+/// message. A seed-build operator otherwise sees only the command and exit
+/// status and has to reproduce the failure to learn why it happened. The tail
+/// was masked on the capture stream, ahead of the Tail window, so it is already
+/// safe to carry as `error.cause` in both human and JSON output.
+pub(crate) fn seed_build_failure(error: &(dyn std::error::Error + 'static)) -> Error {
+    Error::SeedBuild {
+        message: error.to_string(),
+        tail: crate::target_seed_build::prepare_failed_of(error)
+            .map(|prepare| prepare.tail.clone()),
     }
 }
 
@@ -210,16 +244,16 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
                 globals,
             ),
         },
-        Err(error) => crate::fail_with_repair(
+        Err(error) => crate::fail_with_command_error(
             name,
             error.outcome(),
-            if matches!(error, Error::Worktree(WorktreeError::LockBusy)) {
-                "WORKTREE_LOCK_BUSY"
-            } else {
-                "WORKTREE"
-            },
-            &error.local_message(),
-            error.repair(),
+            error.command_error(
+                if matches!(error, Error::Worktree(WorktreeError::LockBusy)) {
+                    "WORKTREE_LOCK_BUSY"
+                } else {
+                    "WORKTREE"
+                },
+            ),
             globals,
         ),
     }
@@ -380,7 +414,7 @@ fn execute(
     let (roots, home, project) = (&resolved.roots, &resolved.home, &resolved.project);
     if matches!(command, Worktree::SeedBuild) {
         let generation = crate::target_seed_build::build(roots.state.as_path(), project)
-            .map_err(|error| Error::SeedBuild(error.to_string()))?;
+            .map_err(|error| seed_build_failure(error.as_ref()))?;
         return Ok(Data::SeedBuilt(generation));
     }
     let facts = worktrees::RepoFacts::default();
@@ -4534,6 +4568,70 @@ mod human_tests {
             }
             assert_eq!(Error::Worktree(error).local_message(), message);
         }
+    }
+
+    /// Spec: docs/specs/run.md#cargo-target-seed
+    #[test]
+    fn failing_prepare_marker_is_visible_in_human_and_json_renderings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let marker = "Cannot find package 'zod'";
+        let tail = format!("npm ERR! {marker}\ninstall the missing dependency\n");
+        let prepare = crate::target_seed_build::PrepareFailed {
+            index: 0,
+            argv: vec!["node".into(), "scripts/generate.mjs".into()],
+            exit: Some(1),
+            tail: tail.clone(),
+        };
+        let boxed: Box<dyn std::error::Error> = Box::new(prepare);
+        let failure = seed_build_failure(boxed.as_ref());
+        assert!(
+            failure
+                .local_message()
+                .contains("build.prepare[0] command failed")
+        );
+        // Drive the production emission path with the one Error::command_error
+        // mapping; human refusals render on stderr, JSON on stdout.
+        let human_globals = provenant_cli::Globals {
+            json: false,
+            full: true,
+            ..Default::default()
+        };
+        let (mut human_out, mut human_err) = (Vec::new(), Vec::new());
+        crate::fail_with_command_error_with_writers(
+            "worktree seed-build",
+            failure.outcome(),
+            failure.command_error("WORKTREE"),
+            &human_globals,
+            &mut human_out,
+            &mut human_err,
+        );
+        let human = String::from_utf8(human_err)?;
+        assert!(human.contains("build.prepare[0] command failed"), "{human}");
+        assert!(human.contains(marker), "{human}");
+        assert!(human.contains("install the missing dependency"), "{human}");
+
+        let json_globals = provenant_cli::Globals {
+            json: true,
+            ..Default::default()
+        };
+        let (mut json_out, mut json_err) = (Vec::new(), Vec::new());
+        crate::fail_with_command_error_with_writers(
+            "worktree seed-build",
+            failure.outcome(),
+            failure.command_error("WORKTREE"),
+            &json_globals,
+            &mut json_out,
+            &mut json_err,
+        );
+        let value: serde_json::Value = serde_json::from_slice(&json_out)?;
+        assert_eq!(value["error"]["cause"].as_str(), Some(tail.as_str()));
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("build.prepare[0]")),
+            "{value}"
+        );
+        Ok(())
     }
 
     #[allow(dead_code)] // The harness=false driver compiles only the helpers.
