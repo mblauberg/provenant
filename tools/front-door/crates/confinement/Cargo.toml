@@ -35,7 +35,6 @@ fixture = [
 snapshot = []
 
 [dev-dependencies]
-syn = { workspace = true }
 provenant-test-support = { path = "../test-support", features = ["fixture"] }
 provenant-fabric-store = { path = "../fabric-store", features = ["fixture"] }
 provenant-os = { workspace = true, features = ["fixture"] }

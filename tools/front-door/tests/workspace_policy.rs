@@ -718,6 +718,138 @@ fn fixture_git_commands_use_the_scrubbed_helper() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
+// Git config argv belongs to the core's typed read/write constructors. These
+// patterns catch the bypass shapes at process/git-helper call sites and a raw
+// write tail; `ConfigMutation` is the only supported mutation input. Strings
+// and test-only scopes are excluded so a fixture or a literal label cannot
+// satisfy or trip the rule.
+fn git_config_violations(source: &str, test_file: bool) -> Vec<String> {
+    const PATTERNS: &[(&str, &str)] = &[
+        (
+            "process command config argv",
+            r#"(?s)Command\s*::\s*new\s*\([^;]*?\)\s*\.args?\s*\([^;]*?"config""#,
+        ),
+        (
+            "executor config argv",
+            r#"(?s)\.execute\s*\(\s*ExecOptions\s*::\s*new\s*\([^;]*?"config""#,
+        ),
+        (
+            "Git method config argv",
+            r#"(?s)\bgit\s*\.\s*(?:full|run)\s*\([^;]*?"config""#,
+        ),
+        (
+            "Git helper config argv",
+            r#"(?s)\b(?:git|host_git\w*|execute_for)\s*\([^;]*?"config""#,
+        ),
+        (
+            "Git helper closure config argv",
+            r#"(?s)\brun\s*\(\s*&\[\s*"config""#,
+        ),
+        (
+            "raw git_config::write argv",
+            r#"git_config\s*::\s*write\s*\(\s*&"#,
+        ),
+        (
+            "raw config mutation argv",
+            r#"(?s)"config"\s*,\s*"--(?:local|replace-all|remove-section|unset|unset-all|add|set)""#,
+        ),
+    ];
+    let tests = selected_test_scopes(source, test_file, false);
+    let mut findings = Vec::new();
+    for (label, pattern) in PATTERNS {
+        let Ok(regex) = regex::Regex::new(pattern) else {
+            continue;
+        };
+        for found in regex.find_iter(source) {
+            let offset = source.as_ptr() as usize + found.start();
+            if tests.iter().any(|scope| {
+                let start = scope.as_ptr() as usize;
+                (start..start + scope.len()).contains(&offset)
+            }) {
+                continue;
+            }
+            findings.push((*label).to_owned());
+            break;
+        }
+    }
+    findings
+}
+
+#[test]
+fn git_config_rule_detects_raw_argv_and_spares_test_scopes() {
+    for source in [
+        r#"fn f(git: &str) { std::process::Command::new(git).args(["config", "--list"]).output(); }"#,
+        r#"fn f(git: &str) { std::process::Command::new(git).arg("config").output(); }"#,
+        r#"fn f(executor: &dyn Executor) { executor.execute(ExecOptions::new(&["git", "config"], cwd, timeout)); }"#,
+        r#"fn f() { host_git(repo, executor, &["config", "--list"], timeout); }"#,
+        r#"fn f() { git(repo, home, &["config", "user.name", "Probe"]); }"#,
+        r#"fn f(repo: &Path, git: &Git) { git.full(repo, &["config", "--get", "core.worktree"]); }"#,
+        r#"fn f(repo: &Path, git: &Git) { git.run(repo, &["config", "--list"]); }"#,
+        r#"fn f() { execute_for(repo, &["git", "config"], timeout, false); }"#,
+        r#"fn f() { let run = |args| host_git_with_cancel(repo, executor, args, timeout, false, None); run(&["config", "--get", "remote.origin.url"]); }"#,
+        r#"fn f(tail: &[OsString]) { provenant_os::git_config::write(&tail, |args| run(args)); }"#,
+        r#"fn f(git: &str) { std::process::Command::new(git).args(["config", "--local", "branch.lane.remote", "origin"]).output(); }"#,
+    ] {
+        assert!(
+            !git_config_violations(source, false).is_empty(),
+            "missed: {source}"
+        );
+    }
+    for source in [
+        r#"fn f() { provenant_os::git_config::write(context, ConfigMutation::SetStore { setting, value }, |args| run(args)); }"#,
+        r#"const LABEL: &str = "config"; fn f() { run(&["status"]); }"#,
+        r#"#[cfg(test)] fn fixture(git: &str) { std::process::Command::new(git).args(["config"]).output(); }"#,
+    ] {
+        assert!(
+            git_config_violations(source, false).is_empty(),
+            "false positive: {source}"
+        );
+    }
+    assert!(
+        git_config_violations(
+            r#"fn f(git: &str) { std::process::Command::new(git).args(["config"]).output(); }"#,
+            true
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn git_config_commands_are_built_only_in_the_core() -> Result<(), Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let core = root.join("crates/os/src/git_config.rs");
+    let mut sources = Vec::new();
+    rust_sources(&root.join("src"), &mut sources)?;
+    if root.join("examples").is_dir() {
+        rust_sources(&root.join("examples"), &mut sources)?;
+    }
+    for entry in fs::read_dir(root.join("crates"))? {
+        let directory = entry?.path();
+        for tree in ["src", "examples"] {
+            let source_root = directory.join(tree);
+            if source_root.is_dir() {
+                rust_sources(&source_root, &mut sources)?;
+            }
+        }
+    }
+    let mut violations = Vec::new();
+    for path in sources {
+        if path == core {
+            continue;
+        }
+        let source = fs::read_to_string(&path)?;
+        for finding in git_config_violations(&source, is_test_source(&path.to_string_lossy())) {
+            violations.push(format!("{}: {finding}", path.display()));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "Git config commands must be built in the core:\n{}",
+        violations.join("\n")
+    );
+    Ok(())
+}
+
 #[test]
 fn os_internals_are_reserved_for_supervisor() -> Result<(), Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
