@@ -617,6 +617,36 @@ fn peer_frames_a_local_run_event_failure() -> Result {
     rig.assert_v1_root_untouched()
 }
 
+fn run_attempt_record(
+    rig: &TestRig,
+    identity: &Value,
+    reference: &str,
+) -> Result<provenant_run::AttemptRecord> {
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let context = provenant_run::ExecutionContext {
+        state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
+        project_id: identity["data"]["project"]
+            .as_str()
+            .ok_or("project")?
+            .parse()?,
+        actor_id: identity["data"]["inbox"]["actor"]
+            .as_str()
+            .ok_or("actor")?
+            .parse()?,
+        read_prompts: false,
+    };
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = provenant_run::RunStore::open(&context, &call)?;
+    let (_, id) = reference.split_once('/').ok_or("reference")?;
+    Ok(store.record(id.parse()?, &call)?)
+}
+
 #[test]
 fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
     for scenario in ["authority", "refresh", "quota"] {
@@ -723,24 +753,42 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         let run: Value = serde_json::from_slice(&run.stdout.bytes)?;
         assert_eq!(run["status"], "failed", "{run}");
         assert_eq!(run["data"]["outcome"], "failed", "{run}");
+        let identity = rig.command(&["fabric", "identity", "--json"])?;
+        let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
         if scenario == "quota" {
             // Issue #3551: a recorded exhaustion on an exact model pin is
-            // advisory. The pinned Claude route is attempted with a warning
-            // naming the record's source and expiry, rather than refused
-            // before launch, so no typed usage_limited refusal is recorded.
+            // advisory. The pinned Claude route is attempted first with a
+            // warning naming the record's source and expiry, rather than
+            // refused before launch, so no typed usage_limited refusal is
+            // recorded and no fallback is promoted ahead of the pin.
             let node = &run["data"]["checkpoint"]["nodes"][0];
             let attempts = node["attempts"].as_array().ok_or("attempts")?;
-            assert!(
-                attempts
-                    .iter()
-                    .any(|attempt| attempt["route"]["adapter"] == "claude"),
-                "the pinned Claude route must still be selected: {run}"
+            let pinned = attempts
+                .iter()
+                .position(|attempt| attempt["route"]["adapter"] == "claude")
+                .ok_or("the pinned Claude route must still be selected")?;
+            assert_eq!(
+                attempts[pinned]["key"]["route_index"], 0,
+                "the pinned route must be attempted before any fallback: {run}"
             );
             assert!(
                 attempts
                     .iter()
                     .all(|attempt| attempt["outcome"] != "usage_limited"),
                 "pinned exhaustion must not be a pre-launch refusal: {run}"
+            );
+            let reference = attempts[pinned]["attempt_ref"]
+                .as_str()
+                .ok_or("reference")?;
+            let record = run_attempt_record(&rig, &identity, reference)?;
+            assert_eq!(record.preparation_failure, None, "{record:?}");
+            assert_eq!(record.provider_launched, Some(true), "{record:?}");
+            let applied = record.applied_route.as_ref().ok_or("applied route")?;
+            assert!(
+                applied.launch_warnings.iter().any(|warning| {
+                    warning.contains("source: fixture") && warning.contains("expiry unix seconds:")
+                }),
+                "the advisory warning must persist its source and expiry: {applied:?}"
             );
             cleanup.disarm();
             continue;
@@ -761,16 +809,12 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
                 .find(|attempt| attempt["route"]["adapter"] == "claude")
                 .ok_or("missing Claude credential refusal")?
         } else {
-            let expected = if scenario == "quota" {
-                "usage_limited"
-            } else {
-                "auth_required"
-            };
+            let expected = "auth_required";
             assert!(
                 attempts
                     .iter()
                     .any(|attempt| attempt["route"]["adapter"] == "fixture"),
-                "typed auth/quota refusal must permit the configured fallback: {run}"
+                "typed auth refusal must permit the configured fallback: {run}"
             );
             attempts
                 .iter()
@@ -778,35 +822,8 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
                 .ok_or("missing typed auth/quota refusal")?
         };
         assert_eq!(refusal_attempt["launched"], false);
-        let identity = rig.command(&["fabric", "identity", "--json"])?;
-        let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
-        let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
-        inputs.state_dir = Some(rig.state.clone());
-        let context = provenant_run::ExecutionContext {
-            state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
-            project_id: identity["data"]["project"]
-                .as_str()
-                .ok_or("project")?
-                .parse()?,
-            actor_id: identity["data"]["inbox"]["actor"]
-                .as_str()
-                .ok_or("actor")?
-                .parse()?,
-            read_prompts: false,
-        };
-        let clock = provenant_os::clock::SystemClock::new();
-        let cancel = provenant_core::CancelToken::new();
-        let call = provenant_run::Request {
-            clock: &clock,
-            cancel: &cancel,
-        };
-        let store = provenant_run::RunStore::open(&context, &call)?;
-        let (_, id) = refusal_attempt["attempt_ref"]
-            .as_str()
-            .ok_or("reference")?
-            .split_once('/')
-            .ok_or("reference")?;
-        let record = store.record(id.parse()?, &call)?;
+        let reference = refusal_attempt["attempt_ref"].as_str().ok_or("reference")?;
+        let record = run_attempt_record(&rig, &identity, reference)?;
         if scenario == "authority" {
             assert_eq!(record.preparation_failure, None, "{record:?}");
             assert!(record.skipped_routes.iter().any(|route| {
@@ -822,11 +839,7 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
             cleanup.disarm();
             continue;
         }
-        let failure = if scenario == "quota" {
-            provenant_records::run::PreparationFailure::UsageLimited
-        } else {
-            provenant_records::run::PreparationFailure::AuthRequired
-        };
+        let failure = provenant_records::run::PreparationFailure::AuthRequired;
         assert_eq!(
             record.preparation_failure,
             Some(failure),
@@ -844,19 +857,11 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
             .iter()
             .find(|route| route.route.starts_with("claude/"))
             .ok_or("missing Claude preparation refusal")?;
-        if scenario == "quota" {
-            assert_eq!(skipped.kind, provenant_records::run::SkipKind::Unavailable);
-            assert_eq!(
-                skipped.cause,
-                Some(provenant_records::RouteExclusionReason::Exhausted)
-            );
-        } else {
-            assert_eq!(skipped.kind, provenant_records::run::SkipKind::AuthRequired);
-            assert_eq!(
-                skipped.cause,
-                Some(provenant_records::RouteExclusionReason::AuthRequired)
-            );
-        }
+        assert_eq!(skipped.kind, provenant_records::run::SkipKind::AuthRequired);
+        assert_eq!(
+            skipped.cause,
+            Some(provenant_records::RouteExclusionReason::AuthRequired)
+        );
         let diagnostic = skipped.diagnostic();
         assert_eq!(diagnostic.code, "REFUSED");
         assert!(diagnostic.next.is_some());

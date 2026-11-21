@@ -91,10 +91,13 @@ models; an uncatalogued selection carries a source warning. When the owner expli
 `providers.<adapter>.models`, that restriction applies to automatic choices
 from both shipped and owner-configured pools, routes, preferences, fallbacks and
 depletion hand-offs. A fallback model is an automatic alternative, even when
-attached to an explicit model pin. `out_of_scope_pin` applies to an explicit
-primary model choice; it does not filter fallback alternatives. An explicit
-primary pin outside the effective scope follows the provider's policy: warn
-once and launch, refuse, or allow silently. Provider model names are matched
+attached to an explicit model pin: it keeps its own recorded readiness and is
+never promoted by the advisory rule for exact pins. `out_of_scope_pin` applies
+to an explicit primary model choice; it does not filter fallback alternatives.
+An explicit primary pin outside the effective scope is advisory and always
+launches: `warn` and `refuse` warn with the setting's source (`allow` stays
+silent), so `refuse` no longer stops the launch.
+Provider model names are matched
 against literal patterns with `*` as a wildcard. Scope describes the requested
 model ID, not an underlying model selected by a provider's automatic mode.
 `Catalogue::launch_model` applies a recorded effort suffix only to a catalogued
@@ -215,7 +218,10 @@ and exit 0; a clean exit without an error still settles as `Succeeded`.
 Unknown or stale quota does not establish exhaustion. Monthly allowance pacing warns when cycles are unobserved as described below. Missing, expired or
 mismatched readiness evidence never reads as ready. Refusals are scoped to
 model and account unless provider evidence proves a wider pool; a plan usage
-limit holds the whole account until its reset. OpenCode retry-after values are
+limit holds the whole account until its reset, except for the advisory carve-out
+below: the exact model the owner pinned warns with the record's source and
+expiry and is attempted anyway, while an automatic fallback or an unpinned
+route still prefers an available route. OpenCode retry-after values are
 rounded up to whole seconds; a newer refusal for the same pool supersedes its
 older reset, and settlement replay respects retained clearing records. Those
 records are bounded, so an evicted clearing cannot prevent a later replay.
@@ -268,7 +274,8 @@ on the same route without marking the account exhausted, then reroute at most
 once to another eligible route or provider at the same tier before stopping at
 the chair.
 - Why: one probe outage or model limit must not take a provider offline, and
-  no stale evidence may admit a launch.
+  no stale evidence may admit a launch except for an exact model pin, whose
+  advisory warning names the record's source and expiry before the attempt.
 - Owner: `crates/quota/src/admission.rs`, `crates/quota/src/readiness.rs`,
   `AccountRecord::successful_login_observed_at` in `crates/quota/src/state.rs`,
   `crates/routing/src/resolve.rs`
