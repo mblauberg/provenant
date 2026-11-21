@@ -20,6 +20,17 @@ fn hook_bypass_usage(record: &run::AttemptRecord) -> Option<Value> {
     serde_json::to_value(record.usage.hook_bypass.as_ref()?).ok()
 }
 
+/// Project attempt-scoped usage onto a result reply. Both result paths call
+/// this, so a settled hook-bypass receipt cannot be dropped from either one.
+fn project_usage(record: &run::AttemptRecord, data: &mut Value) {
+    if let Some(usage) = budget_usage(record) {
+        data["budget_usage"] = usage;
+    }
+    if let Some(bypass) = hook_bypass_usage(record) {
+        data["hook_bypass"] = bypass;
+    }
+}
+
 /// Render a host-owned read through the same CLI projection.
 pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Reply {
     let receipt_tail = matches!(command.part, Part::Receipt)
@@ -586,12 +597,7 @@ fn output_read_part(
         if let Some(stop_work) = &record.stop_work {
             data["stop_work"] = json!(stop_work);
         }
-        if let Some(usage) = budget_usage(&record) {
-            data["budget_usage"] = usage;
-        }
-        if let Some(bypass) = hook_bypass_usage(&record) {
-            data["hook_bypass"] = bypass;
-        }
+        project_usage(&record, &mut data);
         return Ok((data, format!("{reason}\n")));
     }
     let evicted = status::artifact(
@@ -660,12 +666,7 @@ fn output_read_part(
             "digest": chunk.digest,
             "bytes": provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(chunk.bytes),
     });
-    if let Some(usage) = budget_usage(&record) {
-        data["budget_usage"] = usage;
-    }
-    if let Some(bypass) = hook_bypass_usage(&record) {
-        data["hook_bypass"] = bypass;
-    }
+    project_usage(&record, &mut data);
     if evicted {
         // Retention removed the bulk payload; the record, result and capture
         // tails remain.
@@ -1130,19 +1131,53 @@ mod tests {
 
     #[test]
     fn result_renders_the_settled_hook_bypass_observation() {
-        // The host writes this field from the settled record; the lane-authored
-        // result artifact cannot. Both the JSON reply and the chair's summary
-        // must carry it so a bypass is visible without reading raw usage.
-        let data = json!({
-            "attempt_id":"22222222222222222222222222222222",
-            "state":"succeeded",
-            "part":"result",
-            "eof":true,
-            "hook_bypass":{
-                "count":3,
-                "rule":provenant_records::run::LANE_HOOK_BYPASS_RULE,
+        // Settlement reads the shim's observation into `usage`. Project that
+        // settled record the same way output_read_part does: injecting the
+        // field into hand-built reply data would not pin the projection.
+        let id = "22222222222222222222222222222222";
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let record: provenant_run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": id,
+            "project_id": id,
+            "key": {"project": id, "graph": "graph", "node": "node", "attempt": 2},
+            "attempt_number": 2,
+            "revision": 1,
+            "generation": 1,
+            "requested_route": {"kind": "named", "name": "senior"},
+            "authority_digest": digest,
+            "queued_at": "2026-10-29T00:00:00.000000Z",
+            "state": {"state": "running"},
+            "usage": {
+                "hook_bypass": {
+                    "count": 3,
+                    "rule": provenant_records::run::LANE_HOOK_BYPASS_RULE,
+                }
             },
+            "read_only_writable": [],
+            "protected_paths": [],
+            "trace": {},
+            "prompt": {
+                "path": {"encoding": "utf8", "path": "prompt.md"},
+                "digest": digest,
+                "bytes": 0,
+                "complete": true,
+                "redacted": false
+            }
+        }))
+        .expect("settled attempt fixture");
+        let mut data = json!({
+            "attempt_id": id,
+            "state": "succeeded",
+            "part": "result",
+            "eof": true,
         });
+        super::project_usage(&record, &mut data);
+        assert_eq!(data["hook_bypass"]["count"], 3);
+        assert_eq!(
+            data["hook_bypass"]["rule"],
+            provenant_records::run::LANE_HOOK_BYPASS_RULE
+        );
         let command = crate::Output {
             target: crate::Target::parse("repair/writer#2").unwrap(),
             part: crate::Part::Result,

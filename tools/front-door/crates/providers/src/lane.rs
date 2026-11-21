@@ -736,26 +736,77 @@ _provenant_hook_warning() {{
     );
     bytes.extend_from_slice(
         br#"
+# Quote one word for the `eval` that forwards command-scope config to Git's
+# own parser. Command substitution needs a literal round-trip, including quotes.
+_provenant_sq() {
+    printf "'"
+    _provenant_sq_rest=$1
+    while :; do
+        case $_provenant_sq_rest in
+            *\'*)
+                printf '%s' "${_provenant_sq_rest%%\'*}"
+                printf '%s' "'\\''"
+                _provenant_sq_rest=${_provenant_sq_rest#*\'} ;;
+            *) printf '%s' "$_provenant_sq_rest"; break ;;
+        esac
+    done
+    printf "'"
+}
+# Emit the leading command-scope options, quoted for the config probe. Keep the
+# case in a function: /bin/sh on macOS misparses a case directly inside $( ).
+_provenant_collect_config() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -c|--config-env)
+                [ "$#" -ge 2 ] || break
+                printf '%s %s ' "$(_provenant_sq "$1")" "$(_provenant_sq "$2")"
+                shift 2 ;;
+            -c?*|--config-env=*)
+                printf '%s ' "$(_provenant_sq "$1")"
+                shift ;;
+            -C|--git-dir|--work-tree|--namespace|--attr-source|--super-prefix)
+                [ "$#" -ge 2 ] || break
+                shift 2 ;;
+            -*) shift ;;
+            *) break ;;
+        esac
+    done
+}
 # A short-option cluster such as -an or -qn carries -n (--no-verify). A
-# value-taking option consumes the rest of the cluster, so the 'n' in commit
-# -uno/-unormal or -S<key> is a value, not the hook-bypass flag.
+# value-taking option consumes the rest of the cluster, so a following 'n' is
+# its value, not the bypass flag. The value-taking set is per subcommand:
+# commit -m/-F/-C/-c/-u/-S/-t/-U take values, but am -m/-c/-u are boolean and
+# only am -C/-p/-S take values. Sharing commit's set with am misses am -un,
+# -mn and -cn; omitting -t from commit's set warns on a harmless commit -tn.
 _provenant_short_has_no_verify() {
     _provenant_cluster=${1#-}
+    case "$2" in
+        commit) _provenant_value_opts='mFCcuStU' ;;
+        am) _provenant_value_opts='CpS' ;;
+        *) return 1 ;;
+    esac
     while [ -n "$_provenant_cluster" ]; do
         case "$_provenant_cluster" in
             n*) return 0 ;;
-            m*|F*|C*|c*|u*|S*) return 1 ;;
-            ?*) _provenant_cluster=${_provenant_cluster#?} ;;
-            *) return 1 ;;
         esac
+        _provenant_opt=${_provenant_cluster%"${_provenant_cluster#?}"}
+        case "$_provenant_value_opts" in
+            *"$_provenant_opt"*) return 1 ;;
+        esac
+        _provenant_cluster=${_provenant_cluster#?}
     done
     return 1
 }
 _provenant_hook_guard() {
-    # Ask Git to parse its two environment configuration encodings. The scope
-    # distinguishes command overrides from the repository's configured hooks.
-    if "$_provenant_git_program" config --list --show-scope 2>/dev/null |
-        LC_ALL=C grep -i '^command[[:space:]]core\.hookspath=' >/dev/null; then
+    # Let Git resolve the command's own config so a command-scope override
+    # hidden behind -c include.path=<file> is seen. Forward the leading
+    # command-scope options in a subshell; the real scan below keeps its $@.
+    # Only command and system scopes count: local/worktree config belongs to
+    # the repository, and the wrapper owns the global scope. GIT_CONFIG_SYSTEM
+    # reporting at system scope is still a per-command override in a lane.
+    _provenant_probe_cfg=$(_provenant_collect_config "$@")
+    if eval '"$_provenant_git_program" '"$_provenant_probe_cfg"' config --list --show-scope 2>/dev/null' |
+        LC_ALL=C grep -iE '^(command|system)[[:space:]]core\.hookspath=' >/dev/null; then
         _provenant_hook_warning
     fi
     while [ "$#" -gt 0 ]; do
@@ -811,15 +862,17 @@ _provenant_hook_guard() {
                         merge|cherry-pick) ;;
                         *) _provenant_hook_warning ;;
                     esac ;;
-                -m|-F|-C|-c|--message|--file|--reuse-message|--reedit-message)
+                -m|-F|-C|-c|-t|-U)
                     case "$_provenant_subcommand:$1" in
-                        rebase:-m) ;; # rebase -m is boolean --merge, not a value
-                        *) shift; [ "$#" -gt 0 ] || break ;;
+                        commit:-m|commit:-F|commit:-C|commit:-c|commit:-t|commit:-U|am:-C) shift; [ "$#" -gt 0 ] || break ;;
+                        *) ;; # rebase -m, am -m/-c/-u and -S/-u are booleans
                     esac ;;
-                --*|-m*|-F*|-C*|-c*) ;;
+                --message|--file|--reuse-message|--reedit-message|--template|--author|--date|--cleanup|--trailer|--fixup|--squash|--pathspec-from-file)
+                    shift; [ "$#" -gt 0 ] || break ;;
+                --*) ;;
                 -?*)
                     case "$_provenant_subcommand" in
-                        commit|am) _provenant_short_has_no_verify "$1" && _provenant_hook_warning ;;
+                        commit|am) _provenant_short_has_no_verify "$1" "$_provenant_subcommand" && _provenant_hook_warning ;;
                     esac ;;
             esac
             shift
@@ -3563,6 +3616,24 @@ mod tests {
                 .envs(env.iter().copied());
             cmd.output().unwrap()
         };
+        // A file that sets the hook path indirectly, both as an include from
+        // command scope and as the system config selected by the environment.
+        let hook_cfg = dir.path().join("hook-path.cfg");
+        std::fs::write(&hook_cfg, "[core]\n\thooksPath = /dev/null\n")?;
+        let hook_cfg = hook_cfg.to_str().ok_or("hook config path")?;
+        let include_arg = format!("include.path={hook_cfg}");
+        // GIT_CONFIG_SYSTEM is read only when system config is not disabled,
+        // so this variant omits GIT_CONFIG_NOSYSTEM from the run environment.
+        let run_system = |args: &[&str], env: &[(&str, &str)]| {
+            let mut cmd = provenant_os::fixture::git_command_at(&wrapper);
+            cmd.current_dir(&repo)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", dir.path())
+                .args(args)
+                .envs(env.iter().copied());
+            cmd.output().unwrap()
+        };
         let recorded = || -> Result<Vec<String>, Box<dyn std::error::Error>> {
             if !observations.exists() {
                 return Ok(Vec::new());
@@ -3622,6 +3693,9 @@ mod tests {
                 &["commit"],
                 &[("GIT_CONFIG_PARAMETERS", "'core.hooksPath=/dev/null'")],
             ),
+            // Command-scope includes are resolved by Git before the probe sees
+            // them, so the indirect hook-path override must warn too.
+            (&["-c", include_arg.as_str(), "commit"], &[]),
             (&["config", "core.hooksPath", "/dev/null"], &[]),
             (&["config", "--unset", "core.hooksPath"], &[]),
             (&["commit", "-n"], &[]),
@@ -3636,6 +3710,10 @@ mod tests {
             (&["am", "--no-verify"], &[]),
             (&["am", "-n"], &[]),
             (&["am", "--no-veri"], &[]),
+            // am's -u/-m/-c are booleans, so -un/-mn/-cn still carry -n.
+            (&["am", "-un"], &[]),
+            (&["am", "-mn"], &[]),
+            (&["am", "-cn"], &[]),
             (&["push", "--no-verify"], &[]),
             (&["push", "--no-verif"], &[]),
         ];
@@ -3654,6 +3732,12 @@ mod tests {
             (&["commit", "-uall"], &[]),
             (&["commit", "-Sfixture-key"], &[]),
             (&["commit", "-m", "-n"], &[]),
+            // -t (template) takes a value; -n is that value, not --no-verify.
+            (&["commit", "-t", "-n"], &[]),
+            (&["commit", "-tn"], &[]),
+            // am -p/-C take values, so -pn/-Cn are not hook bypasses.
+            (&["am", "-pn"], &[]),
+            (&["am", "-Cn"], &[]),
             (&["merge", "-n"], &[]),
             (&["merge", "--no-verif"], &[]),
             (&["cherry-pick", "--no-verif"], &[]),
@@ -3673,6 +3757,18 @@ mod tests {
             cases.len() + 1,
             "non-bypass commands record no observation"
         );
+
+        // The environment can select a system config file that overrides the
+        // hook path. Git reports it at system scope, not command scope, so the
+        // probe must look beyond the command scope to catch it.
+        let system_override = run_system(&["commit"], &[("GIT_CONFIG_SYSTEM", hook_cfg)]);
+        warn_once(&system_override, "GIT_CONFIG_SYSTEM hook path");
+        assert_eq!(recorded()?.len(), cases.len() + 2);
+        let system_quiet = run_system(&["commit"], &[("GIT_CONFIG_SYSTEM", "/dev/null")]);
+        let stderr = String::from_utf8_lossy(&system_quiet.stderr);
+        assert!(!stderr.contains(rule), "no override warned: {stderr}");
+        assert_eq!(recorded()?.len(), cases.len() + 2);
+
         // The fixture `config core.hooksPath` case must not disable hooks; a
         // later case may already have unset the key, so an absent key is fine.
         let _ = base()
