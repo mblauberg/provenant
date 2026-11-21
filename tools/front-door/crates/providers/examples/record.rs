@@ -835,11 +835,17 @@ fn main() -> Result<()> {
     let mode = provenant_config::read_knobs(&host_roots)
         .ok()
         .and_then(|config| {
-            config
-                .knobs
-                .get("redaction")
-                .and_then(|knob| knob.value.as_str())
-                .and_then(provenant_redact::Mode::parse)
+            use std::io::Write as _;
+            let knob = config.knobs.get("redaction")?;
+            let value = knob.value.as_str()?;
+            if value == "full" {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: redaction=full is retired; using secrets (source: {:?})",
+                    knob.source
+                );
+            }
+            provenant_redact::Mode::parse(value)
         })
         .unwrap_or_default();
     provenant_redact::init(mode);

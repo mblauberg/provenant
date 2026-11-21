@@ -229,7 +229,7 @@ positions may use indices. Graph status keeps route fields verbatim, including
 model, effort, account label, alias, name and extra fields. Over-length values or
 control characters warn without dropping the values.
 
-Under `secrets` or `full`, an operator retry brief holding an exact known
+Under `secrets`, an operator retry brief holding an exact known
 credential value of at least eight bytes warns and proceeds; `[REDACTED]` is
 excluded. Under `off` this check and its warning are skipped. It never opens
 credential stores. Out-of-bounds ambient credentials (>16 KiB, >128 variables
@@ -492,7 +492,8 @@ Oversized findings use content-addressed graph text while the checkpoint retains
 Local execution, graph inputs and retained state remain raw and lossless under
 their custody and integrity controls. The `redaction` modes govern publication:
 `off` passes text unchanged; `secrets` masks credential values and token shapes
-at egress; `full` also masks assignments and local text. Graph and peer exports,
+at egress. Local execution text is never masked. A retired `full` value is
+accepted as `secrets` with a warning naming its source. Graph and peer exports,
 forge content and fixture exports are egress. Metadata is never hidden. When
 masking is enabled, projection failure withholds the affected publication. Raw
 and published byte lengths and digests are bound separately.
@@ -504,8 +505,8 @@ transport. The sender derives the claim from the retained upstream attempt and
 the receiver checks its actor namespace, launch receipt, origin and target.
 All cross-host payloads, including authenticated execution submissions and
 results, pass through `CrossHostTransport`; authentication never exempts
-disclosure policy. Same-host execution stays raw unless `full` applies to local
-display. When masking is enabled, encoded hand-off attachments are decoded and
+disclosure policy. Same-host execution always stays raw. When masking is enabled,
+encoded hand-off attachments are decoded and
 projected as text, or withheld when they cannot be inspected. Peer
 output projects the complete verified text before paging, with published lengths
 and digests. Cross-host projection selects declared free-text fields (prompts,

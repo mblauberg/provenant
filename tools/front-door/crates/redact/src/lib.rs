@@ -1,47 +1,45 @@
-//! Streaming redaction for publication and disclosure boundaries.
+//! Redaction for text published off the host.
 //!
-//! Exact literal prefixes and incomplete token markers stay buffered across
-//! chunks. The streaming filter's EOF hook releases any unmatched tail.
-//! `key=value` credential assignments are scanned byte by byte: keys stream
-//! through unchanged and only the value is withheld, so no replay is needed.
+//! `Mode::Off` (the default) publishes text unchanged. `Mode::Secrets` masks
+//! registered credential values and recognised credential token shapes in text
+//! published to another host. Exact literals and incomplete token markers stay
+//! buffered across chunks so a chunk boundary cannot split a match.
 use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, FilterError};
 use std::collections::{BTreeMap, VecDeque};
 use thiserror::Error;
 
 const REDACTED: &[u8] = b"[REDACTED]";
-/// Short values are too ambiguous for document-wide substring replacement or refusal.
-/// Redaction policy for local output and text leaving this host.
+/// Short values are too ambiguous for document-wide substring replacement.
+pub const MIN_EXACT_BYTES: usize = 8;
+const MAX_SECRETS: usize = 128;
+const MAX_SECRET_BYTES: usize = 64 * 1024;
+const MAX_SECRET_LENGTH: usize = 16 * 1024;
+
+/// Redaction policy for text published off this host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Mode {
     #[default]
     Off,
     Secrets,
-    Full,
 }
 impl Mode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
             Self::Secrets => "secrets",
-            Self::Full => "full",
         }
     }
+    /// The retired `full` value is accepted as `secrets`. A caller that knows
+    /// the configuration source warns there; unknown values are still refused.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "off" => Some(Self::Off),
-            "secrets" => Some(Self::Secrets),
-            "full" => Some(Self::Full),
+            "secrets" | "full" => Some(Self::Secrets),
             _ => None,
         }
     }
     pub const fn masks_egress(self) -> bool {
         !matches!(self, Self::Off)
-    }
-    pub const fn masks_local(self) -> bool {
-        matches!(self, Self::Full)
-    }
-    pub const fn masks_assignments(self) -> bool {
-        matches!(self, Self::Full)
     }
 }
 static MODE: std::sync::OnceLock<Mode> = std::sync::OnceLock::new();
@@ -70,11 +68,6 @@ impl Drop for ModeGuard {
         MODE_OVERRIDE.with(|m| m.set(self.previous));
     }
 }
-
-pub const MIN_EXACT_BYTES: usize = 8;
-const MAX_SECRETS: usize = 128;
-const MAX_SECRET_BYTES: usize = 64 * 1024;
-const MAX_SECRET_LENGTH: usize = 16 * 1024;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RedactorError {
@@ -651,426 +644,6 @@ pub fn is_line_assignment(key: &str) -> bool {
         .iter()
         .any(|(k, line)| *line && canonical.ends_with(std::str::from_utf8(k).unwrap_or("")))
 }
-/// The longest key is 13 bytes; the run keeps enough bytes before it to judge
-/// the separator that precedes it.
-const ASSIGNMENT_RUN: usize = 32;
-/// Scheme words longer than this are not `Basic` or `Bearer`.
-const SCHEME_WORD: usize = 16;
-
-/// Where the assignment scanner is. Quoted values remain masked until a
-/// definite closing delimiter or the raw line end.
-#[derive(Default)]
-enum Assignment {
-    #[default]
-    Scan,
-    /// After a credential key: quotes, escapes and whitespace may precede the separator.
-    Gap { scheme: bool },
-    /// After the separator: quotes, escapes and whitespace may precede the value.
-    Lead {
-        scheme: bool,
-        quote: Option<u8>,
-        quote_slashes: usize,
-        backslashes: usize,
-    },
-    /// Letters after `Authorization:`, held until the scheme is known.
-    Scheme { word: Vec<u8> },
-    /// Inside a value, which is replaced by one `[REDACTED]`. `line` values end
-    /// only at a newline, so an unknown `Authorization` scheme hides its whole line.
-    Value {
-        quote: Option<u8>,
-        quote_slashes: usize,
-        backslashes: usize,
-        pending_slashes: usize,
-        line: bool,
-        masked: bool,
-        /// A fixed-size prefix held until the value ends or differs.
-        marker_length: usize,
-    },
-}
-
-// Redacts the values of credential keys. Quoted values end at their closing
-// quote; a JSON-escaped value (`\"…\"`) ends at the `\"`.
-#[derive(Default)]
-struct AssignmentScanner {
-    state: Assignment,
-    run: Vec<u8>,
-    after_backslash: bool,
-    matched: bool,
-    insertions: Vec<usize>,
-}
-
-impl AssignmentScanner {
-    fn filter(&mut self, bytes: &[u8], output: &mut DecisionQueue) {
-        for byte in bytes {
-            self.step(*byte, output);
-        }
-    }
-
-    fn finish(&mut self, output: &mut DecisionQueue) {
-        match std::mem::take(&mut self.state) {
-            Assignment::Scheme { word } => {
-                // A held scheme word never reached whitespace, so it is the credential.
-                self.mask_bytes(&word, output);
-            }
-            Assignment::Value {
-                pending_slashes,
-                marker_length,
-                backslashes,
-                ..
-            } => {
-                self.finish_marker(marker_length, backslashes, output);
-                self.mask_slashes(pending_slashes, output);
-            }
-            _ => {}
-        }
-        self.run.clear();
-        self.after_backslash = false;
-    }
-
-    fn keep(&mut self, byte: u8, masked: bool, output: &mut DecisionQueue) {
-        output.push((byte, masked));
-        self.matched |= masked;
-    }
-
-    fn mask_bytes(&mut self, bytes: &[u8], output: &mut DecisionQueue) {
-        for byte in bytes {
-            self.keep(*byte, true, output);
-        }
-    }
-
-    fn mask_slashes(&mut self, count: usize, output: &mut DecisionQueue) {
-        for _ in 0..count {
-            self.keep(b'\\', true, output);
-        }
-    }
-
-    fn keep_slashes(&mut self, count: usize, masked: bool, output: &mut DecisionQueue) {
-        for _ in 0..count {
-            self.keep(b'\\', masked, output);
-        }
-    }
-
-    fn finish_marker(
-        &mut self,
-        length: usize,
-        trailing_slashes: usize,
-        output: &mut DecisionQueue,
-    ) {
-        let masked = length != REDACTED.len() || trailing_slashes != 0;
-        for byte in &REDACTED[..length] {
-            self.keep(*byte, masked, output);
-        }
-    }
-
-    // `std::mem::take` leaves `Scan`, so a branch that sets no state returns to scanning.
-    fn step(&mut self, byte: u8, output: &mut DecisionQueue) {
-        loop {
-            match std::mem::take(&mut self.state) {
-                Assignment::Scan => {
-                    let escaped = std::mem::take(&mut self.after_backslash);
-                    if escaped && byte.is_ascii_alphanumeric() {
-                        // The letter of a JSON escape such as `\\n` is not part of a key.
-                        self.keep(byte, false, output);
-                        return;
-                    }
-                    if byte.is_ascii_alphanumeric() || b"_-.".contains(&byte) {
-                        self.run.push(byte.to_ascii_lowercase());
-                        if self.run.len() > ASSIGNMENT_RUN {
-                            self.run.remove(0);
-                        }
-                        self.keep(byte, false, output);
-                        return;
-                    }
-                    let key = self.key_ending_run();
-                    self.run.clear();
-                    if let Some(scheme) = key {
-                        self.state = Assignment::Gap { scheme };
-                        continue;
-                    }
-                    self.after_backslash = byte == b'\\' && !escaped;
-                    self.keep(byte, false, output);
-                    return;
-                }
-                Assignment::Gap { scheme } => {
-                    if byte == b'=' || byte == b':' {
-                        self.keep(byte, false, output);
-                        self.state = Assignment::Lead {
-                            scheme,
-                            quote: None,
-                            quote_slashes: 0,
-                            backslashes: 0,
-                        };
-                        return;
-                    }
-                    if byte.is_ascii_whitespace() || b"\"'\\".contains(&byte) {
-                        self.keep(byte, false, output);
-                        self.state = Assignment::Gap { scheme };
-                        return;
-                    }
-                    // Not an assignment after all, so the byte is rescanned.
-                    continue;
-                }
-                Assignment::Lead {
-                    scheme,
-                    quote,
-                    quote_slashes,
-                    backslashes,
-                } => {
-                    if quote.is_none() && (byte.is_ascii_whitespace() || byte == b'\\') {
-                        self.keep(byte, false, output);
-                        self.state = Assignment::Lead {
-                            scheme,
-                            quote,
-                            quote_slashes,
-                            backslashes: if byte == b'\\' {
-                                backslashes.saturating_add(1)
-                            } else {
-                                0
-                            },
-                        };
-                        return;
-                    }
-                    if quote.is_none() && (byte == b'"' || byte == b'\'') {
-                        self.keep(byte, false, output);
-                        self.state = Assignment::Lead {
-                            scheme,
-                            quote: Some(byte),
-                            quote_slashes: backslashes,
-                            backslashes: 0,
-                        };
-                        return;
-                    }
-                    if quote.is_none() && is_delimiter(byte) {
-                        continue;
-                    }
-                    if scheme && quote.is_none() && byte.is_ascii_alphabetic() {
-                        self.state = Assignment::Scheme { word: vec![byte] };
-                        return;
-                    }
-                    self.state = Assignment::Value {
-                        quote,
-                        quote_slashes,
-                        backslashes: 0,
-                        pending_slashes: 0,
-                        line: scheme,
-                        masked: false,
-                        marker_length: 0,
-                    };
-                    continue;
-                }
-                Assignment::Scheme { mut word } => {
-                    if byte.is_ascii_alphabetic() && word.len() < SCHEME_WORD {
-                        word.push(byte);
-                        self.state = Assignment::Scheme { word };
-                        return;
-                    }
-                    let known =
-                        word.eq_ignore_ascii_case(b"basic") || word.eq_ignore_ascii_case(b"bearer");
-                    if known && byte.is_ascii_whitespace() {
-                        for source_byte in &word {
-                            self.keep(*source_byte, false, output);
-                        }
-                        self.keep(byte, false, output);
-                        self.state = Assignment::Lead {
-                            scheme: false,
-                            quote: None,
-                            quote_slashes: 0,
-                            backslashes: 0,
-                        };
-                        return;
-                    }
-                    self.mask_bytes(&word, output);
-                    self.state = Assignment::Value {
-                        quote: None,
-                        quote_slashes: 0,
-                        backslashes: 0,
-                        pending_slashes: 0,
-                        line: true,
-                        masked: true,
-                        marker_length: 0,
-                    };
-                    continue;
-                }
-                Assignment::Value {
-                    quote,
-                    quote_slashes,
-                    backslashes,
-                    pending_slashes,
-                    line,
-                    mut masked,
-                    mut marker_length,
-                } => {
-                    // The marker's closing bracket belongs to the candidate,
-                    // even though it normally delimits an unquoted value.
-                    if !masked && backslashes == 0 && REDACTED.get(marker_length) == Some(&byte) {
-                        self.state = Assignment::Value {
-                            quote,
-                            quote_slashes,
-                            backslashes,
-                            pending_slashes,
-                            line,
-                            masked,
-                            marker_length: marker_length + 1,
-                        };
-                        return;
-                    }
-                    match quote {
-                        Some(quote) => {
-                            if byte == b'\n' || byte == b'\r' {
-                                self.finish_marker(marker_length, backslashes, output);
-                                self.mask_slashes(pending_slashes, output);
-                                continue;
-                            }
-                            if byte == quote && quote_close(backslashes, quote_slashes) {
-                                // Keep only the source slashes needed to encode this close.
-                                // Older slashes from the same run were emitted as masked.
-                                let exact_marker = !masked
-                                    && marker_length == REDACTED.len()
-                                    && backslashes == quote_slashes;
-                                self.finish_marker(
-                                    marker_length,
-                                    backslashes.saturating_sub(quote_slashes),
-                                    output,
-                                );
-                                if pending_slashes > 0 && !exact_marker {
-                                    // The old scanner masks the first slash as a value
-                                    // byte before recognising the closing delimiter.
-                                    self.insertions.push(output.total);
-                                    self.matched = true;
-                                }
-                                self.keep_slashes(pending_slashes, false, output);
-                                self.keep(byte, false, output);
-                                return;
-                            }
-                            if byte == b'\\' {
-                                let next_count = backslashes.saturating_add(1);
-                                if pending_slashes < quote_slashes {
-                                    self.state = Assignment::Value {
-                                        quote: Some(quote),
-                                        quote_slashes,
-                                        backslashes: next_count,
-                                        pending_slashes: pending_slashes.saturating_add(1),
-                                        line,
-                                        masked,
-                                        marker_length,
-                                    };
-                                } else {
-                                    self.finish_marker(marker_length, 1, output);
-                                    marker_length = 0;
-                                    masked = true;
-                                    self.keep(byte, true, output);
-                                    self.state = Assignment::Value {
-                                        quote: Some(quote),
-                                        quote_slashes,
-                                        backslashes: next_count,
-                                        pending_slashes,
-                                        line,
-                                        masked,
-                                        marker_length,
-                                    };
-                                }
-                                return;
-                            }
-                            self.finish_marker(marker_length, 1, output);
-                            marker_length = 0;
-                            masked = true;
-                            self.mask_slashes(pending_slashes, output);
-                            self.keep(byte, true, output);
-                            self.state = Assignment::Value {
-                                quote: Some(quote),
-                                quote_slashes,
-                                backslashes: 0,
-                                pending_slashes: 0,
-                                line,
-                                masked,
-                                marker_length,
-                            };
-                            return;
-                        }
-                        None => {
-                            let ends = if line {
-                                byte == b'\n' || byte == b'\r'
-                            } else {
-                                // Backslashes and escaped delimiters continue the
-                                // credential, even after an exact marker. Raw line
-                                // endings still bound every unquoted value.
-                                byte == b'\n'
-                                    || byte == b'\r'
-                                    || (byte != b'\\'
-                                        && backslashes.is_multiple_of(2)
-                                        && is_delimiter(byte))
-                            };
-                            if ends {
-                                self.finish_marker(marker_length, 0, output);
-                                continue;
-                            }
-                            self.finish_marker(marker_length, 1, output);
-                            marker_length = 0;
-                            masked = true;
-                            self.keep(byte, true, output);
-                            self.state = Assignment::Value {
-                                quote: None,
-                                quote_slashes: 0,
-                                backslashes: if byte == b'\\' {
-                                    backslashes.saturating_add(1)
-                                } else {
-                                    0
-                                },
-                                pending_slashes: 0,
-                                line,
-                                masked,
-                                marker_length,
-                            };
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// The scheme flag of the key that the run ends with, if any.
-    fn key_ending_run(&self) -> Option<bool> {
-        if self.run.is_empty() {
-            return None;
-        }
-        ASSIGNMENT_KEYS.iter().find_map(|(key, scheme)| {
-            let start = self.run.len().checked_sub(key.len())?;
-            let bounded = start == 0 || !self.run[start - 1].is_ascii_alphanumeric();
-            (bounded && self.run.ends_with(key)).then_some(*scheme)
-        })
-    }
-}
-
-// The delimiter has its own source slashes; each value-level backslash takes
-// one encoding layer. An even number leaves the delimiter unescaped.
-fn closing_quote(backslashes: usize, quote_slashes: usize, layer: usize) -> bool {
-    backslashes % layer == quote_slashes && (backslashes / layer).is_multiple_of(2)
-}
-
-// The opener's slashes give the shallowest layer that can represent it, but
-// the value may be escaped any number of layers deeper (an apostrophe, which
-// JSON never escapes, reveals nothing at all). A quote is a definite close
-// only when every power-of-two layer from the opener's up to the backslash run
-// agrees; a fixed depth cap would release a value escaped one layer deeper.
-fn quote_close(backslashes: usize, quote_slashes: usize) -> bool {
-    let mut layer = quote_slashes.saturating_add(1).next_power_of_two();
-    loop {
-        if !closing_quote(backslashes, quote_slashes, layer) {
-            return false;
-        }
-        layer = layer.saturating_mul(2);
-        if layer > backslashes {
-            return true;
-        }
-    }
-}
-
-/// Bytes that end an unquoted value.
-fn is_delimiter(byte: u8) -> bool {
-    byte.is_ascii_whitespace() || b"\"'\\&,;<>)]}`".contains(&byte)
-}
-
 // Run-length encoding keeps a withheld closing backslash run compact even when
 // the opener is arbitrarily long. Each run covers source bytes, not output.
 #[derive(Default)]
@@ -1420,89 +993,38 @@ fn parse_hex4(bytes: &[u8]) -> Option<u16> {
     })
 }
 
-/// Stateful filter for publication and artifact disclosure. Values are never
-/// serialized or printed; malformed bounds make construction fail closed.
+/// Stateful filter for publication text. Values are never serialized or
+/// printed; malformed bounds make construction fail closed.
 pub struct Redactor {
-    literal_values: Vec<Vec<u8>>,
-    context_bound: bool,
     literals: LiteralAutomaton,
     encoded_literals: Option<EncodedLiteralMatcher>,
     tokens: TokenScanner,
-    assignments: AssignmentScanner,
-    literal_only: bool,
-    passthrough: bool,
-    scan_assignments: bool,
     failed: bool,
-    decisions: [DecisionQueue; 3],
+    decisions: [DecisionQueue; 2],
     redaction_run: bool,
     emitted_source: usize,
     token_source: usize,
     replacements: VecDeque<(usize, usize)>,
-    insertions: VecDeque<usize>,
     has_redacted: bool,
 }
 
 impl Redactor {
     pub fn new(secrets: impl IntoIterator<Item = Vec<u8>>) -> Result<Self, RedactorError> {
         let secrets = validate_secrets(secrets)?;
-
-        Ok(Self::with_secrets(secrets, false))
+        Ok(Self::with_secrets(secrets))
     }
 
-    /// Build the streaming filter for local operator disclosure. It applies
-    /// the same masking as [`known_shapes`] — registered and ambient literal
-    /// values plus credential token and assignment shapes — but masks on the
-    /// stream, ahead of any downstream bound, so a cut can never leave part of
-    /// a secret behind. Under a mode that does not mask local text it passes
-    /// bytes through unchanged. Install it as an exec `CaptureFilter` to mask
-    /// output at capture rather than at a display boundary.
-    pub fn for_local_disclosure() -> Result<Self, RedactorError> {
-        if !mode().masks_local() {
-            let mut filter = Self::with_secrets(Vec::new(), true);
-            filter.passthrough = true;
-            return Ok(filter);
-        }
-        let secrets = ambient_values()?.into_iter().chain(scoped_values());
-        let mut redactor = Self::new(publication_secrets(secrets)?)?;
-        redactor.scan_assignments = true;
-        Ok(redactor)
-    }
-
-    /// Filter for published text. Masks registered typed and ambient
-    /// literal values, including JSON-escaped spellings, without rewriting
-    /// merely secret-shaped examples.
-    pub fn for_publication(
-        typed_values: impl IntoIterator<Item = Vec<u8>>,
-    ) -> Result<Self, RedactorError> {
-        if !mode().masks_egress() {
-            let mut filter = Self::with_secrets(Vec::new(), true);
-            filter.passthrough = true;
-            return Ok(filter);
-        }
-        let mut secrets = ambient_values()?;
-        secrets.extend(scoped_values());
-        secrets.extend(typed_values);
-        Ok(Self::with_secrets(publication_secrets(secrets)?, true))
-    }
-
-    fn with_secrets(secrets: Vec<Vec<u8>>, literal_only: bool) -> Self {
+    fn with_secrets(secrets: Vec<Vec<u8>>) -> Self {
         Self {
             literals: LiteralAutomaton::new(&secrets),
             encoded_literals: (!secrets.is_empty()).then(|| EncodedLiteralMatcher::new(&secrets)),
-            literal_values: secrets,
-            context_bound: false,
             tokens: TokenScanner::default(),
-            assignments: AssignmentScanner::default(),
-            literal_only,
-            passthrough: false,
-            scan_assignments: true,
             failed: false,
             decisions: std::array::from_fn(|_| DecisionQueue::default()),
             redaction_run: false,
             emitted_source: 0,
             token_source: 0,
             replacements: VecDeque::new(),
-            insertions: VecDeque::new(),
             has_redacted: false,
         }
     }
@@ -1514,17 +1036,7 @@ impl Redactor {
                 .as_ref()
                 .is_some_and(EncodedLiteralMatcher::matched)
             || self.literals.matched
-            || (!self.literal_only && (self.tokens.matched || self.assignments.matched))
-    }
-
-    fn bind_publication_context(&mut self) -> Result<(), FilterError> {
-        if self.literal_only && !self.context_bound {
-            let mut values = self.literal_values.clone();
-            values.extend(scoped_values());
-            *self = Self::with_secrets(publication_secrets(values).map_err(|_| FilterError)?, true);
-            self.context_bound = true;
-        }
-        Ok(())
+            || self.tokens.matched
     }
 
     fn filter_frames(
@@ -1532,13 +1044,6 @@ impl Redactor {
         bytes: &[u8],
         sink: &mut dyn FnMut(&[u8]),
     ) -> Result<(), FilterError> {
-        if self.passthrough {
-            for chunk in bytes.chunks(FRAME_LIMIT) {
-                sink(chunk);
-            }
-            return Ok(());
-        }
-        self.bind_publication_context()?;
         if self.failed {
             return Err(FilterError);
         }
@@ -1554,26 +1059,12 @@ impl Redactor {
                 self.literals.filter(chunk, &mut literals);
             }
             self.decisions[0].extend(literals);
-            if self.literal_only {
-                let unchanged: Vec<_> = chunk.iter().copied().map(|byte| (byte, false)).collect();
-                self.decisions[1].extend(unchanged.clone());
-                self.decisions[2].extend(unchanged);
-            } else {
-                let mut tokens = Vec::new();
-                self.tokens.filter(chunk, &mut tokens).map_err(|_| {
-                    self.failed = true;
-                    FilterError
-                })?;
-                if self.scan_assignments {
-                    self.assignments.filter(chunk, &mut self.decisions[2]);
-                    self.insertions
-                        .extend(self.assignments.insertions.drain(..));
-                } else {
-                    self.decisions[2]
-                        .extend(chunk.iter().copied().map(|byte| (byte, false)).collect());
-                }
-                self.queue_tokens(tokens);
-            }
+            let mut tokens = Vec::new();
+            self.tokens.filter(chunk, &mut tokens).map_err(|_| {
+                self.failed = true;
+                FilterError
+            })?;
+            self.queue_tokens(tokens);
             self.emit_decided(&mut emitter)?;
         }
         emitter.flush();
@@ -1581,9 +1072,6 @@ impl Redactor {
     }
 
     fn finish_frames(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
-        if self.passthrough {
-            return Ok(());
-        }
         if self.failed {
             return Err(FilterError);
         }
@@ -1594,19 +1082,12 @@ impl Redactor {
             self.literals.finish(&mut literals);
         }
         self.decisions[0].extend(literals);
-        if !self.literal_only {
-            let mut tokens = Vec::new();
-            self.tokens.finish(&mut tokens).map_err(|_| {
-                self.failed = true;
-                FilterError
-            })?;
-            if self.scan_assignments {
-                self.assignments.finish(&mut self.decisions[2]);
-                self.insertions
-                    .extend(self.assignments.insertions.drain(..));
-            }
-            self.queue_tokens(tokens);
-        }
+        let mut tokens = Vec::new();
+        self.tokens.finish(&mut tokens).map_err(|_| {
+            self.failed = true;
+            FilterError
+        })?;
+        self.queue_tokens(tokens);
         let mut emitter = FrameEmitter::new(sink);
         self.emit_decided(&mut emitter)?;
         emitter.flush();
@@ -1628,14 +1109,6 @@ impl Redactor {
 
     fn emit_decided(&mut self, emitter: &mut FrameEmitter<'_>) -> Result<(), FilterError> {
         while self.decisions.iter().all(|queue| !queue.runs.is_empty()) {
-            if self.insertions.front() == Some(&self.emitted_source) {
-                self.insertions.pop_front();
-                if !self.redaction_run {
-                    emitter.push_bytes(REDACTED);
-                }
-                self.has_redacted = true;
-                self.redaction_run = true;
-            }
             if let Some(&(start, len)) = self.replacements.front()
                 && start == self.emitted_source
             {
@@ -1700,9 +1173,6 @@ impl Redactor {
                 }
             }
             if let Some(&(start, _)) = self.replacements.front() {
-                count = count.min(start - self.emitted_source);
-            }
-            if let Some(&start) = self.insertions.front() {
                 count = count.min(start - self.emitted_source);
             }
             if masked {
@@ -2003,25 +1473,14 @@ fn credential_variable_name(name: &[u8]) -> bool {
     })
 }
 
-/// Filter a diagnostic using known literals and credential shapes. Input
-/// policy uses the shape-only disclosure scanner; content uses publication_text.
-pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
-    if !mode().masks_local() {
-        return Ok(bytes.to_vec());
-    }
-    filter_with(
-        Redactor::for_local_disclosure().map_err(|_| FilterError)?,
-        bytes,
-    )
-}
-/// Filter credential literals and token shapes at an egress boundary.
+/// Mask credential values and recognised token shapes at an egress boundary.
 pub fn egress_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
     if !mode().masks_egress() {
         return Ok(bytes.to_vec());
     }
-    filter_shapes(bytes, mode().masks_assignments())
+    filter_shapes(bytes)
 }
-fn filter_shapes(bytes: &[u8], assignments: bool) -> Result<Vec<u8>, FilterError> {
+fn filter_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
     let secrets = publication_secrets(
         ambient_values()
             .map_err(|_| FilterError)?
@@ -2029,13 +1488,11 @@ fn filter_shapes(bytes: &[u8], assignments: bool) -> Result<Vec<u8>, FilterError
             .chain(scoped_values()),
     )
     .map_err(|_| FilterError)?;
-    let mut redactor = Redactor::new(secrets).map_err(|_| FilterError)?;
-    redactor.scan_assignments = assignments;
+    let redactor = Redactor::new(secrets).map_err(|_| FilterError)?;
     filter_with(redactor, bytes)
 }
 /// The one frame loop that drives a redactor over bounded input and collects
-/// its masked output. The same core backs whole-text filtering and the
-/// streaming `CaptureFilter` used at the exec edge.
+/// its masked output.
 fn filter_with(mut redactor: Redactor, bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
     let mut safe = Vec::new();
     let mut sink = |frame: &[u8]| {
@@ -2047,94 +1504,15 @@ fn filter_with(mut redactor: Redactor, bytes: &[u8]) -> Result<Vec<u8>, FilterEr
     redactor.finish(&mut sink)?;
     Ok(safe)
 }
-
 /// Whether a value contains a recognised credential token shape.
 pub fn has_token_shape(bytes: &[u8]) -> Result<bool, FilterError> {
     let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
-    redactor.scan_assignments = false;
     let mut sink = |_: &[u8]| {};
     for chunk in bytes.chunks(8192) {
         redactor.filter(chunk, &mut sink)?;
     }
     redactor.finish(&mut sink)?;
     Ok(redactor.tokens.matched)
-}
-
-/// Classify a known-shape match without exposing any matched bytes.
-pub fn known_shape_rule(bytes: &[u8]) -> Result<Option<&'static str>, FilterError> {
-    let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
-    let mut sink = |_: &[u8]| {};
-    for chunk in bytes.chunks(8192) {
-        redactor.filter(chunk, &mut sink)?;
-    }
-    redactor.finish(&mut sink)?;
-    Ok(if redactor.tokens.matched {
-        Some("credential token or URL userinfo")
-    } else if redactor.assignments.matched {
-        Some("credential assignment")
-    } else {
-        None
-    })
-}
-
-pub fn delivery_diagnostics(detail: &str) -> String {
-    if !mode().masks_local() {
-        return detail.to_owned();
-    }
-    let filtered = match known_shapes(detail.as_bytes()) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        Err(FilterError) => return "[REDACTED]".into(),
-    };
-    let mut result = String::with_capacity(filtered.len());
-    let mut rest = filtered.as_str();
-    while let Some(scheme_end) = rest.find("://") {
-        let authority_start = scheme_end + 3;
-        result.push_str(&rest[..authority_start]);
-        rest = &rest[authority_start..];
-        let token_end = rest
-            .find(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '<' | '>' | '(' | ')'))
-            .unwrap_or(rest.len());
-        let token = &rest[..token_end];
-        if let Some(at) = token.rfind('@') {
-            result.push_str("[REDACTED]");
-            result.push_str(&token[at..]);
-            rest = &rest[token_end..];
-        } else {
-            // A malformed or truncated authority may have lost its '@'.
-            result.push_str("[REDACTED]");
-            let authority_end = token.find(['/', '?', '#']).unwrap_or(token.len());
-            rest = &rest[authority_end..];
-        }
-    }
-    result.push_str(rest);
-    let mut safe = String::with_capacity(result.len());
-    for token in result.split_inclusive(|c: char| {
-        c.is_whitespace() || matches!(c, '\'' | '"' | '<' | '>' | '(' | ')')
-    }) {
-        if let Some(at) = token.rfind('@')
-            && token[at + 1..].contains(':')
-            && !token.contains("://")
-        {
-            safe.push_str("[REDACTED]");
-            safe.push_str(&token[at..]);
-        } else {
-            safe.push_str(token);
-        }
-    }
-    safe
-}
-
-/// A one-line excerpt of lane or server text, redacted with the known
-/// credential shapes before it is bounded, so a cut never leaves part of a
-/// secret that no longer matches a shape. Text that cannot be filtered is
-/// replaced, never passed through.
-pub fn bounded_line(text: &str, max_chars: usize) -> String {
-    match known_shapes(text.as_bytes()) {
-        Ok(safe) => provenant_core::bounded_line(&String::from_utf8_lossy(&safe), max_chars),
-        Err(FilterError) => {
-            provenant_core::bounded_line("excerpt could not be sanitised", max_chars)
-        }
-    }
 }
 
 impl CaptureFilter for Redactor {
@@ -2164,57 +1542,34 @@ mod tests {
     }
 
     #[test]
-    fn mode_policy_controls_local_and_egress() {
+    fn off_masks_nothing_and_secrets_masks_published_token_shapes() {
         assert_eq!(Mode::default(), Mode::Off);
-        for m in [Mode::Off, Mode::Secrets, Mode::Full] {
-            assert_eq!(Mode::parse(m.as_str()), Some(m));
-        }
+        assert_eq!(Mode::parse(Mode::Off.as_str()), Some(Mode::Off));
+        assert_eq!(Mode::parse(Mode::Secrets.as_str()), Some(Mode::Secrets));
+        // The retired config value stays loadable and means `secrets`.
+        assert_eq!(Mode::parse("full"), Some(Mode::Secrets));
         assert_eq!(Mode::parse("invalid"), None);
-        let input = b"password=fixture-password actual=registered-value-3391";
+        let token = b"ghp_0123456789abcdef0123456789abcdef0123";
+        let input = b"password=fixture-password actual=registered-value-3391 ghp_0123456789abcdef0123456789abcdef0123";
         let secret = b"registered-value-3391".to_vec();
-        let _off = scoped(Mode::Off);
-        assert_eq!(known_shapes(input).unwrap(), input);
-        assert_eq!(
-            delivery_diagnostics("password=fixture-password"),
-            "password=fixture-password"
-        );
-        assert_eq!(
-            bounded_line("password=fixture-password", 512),
-            "password=fixture-password"
-        );
-        assert_eq!(publication_text(input, [secret.clone()]).unwrap(), input);
-        let mut stream = Redactor::for_publication([secret.clone()]).unwrap();
-        assert_eq!(joined(&mut stream, &[input]), input);
         {
-            let _secrets = scoped(Mode::Secrets);
-            assert_eq!(known_shapes(input).unwrap(), input);
-            let mut stream = Redactor::for_publication([secret.clone()]).unwrap();
-            assert_eq!(
-                joined(&mut stream, &[input]),
-                b"password=fixture-password actual=[REDACTED]"
-            );
-            assert_ne!(
-                egress_shapes(b"ghp_0123456789abcdef0123456789abcdef0123").unwrap(),
-                b"ghp_0123456789abcdef0123456789abcdef0123"
-            );
-            assert_eq!(
-                publication_text(input, [secret.clone()]).unwrap(),
-                b"password=fixture-password actual=[REDACTED]"
-            );
-            assert_eq!(
-                egress_shapes(b"password=fixture-password").unwrap(),
-                b"password=fixture-password"
-            );
-            let _full = scoped(Mode::Full);
-            assert_ne!(known_shapes(input).unwrap(), input);
+            let _off = scoped(Mode::Off);
+            assert_eq!(egress_shapes(input).unwrap(), input);
+            assert_eq!(publication_text(input, [secret.clone()]).unwrap(), input);
         }
-        assert_eq!(mode(), Mode::Off);
+        let _secrets = scoped(Mode::Secrets);
+        let masked = egress_shapes(input).unwrap();
+        assert!(!masked.windows(token.len()).any(|w| w == token));
+        assert!(masked.windows(REDACTED.len()).any(|w| w == REDACTED));
+        assert_eq!(
+            publication_text(input, [secret]).unwrap(),
+            b"password=fixture-password actual=[REDACTED] ghp_0123456789abcdef0123456789abcdef0123"
+        );
     }
 
-    // Spec: docs/specs/fabric.md#checkpoint-envelope
     #[test]
     fn known_values_mask_literals_but_preserve_unregistered_shapes() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         let input = b"password=example-3391 actual=real-value-3391";
         let safe = known_values(input, [b"real-value-3391".to_vec()]).unwrap();
         assert_eq!(safe, b"password=example-3391 actual=[REDACTED]");
@@ -2230,22 +1585,19 @@ mod tests {
 
     // Spec: docs/specs/fabric.md#checkpoint-envelope
     #[test]
-    fn launch_descriptor_values_mask_capture_and_settlement_without_persistence() {
-        let _mode = scoped(Mode::Full);
+    fn launch_descriptor_values_mask_publication_without_persistence() {
+        let _mode = scoped(Mode::Secrets);
         let secret = b"descriptor-credential-3391";
-        let mut filter = Redactor::for_publication([]).unwrap();
+        let ambient = b"ambient-launch-3391";
         {
-            let values = launch_values(
-                &[(b"GH_TOKEN".to_vec(), b"ambient-launch-3391".to_vec())],
-                Some(secret),
-            )
-            .unwrap();
+            let values =
+                launch_values(&[(b"GH_TOKEN".to_vec(), ambient.to_vec())], Some(secret)).unwrap();
             let _scope = publication_scope(values).unwrap();
             let input = b"descriptor-credential-3391 ambient-launch-3391 sk-example-value";
-            assert_eq!(
-                checked_frames(&mut filter, &[input]),
-                b"[REDACTED] [REDACTED] sk-example-value"
-            );
+            let published = egress_shapes(input).unwrap();
+            assert!(!published.windows(secret.len()).any(|w| w == secret));
+            assert!(!published.windows(ambient.len()).any(|w| w == ambient));
+            assert!(published.ends_with(b"sk-example-value"));
             assert_eq!(publication_text(secret, []).unwrap(), REDACTED);
         }
         assert_eq!(publication_text(secret, []).unwrap(), secret);
@@ -2253,7 +1605,7 @@ mod tests {
 
     #[test]
     fn matches_credential_value_for_retry_ignores_short_or_placeholder_values() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         // Short values (< 8 bytes) and placeholder '[REDACTED]' are ignored.
         let _scope = publication_scope([
             b"ollama".to_vec(),
@@ -2283,7 +1635,7 @@ mod tests {
 
     #[test]
     fn publication_text_masks_registered_values_and_keeps_examples() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         let encoded = serde_json::to_string("typed\"credential-3391").unwrap();
         let input = format!("example=sk-example-value actual={encoded}");
         assert_eq!(
@@ -2294,12 +1646,12 @@ mod tests {
 
     #[test]
     fn publication_stream_masks_typed_json_values_but_preserves_shapes() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         let secret = b"typed\"credential-3391";
         let encoded = serde_json::to_string(std::str::from_utf8(secret).unwrap()).unwrap();
         let input = format!("example=sk-example-value actual={encoded}");
         for split in 0..=input.len() {
-            let mut redactor = Redactor::for_publication([secret.to_vec()]).unwrap();
+            let mut redactor = Redactor::new([secret.to_vec()]).unwrap();
             assert_eq!(
                 checked_frames(
                     &mut redactor,
@@ -2313,7 +1665,7 @@ mod tests {
     // Spec: docs/specs/retry-owner.md#credential-admission-and-publication
     #[test]
     fn ambient_bounds_are_lenient_only_for_retry() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         use std::ffi::OsString;
         for (count, length, retained, expected) in [
             (1, MAX_SECRET_LENGTH + 1, 0, RedactorError::SecretTooLong),
@@ -2347,7 +1699,7 @@ mod tests {
         reason = "fixture subprocess isolates ambient credentials and captures process-wide stderr"
     )]
     fn oversized_ambient_credential_withdraws_publication_but_admits_retry() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         const CHILD: &str = "PROVENANT_REDACT_BOUND_TEST";
         const NAME: &str = "UNTRUSTED\n\u{1b}[31m_API_KEY";
         let oversized = "oversized-held-credential-".repeat(800);
@@ -2360,8 +1712,8 @@ mod tests {
                 publication_text(oversized.as_bytes(), []),
                 Err(RedactorError::SecretTooLong)
             );
-            assert!(Redactor::for_publication([]).is_err());
-            assert!(known_shapes(oversized.as_bytes()).is_err());
+            assert!(egress_shapes(b"ordinary text").is_err());
+            assert!(egress_shapes(oversized.as_bytes()).is_err());
             return;
         }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -2389,7 +1741,7 @@ mod tests {
 
     #[test]
     fn publication_preserves_raw_escape_literal_matching() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         let secret = br"\u0042-escape-3391";
         let source = br"literal=\u0042-escape-3391";
         let expected = b"literal=[REDACTED]";
@@ -2398,7 +1750,7 @@ mod tests {
             expected
         );
         for split in 0..=source.len() {
-            let mut redactor = Redactor::for_publication([secret.to_vec()]).unwrap();
+            let mut redactor = Redactor::new([secret.to_vec()]).unwrap();
             assert_eq!(
                 checked_frames(&mut redactor, &[&source[..split], &source[split..]]),
                 expected,
@@ -2410,9 +1762,9 @@ mod tests {
 
     #[test]
     fn publication_stream_masks_full_and_mixed_unicode_json_escapes_at_every_split() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         fn escape(text: &str, escape_even: bool) -> String {
-            let _mode = scoped(Mode::Full);
+            let _mode = scoped(Mode::Secrets);
             use std::fmt::Write as _;
             let mut encoded = String::new();
             for (index, character) in text.chars().enumerate() {
@@ -2442,7 +1794,7 @@ mod tests {
                 "finite publication helper"
             );
             for split in 0..=input.len() {
-                let mut redactor = Redactor::for_publication([secret.as_bytes().to_vec()]).unwrap();
+                let mut redactor = Redactor::new([secret.as_bytes().to_vec()]).unwrap();
                 assert_eq!(
                     checked_frames(
                         &mut redactor,
@@ -2457,7 +1809,7 @@ mod tests {
 
     #[test]
     fn ambient_credential_names_reuse_assignment_key_boundaries() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         for name in [
             b"GH_TOKEN".as_slice(),
             b"GITHUB_TOKEN",
@@ -2476,7 +1828,7 @@ mod tests {
 
     #[test]
     fn literal_redaction_is_chunk_invariant_and_preserves_unmatched_text() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         let cases = [
             (
                 vec![b"token-123".to_vec()],
@@ -2545,32 +1897,8 @@ mod tests {
     }
 
     #[test]
-    fn local_disclosure_filter_masks_across_two_filter_calls() {
-        // The capture filter installed on the exec edge is a
-        // `for_local_disclosure` redactor. A stream split can land inside a
-        // registered literal on either side, so state must span the two calls.
-        let _mode = scoped(Mode::Full);
-        let secret = b"split-secret-4472";
-        let _scope = publication_scope([secret.to_vec()]).unwrap();
-        let input = b"before split-secret-4472 after";
-        let expected = b"before [REDACTED] after";
-        let start = input
-            .windows(secret.len())
-            .position(|window| window == secret)
-            .unwrap();
-        for split in start..=start + secret.len() {
-            let mut redactor = Redactor::for_local_disclosure().unwrap();
-            assert_eq!(
-                joined(&mut redactor, &[&input[..split], &input[split..]]),
-                expected,
-                "split {split} bisects the literal"
-            );
-        }
-    }
-
-    #[test]
     fn ordinary_urls_and_embedded_token_markers_are_preserved() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         let mut redactor = Redactor::new([]).expect("empty secret set");
         let output = joined(
             &mut redactor,
@@ -2588,7 +1916,7 @@ mod tests {
     #[test]
     fn token_shapes_are_redacted_or_preserved_across_chunk_boundaries()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         token_markers_split_across_chunks_redact_only_at_word_boundaries();
         json_escaped_boundaries_redact_all_token_shapes_across_chunks();
         raw_backslashes_before_tokens_do_not_disable_redaction_across_chunks();
@@ -2599,7 +1927,7 @@ mod tests {
     }
 
     fn token_markers_split_across_chunks_redact_only_at_word_boundaries() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         let mut redactor = Redactor::new([]).expect("empty secret set");
         let output = joined(
             &mut redactor,
@@ -2609,7 +1937,7 @@ mod tests {
     }
 
     fn json_escaped_boundaries_redact_all_token_shapes_across_chunks() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         for (marker, kind) in TOKEN_MARKERS {
             let marker = marker_pattern(marker);
             let body = match kind {
@@ -2646,7 +1974,7 @@ mod tests {
     }
 
     fn raw_backslashes_before_tokens_do_not_disable_redaction_across_chunks() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         for (marker, kind) in TOKEN_MARKERS {
             let marker = marker_pattern(marker);
             let bodies: &[&str] = match kind {
@@ -2681,7 +2009,7 @@ mod tests {
     }
 
     fn unicode_escapes_inside_tokens_are_redacted_across_chunks() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         for (marker, kind) in TOKEN_MARKERS {
             let marker = marker_pattern(marker);
             let body = match kind {
@@ -2741,7 +2069,7 @@ mod tests {
     }
 
     fn bearer_and_credential_url_values_split_across_chunks_are_hidden() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         let mut redactor = Redactor::new([]).expect("empty secret set");
         let output = joined(
             &mut redactor,
@@ -2762,7 +2090,7 @@ mod tests {
 
     #[test]
     fn provider_token_shapes_are_known() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         for token in [
             "glpat-abcdefghij0123456789",
             "npm_abcdefghijklmnopqrstuvwxyz0123456789",
@@ -2778,16 +2106,14 @@ mod tests {
         // live Stripe keys.
         .chain(["sk", "rk"].map(|kind| format!("{kind}_live_abcdefghijklmnopqrstuvwx")))
         {
-            let token = token.as_str();
-            assert_eq!(
-                known_shape_rule(format!("value {token} end").as_bytes()).ok(),
-                Some(Some("credential token or URL userinfo")),
+            let input = format!("value {token} end");
+            let masked = egress_shapes(input.as_bytes()).unwrap();
+            assert!(
+                !masked.windows(token.len()).any(|w| w == token.as_bytes()),
                 "{token}"
             );
-            let mut redactor = Redactor::new([]).expect("empty secret set");
-            assert_eq!(
-                joined(&mut redactor, &[format!("{token}!").as_bytes()]),
-                b"[REDACTED]!",
+            assert!(
+                masked.windows(REDACTED.len()).any(|w| w == REDACTED),
                 "{token}"
             );
         }
@@ -2797,13 +2123,17 @@ mod tests {
             "npm_package_dependencies_example_package",
             "hf_hub_enable_hf_transfer_download_value",
         ] {
-            assert_eq!(known_shape_rule(text.as_bytes()).ok(), Some(None), "{text}");
+            assert_eq!(
+                egress_shapes(text.as_bytes()).unwrap(),
+                text.as_bytes(),
+                "{text}"
+            );
         }
     }
 
     #[test]
     fn short_or_case_mismatched_tokens_and_passwordless_userinfo_are_preserved() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         let mut redactor = Redactor::new([]).expect("empty secret set");
         let expected = b"bearer values | Bearer values | Bearer abcdefghijklmnopqrs | sk- | sk-abcdefghijklmnopqrs | SK-abcdefghijklmnopqrstuvwxyz | GHP_abcdefghijklmnopqrst | GHO_abcdefghijklmnopqrst | GHU_abcdefghijklmnopqrst | GHS_abcdefghijklmnopqrst | GHR_abcdefghijklmnopqrst | GitHub_pat_abcdefghijklmnopqrst | AKIA123456789012345 | Akia1234567890123456 | ssh://git@host | https://user@example.invalid/path";
         let output = joined(
@@ -2819,7 +2149,7 @@ mod tests {
 
     #[test]
     fn empty_password_component_in_url_userinfo_is_redacted() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         let mut redactor = Redactor::new([]).expect("empty secret set");
         let output = joined(&mut redactor, &[b"https://user:@example.invalid/path"]);
         assert_eq!(output, b"https://[REDACTED]@example.invalid/path");
@@ -2827,276 +2157,8 @@ mod tests {
     }
 
     #[test]
-    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
-    fn exact_redacted_assignments_are_preserved_across_chunk_boundaries() {
-        let _mode = scoped(Mode::Full);
-        for input in [
-            "token=[REDACTED]",
-            "token=[REDACTED] next",
-            "token=[REDACTED]\nnext",
-            "token=[REDACTED]\r\nnext",
-            "token=[REDACTED]\"next\"",
-            "token=[REDACTED]'next'",
-            "token='[REDACTED]'",
-            "token=\"[REDACTED]\" next",
-            "Authorization: Bearer [REDACTED]",
-            r#"{\"token\":\"[REDACTED]\"}"#,
-        ] {
-            for split in 0..=input.len() {
-                let mut redactor = Redactor::new([]).unwrap();
-                assert_eq!(
-                    joined(
-                        &mut redactor,
-                        &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
-                    ),
-                    input.as_bytes()
-                );
-                assert!(!redactor.has_redaction(), "split {split}: {input}");
-            }
-        }
-    }
-
-    #[test]
-    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
-    fn credential_assignments_are_redacted_across_chunk_boundaries() {
-        let _mode = scoped(Mode::Full);
-        let cases: &[(&str, &str)] = &[
-            (r"token=[REDACTED]\suffix", "token=[REDACTED]"),
-            (r"token=[REDACTED]\\suffix", "token=[REDACTED]"),
-            (r"token=[REDACTED]\ suffix", "token=[REDACTED]"),
-            (r#"token=[REDACTED]\"suffix"#, "token=[REDACTED]"),
-            (r"token=[REDACTED]\'suffix", "token=[REDACTED]"),
-            (r"token=[REDACTED]\]suffix", "token=[REDACTED]"),
-            (r"token=[REDACTED]\ suffix next", "token=[REDACTED] next"),
-            (
-                r#"token=[REDACTED]\"suffix" next"#,
-                r#"token=[REDACTED]" next"#,
-            ),
-            (r"token=[REDACTED]\\ next", "token=[REDACTED] next"),
-            (r"token=[REDACTED]\suffix next", "token=[REDACTED] next"),
-            (r"token=[REDACTED]\", "token=[REDACTED]"),
-            ("token=[REDACTED]\\\nnext", "token=[REDACTED]\nnext"),
-            ("token=[REDACTED]\\\r\nnext", "token=[REDACTED]\r\nnext"),
-            (r#"token="[REDACTED]\suffix""#, r#"token="[REDACTED]""#),
-            (r"token='[REDACTED]\suffix'", "token='[REDACTED]'"),
-            (r#"token="[REDACTED]\suffix"#, r#"token="[REDACTED]"#),
-            (r"token='[REDACTED]\suffix", "token='[REDACTED]"),
-            (r"token='[REDACTED]\", "token='[REDACTED]"),
-            (r#"token=\"[REDACTED]\\suffix\""#, r#"token=\"[REDACTED]\""#),
-            (r#"token=\"[REDACTED]\\suffix"#, r#"token=\"[REDACTED]"#),
-            ("token=\"[REDACTED]\\", "token=\"[REDACTED]"),
-            ("token=\"[REDACTED]\\\nnext", "token=\"[REDACTED]\nnext"),
-            (r#"token=\"[REDACTED]\"#, r#"token=\"[REDACTED]"#),
-            (r#"token=\"[REDACTED]suffix\""#, r#"token=\"[REDACTED]\""#),
-            ("token=[REDACTED]extra", "token=[REDACTED]"),
-            ("token=[REDACTED", "token=[REDACTED]"),
-            ("token=[REDACTED]extra next", "token=[REDACTED] next"),
-            ("token='[REDACTED]extra'", "token='[REDACTED]'"),
-            ("password=hunter2 next", "password=[REDACTED] next"),
-            ("PASSWORD: hunter2\n", "PASSWORD: [REDACTED]\n"),
-            ("passwd = 'x y' end", "passwd = '[REDACTED]' end"),
-            ("pass:hunter2,", "pass:[REDACTED],"),
-            (
-                "db_password=\"correct horse\"",
-                "db_password=\"[REDACTED]\"",
-            ),
-            ("token=abc123&next=1", "token=[REDACTED]&next=1"),
-            ("x-auth-token=abc", "x-auth-token=[REDACTED]"),
-            ("secret: \"a\\\"b\"}", "secret: \"[REDACTED]\"}"),
-            (
-                "secret: \"'LEAK_SENTINEL\" end",
-                "secret: \"[REDACTED]\" end",
-            ),
-            ("client_secret=xyz", "client_secret=[REDACTED]"),
-            ("api_key=sk_live_123", "api_key=[REDACTED]"),
-            ("api-key: x123 done", "api-key: [REDACTED] done"),
-            ("apikey=abc", "apikey=[REDACTED]"),
-            ("access_key=AKX", "access_key=[REDACTED]"),
-            ("auth=abc", "auth=[REDACTED]"),
-            ("msg\\npassword=hunter2", "msg\\npassword=[REDACTED]"),
-            (
-                r#"{\"password\":\"hunter2\"}"#,
-                r#"{\"password\":\"[REDACTED]\"}"#,
-            ),
-            (
-                r#"{"content":"{\"password\":\"abc\\\"LEAK_SENTINEL\"}"}"#,
-                r#"{"content":"{\"password\":\"[REDACTED]\"}"}"#,
-            ),
-            (
-                r#"{\"password\":\"abc\\\\\\\"LEAK_SENTINEL\"}"#,
-                r#"{\"password\":\"[REDACTED]\"}"#,
-            ),
-            (
-                r#"{\"password\":\"abc\\\\\"} end"#,
-                r#"{\"password\":\"[REDACTED]"#,
-            ),
-            (
-                r#"\"{\\\"password\\\":\\\"abc\\\\\\\"LEAK_SENTINEL\\\"}\""#,
-                r#"\"{\\\"password\\\":\\\"[REDACTED]\\\"}\""#,
-            ),
-            (
-                "Authorization: Basic dXNlcjpwYXNz\n",
-                "Authorization: Basic [REDACTED]\n",
-            ),
-            (
-                "authorization: bearer abc.def\n",
-                "authorization: bearer [REDACTED]\n",
-            ),
-            (
-                "Authorization: Digest abc def\n",
-                "Authorization: [REDACTED]\n",
-            ),
-            ("Authorization: Basic", "Authorization: [REDACTED]"),
-        ];
-        for (input, expected) in cases {
-            assert_eq!(
-                known_shapes(input.as_bytes()).expect("bounded input"),
-                expected.as_bytes()
-            );
-            for split in 0..=input.len() {
-                let mut redactor = Redactor::new([]).expect("empty secret set");
-                assert_eq!(
-                    joined(
-                        &mut redactor,
-                        &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
-                    ),
-                    expected.as_bytes(),
-                    "{input:?} split {split}"
-                );
-                assert!(redactor.has_redaction(), "{input:?} split {split}");
-            }
-            let chunks: Vec<&[u8]> = input.as_bytes().chunks(1).collect();
-            let mut redactor = Redactor::new([]).expect("empty secret set");
-            assert_eq!(
-                joined(&mut redactor, &chunks),
-                expected.as_bytes(),
-                "{input:?} byte by byte"
-            );
-            assert!(redactor.has_redaction(), "{input:?}");
-        }
-
-        // Encode the whole log repeatedly so the expected source span follows
-        // the same encoding as the credential, including its closing delimiter.
-        for quote in ['\'', '"'] {
-            for value in [
-                format!("abc\\{quote}LEAK_SENTINEL"),
-                "LEAK_SENTINEL\\\\".into(),
-            ] {
-                let mut input = format!("password={quote}{value}{quote} end");
-                let ambiguous_close = value.ends_with("\\\\");
-                let mut expected = if ambiguous_close {
-                    format!("password={quote}[REDACTED]")
-                } else {
-                    format!("password={quote}[REDACTED]{quote} end")
-                };
-                for depth in 0..=2 {
-                    for split in 0..=input.len() {
-                        let mut redactor = Redactor::new([]).expect("empty secret set");
-                        assert_eq!(
-                            joined(
-                                &mut redactor,
-                                &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
-                            ),
-                            expected.as_bytes(),
-                            "depth {depth}, split {split}, {input:?}"
-                        );
-                    }
-                    let mut redactor = Redactor::new([]).expect("empty secret set");
-                    assert_eq!(
-                        joined(
-                            &mut redactor,
-                            &input.as_bytes().chunks(1).collect::<Vec<_>>()
-                        ),
-                        expected.as_bytes(),
-                        "depth {depth}, bytewise, {input:?}"
-                    );
-                    input = serde_json::to_string(&input).expect("encode input");
-                    expected = serde_json::to_string(&expected).expect("encode expected");
-                    if ambiguous_close {
-                        expected.pop();
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
-    fn quoted_credentials_are_line_bounded_and_hide_leading_bytes() {
-        let _mode = scoped(Mode::Full);
-        let cases = [
-            (
-                r#"{"msg": "escaped \" quote", "password": "val\\"} end"#,
-                r#"{"msg": "escaped \" quote", "password": "[REDACTED]"#,
-            ),
-            (
-                r#"Today is a 6" pipe and password="val\\" end"#,
-                r#"Today is a 6" pipe and password="[REDACTED]"#,
-            ),
-            (
-                r#""{\"a\": \"hello \\\" world\", \"password\": \"val\\\\\"} end""#,
-                r#""{\"a\": \"hello \\\" world\", \"password\": \"[REDACTED]"#,
-            ),
-            (r#"password="\\" end"#, r#"password="[REDACTED]"#),
-            (r#"password="  " end"#, r#"password="[REDACTED]" end"#),
-            (r#"password="\secret""#, r#"password="[REDACTED]""#),
-            (r#"password=" secret""#, r#"password="[REDACTED]""#),
-            (
-                "\"password=\\\"\\\\\\\" end\"\nfollowing line",
-                "\"password=\\\"[REDACTED]\nfollowing line",
-            ),
-            (
-                r#"{"log":"password='abc\\'LEAK_SENTINEL' end"}"#,
-                r#"{"log":"password='[REDACTED]' end"}"#,
-            ),
-            (
-                "password=\" LEAK_SENTINEL\nfollowing line",
-                "password=\"[REDACTED]\nfollowing line",
-            ),
-            (
-                "password=\"\\LEAK_SENTINEL\r\nfollowing line",
-                "password=\"[REDACTED]\r\nfollowing line",
-            ),
-            (
-                "password=\"abc\\\"LEAK_SENTINEL\nfollowing line",
-                "password=\"[REDACTED]\nfollowing line",
-            ),
-            (
-                "password=\"safe\" token=LEAK_SENTINEL\nfollowing line",
-                "password=\"[REDACTED]\" token=[REDACTED]\nfollowing line",
-            ),
-            (
-                "password=\"safe\" same line\nfollowing line",
-                "password=\"[REDACTED]\" same line\nfollowing line",
-            ),
-            (
-                r#"password="abc\\" token=LEAK_SENTINEL"#,
-                r#"password="[REDACTED]"#,
-            ),
-        ];
-        for (input, expected) in cases {
-            let bytes = input.as_bytes();
-            for split in 0..=bytes.len() {
-                let mut redactor = Redactor::new([]).expect("empty secret set");
-                assert_eq!(
-                    joined(&mut redactor, &[&bytes[..split], &bytes[split..]]),
-                    expected.as_bytes(),
-                    "{input:?}, split {split}"
-                );
-                assert!(redactor.has_redaction(), "{input:?}, split {split}");
-            }
-            let mut redactor = Redactor::new([]).expect("empty secret set");
-            assert_eq!(
-                joined(&mut redactor, &bytes.chunks(1).collect::<Vec<_>>()),
-                expected.as_bytes(),
-                "{input:?}, bytewise"
-            );
-        }
-    }
-
-    #[test]
     fn ordinary_prose_with_credential_words_is_preserved() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         let input = "token budget is 5; auth failed; oauth=1; compass=north; max_tokens=4096; passwords=3; tokenizer: fast; bypass: on";
         for split in 0..=input.len() {
             let mut redactor = Redactor::new([]).expect("empty secret set");
@@ -3114,17 +2176,8 @@ mod tests {
         assert!(!redactor.has_redaction());
     }
 
-    #[test]
-    fn bounded_line_redacts_credential_assignments() {
-        let _mode = scoped(Mode::Full);
-        assert_eq!(
-            bounded_line("unclassified; password=fixture-secret", 512),
-            "unclassified; password=[REDACTED]"
-        );
-    }
-
     fn token_markers_redact_at_minimum_body_lengths_across_chunks() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         let mut redactor = Redactor::new([]).expect("empty secret set");
         let output = joined(
             &mut redactor,
@@ -3155,49 +2208,13 @@ mod tests {
 
     #[test]
     // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
-    fn overlapping_literal_does_not_change_assignment_boundaries() {
-        let _mode = scoped(Mode::Full);
-        let input = b"password=\"X\\\"LEAK_SENTINEL\" end\nnext";
-        let expected = b"password=\"[REDACTED]\" end\nnext";
-        for split in 0..=input.len() {
-            let mut redactor = Redactor::new([b"X\\".to_vec()]).expect("secret");
-            assert_eq!(
-                checked_frames(&mut redactor, &[&input[..split], &input[split..]]),
-                expected,
-                "split {split}"
-            );
-        }
-        for width in [1, 256, 8192, FRAME_LIMIT] {
-            let mut redactor = Redactor::new([b"X\\".to_vec()]).expect("secret");
-            assert_eq!(
-                checked_frames(&mut redactor, &input.chunks(width).collect::<Vec<_>>()),
-                expected,
-                "width {width}"
-            );
-        }
-        // An encoded Bearer prefix is canonicalised only when that cannot
-        // undo a literal redaction within the original marker.
-        let input = br"\u0042earer abcdefghijklmnopqrst!";
-        for split in 0..=input.len() {
-            let mut redactor = Redactor::new([br"\u0042".to_vec()]).expect("secret");
-            assert_eq!(
-                checked_frames(&mut redactor, &[&input[..split], &input[split..]]),
-                b"[REDACTED]earer [REDACTED]!",
-                "Bearer split {split}"
-            );
-        }
-    }
-
-    #[test]
-    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
     fn expansions_and_long_delimiters_are_chunk_invariant_and_framed() {
-        let _mode = scoped(Mode::Full);
         let short = b"x x x tail";
         let short_expected = b"[REDACTED] [REDACTED] [REDACTED] tail";
         for split in 0..=short.len() {
             let mut redactor = Redactor::new([b"x".to_vec()]).expect("secret");
             assert_eq!(
-                checked_frames(&mut redactor, &[&short[..split], &short[split..]]),
+                joined(&mut redactor, &[&short[..split], &short[split..]]),
                 short_expected
             );
         }
@@ -3206,49 +2223,7 @@ mod tests {
         for width in [1, 256, 8192, FRAME_LIMIT] {
             let mut redactor = Redactor::new([b"x".to_vec()]).expect("secret");
             assert_eq!(
-                checked_frames(&mut redactor, &expanded.chunks(width).collect::<Vec<_>>()),
-                expected,
-                "width {width}"
-            );
-        }
-        let empty_escaped = br#"password=\"\" end"#;
-        let empty_expected = br#"password=\"[REDACTED]\" end"#;
-        for split in 0..=empty_escaped.len() {
-            let mut redactor = Redactor::new([]).expect("empty secret set");
-            assert_eq!(
-                checked_frames(
-                    &mut redactor,
-                    &[&empty_escaped[..split], &empty_escaped[split..]]
-                ),
-                empty_expected,
-                "empty split {split}"
-            );
-        }
-        let sample = b"password=\\\\\\\\\\\\\\\"hidden\\\\\\\\\\\\\\\" end\nnext";
-        let sample_expected = b"password=\\\\\\\\\\\\\\\"[REDACTED]\\\\\\\\\\\\\\\" end\nnext";
-        for split in 0..=sample.len() {
-            let mut redactor = Redactor::new([]).expect("empty secret set");
-            assert_eq!(
-                checked_frames(&mut redactor, &[&sample[..split], &sample[split..]]),
-                sample_expected,
-                "split {split}"
-            );
-        }
-        let slashes = vec![b'\\'; FRAME_LIMIT - 1];
-        let mut input = b"password=".to_vec();
-        input.extend(&slashes);
-        input.extend(b"\"hidden");
-        input.extend(&slashes);
-        input.extend(b"\" end\nnext");
-        let mut expected = b"password=".to_vec();
-        expected.extend(&slashes);
-        expected.extend(b"\"[REDACTED]");
-        expected.extend(&slashes);
-        expected.extend(b"\" end\nnext");
-        for width in [1, 256, 8192, FRAME_LIMIT] {
-            let mut redactor = Redactor::new([]).expect("empty secret set");
-            assert_eq!(
-                checked_frames(&mut redactor, &input.chunks(width).collect::<Vec<_>>()),
+                joined(&mut redactor, &expanded.chunks(width).collect::<Vec<_>>()),
                 expected,
                 "width {width}"
             );
@@ -3258,7 +2233,7 @@ mod tests {
     #[test]
     // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
     fn authority_tokens_are_masked_at_every_split() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         for input in [
             b"https://ghp_abcdefghijklmnopqrst@example.invalid/".as_slice(),
             b"https://user:ghp_abcdefghijklmnopqrst@example.invalid/".as_slice(),
@@ -3279,38 +2254,8 @@ mod tests {
     }
 
     #[test]
-    // Spec: docs/specs/supervisor.md#disclosure-and-safe-git-evidence
-    fn long_withheld_run_drains_in_bounded_calls() {
-        let _mode = scoped(Mode::Full);
-        let slashes = vec![b'\\'; 1024 * 1024 - 1];
-        let mut opener = b"password=".to_vec();
-        opener.extend(&slashes);
-        opener.extend(b"\"secret");
-        let mut redactor = Redactor::new([]).expect("redactor");
-        let mut output = Vec::new();
-        let mut sink = |frame: &[u8]| {
-            assert!(frame.len() <= FRAME_LIMIT);
-            output.extend_from_slice(frame);
-        };
-        for chunk in opener
-            .chunks(8192)
-            .chain(slashes.chunks(8192))
-            .chain(std::iter::once(b"\" end".as_slice()))
-        {
-            redactor.filter(chunk, &mut sink).expect("filter");
-        }
-        redactor.finish(&mut sink).expect("finish");
-        let mut expected = b"password=".to_vec();
-        expected.extend(&slashes);
-        expected.extend(b"\"[REDACTED]");
-        expected.extend(slashes);
-        expected.extend(b"\" end");
-        assert_eq!(output, expected);
-    }
-
-    #[test]
     fn invalid_secret_sets_are_rejected_without_rendering_values() {
-        let _mode = scoped(Mode::Full);
+        let _mode = scoped(Mode::Secrets);
         assert_eq!(
             Redactor::new([Vec::new()]).err(),
             Some(RedactorError::EmptySecret)

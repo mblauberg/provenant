@@ -2310,11 +2310,7 @@ mod tests {
     #[test]
     fn graph_refusal_identifier_remains_visible_to_peer() {
         let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
-        for mode in [
-            provenant_redact::Mode::Off,
-            provenant_redact::Mode::Secrets,
-            provenant_redact::Mode::Full,
-        ] {
+        for mode in [provenant_redact::Mode::Off, provenant_redact::Mode::Secrets] {
             let _mode = provenant_redact::scoped(mode);
             let node = crate::graph::refusal::GraphIdentifier::try_from(token.to_owned()).unwrap();
             assert_eq!(node.to_string(), token);
