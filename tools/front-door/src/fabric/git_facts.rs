@@ -1,5 +1,9 @@
 use super::*;
 
+/// A bounded wait for a base fetch. Fetching moves objects, so it gets longer
+/// than the metadata reads that bound repository facts.
+const BASE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Git variables that would redirect a fetch away from the peer's clone or
 /// let it prompt.
 pub(crate) const GIT_REDIRECTS: &[&str] = &[
@@ -185,4 +189,64 @@ pub(crate) fn remote_base(
         }
     }
     Err(FacadeError::BaseUnreachable)
+}
+
+/// Fetch the clone's origin so a pinned base held only upstream can resolve.
+/// A peer whose origin is behind must fetch before it can resolve a newly
+/// published launch commit. The outcome is returned rather than propagated so
+/// a refusal can always name the clone and what the fetch reported.
+pub(crate) fn fetch_base_from_origin(cwd: &Path, cancel: &CancelToken) -> String {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
+    if cancel.is_cancelled() {
+        return "origin: cancelled".into();
+    }
+    let Some(git) = provenant_os::git::git_executable() else {
+        return "origin: git unavailable".into();
+    };
+    let environment: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
+        .filter(|(key, _)| {
+            key != "GIT_NO_REPLACE_OBJECTS"
+                && key != "GIT_GRAFT_FILE"
+                && !key.to_str().is_some_and(|key| GIT_REDIRECTS.contains(&key))
+        })
+        .chain([
+            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+            ("GIT_NO_REPLACE_OBJECTS".into(), "1".into()),
+            ("GIT_GRAFT_FILE".into(), "/dev/null".into()),
+        ])
+        .collect();
+    let Ok(executor) = SystemExecutor::new(1) else {
+        return "origin: executor unavailable".into();
+    };
+    let argv: Vec<std::ffi::OsString> = std::iter::once(git.as_os_str().to_owned())
+        .chain(
+            [
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "origin",
+            ]
+            .iter()
+            .map(std::ffi::OsString::from),
+        )
+        .collect();
+    let mut options = ExecOptions::new(&argv, cwd, BASE_FETCH_TIMEOUT);
+    options.env = Some(&environment);
+    options.cancel = Some(cancel);
+    options.stdin = Some(b"");
+    options.stdout = StreamPolicy::Discard;
+    options.stderr = StreamPolicy::Discard;
+    match executor.execute(options) {
+        Ok(output) if output.termination == Termination::Exit(0) && !output.timed_out => {
+            "origin: ok".into()
+        }
+        Ok(output) if output.timed_out => "origin: timed out".into(),
+        Ok(_) => "origin: fetch failed".into(),
+        Err(_) => "origin: could not run fetch".into(),
+    }
 }
