@@ -1725,9 +1725,12 @@ pub(crate) fn validate_outcome(outcome: ExecOutcome) -> Result<ExecOutcome, Util
         || outcome.stderr.read_failed
         || outcome.stdout.filter_failed
         || outcome.stderr.filter_failed
-        || outcome.stdout.total_bytes != outcome.stdout.bytes.len() as u64
-        || outcome.stderr.total_bytes != outcome.stderr.bytes.len() as u64
     {
+        // `total_bytes` counts source bytes while `bytes` holds the masked,
+        // bounded result, so their lengths intentionally differ when the
+        // executor's default mask replaces a secret. Loss is reported by the
+        // truncation, frame, sink, read and filter flags above.
+
         return Err(UtilityError::Incomplete);
     }
     Ok(outcome)

@@ -30,9 +30,11 @@ const LAYERS: &[(&str, &[&str])] = &[
     ("test-support", &["core"]),
     ("records", &["core"]),
     ("config", &["core", "records", "os", "redact"]),
-    ("os", &["core"]),
+    // The executor installs the default local-disclosure mask, so it depends
+    // on redaction; the filter contract lives in core to keep the edge acyclic.
+    ("os", &["core", "redact"]),
     // Per-byte redaction, built optimised in dev and test profiles.
-    ("redact", &["core", "os"]),
+    ("redact", &["core"]),
     // Port-plan tests read the default lane settings from config (a sibling
     // layer), so the edge is acyclic.
     ("supervisor", &["core", "records", "os", "config", "redact"]),
@@ -1248,6 +1250,73 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
     assert!(
         violations.is_empty(),
         "adapter policy must use AdapterSpec data:\n{}",
+        violations.join("\n")
+    );
+    Ok(())
+}
+
+/// Rule: every `ExecOptions` capture is masked on the stream by the executor
+/// unless the site opts out with a typed, named reason. Pin the structural
+/// halves in the executor and capture, and reject a capture site that builds
+/// its own `for_local_disclosure` filter now that the default owns that job.
+#[test]
+fn every_capture_uses_the_default_mask_unless_it_names_a_reason() -> Result<(), Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let exec = fs::read_to_string(root.join("crates/os/src/exec.rs"))?;
+    let capture = fs::read_to_string(root.join("crates/os/src/capture.rs"))?;
+
+    for field in ["stdout_mask", "stderr_mask"] {
+        let default = format!("{field}: CaptureMask::default()");
+        assert!(
+            exec.contains(&default),
+            "ExecOptions::new must default {field} to the mask"
+        );
+        let wire = format!("Some(options.{field})");
+        assert!(
+            exec.contains(&wire),
+            "run_inner must pass {field} into the capture"
+        );
+    }
+    assert!(
+        exec.contains("StreamCapture::new_with_mask("),
+        "the executor must install the default mask on captured streams"
+    );
+    assert!(
+        capture.contains("Redactor::for_local_disclosure()"),
+        "the default mask must use local-disclosure redaction"
+    );
+
+    let mut violations = Vec::new();
+    for source_root in source_roots() {
+        let mut sources = Vec::new();
+        rust_sources(&source_root, &mut sources)?;
+        for path in sources {
+            let redaction_owner = path.starts_with(root.join("crates/redact"));
+            let executor = path == root.join("crates/os/src/exec.rs")
+                || path == root.join("crates/os/src/capture.rs");
+            let text = fs::read_to_string(&path)?;
+            for (index, line) in text.lines().enumerate() {
+                if !redaction_owner && !executor && line.contains("for_local_disclosure") {
+                    violations.push(format!(
+                        "{}:{}: capture site builds its own for_local_disclosure filter \
+                         instead of using the executor default",
+                        path.display(),
+                        index + 1
+                    ));
+                }
+                if line.contains("CaptureMask::Raw") && !line.contains("RawCaptureReason::") {
+                    violations.push(format!(
+                        "{}:{}: CaptureMask::Raw must name a RawCaptureReason",
+                        path.display(),
+                        index + 1
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "capture masking rule:\n{}",
         violations.join("\n")
     );
     Ok(())

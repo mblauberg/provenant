@@ -7,11 +7,10 @@ license.workspace = true
 publish = false
 
 [features]
-fixture = ["provenant-core/fixture", "provenant-os/fixture"]
+fixture = ["provenant-core/fixture"]
 
 [dependencies]
 provenant-core = { workspace = true }
-provenant-os = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 

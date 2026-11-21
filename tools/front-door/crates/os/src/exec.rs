@@ -5,6 +5,7 @@ pub(crate) use crate::capture::{Frames, Pump};
 use crate::identity::Signal;
 use crate::sys::{raw_exec::OwnedPid as RawChild, reaper::Reaper, resources::ProcessBudget};
 use provenant_core::CancelToken;
+pub use provenant_core::capture::{CaptureFilter, FRAME_LIMIT, FilterError};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
@@ -31,7 +32,6 @@ impl BuildSignalWait {
 
 pub const DEFAULT_CAPTURE_LIMIT: usize = 8 * 1024 * 1024;
 pub const MAX_CAPTURE_LIMIT: usize = 64 * 1024 * 1024;
-pub const FRAME_LIMIT: usize = 64 * 1024;
 /// Maximum source bytes in a structured provider protocol line.
 pub const PROVIDER_LINE_LIMIT: usize = 1_048_576;
 const DETACHED_RECEIPT_LIMIT: usize = 1024 * 1024;
@@ -138,25 +138,36 @@ impl StreamPolicy<'_> {
         matches!(self, Self::Inherit)
     }
 }
+
+/// Why a call site keeps raw captured bytes instead of the executor's default
+/// local-disclosure mask. The reason is part of the type so an opt-out is
+/// auditable; a bare boolean would let a site disable masking silently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RawCaptureReason {
+    /// The captured bytes are parsed byte-for-byte (paths, object ids,
+    /// protocol fields), so a mask could change their meaning.
+    ByteExactParse,
+    /// A higher layer owns the redaction boundary for these bytes.
+    CallerOwnsRedaction,
+}
+
+/// Per-stream masking policy for captured bytes. Masking runs on the stream,
+/// before the capture bound, so a secret that straddles the bound cannot leave
+/// a fragment in the retained bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CaptureMask {
+    /// Mask captured bytes with local-disclosure redaction. This applies to
+    /// every capture by default.
+    #[default]
+    Mask,
+    /// Keep raw bytes for the named reason.
+    Raw(RawCaptureReason),
+}
+
 /// Frames are decoded before retention and redaction; full queues are loss,
 /// never a synthetic terminal or a process stop request.
 pub trait FrameSink: Send + Sync {
     fn try_frame(&self, bytes: &[u8]) -> Result<(), QueueLoss>;
-}
-#[derive(Debug, Error)]
-#[error("capture filter failed")]
-pub struct FilterError;
-/// A filter returns zero or more frames per call, each at most `FRAME_LIMIT` bytes.
-/// Output is pushed to the caller's sink as soon as it is decided.
-pub trait CaptureFilter {
-    fn filter(&mut self, bytes: &[u8], sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError>;
-
-    /// Flush bytes held until the end of the stream. Filters without buffered
-    /// state can keep the default implementation.
-    fn finish(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
-        let _ = sink;
-        Ok(())
-    }
 }
 /// Memory-only bytes for one inherited read pipe. Only its descriptor number
 /// enters the child's environment; the write end closes before spawn.
@@ -201,6 +212,10 @@ pub struct ExecOptions<'a> {
     pub group_watchdog: bool,
     pub stdout: StreamPolicy<'a>,
     pub stderr: StreamPolicy<'a>,
+    /// Masking policy for retained stdout bytes. Defaults to `CaptureMask::Mask`.
+    pub stdout_mask: CaptureMask,
+    /// Masking policy for retained stderr bytes. Defaults to `CaptureMask::Mask`.
+    pub stderr_mask: CaptureMask,
     pub stdout_decoder: Option<&'a dyn FrameSink>,
     pub stderr_decoder: Option<&'a dyn FrameSink>,
     pub stdout_filter: Option<&'a mut dyn CaptureFilter>,
@@ -234,6 +249,8 @@ impl<'a> ExecOptions<'a> {
             group_watchdog: false,
             stdout: StreamPolicy::default(),
             stderr: StreamPolicy::default(),
+            stdout_mask: CaptureMask::default(),
+            stderr_mask: CaptureMask::default(),
             stdout_decoder: None,
             stderr_decoder: None,
             stdout_filter: None,
@@ -676,15 +693,42 @@ fn run_inner<'a>(
     } else {
         options.stdout_decoder.map(FrameDelivery::Raw)
     };
-    let mut out_pump = StreamCapture::new_with_writer(
+    // Credentials handed to the child can be echoed in its output. Register
+    // them with the default mask as well as the host's ambient values, so a
+    // capture site never has to rebuild a redactor from its own environment.
+    let _credential_scope = if provenant_redact::mode().masks_egress() {
+        let environment = options
+            .env
+            .unwrap_or_default()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_encoded_bytes().to_vec(),
+                    value.as_encoded_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        provenant_redact::launch_values(&environment, None)
+            .ok()
+            .filter(|values| !values.is_empty())
+            .and_then(|values| provenant_redact::publication_scope(values).ok())
+    } else {
+        None
+    };
+
+    // The default mask is owned by the capture so it runs as the first filter
+    // stage, ahead of any caller filter and ahead of the retention bound.
+    let mut out_pump = StreamCapture::new_with_mask(
         options.stdout,
         stdout_decoder,
+        Some(options.stdout_mask),
         options.stdout_filter,
         options.stdout_writer,
     )?;
-    let mut err_pump = StreamCapture::new_with_writer(
+    let mut err_pump = StreamCapture::new_with_mask(
         options.stderr,
         options.stderr_decoder.map(FrameDelivery::Raw),
+        Some(options.stderr_mask),
         options.stderr_filter,
         options.stderr_writer,
     )?;

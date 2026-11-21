@@ -26,6 +26,17 @@ fn seed_build_stderr(line: impl std::fmt::Display) {
     eprintln!("{line}");
 }
 
+/// Mask a command fragment before it is echoed into an error or an operator
+/// line. Arguments can carry credentials (for example `--token=...`), so raw
+/// argv must never reach a diagnostic. If masking cannot run, withhold the
+/// fragment rather than passing it through.
+fn masked_diagnostic(text: &str) -> String {
+    match provenant_redact::known_shapes(text.as_bytes()) {
+        Ok(masked) => String::from_utf8_lossy(&masked).into_owned(),
+        Err(_) => WITHHELD_TAIL.to_owned(),
+    }
+}
+
 /// A failing `build.prepare` command. It travels as the error of `refresh` or
 /// `build`, so a caller tells it from a generic failure by type. The public
 /// fields let the tick record the command and its bounded output tail. The
@@ -361,15 +372,8 @@ fn run(cwd: &Path, argv: &[OsString], overrides: &[(OsString, OsString)]) -> Res
     let mut options = ExecOptions::new(argv, cwd, Duration::from_secs(4 * 60 * 60));
     options.env = Some(&env);
     options.process_group = true;
-    // Captured stderr becomes part of an io::Error that reaches tick's seed
-    // records and seed-build output with no later redaction boundary. Mask it
-    // on the stream, ahead of any bound, as run_with_tail does. If the filter
-    // cannot be built or fails mid-stream, withhold the whole stderr rather
-    // than passing raw bytes on.
-    let mut stderr_filter = provenant_redact::Redactor::for_local_disclosure().ok();
-    options.stderr_filter = stderr_filter
-        .as_mut()
-        .map(|filter| filter as &mut dyn provenant_os::exec::CaptureFilter);
+    // The executor masks captured output on the stream by default, ahead of
+    // any bound, so stderr reaching the error below carries no raw secret.
     let executor = SystemExecutor::new(1)?;
     let result = executor
         .execute(options)
@@ -380,12 +384,13 @@ fn run(cwd: &Path, argv: &[OsString], overrides: &[(OsString, OsString)]) -> Res
         || result.stdout.read_failed
         || result.stderr.filter_failed
     {
-        let stderr = if stderr_filter.is_none() || result.stderr.filter_failed {
+        let stderr = if result.stderr.filter_failed {
             WITHHELD_TAIL.to_owned()
         } else {
             String::from_utf8_lossy(&result.stderr.bytes).into_owned()
         };
-        return Err(io::Error::other(format!("command failed: {argv:?}: {stderr}")).into());
+        let command = masked_diagnostic(&format!("{argv:?}"));
+        return Err(io::Error::other(format!("command failed: {command}: {stderr}")).into());
     }
     Ok(result.stdout.bytes)
 }
@@ -397,11 +402,10 @@ const WITHHELD_TAIL: &str = "[REDACTED]";
 /// Like [`run`], but keeps the combined output tail when a command fails. Both
 /// streams use a tail policy: a long prepare log cannot grow the error without
 /// bound, and the retained bytes are enough to explain a failed generation step.
-/// Local redaction masks each stream at capture, on the executor's
-/// `CaptureFilter`, ahead of the Tail window: a secret that straddles the
-/// window start is masked before the cut can leave part of it behind. A tail
-/// stream's `truncated` flag is expected, so unlike `run` it is not a failure on
-/// its own.
+/// The executor's default local-disclosure mask runs on each stream ahead of
+/// the Tail window: a secret that straddles the window start is masked before
+/// the cut can leave part of it behind. A tail stream's `truncated` flag is
+/// expected, so unlike `run` it is not a failure on its own.
 fn run_with_tail(
     cwd: &Path,
     argv: &[OsString],
@@ -419,12 +423,6 @@ fn run_with_tail(
         limit: OUTPUT_TAIL_BYTES,
     };
     let failed = |tail: String, exit: Option<i32>| CommandFailure { exit, tail };
-    let mut stdout_filter = provenant_redact::Redactor::for_local_disclosure()
-        .map_err(|_| failed(WITHHELD_TAIL.to_owned(), None))?;
-    let mut stderr_filter = provenant_redact::Redactor::for_local_disclosure()
-        .map_err(|_| failed(WITHHELD_TAIL.to_owned(), None))?;
-    options.stdout_filter = Some(&mut stdout_filter);
-    options.stderr_filter = Some(&mut stderr_filter);
     let executor = SystemExecutor::new(1)
         .map_err(|error| failed(seed_error("running seed command", &error).to_string(), None))?;
     let result = executor
@@ -1259,16 +1257,16 @@ fn run_prepares(
     };
     let layer = provenant_config::port_source_layer(table.build.source);
     for (index, argv) in table.build.prepare.iter().enumerate() {
+        let command = masked_diagnostic(&argv.join(" "));
         seed_build_stderr(format!(
-            "seed-build: build.prepare[{index}] (source {layer}): {}",
-            argv.join(" ")
+            "seed-build: build.prepare[{index}] (source {layer}): {command}"
         ));
         let argv = argv.iter().map(OsString::from).collect::<Vec<_>>();
         run_with_tail(checkout_root, &argv, overrides).map_err(|failure| PrepareFailed {
             index,
             argv: argv
                 .iter()
-                .map(|arg| arg.to_string_lossy().into_owned())
+                .map(|arg| masked_diagnostic(&arg.to_string_lossy()))
                 .collect(),
             exit: failure.exit,
             tail: failure.tail,

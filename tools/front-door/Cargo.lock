@@ -590,6 +590,7 @@ dependencies = [
  "jiff",
  "libc",
  "provenant-core",
+ "provenant-redact",
  "provenant-test-support",
  "serde",
  "serde_json",
@@ -651,7 +652,6 @@ name = "provenant-redact"
 version = "2.6.0"
 dependencies = [
  "provenant-core",
- "provenant-os",
  "serde_json",
  "thiserror",
 ]

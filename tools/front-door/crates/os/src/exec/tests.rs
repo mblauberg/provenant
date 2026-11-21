@@ -642,3 +642,55 @@ fn prepared_ref_transaction_keeps_ref_when_callback_expires_or_is_cancelled()
     }
     Ok(())
 }
+
+/// The default mask runs ahead of the capture bound, so a secret that straddles
+/// the bound cannot leave a fragment in the retained bytes. A named raw opt-out
+/// is the only way to keep the unmasked bytes.
+#[test]
+fn default_mask_masks_a_secret_straddling_the_capture_bound()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _mode = provenant_redact::scoped(provenant_redact::Mode::Full);
+    let secret = b"straddling-secret-4472";
+    let _scope = provenant_redact::publication_scope([secret.to_vec()])?;
+
+    let temp = tempfile::tempdir()?;
+    let payload = format!("prefix-{}suffix", String::from_utf8_lossy(secret));
+    let argv = [
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        OsString::from(format!("printf '{payload}'")),
+    ];
+    // The bound lands inside the registered literal.
+    let limit = b"prefix-stradd".len();
+
+    let executor = SystemExecutor::new(1)?;
+    let mut options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(10));
+    options.stdout = StreamPolicy::Capture { limit };
+    let masked = executor.execute(options)?;
+    // The whole secret is replaced before the bound cuts the stream; the bound
+    // then falls inside the replacement marker, which is itself harmless.
+    let expected = &b"prefix-[REDACTED]suffix"[..limit];
+    assert_eq!(
+        masked.stdout.bytes.as_slice(),
+        expected,
+        "the default mask must run ahead of the capture bound"
+    );
+    assert!(
+        !masked
+            .stdout
+            .bytes
+            .windows(b"stradd".len())
+            .any(|window| window == b"stradd")
+    );
+
+    let mut options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(10));
+    options.stdout = StreamPolicy::Capture { limit };
+    options.stdout_mask = CaptureMask::Raw(RawCaptureReason::ByteExactParse);
+    let raw = executor.execute(options)?;
+    assert_eq!(
+        raw.stdout.bytes,
+        b"prefix-stradd".to_vec(),
+        "a named raw opt-out must preserve the unmasked bytes"
+    );
+    Ok(())
+}

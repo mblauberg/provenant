@@ -850,7 +850,8 @@ pub(super) fn outcome_complete(outcome: &ExecOutcome) -> bool {
             && stream.decoder_lost_frames == 0
             && !stream.read_failed
             && !stream.filter_failed
-            && u64::try_from(stream.bytes.len()).ok() == Some(stream.total_bytes)
+        // `total_bytes` counts source bytes; `bytes` is masked on the stream
+        // before the bound, so equal lengths are no longer an invariant.
     };
     stream_complete(&outcome.stdout)
         && stream_complete(&outcome.stderr)

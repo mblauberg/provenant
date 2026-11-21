@@ -1,11 +1,11 @@
 //! Bounded streaming capture, shared by utility execution and provider custody.
 //! Provider frames are decoded before filtering and retention truncation.
-use crate::exec::{
-    CaptureFilter, CapturedStream, ExecError, FRAME_LIMIT, FrameSink, MAX_CAPTURE_LIMIT, QueueLoss,
-    StreamPolicy,
-};
 #[cfg(test)]
-use crate::exec::{FilterError, NonblockingSink};
+use crate::exec::NonblockingSink;
+use crate::exec::{
+    CaptureFilter, CaptureMask, CapturedStream, ExecError, FRAME_LIMIT, FilterError, FrameSink,
+    MAX_CAPTURE_LIMIT, QueueLoss, StreamPolicy,
+};
 use std::io::{self, Read, Write};
 use thiserror::Error;
 
@@ -120,11 +120,92 @@ pub(crate) struct Frames {
     partial_terminal_sent: bool,
 }
 
+/// The executor-owned default mask. It is the first filter stage, so masking
+/// happens before a caller filter and before the retention bound. If the
+/// redactor cannot be built, the whole stream is withheld rather than passing
+/// raw bytes through.
+enum DefaultMask {
+    Active(Box<provenant_redact::Redactor>),
+    Withheld,
+}
+
+/// Compose the owned default mask with the caller filter for one pump turn.
+fn compose_filter<'m, 'c>(
+    mask: &'m mut Option<DefaultMask>,
+    caller: &'m mut Option<&'c mut dyn CaptureFilter>,
+) -> Option<MaskedFilter<'m, 'c>> {
+    if mask.is_none() && caller.is_none() {
+        None
+    } else {
+        Some(MaskedFilter { mask, caller })
+    }
+}
+
+/// Composes the executor-owned mask ahead of a caller filter without forcing
+/// either into a `'static` trait object. Mask frames are staged before being
+/// forwarded, so masking always decides bytes before the caller sees them.
+struct MaskedFilter<'m, 'c> {
+    mask: &'m mut Option<DefaultMask>,
+    caller: &'m mut Option<&'c mut dyn CaptureFilter>,
+}
+
+impl MaskedFilter<'_, '_> {
+    fn forward(&mut self, bytes: &[u8], sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+        match self.caller.as_deref_mut() {
+            Some(caller) => caller.filter(bytes, sink),
+            None => {
+                sink(bytes);
+                Ok(())
+            }
+        }
+    }
+
+    fn finish_forward(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+        match self.caller.as_deref_mut() {
+            Some(caller) => caller.finish(sink),
+            None => Ok(()),
+        }
+    }
+}
+
+impl CaptureFilter for MaskedFilter<'_, '_> {
+    fn filter(&mut self, bytes: &[u8], sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+        let Some(mask) = self.mask.as_mut() else {
+            return self.forward(bytes, sink);
+        };
+        let DefaultMask::Active(redactor) = mask else {
+            return Err(FilterError);
+        };
+        let mut staged = Vec::new();
+        redactor.filter(bytes, &mut |frame| staged.push(frame.to_vec()))?;
+        for frame in &staged {
+            self.forward(frame, sink)?;
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self, sink: &mut dyn FnMut(&[u8])) -> Result<(), FilterError> {
+        let Some(mask) = self.mask.as_mut() else {
+            return self.finish_forward(sink);
+        };
+        let DefaultMask::Active(redactor) = mask else {
+            return Err(FilterError);
+        };
+        let mut staged = Vec::new();
+        redactor.finish(&mut |frame| staged.push(frame.to_vec()))?;
+        for frame in &staged {
+            self.forward(frame, sink)?;
+        }
+        self.finish_forward(sink)
+    }
+}
+
 /// Incremental stream capture using S1's stream policy, outcome, filter and
 /// queue types. Its temporary frame buffer never exceeds 64 KiB.
 pub struct StreamCapture<'a, 'f> {
     policy: StreamPolicy<'a>,
     decoder: Option<FrameDelivery<'a>>,
+    mask: Option<DefaultMask>,
     filter: Option<&'f mut dyn CaptureFilter>,
     writer: Option<&'f mut dyn Write>,
     frames: Frames,
@@ -146,6 +227,19 @@ impl<'a, 'f> StreamCapture<'a, 'f> {
         filter: Option<&'f mut dyn CaptureFilter>,
         writer: Option<&'f mut dyn Write>,
     ) -> Result<Self, ExecError> {
+        Self::new_with_mask(policy, decoder, None, filter, writer)
+    }
+
+    /// Construct a capture with an executor-owned default mask. `None` means
+    /// the site opted out of masking with a named `CaptureMask::Raw` reason;
+    /// non-executor callers use [`Self::new_with_writer`] and install no mask.
+    pub fn new_with_mask(
+        policy: StreamPolicy<'a>,
+        decoder: Option<FrameDelivery<'a>>,
+        mask: Option<CaptureMask>,
+        filter: Option<&'f mut dyn CaptureFilter>,
+        writer: Option<&'f mut dyn Write>,
+    ) -> Result<Self, ExecError> {
         let limit = match &policy {
             StreamPolicy::Capture { limit }
             | StreamPolicy::Tail { limit }
@@ -156,9 +250,18 @@ impl<'a, 'f> StreamCapture<'a, 'f> {
         if limit > MAX_CAPTURE_LIMIT {
             return Err(ExecError::InvalidLimit);
         }
+        let mask = mask.and_then(|policy| match policy {
+            CaptureMask::Raw(_) => None,
+            CaptureMask::Mask => Some(
+                provenant_redact::Redactor::for_local_disclosure()
+                    .map(|redactor| DefaultMask::Active(Box::new(redactor)))
+                    .unwrap_or(DefaultMask::Withheld),
+            ),
+        });
         Ok(Self {
             policy,
             decoder,
+            mask,
             filter,
             writer,
             frames: Frames {
@@ -182,9 +285,10 @@ impl<'a, 'f> StreamCapture<'a, 'f> {
         for chunk in bytes.chunks(INPUT_CHUNK_LIMIT) {
             self.frames
                 .decode_delivery(chunk, self.decoder, &mut self.outcome);
+            let mut filter = compose_filter(&mut self.mask, &mut self.filter);
             self.frames.filter_and_retain(
                 &self.policy,
-                &mut self.filter,
+                filter.as_mut(),
                 &mut self.writer,
                 chunk,
                 &mut self.outcome,
@@ -199,9 +303,10 @@ impl<'a, 'f> StreamCapture<'a, 'f> {
             return;
         }
         self.frames.finish_delivery(self.decoder, &mut self.outcome);
+        let mut filter = compose_filter(&mut self.mask, &mut self.filter);
         self.frames.finish_filter(
             &self.policy,
-            &mut self.filter,
+            filter.as_mut(),
             &mut self.writer,
             &mut self.outcome,
         );
@@ -251,9 +356,10 @@ impl<'a, 'f> StreamCapture<'a, 'f> {
         if !self.finished {
             self.frames
                 .discard_partial_frame(self.decoder, &mut self.outcome);
+            let mut filter = compose_filter(&mut self.mask, &mut self.filter);
             self.frames.finish_filter(
                 &self.policy,
-                &mut self.filter,
+                filter.as_mut(),
                 &mut self.writer,
                 &mut self.outcome,
             );
@@ -358,10 +464,10 @@ impl Frames {
         }
     }
 
-    fn filter_and_retain(
+    fn filter_and_retain<F: CaptureFilter + ?Sized>(
         &mut self,
         policy: &StreamPolicy<'_>,
-        filter: &mut Option<&mut dyn CaptureFilter>,
+        filter: Option<&mut F>,
         writer: &mut Option<&mut dyn Write>,
         chunk: &[u8],
         out: &mut CapturedStream,
@@ -369,7 +475,7 @@ impl Frames {
         if self.filter_disabled {
             return;
         }
-        let Some(filter) = filter.as_deref_mut() else {
+        let Some(filter) = filter else {
             Self::retain_filtered(policy, writer, chunk, out);
             return;
         };
@@ -391,17 +497,17 @@ impl Frames {
         }
     }
 
-    fn finish_filter(
+    fn finish_filter<F: CaptureFilter + ?Sized>(
         &mut self,
         policy: &StreamPolicy<'_>,
-        filter: &mut Option<&mut dyn CaptureFilter>,
+        filter: Option<&mut F>,
         writer: &mut Option<&mut dyn Write>,
         out: &mut CapturedStream,
     ) {
         if self.filter_disabled {
             return;
         }
-        if let Some(filter) = filter.as_deref_mut() {
+        if let Some(filter) = filter {
             let disabled = &mut self.filter_disabled;
             let mut sink = |frame: &[u8]| {
                 if *disabled {
@@ -499,8 +605,12 @@ impl Pump<'_> {
             Ok(0) => {
                 self.frames
                     .finish_delivery(self.decoder.map(FrameDelivery::Raw), out);
-                self.frames
-                    .finish_filter(&self.policy, &mut self.filter, &mut writer, out);
+                self.frames.finish_filter(
+                    &self.policy,
+                    self.filter.as_deref_mut(),
+                    &mut writer,
+                    out,
+                );
                 *pipe = None;
             }
             Ok(count) => {
@@ -510,7 +620,7 @@ impl Pump<'_> {
                     .decode_delivery(bytes, self.decoder.map(FrameDelivery::Raw), out);
                 self.frames.filter_and_retain(
                     &self.policy,
-                    &mut self.filter,
+                    self.filter.as_deref_mut(),
                     &mut writer,
                     bytes,
                     out,

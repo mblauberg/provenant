@@ -362,6 +362,8 @@ impl Executor for HostProbeExecutor<'_> {
             group_watchdog: options.group_watchdog,
             stdout: options.stdout,
             stderr: options.stderr,
+            stdout_mask: options.stdout_mask,
+            stderr_mask: options.stderr_mask,
             stdout_decoder: options.stdout_decoder,
             stderr_decoder: options.stderr_decoder,
             stdout_filter: options

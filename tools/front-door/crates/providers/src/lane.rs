@@ -2828,7 +2828,6 @@ mod tests {
         use crate::{Access, Adapter, Prompt, codex::Codex};
         use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
         use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
-        use provenant_redact::Redactor;
         use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
         let temp = tempfile::tempdir()?;
@@ -2880,13 +2879,9 @@ mod tests {
             let argv: Vec<_> = std::iter::once(tool.as_os_str().to_owned())
                 .chain(args.iter().map(OsString::from))
                 .collect();
-            let mut stdout = Redactor::new([])?;
-            let mut stderr = Redactor::new([])?;
             let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(5));
             options.env = Some(env);
             options.stdin = stdin;
-            options.stdout_filter = Some(&mut stdout);
-            options.stderr_filter = Some(&mut stderr);
             Ok::<_, Box<dyn std::error::Error>>(executor.execute(options)?)
         };
         let base = crate::tests::fixture_access_plan(Access::WorktreeWrite, Some("login"), false);

@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod bytes;
+pub mod capture;
 pub mod changes;
 pub mod consumer_env;
 mod refs;

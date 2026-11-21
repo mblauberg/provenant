@@ -4,7 +4,7 @@
 //! chunks. The streaming filter's EOF hook releases any unmatched tail.
 //! `key=value` credential assignments are scanned byte by byte: keys stream
 //! through unchanged and only the value is withheld, so no replay is needed.
-use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, FilterError};
+use provenant_core::capture::{CaptureFilter, FRAME_LIMIT, FilterError};
 use std::collections::{BTreeMap, VecDeque};
 use thiserror::Error;
 

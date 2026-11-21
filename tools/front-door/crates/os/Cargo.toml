@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 jiff = { workspace = true }
 provenant-core = { workspace = true }
+provenant-redact = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -21,6 +22,7 @@ tempfile = { workspace = true }
 [features]
 fixture = [
     "provenant-core/fixture",
+    "provenant-redact/fixture",
 ]
 
 # Cargo cannot override one lint with lints.workspace = true.

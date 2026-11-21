@@ -11,7 +11,6 @@ use provenant_os::{
     exec::{ExecOptions, StreamPolicy, SystemExecutor, Termination},
     fs::Directory,
 };
-use provenant_redact::Redactor;
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::{OsStr, OsString},
@@ -1982,22 +1981,8 @@ impl HostDeliveryContext {
             }))
             .collect();
         let executor = SystemExecutor::new(1).map_err(|error| failure(error.to_string()))?;
-        let mut redactor = if stage == Stage::Prepare && provenant_redact::mode().masks_local() {
-            Some(
-                Redactor::new(
-                    self.environment
-                        .iter()
-                        .filter(|(key, value)| {
-                            matches!(key.as_slice(), b"GH_TOKEN" | b"GITHUB_TOKEN")
-                                && !value.is_empty()
-                        })
-                        .map(|(_, value)| value.clone()),
-                )
-                .map_err(|_| failure("diagnostic redaction unavailable".into()))?,
-            )
-        } else {
-            None
-        };
+        // Captured stderr is masked on the executor's default stream filter,
+        // ahead of the capture bound; no per-site redactor is needed here.
         let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(30));
         options.cancel = self.cancellation.as_ref();
         options.process_group = true;
@@ -2016,9 +2001,6 @@ impl HostDeliveryContext {
         } else {
             StreamPolicy::Discard
         };
-        options.stderr_filter = redactor
-            .as_mut()
-            .map(|redactor| redactor as &mut dyn provenant_os::exec::CaptureFilter);
         let cancel = provenant_core::CancelToken::new();
         let output = self
             .facts
