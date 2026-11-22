@@ -340,10 +340,18 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
     let outputs = lens.outputs.as_ref().unwrap();
     assert_eq!(outputs.findings.len(), 3);
     assert_eq!(outputs.findings[0].severity, "blocking");
-    assert_eq!(outputs.findings[1].severity, "blocking");
+    assert_eq!(outputs.findings[1].severity, "should-fix");
     assert_eq!(outputs.findings[0].status, "open");
     assert_eq!(outputs.findings[2].id, "F3");
     assert_eq!(outputs.findings[2].severity, "high");
+    assert!(
+        outputs
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unrecognised value")),
+        "{:?}",
+        outputs.warnings
+    );
     assert!(
         outputs.findings.iter().all(|finding| {
             finding.effective_severity() == "note" && finding.trigger().is_none()
@@ -383,7 +391,7 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
     for (finding, severity) in composite
         .findings
         .iter()
-        .zip(["blocking", "blocking", "high"])
+        .zip(["blocking", "should-fix", "high"])
     {
         assert_eq!(finding.severity, severity);
         assert_eq!(finding.effective_severity(), "note");

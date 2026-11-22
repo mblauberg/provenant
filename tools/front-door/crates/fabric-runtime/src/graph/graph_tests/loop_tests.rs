@@ -2158,6 +2158,34 @@ fn clean_initial_review_starts_no_repair_attempt() {
 }
 
 #[test]
+fn confirmed_should_fix_on_the_default_path_runs_a_repair_writer() {
+    let document = review_repair_document();
+    let should_fix = repair_finding(false)
+        .replace("\"severity\":\"high\"", "\"severity\":\"should-fix\"")
+        .replace(
+            "\"blocking_class\":\"default_path_defect\"",
+            "\"blocking_class\":\"none\"",
+        )
+        .replace("VERDICT: FAIL", "VERDICT: PASS");
+    let mut owner = repair_reviews(&[
+        &should_fix,
+        "fixed",
+        "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS",
+    ]);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(run.checkpoint.successful());
+    let nodes: Vec<_> = owner.calls.iter().map(|call| call.0.node_id.as_str()).collect();
+    assert_eq!(nodes, vec!["initial", "fix", "check"]);
+    assert_eq!(
+        advance(&document, &mut FakeOwner::default(), &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+}
+
+#[test]
 fn rejected_only_fail_requests_judgement_without_an_empty_writer() {
     let document = review_repair_document();
     let eligible = repair_finding(false);

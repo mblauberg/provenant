@@ -43,11 +43,15 @@ acting on: a finding with no trigger, and anything off the default path that
 neither breaches a boundary nor loses data. Use `blocking`, `should-fix` or
 `note` as the finding's `severity`. Notes are reported, not repaired.
 
-Reviewers may use other severity words (`p0`, `high`, `medium`, `note` and the
-like); one vocabulary map translates them to these three classes. Only
-`blocking` blocks repair, so a confirmed, worth-fixing `should-fix` on a default
-path stays repairable. A blocking class (`acceptance` or `default_path_defect`)
-also blocks, whatever the severity word.
+Reviewers may use any word from one vocabulary: `critical`, `blocker`,
+`blocking`, `p0`, `high`, `error` or `p1` is blocking; `medium`, `moderate`,
+`should-fix` or `p2` is should-fix; `low`, `warning`, `p3`, `info`,
+`informational`, `note` or `p4` is a note. Only `blocking` contradicts PASS on
+severity. A confirmed, worth-fixing `should-fix` on a default path starts a
+repair writer, and a blocking class (`acceptance` or `default_path_defect`)
+also blocks acceptance and repair, whatever the severity word. A note is
+reported, never repaired. An unrecognised severity word is warned and kept as
+`should-fix`, not treated as an invalid review.
 
 ## What a finding states
 

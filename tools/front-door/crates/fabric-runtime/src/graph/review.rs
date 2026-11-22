@@ -72,20 +72,6 @@ pub(super) fn mark_partial(outputs: &mut NodeOutputs) {
     }
 }
 
-fn contradicts_pass(finding: &Finding) -> bool {
-    if finding.boundary_or_data_loss() {
-        return !finding.falsified_with_evidence();
-    }
-    !finding.spec_defect()
-        && !matches!(finding.status.as_str(), "closed" | "resolved" | "fixed")
-        && !matches!(
-            finding.disposition.as_deref(),
-            Some("rejected" | "resolved" | "fixed" | "disputed" | "removed-the-case")
-        )
-        && finding.default_path()
-        && repair::blocking_severity(finding)
-}
-
 pub(super) fn contract_error(
     node: &PlannedNode,
     upstream: &[Finding],
@@ -180,7 +166,7 @@ pub(super) fn contract_error(
     }
     if outputs.verdict.as_deref() == Some("VERDICT: PASS")
         && outputs.findings.iter().any(|finding| {
-            (contradicts_pass(finding)
+            (repair::blocks_acceptance(finding)
                 && !(upstream.iter().any(|source| source.id == finding.id)
                     && finding.verification.as_deref() == Some("falsified")
                     && finding.falsified_with_evidence()))
@@ -206,7 +192,7 @@ pub(super) fn repair_result_error(
     }
     let required: std::collections::BTreeSet<_> = upstream
         .iter()
-        .filter(|finding| repair::blocking(finding))
+        .filter(|finding| repair::repair_eligible(finding))
         .filter_map(Finding::triage)
         .map(|triage| triage.root_cause)
         .collect();
