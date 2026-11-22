@@ -31,7 +31,7 @@ attestation; a waived leg needs a blocker with source references. The
 A receipt records the chair's decision on one exact subject; a changed subject
 resets it. The edge takes the repository and base from the forge, never the
 request, so a delta review cannot shrink the covered paths. A downgrade needs a
-recorded reason and never passes a crucial or terminal path floor. A receipt
+recorded reason and never passes a `crucial` or `terminal` path floor. A receipt
 whose shape this build cannot read approves nothing. Saves replace the whole
 receipt at an expected revision: one winner, never a torn file.
 - Why: acceptance must track the exact subject reviewed, and concurrent chairs
@@ -46,8 +46,10 @@ keeps the text it replaces as a bounded, hashed revision. Hooks are advisory:
 they emit only their own key's checkpoint, and mark a missing or slow
 source unavailable, never empty. Autosave never writes the chair's
 `checkpoint.md`.
-Hook state carries custody-ledger, lane and worktree rows; it has no checkpoint-derived PR rows or PR scan.
-Inside a lane, session hook context is one line directing progress to the lane handoff; chair checkpoint text, standing grants and save commands are withheld. Outside a lane, hook context retains the chair checkpoint guidance.
+Hook state carries custody-ledger, lane and worktree rows. Inside a lane,
+hook context is one line directing progress to the lane handoff, and chair
+checkpoint text, standing grants and save commands are withheld; outside a lane
+it carries the chair checkpoint guidance.
 - Why: restoring the wrong or a lost checkpoint misdirects an agent, and absent
   evidence must not read as an empty queue.
 - Owner: `crates/workflow/src/session.rs`, `crates/workflow/src/session/state.rs`
