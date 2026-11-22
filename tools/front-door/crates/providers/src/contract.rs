@@ -208,8 +208,7 @@ pub fn model_matches_offered(requested: &str, offered_models: &[String]) -> bool
 
 fn model_matches_single(requested: &str, offered: &str) -> bool {
     fn tokens(name: &str) -> Vec<String> {
-        name.strip_prefix("agy/")
-            .unwrap_or(name)
+        provenant_records::normalise_model_id(name)
             .to_ascii_lowercase()
             .split(|c: char| !c.is_ascii_alphanumeric())
             .filter(|s| !s.is_empty())

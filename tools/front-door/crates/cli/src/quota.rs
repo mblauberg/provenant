@@ -6386,6 +6386,8 @@ mod tests {
             stderr_decoder: None,
             display_name: "Claude",
             quota: policy,
+            reconcile_account: None,
+            model_offers_sink: None,
         };
         let account = AccountScope {
             extra: Default::default(),
@@ -6493,6 +6495,8 @@ mod tests {
                 low_power: true,
                 solo: false,
             },
+            reconcile_account: None,
+            model_offers_sink: None,
         }];
         let temp = tempfile::tempdir()?;
         let mut inputs =

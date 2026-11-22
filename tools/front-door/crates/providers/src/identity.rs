@@ -32,7 +32,11 @@ pub fn codex_account(auth: &[u8]) -> Option<String> {
         account_id: String,
     }
     let auth: Auth = serde_json::from_slice(auth).ok()?;
-    Some(format!("codex-{}", digest(&auth.tokens.account_id)?))
+    Some(
+        provenant_records::Harness::Codex
+            .spec()
+            .account_key(&digest(&auth.tokens.account_id)?),
+    )
 }
 
 /// Cursor uses the subject of its signed-in access token. Decoding claims is
@@ -43,7 +47,11 @@ pub fn cursor_account(token: &str) -> Option<String> {
         sub: String,
     }
     let claims: Claims = serde_json::from_slice(&base64url(token.split('.').nth(1)?)?).ok()?;
-    Some(format!("cursor-{}", digest(&claims.sub)?))
+    Some(
+        provenant_records::Harness::Cursor
+            .spec()
+            .account_key(&digest(&claims.sub)?),
+    )
 }
 
 /// Agy's usage log identifies its Google sign-in without opening a token store.
@@ -51,7 +59,10 @@ pub fn agy_fingerprint(bytes: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(bytes).ok()?;
     let (_, tail) = text.rsplit_once("OAuth: authenticated successfully as ")?;
     let email = tail.split_whitespace().next().filter(|s| s.contains('@'))?;
-    Some(format!("google-{}", fingerprint(email)?.get(..12)?))
+    let namespace = provenant_records::Harness::Agy
+        .spec()
+        .account_identity_namespace?;
+    Some(format!("{namespace}{}", fingerprint(email)?.get(..12)?))
 }
 
 pub fn base64url(s: &str) -> Option<Vec<u8>> {

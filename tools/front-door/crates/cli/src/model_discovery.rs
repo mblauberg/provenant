@@ -1,17 +1,18 @@
 //! Explicit provider refresh and read-only access to the last successful listing.
 use provenant_core::Roots;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-use provenant_records::{Harness, ModelListingFormat};
+use provenant_records::{AdapterSpec, ModelListingFormat};
 use provenant_routing::{Catalogue, DiscoverySnapshot, RoutingError};
 use std::{ffi::OsString, time::Duration};
 
 const LIMIT: u64 = 4 * 1024 * 1024;
-const PROVIDERS: &[(Harness, &[&str])] = &[
-    (Harness::Codex, &["debug", "models"]),
-    (Harness::Agy, &["models"]),
-    (Harness::Opencode, &["models"]),
-    (Harness::Cursor, &["models"]),
-];
+
+/// Model discovery participates only for adapters declaring a listing probe.
+fn discovery_providers() -> impl Iterator<Item = (&'static AdapterSpec, &'static [&'static str])> {
+    provenant_records::ADAPTER_SPECS
+        .iter()
+        .filter_map(|spec| spec.model_discovery.map(|argv| (spec, argv)))
+}
 
 fn read(roots: &Roots, adapter: &str) -> Option<DiscoverySnapshot> {
     let root = provenant_os::fs::Directory::open_anchor(roots.state.as_path()).ok()?;
@@ -62,9 +63,8 @@ pub(crate) fn discovered_canonical_models(roots: &Roots, adapter: &str) -> Vec<S
     reason = "warn that the discovery cache is unusable"
 )]
 pub(crate) fn effective(roots: &Roots) -> Result<Catalogue, RoutingError> {
-    let snapshots: Vec<_> = PROVIDERS
-        .iter()
-        .filter_map(|(adapter, _)| read(roots, adapter.spec().name))
+    let snapshots: Vec<_> = discovery_providers()
+        .filter_map(|(spec, _)| read(roots, spec.name))
         .collect();
     let bundled = Catalogue::bundled()?;
     match bundled.clone().with_discovery(&snapshots) {
@@ -112,16 +112,15 @@ fn refresh_resolving(
     let (tx, rx) = std::sync::mpsc::channel();
     let mut threads = Vec::new();
     let mut pending = std::collections::BTreeSet::new();
-    for (harness, args) in PROVIDERS {
-        let adapter = harness.spec().name;
+    for (spec, args) in discovery_providers() {
+        let adapter = spec.name;
         if !enabled.iter().any(|id| id == adapter) {
             continue;
         }
-        let Ok(binary) = resolve(harness.spec().binary) else {
+        let Ok(binary) = resolve(spec.binary) else {
             continue;
         };
         pending.insert(adapter);
-        let args = *args;
         let cwd = cwd.clone();
         let tx = tx.clone();
         threads.push(std::thread::spawn(move || {
@@ -194,13 +193,13 @@ fn refresh_with(
     probe: impl Fn(&str, &[&str]) -> Option<Vec<u8>>,
 ) -> Vec<String> {
     let mut messages = Vec::new();
-    for (harness, args) in PROVIDERS {
-        let adapter = harness.spec().name;
-        let binary = harness.spec().binary;
+    for (spec, args) in discovery_providers() {
+        let adapter = spec.name;
+        let binary = spec.binary;
         if filter.is_some_and(|filter| filter != adapter) {
             continue;
         }
-        let snapshot = probe(binary, args).and_then(|bytes| match harness.spec().model_listing {
+        let snapshot = probe(binary, args).and_then(|bytes| match spec.model_listing {
             Some(ModelListingFormat::CodexJson) => {
                 provenant_routing::parse_codex_models(&bytes, now).ok()
             }
@@ -270,17 +269,13 @@ fn refresh_with(
             )
             .and_then(|p| p.require_durable())
             .map_err(|e| e.to_string())?;
-            if harness.spec().offered_models
+            if let Some(sink) = provenant_providers::registration(adapter)
+                .and_then(|registration| registration.model_offers_sink)
                 && let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from)
             {
                 let models = canonical_snapshot_models(&snapshot);
                 if !models.is_empty() {
-                    let _ = provenant_providers::agy::remember_models(
-                        roots.state.as_path(),
-                        &home,
-                        now,
-                        &models,
-                    );
+                    let _ = sink(roots.state.as_path(), &home, now, &models);
                 }
             }
             Ok(format!(

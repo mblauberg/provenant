@@ -155,7 +155,7 @@ fn settings_findings(
     let Some(hook) = target
         .hook_file
         .as_ref()
-        .filter(|_| target.harness == Harness::Claude)
+        .filter(|_| target.harness.spec().shared_account_settings)
     else {
         return Ok(());
     };

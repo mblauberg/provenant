@@ -137,11 +137,23 @@ fn set_selector(bytes: &[u8], sel: &str, value: Option<&Json>) -> Result<Vec<u8>
     Err(InstallError::InvalidConfig("unknown selector"))
 }
 
+fn uses_toml_config(harness: Harness) -> bool {
+    harness
+        .spec()
+        .install
+        .is_some_and(|install| install.config.ends_with(".toml"))
+}
+fn declares_instruction_array(harness: Harness) -> bool {
+    harness
+        .spec()
+        .install
+        .is_some_and(|install| install.instruction_array)
+}
 fn json_legacy_selector(harness: Harness, selector: &str) -> bool {
-    harness != Harness::Codex && selector.starts_with("json:/")
+    !uses_toml_config(harness) && selector.starts_with("json:/")
 }
 fn toml_legacy_selector(harness: Harness, selector: &str) -> bool {
-    harness == Harness::Codex && selector.starts_with("toml:")
+    uses_toml_config(harness) && selector.starts_with("toml:")
 }
 
 fn remove_legacy_selectors(
@@ -499,7 +511,7 @@ pub(crate) fn capture(
             }
         }
         if let Some(settings) = &targets.shared_settings
-            && target.harness == Harness::Claude
+            && target.harness.spec().shared_account_settings
             && let Some(hook) = &target.hook_file
             && !same_file(hook, &settings.source_file)
         {
@@ -574,7 +586,7 @@ pub(crate) fn capture(
                     .extend(synced.changes);
             }
         }
-        if target.harness == Harness::Opencode {
+        if declares_instruction_array(target.harness) {
             let snap = capture_one(path, entries)?;
             let (mut bytes, mode) = match plan.files.get(path) {
                 Some(Value::File { bytes, mode }) => (bytes.clone(), *mode),
@@ -646,14 +658,14 @@ pub(crate) fn permitted_selector(
             }));
     }
     if let Some(key) = entry.selector.strip_prefix(crate::shared_settings::PREFIX) {
-        return Ok(target.harness == Harness::Claude
+        return Ok(target.harness.spec().shared_account_settings
             && target.hook_file.as_ref() == Some(&entry.path)
             && crate::shared_settings::check_key(key).is_ok());
     }
     if entry.path != target.config_file {
         return Ok(false);
     }
-    Ok(target.harness == Harness::Opencode
+    Ok(declares_instruction_array(target.harness)
         && matches!(&entry.expected,OwnedValue::Selector{value:Json::String(value), .. } if entry.selector==format!("array:{value}")))
 }
 pub(crate) fn entry_matches(value: &Value, entry: &OwnedEntry) -> Result<bool, InstallError> {
@@ -726,7 +738,7 @@ fn rewrite_instruction_array(
                     .path
                     .to_path_buf()
                     .is_ok_and(|owned_path| owned_path == path)
-                    && entry.harness == Some(Harness::Opencode)
+                    && entry.harness.is_some_and(declares_instruction_array)
                     && entry.selector.starts_with("array:")
                     && entry.expected
                         == (OwnedValue::Selector {

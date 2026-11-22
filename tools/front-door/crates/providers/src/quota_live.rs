@@ -842,7 +842,7 @@ mod tests {
         assert_eq!(saved.entries["agy-work"].priority, Some(7));
         // A delayed probe cannot overwrite a newer manual registration.
         assert!(
-            !crate::accounts::reconcile_agy(&roots, &home, &old, &key("third@example.test"))
+            !crate::agy::reconcile_account(&roots, &home, &old, &key("third@example.test"))
                 .unwrap()
         );
         let unchanged: Settings = provenant_config::read_domain(&state, "accounts").unwrap();
