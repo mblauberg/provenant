@@ -553,15 +553,17 @@ fn prepared_ref_transaction_commits_or_aborts_after_prepare_ack()
 }
 
 #[test]
-fn prepared_ref_transaction_cannot_commit_after_callback_deadline_or_cancellation() {
+fn prepared_ref_transaction_decision_reports_expiry_separately_from_refusal() {
     for (requested, cancelled, before_deadline, expected) in [
-        (true, false, true, true),
-        (true, true, true, false),
-        (true, false, false, false),
-        (false, false, true, false),
+        // (requested, cancelled, before_deadline) -> (commit, deadline_expired)
+        (true, false, true, (true, false)),
+        (true, true, true, (false, false)),
+        (true, false, false, (false, true)),
+        (false, false, true, (false, false)),
+        (true, true, false, (false, true)),
     ] {
         assert_eq!(
-            prepared_ref_commit_allowed(requested, cancelled, before_deadline),
+            prepared_ref_decision(requested, cancelled, before_deadline),
             expected
         );
     }
@@ -571,6 +573,12 @@ fn prepared_ref_transaction_cannot_commit_after_callback_deadline_or_cancellatio
 #[allow(clippy::disallowed_methods)] // The callback must outlive the native process deadline.
 fn prepared_ref_transaction_keeps_ref_when_callback_expires_or_is_cancelled()
 -> Result<(), Box<dyn std::error::Error>> {
+    // The expiry deadline is far shorter than the callback's sleep, so the
+    // decision is certain to land after expiry rather than racing a narrow
+    // margin. The prepare acknowledgement still arrives well within the
+    // deadline on a loaded runner.
+    const EXPIRY_DEADLINE: Duration = Duration::from_millis(500);
+    const CALLBACK_SLEEP: Duration = Duration::from_secs(2);
     for expires in [false, true] {
         let temp = tempfile::tempdir()?;
         for args in [
@@ -605,7 +613,7 @@ fn prepared_ref_transaction_keeps_ref_when_callback_expires_or_is_cancelled()
         let env = crate::fixture::git_env();
         let cancel = CancelToken::new();
         let timeout = if expires {
-            Duration::from_secs(2)
+            EXPIRY_DEADLINE
         } else {
             Duration::from_secs(10)
         };
@@ -616,7 +624,7 @@ fn prepared_ref_transaction_keeps_ref_when_callback_expires_or_is_cancelled()
         let mut decide = || {
             called = true;
             if expires {
-                std::thread::sleep(Duration::from_millis(2_100));
+                std::thread::sleep(CALLBACK_SLEEP);
             } else {
                 cancel.cancel();
             }
@@ -631,6 +639,11 @@ fn prepared_ref_transaction_keeps_ref_when_callback_expires_or_is_cancelled()
         assert!(called, "Git must prepare before asking for the decision");
         if expires {
             assert!(outcome.timed_out, "{outcome:?}");
+        } else {
+            assert!(
+                !outcome.timed_out,
+                "cancellation is not expiry: {outcome:?}"
+            );
         }
 
         let retained = crate::fixture::git_command()

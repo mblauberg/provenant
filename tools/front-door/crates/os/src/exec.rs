@@ -58,7 +58,9 @@ pub struct ExecOutcome {
     pub termination: Termination,
     pub stdout: CapturedStream,
     pub stderr: CapturedStream,
-    /// True only when wall expiry caused TERM delivery to the owned child.
+    /// True when the wall deadline caused a stop signal to the owned child, or
+    /// when it forced a prepared reference transaction to abort at its decision
+    /// point. A caller can rely on this to tell an expiry from a refusal.
     pub timed_out: bool,
     pub drain_truncated: bool,
     pub overflow_stopped: bool,
@@ -301,7 +303,10 @@ pub trait Executor: Send + Sync {
     /// to abort. The executor owns child timeout, cancellation, stream draining
     /// and cleanup. The synchronous decision callback is not preempted, so
     /// callers must keep it bounded. Deadline and cancellation are checked
-    /// before and after it; a late or cancelled decision cannot commit.
+    /// before and after it; a late or cancelled decision cannot commit. An
+    /// abort forced by the deadline sets `ExecOutcome::timed_out`, whether or
+    /// not a stop signal reaches the child, so expiry reads differently from a
+    /// refusal.
     fn execute_prepared_ref_transaction(
         &self,
         options: ExecOptions<'_>,
@@ -553,8 +558,12 @@ impl PreparedRefAck {
     }
 }
 
-fn prepared_ref_commit_allowed(requested: bool, cancelled: bool, before_deadline: bool) -> bool {
-    requested && !cancelled && before_deadline
+/// Decide a prepared reference transaction and record why it did not commit.
+/// The second value is true whenever the deadline had passed at the decision
+/// point: the abort was then caused by expiry, even if cancellation also
+/// arrived, and the outcome must report `timed_out`.
+fn prepared_ref_decision(requested: bool, cancelled: bool, before_deadline: bool) -> (bool, bool) {
+    (requested && !cancelled && before_deadline, !before_deadline)
 }
 
 impl FrameSink for PreparedRefAck {
@@ -728,17 +737,21 @@ fn run_inner<'a>(
             && let Some(transaction) = transaction.as_mut()
         {
             let cancelled = options.cancel.is_some_and(CancelToken::is_cancelled);
-            let requested = if !cancelled && Instant::now() < deadline {
+            let before_deadline = Instant::now() < deadline;
+            let requested = if !cancelled && before_deadline {
                 (transaction.commit_after_prepare)()
             } else {
                 false
             };
             let cancelled = options.cancel.is_some_and(CancelToken::is_cancelled);
-            transaction_action = Some(prepared_ref_commit_allowed(
-                requested,
-                cancelled,
-                Instant::now() < deadline,
-            ));
+            let (commit, deadline_expired) =
+                prepared_ref_decision(requested, cancelled, Instant::now() < deadline);
+            transaction_action = Some(commit);
+            if deadline_expired {
+                // Git receives `abort` and can exit before the stop-signal path
+                // below runs, so that path alone cannot report this expiry.
+                output.timed_out = true;
+            }
         }
 
         let (pending_input, pending_written, close_when_written) = match transaction.as_ref() {
@@ -818,7 +831,7 @@ fn run_inner<'a>(
                     }
                 }
             };
-            output.timed_out = delivered && now >= deadline;
+            output.timed_out |= delivered && now >= deadline;
             output.overflow_stopped = delivered && overflow;
             output.cancelled = delivered && cancelled;
             term_at = Some(now);
