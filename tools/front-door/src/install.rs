@@ -3049,41 +3049,11 @@ mod tests {
         Ok(())
     }
 
-    /// Bind a project through the path the smoke child's `run` uses: the
-    /// canonical common directory discovered by `Context::open`, which is the
-    /// utility's `project_location` plus `bind_project`.
-    fn child_project_binding(
-        roots: &provenant_core::Roots,
-        project: &std::path::Path,
-    ) -> Result<
-        (
-            provenant_config::ProjectLocation,
-            provenant_config::ProjectBinding,
-        ),
-        Box<dyn std::error::Error>,
-    > {
-        use super::*;
-        use provenant_confinement::{UtilityBudget, UtilityRuntime};
-        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-        // UtilityRuntime needs an owner-only home for its isolated Git reads.
-        let git_home = roots.state.as_path().join("tmp/git-home");
-        provenant_os::fixture::private_state_dir(&git_home)?;
-        let runtime = UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
-        let executor = provenant_os::exec::SystemExecutor::new(1)?;
-        let discovered = runtime.project_location(
-            &executor,
-            project,
-            UtilityBudget::bounded(std::time::Duration::from_secs(5))?,
-            &CancelToken::new(),
-        )?;
-        let binding = provenant_config::bind_project(roots, discovered.location.clone())?;
-        Ok((discovered.location, binding))
-    }
-
     #[test]
     fn smoke_cleanup_forgets_the_scratch_project_binding() -> Result<(), Box<dyn std::error::Error>>
     {
         use super::*;
+        use provenant_confinement::{UtilityBudget, UtilityRuntime};
 
         // $TMPDIR on a real macOS host is /var/folders, a symlink to
         // /private/var. The child binds the canonical common directory, so the
@@ -3106,7 +3076,21 @@ mod tests {
         provenant_os::fixture::run_git(scratch.path(), &["add", "fixture.txt"])?;
         provenant_os::fixture::run_git(scratch.path(), &["commit", "-qm", "smoke fixture"])?;
 
-        let (location, binding) = child_project_binding(&roots, scratch.path())?;
+        // Bind through the path the smoke child's `run` uses: `Context::open`
+        // resolves the canonical common directory with the utility and binds
+        // that location.
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let git_home = roots.state.as_path().join("tmp/git-home");
+        provenant_os::fixture::private_state_dir(&git_home)?;
+        let runtime = UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
+        let executor = provenant_os::exec::SystemExecutor::new(1)?;
+        let discovered = runtime.project_location(
+            &executor,
+            scratch.path(),
+            UtilityBudget::bounded(std::time::Duration::from_secs(5))?,
+            &CancelToken::new(),
+        )?;
+        let binding = provenant_config::bind_project(&roots, discovered.location.clone())?;
         let record =
             provenant_config::project_binding_dir(roots.state.as_path(), binding.project_id())
                 .join("project.json");
@@ -3128,7 +3112,7 @@ mod tests {
         drop(scratch);
         forget_smoke_binding(roots.state.as_path(), resolved).map_err(std::io::Error::other)?;
         assert!(!record.exists(), "{} survived cleanup", record.display());
-        assert!(provenant_config::lookup_project(&roots, &location)?.is_none());
+        assert!(provenant_config::lookup_project(&roots, &discovered.location)?.is_none());
         // A second cleanup is not an error: the smoke run may have created none.
         forget_smoke_binding(roots.state.as_path(), resolved).map_err(std::io::Error::other)?;
         Ok(())
