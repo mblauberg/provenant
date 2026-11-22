@@ -21,10 +21,10 @@ struct QuotaRow: Identifiable, Equatable, Sendable {
         let resetsAt: Date?
         let lowerBound: Bool
         let windowMinutes: Int?
+        let advisory: Bool?
 
         var resetAt: Date? { resetsAt }
         var usedPercent: Double? { percent }
-        var advisory: Bool? { false }
         var paceState: String { percent >= 100 ? "exhausted" : "on_pace" }
         /// The menu bar floors a used percentage; use the same rule so both surfaces read the same number.
         var displayPercent: Int { Int(max(percent, 0).rounded(.down)) }
@@ -85,12 +85,16 @@ final class QuotaPanelModel {
                                        resetsAt: item.resetsUnixSeconds.map { Date(timeIntervalSince1970: TimeInterval($0)) },
                                        lowerBound: lowerBound,
                                        windowMinutes: QuotaPresentation.windowMinutes(adapter: adapter, name: item.pool,
-                                                                                     seconds: item.windowSeconds))
+                                                                                     seconds: item.windowSeconds),
+                                       advisory: presentation.advisory)
             }
             let choice = QuotaPresentation.Headline(wire: account.display?.headline ?? show.display?.headline)
             let trend = (history?.readings ?? [])
                 .filter { $0.provider == adapter && $0.accountKey == account.account.accountKey }
                 .compactMap { reading -> TrendPoint? in
+                    // A reading is a snapshot at its observation time, not at the report's generation time.
+                    // Judging its windows against `generatedAt` would discard every older reading as reset.
+                    let observed = Date(timeIntervalSince1970: TimeInterval(reading.observedUnixSeconds))
                     let readingWindows = reading.windows.map { item -> QuotaRow.Window in
                         let presentation = QuotaPresentation.presentation(adapter: adapter, name: item.pool, seconds: item.windowSeconds)
                         return QuotaRow.Window(name: item.pool, pool: presentation.pool, label: presentation.title,
@@ -98,11 +102,12 @@ final class QuotaPanelModel {
                                                resetsAt: item.resetsUnixSeconds.map { Date(timeIntervalSince1970: TimeInterval($0)) },
                                                lowerBound: false,
                                                windowMinutes: QuotaPresentation.windowMinutes(adapter: adapter, name: item.pool,
-                                                                                             seconds: item.windowSeconds))
+                                                                                             seconds: item.windowSeconds),
+                                               advisory: presentation.advisory)
                     }
-                    guard let top = QuotaPresentation.headline(readingWindows, now: generatedAt,
+                    guard let top = QuotaPresentation.headline(readingWindows, now: observed,
                                                                alert: QuotaPresentation.alertPercent, choice: choice) else { return nil }
-                    return TrendPoint(date: Date(timeIntervalSince1970: TimeInterval(reading.observedUnixSeconds)), percent: top.percent)
+                    return TrendPoint(date: observed, percent: top.percent)
                 }
                 .sorted { $0.date < $1.date }
             return QuotaRow(id: account.id, title: account.account.label, provider: adapter, status: account.status,

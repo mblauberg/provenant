@@ -362,6 +362,54 @@ final class ScreenModelTests: XCTestCase {
         XCTAssertTrue(quota.reader.value?.rows.allSatisfy { $0.trend.isEmpty } == true)
     }
 
+    func testHistoryTrendKeepsAReadingWhoseWindowsHaveSinceReset() throws {
+        let showJSON = #"""
+        {"generated_unix_seconds": 1000, "accounts": [
+          {"account": {"adapter": "claude", "account_key": "a", "label": "A"}, "status": "available",
+           "snapshot": {"windows": [
+             {"pool": "five_hour", "used_basis_points": 8400, "resets_unix_seconds": 1500, "window_seconds": 18000}]}}]}
+        """#
+        let historyJSON = #"""
+        {"generated_unix_seconds": 1000, "count": 1, "truncated": false, "readings": [
+          {"observed_unix_seconds": 500, "account_key": "a", "label": "A", "provider": "claude", "status": "available",
+           "windows": [{"pool": "five_hour", "used_basis_points": 3000, "resets_unix_seconds": 900, "window_seconds": 18000}]}]}
+        """#
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let show = try decoder.decode(QuotaShow.self, from: Data(showJSON.utf8))
+        let history = try decoder.decode(QuotaHistory.self, from: Data(historyJSON.utf8))
+        let row = try XCTUnwrap(QuotaPanelModel.snapshot(show, history: history).rows.first)
+        XCTAssertEqual(row.trend.count, 1)
+        XCTAssertEqual(row.trend.first?.date, Date(timeIntervalSince1970: 500))
+        XCTAssertEqual(row.trend.first?.percent, 30)
+    }
+
+    func testConsoleHeadlineIgnoresAnAdvisoryWindowLikeTheMenu() throws {
+        let json = #"""
+        {"generated_unix_seconds": 1, "accounts": [
+          {"account": {"adapter": "claude", "account_key": "a", "label": "A"}, "status": "available",
+           "snapshot": {"windows": [
+             {"pool": "five_hour", "used_basis_points": 1000, "resets_unix_seconds": 1000, "window_seconds": 18000},
+             {"pool": "weekly_scoped:Fable", "used_basis_points": 10000, "resets_unix_seconds": 1000, "window_seconds": 604800}]}}]}
+        """#
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let show = try decoder.decode(QuotaShow.self, from: Data(json.utf8))
+        let row = try XCTUnwrap(QuotaPanelModel.snapshot(show, history: nil).rows.first)
+        XCTAssertEqual(row.headlineWindow?.name, "five_hour")
+        XCTAssertTrue(row.windows.first { $0.name == "weekly_scoped:Fable" }?.advisory == true)
+    }
+
+    func testTerminalOutcomeTonesSeparateFailuresFromOperatorActions() {
+        for state in ["lost", "quarantined", "unsettled", "unclassified"] {
+            XCTAssertEqual(StatusStyle.attempt(state: state).tone, .bad, state)
+        }
+        for state in ["auth_required", "permission_denied", "input_required", "uncommitted",
+                      "model_unavailable", "rate_limited"] {
+            XCTAssertEqual(StatusStyle.attempt(state: state).tone, .caution, state)
+        }
+    }
+
     func testChairsPairSessionsWithTheirProjects() async {
         let (console, _) = client()
         let chairs = ChairsModel(client: console)

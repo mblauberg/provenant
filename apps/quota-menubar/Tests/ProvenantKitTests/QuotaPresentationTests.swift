@@ -13,9 +13,10 @@ final class QuotaPresentationTests: XCTestCase {
         let paceState: String
     }
 
-    private func row(_ name: String, _ pool: String?, _ percent: Double, _ minutes: Int, spent: Bool = false) -> Row {
+    private func row(_ name: String, _ pool: String?, _ percent: Double, _ minutes: Int,
+                     spent: Bool = false, resetAt: Date = Date(timeIntervalSince1970: 1_000)) -> Row {
         Row(name: name, pool: pool, usedPercent: percent, windowMinutes: minutes,
-            resetAt: Date(timeIntervalSince1970: 1_000), advisory: false,
+            resetAt: resetAt, advisory: false,
             paceState: spent || percent >= 100 ? "exhausted" : "on_pace")
     }
 
@@ -44,6 +45,26 @@ final class QuotaPresentationTests: XCTestCase {
         let headline = QuotaPresentation.headline(windows, now: now, alert: QuotaPresentation.alertPercent, choice: .auto)
         XCTAssertEqual(headline?.name, "gemini.weekly")
         XCTAssertEqual(Int((headline?.usedPercent ?? 0).rounded(.down)), 49)
+    }
+
+    func testHeadlineNeverLeadsWithAWindowThatHasAlreadyReset() {
+        let now = Date(timeIntervalSince1970: 500)
+        let expired = row("weekly", nil, 100, 10_080, spent: true, resetAt: Date(timeIntervalSince1970: 400))
+        let current = row("five_hour", nil, 50, 300)
+        let windows = [expired, current]
+        for choice in [QuotaPresentation.Headline.auto, .fiveHour, .weekly] {
+            XCTAssertEqual(QuotaPresentation.headline(windows, now: now, alert: 90, choice: choice)?.name,
+                           "five_hour", "headline \(choice)")
+        }
+    }
+
+    func testHeadlineSkipsAnExpiredSpentWindowInTheBindingPool() {
+        let now = Date(timeIntervalSince1970: 500)
+        let expired = row("gpt.secondary", "gpt", 100, 10_080, spent: true, resetAt: Date(timeIntervalSince1970: 400))
+        let current = row("gpt.primary", "gpt", 50, 600)
+        let headline = QuotaPresentation.headline([expired, current], now: now, alert: 90, choice: .auto)
+        XCTAssertEqual(headline?.name, "gpt.primary")
+        XCTAssertEqual(headline?.usedPercent, 50)
     }
 
     func testChosenHeadlinePicksTheShortestOrLongestWindowInTheBindingPool() {

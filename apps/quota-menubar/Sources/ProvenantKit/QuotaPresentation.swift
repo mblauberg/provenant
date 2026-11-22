@@ -88,7 +88,8 @@ public enum QuotaPresentation {
     }
 
     /// The window an automatic headline shows: the earliest-resetting exhausted window, otherwise a short window
-    /// at the alert level, otherwise the longest window in the binding pool.
+    /// at the alert level, otherwise the longest window in the binding pool. Callers pass `current` windows; a
+    /// window that has already reset must never carry a live headline.
     public static func shown<W: QuotaWindow>(_ windows: [W], alert: Double) -> W? {
         if let spent = worst(windows), spent.isSpent { return spent }
         let withUsage = windows.filter { $0.usedPercent != nil }
@@ -101,11 +102,12 @@ public enum QuotaPresentation {
         return alerts.max { ($0.usedPercent ?? 0) < ($1.usedPercent ?? 0) } ?? longest
     }
 
-    /// The account's headline window under its chosen (or automatic) headline rule.
+    /// The account's headline window under its chosen (or automatic) headline rule. Only windows that can still
+    /// determine state lead: a reading that has reset since the report was taken is never a live headline.
     public static func headline<W: QuotaWindow>(_ windows: [W], now: Date, alert: Double, choice: Headline) -> W? {
         let pool = binding(in: windows, now: now)?.pool
-        let group = windows.contains(where: { $0.pool != nil })
-            ? windows.filter { $0.pool == nil || $0.pool == pool } : windows
+        let group = current(windows.contains(where: { $0.pool != nil })
+            ? windows.filter { $0.pool == nil || $0.pool == pool } : windows, now: now)
         switch choice {
         case .auto: return shown(group, alert: alert)
         case .fiveHour: return group.min { ($0.windowMinutes ?? .max) < ($1.windowMinutes ?? .max) } ?? shown(group, alert: alert)

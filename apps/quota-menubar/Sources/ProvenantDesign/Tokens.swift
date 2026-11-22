@@ -45,9 +45,16 @@ public struct StatusStyle: Equatable, Sendable {
         case "succeeded": return StatusStyle(label: "Succeeded", symbol: "checkmark.circle.fill", tone: .good)
         case "cancelled", "canceled": return StatusStyle(label: "Cancelled", symbol: "minus.circle", tone: .neutral)
         case "failed", "task_failed": return StatusStyle(label: "Task failed", symbol: "xmark.circle.fill", tone: .bad)
-        case "rejected", "quota_limited", "review_required", "timed_out":
+        // Terminal outcomes that wait on a person, a permission or provider capacity: orange, not alarming.
+        case "rejected", "quota_limited", "review_required", "timed_out",
+             "auth_required", "permission_denied", "input_required", "uncommitted",
+             "model_unavailable", "rate_limited":
             return StatusStyle(label: state.replacingOccurrences(of: "_", with: " ").capitalized,
                                symbol: "exclamationmark.circle.fill", tone: .caution)
+        // Terminal outcomes the lane did not survive or cannot classify: a real failure, shown red as before.
+        case "lost", "quarantined", "unsettled", "unclassified":
+            return StatusStyle(label: state.replacingOccurrences(of: "_", with: " ").capitalized,
+                               symbol: "exclamationmark.circle.fill", tone: .bad)
         default: return StatusStyle(label: state.replacingOccurrences(of: "_", with: " ").capitalized, symbol: "circle.dashed", tone: .neutral)
         }
     }
