@@ -1,3 +1,3 @@
 ## Breaking changes
 ### Lanes and settlement
-- `redaction = "full"` is no longer accepted: config check reports an unknown value with its path and line and redaction falls back to its default. Use `off` or `secrets`. #3782
+- `redaction = "full"` is no longer accepted. An unrecognised `redaction` value now warns and falls back to the restrictive `secrets`, not the registry default `off`; only an absent setting takes `off`. Use `off` or `secrets`. #3782

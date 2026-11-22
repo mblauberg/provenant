@@ -150,12 +150,17 @@ fn retired_setting_values_take_the_generic_finding_path() {
         (
             "schema_version=1\n[knobs]\nredaction='full'\n",
             "unknown_value",
-            "knobs.redaction: invalid value (unknown_value); using the default",
+            "knobs.redaction: invalid value (unknown_value); using the restrictive value \"secrets\"",
         ),
     ] {
         let config = load(&roots(), Some(text.as_bytes())).unwrap();
         assert_warning(&config, rule);
         assert_warning_message(&config, message);
+        if rule == "unknown_value" {
+            // An unrecognised redaction value is restrictive, never the
+            // permissive registry default.
+            assert_eq!(config.knobs["redaction"].value, "secrets");
+        }
         let warning = config
             .warnings
             .iter()
