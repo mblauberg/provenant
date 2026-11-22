@@ -402,6 +402,7 @@ fn apply_pool_member(catalogue: &mut Catalogue, entry: PoolMemberOverlay, source
         efforts: entry.efforts,
         free: entry.free,
     };
+    let pool_existed = catalogue.pools.contains_key(&pool);
     let index = catalogue
         .pools
         .get(&pool)
@@ -443,11 +444,18 @@ fn apply_pool_member(catalogue: &mut Catalogue, entry: PoolMemberOverlay, source
     }
     let key = format!("{pool}/{}", model.as_str());
     if entry.remove {
-        catalogue.overlay_sources.pools.remove(&pool);
+        // The pool's own source goes only with the pool; removing one member
+        // of a bundled pool leaves the pool bundled.
+        if !catalogue.pools.contains_key(&pool) {
+            catalogue.overlay_sources.pools.remove(&pool);
+        }
         catalogue.overlay_sources.pool_members.remove(&key);
         catalogue.overlay_sources.weights.remove(&key);
     } else {
-        CatalogueSources::record(&mut catalogue.overlay_sources.pools, pool, source);
+        // Only an overlay that creates the pool owns the pool's existence.
+        if !pool_existed {
+            CatalogueSources::record(&mut catalogue.overlay_sources.pools, pool, source);
+        }
         CatalogueSources::record(
             &mut catalogue.overlay_sources.pool_members,
             key.clone(),
@@ -489,6 +497,36 @@ mod tests {
         assert_eq!(after.family.as_deref(), Some("overlay-family"));
         assert_eq!(after.source, "host");
         assert_eq!(after.policy_rules.len(), rules);
+        Ok(())
+    }
+
+    #[test]
+    fn overlaying_one_member_leaves_a_bundled_pool_bundled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bundled = Catalogue::bundled()?;
+        let (pool, member) = bundled
+            .pools
+            .iter()
+            .find_map(|(name, members)| {
+                members.first().map(|member| (name.clone(), member.clone()))
+            })
+            .ok_or("the bundled catalogue carries a pool")?;
+        let efforts = format!("{:?}", member.efforts).replace('"', "'");
+        let layer = provenant_config::OverlayLayer {
+            source: OverlaySource::Host,
+            text: format!(
+                "[[catalogue.pool_members]]\npool = '{pool}'\nmodel = '{}'\nweight = 1\nefforts = {efforts}\n",
+                member.model.as_str()
+            ),
+        };
+        let effective = bundled.with_overlays(&[layer], Vec::new());
+        assert!(effective.overlay_warnings().is_empty());
+        let key = format!("{pool}/{}", member.model.as_str());
+        assert!(effective.overlay_sources.pool_members.contains_key(&key));
+        assert!(
+            !effective.overlay_sources.pools.contains_key(&pool),
+            "the pool existed before the overlay, so it keeps its bundled source"
+        );
         Ok(())
     }
 }
