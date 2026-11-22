@@ -365,11 +365,17 @@ fn delivery_refuses_corrupt_reachable_content_before_log_or_integration()
     std::fs::write(object, "corrupt object content")?;
     assert!(matches!(
         host.head(&fixture.writer),
-        Err(RunError::Delivery(WriterDeliveryStage::Head))
+        Err(RunError::Delivery {
+            stage: WriterDeliveryStage::Head,
+            ..
+        })
     ));
     assert!(matches!(
         host.commit_body(&fixture.writer, head, "delivery"),
-        Err(RunError::Delivery(WriterDeliveryStage::Head))
+        Err(RunError::Delivery {
+            stage: WriterDeliveryStage::Head,
+            ..
+        })
     ));
     fixture.git(&["branch", "integration"])?;
     let request =
@@ -377,7 +383,10 @@ fn delivery_refuses_corrupt_reachable_content_before_log_or_integration()
             .ok_or("destination")?;
     assert!(matches!(
         host.integrate(&fixture.writer, &request, head),
-        Err(RunError::Delivery(WriterDeliveryStage::Integrate))
+        Err(RunError::Delivery {
+            stage: WriterDeliveryStage::Integrate,
+            ..
+        })
     ));
     Ok(())
 }

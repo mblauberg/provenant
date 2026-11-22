@@ -380,6 +380,57 @@ impl std::fmt::Display for CausedSource {
 
 impl std::error::Error for CausedSource {}
 
+/// The typed leaf cause of a failed host delivery. Its `Display` is
+/// self-contained: `RunError::Delivery` renders `stage: cause` in one message,
+/// so the cause names what actually failed without relying on a source chain.
+#[derive(Debug)]
+pub enum DeliveryCause {
+    /// A host command exited or was signalled. `stderr` is a bounded tail of
+    /// its standard error, passed through because diagnostic redaction is off
+    /// by default.
+    Command {
+        termination: provenant_os::exec::Termination,
+        timed_out: bool,
+        stderr: String,
+    },
+    /// An I/O operation failed before or while running the command.
+    Io(std::io::Error),
+    /// A value returned by the host could not be parsed or was unexpected.
+    Parse { detail: String },
+}
+
+impl DeliveryCause {
+    /// A parse or unexpected-value cause carrying `detail`.
+    pub(crate) fn parse(detail: impl std::fmt::Display) -> Self {
+        Self::Parse {
+            detail: detail.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for DeliveryCause {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Command {
+                termination,
+                timed_out,
+                stderr,
+            } => {
+                write!(
+                    formatter,
+                    "command exited {termination:?} (timed out: {timed_out})"
+                )?;
+                if !stderr.is_empty() {
+                    write!(formatter, ": {stderr}")?;
+                }
+                Ok(())
+            }
+            Self::Io(error) => write!(formatter, "I/O error: {error}"),
+            Self::Parse { detail } => formatter.write_str(detail),
+        }
+    }
+}
+
 /// A declared stage in writer preparation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeliveryPrepareStep {
@@ -462,8 +513,14 @@ pub enum RunError {
     InvalidTaskTitle(String),
     #[error("{message}")]
     Input { kind: ErrorKind, message: String },
-    #[error("host writer delivery failed at {0:?}")]
-    Delivery(WriterDeliveryStage),
+    /// The stage and its typed leaf cause are rendered together, so a printer
+    /// that only formats the error still learns whether the failure was a
+    /// command exit with its stderr, an I/O error or a parse error.
+    #[error("host writer delivery failed at {stage:?}: {cause}")]
+    Delivery {
+        stage: WriterDeliveryStage,
+        cause: DeliveryCause,
+    },
     /// A host command run for a named config read failed. `reason` is the
     /// bounded leaf cause. The stage is reported by the receipt's delivery
     /// fact, and the file/key by the named config error that wraps this, so
@@ -728,6 +785,11 @@ impl From<provenant_confinement::worktrees::WorktreeError> for RunError {
 }
 pub type Result<T> = std::result::Result<T, RunError>;
 impl RunError {
+    /// A failed delivery at `stage` with its typed leaf cause.
+    pub(crate) fn delivery(stage: WriterDeliveryStage, cause: DeliveryCause) -> Self {
+        Self::Delivery { stage, cause }
+    }
+
     pub(crate) fn with_record_context(
         self,
         path: impl Into<std::path::PathBuf>,
@@ -961,9 +1023,9 @@ impl RunError {
                     diagnostic = diagnostic.detail("the writer worktree has uncommitted edits");
                 }
             }
-            Self::Delivery(stage) => {
+            Self::Delivery { stage, .. } => {
                 diagnostic = diagnostic
-                    .detail(format!("host writer delivery failed at {stage:?}"))
+                    .detail(crate::delivery::prepare_reason(self))
                     .fact(DiagnosticFact::DeliveryStage(*stage));
             }
             Self::ConfigCommandFailed { reason } => {

@@ -148,7 +148,10 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
     let head = host.head(&fixture.writer)?;
     assert!(matches!(
         host.integrate(&fixture.writer, &fixture.request, head),
-        Err(RunError::Delivery(WriterDeliveryStage::Integrate))
+        Err(RunError::Delivery {
+            stage: WriterDeliveryStage::Integrate,
+            ..
+        })
     ));
     fixture.git(&[
         "symbolic-ref",
@@ -189,7 +192,10 @@ fn integration_rechecks_primary_checkout_after_preparation()
     let head = host.head(&fixture.writer)?;
     assert!(matches!(
         host.integrate(&fixture.writer, &fixture.request, head),
-        Err(RunError::Delivery(WriterDeliveryStage::Integrate))
+        Err(RunError::Delivery {
+            stage: WriterDeliveryStage::Integrate,
+            ..
+        })
     ));
     Ok(())
 }
@@ -262,7 +268,10 @@ fn graph_publication_recovers_deleted_marked_ref_and_refuses_conflicts()
     ])?;
     assert!(matches!(
         host.graph_publication_branch(&fixture.writer.project, head),
-        Err(RunError::Delivery(WriterDeliveryStage::Push))
+        Err(RunError::Delivery {
+            stage: WriterDeliveryStage::Push,
+            ..
+        })
     ));
     assert_eq!(
         host.command(
@@ -284,7 +293,10 @@ fn graph_publication_recovers_deleted_marked_ref_and_refuses_conflicts()
     )?;
     assert!(matches!(
         host.graph_publication_branch(&fixture.writer.project, other),
-        Err(RunError::Delivery(WriterDeliveryStage::Push))
+        Err(RunError::Delivery {
+            stage: WriterDeliveryStage::Push,
+            ..
+        })
     ));
     let absent = format!("refs/heads/provenant/graph/{other}");
     assert!(
@@ -453,14 +465,26 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
     // the new destination tip and preserves both contributions.
     if let Err(error) = one {
         assert!(
-            matches!(error, RunError::Delivery(WriterDeliveryStage::Integrate)),
+            matches!(
+                error,
+                RunError::Delivery {
+                    stage: WriterDeliveryStage::Integrate,
+                    ..
+                }
+            ),
             "{error}"
         );
         first.integrate(&fixture.writer, &fixture.request, first_head)?;
     }
     if let Err(error) = two {
         assert!(
-            matches!(error, RunError::Delivery(WriterDeliveryStage::Integrate)),
+            matches!(
+                error,
+                RunError::Delivery {
+                    stage: WriterDeliveryStage::Integrate,
+                    ..
+                }
+            ),
             "{error}"
         );
         second.integrate(&second_writer, &fixture.request, second_head)?;
@@ -695,7 +719,10 @@ fn remote_integration_refuses_a_symbolic_destination()
     let head = host.head(&fixture.writer)?;
     assert!(matches!(
         host.integrate(&fixture.writer, &fixture.request, head),
-        Err(RunError::Delivery(WriterDeliveryStage::Integrate))
+        Err(RunError::Delivery {
+            stage: WriterDeliveryStage::Integrate,
+            ..
+        })
     ));
     let remote = host.command(
         &fixture.writer.project,

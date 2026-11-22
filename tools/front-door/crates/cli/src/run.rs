@@ -245,7 +245,7 @@ impl From<run::RunError> for Fail {
             |detail| {
                 if matches!(
                     error,
-                    run::RunError::Delivery(_) | run::RunError::DeliveryLimit { .. }
+                    run::RunError::Delivery { .. } | run::RunError::DeliveryLimit { .. }
                 ) {
                     detail.clone()
                 } else {
@@ -1875,7 +1875,7 @@ fn safe_cause(error: &run::RunError) -> Option<String> {
     use run::RunError as E;
     let fixed = matches!(
         error,
-        E::Delivery(_)
+        E::Delivery { .. }
             | E::IntegrationHeadMoved
             | E::IntegrationParentBusy { .. }
             | E::IntegrationConflict { .. }
