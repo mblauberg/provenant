@@ -902,7 +902,7 @@
         let Data::Resolved(preview) = execute_in(
             &Route::Resolve(query),
             &fixture.roots,
-            SystemClock::new().wall_now()?,
+            provenant_core::Clock::wall_now(&SystemClock::new())?,
             &fixture._temp.path().join("home"),
             &fixture._temp.path().join("checkout"),
         )? else {

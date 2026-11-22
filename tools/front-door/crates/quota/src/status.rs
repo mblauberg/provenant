@@ -96,9 +96,6 @@ pub fn effective_status(input: &StatusInput<'_>) -> Result<EffectiveStatus, Quot
     } = *input;
     let adapter = &record.account.adapter;
     let account_key = &record.account.account_key;
-    let age = record.snapshot.as_ref().map(|s| {
-        u64::try_from(now.saturating_sub(s.observed_unix_seconds).max(0)).unwrap_or(u64::MAX)
-    });
     let auth_required = record.last_error.is_some_and(ProbeFailure::needs_login)
         || (!record
             .auth_verified_unix_seconds

@@ -729,18 +729,6 @@ pub(crate) fn graph_ask_with<T>(
     edge(&service)
 }
 
-pub(crate) fn load_graph_prices(
-    assets: &std::path::Path,
-) -> Result<provenant_telemetry::PriceTable, String> {
-    let path = assets.join("config/telemetry-prices.toml");
-    let text =
-        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let config = toml_edit::de::from_str::<provenant_telemetry::ConfiguredPrices>(&text)
-        .map_err(|error| format!("{}: invalid price table: {error}", path.display()))?;
-    provenant_telemetry::validate_prices(&config)
-        .map_err(|error| format!("{}: invalid price table: {error}", path.display()))
-}
-
 /// Read the bundled sheet with the same host and project config layers the
 /// other cross-cutting domains use. Missing overlays leave the sheet unchanged.
 pub(crate) fn load_graph_prices_layered(

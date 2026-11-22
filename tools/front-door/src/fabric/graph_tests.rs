@@ -3442,7 +3442,10 @@ mod result_tests {
     #[test]
     fn missing_graph_price_table_reports_its_path_and_failure() {
         let assets = tempfile::tempdir().unwrap();
-        let reason = super::load_graph_prices(assets.path()).unwrap_err();
+        let state = tempfile::tempdir().unwrap();
+        let reason = provenant_telemetry::prices_overlay::load(assets.path(), state.path(), None, None)
+            .unwrap_err()
+            .to_string();
         assert!(
             reason.contains(
                 &assets
