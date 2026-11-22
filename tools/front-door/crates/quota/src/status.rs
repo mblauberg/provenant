@@ -116,7 +116,7 @@ pub fn effective_status(input: &StatusInput<'_>) -> Result<EffectiveStatus, Quot
             && auth.refresh_pending
             && auth
                 .observed_unix_seconds
-                .is_some_and(|at| freshness.login_verification_fresh(at, now))
+                .is_some_and(|at| freshness.refresh_pending_fresh(at, now, policies, adapter))
     });
     let live: Vec<_> = record
         .refusals
@@ -180,7 +180,7 @@ pub fn effective_status(input: &StatusInput<'_>) -> Result<EffectiveStatus, Quot
         _ if auth_refresh_pending
             || (record.last_error == Some(ProbeFailure::RefreshDeferred)
                 && record.last_attempt_unix_seconds.is_some_and(|at| {
-                    at <= now && freshness.login_verification_fresh(at, now)
+                    freshness.refresh_pending_fresh(at, now, policies, adapter)
                 })) =>
         {
             QuotaStatus::RefreshPending

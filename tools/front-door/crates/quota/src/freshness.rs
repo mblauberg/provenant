@@ -93,6 +93,20 @@ impl FreshnessPolicy {
             && now.saturating_sub(verified_at) < self.login_verification_seconds as i64
     }
 
+    /// Whether a refresh-pending auth fact, or a refresh-deferred attempt,
+    /// observed at `at` still describes the account. It lives as long as a
+    /// snapshot from the adapter's polling rule, so a fact older than one poll
+    /// never overrides what the next reading would show.
+    pub fn refresh_pending_fresh(
+        &self,
+        at: i64,
+        now: i64,
+        policies: &[QuotaPolicy],
+        adapter: &str,
+    ) -> bool {
+        at <= now && now.saturating_sub(at) < self.snapshot_ttl(policies, adapter)
+    }
+
     /// Whether a snapshot may drive an automatic chair switch.
     pub fn chair_fresh(&self, snapshot: &QuotaSnapshot, now: i64) -> bool {
         snapshot.validate().is_ok()
