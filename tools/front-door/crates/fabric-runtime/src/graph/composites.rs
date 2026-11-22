@@ -940,7 +940,8 @@ fn bounded_findings(findings: Vec<Finding>) -> Vec<Finding> {
                         .split_once(':')
                         .map_or("", |(name, _)| name)
                         == member
-                        && severity(&findings[index].severity) < severity(&findings[old].severity)
+                        && severity_rank(&findings[index].severity)
+                            < severity_rank(&findings[old].severity)
                 }) {
                     let old = compact[slot];
                     compact[slot] = index;
@@ -962,7 +963,7 @@ fn bounded_findings(findings: Vec<Finding>) -> Vec<Finding> {
             }
         }
     }
-    kept.sort_by_key(|&index| (severity(&findings[index].severity), index));
+    kept.sort_by_key(|&index| (severity_rank(&findings[index].severity), index));
     kept.into_iter()
         .map(|index| findings[index].clone())
         .collect()
