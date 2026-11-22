@@ -6,11 +6,6 @@ use serde::{Deserialize, Serialize};
 /// A newer reading clears a refusal only below this use (95%).
 const CLEAR_HEADROOM_BASIS_POINTS: u64 = 9500;
 
-/// How long a live free-pool refusal may go without a cheap tick probe. This
-/// bounds the check interval independently of a provider's much longer
-/// retry-after; a refusal the probe still confirms keeps its reset.
-pub const FREE_POOL_RECHECK_SECONDS: i64 = 600;
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Refusal {
     #[serde(flatten)]
@@ -30,31 +25,13 @@ impl Refusal {
     /// When the refusal stops holding: its reset, or one hour after it was
     /// observed when the provider named no reset. Agy reset estimates are
     /// revalidated after five minutes, even when they claim a multi-day wait.
-    pub fn expires_unix_seconds(&self) -> Result<i64, QuotaError> {
-        refusal_expiry(
+    pub fn expires_unix_seconds(&self, freshness: &FreshnessPolicy) -> Result<i64, QuotaError> {
+        freshness.refusal_expiry(
             &self.account.adapter,
             self.observed_unix_seconds,
             self.resets_unix_seconds,
         )
     }
-}
-/// Shared by account records and already-published readiness observations.
-pub(crate) fn refusal_expiry(
-    adapter: &str,
-    observed: i64,
-    reset: Option<i64>,
-) -> Result<i64, QuotaError> {
-    let revalidation = provenant_records::AdapterSpec::get(adapter)
-        .and_then(|spec| spec.refusal_revalidation_seconds);
-    if revalidation.is_none()
-        && let Some(reset) = reset
-    {
-        return Ok(reset);
-    }
-    let bounded = observed
-        .checked_add(revalidation.unwrap_or(3600))
-        .ok_or(QuotaError::TimeRange)?;
-    Ok(reset.map_or(bounded, |reset| reset.min(bounded)))
 }
 
 /// Why a recorded refusal was cleared. Every clearing carries its source so a
@@ -191,6 +168,8 @@ pub struct Admission<'a> {
     /// Effective policy for the operation making this admission decision.
     pub policy: &'a provenant_records::policy::Policy,
     pub policies: &'a [QuotaPolicy],
+    /// The one owner of every expiry and grace rule these checks apply.
+    pub freshness: &'a FreshnessPolicy,
     pub now_unix_seconds: i64,
     pub records: &'a [AccountRecord],
     /// Only wire-verified model-to-pool bindings. An absent binding cannot
@@ -232,23 +211,10 @@ impl AccountBlock {
 
 impl Admission<'_> {
     /// The account's snapshot when it is still fresh at `now`.
-    fn fresh_snapshot<'r>(
-        &self,
-        adapter: &str,
-        record: Option<&'r AccountRecord>,
-    ) -> Option<&'r QuotaSnapshot> {
+    fn fresh_snapshot<'r>(&self, record: Option<&'r AccountRecord>) -> Option<&'r QuotaSnapshot> {
         record.and_then(|r| r.snapshot.as_ref()).filter(|s| {
-            s.observed_unix_seconds <= self.now_unix_seconds
-                && self
-                    .now_unix_seconds
-                    .saturating_sub(s.observed_unix_seconds)
-                    < schedule::interval(
-                        self.policies,
-                        adapter,
-                        schedule::Trigger::Timer,
-                        schedule::Power::Ac,
-                    )
-                    .unwrap_or(0) as i64
+            self.freshness
+                .snapshot_fresh(s, self.now_unix_seconds, self.policies)
         })
     }
 
@@ -265,8 +231,8 @@ impl Admission<'_> {
         record: Option<&AccountRecord>,
         refusal: &Refusal,
     ) -> Result<bool, QuotaError> {
-        let expires = refusal.expires_unix_seconds()?;
-        let snapshot = self.fresh_snapshot(adapter, record);
+        let expires = refusal.expires_unix_seconds(self.freshness)?;
+        let snapshot = self.fresh_snapshot(record);
         let pool = refusal.pool.as_deref();
         let comparable_newer = record.is_some_and(|r| r.last_error.is_none())
             && snapshot.is_some_and(|s| {
@@ -302,8 +268,10 @@ impl Admission<'_> {
         record: Option<&AccountRecord>,
         refusal: &Refusal,
     ) -> Result<bool, QuotaError> {
-        Ok(refusal.expires_unix_seconds()? > self.now_unix_seconds
-            && !self.refusal_holds(adapter, record, refusal)?)
+        Ok(
+            refusal.expires_unix_seconds(self.freshness)? > self.now_unix_seconds
+                && !self.refusal_holds(adapter, record, refusal)?,
+        )
     }
 
     /// Whether persisted mismatch or a live provider refusal blocks `account_key`
@@ -402,22 +370,27 @@ impl Admission<'_> {
                 .records
                 .iter()
                 .find(|r| r.account.adapter == route.adapter && r.account.account_key == *key);
-            let snapshot = self.fresh_snapshot(&route.adapter, record);
-            if let Some(snapshot) = snapshot {
-                if snapshot.status == QuotaStatus::AuthRequired {
-                    return Err(QuotaError::Refused(
-                        "authentication required; sign in to the selected account",
-                    ));
-                }
-                if partial_headroom(
-                    snapshot,
-                    &route.adapter,
-                    &route.model,
-                    self.pools,
-                    self.now_unix_seconds,
-                ) == PartialHeadroom::Exhausted
-                {
-                    return Err(QuotaError::AllowanceExhausted);
+            if let Some(record) = record {
+                // The same derivation that fills quota show and the menu list
+                // decides admission: no second snapshot-only verdict.
+                let effective = crate::effective_status(&crate::StatusInput {
+                    record,
+                    detections: &[],
+                    readiness: None,
+                    pools: self.pools,
+                    now: self.now_unix_seconds,
+                    freshness: self.freshness,
+                    policies: self.policies,
+                    policy,
+                })?;
+                match effective.status {
+                    QuotaStatus::AuthRequired => {
+                        return Err(QuotaError::Refused(
+                            "authentication required; sign in to the selected account",
+                        ));
+                    }
+                    QuotaStatus::Exhausted => return Err(QuotaError::AllowanceExhausted),
+                    _ => {}
                 }
             }
         }
@@ -655,12 +628,12 @@ pub fn free_pool_recheck_due(record: &AccountRecord) -> Result<Option<i64>, Quot
             .map_or(refusal.observed_unix_seconds, |at| {
                 at.max(refusal.observed_unix_seconds)
             });
-        let expires = refusal.expires_unix_seconds()?;
+        let expires = refusal.expires_unix_seconds(&crate::DEFAULT_FRESHNESS)?;
         if expires <= observed {
             continue;
         }
         let next = observed
-            .checked_add(FREE_POOL_RECHECK_SECONDS)
+            .checked_add(crate::DEFAULT_FRESHNESS.free_pool_recheck_seconds as i64)
             .ok_or(QuotaError::TimeRange)?
             .min(expires);
         due = Some(due.map_or(next, |earlier: i64| earlier.min(next)));
@@ -795,6 +768,7 @@ mod admission_tests {
             Source::Project,
         );
         let context = super::Admission {
+            freshness: &crate::DEFAULT_FRESHNESS,
             policy: &policy,
             policies: &[],
             now_unix_seconds: 0,
@@ -881,6 +855,7 @@ mod admission_tests {
         };
         let pools = vec!["pool-a".into()];
         let admission = |records| Admission {
+            freshness: &crate::DEFAULT_FRESHNESS,
             policy: crate::source::test_policy(),
             policies: crate::source::TEST_POLICIES,
             now_unix_seconds: 1000,
@@ -923,6 +898,7 @@ mod admission_tests {
         record.last_error = Some(ProbeFailure::AccountMismatch);
         let check = |record: &AccountRecord, now| {
             Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: now,
@@ -936,6 +912,7 @@ mod admission_tests {
         for now in [1000, 9000] {
             assert_eq!(
                 Admission {
+                    freshness: &crate::DEFAULT_FRESHNESS,
                     policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: now,
@@ -994,6 +971,7 @@ mod admission_tests {
         let raw = [record];
         let check = |records: &[AccountRecord], now| {
             Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: now,
@@ -1089,6 +1067,7 @@ mod admission_tests {
             route.account_key = Some(key.into());
             assert_eq!(
                 Admission {
+                    freshness: &crate::DEFAULT_FRESHNESS,
                     policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: 1000,
@@ -1104,6 +1083,7 @@ mod admission_tests {
         route.model.clone_from(&refusal.model);
         assert!(
             Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1000,
@@ -1132,6 +1112,7 @@ mod admission_tests {
         };
         let block = |record: &AccountRecord, key: &str, model: &str, pools: &[String]| {
             Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1000,
@@ -1175,6 +1156,7 @@ mod admission_tests {
         }];
         assert!(
             Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1000,
@@ -1191,6 +1173,7 @@ mod admission_tests {
         record.last_error = Some(ProbeFailure::Auth);
         assert!(matches!(
             Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1000,
@@ -1226,6 +1209,7 @@ mod admission_tests {
         for (now, allowed) in [(1000, false), (4599, false), (4600, true)] {
             assert_eq!(
                 Admission {
+                    freshness: &crate::DEFAULT_FRESHNESS,
                     policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: now,
@@ -1257,6 +1241,7 @@ mod admission_tests {
             for (now, allowed) in [(1000, false), (until - 1, false), (until, true)] {
                 assert_eq!(
                     Admission {
+                        freshness: &crate::DEFAULT_FRESHNESS,
                         policy: crate::source::test_policy(),
                         policies: crate::source::TEST_POLICIES,
                         now_unix_seconds: now,
@@ -1307,6 +1292,7 @@ mod admission_tests {
         };
         fn admission_for<'a>(record: &'a AccountRecord, now: i64) -> Admission<'a> {
             Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: now,
@@ -1440,14 +1426,15 @@ mod admission_tests {
         });
         assert_eq!(
             free_pool_recheck_due(&record).unwrap(),
-            Some(1000 + FREE_POOL_RECHECK_SECONDS)
+            Some(1000 + crate::DEFAULT_FRESHNESS.free_pool_recheck_seconds as i64)
         );
         // A probe that confirms the refusal buys another bounded window; the
         // provider reset is unchanged.
-        record.last_attempt_unix_seconds = Some(1000 + FREE_POOL_RECHECK_SECONDS);
+        record.last_attempt_unix_seconds =
+            Some(1000 + crate::DEFAULT_FRESHNESS.free_pool_recheck_seconds as i64);
         assert_eq!(
             free_pool_recheck_due(&record).unwrap(),
-            Some(1000 + 2 * FREE_POOL_RECHECK_SECONDS)
+            Some(1000 + 2 * crate::DEFAULT_FRESHNESS.free_pool_recheck_seconds as i64)
         );
         assert_eq!(record.refusals[0].resets_unix_seconds, Some(50_900));
         // Model and account-wide refusals are not free-pool rechecks.
@@ -1486,6 +1473,7 @@ mod admission_tests {
         let refusal = &record.refusals[0];
         for (now, holds) in [(1000, true), (1299, true), (1300, false)] {
             let admission = Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: now,
@@ -1511,7 +1499,7 @@ mod admission_tests {
                 host: "host".into(),
                 adapter: "agy".into(),
                 account_key: account.account_key.clone(),
-                route: "agy/gemini-3.8-flash".into(),
+                route: ReadinessRoute::from_text("agy/gemini-3.8-flash"),
             };
             let file = crate::ReadinessFile {
                 records: vec![crate::RouteReadiness {
@@ -1566,6 +1554,7 @@ mod admission_tests {
         refused.snapshot = None;
         for (now, allowed) in [(1_000, false), (29_999, false), (30_000, true)] {
             let admission = Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: now,
@@ -1618,6 +1607,7 @@ mod admission_tests {
             snapshot.authority_ref = Some("configured-local-quota".into());
             fresh.snapshot = Some(snapshot);
             let admission = Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1_600,
@@ -1643,6 +1633,7 @@ mod admission_tests {
                 // this readiness file from the same account replacement.
                 let mut readiness = crate::ReadinessFile::default();
                 let prior = Admission {
+                    freshness: &crate::DEFAULT_FRESHNESS,
                     policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: 1_000,
@@ -1660,7 +1651,7 @@ mod admission_tests {
                     host: crate::LOCAL_HOST.into(),
                     adapter: "codex".into(),
                     account_key: "opaque".into(),
-                    route: ACCOUNT_ROUTE.into(),
+                    route: ReadinessRoute::Account,
                 };
                 let read = readiness.get(&scope, 1_600);
                 assert_eq!(read.state, crate::ReadinessState::Unknown);
@@ -1673,6 +1664,7 @@ mod admission_tests {
             let mut failed = fresh.clone();
             failed.last_error = Some(ProbeFailure::Network);
             let admission = Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1_600,
@@ -1713,6 +1705,7 @@ mod admission_tests {
         assert!(capacity.refusals.is_empty());
         let admit = |record: &AccountRecord, now| {
             Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: now,
@@ -1732,6 +1725,7 @@ mod admission_tests {
             assert!(admit(&both, now).is_err());
             assert_eq!(
                 Admission {
+                    freshness: &crate::DEFAULT_FRESHNESS,
                     policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: now,
@@ -1776,6 +1770,7 @@ mod admission_tests {
                 resets_unix_seconds: None,
             });
             let admission = Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 5000,
@@ -1805,6 +1800,7 @@ mod admission_tests {
             resets_unix_seconds: None,
         });
         let admission = Admission {
+            freshness: &crate::DEFAULT_FRESHNESS,
             policy: crate::source::test_policy(),
             policies: crate::source::TEST_POLICIES,
             now_unix_seconds: 1300,
@@ -1829,6 +1825,7 @@ mod admission_tests {
             let records = [record(status)];
             let pools = ["pool-a".into()];
             let context = Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: now,
@@ -1845,6 +1842,7 @@ mod admission_tests {
         let r = route();
         assert!(
             Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1000,
@@ -1857,6 +1855,7 @@ mod admission_tests {
         pools[0] = "pool-a".into();
         assert!(
             Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1000,
@@ -1869,6 +1868,7 @@ mod admission_tests {
         records[0].snapshot.as_mut().unwrap().windows[0].resets_unix_seconds = Some(999);
         assert!(
             Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1000,
@@ -1889,6 +1889,7 @@ mod admission_tests {
         records[0].snapshot.as_mut().unwrap().status = QuotaStatus::Unknown;
         assert!(
             Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 1000,
@@ -1900,6 +1901,7 @@ mod admission_tests {
         );
         assert!(
             Admission {
+                freshness: &crate::DEFAULT_FRESHNESS,
                 policy: crate::source::test_policy(),
                 policies: crate::source::TEST_POLICIES,
                 now_unix_seconds: 4550,
@@ -1917,6 +1919,7 @@ mod admission_tests {
 
         let default_policy = Policy::default();
         let admission = Admission {
+            freshness: &crate::DEFAULT_FRESHNESS,
             policy: &default_policy,
             policies: crate::source::TEST_POLICIES,
             now_unix_seconds: 1000,
@@ -2041,6 +2044,7 @@ mod refusal_scope_tests {
             let records = [record];
             assert_eq!(
                 Admission {
+                    freshness: &crate::DEFAULT_FRESHNESS,
                     policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: now,
@@ -2093,6 +2097,7 @@ mod refusal_scope_tests {
             record.snapshot.as_mut().unwrap().windows[0].used_basis_points = weekly;
             assert_eq!(
                 Admission {
+                    freshness: &crate::DEFAULT_FRESHNESS,
                     policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: 1000,
@@ -2164,6 +2169,7 @@ mod refusal_scope_tests {
         for (model, pool) in [("gemini-fixture", "gemini"), ("claude-fixture", "claude")] {
             assert!(
                 Admission {
+                    freshness: &crate::DEFAULT_FRESHNESS,
                     policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: 1000,
@@ -2194,6 +2200,7 @@ mod refusal_scope_tests {
             });
             for (model, pool) in [("gemini-fixture", "gemini"), ("claude-fixture", "claude")] {
                 let admitted = Admission {
+                    freshness: &crate::DEFAULT_FRESHNESS,
                     policy: crate::source::test_policy(),
                     policies: crate::source::TEST_POLICIES,
                     now_unix_seconds: 1000,

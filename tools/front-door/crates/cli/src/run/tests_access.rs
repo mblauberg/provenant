@@ -563,6 +563,7 @@ fn opencode_stderr_quota_settles_and_records_refusal() -> Result<(), Box<dyn std
     let pools = vec!["opencode-go".into()];
     let check = |now_unix_seconds| {
         Admission {
+            freshness: &provenant_quota::DEFAULT_FRESHNESS,
             policy: &provenant_records::policy::Policy::default(),
             policies: &[],
             now_unix_seconds,

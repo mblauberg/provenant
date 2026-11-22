@@ -54,7 +54,7 @@
             host: provenant_quota::LOCAL_HOST.into(),
             adapter: "codex".into(),
             account_key: "key-one".into(),
-            route: model.as_str().into(),
+            route: provenant_quota::ReadinessRoute::from_text(model.as_str()),
         };
         let file = ReadinessFile {
             records: vec![
@@ -85,7 +85,7 @@
                     schema_version: 1,
                     scope: ReadinessScope {
                         account_key: "key-two".into(),
-                        route: "verified-pool".into(),
+                        route: provenant_quota::ReadinessRoute::pool("verified-pool"),
                         ..scope.clone()
                     },
                     state: ReadinessState::Unavailable,
@@ -140,7 +140,7 @@
         );
         assert_eq!(
             pooled[0].observation.observed_scope.as_ref().unwrap().route,
-            "verified-pool"
+            provenant_quota::ReadinessRoute::pool("verified-pool")
         );
         let other_model = super::ModelId::parse("codex/gpt-6.1-terra")?;
         let other = super::recorded_model_readiness(
@@ -561,7 +561,7 @@
                     host: LOCAL_HOST.into(),
                     adapter: "opencode".into(),
                     account_key: "go".into(),
-                    route: "opencode/opencode-go/deepseek-v4.1-flash".into()
+                    route: provenant_quota::ReadinessRoute::from_text("opencode/opencode-go/deepseek-v4.1-flash")
                 },
                 now
             )

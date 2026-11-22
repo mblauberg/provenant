@@ -301,6 +301,7 @@ fn alternatives_are_bounded_distinct_and_keep_the_callers_order()
         provenant_records::policy::Source::Project,
     );
     let strict_config = RoutingConfig {
+        freshness: provenant_quota::FreshnessPolicy::default(),
         launch_policy: strict_policy,
         ..config.clone()
     };
@@ -342,6 +343,7 @@ fn candidate_errors_and_fallback_effort_match_request_fixtures()
         }],
     );
     let config = RoutingConfig {
+        freshness: provenant_quota::FreshnessPolicy::default(),
         routes: BTreeMap::from([(
             "review".into(),
             NamedRoute {
@@ -437,6 +439,7 @@ fn candidate_errors_and_fallback_effort_match_request_fixtures()
         provenant_records::policy::Source::Project,
     );
     let strict_config = RoutingConfig {
+        freshness: provenant_quota::FreshnessPolicy::default(),
         launch_policy: strict_policy,
         ..config.clone()
     };

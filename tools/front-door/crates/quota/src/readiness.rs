@@ -3,6 +3,79 @@ use crate::QuotaError;
 use provenant_records::ExtraFields;
 use serde::{Deserialize, Serialize};
 
+/// The scope an observation covers. Model routes carry the canonical
+/// `adapter/model` id; pool routes carry a verified pool name. The persisted
+/// shape is a tagged map with readable names, never an ambiguous bare string.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum ReadinessRoute {
+    Account,
+    Model(String),
+    Pool(String),
+}
+impl ReadinessRoute {
+    /// Every route kind, for exhaustive stored-format tables.
+    pub const ALL: &[Self] = &[
+        Self::Account,
+        Self::Model(String::new()),
+        Self::Pool(String::new()),
+    ];
+    /// The account-wide route.
+    pub fn account() -> Self {
+        Self::Account
+    }
+    /// A canonical model id, `adapter/model`.
+    pub fn model(adapter: &str, model: &str) -> Self {
+        Self::Model(format!("{adapter}/{model}"))
+    }
+    /// A verified pool name.
+    pub fn pool(name: impl Into<String>) -> Self {
+        Self::Pool(name.into())
+    }
+    /// Stable readable text for reports and diagnostics.
+    pub fn as_text(&self) -> &str {
+        match self {
+            Self::Account => ACCOUNT_ROUTE,
+            Self::Model(model) | Self::Pool(model) => model,
+        }
+    }
+    /// The model id when this scope names one.
+    pub fn as_model(&self) -> Option<&str> {
+        match self {
+            Self::Model(model) => Some(model),
+            _ => None,
+        }
+    }
+    /// Classify opaque route text by shape. Callers with a known model or pool
+    /// should use [`Self::model`] or [`Self::pool`] instead.
+    pub fn from_text(text: &str) -> Self {
+        if text == ACCOUNT_ROUTE {
+            Self::Account
+        } else if text.contains('/') {
+            Self::Model(text.into())
+        } else {
+            Self::Pool(text.into())
+        }
+    }
+    /// Bounds and control characters of the carried identifier.
+    pub fn valid(&self) -> bool {
+        match self {
+            Self::Account => true,
+            Self::Model(model) | Self::Pool(model) => {
+                !model.is_empty() && model.len() <= 512 && !model.chars().any(char::is_control)
+            }
+        }
+    }
+    /// Uniqueness key including the route kind.
+    pub fn key(&self) -> (u8, &str) {
+        match self {
+            Self::Account => (0, ACCOUNT_ROUTE),
+            Self::Model(model) => (1, model),
+            Self::Pool(pool) => (2, pool),
+        }
+    }
+}
+
 /// Identity of the route whose readiness was observed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadinessScope {
@@ -11,8 +84,18 @@ pub struct ReadinessScope {
     pub host: String,
     pub adapter: String,
     pub account_key: String,
-    /// Canonical model or verified pool identifier.
-    pub route: String,
+    pub route: ReadinessRoute,
+}
+
+/// Build the account-wide scope for an account on this host.
+pub fn account_scope(host: &str, adapter: &str, account_key: &str) -> ReadinessScope {
+    ReadinessScope {
+        extra: Default::default(),
+        host: host.into(),
+        adapter: adapter.into(),
+        account_key: account_key.into(),
+        route: ReadinessRoute::Account,
+    }
 }
 
 impl ReadinessScope {
@@ -100,7 +183,7 @@ pub struct RouteReadiness {
 impl RouteReadiness {
     /// Authentication failures require recovery evidence, not just elapsed time.
     pub fn authentication_failure(&self) -> bool {
-        self.scope.route == ACCOUNT_ROUTE
+        self.scope.route == ReadinessRoute::Account
             && self.state == ReadinessState::Unavailable
             && self
                 .reason
@@ -289,21 +372,19 @@ impl ReadinessFile {
                     || login.scope.account_key != account_key
                     || login.scope.host.is_empty()
                     || login.scope.host.len() > 128
-                    || login.scope.route != ACCOUNT_ROUTE
+                    || login.scope.route != ReadinessRoute::Account
             })
             || self.records.iter().any(|r| {
                 r.scope.adapter != adapter
                     || r.scope.account_key != account_key
                     || r.scope.host.is_empty()
                     || r.scope.host.len() > 128
-                    || r.scope.route.is_empty()
-                    || r.scope.route.len() > 512
-                    || r.scope.route.chars().any(char::is_control)
+                    || !r.scope.route.valid()
                     || !seen.insert((
                         r.scope.host.as_str(),
                         r.scope.adapter.as_str(),
                         r.scope.account_key.as_str(),
-                        r.scope.route.as_str(),
+                        r.scope.route.key(),
                     ))
             })
         {
@@ -315,6 +396,18 @@ impl ReadinessFile {
     /// The readiness of one route. An account-wide unavailable observation
     /// covers every route of that account; any other gap reads as unknown.
     pub fn get(&self, scope: &ReadinessScope, now: i64) -> ReadinessRead {
+        self.get_with(scope, now, &crate::DEFAULT_FRESHNESS)
+    }
+
+    /// Readiness under an explicit [`crate::FreshnessPolicy`]. Reporting,
+    /// routing and admission pass their resolved policy here so one rule set
+    /// decides every observation's lifetime.
+    pub fn get_with(
+        &self,
+        scope: &ReadinessScope,
+        now: i64,
+        freshness: &crate::FreshnessPolicy,
+    ) -> ReadinessRead {
         let read = |scope: &ReadinessScope| {
             let Some(r) = self.records.iter().find(|r| r.scope.same_scope(scope)) else {
                 return ReadinessRead::absent();
@@ -330,12 +423,13 @@ impl ReadinessFile {
                 return ReadinessRead::unknown(ReadinessReason::InvalidEvidence);
             }
             let expires = if r.reason == Some(ReadinessReason::ProviderRefusal) {
-                crate::admission::refusal_expiry(
-                    &r.scope.adapter,
-                    r.observed_unix_seconds,
-                    Some(r.expires_unix_seconds),
-                )
-                .unwrap_or(r.observed_unix_seconds)
+                freshness
+                    .refusal_expiry(
+                        &r.scope.adapter,
+                        r.observed_unix_seconds,
+                        Some(r.expires_unix_seconds),
+                    )
+                    .unwrap_or(r.observed_unix_seconds)
             } else {
                 r.expires_unix_seconds
             };
@@ -368,10 +462,10 @@ impl ReadinessFile {
             }
         };
         let mut account_fallback = None;
-        if scope.route != ACCOUNT_ROUTE {
+        if scope.route != ReadinessRoute::Account {
             let account = read(&ReadinessScope {
                 extra: Default::default(),
-                route: ACCOUNT_ROUTE.into(),
+                route: ReadinessRoute::Account,
                 ..scope.clone()
             });
             if account.state == ReadinessState::Unavailable
@@ -427,7 +521,7 @@ impl ReadinessFile {
             host: host.into(),
             adapter: account.account.adapter.clone(),
             account_key: account.account.account_key.clone(),
-            route: ACCOUNT_ROUTE.into(),
+            route: ReadinessRoute::Account,
         };
         // The account-wide failure supersedes this host's per-route facts.
         // The account record remains the source for restoring held refusals.
@@ -442,16 +536,20 @@ impl ReadinessFile {
             if !admission.refusal_holds(&account.account.adapter, Some(account), refusal)? {
                 continue;
             }
-            let expires = refusal.expires_unix_seconds()?;
+            let expires = refusal.expires_unix_seconds(admission.freshness)?;
             let scope = ReadinessScope {
                 extra: Default::default(),
                 host: host.into(),
                 adapter: account.account.adapter.clone(),
                 account_key: account.account.account_key.clone(),
-                route: refusal
-                    .pool
-                    .clone()
-                    .unwrap_or_else(|| format!("{}/{}", account.account.adapter, refusal.model)),
+                route: if refusal.account_wide() {
+                    ReadinessRoute::Account
+                } else {
+                    refusal.pool.as_ref().map_or_else(
+                        || ReadinessRoute::model(&account.account.adapter, &refusal.model),
+                        |pool| ReadinessRoute::pool(pool.clone()),
+                    )
+                },
             };
             if let Some(held) = published.iter_mut().find(|r| r.scope.same_scope(&scope)) {
                 held.observed_unix_seconds = held
@@ -509,7 +607,7 @@ impl ReadinessFile {
             host: host.into(),
             adapter: account.account.adapter.clone(),
             account_key: account.account.account_key.clone(),
-            route: ACCOUNT_ROUTE.into(),
+            route: ReadinessRoute::Account,
         };
         let previous = self
             .records
@@ -536,12 +634,11 @@ impl ReadinessFile {
                     && record.scope.adapter == account.account.adapter
                     && record.scope.account_key == account.account.account_key
                     && (reason.is_some()
-                        || (record.scope.route == ACCOUNT_ROUTE
+                        || (record.scope.route == ReadinessRoute::Account
                             && record.evidence_ref.as_deref() == Some(QUOTA_PROBE))))
         });
         if let Some(reason) = reason {
-            let interval = i64::try_from(interval_seconds).unwrap_or(i64::MAX);
-            let expires = now.saturating_add(interval.max(1));
+            let expires = crate::DEFAULT_FRESHNESS.readiness_expiry(now, interval_seconds);
             self.records.push(RouteReadiness {
                 extra: previous
                     .as_ref()
@@ -573,8 +670,7 @@ impl ReadinessFile {
                     Some(ReadinessReason::ProbedNoFigures),
                 ),
             };
-            let interval = i64::try_from(interval_seconds).unwrap_or(i64::MAX);
-            let expires = now.saturating_add(interval.max(1));
+            let expires = crate::DEFAULT_FRESHNESS.readiness_expiry(now, interval_seconds);
             self.records.push(RouteReadiness {
                 extra: previous
                     .as_ref()
@@ -615,7 +711,7 @@ mod tests {
                 host: LOCAL_HOST.into(),
                 adapter: "claude".into(),
                 account_key: "key".into(),
-                route: ACCOUNT_ROUTE.into(),
+                route: ReadinessRoute::Account,
             },
             observed_unix_seconds: 100,
             valid_until_unix_seconds: 1000,
@@ -646,7 +742,7 @@ mod tests {
                     host: LOCAL_HOST.into(),
                     adapter: "claude".into(),
                     account_key: "key".into(),
-                    route: ACCOUNT_ROUTE.into(),
+                    route: ReadinessRoute::Account,
                 },
                 observed_unix_seconds: 100,
                 valid_until_unix_seconds: 300,
@@ -659,7 +755,7 @@ mod tests {
             host: LOCAL_HOST.into(),
             adapter: "claude".into(),
             account_key: "key".into(),
-            route: "claude/model".into(),
+            route: ReadinessRoute::from_text("claude/model"),
         };
         assert_eq!(
             file.get(&route, 199).reason,
@@ -706,7 +802,7 @@ mod tests {
             host: LOCAL_HOST.into(),
             adapter: "opencode".into(),
             account_key: "key".into(),
-            route: "opencode/model".into(),
+            route: ReadinessRoute::from_text("opencode/model"),
         };
         for reason in [
             ReadinessReason::SignedOut,
@@ -756,7 +852,7 @@ mod tests {
             host: LOCAL_HOST.into(),
             adapter: "claude".into(),
             account_key: "key".into(),
-            route: "claude/model".into(),
+            route: ReadinessRoute::from_text("claude/model"),
         };
         assert_eq!(
             file.get(&scope, 159).reason,
@@ -764,7 +860,7 @@ mod tests {
         );
         let account_scope = ReadinessScope {
             extra: Default::default(),
-            route: ACCOUNT_ROUTE.into(),
+            route: ReadinessRoute::Account,
             ..scope.clone()
         };
         assert_eq!(
@@ -831,7 +927,7 @@ mod tests {
             host: "host".into(),
             adapter: "agy".into(),
             account_key: "account".into(),
-            route: "model".into(),
+            route: ReadinessRoute::from_text("model"),
         };
         let record = RouteReadiness {
             extra: Default::default(),
@@ -879,7 +975,7 @@ mod tests {
             }
         }
         let mut other = scope.clone();
-        other.route = "other".into();
+        other.route = ReadinessRoute::from_text("other");
         assert_eq!(file.get(&other, 15), ReadinessRead::absent());
         for evidence in ["".into(), "x".repeat(257), "bad/path".into()] {
             file.records[0].evidence_ref = Some(evidence);
@@ -910,7 +1006,7 @@ mod tests {
             host: "host".into(),
             adapter: "fixture".into(),
             account_key: "account".into(),
-            route: "model".into(),
+            route: ReadinessRoute::from_text("model"),
         };
         let file = ReadinessFile {
             extra: Default::default(),
@@ -934,7 +1030,7 @@ mod tests {
         assert_eq!(file.get(&scope, 9).state, ReadinessState::Unknown);
         assert_eq!(file.get(&scope, 20).state, ReadinessState::Unknown);
         let mut account_only = file.clone();
-        account_only.records[0].scope.route = ACCOUNT_ROUTE.into();
+        account_only.records[0].scope.route = ReadinessRoute::Account;
         let model_read = account_only.get(&scope, 10);
         assert_eq!(model_read.state, ReadinessState::Unknown);
         assert!(model_read.observed_scope.is_none());
@@ -956,7 +1052,7 @@ mod tests {
             },
             ReadinessScope {
                 extra: Default::default(),
-                route: "other".into(),
+                route: ReadinessRoute::from_text("other"),
                 ..scope.clone()
             },
         ] {
@@ -972,7 +1068,7 @@ mod tests {
             host: "host".into(),
             adapter: "fixture".into(),
             account_key: "account".into(),
-            route: "model".into(),
+            route: ReadinessRoute::from_text("model"),
         };
         let mut file = ReadinessFile::default();
         file.records.push(RouteReadiness {
@@ -989,7 +1085,7 @@ mod tests {
         file.login = Some(LoginObservation {
             extra: Default::default(),
             scope: ReadinessScope {
-                route: ACCOUNT_ROUTE.into(),
+                route: ReadinessRoute::Account,
                 ..scope
             },
             observed_unix_seconds: 10,
@@ -1129,6 +1225,7 @@ mod tests {
         static POLICY: std::sync::OnceLock<provenant_records::policy::Policy> =
             std::sync::OnceLock::new();
         crate::Admission {
+            freshness: &crate::DEFAULT_FRESHNESS,
             policy: POLICY.get_or_init(Default::default),
             policies: crate::source::TEST_POLICIES,
             now_unix_seconds: now,
@@ -1142,7 +1239,7 @@ mod tests {
             host: LOCAL_HOST.into(),
             adapter: "claude".into(),
             account_key: "key".into(),
-            route: route.into(),
+            route: ReadinessRoute::from_text(route),
         }
     }
 
@@ -1176,13 +1273,13 @@ mod tests {
         let row_extra = ready.extra.clone();
         let scope_extra = ready.scope.extra.clone();
         let mut retained = ready.clone();
-        retained.scope.route = "retained".into();
+        retained.scope.route = ReadinessRoute::from_text("retained");
         let mut peer = ready.clone();
         peer.scope.host = "peer".into();
         peer.state = ReadinessState::Unavailable;
         peer.reason = Some(ReadinessReason::ProviderRefusal);
         let mut probe = ready.clone();
-        probe.scope.route = ACCOUNT_ROUTE.into();
+        probe.scope.route = ReadinessRoute::Account;
         probe.state = ReadinessState::Unknown;
         probe.reason = Some(ReadinessReason::CommandFailure);
         probe.evidence_ref = Some("quota-probe".into());

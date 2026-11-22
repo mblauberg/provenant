@@ -63,7 +63,7 @@ fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
                     host: provenant_quota::LOCAL_HOST.into(),
                     adapter: "codex".into(),
                     account_key: account.clone(),
-                    route: "codex/gpt-6-luna".into(),
+                    route: provenant_quota::ReadinessRoute::from_text("codex/gpt-6-luna"),
                     extra: Default::default(),
                 },
                 state: provenant_quota::ReadinessState::Ready,

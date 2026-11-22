@@ -170,7 +170,7 @@ fn resolve_reports_effort_controls_and_nearby_models() -> Result {
                 host: provenant_quota::LOCAL_HOST.into(),
                 adapter: "codex".into(),
                 account_key: "key-one".into(),
-                route: "codex/gpt-6-luna".into(),
+                route: provenant_quota::ReadinessRoute::from_text("codex/gpt-6-luna"),
             },
             state: provenant_quota::ReadinessState::Unavailable,
             reason: Some(provenant_quota::ReadinessReason::ProviderRefusal),

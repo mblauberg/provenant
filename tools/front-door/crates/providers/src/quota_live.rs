@@ -819,6 +819,7 @@ mod tests {
             .replacement
             .unwrap();
         let admission = provenant_quota::Admission {
+            freshness: &provenant_quota::DEFAULT_FRESHNESS,
             policy: &provenant_records::policy::Policy::default(),
             policies: &[],
             records: std::slice::from_ref(&stale),
@@ -927,6 +928,7 @@ mod tests {
                 .replacement
                 .unwrap();
         let admission = provenant_quota::Admission {
+            freshness: &provenant_quota::DEFAULT_FRESHNESS,
             policy: &provenant_records::policy::Policy::default(),
             policies: &[],
             records: std::slice::from_ref(&stale),

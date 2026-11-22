@@ -331,7 +331,9 @@ fn pinned_refusal_warning(
                     } else {
                         return None;
                     };
-                    let expiry = refusal.expires_unix_seconds().ok()?;
+                    let expiry = refusal
+                        .expires_unix_seconds(&provenant_quota::DEFAULT_FRESHNESS)
+                        .ok()?;
                     (expiry > now).then_some((scope, expiry, refusal))
                 })
                 .max_by_key(|(scope, expiry, _)| (*scope, *expiry))
@@ -3404,7 +3406,7 @@ pub(super) fn prepare_candidates_inner(
                         host: provenant_quota::LOCAL_HOST.into(),
                         adapter: entry.adapter.clone(),
                         account_key: entry.key.clone(),
-                        route: provenant_quota::ACCOUNT_ROUTE.into(),
+                        route: provenant_quota::ReadinessRoute::Account,
                     };
                     let recorded =
                         crate::quota::read_readiness(roots.state.as_path(), &scope, timestamp);

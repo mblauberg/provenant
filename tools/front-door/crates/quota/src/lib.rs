@@ -1,6 +1,8 @@
 //! Quota policy is pure: immutable observations in, bounded update intents out.
 #![forbid(unsafe_code)]
 pub mod chair;
+pub mod freshness;
+pub use freshness::*;
 mod source;
 pub use source::*;
 mod allowance;
@@ -18,6 +20,8 @@ pub use state::*;
 mod admission;
 pub mod schedule;
 pub use admission::*;
+mod status;
+pub use status::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum QuotaError {

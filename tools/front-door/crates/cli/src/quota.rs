@@ -996,6 +996,65 @@ pub(crate) fn recorded_readiness_file(
         .map_or(Ok(None), |dir| read_readiness_file(&dir, adapter, key))
 }
 
+/// One account's readiness file, kept with its identity for status derivation.
+pub(crate) struct OwnedReadiness {
+    adapter: String,
+    account_key: String,
+    file: ReadinessFile,
+}
+
+/// Load every account's whole readiness file once, so status, the model list
+/// and the display use the same observations. Store outages leave an account
+/// without readiness evidence rather than failing the report.
+pub(crate) fn recorded_readiness(
+    state: &Path,
+    records: &[provenant_quota::AccountRecord],
+) -> Vec<OwnedReadiness> {
+    records
+        .iter()
+        .filter_map(|record| {
+            recorded_readiness_file(state, &record.account.adapter, &record.account.account_key)
+                .ok()
+                .flatten()
+                .map(|file| OwnedReadiness {
+                    adapter: record.account.adapter.clone(),
+                    account_key: record.account.account_key.clone(),
+                    file,
+                })
+        })
+        .collect()
+}
+
+pub(crate) fn readiness_inputs(
+    owned: &[OwnedReadiness],
+) -> Vec<provenant_quota::ReadinessInput<'_>> {
+    owned
+        .iter()
+        .map(|item| provenant_quota::ReadinessInput {
+            adapter: &item.adapter,
+            account_key: &item.account_key,
+            file: &item.file,
+        })
+        .collect()
+}
+
+/// Resolve the freshness policy from the quota config domain, carrying the
+/// layer that supplied its values so reports can show the source.
+pub(crate) fn quota_freshness(
+    origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
+    settings: &provenant_quota::Settings,
+) -> provenant_quota::FreshnessPolicy {
+    let configured = origins
+        .keys()
+        .any(|key| key.starts_with("domains.quota.freshness."));
+    let source = if configured {
+        provenant_quota::FreshnessSource::Config
+    } else {
+        provenant_quota::FreshnessSource::Default
+    };
+    provenant_quota::FreshnessPolicy::from_settings(settings.freshness).with_source(source)
+}
+
 /// The readiness of one route, read without locks, directory creation or
 /// provider I/O. A missing, stale, mismatched or damaged record is unknown;
 /// nothing here reads as ready unless fresh evidence says so. Routing and the
@@ -1087,6 +1146,7 @@ fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), E
         // only moves when a fresh reading stops counting as fresh.
         let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
         let admission = Admission {
+            freshness: &provenant_quota::DEFAULT_FRESHNESS,
             policy: &policy,
             policies: &policies,
             now_unix_seconds: now,
@@ -1108,7 +1168,7 @@ fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), E
                     host: LOCAL_HOST.into(),
                     adapter: adapter.clone(),
                     account_key: key.clone(),
-                    route: ACCOUNT_ROUTE.into(),
+                    route: provenant_quota::ReadinessRoute::Account,
                 },
                 observed_unix_seconds: now,
                 valid_until_unix_seconds: now
@@ -1665,7 +1725,7 @@ fn decorate_login(
                 host: LOCAL_HOST.into(),
                 adapter: row.account.adapter.clone(),
                 account_key: row.account.account_key.clone(),
-                route: provenant_quota::ACCOUNT_ROUTE.into(),
+                route: provenant_quota::ReadinessRoute::Account,
             },
             now,
         ));
@@ -1738,7 +1798,9 @@ pub fn recorded_login_rows(roots: &Roots) -> Result<Vec<AccountRow>, String> {
 fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError> {
     // Quota commands are host-wide and have no project.
     let policy = provenant_config::policy::read(roots.state.as_path(), "", &Default::default());
-    let domains = crate::config_reads::read_for(roots, "quota")?.domains;
+    let resolved = crate::config_reads::read_for(roots, "quota")?;
+    let freshness = quota_freshness(&resolved.origins, &resolved.domains.quota);
+    let domains = resolved.domains;
     let accounts = domains.accounts.unique_accounts();
     let mut configured: Vec<_> = accounts
         .entries
@@ -1764,6 +1826,8 @@ fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError
     let now = SystemClock::new().unix_seconds();
     let policies =
         provenant_providers::scheduling_policies(&domains.quota, provenant_providers::REGISTRY);
+    let owned = recorded_readiness(roots.state.as_path(), &records);
+    let inputs = readiness_inputs(&owned);
     let mut report = schedule::report(
         &policies,
         &records,
@@ -1772,6 +1836,8 @@ fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError
         now,
         String::new(),
         &policy,
+        &freshness,
+        &inputs,
     )?;
     decorate(&mut report, &accounts, &domains.quota.display);
     decorate_login(
@@ -1903,7 +1969,9 @@ pub(crate) fn execute(
     {
         return Err(EdgeError::Adapter);
     }
-    let domains = crate::config_reads::read_for(roots, "quota")?.domains;
+    let resolved = crate::config_reads::read_for(roots, "quota")?;
+    let freshness = quota_freshness(&resolved.origins, &resolved.domains.quota);
+    let domains = resolved.domains;
     let (settings, entries) = (domains.quota, domains.accounts);
     let clock = SystemClock::new();
     let now = clock
@@ -1923,6 +1991,8 @@ pub(crate) fn execute(
         let mut records = read_cache(roots)?;
         add_configured(&mut records, &configured);
         settings.apply_calibration(&mut records, now);
+        let owned = recorded_readiness(roots.state.as_path(), &records);
+        let inputs = readiness_inputs(&owned);
         let mut report = schedule::report(
             &policies,
             &records,
@@ -1931,6 +2001,8 @@ pub(crate) fn execute(
             now,
             report_path,
             &policy,
+            &freshness,
+            &inputs,
         )?;
         decorate(&mut report, &entries, &settings.display);
         decorate_login(
@@ -2191,6 +2263,8 @@ pub(crate) fn execute(
         .as_timestamp()
         .as_second();
     settings.apply_calibration(&mut records, now);
+    let owned = recorded_readiness(roots.state.as_path(), &records);
+    let inputs = readiness_inputs(&owned);
     let mut report = schedule::report(
         &policies,
         &records,
@@ -2199,6 +2273,8 @@ pub(crate) fn execute(
         now,
         report_path,
         &policy,
+        &freshness,
+        &inputs,
     )?;
     decorate(&mut report, &entries, &settings.display);
     decorate_login(
@@ -2230,6 +2306,8 @@ pub(crate) fn execute(
         now,
         report.report_path.clone(),
         &policy,
+        &freshness,
+        &inputs,
     )?;
     decorate(&mut shown, &entries, &settings.display);
     decorate_login(
@@ -2574,6 +2652,7 @@ impl ReadingClear<'_> {
         };
         let current = &self.records[index];
         let admission = Admission {
+            freshness: &provenant_quota::DEFAULT_FRESHNESS,
             policy: self.policy,
             policies: self.policies,
             now_unix_seconds: now,
@@ -2658,7 +2737,7 @@ pub fn readiness_words(readiness: &ReadinessRead) -> String {
         result.push_str(&format!(" ({reason})"));
     }
     if let Some(scope) = &readiness.observed_scope {
-        result.push_str(&format!("; scope {}", scope.route.escape_debug()));
+        result.push_str(&format!("; scope {}", scope.route.as_text()));
     }
     if let Some(observed) = readiness.observed_unix_seconds {
         result.push_str(&format!("; observed {observed}"));
@@ -3246,7 +3325,7 @@ mod tests {
             host: LOCAL_HOST.into(),
             adapter: account.adapter.clone(),
             account_key: account.account_key.clone(),
-            route: "cursor/composer-2.5".into(),
+            route: provenant_quota::ReadinessRoute::from_text("cursor/composer-2.5"),
         };
         assert_eq!(
             read_readiness(roots.state.as_path(), &scope, now).reason,
@@ -3631,7 +3710,7 @@ mod tests {
                 host: LOCAL_HOST.into(),
                 adapter: "claude".into(),
                 account_key: "key".into(),
-                route: "claude/model".into(),
+                route: provenant_quota::ReadinessRoute::from_text("claude/model"),
             },
             read_at,
         );
@@ -3750,6 +3829,7 @@ mod tests {
                 schema_version: 1,
                 generated_unix_seconds: 0,
                 accounts: vec![AccountRow {
+                    models: Vec::new(),
                     account: AccountScope {
                         extra: Default::default(),
                         adapter: "agy".into(),
@@ -3796,6 +3876,7 @@ mod tests {
     #[test]
     fn decorate_gives_generic_keychain_repair_without_a_matching_registration() {
         let row = |label: &str| AccountRow {
+            models: Vec::new(),
             account: AccountScope {
                 extra: Default::default(),
                 adapter: "agy".into(),
@@ -3847,6 +3928,7 @@ mod tests {
             schema_version: 1,
             generated_unix_seconds: 0,
             accounts: vec![AccountRow {
+                models: Vec::new(),
                 account: AccountScope { extra: Default::default(),
                     adapter: "agy".into(),
                     account_key: "agy-google-abc".into(),
@@ -3888,6 +3970,7 @@ mod tests {
     #[test]
     fn quota_summary_bounds_rows_and_counts_omitted_accounts() {
         let row = |status| AccountRow {
+            models: Vec::new(),
             account: AccountScope {
                 extra: Default::default(),
                 adapter: "test".into(),
@@ -3964,6 +4047,7 @@ mod tests {
         let zone = jiff::tz::TimeZone::get("Australia/Brisbane").unwrap();
         let second = |value: &str| value.parse::<jiff::Timestamp>().unwrap().as_second();
         let row = |label: &str, resets_at: Option<&str>| AccountRow {
+            models: Vec::new(),
             account: AccountScope {
                 extra: Default::default(),
                 adapter: "opencode".into(),
@@ -4182,6 +4266,7 @@ mod tests {
             status,
             resets_at: None,
             refusals: vec![],
+            models: Vec::new(),
             free_pool_refusal: false,
             age_seconds: Some(7),
             next_due_unix_seconds: None,
@@ -4580,6 +4665,8 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
             &provenant_records::policy::Policy::default(),
+            &provenant_quota::DEFAULT_FRESHNESS,
+            &[],
         )?;
         let bytes = serde_json::to_vec(&report)?;
         durable(provenant_os::fs::Directory::atomic_write_with_permissions(
@@ -5093,7 +5180,7 @@ mod tests {
             host: LOCAL_HOST.into(),
             adapter: "claude".into(),
             account_key: "go".into(),
-            route: "claude/another-model".into(),
+            route: provenant_quota::ReadinessRoute::from_text("claude/another-model"),
         };
         for now in [101, 1000] {
             assert_eq!(
@@ -5234,7 +5321,7 @@ mod tests {
             host: LOCAL_HOST.into(),
             adapter: "codex".into(),
             account_key: "key".into(),
-            route: "codex/model".into(),
+            route: provenant_quota::ReadinessRoute::from_text("codex/model"),
         };
         let mut file = ReadinessFile::default();
         let mut account = AccountRecord::empty(provenant_quota::AccountScope {
@@ -5287,7 +5374,7 @@ mod tests {
             host: LOCAL_HOST.into(),
             adapter: "opencode".into(),
             account_key: "go".into(),
-            route: "opencode/model".into(),
+            route: provenant_quota::ReadinessRoute::from_text("opencode/model"),
         };
         let account = AccountRecord::empty(provenant_quota::AccountScope {
             extra: Default::default(),
@@ -5324,7 +5411,7 @@ mod tests {
         file.login = Some(provenant_quota::LoginObservation {
             extra: Default::default(),
             scope: ReadinessScope {
-                route: provenant_quota::ACCOUNT_ROUTE.into(),
+                route: provenant_quota::ReadinessRoute::Account,
                 ..scope.clone()
             },
             observed_unix_seconds: 100,
@@ -5393,6 +5480,8 @@ mod tests {
             0,
             "/report.json".into(),
             &provenant_records::policy::Policy::default(),
+            &provenant_quota::DEFAULT_FRESHNESS,
+            &[],
         )?;
         for (icon, expected) in [
             ("codex-removed", MOST_CONSTRAINED),
@@ -5433,7 +5522,7 @@ mod tests {
             host: LOCAL_HOST.into(),
             adapter: adapter.into(),
             account_key: key.into(),
-            route: route.into(),
+            route: provenant_quota::ReadinessRoute::from_text(route),
         };
         let pool = scope("claude", "key", "pool");
         // No file reads as unknown, never ready.
@@ -5798,7 +5887,7 @@ mod tests {
                     host: LOCAL_HOST.into(),
                     adapter: "codex".into(),
                     account_key: "key".into(),
-                    route: provenant_quota::ACCOUNT_ROUTE.into(),
+                    route: provenant_quota::ReadinessRoute::Account,
                 },
                 SystemClock::new().unix_seconds(),
             );
@@ -5823,7 +5912,7 @@ mod tests {
             host: LOCAL_HOST.into(),
             adapter: "claude".into(),
             account_key: "key".into(),
-            route: "claude/model".into(),
+            route: provenant_quota::ReadinessRoute::from_text("claude/model"),
         };
         let file = ReadinessFile {
             extra: Default::default(),
@@ -5923,7 +6012,7 @@ mod tests {
             host: LOCAL_HOST.into(),
             adapter: "agy".into(),
             account_key: "work".into(),
-            route: "agy/model".into(),
+            route: provenant_quota::ReadinessRoute::from_text("agy/model"),
         };
         let held = read_readiness(state, &route, SystemClock::new().unix_seconds());
         assert_eq!(held.state, ReadinessState::Unavailable);
@@ -5947,7 +6036,7 @@ mod tests {
             ReadinessState::Unknown
         );
         let pool = ReadinessScope {
-            route: "pool-0".into(),
+            route: provenant_quota::ReadinessRoute::pool("pool-0"),
             ..route.clone()
         };
         assert_eq!(
@@ -6064,6 +6153,8 @@ mod tests {
             100,
             "/report.json".into(),
             &provenant_records::policy::Policy::default(),
+            &provenant_quota::DEFAULT_FRESHNESS,
+            &[],
         )?;
         let human = quota_human(&report);
         let snapshot = report.accounts[0].snapshot.as_ref().unwrap();
@@ -6178,6 +6269,8 @@ mod tests {
             100,
             "/report.json".into(),
             &provenant_records::policy::Policy::default(),
+            &provenant_quota::DEFAULT_FRESHNESS,
+            &[],
         )
         .unwrap();
         assert_eq!(rep.coverage.known, 3);

@@ -120,7 +120,7 @@ pub(super) fn graph_run_refuses_low_disk_writers() -> Result {
                 host: provenant_quota::LOCAL_HOST.into(),
                 adapter: account.account.adapter.clone(),
                 account_key: account.account.account_key.clone(),
-                route: "codex/gpt-6-luna".into(),
+                route: provenant_quota::ReadinessRoute::from_text("codex/gpt-6-luna"),
             },
             state: provenant_quota::ReadinessState::Ready,
             reason: None,
