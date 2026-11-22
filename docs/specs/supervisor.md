@@ -153,7 +153,7 @@ because the guardian cannot read config; unreadable run settings warn
 unresolved exit carries a `retention` record (guardian identity, start, limit)
 and `provenant status` names the guardian only while its exact identity is
 alive; otherwise it points to `provenant reconcile`. When retention ends with the
-exit unresolved, the record adds `retention.ended` with the reason, time
+exit unresolved, the `retention` record adds an `ended` object with the reason, time
 retained and a diagnostic blocker (`RetentionBlocker`). Past the limit the
 guardian exits `timeout` with code `RETENTION_LIMIT`; other guardian faults use
 `SUPERVISOR`. Ending retention signals and removes nothing: the unresolved exit
