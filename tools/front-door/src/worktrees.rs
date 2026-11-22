@@ -2260,17 +2260,22 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     // A binding whose common directory is gone stops being a project once its
     // last record has been idle for the same lifetime. Pressure sweeps leave
     // the registry alone; previews name what a later apply retires.
-    let retired_projects: Vec<RetiredProject> = if command.pressure {
-        Vec::new()
+    let retirement = if command.pressure {
+        provenant_config::Retirement::default()
     } else {
         provenant_config::retire_vanished_projects(&roots, idle_seconds, command.dry_run)?
-            .into_iter()
-            .map(|binding| RetiredProject {
-                project: binding.project_id(),
-                common_dir: binding.common_dir().to_owned(),
-            })
-            .collect()
     };
+    for warning in retirement.warnings {
+        append_sweep_warning(&mut sweep_warning, warning);
+    }
+    let retired_projects: Vec<RetiredProject> = retirement
+        .retired
+        .into_iter()
+        .map(|binding| RetiredProject {
+            project: binding.project_id(),
+            common_dir: binding.common_dir().to_owned(),
+        })
+        .collect();
     if initial_cursor
         .as_ref()
         .is_some_and(|cursor| cursor.class == "complete")

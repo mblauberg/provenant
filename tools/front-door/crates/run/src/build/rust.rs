@@ -285,7 +285,6 @@ mod tests {
     #[test]
     fn lane_varying_environment_is_removed() {
         let context = BuildContext {
-            schema: 1,
             project: "/project".into(),
             project_key: "p".into(),
             worktree: "/lane/a".into(),

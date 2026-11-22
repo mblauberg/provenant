@@ -1069,15 +1069,6 @@ fn digest_prepare(prepare: &[Vec<String>]) -> String {
         .collect()
 }
 fn build_context(job: &Job, context: &RunContext) -> BuildContext {
-    if let Some(value) = job
-        .env
-        .iter()
-        .find(|(key, _)| key == provenant_core::consumer_env::BUILD_CONTEXT)
-        .and_then(|(_, value)| value.to_str())
-        && let Ok(context) = BuildContext::from_json(value)
-    {
-        return context;
-    }
     let get = |name: &str| {
         job.env
             .iter()
@@ -1085,7 +1076,6 @@ fn build_context(job: &Job, context: &RunContext) -> BuildContext {
             .map(|(_, value)| PathBuf::from(value))
     };
     BuildContext {
-        schema: 1,
         project: job.project.clone(),
         project_key: job.project_key.clone(),
         worktree: super::job_root(job).to_path_buf(),

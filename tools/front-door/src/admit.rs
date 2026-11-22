@@ -806,7 +806,6 @@ pub(crate) fn host_build_context(
         .and_then(|value| value.into_string().ok())
         .is_some_and(|value| value == "on");
     Ok(BuildContext {
-        schema: 1,
         project: project.clone(),
         project_key,
         worktree: project,

@@ -572,7 +572,10 @@ impl TargetProtection {
 
 /// Snapshot live writer custody across every registered project for launch
 /// eviction. Any unreadable registration, run store or request makes the whole
-/// cache set conservative until a later observation succeeds.
+/// cache set conservative until a later observation succeeds. A vanished,
+/// retired or excluded registration protects nothing: it is skipped without
+/// aborting the scan, because a dead binding must never change host-wide cache
+/// collection.
 pub fn target_protection_for_launch(
     roots: &provenant_core::Roots,
     current_worktree: Option<&Path>,
@@ -681,7 +684,7 @@ pub fn target_protection_for_launch_while(
         cancel: &cancel,
     };
     let mut records_observed = 0_usize;
-    for project_id in project_ids {
+    'projects: for project_id in project_ids {
         if !keep_going() {
             let _ = writeln!(
                 std::io::stderr().lock(),
@@ -699,32 +702,29 @@ pub fn target_protection_for_launch_while(
                     common_dir.display()
                 );
                 protection.unobserved = true;
-                return protection;
+                continue 'projects;
             }
+            // The common directory is gone: the project holds no live custody,
+            // so it protects nothing. Retirement removes its record separately.
             Ok(provenant_config::GcProjectStatus::Vanished { binding, .. }) => {
                 let _ = writeln!(
                     std::io::stderr().lock(),
-                    "warning: project {project_id} at {} is gone; preserving all targets",
+                    "warning: project {project_id} at {} is gone; it protects no targets",
                     binding.common_dir().display()
                 );
-                protection.unobserved = true;
-                return protection;
+                continue 'projects;
             }
-            Ok(provenant_config::GcProjectStatus::Excluded) => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: project {project_id} registration is excluded; preserving all targets"
-                );
-                protection.unobserved = true;
-                return protection;
-            }
+            // Excluded registrations (non-Git workspaces, and record-less
+            // directories this selection no longer returns) are outside
+            // collection and protect nothing.
+            Ok(provenant_config::GcProjectStatus::Excluded) => continue 'projects,
             Err(error) => {
                 let _ = writeln!(
                     std::io::stderr().lock(),
                     "warning: project {project_id} lookup failed: {error}; preserving all targets"
                 );
                 protection.unobserved = true;
-                return protection;
+                continue 'projects;
             }
         };
         let checkout = binding
@@ -737,7 +737,7 @@ pub fn target_protection_for_launch_while(
                 "warning: project {project_id} has no primary checkout; preserving all targets"
             );
             protection.unobserved = true;
-            return protection;
+            continue 'projects;
         };
         let remaining = PROTECTION_SCAN_BUDGET.saturating_sub(started.elapsed());
         let budget = match provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))
@@ -761,7 +761,7 @@ pub fn target_protection_for_launch_while(
                     "warning: could not open repository for project {project_id}; preserving all targets"
                 );
                 protection.unobserved = true;
-                return protection;
+                continue 'projects;
             }
         };
         let common = match Directory::open_anchor(binding.common_dir()) {
@@ -772,7 +772,7 @@ pub fn target_protection_for_launch_while(
                     "warning: could not open common dir for project {project_id}; preserving all targets"
                 );
                 protection.unobserved = true;
-                return protection;
+                continue 'projects;
             }
         };
         if !common
@@ -784,7 +784,7 @@ pub fn target_protection_for_launch_while(
                 "warning: common dir identity mismatch for project {project_id}; preserving all targets"
             );
             protection.unobserved = true;
-            return protection;
+            continue 'projects;
         }
         let project_state_path = roots
             .state
@@ -800,7 +800,7 @@ pub fn target_protection_for_launch_while(
                     "warning: could not read project state for project {project_id}; preserving all targets"
                 );
                 protection.unobserved = true;
-                return protection;
+                continue 'projects;
             }
         };
         let registration = project_state.as_ref().map_or(
@@ -838,7 +838,7 @@ pub fn target_protection_for_launch_while(
                     "warning: writer occupancy inspection failed for project {project_id}; preserving all targets"
                 );
                 protection.unobserved = true;
-                return protection;
+                continue 'projects;
             }
         };
         let project_key = provenant_config::project_key(binding.common_dir());
@@ -863,7 +863,7 @@ pub fn target_protection_for_launch_while(
                     "warning: could not open run store for project {project_id}: {error}; preserving all targets"
                 );
                 protection.unobserved = true;
-                return protection;
+                continue 'projects;
             }
         }) else {
             continue;
@@ -945,7 +945,7 @@ pub fn target_protection_for_launch_while(
                 "warning: lane record scan incomplete for project {project_id}; preserving all targets"
             );
             protection.unobserved = true;
-            return protection;
+            continue 'projects;
         }
     }
     protection
@@ -4294,32 +4294,106 @@ mod tests {
         fs::create_dir(&entry)?;
         fs::set_permissions(&entry, fs::Permissions::from_mode(0o700))?;
         let workers = provenant_confinement::worktrees::SystemWorkerObserver;
-        for interrupted in [true, false] {
-            let mut stop = || interrupted;
-            let protection =
-                target_protection_for_launch_while(&roots, None, None, &workers, &mut stop);
-            assert!(
-                protection.unobserved,
-                "incomplete enumeration or missing typed binding must protect all targets"
-            );
-            let fixture = Fixture::new();
-            let target = fixture.shared_profile('a', "debug", 4096, 1000);
-            let budget = provenant_config::CargoCacheBudget {
-                bytes: 0,
-                setting: "0".into(),
-                source: provenant_records::LimitSource::Default,
-            };
-            let report = collect_with_protection(
-                &state,
-                fixture.home.path(),
-                limits(0, 0),
-                false,
-                &budget,
-                &protection,
-            )?;
-            assert!(report.removed.is_empty());
-            assert!(target.exists());
-        }
+        let mut stop = || true;
+        let protection =
+            target_protection_for_launch_while(&roots, None, None, &workers, &mut stop);
+        assert!(
+            protection.unobserved,
+            "an interrupted registry scan must protect all targets"
+        );
+        let fixture = Fixture::new();
+        let target = fixture.shared_profile('a', "debug", 4096, 1000);
+        let budget = provenant_config::CargoCacheBudget {
+            bytes: 0,
+            setting: "0".into(),
+            source: provenant_records::LimitSource::Default,
+        };
+        let report = collect_with_protection(
+            &state,
+            fixture.home.path(),
+            limits(0, 0),
+            false,
+            &budget,
+            &protection,
+        )?;
+        assert!(report.removed.is_empty());
+        assert!(target.exists());
+        Ok(())
+    }
+
+    // Spec: docs/specs/disk.md#scratch-and-cache-custody
+    #[test]
+    fn a_retired_binding_still_lets_targets_be_collected() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let fixture = Fixture::new();
+        let temp = tempfile::tempdir()?;
+        let root = fs::canonicalize(temp.path())?;
+        let home = root.join("home");
+        let project = root.join("project");
+        let common = project.join(".git");
+        let state = root.join("state");
+        fs::create_dir_all(&home)?;
+        fs::create_dir_all(&common)?;
+        fs::create_dir(&state)?;
+        fs::write(common.join("HEAD"), "ref: refs/heads/main")?;
+        fs::create_dir(common.join("objects"))?;
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
+        let mut inputs = provenant_core::RootInputs::new(home, project);
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let binding = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(&common)?,
+        )?;
+
+        // A vanished common directory holds no live custody: it protects no
+        // target and never aborts the scan for later projects.
+        fs::remove_dir_all(&common)?;
+        assert!(matches!(
+            provenant_config::lookup_gc_project(&roots, binding.project_id())?,
+            provenant_config::GcProjectStatus::Vanished { .. }
+        ));
+        assert!(
+            !target_protection_for_launch(&roots, None, None).unobserved,
+            "a vanished binding protects nothing"
+        );
+
+        // Retirement removes the record and keeps the host-project directory
+        // for a later bind. The directory is absent to collection, so the
+        // retired binding cannot preserve every Cargo target host-wide.
+        assert!(provenant_config::forget_project(
+            &roots,
+            binding.project_id()
+        )?);
+        assert!(
+            provenant_config::project_binding_dir(roots.state.as_path(), binding.project_id())
+                .exists()
+        );
+        let protection = target_protection_for_launch(&roots, None, None);
+        assert!(
+            !protection.unobserved,
+            "a record-less host-project directory is absent, not unobserved"
+        );
+
+        let target = fixture.shared_profile('a', "debug", 4096, 100);
+        let budget = provenant_config::CargoCacheBudget {
+            bytes: 0,
+            setting: "0".into(),
+            source: provenant_records::LimitSource::Default,
+        };
+        let report = collect_with_protection(
+            roots.state.as_path(),
+            fixture.home.path(),
+            limits(0, 0),
+            false,
+            &budget,
+            &protection,
+        )?;
+        assert!(
+            report.removed.iter().any(|entry| entry.path == target),
+            "a retired binding must not protect targets: {report:?}"
+        );
+        assert!(!target.exists());
         Ok(())
     }
 

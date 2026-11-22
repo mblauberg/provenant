@@ -1,5 +1,7 @@
-//! Local verification a writer is told to run (`lanes.verification`).
-//! Advisory: the preamble names its source. A brief line overrides the knob.
+//! Verification guidance in a writer preamble (`lanes.verification`). Lanes
+//! format only; the paragraph names what the chair's integrated check and CI
+//! will run. Advisory: the preamble names its source. A brief line overrides
+//! the knob.
 use provenant_records::{LimitSource, run::HarnessProfile};
 
 /// The registry knob.
@@ -7,7 +9,7 @@ pub const KNOB: &str = "lanes.verification";
 
 /// The default verification paragraph. A launch that does not override it
 /// includes this text unchanged.
-pub const CHECK_PARAGRAPH: &str = "Verification: CI runs the full tests and lints. Build in the CARGO_TARGET_DIR the lane sets, this worktree's own target seeded warm. When it is warm, run `cargo check`, clippy on touched crates and the tests that cover your change; otherwise do not build cold: leave it to CI and say so. Report what you ran (source: default; lanes.verification).\n";
+pub const CHECK_PARAGRAPH: &str = "Verification: format only. Run `cargo fmt` (or the repository's formatter) on the files you touched; do not compile, seed or admit a build. The chair's integrated check compiles and lints the touched crates and their tests, and CI runs the full suite. Report what you formatted (source: default; lanes.verification).\n";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VerificationScope {
@@ -98,13 +100,13 @@ impl VerificationResolution {
         }
         let body = match scope.value {
             VerificationScope::Check => {
-                "Verification: build in the CARGO_TARGET_DIR the lane sets, this worktree's own target seeded warm; if it is cold, say so and leave the build to CI. Run cargo check on the touched crates, then commit and push."
+                "Verification: format only. Run the repository's formatter on the files you touched; do not compile, seed or admit a build. The chair's integrated check compiles and lints the touched crates, and CI runs the full suite. Then commit and push."
             }
             VerificationScope::Targeted => {
-                "Verification: build in the CARGO_TARGET_DIR the lane sets, this worktree's own target seeded warm; if it is cold, say so and leave the build to CI. Run cargo check, clippy on touched crates and targeted tests for changed code, then commit and push. Leave the whole workspace suite to CI."
+                "Verification: format only. Run the repository's formatter on the files you touched; do not compile, seed or admit a build. The chair's integrated check compiles and lints the touched crates and their tests, and CI runs the full suite. Then commit and push."
             }
             VerificationScope::Full => {
-                "Verification: build in the CARGO_TARGET_DIR the lane sets, this worktree's own target seeded warm; if it is cold, say so and leave the build to CI. Run the local checks the repository documents for this change, including its tests; leave the whole workspace suite to CI, then commit and push."
+                "Verification: format only. Run the repository's formatter on the files you touched; do not compile, seed or admit a build. The chair's integrated check compiles and lints the whole workspace, and CI runs the full suite. Then commit and push."
             }
         };
         format!("{body} (source: {}; {KNOB}).\n", scope.source)
@@ -154,7 +156,11 @@ mod tests {
         assert!(cause.contains("the brief declares targeted"), "{cause}");
         let text = resolved.paragraph();
         assert!(text.contains("source: brief"));
-        assert!(text.contains("targeted tests"));
+        assert!(text.contains("touched crates and their tests"));
+        assert!(text.contains("format only"));
+        assert!(!text.contains("cargo check"));
+        assert!(!text.contains("cargo build"));
+        assert!(!text.contains("seeded warm"));
         assert!(!text.contains("at most one cheap compile check"));
     }
 
@@ -163,6 +169,29 @@ mod tests {
         let resolved = VerificationResolution::resolve(&HarnessProfile::default(), "implement it");
         assert_eq!(resolved.paragraph(), CHECK_PARAGRAPH);
         assert!(resolved.paragraph().contains("source: default"));
+        assert!(resolved.paragraph().contains("format only"));
+        assert!(!resolved.paragraph().contains("cargo check"));
+    }
+
+    // Spec: docs/specs/run.md#lanes-do-not-build
+    #[test]
+    fn every_scope_tells_the_lane_to_format_and_never_to_build() {
+        for (scope, source) in [
+            (VerificationScope::Check, "check"),
+            (VerificationScope::Targeted, "targeted"),
+            (VerificationScope::Full, "full"),
+        ] {
+            let mut profile = HarnessProfile::default();
+            profile.knobs.insert(KNOB.into(), source.into());
+            profile.knob_sources.insert(KNOB.into(), LimitSource::Host);
+            let text = VerificationResolution::resolve(&profile, "implement it").paragraph();
+            assert!(text.contains("format only"), "{scope:?}: {text}");
+            assert!(text.contains("source: host"), "{scope:?}: {text}");
+            assert!(!text.contains("cargo check"), "{scope:?}: {text}");
+            assert!(!text.contains("cargo build"), "{scope:?}: {text}");
+            assert!(!text.contains("CARGO_TARGET_DIR"), "{scope:?}: {text}");
+            assert!(!text.contains("seeded warm"), "{scope:?}: {text}");
+        }
     }
 
     #[test]

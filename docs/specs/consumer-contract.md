@@ -107,7 +107,6 @@ port commands, and `caller` ones are read only from the caller.
 | `PROVENANT_ADMISSION_SLOT_STATE` | lane | internal | The host admission state directory. | only for admitted commands |
 | `PROVENANT_ADMISSION_SLOTS` | lane | internal | The host admission class slot count. | only for admitted commands |
 | `PROVENANT_ADMISSION_WAIT_DIR` | lane | internal | The lane scratch directory for admission wait signal. | only for admitted commands |
-| `PROVENANT_BUILD_CONTEXT` | lane | internal | Frozen host-side repository and toolchain context for a build job. | the chair's host-owned warm check |
 | `PROVENANT_ADMISSION_DISK_LIMITS` | lane | internal | Encoded admission disk limits. | only for admitted commands |
 | `PROVENANT_ADMISSION_MEMORY_LIMIT` | lane | internal | Admission memory limit in bytes. | only for admitted commands |
 | `PROVENANT_ADMISSION_TRIM_ACTION` | lane | internal | Trim action executed on disk floor or memory pressure. | only for admitted commands |

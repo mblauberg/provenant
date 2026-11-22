@@ -936,8 +936,8 @@
       "default": "targeted",
       "status": "wired",
       "reader": "tools/front-door/crates/run/src/verification.rs",
-      "effect": "Local verification a writer lane is told to run before it commits. targeted (default) uses the worktree's own target for cargo check, clippy on touched crates and targeted tests. check is one cargo check of the package it changed. full runs the repository's documented local checks, leaving the whole workspace suite to CI. A brief line `Verification scope: targeted` (or check or full) overrides the knob; the preamble then names source brief. Host and project [knobs] name source host or project. Set per run with --knob lanes.verification=targeted.",
-      "trade_off": "Advisory guidance; a wider scope spends the host build cap."
+      "effect": "Verification guidance in a writer lane's preamble. The lane formats only: it never compiles, seeds or admits a build. targeted (default) names the touched crates and their tests that the chair's integrated check compiles and lints; check narrows that to the touched crates; full names the whole workspace. CI runs the full suite in every case. A brief line `Verification scope: targeted` (or check or full) overrides the knob; the preamble then names source brief. Host and project [knobs] name source host or project. Set per run with --knob lanes.verification=targeted.",
+      "trade_off": "Advisory guidance; a wider scope spends the chair's host build cap, never the lane's, because lanes do not build."
     },
     "lanes.writer_dirty": {
       "type": "enum",

@@ -80,7 +80,6 @@ pub const ADMISSION_SLOT: &str = "PROVENANT_ADMISSION_SLOT";
 pub const ADMISSION_SLOT_STATE: &str = "PROVENANT_ADMISSION_SLOT_STATE";
 pub const ADMISSION_SLOTS: &str = "PROVENANT_ADMISSION_SLOTS";
 pub const ADMISSION_WAIT_DIR: &str = "PROVENANT_ADMISSION_WAIT_DIR";
-pub const BUILD_CONTEXT: &str = "PROVENANT_BUILD_CONTEXT";
 pub const ADMISSION_DISK_LIMITS: &str = "PROVENANT_ADMISSION_DISK_LIMITS";
 pub const ADMISSION_MEMORY_LIMIT: &str = "PROVENANT_ADMISSION_MEMORY_LIMIT";
 pub const ADMISSION_TRIM_ACTION: &str = "PROVENANT_ADMISSION_TRIM_ACTION";
@@ -373,7 +372,7 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         CARGO_SOURCE_WRITES,
         Lane,
         Internal,
-        "Whether lane Cargo may write registry sources; the cargo shim explains offline failures with it.",
+        "Whether the lane Cargo home may write registry sources.",
         "lanes with a Cargo home",
     ),
     var(
@@ -417,13 +416,6 @@ pub const CONSUMER_ENV: &[EnvVar] = &[
         Internal,
         "The lane scratch directory for admission wait signal.",
         ADMITTED_COMMAND,
-    ),
-    var(
-        BUILD_CONTEXT,
-        Lane,
-        Internal,
-        "Frozen host-side repository and toolchain context for a build job.",
-        "the chair's host-owned warm check",
     ),
     var(
         ADMISSION_DISK_LIMITS,

@@ -198,9 +198,9 @@ pub fn lookup_project_at_state(
 
 /// Remove one binding record so the host stops treating the project as
 /// registered. The private host-project directory and its settings stay, so a
-/// later bind of the same common directory reuses them. Returns whether a
-/// record was removed; a missing binding or an unpublished stage is not an
-/// error.
+/// later bind of the same common directory reuses them; scheduled collection
+/// treats a directory without a record as absent. Returns whether a record was
+/// removed; a missing binding or an unpublished stage is not an error.
 pub fn forget_project(roots: &Roots, project: ProjectId) -> Result<bool, ConfigError> {
     forget_project_at_state(roots.state.as_path(), project)
 }
@@ -326,6 +326,16 @@ pub fn lookup_gc_project(
     }
 }
 
+/// Retirement of bindings whose common directory is gone. A preview names
+/// what apply would retire. Per-binding read or removal failures are warnings:
+/// one unreadable registration never aborts the pass, which fails only when the
+/// registry itself cannot be enumerated.
+#[derive(Debug, Default)]
+pub struct Retirement {
+    pub retired: Vec<ProjectBinding>,
+    pub warnings: Vec<String>,
+}
+
 /// Retire bindings whose common directory is gone and whose record has not
 /// changed for `idle_seconds`. A vanished directory leaves the record's last
 /// modification as the only age evidence; preview reports without removing.
@@ -333,7 +343,7 @@ pub fn retire_vanished_projects(
     roots: &Roots,
     idle_seconds: u64,
     dry_run: bool,
-) -> Result<Vec<ProjectBinding>, ConfigError> {
+) -> Result<Retirement, ConfigError> {
     let now_ns = i128::from(
         provenant_os::clock::SystemClock::new()
             .try_unix_millis()
@@ -341,24 +351,44 @@ pub fn retire_vanished_projects(
     ) * 1_000_000;
     let idle_ns = i128::from(idle_seconds) * 1_000_000_000;
     let selection = registered_gc_project_selection(roots)?;
-    let mut retired = Vec::new();
+    let mut retirement = Retirement::default();
     for project in selection.project_ids {
+        let status = match lookup_gc_project(roots, project) {
+            Ok(status) => status,
+            Err(error) => {
+                retirement.warnings.push(format!(
+                    "project {} lookup failed while retiring vanished bindings: {error}",
+                    project_binding_dir(roots.state.as_path(), project).display()
+                ));
+                continue;
+            }
+        };
         let GcProjectStatus::Vanished {
             binding,
             record_modified_ns,
-        } = lookup_gc_project(roots, project)?
+        } = status
         else {
             continue;
         };
         if now_ns.saturating_sub(record_modified_ns) < idle_ns || binding.common_dir_present() {
             continue;
         }
-        if !dry_run && !forget_project(roots, project)? {
-            continue;
+        if !dry_run {
+            match forget_project(roots, project) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    retirement.warnings.push(format!(
+                        "project {} could not be retired: {error}",
+                        project_binding_dir(roots.state.as_path(), project).display()
+                    ));
+                    continue;
+                }
+            }
         }
-        retired.push(binding);
+        retirement.retired.push(binding);
     }
-    Ok(retired)
+    Ok(retirement)
 }
 
 /// Scheduled projects and transient registrations excluded from collection.
@@ -526,8 +556,9 @@ fn checkpoint_gc_selection(
     }
 }
 
-/// Enumerate registered project IDs in resumable batches. Paths are resolved
-/// from their current records by callers immediately before use.
+/// Enumerate registered project IDs in resumable batches. A directory without
+/// a published record is absent, so a retired binding is not selected. Paths
+/// are resolved from their current records by callers immediately before use.
 pub fn registered_gc_project_selection_with_progress(
     roots: &Roots,
     resume_detail: Option<&str>,
@@ -690,6 +721,12 @@ pub fn registered_gc_project_selection_with_progress(
             warn_unrecognised_project(&registry_path.join(&entry));
             continue;
         };
+        // A directory without a record is what a forgotten binding leaves
+        // behind. It is absent to collection: selecting its ID would make a
+        // retired project look like live custody.
+        if !project_directory_is_registered(&registry, &entry) {
+            continue;
+        }
         snapshot.project_ids.insert(project);
     }
 
@@ -860,6 +897,22 @@ fn find_binding(
         }
     }
     Ok(found)
+}
+
+/// A directory that exists but has no published record. A forgotten or
+/// retired binding leaves its host-project directory in place so a later bind
+/// reuses the settings; collection must treat that directory as absent.
+/// Anything that exists but cannot be inspected stays selected, so the caller
+/// marks a genuinely unreadable registration unobserved rather than skipping
+/// it.
+fn project_directory_is_registered(registry: &Directory, entry: &OsStr) -> bool {
+    match registry.open_verified_directory(entry) {
+        Ok(directory) => match directory.metadata_at(OsStr::new(RECORD), false) {
+            Ok(_) => true,
+            Err(error) => !error.is_not_found(),
+        },
+        Err(error) => !error.is_not_found(),
+    }
 }
 
 /// One clear warning for an entry that cannot be a binding directory. The
@@ -1466,6 +1519,12 @@ mod tests {
         assert_eq!(lookup_project(&roots, &location).unwrap(), None);
         assert!(registered_projects(&roots).unwrap().is_empty());
         assert!(
+            registered_gc_project_selection(&roots)
+                .unwrap()
+                .project_ids
+                .is_empty()
+        );
+        assert!(
             directory.exists(),
             "the host-project directory stays for a later bind"
         );
@@ -1490,11 +1549,9 @@ mod tests {
             lookup_gc_project(&roots, binding.project_id()).unwrap(),
             GcProjectStatus::Vanished { .. }
         ));
-        assert!(
-            retire_vanished_projects(&roots, 3600, false)
-                .unwrap()
-                .is_empty()
-        );
+        let retirement = retire_vanished_projects(&roots, 3600, false).unwrap();
+        assert!(retirement.warnings.is_empty());
+        assert!(retirement.retired.is_empty());
 
         let record = project_binding_dir(roots.state.as_path(), binding.project_id()).join(RECORD);
         fs::File::open(&record)
@@ -1504,6 +1561,7 @@ mod tests {
         assert_eq!(
             retire_vanished_projects(&roots, 3600, true)
                 .unwrap()
+                .retired
                 .iter()
                 .map(ProjectBinding::project_id)
                 .collect::<Vec<_>>(),
@@ -1512,10 +1570,53 @@ mod tests {
         );
         assert!(registered_projects(&roots).unwrap().contains(&binding));
         assert_eq!(
-            retire_vanished_projects(&roots, 3600, false).unwrap(),
+            retire_vanished_projects(&roots, 3600, false)
+                .unwrap()
+                .retired,
             vec![binding]
         );
         assert!(registered_projects(&roots).unwrap().is_empty());
+    }
+
+    #[test]
+    fn retirement_warns_about_an_unreadable_binding_and_retires_the_rest() {
+        let temp = tempdir();
+        let roots = roots(&temp);
+        let base = canonical_base(&temp);
+
+        let vanished = base.join("vanished/.git");
+        fs::create_dir_all(vanished.join("objects")).unwrap();
+        fs::write(vanished.join("HEAD"), "ref: refs/heads/main").unwrap();
+        let retired = bind_project(&roots, ProjectLocation::new(&vanished).unwrap()).unwrap();
+        fs::remove_dir_all(&vanished).unwrap();
+        let record = project_binding_dir(roots.state.as_path(), retired.project_id()).join(RECORD);
+        fs::File::open(&record)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH)
+            .unwrap();
+
+        let corrupt = base.join("corrupt/.git");
+        fs::create_dir_all(corrupt.join("objects")).unwrap();
+        fs::write(corrupt.join("HEAD"), "ref: refs/heads/main").unwrap();
+        let unreadable = bind_project(&roots, ProjectLocation::new(&corrupt).unwrap()).unwrap();
+        fs::write(
+            project_binding_dir(roots.state.as_path(), unreadable.project_id()).join(RECORD),
+            "truncated",
+        )
+        .unwrap();
+
+        let retirement = retire_vanished_projects(&roots, 3600, false).unwrap();
+        assert_eq!(retirement.retired, vec![retired]);
+        assert_eq!(retirement.warnings.len(), 1);
+        assert!(
+            retirement.warnings[0].contains(&unreadable.project_id().to_string()),
+            "the warning names the unreadable binding: {:?}",
+            retirement.warnings
+        );
+        assert!(matches!(
+            lookup_gc_project(&roots, unreadable.project_id()),
+            Err(ConfigError::InvalidProjectBinding)
+        ));
     }
 
     // Spec: docs/specs/disk.md#bounded-sweeps

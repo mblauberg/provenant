@@ -25,9 +25,11 @@ else `HOME/.cargo`). Adapters and the launching shell cannot replace it.
 
 Lanes share the host's registry, Git databases and checkouts and may write them, so a build
 fetches once for every later build. `domains.fabric.lanes.cargo_source_writes = false` makes them
-read-only and Cargo offline; a missing dependency then fails and the Cargo shim names the setting,
-its source and the host fetch to run. `credentials` and `credentials.toml` are always denied read
-and write, including in relocated homes; host `config` files are read-only data.
+read-only and Cargo offline; a missing dependency then fails offline, and the admission wrapper
+names the setting, its source and the host fetch to run. A lane's own manual cargo invocation sees
+the read-only Cargo home and `PROVENANT_CARGO_SOURCE_WRITES`. `credentials` and `credentials.toml`
+are always denied read and write, including in relocated homes; host `config` files are read-only
+data.
 
 ## Lanes do not build
 

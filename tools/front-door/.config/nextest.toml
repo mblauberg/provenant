@@ -66,7 +66,7 @@ not (
         test(=peer_agent::tests::forward_falls_back_only_when_no_agent_accepts) |
         test(=peer_agent::tests::listen_replaces_a_stale_socket_but_not_a_live_agent)
     )) |
-    (package(=provenant) & binary(=integration) & test(=fabric_lane::lane_run_submits_child_through_parent_relay)) |
+    (package(=provenant) & binary(=integration) & test(=fabric_lane::lane_run_submits_child_through_parent_relay))
 )
 '''
 
