@@ -29,11 +29,11 @@
           "summary": null
         },
         "role": "chair",
-        "summary": "Console checkpoint",
-        "summary_status": "title"
+        "summary": null,
+        "summary_status": "unavailable"
       }
     ],
-    "snapshot": "sha256:7ffa1a4dcbac2b9c9e95a2b559da36b564600c99e7be2f699a595b8ab1fda1d2",
+    "snapshot": "sha256:9b20d92ab3bb05518444148548bdfcce45638cbac982608e2e274fc8ce398f1f",
     "truncated": false
   },
   "error": null,
