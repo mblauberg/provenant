@@ -1529,7 +1529,7 @@ mod admission_tests {
             let file = crate::ReadinessFile {
                 records: vec![crate::RouteReadiness {
                     extra: Default::default(),
-                    schema_version: 1,
+                    schema_version: crate::READINESS_SCHEMA_VERSION,
                     scope: scope.clone(),
                     state: crate::ReadinessState::Unavailable,
                     reason: Some(crate::ReadinessReason::ProviderRefusal),

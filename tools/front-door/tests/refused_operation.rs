@@ -53,11 +53,11 @@ fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
         ));
         let now = SystemClock::new().unix_seconds();
         let readiness = provenant_quota::ReadinessFile {
-            schema_version: 1,
+            schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
             login: None,
             extra: Default::default(),
             records: vec![provenant_quota::RouteReadiness {
-                schema_version: 1,
+                schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
                 extra: Default::default(),
                 scope: provenant_quota::ReadinessScope {
                     host: provenant_quota::LOCAL_HOST.into(),

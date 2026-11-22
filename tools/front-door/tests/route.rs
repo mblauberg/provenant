@@ -164,7 +164,7 @@ fn resolve_reports_effort_controls_and_nearby_models() -> Result {
     let file = provenant_quota::ReadinessFile {
         records: vec![provenant_quota::RouteReadiness {
             extra: Default::default(),
-            schema_version: 1,
+            schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
             scope: provenant_quota::ReadinessScope {
                 extra: Default::default(),
                 host: provenant_quota::LOCAL_HOST.into(),

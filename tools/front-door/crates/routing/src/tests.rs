@@ -343,7 +343,7 @@ fn observation(
 ) -> provenant_quota::RouteReadiness {
     provenant_quota::RouteReadiness {
         extra: Default::default(),
-        schema_version: 1,
+        schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
         scope: provenant_quota::ReadinessScope {
             extra: Default::default(),
             host: provenant_quota::LOCAL_HOST.into(),
@@ -368,7 +368,7 @@ fn readiness_over(
     move |scope, now| {
         provenant_quota::ReadinessFile {
             extra: Default::default(),
-            schema_version: 1,
+            schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
             login: None,
             records: records
                 .iter()

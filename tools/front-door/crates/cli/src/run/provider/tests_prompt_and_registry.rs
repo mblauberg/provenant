@@ -929,10 +929,10 @@ fn registry_provider_resolves_prepares_and_reports_quota(
     let readiness_dir = state.join("readiness").join(account_key);
     std::fs::create_dir_all(&readiness_dir)?;
     let stale = provenant_quota::ReadinessFile { extra: Default::default(),
-        schema_version: 1,
+        schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
         login: None,
         records: vec![provenant_quota::RouteReadiness { extra: Default::default(),
-            schema_version: 1,
+            schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
             scope: provenant_quota::ReadinessScope { extra: Default::default(),
                 host: provenant_quota::LOCAL_HOST.into(),
                 adapter: adapter_name.into(),
@@ -1482,10 +1482,10 @@ fn prepare_with_partial_account_estimates(
         std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
         let readiness_path = directory.join("opencode.json");
         let readiness = provenant_quota::ReadinessFile { extra: Default::default(),
-            schema_version: 1,
+            schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
             login: None,
             records: vec![provenant_quota::RouteReadiness { extra: Default::default(),
-                schema_version: 1,
+                schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
                 scope: provenant_quota::ReadinessScope { extra: Default::default(),
                     host: provenant_quota::LOCAL_HOST.into(),
                     adapter: "opencode".into(),

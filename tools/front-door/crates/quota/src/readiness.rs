@@ -213,7 +213,10 @@ pub const ACCOUNT_ROUTE: &str = "*";
 /// older readers treat every JSON file under `quota/` as an account snapshot.
 pub const READINESS_DIRECTORY: &str = "readiness";
 pub const MAX_READINESS_RECORDS: usize = crate::MAX_WINDOWS;
-const SCHEMA_VERSION: u32 = 1;
+/// The readiness shape: 2 identifies the tagged route scope, which replaced the
+/// scope's string route. Older files do not decode and are dropped until the
+/// next observation rewrites them.
+pub const READINESS_SCHEMA_VERSION: u32 = 2;
 const QUOTA_PROBE: &str = "quota-probe";
 
 /// Non-secret expiry metadata observed for this account's login. It is not
@@ -347,7 +350,7 @@ impl Default for ReadinessFile {
     fn default() -> Self {
         Self {
             extra: Default::default(),
-            schema_version: SCHEMA_VERSION,
+            schema_version: READINESS_SCHEMA_VERSION,
             records: Vec::new(),
             login: None,
         }
@@ -365,7 +368,7 @@ impl ReadinessFile {
 
     fn validate(&self, adapter: &str, account_key: &str) -> Result<(), QuotaError> {
         let mut seen = std::collections::BTreeSet::new();
-        if self.schema_version != SCHEMA_VERSION
+        if self.schema_version != READINESS_SCHEMA_VERSION
             || self.records.len() > MAX_READINESS_RECORDS
             || self.login.as_ref().is_some_and(|login| {
                 login.scope.adapter != adapter
@@ -407,8 +410,8 @@ impl ReadinessFile {
             let Some(r) = self.records.iter().find(|r| r.scope.same_scope(scope)) else {
                 return ReadinessRead::absent();
             };
-            if self.schema_version != SCHEMA_VERSION
-                || r.schema_version != SCHEMA_VERSION
+            if self.schema_version != READINESS_SCHEMA_VERSION
+                || r.schema_version != READINESS_SCHEMA_VERSION
                 || r.observed_unix_seconds > now
                 || r.expires_unix_seconds <= r.observed_unix_seconds
                 || r.evidence_ref
@@ -559,7 +562,7 @@ impl ReadinessFile {
                 .find(|record| record.scope.same_scope(&scope));
             published.push(RouteReadiness {
                 extra: old.map_or_else(Default::default, |record| record.extra.clone()),
-                schema_version: SCHEMA_VERSION,
+                schema_version: READINESS_SCHEMA_VERSION,
                 scope: old
                     .map_or_else(|| scope.clone(), |record| record.scope.updated_from(&scope)),
                 state: ReadinessState::Unavailable,
@@ -639,7 +642,7 @@ impl ReadinessFile {
                 extra: previous
                     .as_ref()
                     .map_or_else(Default::default, |record| record.extra.clone()),
-                schema_version: SCHEMA_VERSION,
+                schema_version: READINESS_SCHEMA_VERSION,
                 scope: previous.as_ref().map_or_else(
                     || account_scope.clone(),
                     |record| record.scope.updated_from(&account_scope),
@@ -671,7 +674,7 @@ impl ReadinessFile {
                 extra: previous
                     .as_ref()
                     .map_or_else(Default::default, |record| record.extra.clone()),
-                schema_version: SCHEMA_VERSION,
+                schema_version: READINESS_SCHEMA_VERSION,
                 scope: previous.as_ref().map_or_else(
                     || account_scope.clone(),
                     |record| record.scope.updated_from(&account_scope),
@@ -1034,7 +1037,7 @@ mod tests {
         };
         let record = RouteReadiness {
             extra: Default::default(),
-            schema_version: 1,
+            schema_version: crate::READINESS_SCHEMA_VERSION,
             scope: scope.clone(),
             state: ReadinessState::Unavailable,
             reason: Some(ReadinessReason::ProviderRefusal),
@@ -1101,7 +1104,7 @@ mod tests {
             ReadinessRead::unknown(ReadinessReason::InvalidEvidence)
         );
         file.records[0].expires_unix_seconds = 20;
-        file.records[0].schema_version = 2;
+        file.records[0].schema_version = READINESS_SCHEMA_VERSION + 1;
         assert_eq!(
             file.get(&scope, 15, &crate::DEFAULT_FRESHNESS),
             ReadinessRead::unknown(ReadinessReason::InvalidEvidence)
@@ -1121,7 +1124,7 @@ mod tests {
             extra: Default::default(),
             records: vec![RouteReadiness {
                 extra: Default::default(),
-                schema_version: 1,
+                schema_version: crate::READINESS_SCHEMA_VERSION,
                 scope: scope.clone(),
                 state: ReadinessState::Ready,
                 reason: None,
@@ -1206,7 +1209,7 @@ mod tests {
         let mut file = ReadinessFile::default();
         file.records.push(RouteReadiness {
             extra: Default::default(),
-            schema_version: SCHEMA_VERSION,
+            schema_version: READINESS_SCHEMA_VERSION,
             scope: scope.clone(),
             state: ReadinessState::Ready,
             reason: None,
@@ -1401,7 +1404,7 @@ mod tests {
         ];
         let mut ready = RouteReadiness {
             extra: Default::default(),
-            schema_version: 1,
+            schema_version: crate::READINESS_SCHEMA_VERSION,
             scope: route("pool"),
             state: ReadinessState::Ready,
             reason: None,
@@ -1550,7 +1553,7 @@ mod tests {
         let refused_scope = route("claude/refused");
         file.records.push(RouteReadiness {
             extra: Default::default(),
-            schema_version: SCHEMA_VERSION,
+            schema_version: READINESS_SCHEMA_VERSION,
             scope: refused_scope.clone(),
             state: ReadinessState::Unavailable,
             reason: Some(ReadinessReason::ProviderRefusal),

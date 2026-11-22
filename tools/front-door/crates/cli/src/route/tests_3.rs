@@ -83,7 +83,7 @@
         let readiness_path = readiness.join("cursor.json");
         let mut file = provenant_quota::ReadinessFile::default();
         file.records.push(provenant_quota::RouteReadiness {
-            extra: Default::default(), schema_version: 1,
+            extra: Default::default(), schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
             scope: provenant_quota::ReadinessScope {
                 extra: Default::default(), host: provenant_quota::LOCAL_HOST.into(), adapter: "cursor".into(),
                 account_key: "local".into(), route: provenant_quota::ReadinessRoute::from_text("cursor/composer-2.5"),

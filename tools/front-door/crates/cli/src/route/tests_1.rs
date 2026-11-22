@@ -59,7 +59,7 @@
         let file = ReadinessFile {
             records: vec![
                 RouteReadiness { extra: Default::default(),
-                    schema_version: 1,
+                    schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
                     scope: scope.clone(),
                     state: ReadinessState::Unavailable,
                     reason: Some(ReadinessReason::ProviderRefusal),
@@ -69,7 +69,7 @@
                     evidence_ref: Some("fixture".into()),
                 },
                 RouteReadiness { extra: Default::default(),
-                    schema_version: 1,
+                    schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
                     scope: ReadinessScope {
                         account_key: "key-two".into(),
                         ..scope.clone()
@@ -82,7 +82,7 @@
                     evidence_ref: Some("fixture".into()),
                 },
                 RouteReadiness { extra: Default::default(),
-                    schema_version: 1,
+                    schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
                     scope: ReadinessScope {
                         account_key: "key-two".into(),
                         route: provenant_quota::ReadinessRoute::pool("verified-pool"),

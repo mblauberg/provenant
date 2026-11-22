@@ -393,10 +393,10 @@ mod tests {
     fn observation(state: ReadinessState, reason: Option<ReadinessReason>) -> ReadinessFile {
         ReadinessFile {
             extra: Default::default(),
-            schema_version: 1,
+            schema_version: crate::READINESS_SCHEMA_VERSION,
             records: vec![RouteReadiness {
                 extra: Default::default(),
-                schema_version: 1,
+                schema_version: crate::READINESS_SCHEMA_VERSION,
                 scope: ReadinessScope {
                     extra: Default::default(),
                     host: LOCAL_HOST.into(),

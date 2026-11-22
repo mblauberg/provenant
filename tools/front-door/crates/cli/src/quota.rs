@@ -980,7 +980,44 @@ fn read_readiness_file(
     if bytes.len() as u64 > MAX_RECORD_BYTES {
         return Err(QuotaError::Invalid("readiness bound").into());
     }
-    Ok(Some(ReadinessFile::decode(&bytes, adapter, key)?))
+    match ReadinessFile::decode(&bytes, adapter, key) {
+        Ok(file) => Ok(Some(file)),
+        // A file from an older readiness shape is dropped until the next
+        // observation rewrites it; damage in a current file stays an error.
+        Err(error) => match older_readiness_version(&bytes) {
+            Some(version) => {
+                note_dropped_readiness(adapter, key, version);
+                Ok(None)
+            }
+            None => Err(error.into()),
+        },
+    }
+}
+
+/// The schema version of a readiness file written by an older release.
+fn older_readiness_version(bytes: &[u8]) -> Option<u64> {
+    let version = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()?
+        .get("schema_version")?
+        .as_u64()?;
+    (version < u64::from(provenant_quota::READINESS_SCHEMA_VERSION)).then_some(version)
+}
+
+/// One note per process and account for a dropped older readiness file.
+fn note_dropped_readiness(adapter: &str, key: &str, version: u64) {
+    use std::io::Write;
+    static NOTED: std::sync::Mutex<std::collections::BTreeSet<(String, String)>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let first = NOTED
+        .lock()
+        .is_ok_and(|mut noted| noted.insert((adapter.to_owned(), key.to_owned())));
+    if first {
+        let _ = writeln!(
+            io::stderr().lock(),
+            "Note: readiness for {adapter}/{key} is from an older release (schema {version}, now {}); dropped until the next observation",
+            provenant_quota::READINESS_SCHEMA_VERSION
+        );
+    }
 }
 
 /// Read one account's bounded readiness file for a shared display snapshot.
@@ -6133,11 +6170,11 @@ mod tests {
         };
         let file = ReadinessFile {
             extra: Default::default(),
-            schema_version: 1,
+            schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
             login: None,
             records: vec![provenant_quota::RouteReadiness {
                 extra: Default::default(),
-                schema_version: 1,
+                schema_version: provenant_quota::READINESS_SCHEMA_VERSION,
                 scope: scope.clone(),
                 state: ReadinessState::Ready,
                 reason: None,
@@ -6171,6 +6208,31 @@ mod tests {
                 assert_eq!(read.reason, Some(ReadinessReason::InvalidEvidence));
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn an_older_readiness_shape_is_dropped_while_damage_stays_an_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let root = private(temp.path())?;
+        let readiness = child(&root, OsStr::new(READINESS_DIRECTORY))?;
+        let _account = child(&readiness, OsStr::new("key"))?;
+        let path = temp.path().join("readiness/key/claude.json");
+        let write = |bytes: &[u8]| -> Result<(), Box<dyn std::error::Error>> {
+            std::fs::write(&path, bytes)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            Ok(())
+        };
+        // The version-1 shape named the route as a string.
+        write(
+            br#"{"schema_version":1,"records":[{"schema_version":1,"scope":{"host":"local","adapter":"claude","account_key":"key","route":"claude/model"},"state":"ready","observed_unix_seconds":100,"expires_unix_seconds":200}]}"#,
+        )?;
+        assert!(recorded_readiness_file(temp.path(), "claude", "key")?.is_none());
+        write(b"{")?;
+        assert!(recorded_readiness_file(temp.path(), "claude", "key").is_err());
         Ok(())
     }
 
