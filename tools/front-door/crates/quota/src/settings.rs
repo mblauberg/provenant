@@ -4,8 +4,11 @@ use crate::Calibration;
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+/// Every field defaults, because the state-keyed boundary reader decodes the
+/// user's own table alone: a host that set one freshness key wrote no other
+/// field, and a missing field must not discard the ones it did write.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub max_parallel: u64,
     pub wall_budget_seconds: u64,
@@ -327,6 +330,26 @@ mod tests {
         toml_edit::de::from_str(text)
     }
     const BASE: &str = "max_parallel = 3\nwall_budget_seconds = 55\n";
+    // The boundary reader hands serde the user's table, not the aggregate's
+    // merged one: one configured freshness key must still apply.
+    #[test]
+    fn a_partial_section_reads_the_configured_keys_beside_the_defaults() {
+        let configured = parse("[freshness]\nreadiness_min_seconds = 500\nrefusal_seconds = 60\n")
+            .expect("a partial quota section reads");
+        let defaults = Settings::default();
+        assert_eq!(configured.max_parallel, defaults.max_parallel);
+        assert_eq!(configured.wall_budget_seconds, defaults.wall_budget_seconds);
+        assert_eq!(
+            configured.freshness.readiness_min_seconds, 500,
+            "the configured floor"
+        );
+        assert_eq!(configured.freshness.refusal_seconds, 60);
+        assert_eq!(
+            configured.freshness.snapshot_seconds, defaults.freshness.snapshot_seconds,
+            "an unset freshness key keeps its compiled default"
+        );
+        assert!(configured.validate().is_empty());
+    }
     #[test]
     fn login_warning_defaults_and_overrides() {
         let defaults = parse(BASE).unwrap();

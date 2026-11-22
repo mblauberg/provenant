@@ -35,8 +35,10 @@ pub trait DomainConfig: DeserializeOwned {
 /// Read one domain's table straight from `<state>/config.toml`, without
 /// resolving the other domains, for a settlement or status reader that does
 /// not link the binary's closed aggregate. A missing file or table answers the
-/// section's serde defaults. Unknown fields warn; invalid known authority input,
-/// syntax, version, size and I/O errors remain hard failures.
+/// section's serde defaults, and so does every field the user's table omits:
+/// the file holds only the keys the host set, never the compiled defaults.
+/// Unknown fields warn; invalid known authority input, syntax, version, size
+/// and I/O errors remain hard failures.
 pub fn read_domain<T: DeserializeOwned + Default>(state: &Path, name: &str) -> std::io::Result<T> {
     crate::loader::read_boundary_settings(state, &format!("domains.{name}"))
 }
