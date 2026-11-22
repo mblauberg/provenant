@@ -701,6 +701,15 @@ pub fn target_protection_for_launch_while(
                 protection.unobserved = true;
                 return protection;
             }
+            Ok(provenant_config::GcProjectStatus::Vanished { binding, .. }) => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: project {project_id} at {} is gone; preserving all targets",
+                    binding.common_dir().display()
+                );
+                protection.unobserved = true;
+                return protection;
+            }
             Ok(provenant_config::GcProjectStatus::Excluded) => {
                 let _ = writeln!(
                     std::io::stderr().lock(),
@@ -1159,7 +1168,7 @@ pub fn collect_with_protection(
     protection: &TargetProtection,
 ) -> Result<Report, Box<dyn std::error::Error>> {
     let mut refresh = || protection.clone();
-    collect(
+    collect_targets(
         host,
         home,
         limits,
@@ -1181,7 +1190,7 @@ pub(crate) fn collect_with_protection_refresh(
     protection: &TargetProtection,
     refresh_protection: &mut dyn FnMut() -> TargetProtection,
 ) -> Result<Report, Box<dyn std::error::Error>> {
-    collect(
+    collect_targets(
         host,
         home,
         limits,
@@ -1193,7 +1202,7 @@ pub(crate) fn collect_with_protection_refresh(
 }
 
 /// The collect workhorse shared by explicit GC and launch admission.
-fn collect(
+fn collect_targets(
     host: &Path,
     home: &Path,
     limits: Limits,

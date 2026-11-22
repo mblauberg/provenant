@@ -1412,6 +1412,7 @@ pub(crate) fn cleanup_git_pins(
     Ok(())
 }
 fn writer_branch(worktree: &VerifiedWorktree) -> Result<GitRefName> {
+    use std::io::Read as _;
     let head_path = worktree.repo().private_git_dir().join("HEAD");
     let mut head = Vec::new();
     worktree

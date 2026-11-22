@@ -55,6 +55,18 @@ trigger; `provenant tick` takes the same path.
   Lanes write to them by default; with `domains.fabric.lanes.cargo_source_writes` set to `false`
   a missing dependency needs a host fetch.
 
+### Project bindings
+
+- A registered project whose common directory is gone protects nothing. Launch
+  confinement, tick settlement and forge polling skip its binding, and GC
+  retires the binding once its record has been idle for `gc.idle` (or the
+  `--idle` override); `gc --dry-run` names the bindings it would retire. The
+  private host-project directory stays, so a checkout that returns reuses its
+  ports and settings.
+- A registered project that still exists but whose layout cannot be read warns
+  at launch and protects that project's whole root instead of refusing an
+  unrelated launch.
+
 ### Worktrees and branches
 
 - Foreign worktrees and local branches are collected by default. The first pass

@@ -3188,7 +3188,7 @@ pub(super) fn prepare_candidates_inner(
         &launch_policy,
     )?;
     let github_roots = github_roots(registry);
-    let protected_worktrees = protected_worktrees(registry, &source, &git)?;
+    let (protected_worktrees, protection_warnings) = protected_worktrees(registry, &source, &git)?;
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.clone().into_values().collect();
     let mut default_failures = std::collections::BTreeMap::new();
@@ -5313,6 +5313,9 @@ pub(super) fn prepare_candidates_inner(
                 .opus_writer_advisory(&catalogue, &route)
         {
             push_launch_warning(&mut route, advisory);
+        }
+        for warning in &protection_warnings {
+            push_launch_warning(&mut route, warning.clone());
         }
         // The record was created before launch preparation added diagnostics.
         provider.launch_warnings = route.diagnostics.launch_warnings.clone();

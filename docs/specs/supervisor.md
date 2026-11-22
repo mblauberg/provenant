@@ -76,8 +76,9 @@ attempt state.
 ### Tick-driven settlement
 
 `provenant tick` queues recovery for settling and unattended attempts in every
-registered project from one bounded process census per pass; a failed project
-never blocks the others. A sealed exit stays settlement evidence when the census
+registered project from one bounded process census per pass; a binding whose
+common directory is gone is skipped, and a failed project never blocks the
+others. A sealed exit stays settlement evidence when the census
 is unavailable. Unknown attempts get proof-only recovery: the original guardian,
 custody and attempt holder locks and a fresh empty worktree census must prove
 absence before same-boot settlement, and unknown evidence never clears custody.
@@ -233,11 +234,15 @@ standalone tools stay under the lane profile. The client needs loopback access.
 ### Host inventory problems stay local
 
 Host confinement inventories registered projects, worktree allocations, owned
-worktrees and writer custody. An unusable sibling entry is protected as a denied
-root and reported through the host warning channel with its path and reason; it
-never refuses an unrelated launch. If the entry's directory cannot be named,
-inventory refuses with that path and stage. The selected writer's own slot stays
-fail-closed, including unresolved guardian evidence, until reconciled.
+worktrees and writer custody. A binding whose common directory is gone protects
+nothing and is skipped by launch confinement, settlement and forge polling. A
+present project whose layout cannot be read warns through launch preparation and
+protects that project's root, so it never refuses an unrelated launch. An
+unusable sibling entry is protected as a denied root and reported through the
+host warning channel with its path and reason; it never refuses an unrelated
+launch. If the entry's directory cannot be named, inventory refuses with that
+path and stage. The selected writer's own slot stays fail-closed, including
+unresolved guardian evidence, until reconciled.
 - Why: retained sibling evidence must not become a host-wide launch outage.
 - Owner: `crates/confinement/src/permissions/policy/host.rs`,
   `crates/supervisor/src/custody.rs`
