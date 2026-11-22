@@ -4,6 +4,10 @@
 Unknown commands and flags in runbooks, skills and ambient instructions fail,
 inline or in fenced `provenant` lines; in other documents, and for paths and
 ADRs, they are advisory warnings.
+Backticked UPPER_SNAKE names (error codes, environment variables) must appear in
+the sources under tools/, config/, scripts/ or .github/, and backticked dotted
+configuration keys must be fields of `config schema --all`; both fail in specs,
+runbooks, skills and ambient instructions.
 Research index omissions and projection mismatches fail;
 strict inventory enforces headers, Anchor paths and diagram metadata. Rust
 comments citing Spec: sections always resolve strictly. Runtime absolute paths
@@ -16,6 +20,7 @@ without building.
 """
 
 import argparse
+import fnmatch
 import html
 import json
 from pathlib import Path
@@ -32,28 +37,48 @@ def warn(path, line, kind, reference, level="warning"):
     print(f"{path}:{line}: {level}: unresolved {kind} `{reference}`")
 
 
+def cli_json(args, root, *words):
+    """Run the CLI with --json and return its payload, from the binary or cargo."""
+    if not args.binary:
+        print(
+            "check-doc-truth: building the CLI with cargo run; use --binary, "
+            "--help-json or --inventory-only to avoid a build",
+            file=sys.stderr, flush=True,
+        )
+    command = (
+        [str(Path(args.binary).resolve()), *words, "--json"]
+        if args.binary
+        else ["cargo", "run", "--quiet", "--locked", "--bin", "provenant",
+              "--", *words, "--json"]
+    )
+    result = subprocess.run(
+        command, cwd=root / "tools/front-door", check=True,
+        capture_output=True, text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def config_keys(args, root):
+    """Editable configuration field paths from `config schema --all`, or None when unavailable."""
+    try:
+        if args.schema_json:
+            payload = json.loads(Path(args.schema_json).read_text())
+        elif args.help_json:
+            return None  # A help fixture alone does not describe configuration.
+        else:
+            payload = cli_json(args, root, "config", "schema", "--all")
+        return {field["path"] for field in payload.get("data", payload)["fields"]}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.CalledProcessError) as error:
+        warn("check-doc-truth", 1, "config schema source", str(error).splitlines()[0])
+        return None
+
+
 def catalogue(args, root):
     try:
         if args.help_json:
             payload = json.loads(Path(args.help_json).read_text())
         else:
-            if not args.binary:
-                print(
-                    "check-doc-truth: building CLI help with cargo run; use --binary, "
-                    "--help-json or --inventory-only to avoid a build",
-                    file=sys.stderr, flush=True,
-                )
-            command = (
-                [str(Path(args.binary).resolve()), "help", "--all", "--json"]
-                if args.binary
-                else ["cargo", "run", "--quiet", "--locked", "--bin", "provenant",
-                      "--", "help", "--all", "--json"]
-            )
-            result = subprocess.run(
-                command, cwd=root / "tools/front-door", check=True,
-                capture_output=True, text=True,
-            )
-            payload = json.loads(result.stdout)
+            payload = cli_json(args, root, "help", "--all")
         data = payload.get("data", payload)
         commands = {entry["command"]: entry for entry in data["commands"]}
         if "provenant" not in commands:
@@ -217,12 +242,93 @@ def retired_section_lines(text):
     return lines
 
 
-def check_references(root, document, commands, adrs, gone):
+SOURCE_SUFFIXES = (".rs", ".toml", ".json", ".py", ".sh", ".yml", ".yaml", ".swift", ".sql")
+SOURCE_DIRS = ("tools/", "config/", "scripts/", ".github/", "apps/")
+CODE_NAME = re.compile(r"(?<![\w./-])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?![\w/])")
+CONFIG_KEY = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_{}*]+)+")
+FILE_SUFFIXES = {"toml", "json", "jsonl", "md", "rs", "py", "sh", "yml", "yaml", "sql", "sb",
+                 "lock", "txt", "db", "log", "swift", "plist", "png", "svg"}
+_code_names = None
+
+
+def source_code_names(root):
+    """Every UPPER_SNAKE name in the tracked sources: codes and environment variables."""
+    global _code_names
+    if _code_names is None:
+        _code_names = set()
+        try:
+            listed = subprocess.run(["git", "ls-files", "-z"], cwd=root, check=True,
+                                    capture_output=True, text=True).stdout.split("\0")
+        except (OSError, subprocess.CalledProcessError):
+            listed = []
+        for name in listed:
+            if name.startswith(SOURCE_DIRS) and name.endswith(SOURCE_SUFFIXES):
+                try:
+                    _code_names.update(CODE_NAME.findall((root / name).read_text(errors="ignore")))
+                except OSError:
+                    pass
+    return _code_names
+
+
+def config_key_known(key, fields):
+    """A key resolves when it is a field path or a prefix of one; `{x}` and `*` match any segment."""
+    parts = key.split(".")
+    for field in fields:
+        names = field.split(".")
+        if len(parts) <= len(names) and all(
+                part == name or fnmatch.fnmatchcase(name, part) or re.fullmatch(r"\{.*\}|\*", part)
+                or re.fullmatch(r"\{.*\}", name)
+                for part, name in zip(parts, names)):
+            return True
+    return False
+
+
+SYMBOL_REF = re.compile(r"^[\"'(\[]*(?P<path>[\w./-]+\.rs)(?:::|#)(?P<symbol>[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)")
+
+
+def check_file_symbols(root, document, display, line, word, level):
+    """A `file.rs::Symbol` reference names text that its file still contains."""
+    match = SYMBOL_REF.match(word)
+    target = next((base / match["path"] for base in (root, document.parent, root / "tools/front-door")
+                   if (base / match["path"]).is_file()), None) if match else None
+    if target is None:
+        return 0
+    text = target.read_text(errors="ignore")
+    failures = 0
+    for name in match["symbol"].split("::"):
+        if not re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", text):
+            warn(display, line, "symbol", f"{match['path']}::{name}", level)
+            failures += level == "error"
+    return failures
+
+
+def check_symbols(root, display, line, reference, fields, level):
+    """Report named codes, environment variables and configuration keys that no source defines."""
+    failures = 0
+    # Capitalised words in a provenant command line are placeholders for its arguments.
+    # So is the value after a flag in a fragment such as `--issued-at UNIX_SECONDS`.
+    names = [] if re.match(r"^(?:\$ )?provenant\b", reference) else CODE_NAME.findall(
+        re.sub(r"(?<![\w-])--[a-z][\w-]*[ =]+[A-Z][A-Z0-9_]*", "", reference))
+    for name in dict.fromkeys(names):
+        if name not in source_code_names(root):
+            warn(display, line, "code or variable", name, level)
+            failures += level == "error"
+    if fields and CONFIG_KEY.fullmatch(reference):
+        sections = {field.split(".")[0] for field in fields}
+        if (reference.split(".")[0] in sections and reference.rsplit(".", 1)[1] not in FILE_SUFFIXES
+                and not config_key_known(reference, fields)):
+            warn(display, line, "config key", reference, level)
+            failures += level == "error"
+    return failures
+
+
+def check_references(root, document, commands, adrs, gone, fields=None):
     """Report unresolved references; return the number that fail the check."""
     display = document.relative_to(root)
     text = document.read_text()
     strict = is_strict(root, document)
     level = "error" if strict else "warning"
+    symbol_level = "error" if strict or (root / "docs/specs") == document.parent else "warning"
     failures = 0
     references = list(inline_code(text))
     if strict:
@@ -231,6 +337,7 @@ def check_references(root, document, commands, adrs, gone):
     for line, reference, context in references:
         if RETIRED.search(context) or line in retired_lines:
             continue
+        failures += check_symbols(root, display, line, reference, fields, symbol_level)
         scopes, missing = command_scope(reference, commands) if commands else (None, None)
         if missing and missing not in HIDDEN:
             warn(display, line, "command", missing, level)
@@ -250,6 +357,7 @@ def check_references(root, document, commands, adrs, gone):
             if int(number) not in adrs:
                 warn(display, line, "ADR", f"ADR {number}")
         for word in dict.fromkeys(reference.split()):
+            failures += check_file_symbols(root, document, display, line, word, symbol_level)
             path = path_reference(word)
             if path and not resolves_path(root, document, path, gone):
                 warn(display, line, "path", path)
@@ -379,17 +487,17 @@ def check_anchors(root, document):
     return missing
 
 
-def check_spec_index(root):
-    """Every living area spec must be reachable from its directory index."""
-    index = root / "docs/specs/README.md"
+def check_index(root, directory, kind):
+    """Every living document in a directory must be reachable from its README index."""
+    index = root / directory / "README.md"
     if not index.exists():
         return 0
     targets = {target.split("#", 1)[0] for target in
                re.findall(r"\]\(([^)]+)\)", index.read_text())}
     missing = 0
-    for spec in sorted(index.parent.glob("*.md")):
-        if spec != index and spec.name not in targets:
-            warn(index.relative_to(root), 1, "spec index entry", spec.name)
+    for document in sorted(index.parent.glob("*.md")):
+        if document != index and document.name not in targets:
+            warn(index.relative_to(root), 1, f"{kind} index entry", document.name)
             missing += 1
     return missing
 
@@ -500,12 +608,14 @@ def main():
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--binary", help="worktree-built CLI (reuses the CI build)")
     source.add_argument("--help-json", help="CLI help catalogue fixture, with or without result envelope")
+    parser.add_argument("--schema-json", help="`config schema --all --json` fixture, with or without result envelope")
     parser.add_argument("--inventory-only", action="store_true", help="check documentation evidence without loading the CLI catalogue")
     parser.add_argument("--strict-inventory", action="store_true", help="fail on missing headers, Anchor paths, spec index entries or diagram metadata")
     args = parser.parse_args()
     root = args.root.resolve()
     command_errors = check_research_index(root)
     commands = None if args.inventory_only else catalogue(args, root)
+    fields = None if args.inventory_only else config_keys(args, root)
     adrs = {int(match[1]) for path in (root / "docs/adr").glob("*.md")
             if (match := re.match(r"(\d+)-", path.name))}
     # Bare filenames are checked only against paths once tracked and now gone:
@@ -529,7 +639,9 @@ def main():
     missing = sum(inventory(root, document) for document in evidence
                   if document in documents or document.name == "worktrees.md")
     missing += sum(check_anchors(root, document) for document in evidence)
-    missing += check_spec_index(root)
+    missing += check_index(root, "docs/specs", "spec")
+    missing += check_index(root, "docs/runbooks", "runbook")
+    missing += check_index(root, "docs/adr", "ADR")
     check_spec_length(root)
     adr_documents = sorted((root / "docs/adr").glob("*.md"))
     missing += sum(check_diagrams(root, document) for document in evidence + adr_documents)
@@ -541,7 +653,7 @@ def main():
         ambient = [root / name for name in AMBIENT_DOCS]
         skills = sorted((root / "skills").rglob("*.md"))
         for document in [path for path in ambient if path.exists()] + skills + documents + maintained + adr_documents:
-            reference_errors += check_references(root, document, commands, adrs, gone)
+            reference_errors += check_references(root, document, commands, adrs, gone, fields)
     return int(bool(command_errors) or bool(reference_errors) or (args.strict_inventory and bool(missing)) or bool(citations))
 
 

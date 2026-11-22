@@ -18,127 +18,103 @@ relative to `tools/front-door/`.
 The guardian does only what a provider cannot do for itself: start it with its
 environment, wait for its exit on events, end the lane's own process tree,
 record exit and settlement durably, and hold the writer, credential and
-authority boundaries. It does not judge activity (CPU, output silence or
-progress), sample disk, or match command names; provider permission modes and
-command admission cover those. Process-tree sampling is opt-in.
+authority boundaries. It never judges activity (CPU, output silence, progress),
+samples disk or matches command names.
 - Why: one guardian runs per lane, so every periodic read multiplies across
-  parallel lanes on a loaded host.
+  parallel lanes.
 - Owner: `crates/supervisor/src/guardian.rs`
 
 ### Closed stop reasons; natural exit wins
 
-Only `ProviderGroup::stop(StopReason)` signals a provider: cancellation, the
-wall-clock runtime deadline, protocol rejection, a supervisor signal or
-post-terminal cleanup. Silence, inactivity, capture failure, ENOSPC and failed
-publication are never stop reasons, and there is no startup deadline. A natural
-exit wins over a late cancel or deadline, and a host sleep cannot extend the
-deadline.
-- Why: a bookkeeping fault or slow start must never kill a healthy provider,
-  and a stuck one must not hold a worktree for hours.
+Only `ProviderGroup::stop(StopReason)` signals a provider, and `StopReason` is
+closed: cancellation, steering, the wall-clock deadline, a writer's token
+budget or context handoff threshold, protocol rejection, a supervisor signal
+and post-terminal cleanup. Silence, inactivity, capture failure, ENOSPC and
+failed publication are never stop reasons, and there is no startup deadline. A
+natural exit wins over a late cancel or deadline, and host sleep cannot extend
+the deadline.
+- Why: a bookkeeping fault or slow start must never kill a healthy provider.
 - Owner: `crates/supervisor/src/machine.rs`
 
 ### Signals need proven identity and scope
 
-The PID stays reserved until the handle is reaped last. Only the unreaped
-provider, its group while the leader is unreaped, descendants with retained
-proof of provider ancestry, and proven attempt-sandbox escapees may be signalled.
-Descendant proof survives session changes and reparenting, but every signal
-revalidates the full native identity. On macOS, however the provider ends,
-natural exit included, cleanup ends the lane's own tree: recorded descendants and
-sandbox-marked escapees get TERM, then KILL after the descendant grace. The
-child registry must permit cleanup. With no native child registry, a present
-host holder permits the lane's own descendant stops; an absent holder does not.
-A live graph child spares only its own
-process tree: it is a separate attempt, never a recorded descendant of this
-lane's provider and never carrying this lane's sandbox mark, so it is never a
-cleanup candidate and cannot withhold a lane's signals or its custody release.
-Spared and protected owners and their possible descendants stay excluded. The exit
-records one summary warning ("killed N surviving descendants") and at most 16
-unresolved identities; the reservation journal records up to 128. Background
-services an unsandboxed lane starts (for example a compiler-cache server) are
-its descendants, so they now end with the lane. Under retained custody the
-repeated stop takes at most three censuses: TERM, a wait on exit watches for the
-signalled processes, KILL, another wait, and one last look; with nothing to
-signal it stops after the first. The signal-free settlement look runs only on
-macOS, the one platform where it can settle.
-A census listing or cwd observation alone never grants signal authority.
-Recovery after guardian loss signals only recorded descendants whose identity
-still matches and live processes carrying the attempt's sandbox mark; it runs
-its census and sandbox probe only for an unresolved exit.
+The PID stays reserved until the handle is reaped last. Only these may be
+signalled: the unreaped provider, its group while the leader is unreaped,
+descendants with retained proof of provider ancestry, and escapees proven by the
+attempt's sandbox mark. Every signal revalidates the full native identity. A
+census listing or cwd observation never grants signal authority.
 
-A launch is named by its attempt's `WorkKey`: the guardian's launch summary
-records the key, and a stop request is identified by attempt and generation.
-The launch summary also records the launching build's version and source
-digest, so every launch names the binary that wrote it, even when an upgrade
-lands while the attempt is queued.
-A supervisor restart finds a live writer by the key through the attempt row,
-then reads that attempt's custody records.
+On macOS, however the provider ends (natural exit included), cleanup ends the
+lane's own tree with TERM, then KILL after the descendant grace, so background
+services an unsandboxed lane starts end with it. A live graph child is a
+separate attempt, never a cleanup candidate, and cannot withhold a lane's
+signals or custody release. Recovery after guardian loss signals only recorded
+descendants whose identity still matches and live processes carrying the
+sandbox mark.
+
+A launch is named by its attempt's `WorkKey`; the launch summary records the key
+and the launching build's version and source digest. A supervisor restart finds
+a live writer by the key through the attempt row.
 - Why: signalling a recycled PID or a sibling's group kills unrelated work, and
-  a lane's backgrounded loops must not outlive it (#3545).
+  a lane's backgrounded loops must not outlive it.
 - Owner: `crates/supervisor/src/process_os/`, `crates/supervisor/src/custody.rs`
 
 ### Read-only writer presence
 
-Status uses the recorded boot, PID and native start identity for the guardian,
-provider and tracked descendants. It reports a writer as live only when the
-guardian or provider's exact identity is present and non-zombie. A changed boot
-proves the old process tree is gone. Same-boot absence remains unknown even
-with a complete census: the durable process checkpoint can predate a fork into
-another session or process group, and the census cannot identify that untracked
-child after reparenting. A sealed process exit reports settlement as pending.
-Missing or malformed checkpoints, reused PIDs, inaccessible processes and
-incomplete censuses are unknown. Status only projects these facts; scoped
-reconciliation rechecks custody before changing attempt state.
+Status reports a writer live only when the guardian's or provider's exact
+recorded identity (boot, PID, native start) is present and non-zombie. A changed
+boot proves the old tree gone. Same-boot absence, missing or malformed
+checkpoints, reused PIDs, inaccessible processes and incomplete censuses are
+unknown, because the checkpoint can predate a fork the census cannot identify
+after reparenting. A sealed process exit reports settlement pending. Status only
+projects these facts; scoped reconciliation rechecks custody before changing
+attempt state.
 - Why: a dead guardian or recycled PID cannot hide a surviving provider child,
-  and uncertainty must not be turned into a running writer or an unsafe retry.
+  and uncertainty must not become a running writer or an unsafe retry.
 - Owner: `crates/supervisor/src/custody.rs`, `crates/run/src/controls.rs`
 
 ### Tick-driven settlement
 
-Tick queues recovery for settling and unattended attempts in every registered
-project, using one bounded host process census for the pass. Failed project
-recovery does not prevent other projects or scheduled tasks from running.
-A sealed exit remains settlement evidence when the census is unavailable;
-live attempts retain their automatic fence. Unknown attempts are queued for
-proof-only recovery: the original guardian, custody and attempt holder locks and
-a fresh empty worktree census must prove absence before same-boot settlement.
-Unknown evidence itself never clears custody.
-Repeated ticks reuse the recovery driver's backoff, queued-worker marker and
-native settlement locks rather than duplicating settlement work. The guardian
-persists a failed terminal publication in the scoped settlement journal so a
-status read can explain the pending settlement without consulting stderr.
-- Why: losing the guardian or its immediate terminal publication must not lose
-  the automatic path to a terminal attempt.
+`provenant tick` queues recovery for settling and unattended attempts in every
+registered project from one bounded process census per pass; a failed project
+never blocks the others. A sealed exit stays settlement evidence when the census
+is unavailable. Unknown attempts get proof-only recovery: the original guardian,
+custody and attempt holder locks and a fresh empty worktree census must prove
+absence before same-boot settlement, and unknown evidence never clears custody.
+Repeated ticks reuse the recovery backoff, worker marker and native locks. The
+guardian persists a failed terminal publication in the scoped settlement
+journal, so status explains the pending settlement without stderr.
+- Why: losing the guardian must not lose the automatic path to a terminal
+  attempt.
 - Owner: `src/tick.rs`, `crates/run/src/controls.rs`,
   `crates/supervisor/src/settlement_progress.rs`
 
 ### Explicit abandonment
 
-A chair may explicitly abandon a nonterminal writer with a reason when its
-presence is not live, its native writer lease is free and the configured
-worktree process census positively reports `Free`. Same-boot unknown presence
-is eligible only with both exclusion and positive non-occupancy evidence.
-Live presence, held exclusion and every non-free or incomplete occupancy
-result refuse abandonment with typed blocking evidence. Launch and attempt
-custody stay excluded during the decision. This escape hatch does not change
-the proof required by automatic reconciliation.
+`provenant reconcile --abandon` lets a chair abandon a nonterminal writer with a
+reason only when its presence is not live, its native writer lease is free and
+the worktree process census reports `Free`. Same-boot unknown presence needs
+both exclusion and positive non-occupancy evidence. Live presence, held
+exclusion and any non-free or incomplete occupancy refuse with typed blocking
+evidence. This does not change the proof automatic reconciliation needs.
 
-The explicit loss intent is durable before the attempt is committed `lost`;
-repeating an interrupted abandonment with the same reason finishes it. An
-incomplete intent remains visibly settling until that retry. Abandonment warns
-that the attempt was declared lost and retains all attempt evidence, scratch,
-worktree contents and private Git. A never-dispatched queued attempt keeps its
-existing evidence-preserving cancellation behaviour.
-- Why: when native guardian-loss proof is unavailable, deliberate recovery must
-  not turn an incomplete process census into permission to reuse a worktree.
+The loss intent is durable before the attempt is committed `lost`; repeating an
+interrupted abandonment with the same reason finishes it, and an incomplete
+intent stays visibly settling. Abandonment warns and retains all attempt
+evidence, scratch, worktree contents and private Git. A never-dispatched queued
+attempt keeps its evidence-preserving cancellation.
+- Why: an incomplete process census must not become permission to reuse a
+  worktree.
 - Owner: `crates/run/src/settlement.rs`, `crates/cli/src/run/reconcile.rs`
 
 ### Guardian holds custody past its owner
 
 The guardian keeps the provider, attempt lock and writer lease after its owner
-dies. Secrets travel in memory and pipes, never argv or disk.
-A missing launch acknowledgement is an unknown launch, never permission to
-launch again.
+dies. Secrets travel in memory and pipes, never argv or disk. A missing launch
+acknowledgement is an unknown launch, never permission to launch again. Writer,
+custody, port and directory descriptors close on provider exec; only explicit
+executable inputs (secrets, confinement profiles) cross, so a service a provider
+detaches cannot retain the lane's writer lease.
 - Why: losing the caller must not lose custody or double-launch a writer.
 - Owner: `crates/supervisor/src/guardian/`
 
@@ -147,84 +123,53 @@ launch again.
 A writer stays fenced until the provider is reaped, two complete censuses show
 no surviving member or escapee, and a fresh lock on the original holder inode
 succeeds. Failed, racing or incomplete reads keep the fence; only a recorded
-decision with matching authority clears one, and that decision permits no signal.
+decision with matching authority clears one, and that decision permits no
+signal. Guardian loss leaves the durable unresolved reservation fenced against
+every new attempt even when the kernel lease is free.
+
+At the first cleanup deadline one diagnostic census per guardian names
+observable PIDs, command names and open writer-lock paths with a reconcile
+action. An open path is not proof of lock ownership; unknown holders stay
+explicit uncertainty; a timeout alone never authorises settlement or an
+unrelated signal.
 - Why: a leftover descendant could still write the worktree.
 
-### Provider descriptors and detached services
+### Retention is bounded and event-driven
 
-Writer, custody, port and directory descriptors close on provider exec. Only
-explicit executable inputs (secrets and confinement profiles) cross that edge;
-the private guardian handoff retains its capability transfer. An ordinary
-service detached by an unsandboxed provider therefore cannot retain the lane's
-inherited writer lease. Guardian loss still leaves the durable unresolved
-reservation fenced against every new attempt, even if the kernel lease is free.
+While retaining unresolved custody the guardian blocks on process, cancellation
+and signal events and costs no CPU between them. Its reactor latches every
+kqueue edge until the loop that acts on it takes it, and a supervisor signal
+stays visible to every later loop. A supervisor signal during cleanup or
+retention gets one more bounded stop (TERM, grace, KILL); then the guardian ends
+retention and exits. Retrying an undurable reservation or exit publication
+stops after a bounded time once a supervisor signal has latched; the previous
+reservation or the exit's `publication_pending` marker stays the fence.
+- Why: kqueue reports each edge once, and retained custody can last hours with
+  one guardian per lane.
 
-Cleanup has a bounded stop budget. At the first deadline a separate, cooperatively
-bounded diagnostic census (once per guardian) names observable PIDs, short native command names and
-open writer-lock paths, with a reconcile action. An open path is not proof of
-flock ownership and grants no signal authority. Unknown or unreadable holders
-remain explicit uncertainty. The guardian continues retaining unresolved
-custody; a timeout alone never authorises settlement or an unrelated signal.
-
-While retaining, the guardian blocks on process, cancellation and signal
-events. It runs a signal-free settlement check after a process event (at most
-every 100 ms) or at a backstop (5 s with process watches, else 1 s). It repeats
-the bounded stop only on cancellation or every 30 s, and reads host graph
-evidence only when a stop has signal candidates. Idle retention therefore costs
-no CPU between events.
-- Why: detached services must not hold a lease or cause unsafe release.
-- Why: retained custody can last hours, and one guardian runs per lane (#3560).
-
-The guardian's reactor latches every kqueue edge it drains (supervisor signal,
-cancellation change, process event) until the loop that acts on it takes it,
-and a supervisor signal stays visible to every later loop. A pacing or retry
-pause therefore cannot drop one. A supervisor signal during cleanup or
-retention gets one more bounded stop (TERM, the descendant grace, KILL); then
-the guardian ends retention and exits.
-- Why: kqueue reports each edge once. A v2.2.0 guardian discarded a SIGTERM
-  this way and held a lane's writer lock for 2h43m (#3572, #3585).
-
-Retention is bounded by `domains.run.retained_custody_seconds` (1..=604800 s,
-default 3600). The launcher resolves it, because the guardian cannot read
-config. `provenant config show --full` shows the value and its source, and
-unreadable run settings warn and keep the default
-(`LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT`). The unresolved exit carries
-a `retention` record: the holding guardian's identity, when retention began
-and the limit. `provenant status` names that guardian's PID and age only while
-its census shows that exact identity alive; otherwise it says the guardian is
-gone and points to `provenant reconcile`. A settled exit drops the record. When
-retention ends with the exit still unresolved, whether by signal or by limit,
-the guardian adds `retention.ended` to the record. This records the reason, the
-time retained and the blocker (`stop_refused`, `protected_owner`,
-`census_incomplete`, `survived_stop` or `settlement_unproven`) beside the
-unresolved PIDs. `stop_refused` means a live candidate this pass was not
-allowed to be signalled; a withheld permission with nothing to stop refuses
-nothing. Past the limit it then exits with the typed `RetentionLimit`
-failure: status `timeout` (exit 124), error code `RETENTION_LIMIT`, where
-other guardian faults exit `error` (3) with `SUPERVISOR`. Ending retention signals nothing and removes nothing.
-The unresolved exit and reservation keep the writer fenced. Once the guardian
-is gone, `provenant reconcile` ends only proven orphans, through the orphan
-recovery path.
+`domains.run.retained_custody_seconds` bounds retention. The launcher resolves it
+because the guardian cannot read config; unreadable run settings warn
+(`LAUNCH_RETAINED_CUSTODY_LIMIT_OR_WARN_DEFAULT`) and keep the default. The
+unresolved exit carries a `retention` record (guardian identity, start, limit)
+and `provenant status` names the guardian only while its exact identity is
+alive; otherwise it points to `provenant reconcile`. When retention ends with the
+exit unresolved, the `retention` record adds an `ended` object with the reason, time
+retained and a diagnostic blocker (`RetentionBlocker`). Past the limit the
+guardian exits `timeout` with code `RETENTION_LIMIT`; other guardian faults use
+`SUPERVISOR`. Ending retention signals and removes nothing: the unresolved exit
+and reservation keep the writer fenced, and `provenant reconcile` ends only
+proven orphans.
 - Why: an orphaned guardian must not hold a lane indefinitely, and the fence,
-  not the guardian, is what protects the worktree.
-
-Reaping the leader under the fenced lease backs off from 25 ms to 1 s and stops
-at a 5 s monotonic deadline, since a pause ends early on any reactor edge. The
-provider group is then dropped unsignalled, and its bounded reaper permit
-takes over. Retrying an undurable cleanup reservation or exit publication
-continues while the disk may recover, but once a supervisor signal has
-latched it stops after 5 s and the guardian exits with an error. The previous
-reservation, or the exit's `publication_pending` marker, stays the durable
-fence for reconcile, as after a crash.
-- Why: a retry loop with no bound or backoff could keep a guardian alive.
+  not the guardian, protects the worktree.
 
 ### Durable exit publication
 
 The initial exit record is published without replacing an existing one, after
 what it references is durable. Run pins an immutable provider-exit snapshot
 before committing its outcome; later cleanup may replace only the process-exit
-observation. A failed publication keeps custody and retries; an unconfirmed
-sync is `durability_unconfirmed`, never absent.
+observation. A failed publication keeps custody and retries; an unconfirmed sync
+is `durability_unconfirmed`, never absent. Captures and frames are bounded; an
+oversized frame is decoder loss, never a fabricated terminal event.
 - Why: a lost or overwritten exit record loses the only proof of outcome.
 
 ### Writer reservation and settlement
@@ -234,8 +179,8 @@ quiescence and run's terminal commit, or an authorised reconcile; the worktree
 flock stays held through import and [publication](run.md#publication-order). A
 missing or malformed reservation refuses automatic recovery of that attempt;
 [explicit abandonment](#explicit-abandonment) instead requires native exclusion
-and positive worktree non-occupancy. Scratch deletion needs a verified settlement
-commit.
+and positive worktree non-occupancy. Scratch deletion needs a verified
+settlement commit.
 - Why: a writer must never be freed on a partial or forged settlement.
 
 ### Stable locks and atomic writes
@@ -250,368 +195,246 @@ replayable authority.
 
 ### Build strategy context
 
-Lane Cargo shims carry the host-resolved build port in
-`PROVENANT_BUILD_CONTEXT`. The frozen context includes the strategy and its
-source, host toolchain paths and the lane's private Git binding. Build strategy
-selects local lane execution, a repository command wrapper, or slot execution;
-slot provisioning remains available for every strategy. The separate local
-Cargo advisory still applies to shim invocations.
-- Why: build coordination varies by repository without changing attempt custody.
+Lane `cargo`, `nextest` and `cargo-nextest` PATH shims run
+`provenant admit build -- <real>` and carry the host-resolved build port in
+`PROVENANT_BUILD_CONTEXT`: strategy and source, host toolchain paths and the
+lane's private Git binding. The strategy selects local lane execution, a
+repository command wrapper or a reusable build slot (an unavailable pool falls
+back locally with a recorded exception) and never changes attempt custody. The
+local-Cargo advisory still applies to shim invocations. Admission limits are
+`[admission.build].slots`; layered `build.*` ports are in
+[state](state.md#configuration).
+- Why: build coordination varies by repository without changing custody.
 - Owner: `crates/providers/src/lane.rs`; `src/admit.rs`; `crates/run/src/build/`
-
-### Bounded execution
-
-Captures and frames are bounded; an oversized frame is decoder loss, never a
-fabricated terminal event.
-- Why: unbounded output must not stall custody or invent an outcome.
 
 ## Permission policy
 
 Lane profiles start open and deny the boundaries
 ([ADR 0040](../adr/0040-open-lane-policy-with-explicit-boundaries.md)).
-`ResolvedConfinementPolicy` composes the host's optional restrictions, the lane's
-network selection and the provider's authentication and offline preferences.
-Admission and rendering consume this same resolution and retain restriction
-sources. An absent optional setting leaves ordinary files, tools, local
-services and network access open. Capacity settings warn by default; a sourced
-configured stop remains distinct from a mandatory boundary refusal.
+`ResolvedConfinementPolicy` composes the host's optional restrictions, the
+lane's network selection and the provider's authentication and offline
+preferences; admission and rendering consume the same resolution and retain its
+sources. An absent optional setting leaves files, tools, local services and
+network open. Capacity settings warn by default; a configured stop stays
+distinct from a mandatory boundary refusal.
 
-OpenCode's profile follows `lanes.access`: `host` (the default) points the
-client at the host's real XDG data, config, state and cache directories and
-grants the lane access to them, including their credential stores; `isolated`
-keeps the private per-attempt directories. Host access attaches to the service
-when available, and the lane continues its sessions by the recorded session ID in
-the host store. If the prior session is unavailable in the selected host store, launch warns and
-starts a fresh session; without a service it warns and runs standalone on the host
-profile. The client needs loopback access to attach. Attached tools
-execute in the host service process with the attempt worktree as their directory,
-outside the lane's process confinement; standalone tools remain subject to the
-lane profile. Launch diagnostics report the effective profile and its source.
+`lanes.access` ([ADR 0042](../adr/0042-lane-access-host-by-default.md)) selects
+credential treatment. `host` (the default) uses native provider homes, skill
+discovery and login state, and a credential overlap warns with path, access and
+source, then continues. `isolated` uses private per-attempt state and refuses
+overlaps. Under isolated access every credential declaration is enforced
+independently: an exception for an enclosing runtime, package or authentication
+root cannot open a nested declared store, and a lane cannot hard-link a file in a
+credential root, the shared Git control directory or another lane's worktree.
 
-Every credential declaration is enforced independently, except for the host
-access choice above. An exception for an
-enclosing runtime, package or selected authentication root cannot open a nested
-declared store. Selected authentication and its exact aliases retain only their
-declared access. A lane cannot create a hard link to a file in a credential root, the shared
-Git control directory or another lane's worktree; every other hard link is
-allowed.
+OpenCode under host access attaches to the host service when available and
+resumes by recorded session ID in the host store; an unavailable prior session
+warns and starts fresh, and without a service it warns and runs standalone.
+Attached tools run in the host service process, outside the lane's confinement;
+standalone tools stay under the lane profile. The client needs loopback access.
 
 ### Host inventory problems stay local
 
 Host confinement inventories registered projects, worktree allocations, owned
 worktrees and writer custody. An unusable sibling entry is protected as a denied
-root and reported through the host warning channel with its anchor path and
-reason; it does not refuse an unrelated launch. If the entry's directory cannot
-be named, inventory refuses with that path and stage. The selected writer's own
-slot remains fail-closed, including legacy guardian evidence, which stays fenced
-until that attempt is reconciled.
-The macOS release smoke launches a read-only lane against the upgrade corpus
-with real confinement, including retained previous-release custody evidence.
+root and reported through the host warning channel with its path and reason; it
+never refuses an unrelated launch. If the entry's directory cannot be named,
+inventory refuses with that path and stage. The selected writer's own slot stays
+fail-closed, including unresolved guardian evidence, until reconciled.
 - Why: retained sibling evidence must not become a host-wide launch outage.
 - Owner: `crates/confinement/src/permissions/policy/host.rs`,
   `crates/supervisor/src/custody.rs`
 
 ### Plans refuse unsafe roots
 
-Confinement refuses traversal, symlinked state or lock leaves, declared
-credential roots and grants enclosing them, broad home or tmp grants and
-Git-internal roots. Credential declarations name concrete resolved paths and
-their source: built-in secret stores, provider configuration and data stores,
-every registered account's stores and the resolved Cargo home's credential
-files. For HOME-rooted accounts, the stores are the adapter's client state
-below HOME and its declared credential files; registration does not make
-the entire account HOME a credential store. Roots carry declarations; launch preparation classifies built-in,
-provider, host-variable and account declarations once, using the actual launch
-source and cwd, scratch, and the derived writer cache, without unioning an
-earlier project classification. Scratch and the writer cache are lane roots
-just as the source and cwd are. Host state admission also consumes raw host
-declarations and refuses state roots inside dedicated stores. A declaration
-exactly at HOME does not displace Provenant's normal home-relative state tree;
-exact credential declarations there retain their hold. This host-state rule
-does not classify or narrow the later launch boundary.
-Credential-root classification uses `CredentialRoots::select_refusal` to name
-the most specific applicable declaration and its origin: an exact path match
-first, then the deepest enclosing or enclosed store, independent of declaration
-order. Equal-depth ties use stable declaration fields. Under isolated access,
-overlap with a lane root retains its refusal. Under host access, an overlapping
-or unresolved credential root warns with its path, access and source, then
-preparation continues.
+Confinement refuses traversal, symlinked state or lock leaves, grants that
+enclose a declared credential root, broad home or tmp grants and Git-internal
+roots. Credential declarations name concrete resolved paths and sources:
+built-in secret stores, provider configuration and data stores, every
+registered account's stores and the resolved Cargo home's credential files. For
+HOME-rooted accounts only the adapter's client state and declared credential
+files are stores, never the whole home. `CredentialRoots::select_refusal` names
+the most specific declaration (exact match, then deepest enclosing or enclosed
+store, independent of declaration order). Every declaration is kept whatever its
+order or spelling.
 
-Isolated profiles render mandatory credential denials from `DenialRoot`,
-independently of grant validation: denial paths must be absolute, normalised
-and below the filesystem root. A denial may cover HOME; this never relaxes
-broad-grant validation. Host profiles omit credential, keychain/security, and
-process inspection, signal and task-port denials.
+Under isolated access:
+- A store, or a declared credential file from an adapter or host inventory
+  (including per-account tokens and refresh locks), equal to or inside a lane
+  root refuses the launch, naming origin and path. The declared path and its
+  resolved target are both checked, so neither symlink direction evades it.
+- A store holding no lane root keeps whole-subtree denial. A store enclosing
+  lane roots keeps it minus validated carve-outs for lane, executable,
+  runtime-read and tool-execution grants. Each carve-out is a strict descendant
+  of the store, encloses no other store, and confers read and execution only;
+  writes stay limited to lane roots and selected authentication refresh.
+- An enclosed exact credential endpoint keeps its denial and a grant at the
+  endpoint refuses. Read and execution grants may enclose an exact credential
+  file; writes and lane authority enclosing one refuse.
+- Selected authentication keeps exact-file access. Adapters declare the selected
+  identity's exact endpoints (database sidecars included) and stage only those
+  into private authentication state; a broad configuration grant cannot reopen
+  a shared store. Input materialisation refuses enclosing endpoints, since
+  staged copies lose the sandbox denial.
+- A directory link under a store also denies its resolved target outside HOME;
+  an overlap with lane authority refuses.
+- Skill snapshots use `CredentialRoots::skill_entry_refusal`: every declared
+  nested store and exact endpoint stays out of staged setup bytes, including
+  unselected accounts' declarations and their aliases.
+- Mandatory denials render from `DenialRoot` independently of grant validation
+  and may cover HOME without relaxing broad-grant validation. Ancestor metadata
+  stays available for traversal; contents and extended attributes stay denied.
 
-A store containing no lane root retains whole-subtree protection in isolated
-profiles. A store strictly containing lane roots retains whole-subtree
-protection minus validated
-lane, process-executable, runtime-read and tool-execution grants. Each carve-out
-must be a strict descendant of the store and enclose no dedicated store.
-An enclosed exact credential endpoint retains its independent denial; a grant
-at the endpoint itself refuses. Runtime carve-outs confer read and execution only;
-writes remain limited to lane roots and selected authentication refresh. In the
-open profile, the renderer denies the store subpath with `require-all` and a
-`require-not` carve-out for each admitted grant at its validated scope. Under an
-allowlist profile, default deny protects the store outside those grants. The current production
-renderer is open; this rule also defines the boundary for an allowlist profile.
-Metadata on ancestors of admitted paths remains available for executable and
-dynamic-loader traversal; directory contents and extended attributes stay denied.
-These metadata exceptions do not add read or execution authority over siblings.
-Undeclared store files outside validated carve-outs remain denied in isolated
-profiles; files inside a lane root are accessible by design. Under isolated
-access, a store equal to or inside a lane root refuses the launch; under host
-access it warns and proceeds. A provider can use its admitted runtime files
-and lane-private writable state while unlisted store files remain inaccessible.
+Under host access an overlapping or unresolved credential root, and an optional
+project path inside one, warns with path, access and source and continues; host
+profiles omit credential, keychain and process-inspection denials. A component
+named `.claude`, `.codex`, `.cursor` or `.gemini` is no credential boundary, and
+overlap with project-local agent configuration warns only when
+`policy.CONFINEMENT_SOURCE_AGENT_CONFIG_NONE` is enabled. A verified linked
+worktree is admitted at its real path wherever it lives. Git markers, common
+directories and private worktree Git directories keep their hard hold. Declared
+worktree allocation roots stay protected from extra host write grants, even
+before they exist.
 
-Adapter and host file inventories, including Provenant-owned per-account lane
-tokens and refresh locks, serve only to check whether a declared credential
-file lies inside any lane root. Under isolated access, such a file refuses the
-launch, naming its origin and path; host access warns and proceeds. Both the
-declared path and its resolved target are checked against
-every declared and resolved lane root, so neither direction of a symlink can
-evade the boundary. An inventory does not replace or narrow the isolated-mode
-store denial. Stores without an inventory retain the same subtree boundary.
-A HOME-rooted store may enclose default state: the store
-is a protection rather than an authentication grant, and state retains its
-independent mandatory protection. Independent sibling profiles and file
-declarations keep exact scope. In isolated profiles, no grant may enclose a
-store or open it outside its validated carve-outs. Read and execution grants may enclose
-exact credential files because their independent denials still apply; writes
-and lane authority enclosing a declared credential file refuse under isolated
-access. Host access accepts credential-overlapping grants with a warning.
-Input materialisation also refuses enclosing endpoints under isolated access:
-staged copies cannot inherit the original path's sandbox denial. Selected authentication retains its
-explicit exact-file access; a broad authentication or configuration grant
-cannot reopen a shared store. Adapters declare the selected identity's exact
-authentication endpoints, including database sidecars when required, and stage
-only those endpoints into private authentication state. Credential read aliases
-are derived from exact endpoint declarations after shared-store filtering;
-a discarded subtree read cannot confer alias access. Directory links under a
-store also deny the resolved target subtree when it is outside HOME. A target
-overlapping lane authority refuses inventory; runtime authority overlapping the
-target refuses compilation. Refusals identify the link origin and target path.
-Isolated-profile credential denials follow grants in the rendered profile. The
-standalone Codex release package read exception belongs only to the built-in
-default Codex home; dedicated relocated and registered stores retain whole-store
-protection. Shared stores use the validated carve-out rule above. The exception confers no writes and never exempts another
-overlapping credential denial.
-
-Every declaration is kept, whatever its order or kind; each spelling of a
-declared location carries every declaration made at or beneath any spelling of
-it, so a store registered at a Codex home or its alias stays refused.
-
-Isolated skill snapshots use `CredentialRoots::skill_entry_refusal` for each entry and
-resolved link target. The selected skills directory may sit beneath an enclosing
-provider store; that permits ordinary skills only within the selected source.
-Every independently declared nested store and exact endpoint remains excluded,
-including declarations for unselected accounts and their resolved aliases.
-Directories containing declared endpoints may supply ordinary siblings, but
-neither the endpoints nor links to them may enter staged setup bytes. Selecting
-a declared store itself does not exempt it. Provider-declared sibling profile
-files retain exact scope for registered and default account directories.
-
-A component named `.claude`, `.codex`, `.cursor` or `.gemini` does not establish
-a credential boundary. Project-local agent configuration overlaps warn with
-their source and proceed. A verified linked worktree is admitted at its real
-path, including beneath project-local agent configuration or outside the
-project. Under isolated access, a declared store may strictly contain that
-root under the carve-out rule above; equality, enclosed stores and enclosed
-credential files refuse. Under host access those overlaps warn and proceed.
-Git markers, common
-directories and private worktree Git directories keep their hard hold.
-`run --explain` and launch preparation share source and state admission checks;
-explanation reports credential admission as `pending_route` until launch
-preparation resolves the selected route's access.
-
-Unsupported confinement fails honestly and never widens a selected profile's
-access. The mere presence of an inherited OS sandbox does not prove equivalent
-credential, Git or read-only protection. A trusted route selected by the host's
-default or an explicit off setting can retain an existing OS sandbox without a
-new profile when neither explicit restrictions nor an active parent floor
-require one; its receipt reports inherited enforcement.
-Failure to enforce a selected profile cannot choose that route implicitly.
-An optional project path that resolves into a declared credential root is
-omitted with a warning under isolated access; host access retains it and warns
-with the path, effective access and source.
-
-Registered Git projects' declared worktree allocation roots remain protected
-from extra host write grants, including before those roots exist. Resolve the
-project port table from the verified primary checkout in Git's worktree
-inventory; the common Git directory's parent does not establish that owner.
+Unsupported confinement fails honestly and never widens a selected profile. An
+inherited OS sandbox does not prove equivalent protection; a route chosen by
+host default or explicit off may keep one only when no explicit restriction or
+parent floor requires a profile, and its receipt reports inherited enforcement.
+`run --explain` shares these checks and reports credential admission as
+`pending_route` until launch preparation resolves the route's access.
 - Why: one broad grant silently voids the boundary.
 - Owner: `crates/core/src/roots.rs`, `crates/confinement/src/permissions.rs`,
   `crates/cli/src/run/provider/confinement.rs`, `crates/providers/src/skill_stage.rs`
 
 ### Shared Git metadata is read-only
 
-Each writer owns an attempt-private Git view with separate refs, index,
-objects, configuration and credentials, using the repository object store as a
-read-only alternate. The repository's refs, config, alternates, hooks and admin
-metadata stay read-only to lanes. The host imports verified objects and moves
-the branch by compare-and-swap. See [launch custody](run-launch.md#admission-and-custody).
-The lane Git wrapper binds commands implicitly targeting its
-worktree; commands for other repositories, commands with explicit repository
-selectors and Git transport endpoints pass through with their arguments and
-environment intact. Fixture commands remove inherited lane Git selectors and
-use native Git while retaining the surrounding tool PATH.
+Each writer owns an attempt-private Git view with separate refs, index, objects,
+configuration and credentials, using the repository object store as a read-only
+alternate. The repository's refs, config, alternates, hooks and admin metadata
+stay read-only to lanes. The host imports verified objects and moves the branch
+by compare-and-swap ([launch custody](run-launch.md#admission-and-custody)). The
+lane Git wrapper binds commands that implicitly target its worktree; commands
+with an explicit repository selector, other repositories and transport endpoints
+pass through unchanged.
 - Why: ordinary Git works in the lane while other lanes' refs and the host's Git
-  behaviour stay protected; sharing objects and caches is intended.
+  behaviour stay protected.
 
 ### Native environment and sandbox tool stores
 
-`base_env` inherits the host environment for host access, sandboxed or not;
-isolated sandboxed lanes use the minimal reconstructed environment.
-`strip_hosted_credentials` filters hosted-cloud variables only for isolated
-access. Sandboxed lanes use private TMPDIR and TMPPREFIX because host temporary
-paths may not be writable. `FilteredLanePath` selects
-retained requester PATH, otherwise captured host search path, or process PATH
-only without a host handoff. It filters canonical directories and executable
-symlink targets under the primary project and selected worktree, including both
-roots for linked checkouts and requesters starting in a subdirectory. Lane
-model/account identity and version probes, bare commands and native provider
-launches share that PATH. Sandboxed launches prepend required private wrappers,
-then retain requester PATH precedence before fixed tool-search fallbacks. PATH
-entries do not add filesystem or executable grants.
-Host delivery filters its captured host PATH through the same owner for tool
-lookup. Explicit
-program paths stay explicit. Graph retries capture PATH before changing state,
-then save it with any retry patch under one journal lock. For a resolved retry,
-PATH capture precedes retry validation, including a settled-graph no-op refusal.
-A capture failure leaves the previous binding and checkpoint intact; a
-deliberately empty PATH remains a valid captured value. Remote peers record their
-own PATH at ingress because origin directories may not exist there.
-
-`HostLaunchContext::provider_path_environment` captures the host SSH agent
-selector across guardian custody. Host-access preparation grants the resolved
-exact socket under a sandbox; isolated preparation retains the credential
-boundary.
+`base_env` inherits the host environment under host access, sandboxed or not;
+isolated sandboxed lanes get a minimal reconstructed one and
+`strip_hosted_credentials` filters hosted-cloud variables. Sandboxed lanes use a
+private TMPDIR. `FilteredLanePath` owns the lane PATH: the retained requester
+PATH, else the captured host search path, else the process PATH only without a
+host handoff, minus directories and executable symlink targets under the primary
+project and selected worktree. Account and model probes, bare commands and
+native launches share it, and PATH adds no filesystem or executable grant. Graph
+retries capture PATH before changing state and save it with the retry patch under
+one journal lock; a capture failure leaves the previous binding intact. Remote
+peers record their own PATH at ingress.
+`HostLaunchContext::provider_path_environment` captures the SSH agent selector
+across custody; host access under a sandbox grants the exact resolved socket.
 
 Provider preparation may select an account-specific home or redirect state and
-cache paths in either confinement mode; account selectors choose the registered
-account and its required credentials. Credential values stay in the live launch,
-never in prompts or receipts. Native launches skip skill copies, tool dependency
-discovery and credential symlink inventory. Every lane gets the cargo, nextest
-and cargo-nextest PATH shims, which run `provenant admit build -- <real> "$@"`,
-and binds the host Cargo home and private target/build directories before seed
-validation.
-
-Isolated sandboxed lanes stage skills. Host access uses native provider homes
-and skill discovery, including linked references; account-specific homes remain
-when they select a login. Sandboxed lanes discover tool
-dependencies and credential aliases, and report inventory omissions in one
-actionable warning. Cargo registry and Git sources are writable unless
-`domains.fabric.lanes.cargo_source_writes` is turned off. Cargo lock and cache-use
-tracking files have exact write grants; Cargo credentials are denied under
-isolated access and available under host access subject to the sandbox's write
-roots and explicit denies.
-The pnpm, npm and Node caches the host later runs unconfined stay read-only;
-build output and tool configuration use private lane caches.
+cache paths in either mode; credential values stay in the live launch, never in
+prompts or receipts. Native launches skip skill copies, tool dependency
+discovery and credential symlink inventory. Isolated sandboxed lanes stage
+skills, discover tool dependencies and credential aliases, and report omissions
+in one warning. Cargo registry and Git sources are writable unless
+`domains.fabric.lanes.cargo_source_writes` is off; Cargo credentials are denied
+under isolated access. Package caches the host later runs unconfined (pnpm, npm,
+Node) stay read-only; build output uses private lane caches.
 - Why: native lanes use ordinary tools and login state; sandboxed lanes keep
-  source sharing explicit while keeping build output isolated.
+  source sharing explicit and build output isolated.
 
 ### Network, IPC and process information
 
 No lane reaches the peer agent's socket. Ordinary system and process metadata
-queries remain open. Arguments, task information and memory from outside the
-lane's sandbox stay private; the cross-process pidinfo guard is required to
-enforce the argument boundary. Same-sandbox process queries and signals remain
+queries stay open; arguments, task information and memory from outside the
+lane's sandbox stay private. Same-sandbox process queries and signals remain
 available. SysV IPC is host-global on macOS, so same-user IPC isolation needs a
 separate OS user or VM.
-- Why: the peer agent relays to unconfined children, and Seatbelt can enforce
-  no more.
+- Why: the peer agent relays to unconfined children, and Seatbelt can enforce no
+  more.
 
 ### Lane process-tree memory interface
 
-The process-tree interface reads a host-sampled snapshot of the lane's own
-descendants without process-listing authority. A missing, stale, incomplete or
-unsupported sample is unavailable, never a partial tree or zero memory.
-The sample is periodic observation, not an atomic census or a memory limit.
-Sampling runs only when something needs it:
-`domains.run.resource_sample_interval_ms` (1..=60000 ms) sets an interval, and
-when it is 0 (the default) a host or project admission class with
-`memory_per_slot` turns sampling on every 5000 ms. Otherwise sampling is off
-and `PROVENANT_PROCESS_TREE` is unset. The launcher resolves the interval and
-hands it to the guardian, which starts with an empty environment and reads no
-config; unreadable run settings warn and launch without a sampler
-(`LAUNCH_PROCESS_TREE_INTERVAL_OR_WARN_NONE`). Each private snapshot records a
-freshness allowance derived from that interval plus the bounded sample budget;
-the CLI output and public sample schema do not change. The setting source is
-available from `provenant config show --full`.
+The interface reads a host-sampled snapshot of the lane's own descendants
+without process-listing authority. A missing, stale, incomplete or unsupported
+sample is unavailable, never a partial tree or zero memory; the sample is
+periodic observation, not an atomic census or a memory limit. Sampling runs only
+when `domains.run.resource_sample_interval_ms` is set or an admission class has
+`memory_per_slot`; otherwise `PROVENANT_PROCESS_TREE` is unset. The launcher
+resolves the interval for the guardian, which reads no config; unreadable run
+settings warn (`LAUNCH_PROCESS_TREE_INTERVAL_OR_WARN_NONE`) and launch without a
+sampler.
 - Why: a memory guard that reads lost observation as zero would approve a
   runaway build.
 - Owner: `crates/supervisor/src/process_tree.rs`, `src/process_tree.rs`
 
 ### Disclosure and safe Git evidence
 
-`redaction` is one sourced setting: `off` (default) or `secrets`.
-`config show` reports its value and source on one line; under `off` that is the
-only trace, with no masking or per-field warnings anywhere. `secrets` masks
-credential values and credential token shapes in text leaving the host, including
-GitHub publication, cross-host peer and relay projection and fixture export, and
-credential-shaped values in config history. Local output and diagnostics stay raw
-under either mode. Model, effort, adapter,
-alias, name, tier, account label and key, source, pool selection, paths, worktree,
-stage, graph and node names are never hidden under any mode.
+`redaction` is one sourced setting, `off` by default
+([ADR 0035](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md)).
+Under `off` nothing is masked and no per-field warning appears; `config show`
+reports the value and source. `secrets` masks credential values and token
+shapes in text leaving the host: GitHub publication, cross-host peer and relay
+projection, fixture export and configuration history. Local output and
+diagnostics stay raw under both modes, and model, effort, adapter, alias, name,
+tier, account label, source, pool, path, worktree, stage, graph and node names
+are never hidden. Raw and exported bytes carry separate lengths and digests,
+and a failed projection withholds the affected publication. In-memory Debug
+masking, fence-token argv masking, the GitHub token receipt and chair checkpoint
+scoping are unconditional and are not output policy.
 
-Raw and exported bytes have separate lengths and digests. When an enabled
-projection fails, it withholds the affected publication. Host-local provider
-captures preserve raw bytes for settlement replay; prepare tails and diagnostics
-are bounded without masking.
+Provider stdout and stderr are retained losslessly in bounded host-owned private
+capture, and JSONL frames are decoded without rewriting their bytes; malformed
+retained frames are evidence defects. Capture and local settlement never modify
+provider continuation state.
 
-In-memory Debug masking, fence-token argv masking, git-config credential
-withholding (controlled by `domains.lanes.git_config_allow`), the GitHub token
-receipt and chair checkpoint scoping are unconditional and are not output policy.
-
-Provider stdout and stderr are retained losslessly within bounded, host-owned
-private capture. Provider JSONL frames are decoded without rewriting their bytes;
-malformed retained frames remain evidence defects. Capture and local settlement
-do not modify provider continuation state.
-- Owner: `src/lib.rs`, `crates/run/src/holder.rs`
-Host Git runs with
-hooks, filters, fsmonitor and external programs off, and refuses configuration
-from a lane-writable include. Host delivery pushes once, from the host, and
-refuses credential-bearing URLs.
-- Why: repository content and lane output are attacker-controlled input to the host.
-- Owner: `crates/redact/src/lib.rs`, `crates/confinement/src/publication.rs`, `crates/confinement/src/utility.rs`
+Host Git runs with hooks, filters, fsmonitor and external programs off and
+refuses configuration from a lane-writable include. Host delivery pushes once,
+from the host; under isolated access a remote URL with userinfo, query or
+fragment is refused, and under host access it warns.
+- Why: repository content and lane output are attacker-controlled input to the
+  host.
+- Owner: `src/lib.rs`, `crates/run/src/holder.rs`, `crates/redact/src/lib.rs`,
+  `crates/confinement/src/publication.rs`, `crates/confinement/src/utility.rs`
 
 ## Worktrees
 
 ### Managed writer path owner
 
-`run --branch` uses primary root/ports regardless of cwd; relative
-`--worktree` stays cwd-relative.
-- Why: roots differ.
-- Owner: `Context::open`, `bind_launch_controls`, `worktrees::open_primary_repo`
+`run --branch` resolves root and ports from the primary checkout whatever the
+cwd; a relative `--worktree` stays cwd-relative.
+- Why: the two roots differ.
+- Owner: `Context::open`, `bind_launch_controls`
 
 ### Shared occupancy; removal never forces
 
-Git's own inventory is the worktree registry. A worktree's owning lane decides
-who else writes in it. Worktree occupancy is a shared lease: any number of lanes
-may hold one worktree simultaneously. By maintainer decision (#3451), path claims
-are advisory and overlapping claims refuse nothing; a live conflicting writer is
-not excluded by Provenant. Attempts own separate Git refs, indexes and object
-stores; ordinary commits cannot take a sibling's staged snapshot. Host publication
-uses expected-old-tip compare-and-swap after verification, retaining divergent
-private commits for recovery. Custody outlives the requesting call. Each attempt
-also holds its own holder lease; proof that a sibling has settled cannot release
-another attempt's custody. An unscoped budget commit requires durable proof that
-no sibling shared the worktree during that attempt, and holds the admission gate
-through the commit. Shared attempts instead report typed leftover paths.
-Removal requires exclusive occupancy with zero live holders and no unresolved
-reservation. Terminal outcome publication alone does not release custody. Under
-exclusion, removal checks native cleanliness and every recorded attempt index;
-staged work or uncertain index identity retains the checkout. `worktree remove`
-refuses the primary, a live writer or observed process, and has no force. Dirty
-work requires explicit discard, with its recoverable archive captured before
-removal; it deletes a branch only with current landing evidence or explicit discard.
-A persisted writer reservation remains a custody fence when its kernel lock is
-absent until run-owned reconciliation settles the attempt; cache guards and
-actual removal both refuse without clearing its evidence.
-Named removal without current landing or subsumption proof returns
-`WorktreeError::UnprovenLanding`, naming the branch and missing proof, with an
-explicit-discard recovery command. `IdentityChanged` remains a changed-identity
-or changed-observation refusal, not a substitute for missing landing proof.
+Git's own inventory is the worktree registry, and occupancy is a shared lease:
+any number of lanes may hold one worktree, path claims are advisory, and a live
+conflicting writer is not excluded by Provenant. Attempts own separate Git refs,
+indexes and object stores, so a commit cannot take a sibling's staged snapshot.
+Host publication uses expected-old-tip compare-and-swap after verification and
+retains divergent private commits. Each attempt holds its own holder lease;
+proof that a sibling settled never releases another attempt's custody. An
+unscoped budget commit needs durable proof that no sibling shared the worktree;
+shared attempts report typed leftover paths instead.
+
+Removal needs exclusive occupancy, zero live holders and no unresolved
+reservation, and terminal outcome publication alone does not release custody.
+Under exclusion removal checks native cleanliness and every recorded attempt
+index; staged work or uncertain index identity retains the checkout.
+`worktree remove` refuses the primary, a live writer or an observed process, and
+has no force. Dirty work needs explicit discard with its recoverable archive
+captured first; a branch is deleted only with current landing evidence or
+explicit discard. A persisted writer reservation stays a custody fence while its
+kernel lock is absent, until run-owned reconciliation settles the attempt. Named
+removal without current landing or subsumption proof returns
+`WorktreeError::UnprovenLanding`, naming the branch and missing proof, with the
+explicit-discard command; `IdentityChanged` means a changed identity or
+observation, never missing landing proof.
 - Why: removing a tree under a live writer destroys its work.
 - Owner: `crates/confinement/src/worktrees.rs`
 
@@ -620,9 +443,9 @@ or changed-observation refusal, not a substitute for missing landing proof.
 A root is `Free` only when every possible writer was observed completely with
 stable identity; a placed occupant makes it `Live`, and a failed or partial
 query leaves it `Unknown`, never empty. A process whose real, effective and
-saved uids are all stable system uids other than the root owner's is outside
-the writer cohort; host exceptions are in
-[configuration](../runbooks/configuration.md#unreadable-process-census-exceptions).
+saved uids are all stable system uids other than the root owner's is outside the
+writer cohort
+([exceptions](../runbooks/configuration.md#unreadable-process-census-exceptions)).
 Landing and collection require `Free`; the census grants no signal authority.
 - Why: a retained cwd or descriptor survives permission changes, so current
   permissions cannot prove absence.
@@ -630,52 +453,40 @@ Landing and collection require `Free`; the census grants no signal authority.
 
 ### Settled dwellers are reported, never signalled
 
-`gc` preview and apply, `hosts doctor` and `worktree doctor` name every process
-that one bounded worktree census finds inside a terminal lane worktree or a
-settled attempt directory, with its pid, command, and whether a cwd, executable
-image or open descriptor placed it there. Every dweller of a root is named, not
-only the first process that placed a path there. An attempt contributes roots
-only while its run is `Terminal` and its custody is released; one shared helper
-applies that filter to both gc and host doctor. All three commands use the same
-2,000,000 microsecond budget and exclude the caller's own session and verified
-ancestors, including processes the listing could not name. A path observation
-alone grants no signal authority: these paths only report, and never signal, a
-dweller; the lane's own tree is reaped separately under proven identity.
-
-`worktree doctor` keeps main's unbounded occupancy classification and adds the
-held rows beside it, only for terminal worktrees; a bounded census never
-changes live-writer or `census_unknown` classification. When a bounded census is
-cut short by its budget or cancellation, or its process listing or coverage is incomplete, the report warns
-`dweller census incomplete (budget/cancel); results may be missing` rather than
-reading as no dwellers, and never refuses the command. A locally produced
-report caps held rows at 128 and acknowledges any omitted rows with an
-`N more held processes not shown` line, so it always passes peer validation.
-- Why: an orphaned process must be visible to the operator without turning a
-  cwd or descriptor hint into permission to kill an unrelated process, and a
-  partial census or a large host must never look like a clean result.
-- Owner: `crates/confinement/src/worktrees/census.rs`, `crates/confinement/src/worktrees/doctor.rs`, `src/worktrees.rs`, `src/gc_support.rs`, `src/hosts.rs`
+`gc` (preview and apply), `hosts doctor` and `worktree doctor` name every
+process one bounded census finds inside a terminal lane worktree or settled
+attempt directory, with pid, command and whether a cwd, executable image or open
+descriptor placed it there. An attempt contributes roots only while its run is
+`Terminal` and its custody released, through one shared filter. The three
+commands share one census budget and exclude the caller's session and verified
+ancestors. A bounded census cut short, or with an incomplete listing, warns that
+results may be missing instead of reading as no dwellers, and never refuses the
+command; a local report caps its held rows, says how many it omitted and still
+passes peer validation. `worktree doctor` keeps unbounded live-writer and
+`census_unknown` classification, adding held rows only for terminal worktrees.
+- Why: an orphan must be visible without turning a cwd or descriptor hint into
+  permission to kill an unrelated process, and a partial census must never look
+  clean.
+- Owner: `crates/confinement/src/worktrees/census.rs`,
+  `crates/confinement/src/worktrees/doctor.rs`, `src/worktrees.rs`,
+  `src/gc_support.rs`, `src/hosts.rs`
 
 ### Pruning and GC need proof
 
-Pruning proves subsumption or landing from declared retained-ref, tree-equivalent,
-integration or forge evidence and revalidates it at mutation. Reference deletion
-requires landed evidence and the expected old OID; worktree-only retirement
-preserves the branch. GC keeps anything in doubt: a held writer lock keeps a
-cache, and foreign, detached or idle worktree collection requires the declared
-retention policy and complete current custody, run and process evidence.
-Shallow history, conflicted comparisons, moved tips and unavailable evidence
-keep the candidate.
-Settlement chooses worktree-only retirement for retained-ref subsumption,
-preserving the local branch; integration evidence may also retire the branch.
-A pruning receipt is a locator, not removal authority. If the checkout is absent
-and no durable retirement owns the receipt's reference, an applied GC sweep
-retires the orphaned operation receipt with the typed
-`missing_retirement_owner` cause and custody-unknown retention evidence. It
-never certifies deletion from path absence. Existing checkouts are reconsidered
-under fresh ownership and landing proof, and reference cleanup remains subject
-to its normal independent proof checks. `provenant gc --apply` performs this
-recovery without an absent owner holding the receipt in an endless retry.
-Removal previews use the same cleanliness and ignored-output eligibility
-checks as apply; a preview never reports dirty user data as removable.
+Pruning proves subsumption or landing from declared retained-ref,
+tree-equivalent, integration or forge evidence, and revalidates it at mutation.
+Reference deletion needs landed evidence and the expected old OID; worktree-only
+retirement preserves the branch, and retained-ref subsumption always chooses it.
+GC keeps anything in doubt: a held writer lock keeps a cache, and foreign,
+detached or idle worktree collection needs the declared retention policy and
+complete current custody, run and process evidence. Shallow history, conflicted
+comparisons, moved tips and unavailable evidence keep the candidate. Removal
+previews use the apply checks and never report dirty user data as removable.
+
+A pruning receipt is a locator, not removal authority. When the checkout is
+absent and no durable retirement owns the receipt's reference, `provenant gc
+--apply` retires the orphaned receipt with cause `missing_retirement_owner` and
+custody-unknown retention evidence; it never certifies deletion from path
+absence, and existing checkouts are reconsidered under fresh proof.
 - Why: GC runs unattended; pruning on a guess deletes the user's work.
 - Owner: `crates/confinement/src/worktrees.rs`, `crates/confinement/src/cache.rs`

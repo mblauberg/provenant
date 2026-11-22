@@ -7,53 +7,35 @@ Anchor: `crates/core/src/roots.rs`, `crates/records/src/lib.rs`,
 `crates/config/src/managed.rs`, `crates/cli/src/run/provider/preparation.rs`,
 `crates/fabric-runtime/src/runs.rs`, `src/fabric/peer.rs`
 
-Keys and defaults: `provenant config schema`. Operator steps: the
-[install](../runbooks/install.md) and [GC](../runbooks/gc.md) runbooks.
+Keys and defaults: `provenant config schema`. Environment variables:
+[consumer contract](consumer-contract.md#environment). Operator steps: the
+[install](../runbooks/install.md), [configuration](../runbooks/configuration.md)
+and [GC](../runbooks/gc.md) runbooks.
 
 ## Roots and identities
 
 ### Root selection never falls back
 
-An empty or relative explicit root fails and never yields to the default. A
-root inside a declared credential, Git-metadata or other-state boundary is
-refused. A root that contains an other-state boundary is refused too, but one
-that contains Git metadata, a credential store or an advisory location
-proceeds, because lane checkouts, provider homes and installed releases live
-under the state root. A root inside a checkout, a workspace or the retired
-agent-harness location warns with its source and proceeds. OS binding captures existing Git markers and
-linked-worktree metadata; installed release directories imply no Git boundary.
-Credential boundaries use the same concrete, sourced declarations as lane
-grant validation; a credential directory name elsewhere in a path establishes
-no boundary.
-The same declaration and decision apply before
-and after alias binding. Existing workspace `.agent-run` stores are captured
-as other-state boundaries; that name alone establishes no boundary.
-Reads create no state.
+An empty or relative explicit root fails and never yields to the default. A root
+inside a declared credential, Git-metadata or other-state boundary is refused,
+as is one containing an other-state boundary. A root that contains Git metadata,
+a credential store or an advisory location proceeds, because lane checkouts,
+provider homes and installed releases live under the state root. A root inside a
+checkout or workspace warns with its source and proceeds. Credential boundaries
+use the same concrete, sourced declarations as lane grant validation, before and
+after alias binding; a credential directory name elsewhere in a path is no
+boundary. Reads create no state.
 - Why: a wrong root mixes or destroys another installation's state.
 - Owner: `crates/core/src/roots.rs`, `src/roots.rs`
 
 ### The first install uses a fresh root
 
-The first install validates a sibling staging root against the captured
-install root inputs, changing only the state candidate. It validates the
-release and every staged target before publishing the new root. Into an absent
-or empty default root it copies `config.toml` and `host-id`; the old state is
-not migrated, and install never reads its install receipt. A fresh custom root
-remains valid.
-If the selected root is identified as 1.x by its default v1 path or old-root
-markers and no handoff applies, install reports `STATE_FORMAT_BREAK`, names the
-old root, and directs the operator to the default v2 root for owner-config
-handoff or to a fresh custom root with configuration selected manually.
-The old root remains for the operator to inspect and remove after preserving
-anything needed.
-
-Install owns only its declared Provenant artifact names. It replaces those
-names directly without reading a receipt from another installation.
-Unrecognised state and client configuration remain outside that ownership set;
-release notes give any required manual cleanup, and doctor may warn about a
-remaining old root.
-- Why: the new root starts with one state format and install cannot infer
-  ownership from another installation's receipt.
+The first 2.0 install copies only owner configuration into an absent or empty
+default root, never migrates 1.x state and never writes the old root; a selected
+root with the 1.x layout is refused with `STATE_FORMAT_BREAK`. Install owns only
+its declared Provenant artifact names and never reads a 1.x receipt. Procedure:
+[first 2.0 install after 1.x](../runbooks/install.md#first-20-install-after-1x).
+- Why: install cannot infer ownership from a receipt of another state format.
 - Owner: `src/state_handoff.rs`, `src/install.rs`, `crates/core/src/roots.rs`
 
 ### Identifiers have one spelling
@@ -64,13 +46,9 @@ A value that can normalise two ways is rejected at the wire boundary.
 
 ### Wall time has one stated bound
 
-`WallTime::MAX` is the single greatest instant the wire accepts:
-`253_402_207_200_000_000` microseconds (`9999-12-30T22:00:00.000000Z`).
-Jiff's `Timestamp::MAX` carries nanoseconds past that whole second, so the
-bound comes from the constant and not a documented spelling; anything above it
-is out of range. A consumer that needs the latest representable instant,
-including the graph checkpoint envelope, derives it from `WallTime::MAX` and
-has no epoch fallback.
+`WallTime::MAX` is the single greatest instant the wire accepts. A consumer that
+needs the latest representable instant, including the graph checkpoint
+envelope, derives it from the constant and has no epoch fallback.
 - Why: a bound naming a value the constructor rejects invites silent fallbacks
   that hide the mismatch.
 - Owner: `crates/core/src/time.rs`, `crates/fabric-runtime/src/graph/envelope.rs`
@@ -79,67 +57,55 @@ has no epoch fallback.
 
 A graph name identifies one graph generation for its project's lifetime.
 Checkpoint collection leaves a durable name reservation because retained
-attempt, chair and event records continue to refer to the graph by name. A
-collected name is not allocated to a later graph.
-- Why: reusing the name can collide with retained attempt keys or inherit a
-  stale chair association.
-- Owner: `crates/fabric-runtime/src/graph/journal.rs`,
-  `src/fabric/interface.rs`
+attempt, chair and event records still refer to the graph by name; a collected
+name is never allocated to a later graph.
+- Why: reuse can collide with retained attempt keys or inherit a stale chair
+  association.
+- Owner: `crates/fabric-runtime/src/graph/journal.rs`, `src/fabric/interface.rs`
 
 ### Graph checkpoints cover persisted text
 
-Graph admission normalises prompt text before planning or digesting; result
-and patch ingress use the same normal form. `FileJournal` hashes that typed
-checkpoint and execution, externalises text without changing its bytes, and
-validates the reconstructed result before atomic publication. Landing review queries retain valid settlements while reporting
-unreadable graph sources by graph ID. Readers of an atomic checkpoint see one
-complete published record. Every corrupt checkpoint stays visible as unreadable
-through status, with its graph ID and typed reason. The first tick read reports
-a corrupt checkpoint and records its file digest and typed reason in a quarantine
-marker; later ticks over identical bytes skip it, changed bytes are reported
-again, and `provenant stop -- NAME` retires the record. Pending-index recovery
-never uses unverified lifecycle fields to classify a corrupt record as settled.
+Admission normalises prompt text before planning or digesting, and result and
+patch ingress use the same normal form. `FileJournal` hashes the typed
+checkpoint, externalises text without changing its bytes and validates the
+reconstructed result before atomic publication; readers see one complete
+published record. Every corrupt checkpoint stays visible as unreadable through
+status with its graph ID and typed reason, and landing review reports unreadable
+graph sources by graph ID while keeping valid settlements. The first tick read of
+a corrupt checkpoint records its file digest and reason in a quarantine marker;
+identical bytes are skipped on later ticks, changed bytes are reported again and
+`provenant stop -- NAME` retires the record. Pending-index recovery never uses
+unverified lifecycle fields to classify a corrupt record as settled.
 - Why: stored text must verify on reload, and one damaged graph must not hide
-  independent review evidence in another or flood every tick with the same
-  unresolvable retry.
+  another's review evidence or flood every tick with an unresolvable retry.
 - Owner: `crates/fabric-runtime/src/graph/journal.rs`, `src/pr/landing/adapters.rs`
 
 ## SQLite stores
 
 ### A format major permits additive evolution
 
-Each SQLite store has a fixed `user_version` base identifier within its
-containing state-root format major. The numeric identifier is local to that
-store and need not equal the root major; it is fixed for the life of that root
-major and cannot be bumped independently. Binaries for the same root major can
-read and write the store regardless of release minor. Each owner declares one
-ordered list of additive steps, tagged with the release minor that added them;
-no minor counter is stored. Steps add tables and indexes with `IF NOT EXISTS`,
-or columns that are nullable or have a non-NULL constant default. They never
-rewrite, drop or rename existing objects. Every insert names its columns, so
-an older writer ignores columns added by a newer one.
-
-A writable open creates the base and any missing steps atomically, or applies
-missing steps to an existing same-major store. Existence determines which
-steps are missing. A current store opens without a write; concurrent openers
-re-check under the same immediate transaction before applying steps. A reader
-ignores unknown objects, but refuses a missing known base table or a missing
-declared step. A missing step requires a writable open. A different root major
-is refused without changing the store. The sole bounded exception to the
-no-older-shape reader or migration rule is these additive SQLite steps within
-the same root major. A non-additive stored change requires a new root format
-major and a fresh root, with the owner-configuration handoff used for 1.x to
-2.0.
-- Why: additive changes within one root major must preserve stored state and permit
-  binaries of different minors to share the same format.
+Each SQLite store has a fixed `user_version` base within its state-root format
+major, and binaries of the same major read and write it whatever their release
+minor. Each owner declares one ordered list of additive steps tagged with the
+release minor that added them: tables and indexes with `IF NOT EXISTS`, and
+columns that are nullable or have a non-NULL constant default. Steps never
+rewrite, drop or rename, and every insert names its columns, so an older writer
+ignores newer columns. A writable open creates the base and any missing steps
+atomically, re-checking under the same immediate transaction; a current store
+opens without a write. A reader ignores unknown objects but refuses a missing
+known base table or declared step, and a different root major is refused without
+changing the store. A non-additive stored change needs a new root format major
+and a fresh root.
+- Why: additive changes within one major must preserve stored state and let
+  different minors share the format.
 - Owner: `crates/sqlite/src/schema.rs`, each store's schema declaration
 
 ## Records
 
 ### Commit before signal
 
-Owners commit durable state before the lossy change-generation signal; a
-failed signal never fails the committed write. Readers treat an absent or reset
+Owners commit durable state before the lossy change-generation signal; a failed
+signal never fails the committed write. Readers treat an absent or reset
 generation as unknown and re-read.
 - Why: a hint must not become a second source of truth.
 - Owner: `crates/os/src/changes.rs`
@@ -148,17 +114,16 @@ generation as unknown and re-read.
 
 Unsupported versions fail before mutation. The reader rejects ambiguous or
 unbounded input and never echoes the rejected value. Closed codecs reject or
-discard unknown fields; records with explicit extension maps preserve their
-extensions. Host-owned semantics belong to typed fields on their owning record;
-malformed values fail decoding instead of becoming absent facts. Extension maps
-preserve only unknown fields, so a newer writer's data can survive a round trip.
-Edge-built facts are `Serialize` only. Stored-record read failures name the path and record type, with the schema version when readable; typed decode failures retain the missing field name without echoing rejected values. Additive optional exit evidence defaults to absence when reading earlier records within the same state-root major.
+discard unknown fields; records with explicit extension maps preserve only
+unknown fields, so a newer writer's data survives a round trip. Malformed values
+fail decoding instead of becoming absent facts, and read failures name the path
+and record type (with the schema version when readable) and the missing field,
+never the rejected value. Additive optional fields default to absence.
+Edge-built facts are `Serialize` only.
 - Why: a forged file must not become evidence.
 - Lint: `scripts/check-extra-fields` rejects host literal and constant keys in
   non-test extension-map reads and writes, with no allowlist.
 - Owner: `crates/records/src/`
-
-Landing records retain the current snapshot and consumer revisions without an unconsumed event outbox. Their readers use the common bounded records decoder and reject removed fields.
 
 ### One digest preimage
 
@@ -172,83 +137,109 @@ Landing records retain the current snapshot and consumer revisions without an un
 
 Syntax, version and filesystem-boundary failures refuse loading; an invalid
 optional value warns and uses the default, and a malformed restriction never
-becomes permission. `config set` uses the same tolerant read as `config check`,
-warns with the full path of unknown keys and keeps them when publishing an edit
-atomically. `config set` accepts every documented editable domain setting
-through the same typed schema as `config apply`. `config show` reports
-`redaction` and its source on one line. In `off` mode configuration history
-is raw; `secrets` masks credential-shaped values in history.
-Metadata and paths remain visible.
-Project binding directories must be directories owned by the current user and
-private from group and other users. Permission or ownership failures have a
-local repair diagnostic; malformed bindings and filesystem errors retain their
-own causes, and lookup never repairs state.
-Callers that surface the typed unsafe-directory failure preserve its safe local
-location and repair action. Local attempt status retains that detail, while peer
-status and events use the cause on their terminal state to replace terminal
-text with a safe reason and remedy. The event projection uses its own recorded
-cause, not a later attempt lookup. Direct diagnostic projections disclose remote
-paths only through an approved anchor.
-Commands load their declared domains; invalid unused domains warn, and effective defaults retain their compiled source.
-One sourced port table declares forge operations, verify, land, CI observation, worktree layout, naming, post-create, tracker, release and attempt admission ports, plus the full layered build interface. Layers apply in precedence order `builtin` < `detected` < `host` < `host-project` < `project`: compiled builtins are overridden by detected defaults, host `state/ports.json`, host-project `state/projects/<project_id>/ports.json` (the ProjectId binding directory named by `provenant config path`), and repository values at `.provenant/ports.json`. The keyed host-project layer configures a consumer repository entirely from host state with no files in its tree; a missing binding or layer is skipped silently. Each layer deep-merges object fields over the lower layer, so an overlay that sets only `verify.base` keeps the lower layer's other verify fields. Provenance is tracked per dotted leaf, each leaf reports the highest layer that set it, and a port's source is derived from those leaves; a serialised source cannot override that provenance. Omitted fields and ports retain their lower layer and source. `schema_version` is optional in an overlay (it defaults to the current version and a mismatch warns rather than refuses a compatible shape). When no layer sets `verify.base`, it is inferred from `refs/remotes/<remote>/HEAD` for the effective `verify.remote`; `config show` reports the value with the layer or inferred ref as its source, and an unresolved base names the key and files to set. A malformed layer names its file and key and is never reported as a Git configuration error; a bad project overlay is warned and skipped so commands that do not need verify still run, while an unreadable host port table still refuses lane identity. This repository stores its source at `config/ports.json` and links the optional Provenant path there; CI reads the source directly, and the repository's own script-based verify tiers stay in that source while the builtin tiers use neutral cargo commands. Verify tiers declare free-form names, an explicit default, selection and host-load policy, while the builtin layout declares its roots and branch path once.
-Forge operations share one typed port and one Builtin/Command/None adapter in `config::ports`; CI observation and tracker select their sourced category through that same adapter. The land owner resolves `PortTable.land` before publication effects, independently of candidate and ordering strategy. The resolved publication declaration is sealed in the landing plan. The land command reuses `records::landing::RepositoryCommand`: exit 0 means landed, other nonzero exits refuse except its declared unknown code. A command port inherits only the declared execution-context environment (paths, home, temporary directory, locale and toolchain selection), plus explicit owner-supplied values; ambient credential and agent variables are not forwarded. A command port runs configured argv directly, followed by owner-supplied arguments, with no shell; declared exit codes select succeeded, unknown or refused. Consumers of response bytes treat incomplete capture as unavailable; exit-only admission uses declared exit success and records capture completeness separately. `none` disables that port without selecting the builtin behavior.
-Naming commands receive the requested branch and project path as arguments; complete single-line branch output derives a name. Empty output keeps the request; invalid output or a command failure warns and keeps it. Post-create commands receive the branch and new worktree path. Admission commands receive `PROVENANT_PORT_PHASE=acquire|release`, `PROVENANT_ADMISSION_ATTEMPT`, `PROVENANT_ADMISSION_EPOCH`, `PROVENANT_ADMISSION_WORKTREE`, `PROVENANT_ADMISSION_PROJECT` and an informational `PROVENANT_ADMISSION_OWNER_PID`. The repository owns its semaphore keyed by attempt and epoch: acquire and release are idempotent, and release fences any late acquire for the same epoch. A queued retry uses a new epoch. The existing `Starting` claim and launcher ownership cover acquisition and provider preparation, so cancellation retains admission until preparation unwinds. Provenant freezes the exact command/source privately before acquisition and invokes release outside terminal transaction locks. A matching successful command receipt proves release after terminal settlement without changing the immutable attempt record. Busy acquisition returns the attempt for retry after release is known, without a Provenant semaphore.
-Build work resolves the layered `build.*` port and uses the existing `[admission.build].slots` limit. The host freezes the selected strategy, its source, toolchain paths and lane Git binding in `PROVENANT_BUILD_CONTEXT`. Strategies run in a local lane process, through the configured `build.command`, or in a reusable build slot; slot admission falls back locally with a recorded exception when the pool is unavailable. The independent local-Cargo execution advisory still applies to shim invocations.
-CI observation commands receive `PROVENANT_PORT_REQUEST_PATH` and `PROVENANT_PORT_IF_NONE_MATCH` (empty when no validator is sent), and emit `{"status": number, "headers": {"etag": "..."}, "body": "UTF-8 response bytes"}`; 304 responses use an empty body. Missing builtin response headers are a typed observation: the body remains readable, no ETag is retained, and later reads fetch the full response. Repository discovery uses the same selected backend with the literal request path `repos/{owner}/{repo}`; its body is the UTF-8 JSON object `{"full_name":"owner/repo"}` and `none` refuses the lookup without using the builtin adapter. Verify command ports substitute `{tier}` in their declared argv and receive `PROVENANT_VERIFY_TIER`, `PROVENANT_VERIFY_PROJECT_ROOT` and the private `PROVENANT_VERIFY_EFFECTIVE_CONFIG_JSON`, which contains only the resolved verify declaration. The builtin engine uses that declaration so host overrides apply; direct repository CI still reads `config/ports.json` without Provenant. Tracker commands receive one issue number and emit the normalised projection `{body, state, kind}`. Release commands receive optional `--base` and `--head`, then emit the complete `{findings: [{rule, path, line, message}]}` set for Provenant to page; `path` uses the existing `PathWire` representation and `line` is one-based. Command receipts under `port-receipts/<owner>/` bind typed owner/backend, command digest, source, phase and hashed request key to outcome, exit code, elapsed time and stdout digest; these versioned, bounded records omit argv, environment and output contents. Visible publication with unconfirmed durability remains a typed visible receipt, never an absent receipt.
+becomes permission. Commands load only their declared domains; invalid unused
+domains warn. `config set` uses the same tolerant read as `config check` and the
+same typed schema as `config apply`, warns on unknown keys, keeps them and
+publishes atomically. `config show` reports each value with its source.
+Redaction is owned by [supervisor](supervisor.md#disclosure-and-safe-git-evidence).
+
+Project binding directories must be owned by the current user and private from
+group and other users. A permission or ownership failure carries a local repair
+diagnostic; malformed bindings and filesystem errors keep their own causes, and
+lookup never repairs state. Peer status and events replace local paths in a
+terminal cause with a safe reason and remedy, taken from the event's own recorded
+cause, and disclose remote paths only through an approved anchor.
 - Why: errors need visible remedies without expanding authority.
 - Owner: `crates/config/src/`
 
+### One sourced port table
+
+One table declares forge operations, verify, land, CI observation, worktree
+layout, naming, post-create, tracker, release, attempt admission and the build
+interface. Layers apply `builtin` < `detected` < `host` < `host-project` <
+`project` ([layout](../runbooks/configuration.md#port-table)). Each layer deep-merges
+object fields over the lower one; provenance is tracked per dotted leaf and a
+port's source derives from its leaves, so a serialised source never overrides it.
+A host-project layer configures a consumer repository with no files in its tree.
+A missing layer is skipped silently; a malformed one names its file and key, a
+bad project overlay warns and is skipped so commands that do not need verify
+still run, and an unreadable host table still refuses lane identity. `verify.base`
+is inferred from the remote's default branch when no layer sets it, and
+`config show` names the source.
+
+Forge operations, CI observation and tracker share one typed port and one
+Builtin/Command/None adapter in `config::ports`; `none` disables a port without
+selecting the builtin. A command port runs its configured argv directly with no
+shell, inherits only the declared execution-context environment plus
+owner-supplied values and never forwards ambient credential or agent variables.
+Declared exit codes select succeeded, unknown or refused, and incomplete capture
+is unavailable. The land owner resolves `PortTable.land` before publication
+effects and seals it in the landing plan. Command receipts under
+`port-receipts/<owner>/` are bounded and omit argv, environment and output; a
+visible publication with unconfirmed durability stays a typed visible receipt.
+
+Admission ports give the repository its own semaphore keyed by attempt and epoch:
+acquire and release are idempotent, release fences a late acquire for the same
+epoch, and a queued retry uses a new epoch. Cancellation retains admission until
+preparation unwinds, the command and source are frozen privately before
+acquisition, and release runs outside terminal transaction locks. A matching
+successful receipt proves release after terminal settlement without changing the
+immutable attempt record, and busy acquisition returns the attempt for retry.
+Environment variables for port commands are in the
+[consumer contract](consumer-contract.md#environment).
+- Why: one declared layering lets a repository be configured from host state or
+  its own tree with one provenance rule.
+- Owner: `crates/config/src/ports.rs`
+
 ### Build state has one host root
 
-The build store, queue, ledger and maintenance record share `<state>/build/`:
-`store/<project_key>.git` (bare store, `core.hooksPath=/dev/null`, `gc.auto=0`,
-`receive.denyDeletes=false`) with `refs/snapshots/<owner>/<seq>` and
-`refs/bases/<owner>/<seq>` pins and a `store/<project_key>.lock` (shared for
-fetch, exclusive for GC); `queue/build/<ticket_id>.json` tickets whose liveness
-is the exclusive flock on the sibling `<ticket_id>.lock`; `jobs.jsonl` with
-`jobs.lock`; and `maintenance.json`.
-The canonical ledger is host-level so the soak spans lanes, the chair and
-landing and survives attempt GC. When the host ledger is unwritable, a row goes
-to `<attempt scratch>/build-jobs.jsonl` and the report counts it missing.
-Slots live under `~/Library/Caches/provenant-slots/<project_key>/<n>/` with
-`repo/` (a clone of the store, objects hardlinked, never shared alternates),
-`target/` (`CARGO_TARGET_DIR`), `tmp/` (`TMPDIR`), `slot.json` (slot record),
-`job.json` (an intent written before spawn, upgraded to the running process
-identity after spawn), `slot.lock` (held for the job) and `intent.lock` (held by
-the holder and inherited by its build children so a slot stays occupied until
-they are all gone). `slot.json` lives inside the slot so an OS cache purge
-removes both together.
-- Why: one root to report, GC and document; a slot record must never disagree
-  with its slot.
+The build store, queue, ledger and maintenance record share `<state>/build/`. The
+ledger is host-level so the soak spans lanes, the chair and landing and survives
+attempt GC; when it is unwritable the row goes to the attempt scratch and the
+report counts it missing. Build slots live in the host cache directory; a slot's
+`repo/` is a clone of the store with hardlinked objects, never shared
+alternates, and `slot.json` lives inside the slot so an OS cache purge removes
+both. A slot stays occupied until the holder and every build child it spawned
+are gone.
+- Why: one root to report, GC and document, and a slot record must never
+  disagree with its slot.
 - Owner: `crates/run/src/build/paths.rs`, `crates/run/src/build/ledger.rs`
 
 ### Retention keeps evidence
 
-GC retains evidence and unimported Git work; it expires resumable provider state
-only after archiving history. It skips busy items, protects active reservations
-and continuations, and uses identity-checked deletion without following links.
-Usage retention belongs to [telemetry](telemetry.md#the-usage-ledger-outlives-the-run-store).
-`RETENTION_CLASSES` is the executable declaration of every retention class: a typed owner and adapter, triggers, eligibility and effective schema settings. Required collection and measurement methods are generated from that declaration; there is no wildcard adapter. Scheduled tick and explicit GC execute the same registry path. Each scheduled class runs its own adapter, including payload cap, attempt scratch, graph checkpoints and port receipts; byte rows come from adapter measurements, with complete, partial or unavailable observations and visible collection failures.
-`gc.idle` defaults to `6h` for artifacts with no finished-work owner state.
-Released read-only attempt `tmp` and candidate targets become collectable after
-`gc.idle`, regardless of branch, PR, graph or worktree state. Writer scratch
-becomes immediately collectable when its branch is merged or PR closed, its
-graph is cancelled or superseded, or its worktree is removed. Collection retains durable
-results, handoffs, logs and process records, and never removes files from busy
-or unreleased attempts. After merge, cleanup targets only the merged branch's
-worktree and attempt scratch. At lane launch, space below `gc.free_floor`
-triggers a best-effort single-flight full sweep; full sweeps preserve busy or
-recently used shared caches and the newest seed generation. Managed Cargo
-targets unused for `gc.cargo_target_idle` (default 30 days), or whose worktree
-is gone or replaced, are collected whatever the cache budget allows.
-The [disk spec](disk.md#bounded-sweeps) owns sweep budgets and resumption;
-[cache custody](disk.md#scratch-and-cache-custody) covers private and shared
-Cargo targets under `lanes.cargo_cache_max`.
-Admission command receipts become eligible only after their attempt is terminal and release is proven. Naming and post-create command receipts carry a declared age lifetime, defaulting to 30 days and stored on each receipt. Approval carry receipts (`state/landing/approval-carry/`) retain approval provenance across clean merges and formatting deltas; they become collectable after 30 days or when the pull request is closed or merged. GC resumes interrupted checkpoint collection under the graph lock when a reserved graph name has no checkpoint; remaining prompt blobs, sidecars and pending markers are collected while the name reservation survives.
-Scheduled collection runs once a day from `provenant tick`, and the daily deadline advances only when a collection completes: launching a detached worker moves nothing. A worker that fails, cannot be launched, or is interrupted (its result still says `queued` or `running` while no process holds the worker lock) leaves the day due and is retried with a bounded backoff of 15 minutes, 1 hour, 4 hours and 16 hours, then at the daily cadence, counted by the `failures` field of `gc-result.json`. A `queued` result younger than a minute is a worker that has not yet taken its lock and is left alone. A stale failure is reported once per tick as `gc=retry_pending` with its age, attempt and next retry; only the finding of an interruption, or a failed launch, is an error. A collection that stops at its sweep budget and saved a cursor ends as `partial`: it is progress, not a failure, so it advances the deadline, resets the count and is resumed by the next sweep. A completed or partial collection resets the count, and only those queue the seed pass. A deadline that cannot be advanced (the cadence lock stayed busy through a few attempts) is noted on the completed result, never recorded as a failure. A result that cannot be read (corrupt, over its cap or from a newer writer) is treated as absent, reported once, and replaced by the next queued result, so it cannot block collection; a result dated in the future, from a clock that moved back, is stale and is retried at once. Saved causes are bounded. `gc-result.json` and `seed-result.json` are rewritten whole by their writer rather than updated in place, so they do not round-trip fields they do not know; `failures`, `projects` and `omitted_projects` are optional, a skip reason a newer writer adds reads as unrecognised, and no older shape has a reader.
-Removal records preserve subject, tip, subsumed or landed predicate and evidence source; shallow history, conflicted merge trees, offline forge and rewritten default branches remain typed kept outcomes.
-- Why: freeing space must not destroy evidence or a session in use.
-- Owner: `crates/config/src/gc.rs`; `worktrees.rs`; `crates/run/src/retention.rs`
+GC retains evidence and unimported Git work, expires resumable provider state
+only after archiving history, skips busy items, protects active reservations and
+continuations, and deletes by identity without following links. Usage retention
+belongs to [telemetry](telemetry.md#the-usage-ledger-outlives-the-run-store);
+scratch and cache eligibility, sweep budgets and resumption to the
+[disk spec](disk.md); worktree and branch removal to
+[worktrees](supervisor.md#pruning-and-gc-need-proof).
+
+`RETENTION_CLASSES` is the executable declaration of every retention class (typed
+owner and adapter, triggers, eligibility, schema settings); scheduled tick and
+explicit GC run the same registry path, each class through its own adapter, with
+no wildcard adapter. Byte rows come from adapter measurements marked complete,
+partial or unavailable, and collection failures stay visible. Admission command
+receipts become eligible only once their attempt is terminal and release is
+proven. GC resumes interrupted checkpoint collection under the graph lock while
+the name reservation survives. Removal records keep subject, tip, subsumed or
+landed predicate and evidence source; shallow history, conflicted merge trees,
+an offline forge and rewritten default branches stay typed kept outcomes.
+
+Scheduled collection runs daily from `provenant tick`, and the daily deadline
+advances only when a collection completes: launching a detached worker moves
+nothing. A worker that fails, cannot launch or is interrupted leaves the day due
+and is retried with bounded backoff, counted in `failures` in `gc-result.json`
+and reported once per tick as `gc=retry_pending`. A collection that stops at its
+sweep budget with a saved cursor ends `partial`: it is progress, resets the
+count and is resumed by the next sweep. An unreadable result (corrupt, over its
+cap, from a newer writer) is treated as absent, reported once and replaced; a
+result dated in the future is stale. `gc-result.json` and `seed-result.json` are
+rewritten whole, so a writer does not round-trip fields it does not know.
+- Why: freeing space must not destroy evidence or a session in use, and one bad
+  result must not block collection.
+- Owner: `crates/config/src/gc.rs`; `crates/confinement/src/worktrees.rs`;
+  `crates/run/src/retention.rs`
 
 ## Release identity
 
@@ -261,8 +252,8 @@ no override; test-only edits do not change it.
 
 ### Releases are immutable
 
-Install verifies and smoke-tests a release before trusting it. `release.json`
-is published last and a published release is never repaired. A digest proves
+Install verifies and smoke-tests a release before trusting it. `release.json` is
+published last and a published release is never repaired. A digest proves
 identity, not publisher trust.
 - Why: a partial or swapped release must never run.
 - Owner: `crates/config/src/release.rs`
@@ -271,12 +262,11 @@ identity, not publisher trust.
 
 ### Harness integrations have one declaration
 
-Managed harness paths and native hook event mappings come from `AdapterSpec`.
-Every supported instruction target links the same release instruction asset.
-An unavailable integration names its reason and source in install findings.
-Provenant has no MCP integration: the CLI is the agent interface, and install
-leaves every MCP server untouched.
-- Why: adapters share capability intent while native formats remain replaceable.
+Managed harness paths and native hook event mappings come from `AdapterSpec`, and
+every supported instruction target links the same release instruction asset. An
+unavailable integration names its reason and source in install findings.
+Provenant has no MCP integration: the CLI is the agent interface.
+- Why: adapters share capability intent while native formats stay replaceable.
 - Owner: `crates/records/src/adapters.rs`, `crates/config/src/harness.rs`
 
 ### Preview before every write
@@ -290,8 +280,8 @@ the install.
 ### Only proven-owned entries change
 
 Removal unlinks only entries whose value still matches the receipt, never
-recursively; adoption does not authorise deletion. After a home or
-state-root move, stale entries are reported without their paths being inspected.
+recursively; adoption does not authorise deletion. After a home or state-root
+move, stale entries are reported without their paths being inspected.
 - Why: an old path may now belong to something else.
 - Owner: `crates/config/src/managed.rs`
 
@@ -305,7 +295,7 @@ symlinked configs are refused unchanged. Edited hooks are not overwritten.
 ### LaunchAgents are owned like any entry
 
 The peer-agent and tick plists join the preview and receipt. A symlink at the
-plist or a parent is refused, and an older plist is adopted only on an exact
+plist or a parent is refused, and an existing plist is adopted only on an exact
 byte match.
 - Why: a LaunchAgent runs unattended with the user's authority.
 - Owner: `crates/config/src/managed.rs`, `src/tick_agent.rs`
@@ -319,30 +309,18 @@ recovers it, even with no receipt. There are no rollback journals.
 
 ## Typed host metadata in format 2
 
-`Trace.telemetry_context` owns launch-time `TelemetryContext` observations.
-Capture passes the declared value directly into the trace; readers never decode
-it from an extension map. Port receipt retention reads the attempt's declared
-`repository_admission_binding`, including its validated command digest and lease
-epoch, rather than maintaining a second admission-binding wire shape.
-Known fields with the wrong JSON type fail record decoding. Missing optional
-observations remain unknown. Unknown forward fields alone remain in extension
-maps; there are no old-shape readers or key aliases.
-- Why: the 2.0 stored shape gives each host fact one shared writer/reader type.
+Every host fact has one typed field on its owning record, shared by writer and
+reader, and never lives in an extension map: `Trace.telemetry_context`, the
+attempt's `repository_admission_binding`, sandbox mode and admission receipts,
+preparation failures and guard evidence, graph specification, attempt and route
+metadata (provisioning, placement, review, peer, template), the peer planner
+fallback reason, the wait observation report and telemetry's work-context PR,
+lens, task and risk. Optional facts may be absent, which reads as unknown; a
+present value of the wrong JSON type fails decoding. Every new persisted field is
+optional or defaulted, and flattened extension maps keep unknown fields from
+newer minor writers without interpreting them as host facts.
+- Why: each host fact gets one shared writer and reader type, so no string key
+  decides authority.
 - Owner: `crates/records/src/trace.rs`; `crates/records/src/run.rs`;
-  `crates/fabric-runtime/src/graph/model.rs`; `crates/fabric-runtime/src/coordination/facade.rs`;
-  `crates/fabric-runtime/src/runs.rs`
-
-Sandbox mode and sandbox-admission receipts are declared route metadata. The
-confinement writer, launch writer and attempt readers share those typed fields;
-no shared string key or extension-map decode determines sandbox authority.
-Preparation failures, guard evidence, launch preparation observations and usage
-aggregation likewise belong to their declared run record owners. Optional facts
-may be absent; a present value with the wrong type fails decoding.
-
-Graph specifications, attempts and routes own provisioning, placement, review,
-peer and template metadata. Relay and interface callers pass the declared values
-directly. Peer output carries a typed planner-fallback reason, while its typed
-attempt target owns identity. Wait replies carry a typed observation report.
-Telemetry reads declared work-context PR, lens, task and risk fields. Every new
-persisted field is optional or defaulted; flattened extension maps retain
-unknown fields from newer minor writers without interpreting them as host facts.
+  `crates/fabric-runtime/src/graph/model.rs`;
+  `crates/fabric-runtime/src/coordination/facade.rs`; `crates/fabric-runtime/src/runs.rs`

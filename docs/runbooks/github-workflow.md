@@ -27,34 +27,25 @@ project's workflows set `Done` when the issue closes or its pull request
 merges; setting `Done` closes an open issue, so never set it on work that must
 stay open. Link a pull request with `Closes #N` only when merge leaves no user
 or external-action gate; otherwise `References #N`. Commits never carry a
-closing keyword.
-
-Use `gh project item-list`, `gh project field-list` and `gh project item-edit`
-to find the project item and current Status options before changing it.
+closing keyword. Find the project item and the current Status options with
+`gh project item-list` and `gh project field-list` before editing one.
 
 ## Branch, commit, pull request
 
 Name the branch `<type>/<area>-<slug>` without an issue number or run
-vocabulary. Create it with
-`provenant worktree create BRANCH --base main`; to record the issue link on
-GitHub, create the branch first with `gh issue develop N --name BRANCH`.
-`worktree remove NAME` refuses dirty worktrees; `--discard` also deletes an
-unmerged branch.
+vocabulary. `provenant worktree create BRANCH --base main` makes the worktree
+(see [worktrees](../worktrees.md)); to record the issue link on GitHub, create
+the branch first with `gh issue develop N --name BRANCH`. Lane publishing is in
+[lane delivery](lane-lifecycle.md#delivery).
 
-See [lane delivery](lane-lifecycle.md#delivery) for publishing.
-
-`gh pr create --body` bypasses
-[the template](../../.github/pull_request_template.md): fill a copy (evidence
-rows bound to the exact head, the independent-review block) and pass it with
-`--body-file`, or build it from recorded attempts with
-`provenant pr open --from-attempt TARGET --review TARGET --summary-file summary.md --issue N --dry-run`.
-Complete rows marked `pending` before asking for review.
-
-Inside a lane, open the pull request with `gh pr create --body-file` against a
-filled copy of the template: the lane's own attempt is still running, so
-`provenant pr open --from-attempt` refuses it. `pr open` is for the chair
-after the attempt settles. The lane's `gh` is pinned to the host's gh
-configuration directory, so no `GH_CONFIG_DIR` prefix is needed.
+`gh pr create --body` bypasses [the template](../../.github/pull_request_template.md):
+fill a copy (evidence rows bound to the exact head, the independent-review block)
+and pass it with `--body-file`, or build it from recorded attempts with
+`provenant pr open --from-attempt TARGET --summary-file summary.md --issue N --dry-run`.
+Complete rows marked `pending` before asking for review. A lane opens its own
+pull request with `gh pr create --body-file` because its attempt is still
+running and `pr open` refuses it; `pr open` is for the chair after the attempt
+settles.
 
 A stack is a linear chain of dependent slices: the bottom PR targets `main`,
 each later PR the branch below, each with its own issue link (`gh stack --help`).
@@ -64,19 +55,18 @@ heads and review evidence. Land bottom-first with `provenant land`.
 ## Merge
 
 Agents merge directly: once a pull request has the lens review its risk
-requires (`provenant run review`) and `ci-status`
-is green on the exact head, merge without waiting for the user. CI and test-speed
-fixes, and changes that restore a red `main`, merge on green `ci-status` alone; changes that skip or weaken a check or alter a real
-boundary take their normal review. Before merging a substantial change, confirm
-its receipt is current
+requires (`provenant run review`) and `ci-status` is green on the exact head,
+merge without waiting for the user. CI and test-speed fixes, and changes that
+restore a red `main`, merge on green `ci-status` alone; changes that skip or
+weaken a check or alter a real boundary take their normal review. Before
+merging a substantial change, confirm its receipt is current
 (`provenant workflow receipt show ID`).
 
 Repository admins may bypass `Protect main` for pull-request merges only;
-direct pushes still need CI. Use
-`gh pr merge N --merge --admin` only when `ci-status` was green on an earlier
-head of the same pull request and `git diff --stat GREEN NEW` shows non-code
-files only (docs, skills, release notes). Never use it for a code delta, a red
-check or an unreviewed change.
+direct pushes still need CI. Use `gh pr merge N --merge --admin` only when
+`ci-status` was green on an earlier head of the same pull request and
+`git diff --stat GREEN NEW` shows non-code files only (docs, skills, release
+notes). Never use it for a code delta, a red check or an unreviewed change.
 
 `ci-status` is the single required check: the aggregate job at the end of
 [`ci.yml`](../../.github/workflows/ci.yml). `Protect main` does not require
@@ -88,27 +78,20 @@ branches outside authorised merges.
 
 ### Land
 
-Use `provenant land --help` for options and `provenant land --explain` for
-the effective policy and its sources. The landing owner gates the exact
-candidate; see [ADR 0037](../adr/0037-batched-exact-candidate-landing.md).
-Rerun the same request when a landing is pending or busy.
+`provenant land --help` lists options and `provenant land --explain` shows the
+effective policy and its sources (`domains.pr.land.*`). The landing owner gates
+the exact candidate ([ADR 0037](../adr/0037-batched-exact-candidate-landing.md)).
+Review must be independent of the writer and cover the exact head; a changed
+head needs fresh evidence.
 
-Sharp edges:
-
-- A land waiting on a gate prints the candidate ref, checks URL and state, then
-  elapsed time every `progress_seconds`. A candidate whose tree already passed
-  the required checks on a member head skips the gate (`reuse_tested_tree`).
-  A land killed mid-gate leaves its candidate ref until the pull request is
-  merged or closed; the next land collects it.
-- Changing `candidate_ref_prefix` needs a matching CI trigger (the bundled one
-  covers `land/**`). A command gate runs without `GH_TOKEN`, `GITHUB_TOKEN` and
-  `GH_ENTERPRISE_TOKEN` unless `gate.env_passthrough` names them.
-- Review must be independent of the writer and cover the exact head. Inspect
-  `land --explain` for the effective approval policy and its sources; a changed
-  head needs fresh evidence.
-- `LAND_PENDING` and `LAND_BUSY` exit as `pending`; rerun the same `land`.
-  `LAND_CONFLICT`: the PR conflicts with the target; rebase or merge, then push.
-  `LAND_PUBLICATION_UNKNOWN`: rerun `land` (see below).
+- `LAND_PENDING` and `LAND_BUSY` exit as `pending`: rerun the same `land`.
+  `LAND_CONFLICT` means the PR conflicts with the target: rebase or merge, then
+  push. `LAND_PUBLICATION_UNKNOWN`: see the recovery below.
+- A killed land leaves its candidate ref until the pull request is merged or
+  closed; the next land collects it. Changing `domains.pr.land.candidate_ref_prefix`
+  needs a matching CI trigger (the bundled one covers `land/**`).
+- A command gate runs without `GH_TOKEN`, `GITHUB_TOKEN` and
+  `GH_ENTERPRISE_TOKEN` unless `domains.pr.land.gate.env_passthrough` names them.
 - Cleanup after merge (fast-forward base, delete build output, worktree and
   local branch) runs only when the local tip is exactly the merged head. A
   refused step reports `cleanup_pending` and the merge still exits 0; fix the
@@ -120,11 +103,11 @@ The lander writes a marker under `landing/pending/` before publishing; an
 ambiguous outcome (timeout, 5xx) keeps it and the error names it. Never delete
 it to force a retry.
 
-Restore forge access, check `git merge-base --is-ancestor CANDIDATE origin/TARGET`
-after fetching and `gh pr view N --json state,headRefOid,mergeCommit` per PR,
-then rerun `provenant land N` without `--shadow`: recovery observes the outcome,
-finishes receipts and deletes the marker last. Recovery never sleeps: a marker
-younger than `publish_settle_seconds` that it cannot yet prove stays for the
+Restore forge access, fetch, check `git merge-base --is-ancestor CANDIDATE origin/TARGET`
+and `gh pr view N --json state,headRefOid,mergeCommit` per PR, then rerun
+`provenant land N` without `--shadow`: recovery observes the outcome, finishes
+receipts and deletes the marker last. It never sleeps, so a marker younger than
+`domains.pr.land.publish_settle_seconds` that it cannot yet prove stays for the
 next run.
 
 REST merges use the authenticated GitHub account's commit email, not local
@@ -145,6 +128,6 @@ auto-merge on green `ci-status`; anything else takes a `routine` reviewer.
 
 ## Scheduled tracker upkeep
 
-On one scheduling host per repository, opt in with
-`[domains.steward.repositories.tracker]` (`directory`, `cadence_seconds`);
-`provenant tick` then launches the `steward` graph when due.
+On one scheduling host per repository, set
+`domains.steward.repositories.tracker.directory` and
+`domains.steward.repositories.tracker.cadence_seconds`; `provenant tick` then launches the `steward` graph when due.

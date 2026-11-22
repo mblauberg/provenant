@@ -10,59 +10,52 @@ contract owns private Git and publication.
 
 ### Project layout ownership
 
-Project identity remains keyed by the canonical Git common directory. A
-project-scoped path is owned by the primary checkout proved by Git's worktree
-inventory or by a selected checkout whose private and common Git directories
-match. When an external Git directory prevents inventory from naming that
-checkout, a saved path may fill the gap only if it was captured from a verified
-primary and Git re-proves that it is still the primary for the same common
-directory. Linked-worktree membership alone does not prove primary ownership.
-A bare repository has no project checkout and keeps host/common-only layout.
-The common-directory parent is never a checkout claim.
-- Why: external metadata directories and linked checkouts do not encode a
-  primary path by parent relationship.
+Project identity is keyed by the canonical Git common directory. A project-scoped path is owned by
+the primary checkout proved by Git's worktree inventory, or by a selected checkout whose private
+and common Git directories match. When an external Git directory keeps inventory from naming
+that checkout, a saved path fills the gap only if it was captured from a verified primary and Git
+re-proves it is still the primary for the same common directory. Linked-worktree membership alone
+never proves primary ownership. A bare repository has no project checkout and keeps host and
+common-only layout, and the common directory's parent is never a checkout claim.
+- Why: external metadata directories and linked checkouts do not encode a primary path by parent
+  relationship.
 
-A writer needs an explicit verified worktree. Git inventory establishes
-membership; a registry reservation alone does not. Only proven-owned work is
-eligible for cleanup.
+A writer needs an explicit verified worktree: Git inventory establishes membership, a registry
+reservation alone does not, and only proven-owned work is eligible for cleanup.
 - Why: custody and cleanup must not claim another checkout.
 
-Only Provenant-created refs in their current generation may be removed. Landing
-requires ancestry or a receipt chain to an authorised root; a missing commit or
-rewritten target is unproven. Tree or patch equality is not landing evidence.
+Only Provenant-created refs in their current generation may be removed. Landing requires ancestry
+or a receipt chain to an authorised root; a missing commit or rewritten target is unproven, and
+tree or patch equality is not landing evidence.
 - Why: equivalent content does not prove that the owned work landed.
 
-Cleanup retains dirty, live and explicitly kept work, checks the expected tip and
-uses a lease for deletion. Failure warns without changing settlement's outcome.
+Cleanup retains dirty, live and explicitly kept work, checks the expected tip and uses a lease for
+deletion. A failure warns without changing settlement's outcome.
 - Why: cleanup must not destroy changed or unproven work.
 
-Host seeding copies or clones shared stores rather than hard-linking them; lane
-hard links follow the [permission policy](supervisor.md#permission-policy).
+Host seeding copies or clones shared stores rather than hard-linking them; lane hard links follow
+the [permission policy](supervisor.md#permission-policy).
 - Why: a writable link must not mutate shared data outside the checkout.
 
 ## Delivery
 
-`HostDeliveryContext` accepts host-configured Git transport helpers and URL
-features with a warning under host access. Isolated access retains the existing
-refusals. Transport checks still protect configuration writable by a sandboxed
-lane; credential-bearing URLs stay out of process arguments. Delivery bindings,
-receipts and the ref ledger retain only the URL without userinfo. Cleanup
-resolves the configured push URL again and checks its credential-free identity
-against the recorded endpoint before using it.
+Under `host` access, `HostDeliveryContext` accepts host-configured Git transport helpers and URL
+features with a warning; `isolated` refuses them. Transport checks still protect configuration a
+sandboxed lane can write, and credential-bearing URLs stay out of process arguments. Delivery
+bindings, receipts and the ref ledger keep only the URL without userinfo, and cleanup re-resolves
+the push URL and checks its credential-free identity against the recorded endpoint.
 
-Dispatch checks delivery targets before admission; delivery checks protection
-again. Direct push and integration refuse protected targets. Integration
-conflicts do not publish a ref, and a concurrent loser records a failure for
-host pickup.
+Dispatch checks delivery targets before admission and delivery checks protection again. Direct
+push and integration refuse protected targets. Integration conflicts publish no ref, and a
+concurrent loser records a failure for host pickup.
 - Why: publication must respect current authority and never expose a partial merge.
 
-Settled pickup requires a successful writer, released custody, a clean tree and
-the exact recorded head. A successful pickup replays without repeating its
-external effects. An existing PR is reused only for the delivered head and
-expected base.
+Settled pickup requires a successful writer, released custody, a clean tree and the exact recorded
+head. A successful pickup replays without repeating its external effects, and an existing PR is
+reused only for the delivered head and expected base.
 - Why: later delivery must not silently include unrelated edits.
 
-GitHub authority remains the user's. Credential selection has one host seam;
-a failed mint does not fall back, and token bytes are not recorded. Project
-GitHub policy is an advisory guard, not a security boundary.
+GitHub authority stays the user's. Credential selection has one host seam, a failed mint does not
+fall back, and token bytes are never recorded. Project GitHub policy is an advisory guard, not a
+security boundary.
 - Why: a lane must not gain authority through an implicit credential fallback.

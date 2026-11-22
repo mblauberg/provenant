@@ -4,23 +4,20 @@ Copy these sections into the target's declared work-item runbook (default
 `docs/runbooks/github-workflow.md`), cut what does not apply, and let the project add
 its own mechanics. Open the runbook with `Owner:` (the responsible role) and
 `Anchor:` (the target's source symbols or tests that the text must track).
-This repository's own runbook is the worked example.
 
 ## Statuses
 
-Use this repository's GitHub workflow runbook
-as a starting point; document the target's Status choices in its runbook. Labels
-describe content or gates, not progress.
+Project Status is the only workflow state: Backlog, Ready, In progress, In
+review, Awaiting user, Done. Labels describe content or gates, never progress.
 
 ## Branches
 
-Document the target's branch conventions.
+`<type>/<area>-<slug>`, with no issue number or run vocabulary.
 
 ## Closing links
 
-Document the target's closing-link conventions. This repository's
-GitHub workflow runbook
-is a worked example.
+`Closes #N` only when merge leaves no user or external-action gate; otherwise
+`References #N`. Commits never carry a closing keyword.
 
 ## Merge authority
 

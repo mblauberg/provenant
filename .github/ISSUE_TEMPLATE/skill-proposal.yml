@@ -5,12 +5,11 @@ body:
   - type: markdown
     attributes:
       value: >-
-        Every skill in the catalogue costs tokens in every session and competes
-        with its neighbours for routing, so the bar is high and it is set in
-        MAINTAINING.md ("Change a skill", "Promote and retire"). These fields
-        are that bar. A capability that cannot fill them is usually a project
-        rule, a script or a hook, or a reference inside an existing skill: that
-        is a good outcome, not a rejection.
+        Every skill costs tokens in every session and competes with its
+        neighbours for routing, so the bar is high. The `improve` skill's
+        authoring guidance sets it. A capability that cannot fill these fields is
+        usually a project rule, a script or hook, or a reference inside an
+        existing skill: that is a good outcome, not a rejection.
 
   - type: input
     id: name
@@ -27,9 +26,9 @@ body:
     attributes:
       label: One-line description
       description: >-
-        This is all a model sees when it routes. Put the trigger terms and the
-        nearest exclusion inside the first 250 characters. Shape: "Use for X.
-        Not for Y; use Z."
+        This is all a model sees when it routes (at most 1024 characters). Put the
+        trigger terms first and the nearest exclusion next. Shape: "Use for X. Not
+        for Y; use Z."
       placeholder: "Use for X, Y and Z. Not for W; use <nearest-skill>."
     validations:
       required: true
@@ -58,65 +57,9 @@ body:
     attributes:
       label: Why this is not that skill
       description: >-
-        Name the difference in trigger, authority, artifacts or completion
+        Name the difference in trigger, authority, artefacts or completion
         gates. A skill that cannot hold a stable boundary against its nearest
         neighbour gets merged into it rather than added beside it.
-    validations:
-      required: true
-
-  - type: textarea
-    id: fixtures
-    attributes:
-      label: Trigger fixtures
-      description: >-
-        At least two of each, with the exact route you expect (primary skill,
-        plus any companion).
-
-
-        Positive: requests that must route here.
-
-        Negative: requests that must not route here, and where they go instead.
-
-        Boundary: requests that sit right against the nearest skill, where the
-        named owner must win.
-      value: |
-        Positive:
-        1. "..." -> this skill
-        2. "..." -> this skill
-
-        Negative:
-        1. "..." -> <other-skill>
-        2. "..." -> <other-skill>
-
-        Boundary:
-        1. "..." -> <nearest-skill>, not this one, because ...
-        2. "..." -> this skill, not <nearest-skill>, because ...
-    validations:
-      required: true
-
-  - type: dropdown
-    id: promotion-status
-    attributes:
-      label: Promotion status
-      description: >-
-        Choose the smallest honest status. Limited evidence belongs in an
-        opt-in provisional skill, not a global-ready claim.
-      options:
-        - Project-local
-        - Opt-in provisional
-        - Global-ready
-    validations:
-      required: true
-
-  - type: textarea
-    id: promotion-rationale
-    attributes:
-      label: Promotion rationale
-      description: >-
-        Name the reusable artifact and ownership boundary. Trigger terms and
-        fixtures are captured above. Cross-project evidence is helpful but not
-        required; state why the selected status is honest and generalise
-        project-specific values into knobs.
     validations:
       required: true
 
@@ -125,9 +68,8 @@ body:
     attributes:
       label: Smallest correct container
       description: >-
-        MAINTAINING.md asks for the smallest container that holds the
-        capability. Which is this, and be honest: a global skill is the most
-        expensive answer.
+        The smallest container that holds the capability. Be honest: a global
+        skill is the most expensive answer.
       options:
         - A global Agent Skill (this proposal)
         - An always-loaded project rule
@@ -154,9 +96,7 @@ body:
     attributes:
       label: Cost and safety
       options:
-        - label: SKILL.md will be roughly 500 words or less, with depth in narrowly named reference files loaded only when needed.
-          required: true
-        - label: The description fits the catalogue budget (the canonical catalogue stays at or below 8,000 characters).
+        - label: SKILL.md stays small and routes; depth goes in narrowly named reference files loaded only when needed.
           required: true
         - label: The skill grants no authority by itself; metadata and tool lists may narrow invocation but never widen permission.
           required: true

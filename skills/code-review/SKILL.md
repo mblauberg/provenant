@@ -7,12 +7,13 @@ description: "Use for independent read-only review of a pinned diff or pull requ
 
 Review independently at a pinned head and prove coverage alongside CI.
 
-The chair or lead chooses whether to review, the reviewers and their number.
-A small change needs no review; for routine work, use one reviewer. For risky changes, prefer
-a strong reviewer from another model family, optionally paired with one from
-the author's family. Avoid a lightweight cross-family slot; if only the same
-family is available, warn and proceed. These are overridable preferences, not
-routing requirements.
+The chair or lead chooses whether to review, the reviewers and their number;
+`provenant workflow review` checks recorded coverage against the receipt's risk
+tier. A small change needs no review and routine work takes one reviewer. For
+risky changes, cover the lenses the risk requires first; a strong reviewer from
+another model family is a bonus, optionally paired with one from the author's
+family. If only the same family is available, warn and proceed. These are
+overridable preferences, not routing requirements.
 
 For a configured panel, pin the subject and base and supply the spec:
 
@@ -20,23 +21,24 @@ For a configured panel, pin the subject and base and supply the spec:
 provenant run review-panel --pr 123 --brief-file brief.md
 ```
 
-A dotted leaf such as `review.correctness` selects one lens. Security-privacy
-runs only for credential, secret or publication paths, or when the owner asks.
-Review a changed subject against prior findings and the invariant under repair.
+A dotted leaf such as `review.correctness` selects one lens. The security-privacy
+lens is selected by credential, secret or publication paths, or when the owner
+asks. Review a changed subject against prior findings and the invariant under
+repair.
 
 ## Independence
 
 - Follow the pinned-commit and read-only rules in the reviewer context.
 - The brief carries the spec, never the author's hypothesis, expected verdict
   or scratchpad.
-- A review that cannot read its rubric or required context is `incomplete`,
+- A review that cannot read its rubric or required context is `inconclusive`,
   never `clean`.
 
 ## Rubric
 
-[reviewer-context.md](references/reviewer-context.md) defines findings;
-[review-lenses.md](references/review-lenses.md) supplies inspection questions.
-Template briefs live under `references/lenses/`.
+[reviewer-context.md](references/reviewer-context.md) defines findings and
+blocking; [review-lenses.md](references/review-lenses.md) supplies the shared
+inspection questions. The lens briefs sit under `references/lenses/`.
 
 ## What a clean verdict proves
 
