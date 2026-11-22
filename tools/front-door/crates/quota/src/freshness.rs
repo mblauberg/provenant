@@ -161,7 +161,9 @@ mod tests {
         assert_eq!(policy.source, FreshnessSource::Config);
         assert_eq!(policy.expired_availability_expires(100), 120);
         assert_eq!(policy.readiness_expiry(100, 1), 123);
-        assert!(!policy.login_verification_fresh(81, 100));
-        assert!(policy.login_verification_fresh(82, 100));
+        // A verification expires once its age reaches the configured lifetime.
+        assert!(!policy.login_verification_fresh(82, 100));
+        assert!(policy.login_verification_fresh(83, 100));
+        assert!(!policy.login_verification_fresh(101, 100));
     }
 }
