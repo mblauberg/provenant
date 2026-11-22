@@ -29,8 +29,9 @@ data from examples.
 
 - Inspect the `provenant` binary's commands, hooks and model routes before
   running them on a trusted machine.
-- Grant the narrowest filesystem, credential, network and deployment authority
-  required for the task.
+- Lanes run with host access by default ([ADR 0042](docs/adr/0042-lane-access-host-by-default.md));
+  set `lanes.access` to `isolated` for work you do not trust, and grant
+  deployment and credential authority only where the task needs it.
 - Treat model output, web content, repository text and third-party agent output
   as untrusted input rather than authority.
 - Keep credentials in the platform's secret store or environment, never in

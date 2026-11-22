@@ -8,12 +8,12 @@ compared honestly. A detectable regression is not a prerequisite for a finding.
 
 The scripts are in this skill's `scripts/` directory and use only Python 3's
 standard library. They do not discover home directories, modify source
-histories, call providers or file issues.
-Read the authorised local files in place. Keep intermediate files local, outside
-Git. Do not select credential stores or files containing secrets for model input.
+histories, call providers or file issues. Read the authorised local files in
+place and keep intermediate files local, outside Git. Do not select credential
+stores or files containing secrets for model input.
 
-Create a private manifest with explicit sources at `$audit_dir/manifest.json`.
-Paths below are placeholders:
+Create a private manifest with explicit sources at `$audit_dir/manifest.json`
+(paths here are placeholders):
 
 ```json
 {
@@ -38,31 +38,27 @@ python3 "$skill_dir/scripts/audit.py" prepare "$audit_dir/manifest.json" "$audit
 
 See the script help for options.
 
-Keep the manifest and output outside the checkout because they contain private
-paths and transcript excerpts.
-`rows.json` and `key.json` are private. `blind.json` and `audit-blind.json` contain
-only shuffled opaque IDs and user/reply/next-user excerpts. Review these packets
-before dispatch: mask explicit group, date, release, project and instruction
-mentions in the excerpts, and remove secrets. Metadata stripping cannot blind a
-self-identifying sentence. Keep IDs aligned and record masking locally. Do not
+Keep the manifest and output outside the checkout: they hold private paths and
+transcript excerpts. `rows.json` and `key.json` are private. `blind.json` and
+`audit-blind.json` hold only shuffled opaque IDs and user/reply/next-user
+excerpts; before dispatch, mask explicit group, date, release, project and
+instruction mentions and remove secrets, because metadata stripping cannot blind
+a self-identifying sentence. Keep IDs aligned, record masking locally and never
 send the rows, manifest or key to raters.
 
 ## Blind panel
 
 Give a cheap model `rubric.txt` and `blind.json`; save its JSON array as
 `cheap.json`. Independently give a stronger model the same rubric and
-`audit-blind.json`; save `strong.json`. Select actual configured models with
-`orchestrate`, and record their resolved routes locally. Do not show the cheap
-labels to the stronger auditor. The randomly selected audit subset is fixed by
-the seed and count; increase coverage when raters disagree or events are rare.
-
-Follow the supplied rubric. An absent next message is unknown, not an
-endorsement. Check rater agreement before interpreting the labels.
+`audit-blind.json`; save `strong.json`. Select configured models with
+`orchestrate`, record their resolved routes locally and do not show the cheap
+labels to the auditor. Increase the audit subset when raters disagree or events
+are rare. An absent next message is unknown, not an endorsement. Check rater
+agreement before interpreting the labels.
 
 Raw history may go to other providers only when the owner authorised that run;
 credentials and secrets are excluded in every case. Otherwise use an authorised
 local model, or keep the packets local and report labelling as unverified.
-Local read-only history analysis needs no receipt.
 
 ```sh
 python3 "$skill_dir/scripts/audit.py" report "$audit_dir/audit" --cheap "$audit_dir/cheap.json" --audit "$audit_dir/strong.json" > "$audit_dir/report.json"

@@ -1,7 +1,7 @@
 # Fragment extracted from provenant's .github/workflows/ci.yml. Append this
 # job to the project's own CI workflow, listing every real build/test/lint
 # job under `needs`. This is the ONE job named in the branch ruleset's
-# required status check — never pin an individual build job as required,
+# required status check. Never pin an individual build job as required,
 # because adding a job later would silently need a manual ruleset edit.
 
 concurrency:

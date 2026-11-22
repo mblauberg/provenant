@@ -32,9 +32,9 @@ harness handles routing, execution and records.
 Routes select models and accounts with quota headroom. A writer works in its
 own registered worktree, so parallel changes have separate Git state. Run
 records preserve the work and its outcome for inspection and continuation.
-Permission policy and the trust placed in a route matter: review the
-[configuration](docs/runbooks/configuration.md#lane-sandbox-mode) and grant
-only the authority the work needs.
+Lanes run with host access by default; the
+[configuration runbook](docs/runbooks/configuration.md#lane-sandbox-mode) covers
+isolated access and sandbox mode.
 
 The optional [macOS quota menu](apps/quota-menubar/README.md) presents account
 usage and opens the console. Local telemetry helps inspect usage and runs;

@@ -7,6 +7,3 @@
 - Stop rule: <criteria met, budget boundary, or explicit owner STOP for a standing mission>
 - Resume trigger: <event and owner state to recheck>
 - Reporting cadence: <milestones for the chair log and outcome report>
-
-For a standing mission, an empty queue leaves the mission open. Record its
-waiting condition rather than changing its stop rule.

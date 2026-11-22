@@ -2,35 +2,30 @@
 Owner: provenant-routing
 Anchor: [resolve.rs](../../tools/front-door/crates/routing/src/resolve.rs); [ADR 0039](../adr/0039-graph-of-templates.md#interface)
 
-How to choose and steer routes, pace accounts and shape review panels. The
-bundled catalogue (`tools/front-door/crates/routing/assets/catalogue.toml`) owns
-default pool membership, weights and effort controls; the
-[routing spec](../specs/routing.md) owns the rules. Everything below is
-overridable in the selected state's `<state>/config.toml`.
+How to choose and steer routes, pace accounts and shape review panels. The bundled
+[catalogue](../../tools/front-door/crates/routing/assets/catalogue.toml) owns pool
+membership, weights and effort controls, and the [routing spec](../specs/routing.md)
+owns the rules. Everything below is overridable in the selected state's
+`<state>/config.toml`.
 
 ## Inspect and choose
 
-Run `provenant route list` to inspect model sources and pools, then `provenant route resolve NAME`
-to preview a choice and its sources. Use `provenant route --help` to change
-pools or exclude a route. Dispatch readiness can change after the preview, so
-check the attempt record for the resolved route.
+`provenant route list` shows model sources and pools, and `provenant route resolve
+NAME` previews a choice with its sources. `provenant route --help` lists the
+commands that change pools or exclude a route. Readiness can change after the
+preview, so read the attempt record for the resolved route.
 
 ## Pacing
 
-Configure account pacing under `[domains.routing.pacing]`; inspect the available
-settings with `provenant config schema` and the result with
-`provenant route resolve NAME`. Remove account references when unregistering an
-account. For a temporary change, use `provenant route override --help`; inspect
-and clear the override when it is no longer needed.
+Pacing settings live under `[domains.routing.pacing]`; `provenant config schema`
+lists them and `provenant route list` (or `--json`) shows the effective settings,
+estimates, budgets and sources. Remove an account's pacing entries when you
+unregister it. For a temporary change use `provenant route override`, and clear it
+when it is no longer needed.
 
-Monthly allowance accounts default to a 10 percentage point burst above elapsed
-cycle time. The local launch ledger keeps estimates current while provider
-billing lags. Missing or stale cycles use a remembered reset and duration rolled
-forward, or the calendar month in UTC. Recorded launches remain in the estimate;
-an inferred cycle warns rather than holding the account. Inspect settings, estimates, budgets, sources and knobs with
-`provenant route list` (or `--json`).
-
-Override the global defaults, or a single account, in the selected config:
+Monthly-allowance accounts may spend up to the elapsed cycle fraction plus a burst
+(10 percentage points by default). Override the global monthly profile, or one
+account's:
 
 ```toml
 [domains.routing.pacing.monthly]
@@ -41,123 +36,75 @@ initial_launch_cost_basis_points = 100
 burst_percent = 15
 ```
 
-An account monthly table overrides the full global monthly profile; omitted
-fields take shipped defaults. Set `enabled = false` in that table to bypass the
-monthly cap, or set the account pacing `policy = "spend"` to stop pacing all its
-windows. These preferences do not bypass exhausted allowance or authentication.
-
-The account quota cache also persists the launch journal. Preparation reserves a
-launch before returning its specification, under the quota publication lock.
-The most recent 4096 attempt IDs deduplicate replayed preparation. A busy cache
-retries briefly, then admits with a warning and a separate reservation receipt.
-Cache reads include that receipt; the next account publication absorbs it.
-When quota ticks remove accounts absent from provider discovery, they retain
-non-empty debt only for the canonical local-login key and clear all provider,
-login and readiness observations. Removed registered accounts drop their records.
-A retained ledger alone does not establish a local login for review preview.
-Bypassed accounts avoid the lock and do not book monthly debt. Failed launches
-retain their reservation conservatively.
-
-Between reports, estimated spend is the last reported percentage plus pending
-booked costs, conservatively raised by any learned per-launch cost. Positive
-provider-reported usage changes confirm only the reservations they cover, in
-ledger order. A single-launch
-sample can increase that estimate; ambiguous partial samples cannot lower it.
-Before calibration, the configured initial launch cost is booked with each
-reservation. Later overrides affect new launches; pending launches retain their
-booked costs even when a calendar estimate becomes a provider billing cycle.
-The first provider sample establishes a baseline without confirming earlier
-local launches. Flat or decreasing readings in the
-same cycle retain pending launch estimates. A new cycle resets spend but retains
-learned cost. Timestamps keep launches at or after a slow probe's observation
-pending even when they were recorded before it completed; insufficient retained
-journal coverage never clears debt.
-
-Monthly windows are recognised by billing-cycle/monthly/thirty-day pool names
-or 28–31 day durations. An adapter's monthly-allowance declaration, account
-monthly profile or remembered monthly ledger also requires evidence when a
-snapshot omits its cycle. Missing, stale, future-dated, reset or incomplete
-cycles use available usage and an inferred cycle, with a sourced policy warning
-rather than a hold based on uncertainty. Local login estimates name their cycle
-source and retain recorded launches. Other windows retain their existing treatment, and
-monthly windows respect model-pool scope. Profiles can select other windows
-with `windows`. The launch journal spans one account's models and pools; its
-booked costs estimate usage rather than measure actual individual costs or
-unreported external usage.
+An account's monthly table replaces the whole global monthly profile, with omitted
+fields taking shipped defaults. `enabled = false` in that table bypasses the monthly
+cap, and an account `policy = "spend"` stops pacing all its windows; `windows`
+selects which windows a profile covers. None of these bypass an exhausted allowance
+or authentication. How the launch ledger estimates spend, books costs and handles
+missing cycles is in the
+[routing spec](../specs/routing.md#monthly-allowance-ledger).
 
 ## Model policy
 
-Configure policy under `[domains.routing.model_policy]`. Run
-`provenant route resolve MODEL` to inspect the effective policy and its sources,
-and `provenant config check` to find invalid rules. The
-[routing spec](../specs/routing.md) owns the routing behaviour.
+Configure policy under `[domains.routing.model_policy]`. `provenant route resolve
+MODEL` shows the effective policy and its sources, and `provenant config check`
+finds invalid rules. The [routing spec](../specs/routing.md) owns the behaviour.
 
 ## Review panels
 
-Configure review shapes and selection under `[domains.routing.review]`; inspect
-the schema for available settings. Preview a review before submitting it:
+Configure review shapes and selection under `[domains.routing.review]`. Preview a
+review before submitting it:
 
 ```sh
 provenant run review-panel --brief-file brief.md --set subject=origin/branch --set review_base=origin/main --explain
 ```
 
 The host pins both refs, then selects the panel from the changed paths and size
-between their merge base and the subject. Configured path floors therefore apply
-before the full panel expands, and the brief reaches its framing, lens,
-verification and synthesis stages. A command such as
-`provenant run review.security` runs one lens only; use `review-panel` for the
-complete configured topology. For an explicit risk or risk tag, supply the
-graph's top-level `review` request; `--set subject` and `--set review_base` pin
-the range only. If path or size metadata is incomplete, Provenant applies the
-configured unreadable-path floors and includes a warning in reviewer guidance.
-
-Bind each attempt's resolved route to the review evidence. Review a changed head
-again as required by the repository's workflow.
+between their merge base and the subject, so configured path floors apply before
+the full panel expands. If path or size metadata is incomplete, the configured
+unreadable-path floors apply and reviewer guidance carries a warning. A command
+such as `provenant run review.security` runs one lens only; use `review-panel` for
+the configured topology. `--set subject` and `--set review_base` only pin the range;
+for an explicit risk or risk tag, supply the graph's top-level `review` request.
+Bind each attempt's resolved route to the review evidence, and review a changed
+head again as the repository's workflow requires.
 
 ## Templates
 
-Run `provenant templates` to discover templates and `provenant templates show NAME`
-to inspect one. Register a writer worktree or provide a branch and base, then
-preview the submission with `provenant run --file delivery.toml --explain`.
-Check its scope, authority and gates before submitting without `--explain`.
-Use `provenant help --all` for parameters and graph operations. The
-[template decision](../adr/0039-graph-of-templates.md) describes the model.
+`provenant templates` lists templates and `provenant templates show NAME` shows
+one's nodes and parameters. Register a writer worktree or give a branch and base,
+then preview the submission with `provenant run --file delivery.toml --explain`;
+check its scope, authority and gates before submitting without `--explain`.
+`provenant help --all` has the parameters and graph operations;
+[ADR 0039](../adr/0039-graph-of-templates.md) has the model.
 
-For command or host-native routes, configure named entries under
-`[domains.fabric.commands]` or `[domains.fabric.host_native]`; use the config
-schema and route help to select them. Command argv comes from host configuration,
-not the task prompt.
+For command or host-native routes, define named entries under
+`[domains.fabric.commands]` or `[domains.fabric.host_native]`. Command argv comes
+from host configuration, never the task prompt.
 
 ### Batch template
 
-The `batch` template coordinates multiple implementation slices into one
-`integration_branch`, followed by review and bounded repair.
+`batch` implements several slices into one `integration_branch`, then reviews it
+and repairs within a bound. `items` takes bare strings (default parameters) or
+tables:
 
-#### Slice parameters and structured items
+- `id`: the slice's unique identifier.
+- `brief` or `brief_file`: the prompt, or a file holding it (not both).
+- `route` or `model`: a per-slice override (not both).
+- `write_scope`: advisory paths the slice may modify.
+- `after`: slice IDs that must settle successfully first. An unknown ID or a
+  cycle is rejected at compile time, naming the IDs.
 
-`items` accepts a list of bare strings (defaulting parameters) or structured tables:
-- `id`: unique identifier for the slice.
-- `brief` or `brief_file`: the prompt or file path containing the slice brief (mutually exclusive).
-- `route` or `model`: per-item model or route override (mutually exclusive).
-- `write_scope`: advisory list of paths the slice is scoped to modify.
-- `after`: list of other slice IDs that must settle successfully before this slice begins. Unknown IDs and dependency cycles are rejected at compile time naming the offending IDs.
+`max_parallel` caps concurrent slices. It defaults to
+`domains.fabric.batch.max_parallel` (shown with its source by `--explain`) and
+`--set max_parallel=N` overrides it per run. Each slice gets its own managed
+worktree under the worktree layout; the batch `worktree` parameter stays the
+checkout for review repair. A slice with `after` starts from the integration
+branch once its prerequisites have integrated; independent slices start from the
+graph's pinned integration base. `provenant status` shows a queued slice as
+`waiting: after` (prerequisites unsettled) or `waiting: cap` (dependencies met,
+cap full).
 
-#### Concurrency and ordering
-
-The `max_parallel` parameter caps how many slices execute concurrently.
-Each slice uses a separate managed worktree from the configured worktree layout.
-The batch `worktree` parameter remains the checkout used for review repair.
-Slices with `after` start from the integration branch after their prerequisites
-have integrated; independent slices start from the graph's pinned integration base.
-It defaults to `domains.fabric.batch.max_parallel` (shown with its source in `--explain`),
-and can be overridden per run via `--set max_parallel=N`.
-
-Queued slices report as `waiting` in `provenant status`, displaying the wait reason:
-- `waiting: after` when waiting on prerequisite dependencies in `after`.
-- `waiting: cap` when dependencies are satisfied but the concurrency cap is occupied.
-
-#### Incremental integration and conflict isolation
-
-Each slice integrates into `integration_branch` as it settles. If a slice encounters
-a merge conflict, only that slice pauses (`blocked`, with the conflicting files
-reported), allowing independent sibling slices to continue execution uninterrupted.
+Each slice integrates into `integration_branch` as it settles. A merge conflict
+pauses only that slice (`blocked`, with the conflicting files reported) while
+independent siblings continue.

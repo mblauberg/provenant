@@ -3,10 +3,10 @@
 Owner: `crates/core/src/consumer_env.rs` (environment), `crates/config/src/repository_files.rs` (repository files), `crates/cli/src/external_contract.rs` (the outward declaration)
 Anchor: `crates/cli/src/external_contract.rs::ExternalContract`
 
-This page is what a repository, its scripts and its CI may rely on when they
-adopt Provenant or run beside it. Each table below is the rendering of one
-declaration in code.
-[Using Provenant 2 from another repository](../runbooks/using-provenant-2-from-another-repository.md)
+What a repository, its scripts and its CI may rely on when they adopt
+Provenant or run beside it. Each table below renders one declaration in code
+(`provenant-cli print-reference-data` prints them) and a test fails when they
+disagree. [Using Provenant 2 from another repository](../runbooks/using-provenant-2-from-another-repository.md)
 is the procedure.
 
 ## Stability tiers
@@ -15,13 +15,10 @@ Every consumer item carries one tier, declared on its entry. `evolving` is the
 default: the item may change in any minor release, and the release notes name
 the change. `stable` is kept small: an item is stable only when a consuming
 repository relies on it today, and it changes or goes only in a major release,
-with a release note. Stable items include `PROVENANT_SANDBOX`,
-`PROVENANT_PROCESS_TREE`, `PROVENANT_LANE_CARGO_LINT_TARGET`, process-tree
-output and exit codes. `internal` is
-Provenant's own wiring and may change in any release. A `PROVENANT_*` name the
-environment table does not declare is internal, and every `PROVENANT_TEST_*`
-name is internal by rule and never declared. Promoting an item is a one-entry
-change to its declaration.
+with a release note. `internal` is Provenant's own wiring and may change in any
+release. A `PROVENANT_*` name the environment table does not declare is
+internal, and every `PROVENANT_TEST_*` name is internal by rule and never
+declared. Promoting an item is a one-entry change to its declaration.
 
 - Why: a consumer must know which surfaces it may build on before it builds,
   and promising only what is used keeps the rest free to improve.
@@ -42,8 +39,10 @@ port table or settings, never a name compiled into a reader.
 
 ## Commands
 
-Command names may change freely. JSON envelopes other than `process-tree`
-are evolving. Human output, including printed next-step command lines, is evolving: scripts read `--json`. A removed command or option now fails with the ordinary unknown-command or unknown-flag error, which exits 2. There are no aliases. The 2.0.0 release notes retain the migration list.
+Command names may change freely, and an unknown command or flag fails with
+exit 2; there are no aliases. JSON envelopes other than `process-tree` are
+evolving, and so is human output, including printed next-step command lines:
+scripts read `--json`.
 
 - Why: a script that drives Provenant needs a fixed grammar and one parseable form.
 - Owner: `crates/cli/src/grammar.rs`
@@ -62,11 +61,7 @@ the file set may change in any release.
 
 Channels: `lane` variables are set in every lane process, `lane_or_caller`
 ones are also read from the caller, `port_command` ones are given to repository
-port commands, and `caller` ones are read only from the caller. `HOME` is the
-home selected during provider launch preparation. Unsandboxed lanes use the
-caller's home by default; a provider or selected account may choose an
-account-specific or private home in either mode. Provider cache and credential
-locations may also differ from `HOME`.
+port commands, and `caller` ones are read only from the caller.
 
 | Variable | Channel | Stability | Meaning | When |
 |---|---|---|---|---|
@@ -126,12 +121,14 @@ locations may also differ from `HOME`.
 ## State root
 
 The state root is `~/.local/share/provenant/v2` unless `PROVENANT_STATE_DIR`
-names another. The default root does not warn merely because the working
-workspace is the home directory or its ancestor. An unusual root's advisory
-overlaps are reported once per state-root digest. The 1.x root `~/.local/share/provenant/v1` is never written by
-2.x, so reinstalling 1.x finds its state as it was left. This tier is evolving.
+names another. The default root does not warn because the workspace is the home
+directory or its ancestor, and an unusual root's advisory overlaps are reported
+once per state-root digest. The previous major's root,
+`~/.local/share/provenant/v1`, is never written
+([install runbook](../runbooks/install.md#first-20-install-after-1x)). This tier
+is evolving.
 
-- Why: two majors must be able to coexist and roll back without migration.
+- Why: two majors must be able to coexist without touching each other's state.
 - Owner: `crates/core/src/roots.rs`, `src/state_handoff.rs`
 
 ## Repository files

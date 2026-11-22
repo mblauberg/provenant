@@ -47,6 +47,8 @@ go under `.provenant/templates/`; a template grants no new authority. Run
    the evidence rows.
 5. **Runbook:** seed the work-item runbook from
    [the runbook seed](references/runbook-seed.md).
-6. **Dependabot and CODEOWNERS:** adapt [`dependabot.yml`](templates/dependabot.yml).
+6. **Dependabot and CODEOWNERS:** adapt [`dependabot.yml`](templates/dependabot.yml)
+   and name the owner in `CODEOWNERS`.
 
-Check authority before changes to rulesets or destructive label synchronisation.
+Ruleset changes and destructive label synchronisation need the owner's
+authority.

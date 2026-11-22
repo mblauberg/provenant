@@ -8,24 +8,24 @@ must never happen, and why. Code and tests own what exists and how it behaves,
 GitHub issues own delivery state, and the [runbooks](../runbooks/) own
 procedure.
 
-Each spec is an invariants page. An entry states one invariant in a few
-sentences, then gives a one-sentence `Why` and an `Owner`.
-Narration, enumerations, history, flags, schemas, defaults and limits stay out:
-name the owning module, type or declaration in `Anchor:` or link the generated
-reference. Specs never name individual tests, line numbers or inventory counts.
-Tests cite the section they pin with `Spec: docs/specs/NAME.md#anchor`.
-`scripts/check-doc-truth` strictly resolves those Rust comments to spec files
-and heading anchors, and warns when a page exceeds its word cap.
-[Engineering docs](../../skills/engineering-docs/SKILL.md) owns placement.
+Each spec is an invariants page: one invariant in a few sentences, a
+one-sentence `Why` and an `Owner`. Narration, enumerations, history, flags,
+schemas, defaults and limits stay out; name the owning module, type or
+declaration in `Anchor:`. Specs never name individual tests, line numbers or
+inventory counts. Tests cite the section they pin with
+`Spec: docs/specs/NAME.md#anchor`, and `scripts/check-doc-truth` resolves those
+Rust comments to spec files and heading anchors and warns when a page exceeds
+its word cap. [Engineering docs](../../skills/engineering-docs/SKILL.md) owns
+placement.
 
 The binary is the reference: `provenant help --all` for commands and
-`provenant config schema` for config keys. `scripts/generate-reference` renders
-them as Markdown under the untracked `<repository>/docs/reference/`.
+`provenant config schema --all` for config keys. `scripts/generate-reference`
+renders them as Markdown under the untracked `<repository>/docs/reference/`.
 
 ## Area specs
 
 - [Consumer contract](consumer-contract.md): what an adopting repository may rely on, and how stably
-- [CLI](cli.md): envelope, exits, waits, hooks and checks
+- [CLI](cli.md): envelope, refusals, waits, status, landing, hooks and checks
 - [Disk](disk.md): read-only storage inventory
 - [State](state.md): roots, records, config and managed install
 - [Supervisor](supervisor.md): custody, confinement and worktrees
