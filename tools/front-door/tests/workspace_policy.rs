@@ -63,7 +63,8 @@ const LAYERS: &[(&str, &[&str])] = &[
         ],
     ),
     ("quota", &["core", "records", "config"]),
-    ("telemetry", &["core", "records", "routing", "os"]),
+    // Price overlays read host and project layers through config.
+    ("telemetry", &["core", "records", "config", "routing", "os"]),
     (
         "routing",
         &["core", "records", "config", "quota", "providers"],
