@@ -916,7 +916,7 @@ pub(super) fn execute_in(
                     _ => None,
                 };
                 let pacing = provenant_routing::pacing_preview(&model, context);
-                let mut recorded_readiness = recorded_model_readiness(
+                let recorded = recorded_model_readiness(
                     accounts,
                     &model,
                     &context.catalogue.admission_pools(&model),
@@ -930,6 +930,14 @@ pub(super) fn execute_in(
                         )
                     },
                 );
+                let (mut recorded_readiness, offered_exclusions, offered_warnings) =
+                    filter_unoffered_readiness(
+                        recorded,
+                        &model,
+                        context.catalogue,
+                        records,
+                        query.account.as_deref(),
+                    );
                 let pools = context.catalogue.admission_pools(&model);
                 let quota_evidence = quota_observations(
                     context.catalogue,
@@ -1067,6 +1075,8 @@ pub(super) fn execute_in(
                     },
                     pacing,
                     recorded_readiness,
+                    offered_exclusions,
+                    offered_warnings,
                     login_diagnostic,
                     quota,
                     admission_refusal,

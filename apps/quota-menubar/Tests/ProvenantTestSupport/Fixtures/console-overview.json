@@ -2,14 +2,14 @@
   "command": "console overview",
   "data": {
     "counts": {
-      "attention": null,
+      "attention": 0,
       "needs_you": 1,
-      "running": null
+      "running": 0
     },
     "coverage": {
       "inbox": "complete",
       "nested_runs": "unavailable",
-      "runs": "unavailable",
+      "runs": "empty",
       "scope": "local"
     },
     "lanes": [],

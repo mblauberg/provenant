@@ -965,6 +965,12 @@ pub struct RoutePreview {
     /// Recorded model-scoped evidence, separate from live executable availability.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recorded_readiness: Vec<RecordedReadiness>,
+    /// Accounts withheld because their recorded offer list lacks the model.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub offered_exclusions: Vec<String>,
+    /// Pinned accounts attempted despite a recorded offer list lacking the model.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub offered_warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login_diagnostic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

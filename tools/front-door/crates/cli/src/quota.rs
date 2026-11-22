@@ -5673,34 +5673,49 @@ mod tests {
                 self.expiry
             }
         }
-        for (failure, malformed, expected) in [
-            (None, false, None),
-            (Some(ProbeFailure::RefreshDeferred), false, None),
-            (None, true, Some(ReadinessReason::CommandFailure)),
+        for (failure, malformed, expected_reason, expected_state) in [
+            (None, false, None, ReadinessState::Ready),
+            (
+                Some(ProbeFailure::RefreshDeferred),
+                false,
+                Some(ReadinessReason::NotProbed),
+                ReadinessState::Unknown,
+            ),
+            (
+                None,
+                true,
+                Some(ReadinessReason::CommandFailure),
+                ReadinessState::Unavailable,
+            ),
             (
                 Some(ProbeFailure::MissingCli),
                 false,
                 Some(ReadinessReason::MissingExecutable),
+                ReadinessState::Unavailable,
             ),
             (
                 Some(ProbeFailure::Auth),
                 false,
                 Some(ReadinessReason::SignedOut),
+                ReadinessState::Unavailable,
             ),
             (
                 Some(ProbeFailure::LoginExpired),
                 false,
                 Some(ReadinessReason::LoginExpired),
+                ReadinessState::Unavailable,
             ),
             (
                 Some(ProbeFailure::AccountMismatch),
                 false,
                 Some(ReadinessReason::AccountMismatch),
+                ReadinessState::Unavailable,
             ),
             (
                 Some(ProbeFailure::Network),
                 false,
                 Some(ReadinessReason::CommandFailure),
+                ReadinessState::Unavailable,
             ),
         ] {
             let temp = tempfile::tempdir()?;
@@ -5775,6 +5790,7 @@ mod tests {
                     "unknown"
                 }
             );
+            // `quota show` reads the account-wide scope published by a tick.
             let read = read_readiness(
                 roots.state.as_path(),
                 &ReadinessScope {
@@ -5782,23 +5798,12 @@ mod tests {
                     host: LOCAL_HOST.into(),
                     adapter: "codex".into(),
                     account_key: "key".into(),
-                    route: "codex/model".into(),
+                    route: provenant_quota::ACCOUNT_ROUTE.into(),
                 },
                 SystemClock::new().unix_seconds(),
             );
-            assert_eq!(
-                read.reason,
-                Some(expected.unwrap_or(ReadinessReason::NotProbed)),
-                "{failure:?}/{malformed}"
-            );
-            assert_eq!(
-                read.state,
-                if expected.is_some() {
-                    ReadinessState::Unavailable
-                } else {
-                    ReadinessState::Unknown
-                }
-            );
+            assert_eq!(read.reason, expected_reason, "{failure:?}/{malformed}");
+            assert_eq!(read.state, expected_state, "{failure:?}/{malformed}");
         }
         Ok(())
     }

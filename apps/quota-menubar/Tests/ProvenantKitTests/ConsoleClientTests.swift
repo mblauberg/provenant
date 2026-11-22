@@ -21,12 +21,12 @@ final class ConsoleClientTests: XCTestCase {
 
         let (console, _) = client([(["console", "overview"], "console-overview", 0)])
         let overview = try await console.overview()
-        XCTAssertNil(overview.counts.running)
-        XCTAssertNil(overview.counts.attention)
+        XCTAssertEqual(overview.counts.running, 0)
+        XCTAssertEqual(overview.counts.attention, 0)
         XCTAssertEqual(overview.counts.needsYou, 1)
         XCTAssertEqual(overview.needsYou.map(\.title), ["Review console"])
         XCTAssertEqual(overview.needsYou.first?.projectLabel, "project")
-        XCTAssertEqual(overview.coverage.warnings, ["Runs: unavailable", "Nested runs: unavailable"])
+        XCTAssertEqual(overview.coverage.warnings, ["Nested runs: unavailable"])
     }
 
     func testBoardDecodesLanesAndPassesPagingArguments() async throws {

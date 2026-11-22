@@ -524,6 +524,61 @@ fn offered_list_serves_model(
             .into_iter()
             .any(|newer| provenant_providers::model_matches_offered(newer.model(), offered))
 }
+/// Whether a known offer list serves a model under the same supersedence rules
+/// used for pool candidates. An empty list means no restriction is known.
+pub fn offered_models_serve(offered: &[String], model: &ModelId, catalogue: &Catalogue) -> bool {
+    offered_list_serves_model(offered, model, catalogue, false)
+}
+
+/// An account's known offer list. The keychain-stamped usage probe is the first
+/// source; the quota snapshot records the same offer list for an account whose
+/// probe has not run yet. An empty list means the offers are unknown, never that
+/// the account serves every model.
+fn snapshot_offered_models<'a>(
+    accounts: &'a [provenant_quota::AccountRecord],
+    adapter: &str,
+    account_key: Option<&str>,
+) -> Option<&'a [String]> {
+    if !provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| spec.offered_models) {
+        return None;
+    }
+    let key = account_key?;
+    accounts
+        .iter()
+        .find(|record| record.account.adapter == adapter && record.account.account_key == key)
+        .and_then(|record| record.snapshot.as_ref()?.details.as_ref())
+        .filter(|details| !details.models.is_empty())
+        .map(|details| details.models.as_slice())
+}
+
+/// Give an unpinned selection the account's recorded offer list when its usage
+/// probe has not run. A pin keeps its original availability: an explicitly
+/// chosen account is attempted even when its recorded offers lack the model.
+fn availability_with_known_offers(
+    availability: &[AvailabilityRecord],
+    accounts: &[provenant_quota::AccountRecord],
+) -> Vec<AvailabilityRecord> {
+    availability
+        .iter()
+        .map(|record| {
+            if !record.observed_models.is_empty()
+                || !provenant_records::AdapterSpec::get(&record.adapter)
+                    .is_some_and(|spec| spec.offered_models)
+            {
+                return record.clone();
+            }
+            match snapshot_offered_models(accounts, &record.adapter, record.account_key.as_deref())
+            {
+                Some(models) => AvailabilityRecord {
+                    observed_models: models.to_vec(),
+                    ..record.clone()
+                },
+                None => record.clone(),
+            }
+        })
+        .collect()
+}
+
 fn account_serves_model(
     record: &AvailabilityRecord,
     model: &ModelId,
@@ -1337,6 +1392,36 @@ pub fn pacing_preview(model: &ModelId, context: &RoutingContext<'_>) -> Vec<Paci
             })
             .map(|a| a.account_key.clone()),
     );
+    // An adapter with registered accounts does not launch through its
+    // synthetic local login. Its cached quota row is not a route candidate.
+    if let Some(spec) = provenant_records::AdapterSpec::get(model.adapter())
+        && context.accounts.iter().any(|record| {
+            record.account.adapter == model.adapter()
+                && !spec.is_unregistered_local(&record.account.account_key)
+        })
+    {
+        accounts.retain(|key| {
+            key.as_deref()
+                .is_none_or(|key| !spec.is_unregistered_local(key))
+        });
+    }
+    // Pacing rows for accounts known not to offer the model are not route
+    // candidates either. An unrecorded offer list stays in the report.
+    if accounts.iter().any(|key| {
+        key.as_deref()
+            .and_then(|key| snapshot_offered_models(context.accounts, model.adapter(), Some(key)))
+            .is_some()
+    }) {
+        accounts.retain(|key| {
+            key.as_deref()
+                .and_then(|key| {
+                    snapshot_offered_models(context.accounts, model.adapter(), Some(key))
+                })
+                .is_none_or(|offered| {
+                    offered_list_serves_model(offered, model, context.catalogue, false)
+                })
+        });
+    }
     if accounts.is_empty() {
         accounts.insert(None);
     }
@@ -2702,6 +2787,11 @@ pub fn resolve_for_account_with_seed_excluding_family(
         })
         .cloned()
         .collect();
+    let availability = if matches!(account, AccountSelection::Any) {
+        availability_with_known_offers(&availability, context.accounts)
+    } else {
+        availability
+    };
     let kept = ValidatedContext(RoutingContext {
         availability: &availability,
         ..context.0

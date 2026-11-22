@@ -84,7 +84,11 @@ Gemini 4 or Claude 5.5 omits `gemini-3.8-flash` or Claude 4.6 from its automatic
 pools while an account offering only the older models keeps them), and pool
 candidate resolution only assigns an account to models it actually offers. When no account offer list is observed yet, unknown offerings retain shipped pool
 members without applying supersedence; owner-configured pools stay pinned
-regardless of supersedence.
+regardless of supersedence. An account's quota snapshot offer list is a known list
+when its probe has not run: an unpinned selection never picks an account whose
+known list lacks the model, and `route resolve` reports the exclusion with its
+recorded offers. An explicit `--account` pin is attempted with a warning instead
+of being withheld.
 Discovery messages are transient command
 output, not part of the persisted quota report. Route listings name the source of
 model, valid pair, named route and pool entries, and the configuration layer that
@@ -276,6 +280,8 @@ below ready or untested accounts during its validity window; if only failed-prob
 accounts remain, launch proceeds with a warning unless the `PROBE_FAILURE`
 policy knob refuses. Readiness display distinguishes "not probed" (with a tick hint)
 from "probed, provider reports no figures" and "probed, failed" (both without hint).
+A successful probe with figures records positive account readiness, so a completed
+tick is never displayed as unprobed.
 Unknown provider errors whose kind and status are absent or unknown settle as
 `unclassified`, not `usage_limited`: they preserve the provider message, retry once
 on the same route without marking the account exhausted, then reroute at most

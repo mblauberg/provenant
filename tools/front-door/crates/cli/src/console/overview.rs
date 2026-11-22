@@ -185,13 +185,18 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
             Err(_) => "unavailable",
         },
         Err(provenant_run::RunError::Version(_)) => "incompatible",
-        _ => "unavailable",
+        // A healthy host with no run store has no lanes, not unreadable state.
+        // Board and tree already report this as `empty`; overview must agree.
+        Ok(None) => "empty",
+        Err(_) => "unavailable",
     };
     Ok(
         json!({"schema_version":2,"needs_you":needs_you,"lanes":lanes,
         "counts":{"needs_you":(fabric != "unavailable" && fabric != "incompatible").then_some(needs_you.len()),
                   "running":(run != "unavailable" && run != "incompatible").then_some(running),
                   "attention":(run != "unavailable" && run != "incompatible").then_some(attention_count)},
+        // Overview reads only this host's stores; it never traverses nested
+        // runs, so their coverage is declared unavailable, not measured.
         "coverage":{"scope":"local","inbox":fabric,"runs":run,"nested_runs":"unavailable"}}),
     )
 }
