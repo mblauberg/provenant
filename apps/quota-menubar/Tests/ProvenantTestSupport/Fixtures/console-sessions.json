@@ -37,16 +37,8 @@
           }
         },
         "role": "chair",
-        "summary": {
-          "needs_you": [],
-          "next": "Review",
-          "now": "Implementing console",
-          "revision": 1,
-          "risk": "none",
-          "schema_version": 1,
-          "updated_at": "2026-11-02T01:58:26.745295Z"
-        },
-        "summary_status": "available"
+        "summary": "Implementing console",
+        "summary_status": "structured"
       },
       {
         "consistency": "current",
@@ -77,19 +69,11 @@
           }
         },
         "role": "chair",
-        "summary": {
-          "needs_you": [],
-          "next": "Review",
-          "now": "Implementing the console",
-          "revision": 1,
-          "risk": "none",
-          "schema_version": 1,
-          "updated_at": "2026-11-02T02:18:00Z"
-        },
-        "summary_status": "available"
+        "summary": "Implementing the console",
+        "summary_status": "structured"
       }
     ],
-    "snapshot": "sha256:b4e73432b809f02d24350752cb700a67a7791ec11b981983ca4155a8d1df6fda",
+    "snapshot": "sha256:2f7eefd4a3ea7b4faf2470bb405714a7c961a222393cb4cbfb12068cbb477a62",
     "truncated": false
   },
   "error": null,

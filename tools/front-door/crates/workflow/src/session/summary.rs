@@ -27,6 +27,133 @@ impl SummaryError {
     }
 }
 
+/// Where a console-visible summary line came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummarySource {
+    /// The `now` line of a chair-authored `provenant_summary` header.
+    Structured,
+    /// The first meaningful line of the checkpoint's `## Intent` section.
+    Intent,
+    /// The first meaningful line of the checkpoint's `## Goal` section.
+    Goal,
+    /// The first meaningful line of the checkpoint's `## Done` section.
+    Done,
+    /// The checkpoint's top-level title, when no preferred section has a line.
+    Title,
+    /// No checkpoint, or no usable line in it.
+    Unavailable,
+}
+
+/// A short display line read from a checkpoint, and the section it came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SummaryLine {
+    pub text: String,
+    pub source: SummarySource,
+}
+
+/// Longest derived line before an ellipsis is appended. A line is a display
+/// hint, never a replacement for reading the checkpoint.
+pub const SUMMARY_LINE_BYTES: usize = 200;
+
+fn bound_line(text: &str) -> String {
+    if text.len() <= SUMMARY_LINE_BYTES {
+        return text.to_owned();
+    }
+    let mut end = SUMMARY_LINE_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+/// The first useful text on a line: past list and quote markers and whole-line
+/// emphasis, but never a heading or a rule.
+fn meaningful_line(line: &str) -> Option<String> {
+    let mut text = line.trim();
+    if text.is_empty() || text.starts_with('#') || matches!(text, "---" | "***" | "___") {
+        return None;
+    }
+    loop {
+        let unmarked = ["- ", "* ", "+ ", "> "]
+            .into_iter()
+            .find_map(|marker| text.strip_prefix(marker))
+            .or_else(|| {
+                let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+                (digits > 0)
+                    .then(|| &text[digits..])
+                    .and_then(|rest| rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") ")))
+            });
+        match unmarked {
+            Some(rest) => text = rest.trim_start(),
+            None => break,
+        }
+    }
+    for marker in ["**", "__", "`"] {
+        if text.len() >= 2 * marker.len() && text.starts_with(marker) && text.ends_with(marker) {
+            text = text[marker.len()..text.len() - marker.len()].trim();
+        }
+    }
+    (!text.is_empty()).then(|| bound_line(text))
+}
+
+/// An ATX heading's level and text, with the leading hashes and space removed.
+fn heading(line: &str) -> Option<(usize, &str)> {
+    let trimmed = line.trim();
+    let level = trimmed.bytes().take_while(|byte| *byte == b'#').count();
+    if level == 0 || !trimmed[level..].starts_with(' ') {
+        return None;
+    }
+    Some((level, trimmed[level..].trim()))
+}
+
+/// Derive one short line from a saved checkpoint without a model call.
+/// `Intent`, then `Goal`, then `Done` win over the title; the first meaningful
+/// line of the first matching section is used. Frontmatter and fenced code are
+/// skipped, and a changed checkpoint changes the line on the next read.
+pub fn checkpoint_summary_line(markdown: &str) -> Option<SummaryLine> {
+    let start = header_end(markdown).ok().flatten().unwrap_or(0);
+    let mut sections: [Option<String>; 3] = [None, None, None];
+    let mut title = None;
+    let mut section = None;
+    let mut fenced = false;
+    for line in markdown[start..].lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        if let Some((level, text)) = heading(line) {
+            section = match text.to_ascii_lowercase().as_str() {
+                "intent" => Some(0),
+                "goal" => Some(1),
+                "done" => Some(2),
+                _ => None,
+            };
+            if level == 1 && title.is_none() {
+                title = meaningful_line(text);
+            }
+            continue;
+        }
+        if let Some(index) = section
+            && sections[index].is_none()
+        {
+            sections[index] = meaningful_line(line);
+        }
+    }
+    [
+        (sections[0].take(), SummarySource::Intent),
+        (sections[1].take(), SummarySource::Goal),
+        (sections[2].take(), SummarySource::Done),
+        (title, SummarySource::Title),
+    ]
+    .into_iter()
+    .find_map(|(text, source)| text.map(|text| SummaryLine { text, source }))
+}
+
 /// Fields omitted from a patch retain their existing values. Revision zero
 /// creates a summary on an existing checkpoint.
 /// This is a CLI update request; strict decoding rejects misspelled or
@@ -711,6 +838,44 @@ mod tests {
         let rewritten: serde_json::Value =
             provenant_records::decode(encoded.as_slice(), limits).unwrap();
         assert_eq!(rewritten["future_summary_field"], extension);
+    }
+
+    #[test]
+    fn checkpoint_summary_line_prefers_sections_in_order() {
+        let markdown = "# Session checkpoint (work)\n\n## Done\n- Shipped the fix\n\n## Goal\n**Finish the slice**\n\n## Intent\n> Keep the console useful\n";
+        let line = checkpoint_summary_line(markdown).unwrap();
+        assert_eq!(line.text, "Keep the console useful");
+        assert_eq!(line.source, SummarySource::Intent);
+
+        let without_intent = markdown.replace("## Intent\n> Keep the console useful\n", "");
+        let line = checkpoint_summary_line(&without_intent).unwrap();
+        assert_eq!(line.text, "Finish the slice");
+        assert_eq!(line.source, SummarySource::Goal);
+
+        let without_goal = without_intent.replace("## Goal\n**Finish the slice**\n", "");
+        let line = checkpoint_summary_line(&without_goal).unwrap();
+        assert_eq!(line.text, "Shipped the fix");
+        assert_eq!(line.source, SummarySource::Done);
+    }
+
+    #[test]
+    fn checkpoint_summary_line_falls_back_to_title() {
+        let line = checkpoint_summary_line("# Console checkpoint\n\nBody\n").unwrap();
+        assert_eq!(line.text, "Console checkpoint");
+        assert_eq!(line.source, SummarySource::Title);
+        assert!(checkpoint_summary_line("legacy checkpoint\n").is_none());
+    }
+
+    #[test]
+    fn checkpoint_summary_line_skips_frontmatter_and_fences_and_bounds_length() {
+        let source = format!(
+            "---\nprovenant_standing:\n  schema_version: 1\n---\n# Title\n\n## Intent\n```\n## Goal\nignored\n```\n{}\n",
+            "x".repeat(400)
+        );
+        let line = checkpoint_summary_line(&source).unwrap();
+        assert_eq!(line.source, SummarySource::Intent);
+        assert_eq!(line.text.len(), SUMMARY_LINE_BYTES + '…'.len_utf8());
+        assert!(line.text.ends_with('…'));
     }
 
     #[test]

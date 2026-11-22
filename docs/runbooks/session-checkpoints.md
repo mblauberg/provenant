@@ -59,6 +59,16 @@ reapply) and compare summary revisions with `chair summary diff SESSION --from N
 `show` also reports stale `needs_you` references against the local inbox;
 coverage is `partial` when the scan was truncated.
 
+`console sessions` shows one short `summary` line per chair and a
+`summary_status` naming its source: `structured` (the header's `now`), `intent`,
+`goal` or `done` (the first meaningful line of that checkpoint section, in that
+priority), `title` (the checkpoint's first `#` heading), or `unavailable` (no
+checkpoint or no usable line). The line is derived deterministically from the
+current checkpoint without a model call, is bounded to 200 bytes and may be
+clipped with an ellipsis; frontmatter and fenced code are skipped. The full
+structured summary remains at `record.summary`. A stale or changed checkpoint
+updates the derived line on the next read; it never edits the checkpoint.
+
 Append a substantive update once with
 `provenant chair log append --session SESSION --file update.json --operation-id ID --issued-at UNIX_SECONDS`
 (JSON: `kind`, `markdown`, `channel`, optional `request_ids`, `attempt_ids`,

@@ -37,7 +37,7 @@ final class ChairsModel {
     /// A summary when the CLI has one; otherwise the record's project, session and save time. A bare "no summary"
     /// placeholder tells a supervisor nothing and repeats on every row of a host with no CLI summaries.
     nonisolated static func title(_ session: ChairSession, project: String?, now: Date) -> String {
-        if let summary = session.summary?.now, !summary.isEmpty { return summary }
+        if let summary = session.summary, !summary.isEmpty { return summary }
         var parts: [String] = []
         if let project, !project.isEmpty { parts.append(project) }
         parts.append("Session \(session.record.hostSessionId.prefix(8))")

@@ -54,13 +54,13 @@ fn console_catalogues_use_registered_labels_and_saved_summaries() -> Result {
             checkpoint.to_str().ok_or("path")?,
         ],
     )?;
-    let without_summary = cli(&rig, &["console", "sessions"])?;
-    assert!(without_summary["data"]["sessions"][0]["summary"].is_null());
+    let derived = cli(&rig, &["console", "sessions"])?;
     assert_eq!(
-        without_summary["data"]["sessions"][0]["summary_status"],
-        "unavailable"
+        derived["data"]["sessions"][0]["summary"],
+        "Console checkpoint"
     );
-    fixture(&rig, "sessions-without-summary", &without_summary)?;
+    assert_eq!(derived["data"]["sessions"][0]["summary_status"], "title");
+    fixture(&rig, "sessions-without-summary", &derived)?;
     let patch = rig.root.join("summary.json");
     std::fs::write(
         &patch,
@@ -90,9 +90,9 @@ fn console_catalogues_use_registered_labels_and_saved_summaries() -> Result {
     let sessions = cli(&rig, &["console", "sessions"])?;
     assert_eq!(sessions["data"]["schema_version"], 2);
     let session = &sessions["data"]["sessions"][0];
-    assert_eq!(session["summary"]["now"], "Implementing console");
-    assert_eq!(session["summary"], session["record"]["summary"]);
-    assert_eq!(session["summary_status"], "available");
+    assert_eq!(session["summary"], "Implementing console");
+    assert_eq!(session["summary_status"], "structured");
+    assert_eq!(session["record"]["summary"]["now"], "Implementing console");
     fixture(&rig, "sessions", &sessions)?;
     let draft = rig.root.join("request.json");
     std::fs::write(

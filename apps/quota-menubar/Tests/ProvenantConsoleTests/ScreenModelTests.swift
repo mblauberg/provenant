@@ -437,7 +437,8 @@ final class ScreenModelTests: XCTestCase {
         let snapshot = chairs.reader.value
         XCTAssertEqual(snapshot?.sessions.count, 1)
         // Two saved records for one host session collapse to the later save.
-        XCTAssertEqual(snapshot?.sessions.first?.summary?.now, "Implementing the console")
+        XCTAssertEqual(snapshot?.sessions.first?.summary, "Implementing the console")
+        XCTAssertEqual(snapshot?.sessions.first?.record.summary?.now, "Implementing the console")
         XCTAssertEqual(snapshot?.sessions.first?.record.lastSavedAt, "2026-11-02T02:18:00Z")
         XCTAssertEqual(snapshot?.projects.count, 1)
         XCTAssertNil(snapshot?.projectName("no-such-project"))
@@ -452,7 +453,7 @@ final class ScreenModelTests: XCTestCase {
         XCTAssertFalse(Stamp.relative("2026-11-02T02:18:00Z", now: clock).contains("in "))
     }
 
-    func testChairRowFallsBackToTheRecordWhenThereIsNoSummary() async throws {
+    func testChairRowShowsTheDerivedLineWhenThereIsNoStructuredSummary() async throws {
         let replies: [Replay.Reply] = [(["console", "sessions"], "console-sessions-without-summary", 0),
                                        (["console", "projects"], "console-projects", 0)]
         let (console, _) = client(replies)
@@ -461,11 +462,8 @@ final class ScreenModelTests: XCTestCase {
         let session = try XCTUnwrap(chairs.reader.value?.sessions.first)
         let project = chairs.reader.value?.projectName(session.record.projectId)
         let now = try XCTUnwrap(Stamp.parse("2026-11-22T09:00:00Z"))
-        let title = ChairsModel.title(session, project: project, now: now)
-        XCTAssertTrue(title.hasPrefix("project · Session "), title)
-        XCTAssertTrue(title.contains("saved "), title)
-        XCTAssertFalse(title.contains("in "), title)
-        XCTAssertFalse(title.contains("No summary yet"), title)
+        XCTAssertNil(session.record.summary)
+        XCTAssertEqual(ChairsModel.title(session, project: project, now: now), "Console checkpoint")
     }
 
     func testChairRowPrefersTheSummaryWhenPresent() async throws {
