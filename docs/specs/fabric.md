@@ -5,21 +5,21 @@ coordination, lane relay, peers, graphs, Git transport)
 Anchor: `crates/fabric-store/src/db.rs`, `crates/fabric-runtime/src/graph.rs`,
 `crates/fabric-runtime/src/relay/mod.rs`
 
-Fabric is the daemonless coordination layer for one user's agents and hosts.
-It grants no authority to install, land or run a provider, and keeps no second
-run status ([run](run.md)). ADRs
+Fabric is the daemonless coordination layer for one user's agents and hosts. It
+grants no authority to install, land or run a provider, and keeps no second run
+status ([run](run.md)). ADRs
 [0020](../adr/0020-retire-the-daemon-fabric.md),
 [0021](../adr/0021-configured-workspace-dispatch-boundaries.md),
 [0026](../adr/0026-federate-fabric-across-own-hosts-over-ssh.md) and
 [0039](../adr/0039-graph-of-templates.md) record the decisions; the
-[peer host runbook](../runbooks/fabric-hosts.md) and `provenant help --all`
-own use, flags and limits. Paths are relative to `tools/front-door/`.
+[peer host runbook](../runbooks/fabric-hosts.md) and `provenant help --all` own
+use, flags and limits. Paths are relative to `tools/front-door/`.
 
 ## Identity and store
 
 Chair custody and session checkpoints derive the actor through the same
-harness-aware inbox identity. When `PROVENANT_SESSION_ID` is unset, custody
-uses the saved session for that actor if one exists.
+harness-aware inbox identity; when `PROVENANT_SESSION_ID` is unset, custody uses
+the actor's saved session if one exists.
 
 ### Projects never merge by guess
 
@@ -32,9 +32,9 @@ peer. No scan or URL heuristic joins projects.
 
 Lanes open the database read-only and no lane profile grants writes to it, its
 companions or Fabric locks. A lane reaches the host only through its own
-attempt-bound socket, where the host, not the request, fixes the sender.
-`fabric mail send` uses that relay inside a lane; other CLI coordination
-mutations refuse. A caller-supplied sender is rejected at the relay boundary.
+attempt-bound socket, where the host, not the request, fixes the sender; a
+caller-supplied sender is rejected. `fabric mail send` uses that relay inside a
+lane, and other CLI coordination mutations refuse.
 - Why: a lane must not forge records that the host or another agent trusts.
 - Owner: `crates/fabric-runtime/src/relay/host.rs`, `crates/fabric-store/src/db.rs`
 
@@ -42,87 +42,72 @@ mutations refuse. A caller-supplied sender is rejected at the relay boundary.
 
 Coordination and the host custody ledger use private SQLite databases. Symlinked
 or shared components and a different SQLite format major are refused before any
-mutation, and config may lower limits but never raise them. A mutation and its event commit together, and no transaction
-stays open across waits, spawns, Git or SSH. A retried operation ID returns its
-stored receipt; the same ID with a different digest conflicts.
-Same-major additive schema steps follow the [SQLite store rule](state.md#sqlite-stores).
+mutation, and config may lower limits but never raise them. A mutation and its
+event commit together, and no transaction stays open across waits, spawns, Git or
+SSH. A retried operation ID returns its stored receipt; the same ID with a
+different digest conflicts. Same-major schema steps follow the
+[SQLite store rule](state.md#sqlite-stores).
 - Why: a swapped database could forge fences, and agents retry after timeouts.
 
 ### Custody and cursors
 
-Fabric claims and graph chair identity use one host-owned custody ledger.
-Subject kinds are declared once in `records::custody::SubjectKind`: graph,
-attempt, branch, ref, worktree, pr, issue, path and cloud key. Records retain
-the holder (chair or attempt nested under a chair), project, origin,
-active/landed/retired/released state, last activity, related artefacts and
-dispatch provenance. Worktree custody identifies an immutable checkout incarnation:
-its subject contains the canonical path association and a generation published
-once in that checkout's private Git directory. Creation, launch and retirement
-share this identity. Recreating a removed path allocates a new generation;
-retired subjects and their history remain immutable. Previews observe existing
-identities without creating them.
-`LandedEvidence` names its predicate (subsumed or landed) and proof source.
-The custody-owned `RetirementRecord` pins the endpoint-qualified reference
-generation, expected commit, authority and initial proof in the host store.
-New intent observes the current tip through the generation allocator under
-removal custody. Replay preserves that identity and initial intent while
-recording freshly validated proof on each completed step.
-Remote endpoint identity keeps only a digest of its bound push URL. Detached
-worktrees identify their real private `HEAD` through a worktree endpoint and the
-same generation allocator. Worktree-only retirement records affect only the
-worktree custody subjects; they preserve the reference and its custody.
-Each completed subject step stores the proof it used: under a landing-based
-intent, a worktree may complete when its tip is subsumed or landed, while
-reference deletion requires a landed proof. Explicit discard remains a distinct
-authority choice and never claims landing. Worktree discard pins the archive
-ID and exact tip captured before removal in that same record. `Removed`
-projections carry the completed step proof and durable retirement ID. Retention
-and evidence owners decide eligibility; the custody-owned lifecycle
-alone records intent, resumable outcomes and removal projections. Every worktree
-removal first proves that a surviving ref retains its tip or creates and durably
-records a preservation ref; detached HEAD metadata alone is not preservation.
-The pending retirement index covers every record with an unfinished step and
-clears only when all declared steps complete. One lifecycle replay owner resumes
-linked worktree and reference steps with fresh evidence; a missing checkout does
-not seal a receipt while reference deletion is pending. Changed identity or
-unavailable evidence leaves the retirement retryable. State alone never
-authorises deletion.
+Fabric claims and graph chair identity share one host-owned custody ledger.
+Subject kinds are declared once in `records::custody::SubjectKind`. A record keeps
+its holder (chair, or attempt nested under a chair), project, origin, state
+(active, landed, retired, released), last activity, related artefacts and
+dispatch provenance.
 
-Claims do not expire, lock or refuse overlapping advisory ownership. Acquiring
+Worktree custody identifies an immutable checkout incarnation: the canonical path
+association plus a generation published once in the checkout's private Git
+directory. Creation, launch and retirement share it, recreating a removed path
+allocates a new generation, retired subjects stay immutable and previews create
+no identity. `LandedEvidence` names its predicate (subsumed or landed) and proof
+source. The custody-owned `RetirementRecord` pins the endpoint-qualified
+reference generation, expected commit, authority and initial proof; replay keeps
+that intent and records freshly validated proof on each completed step. Under a
+landing-based intent a worktree may complete when its tip is subsumed or landed,
+reference deletion needs landed proof, and explicit discard is a distinct
+authority that never claims landing and pins the archive ID and exact tip.
+Worktree-only retirement leaves the reference and its custody. Every worktree
+removal first proves a surviving ref retains its tip or durably records a
+preservation ref; detached HEAD metadata alone is not preservation. The pending
+retirement index covers every unfinished record and clears only when all steps
+complete; one lifecycle replay owner resumes steps with fresh evidence, and a
+missing checkout does not seal a receipt while reference deletion is pending.
+Changed identity or unavailable evidence leaves retirement retryable. Retention
+and evidence owners decide eligibility; state alone never authorises deletion.
+
+Claims never expire, lock or refuse overlapping advisory ownership: acquiring
 another holder's item warns, records the previous holder in the same transaction
-as the custody change, and proceeds. Gone holders leave unattended items for
-adoption. Unknown native presence stays unknown. Run writer leases still own
-worktree custody. Cursors advance monotonically; an unreachable peer is Unknown.
-Holder identifiers in warnings use their normal hexadecimal display rather than
-debug-struct formatting.
-- Why: unattended work must remain discoverable without making advisory custody
+and proceeds. Gone holders leave unattended items for adoption, unknown native
+presence stays unknown, and run writer leases still own worktree custody.
+Cursors advance monotonically; an unreachable peer is Unknown.
+- Why: unattended work must stay discoverable without making advisory custody
   another admission boundary.
-- Owner: `crates/records/src/custody.rs`, `crates/fabric-store/src/claims.rs`, `crates/config/src/gc.rs`
+- Owner: `crates/records/src/custody.rs`, `crates/fabric-store/src/claims.rs`,
+  `crates/config/src/gc.rs`
 
 ### Chair bindings follow graph names
 
-The host chair index reads graph subjects in the custody ledger, keyed by
-project and graph name. A graph's first launch seals its dispatch provenance;
-every later attempt resolves it. Direct host launch observes the chair when
-its canonical request names none, without rewriting that request. An explicit
-chair change warns and records the previous holder. Child graphs inherit their
-parent's chair; an unknown parent stays unbound. Explicit adoption changes
-advisory custody and is recorded. Graph names, rather than attempt or operation
-identifiers, address this view.
-- Why: every node in a graph resolves the same dispatching chair without a
-  second identity mapping.
+The host chair index reads graph subjects in the custody ledger, keyed by project
+and graph name. A graph's first launch seals its dispatch provenance and every
+later attempt resolves it. Direct host launch observes the chair when its request
+names none, without rewriting the request. An explicit chair change or adoption
+warns, records the previous holder and changes only advisory custody. Child
+graphs inherit their parent's chair; an unknown parent stays unbound.
+- Why: every node in a graph resolves the same dispatching chair without a second
+  identity mapping.
 - Owner: `crates/fabric-store/src/chairs.rs`, `crates/fabric-runtime/src/chairs.rs`
 
 ## Human requests
 
-One service for the CLI owns requests and immutable answers, binding
-project, host and actor from identity, never request JSON. An answer commits
-with its history, delivery intent and receipt in one transaction, and a
-competing answer cannot replace the winner. Claimed work stays unverified until
-host coverage verifies it. Only an explicit acknowledgement from the exact
-target consumes an answer, and an answer never starts, resumes or approves
-anything. Remote answers run on the owning host; an unavailable owner is
-reported, never mirrored.
+One service for the CLI owns requests and immutable answers, binding project,
+host and actor from identity, never request JSON. An answer commits with its
+history, delivery intent and receipt in one transaction, and a competing answer
+cannot replace the winner. Claimed work stays unverified until host coverage
+verifies it. Only an explicit acknowledgement from the exact target consumes an
+answer, and an answer never starts, resumes or approves anything. Remote answers
+run on the owning host; an unavailable owner is reported, never mirrored.
 - Why: a timeout, a forged label or a competing UI must not produce a second
   authoritative answer or stand in for a workflow gate.
 - Owner: `crates/fabric-runtime/src/inbox.rs`, `crates/fabric-store/src/human_inbox.rs`
@@ -130,311 +115,255 @@ reported, never mirrored.
 ## CLI and relay surfaces
 
 Relay input is a strict tagged enum with no coercion, validated before side
-effects, and the relay carries coordination only. The wire field for child lane
-addition is `prompt`, matching the compiled graph node key; stray `brief`
-spellings on the relay wire are rejected. A queued relay caller must
-still be present with budget left before any effect, so a timed-out call cannot
-commit. The CLI and the relay render one typed category per error. Settlement
-reactions (graph advance, chair notice, chair log) run once in effect; notices
-never instruct.
+effects, and the relay carries coordination only. A queued relay caller must still
+be present with budget left before any effect, so a timed-out call cannot commit.
+The CLI and the relay render one typed category per error. Settlement reactions
+(graph advance, chair notice, chair log) run once in effect, and notices never
+instruct.
 - Why: a lenient parser turns a typo into another request, and a lost lane must
   never commit after its deadline.
-- Owner: `crates/fabric-runtime/src/relay/`, `crates/fabric-runtime/src/coordination/facade.rs`
+- Owner: `crates/fabric-runtime/src/relay/`,
+  `crates/fabric-runtime/src/coordination/facade.rs`
 
 ## Bounded graphs and route fallback
 
-Policy has three operation scopes: graph-wide replay validation and expansion use
-current host then project policy; node decisions add that node's dispatch
-overlay; attempt resume, settlement, publication and recovery use the sealed
-task-profile snapshot. Host-only operations without a project use host policy.
+Policy has three operation scopes. Graph-wide replay validation and expansion use
+current host then project policy; node decisions add that node's dispatch overlay;
+attempt resume, settlement, publication and recovery use the sealed task-profile
+snapshot. Host-only operations without a project use host policy.
 
-The graph runtime admits a template, document or planner fragment only after
-checking schema capability, structural limits, the fully expanded plan, the
-checkpoint envelope and selected outputs. A launch retry without a wall clock
-leaves the prior checkpoint.
-General launch/read waits and writer provisioning have independent, sourced allowances in `domains.fabric.graph.launch_wait_seconds` and `domains.fabric.graph.writer_provision_seconds`; both default to 55 seconds and accept 1..=14400.
-An occupied concurrency threshold warns and proceeds unless its declared policy refuses; writer custody remains a Git boundary.
+The runtime admits a template, document or planner fragment only after checking
+schema capability, structural limits, the fully expanded plan, the checkpoint
+envelope and selected outputs. A launch retry without a wall clock leaves the
+prior checkpoint. Launch and read waits and writer provisioning have independent
+sourced allowances (`domains.fabric.graph.launch_wait_seconds`,
+`domains.fabric.graph.writer_provision_seconds`). An occupied concurrency
+threshold warns and proceeds unless its declared policy refuses; writer custody
+remains a Git boundary.
 - Why: a graph that starts must be able to finish within its bounds.
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
 ### Bundled template declarations
 
-Every bundled template is parsed and structurally checked by the shared
-`TemplateLibrary`; its declared parameter schema is applied by the shared
-`Compiler` before graph admission. The CLI catalogue exposes those declarations,
-while specialised launch behaviour remains covered at the command boundary.
-- Why: adding a bundled template must not require another per-template CLI
+The shared `TemplateLibrary` parses and structurally checks every bundled
+template, and the shared `Compiler` applies its declared parameter schema before
+admission. The CLI catalogue exposes those declarations.
+- Why: adding a bundled template must not need another per-template CLI
   subprocess to prove its schema is accepted.
 - Owner: `crates/fabric-runtime/src/graph/template.rs`
 
 `after_settled` orders a node after its predecessors settle in any state without
-propagating their failure. The predecessors remain visible in the graph outcome.
-Inputs may select outputs from either kind of direct dependency; unavailable optional outputs remain absent, while required outputs still gate admission.
+propagating their failure; they stay visible in the graph outcome. Inputs may
+select outputs from either kind of direct dependency; unavailable optional
+outputs stay absent and required outputs still gate admission.
 
 ### Implementation planning
 
-Implementation templates compile to a writer by default. `--plan` or the
-boolean template parameter `plan=true` adds a read-only planner whose result
-the writer consumes. `domains.fabric.implement.plan` sets the default and
-`--explain` reports its source; an explicit parameter takes precedence.
-`deliver` and `batch` accept `plan`, and a batch item may override it with
-`{ item = "slice", with = { plan = true } }`.
+Implementation templates compile to a writer by default. `--plan` or the template
+parameter `plan=true` adds a read-only planner whose result the writer consumes;
+`domains.fabric.implement.plan` sets the default, `--explain` reports its source
+and an explicit parameter wins. `deliver` and `batch` accept `plan`, and a batch
+item may override it.
 
-`batch` expands over `items`, accepting either bare strings or structured item tables
-`{ id, brief | brief_file, route | model, write_scope, after, with }`. Mutual exclusion
-is enforced between `brief` and `brief_file`, and between `route` and `model`. Slices
-support ordering via `after`, which names prerequisite item IDs; unknown IDs and dependency
-cycles are refused at compile time with offending IDs named. Slices run under a concurrency
-cap specified by `max_parallel` (default from config `domains.fabric.batch.max_parallel`,
-reported with its source in `--explain`, and overridable per run via `--set max_parallel=N`).
-The host provisions a distinct managed worktree for each slice. A dependent slice
-starts from the current integration head after its prerequisites integrate; an
-independent slice starts from the graph's pinned integration base.
-Queued slices appear as `waiting` in status with reason `cap` or `after`. As each slice settles,
-it integrates into `integration_branch`; a merge conflict pauses only the conflicting slice
-(`blocked` with conflicting files reported) and leaves remaining slices running.
-- Why: single writers start without an implicit planning stage; callers choose
-  when planning adds value. Batch tasks require flexible per-slice briefs, routing,
-  dependency ordering, bounded concurrency, and isolated merge conflict handling.
-- Owner: `src/fabric/interface.rs`, `src/graph_interface.rs`, `crates/fabric-runtime/src/graph/template.rs`, `crates/fabric-runtime/src/graph/transitions.rs`, `crates/run/src/delivery.rs`
+`batch` expands over `items` into slices, each with its own managed worktree. A
+slice's `after` names prerequisite item IDs; unknown IDs and cycles are refused at
+compile time naming the IDs. `max_parallel` (default
+`domains.fabric.batch.max_parallel`, overridable with `--set max_parallel=N`)
+caps concurrency, and queued slices show `waiting` with reason `cap` or `after`. A
+dependent slice starts from the current integration head after its
+prerequisites integrate, an independent one from the graph's pinned base, and
+each integrates into `integration_branch` as it settles. A merge conflict pauses
+only that slice (`blocked`, with conflicting files) and the rest keep running.
+- Why: single writers start without an implicit planning stage, and batches need
+  per-slice routing, ordering and bounded concurrency with isolated conflicts.
+- Owner: `src/fabric/interface.rs`, `src/graph_interface.rs`,
+  `crates/fabric-runtime/src/graph/template.rs`,
+  `crates/fabric-runtime/src/graph/transitions.rs`, `crates/run/src/delivery.rs`
 
 ### Graph admission and refusal causes
 
 Launch, retry, edit and relay add/edit build the complete candidate in memory.
 Requester binding and PATH, extension syntax (`GraphInput::validate_input`),
-prospective loop expansion, structural host limits, the checkpoint
-envelope and effective input policy must all pass before publishing anything. The
+prospective loop expansion, structural host limits, the checkpoint envelope and
+effective input policy must all pass before anything is published, and the
 journal lock covers reading the original state through publication. A refused
 candidate leaves the checkpoint and execution binding unchanged. The pure
-`admit_candidate` gate owns admission; entry points do not maintain separate
-resume validators.
-A structural limit at first admission refuses without publishing. An existing
-running graph that exceeds a structural limit, including during expansion or
-following a host limit reduction, saves a `StructuralLimit` pause and can
-resume after the limit is raised. A cancelled graph, or a settled graph with
-no pending recovery, saves no new structural pause. A verdict correction that
-cannot fit retains the structural pause on its failed lens until retried.
-Resume does not reactivate a previous expansion pause before
-retrying its decision. Malformed fragments remain `InvalidPlanExpansion`;
-only a typed structural overrun receives `StructuralLimit`. Persisted topology
-is checked by the candidate gate before prospective topology so corrupt checkpoints retain their node
-and `bad_checkpoint` diagnosis. Extensions have no separate count or byte cap;
-the complete retained extension list contributes to the checkpoint envelope.
+`admit_candidate` gate owns admission; entry points keep no separate resume
+validators.
 
-Admission refusals may name node IDs, loop keys and field paths that passed the
-identifier grammar, and host-owned rule identifiers and schema positions. They
-never echo free-form caller text such as prompt or brief bodies. `SchemaPath`
-retains schema positions only; arbitrary map keys become `[<key>]` and array
-positions may use indices. Graph status keeps route fields verbatim, including
-model, effort, account label, alias, name and extra fields. Over-length values or
-control characters warn without dropping the values.
+A structural limit at first admission refuses without publishing. A running graph
+that later exceeds one (during expansion or after a host limit is lowered) saves
+a `StructuralLimit` pause and resumes once the limit is raised; a cancelled or
+settled graph with no pending recovery saves none. A verdict correction that
+cannot fit keeps the pause on its failed lens until retried. Only a typed
+structural overrun gets `StructuralLimit`; malformed fragments stay
+`InvalidPlanExpansion`. Persisted topology is checked before prospective
+topology, so a corrupt checkpoint keeps its node and `bad_checkpoint` diagnosis.
+Extensions have no separate cap; the retained extension list counts toward the
+checkpoint envelope.
 
-Under `secrets`, an operator retry brief holding an exact known
-credential value of at least eight bytes warns and proceeds; `[REDACTED]` is
-excluded. Under `off` this check and its warning are skipped. It never opens
-credential stores. Out-of-bounds ambient credentials (>16 KiB, >128 variables
-or >64 KiB total) are skipped by the retry check with one warning per process
-without names or values. Automatic writer restarts reuse accepted input.
-Warnings are returned in command/relay receipts, including detached launches. Extension causes carry a closed extension
-kind and rule; limit causes name the host limit, never the supplied value.
-CLI stderr, diagnostic JSON and relay wire details project the same cause.
-
+Refusals may name node IDs, loop keys, field paths that passed the identifier
+grammar, and host-owned rule identifiers and schema positions, and never echo
+free-form caller text such as prompt or brief bodies. `SchemaPath` keeps schema
+positions only. Graph status keeps route fields verbatim. Over-length values or
+control characters warn without dropping the values. Limit causes name the host
+limit, never the supplied value; CLI stderr, diagnostic JSON and relay details
+project the same cause, and warnings return in command and relay receipts,
+detached launches included. Under `secrets`, an operator retry brief holding an
+exact known credential value warns and proceeds (never opening credential
+stores); under `off` the check is skipped. Automatic writer restarts reuse
+accepted input.
 - Why: a refusal must neither publish rejected input nor copy it into diagnostics.
-- Owner: `crates/fabric-runtime/src/graph/candidate.rs`, `crates/fabric-runtime/src/graph/refusal.rs`, `src/fabric/interface.rs`, `src/fabric/graph_execution.rs`, `crates/cli/src/fabric/graph_relay.rs`
+- Owner: `crates/fabric-runtime/src/graph/candidate.rs`,
+  `crates/fabric-runtime/src/graph/refusal.rs`, `src/fabric/interface.rs`,
+  `src/fabric/graph_execution.rs`, `crates/cli/src/fabric/graph_relay.rs`
 
 ### Composite settlement
 
-A composite's state, outputs and error summary derive from its members while its own `when` condition holds. A composite skipped by its own condition retains that state regardless of its members. An explicit `GraphPatch` skip of a composite remains authoritative until a later replacement or retry supersedes it; reconciliation still recomputes the other active composite boundaries in the same checkpoint. A patch that replaces or skips a member recomputes the affected active composite boundaries in the same checkpoint.
+A composite's state, outputs and error summary derive from its members while its
+own `when` condition holds; a composite skipped by its own condition keeps that
+state whatever its members. An explicit `GraphPatch` skip of a composite stays
+authoritative until a later replacement or retry supersedes it, and a patch that
+replaces or skips a member recomputes the affected active composite boundaries in
+the same checkpoint.
 - Why: recovery must validate a checkpoint against the topology it records.
-- Owner: `crates/fabric-runtime/src/graph/composites.rs`, `crates/fabric-runtime/src/graph/patch.rs`
+- Owner: `crates/fabric-runtime/src/graph/composites.rs`,
+  `crates/fabric-runtime/src/graph/patch.rs`
 
-Launched review panels settle with partial coverage by default. The panel retains successful evidence, marks its verdict inconclusive unless blocking findings require changes, and names unavailable lenses in its result and coverage warning. Coverage shortfalls warn by default; a project floor declaring `hard = true` refuses when its required lenses or reviewer minimum are missing.
-- Why: an unavailable reviewer must not discard useful evidence; projects may explicitly require coverage for their own boundaries.
-- Owner: `crates/routing/src/review.rs`, `crates/cli/src/fabric/graph_relay.rs`, `crates/fabric-runtime/src/graph/template.rs`, `crates/fabric-runtime/src/graph/composites.rs`
+Review panels settle with partial coverage by default. The panel keeps successful
+evidence, marks its verdict inconclusive unless blocking findings require
+changes, and names unavailable lenses in its result and coverage warning. A
+shortfall warns; a project floor declaring `hard = true` refuses when required
+lenses or the reviewer minimum are missing.
+- Why: an unavailable reviewer must not discard useful evidence, while a project
+  may require coverage for its own boundaries.
+- Owner: `crates/routing/src/review.rs`, `crates/cli/src/fabric/graph_relay.rs`,
+  `crates/fabric-runtime/src/graph/template.rs`
 
 ### Session-ready steering
 
-`provenant steer` accepts bounded, operation-idempotent instructions for the
-exact running graph attempt. Each accepted operation has its own durable text
-and receipt; settlement combines them in arrival order into one continuation.
-The route digest that binds a steer covers session identity (provider, model,
-effort, account and host-native lane), not route-selection history such as
-pool draws or account source, so a same-identity continuation always resumes.
-The host's shared adapter stream decoder records the first validated session
-identity against the admitted provider route and spawned process identity. It
-requests an interrupt through the attempt's existing custody owner only after
-that readiness record is durable. If readiness is not yet available, the text
-stays queued while the provider continues. After settlement, the graph resumes
-the same provider, model, account and session with the saved instructions as
-the next user turn. It preserves writer custody. Before it interrupts the live
-attempt, the owner prints one line naming the configured steer.fallback and the
-layer that set it, so the action is stated before it happens. When the provider
-session is unavailable, steer.fallback defaults to fresh_with_handoff: the fresh
-session continues with the original accepted brief, the previous bounded handoff
-and all queued steer text. Set domains.fabric.steer.fallback to "refuse" to
-retain the accepted steer without a successor. A route, account, session or
-process identity mismatch remains fatal and never takes the fresh fallback.
-Providers that can resume (claude, codex, cursor, agy, opencode) keep their
-session across the restart; command and host-native routes cannot resume and
-start fresh. Injecting a turn into an already-running provider process without
-a restart is not implemented: it needs a persistent, authenticated bidirectional
-channel per adapter, which none of the adapters expose. The resume-capable
-providers are the ones that could support it; until then the session-preserving
-restart is the delivery path. A writer's continuation reuses the retained
-worktree, so its admission waits until settlement releases the steered
-attempt's custody: the steering stays queued and the settlement reaction is
-retried, never dropped. A stop of a terminal steered attempt resolves queued
-steering at once as not continued, cause `terminal_stop`. Steered lanes that settle close together claim a
-restart slot from
-a host-state gate spaced by domains.fabric.steer.restart_spacing_ms (default
-2000 ms; 0 disables), which bounds concurrent restarts instead of racing the
-launch lock; an applied wait names its configuration source.
+`provenant steer` accepts bounded, operation-idempotent instructions for the exact
+running graph attempt. Each has its own durable text and receipt, and settlement
+combines them in arrival order into one continuation. The route digest binding a
+steer covers session identity (provider, model, effort, account, host-native
+lane), not route-selection history, so a same-identity continuation always
+resumes.
 
-When placement or the accepted run owner is temporarily unavailable, the graph
-journal persists a bounded steer intent for the exact work key before replying
-with a warning. Tick checks that work key, launch actor and operation again,
-then replays the original inbox operation under its original requester identity.
-A committed inbox receipt precedes removal from the queue; an ambiguous reply
-retries the same operation. Identity or lineage conflicts never take this path.
-A later safe refusal retains the accepted text in the private graph history
-without keeping an active retry. Generic graph status never echoes that text.
-For native provider launches, the host records one session root for the final
-prepared candidate and binds it to the selected provider, model and account.
-Terminal settlement and the next prepared launch check that host-owned selector
-against the sealed applied route; no mutable account registry lookup or broad
-home scan can redirect identity. Codex uses the selected root to read its
-unchanged v1 rollout metadata and validates the exact saved session and model,
-including a locally discovered account whose selection is not persisted in the
-accounts registry. The provider receives the exact saved session ID and its
-existing stream decoder must confirm that identity and route; missing, expired,
-unreadable or contradictory state stays not-continued. Native account state is
-not scanned or copied into the successor. Sandboxed state continues from
-attempt-private storage; providers that explicitly retain state there, such as
-OpenCode, continue through that same private-state owner.
-Settlement scratch cleanup must preserve the predecessor's session state until
-the continuation has launched. A refused continuation retains closed facts
-identifying the authority rule, affected field and failure kind through
-preparation and into its settled reason. Provider output and identity values
-never supply that public explanation.
-The guardian preserves the typed `steered` stop through exit publication, and
-Run admits that continuation only when the intentional interrupt was delivered
-before exit. A stream identity error also leaves a route- and process-bound
-conflict fence when the rejected first frame yields no usable session event;
-that fence is not session-readiness evidence. The guardian seals this live
-conflict separately from the bounded stdout tail, so a failed ledger write or a
-discarded head frame cannot erase it. Oversized frames, undecodable
-delimiter-complete frames, unreadable output, or drain-truncated live output
-also seal incomplete identity evidence. By default settlement warns with the
-policy source and uses the observed exit and result; `policy.PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE`
-can suppress the warning or refuse settlement and continuation. An observed
-identity conflict remains fatal at every setting. Undecodable protocol frames, including
-final fragments, report a one-based line-numbered `MalformedFrame` evidence
-defect during replay. Settlement leaves that result
-unsettled instead of admitting a same-session continuation. The guardian
-immediately routes a live identity conflict through its existing protocol
-rejection stop path while preserving the separate conflict evidence for
-settlement. It separately records an incomplete JSON record in the final bytes
-only when the stream reaches actual EOF. That final fragment is tolerated only
-after a delivered `ExplicitCancellation` or `Steered` stop; natural completion
-and uncertain signal delivery remain unsettled. A parseable final record still
-passes through the shared adapter checks, so a session or model mismatch always
-fences continuation, including when that record has no trailing newline.
+Delivery is a session-preserving restart, not live injection. The host's shared
+adapter stream decoder records the first validated session identity against the
+admitted route and spawned process, and the interrupt is requested through the
+attempt's custody owner only after that record is durable; until then the text
+stays queued while the provider continues. After settlement the graph resumes the
+same provider, model, account and session with the saved text as the next user
+turn, keeping writer custody. Before interrupting, the owner prints one line
+naming `domains.fabric.steer.fallback` and the layer that set it. When the
+session is unavailable the default `fresh_with_handoff` starts a fresh session
+with the accepted brief, previous bounded handoff and queued steer text;
+`refuse` keeps the steer without a successor. A route, account, session or
+process identity mismatch is fatal and never takes the fresh fallback. Adapters
+advertise `continuation` only when their run path can retain and resume the
+session; other routes are `unsupported` and start fresh. Concurrent restarts are
+spaced by `domains.fabric.steer.restart_spacing_ms`.
 
-The receipt says `queued` only after the text is durable. It does not claim a
-provider interrupt or resumed continuation; graph/run status owns those later
-outcomes. Status exposes `queued`, `resumed` or `not_continued`,
-the stable operation and message IDs, and the successor when known. A
-launcher’s typed `launched` receipt records admission but leaves the status
-`queued`. `resumed` requires the child's observed session to match the predecessor
-session and its sealed applied route to retain the provider, model and account.
-A fresh fallback instead records `fresh_session` and requires a conflict-free
-observed child session on that same authorised route; it never claims to have
-resumed the predecessor's provider session. Optional model telemetry keeps the configured identity policy:
-missing telemetry alone does not negate the session acknowledgement, while a
-known contradiction fences continuation. A later terminal session mismatch or
-incomplete session/capture proof under strict policy changes that
-interim status to `not_continued`; Run retains the earlier live acknowledgement
-fact with the terminal disposition. Terminal matching evidence finalises
-`resumed`. The disposition is durable in Run even if child evidence is later
-retained or collected. Busy, skipped, empty and uncertain launch results stay
-`queued`; a terminal refusal, verified session mismatch or incomplete terminal
-proof becomes `not_continued` with a closed safe cause. The original text
-remains in the private durable ledger in every outcome. Status never
-echoes the steering text into generic receipts or status. Replaying an
-operation with the same text returns the same intent, while reusing its ID
-with different text conflicts. The host verifies launch evidence and
-ownership before reading steering input. At local graph admission, the host stamps graph, node and attempt identity from the work key; an accepted request replay preserves that stored identity, and caller-supplied flags never establish it. If natural completion races with
-readiness or the interrupt request, settlement adopts the durable intent when
-terminal session evidence is valid. A different typed stop wins and leaves the
-saved input without an automatic continuation; a later owner cancel still wins
-after a delivered `Steered` stop without changing that stop's evidence. If the
-live session or process identity changes, or the terminal session disagrees
-with the bound expectation, status records the safe mismatch cause instead of
-starting a fresh session.
+A writer's continuation reuses the retained worktree, so admission waits for
+settlement to release the steered attempt's custody: steering stays queued and
+the reaction is retried, never dropped. Stopping a terminal steered attempt
+resolves queued steering as not continued (`terminal_stop`). When placement or
+the run owner is temporarily unavailable, the graph journal persists a bounded
+steer intent for the work key and warns; tick replays the original inbox
+operation under its original requester, a committed inbox receipt precedes queue
+removal, and identity or lineage conflicts never take this path.
 
-Owner cancellation and same-session graph continuation admission serialise on
-the parent attempt's publication fence. A cancellation accepted before a child
-exists leaves a durable explicit-stop intent for the gate; if the child was
-already admitted, graph cancellation follows the validated continuation chain
-and targets its current leaf. The durable intent does not assert signal delivery.
-Steer and owner stops use Supervisor's scoped `stop-intent.json` protocol;
-all readers share its interpretation. `cancel.json` accepts explicit
-cancellation only. Admission and ongoing work ignore only a valid steer for
-this scope and operation. Settlement may preserve committed work under an exact delivered steer or a
-current explicit owner cancellation. A later explicit cancellation preserves
-commits while vetoing continuation; it never rewrites the provider's earlier
-stop evidence. A replacement intent, foreign requester or malformed record
-vetoes the in-flight preservation token. The guardian validates the requester before
-acting and never interprets a steer stored as cancellation.
+For native launches the host records one session root for the final prepared
+candidate, bound to the selected provider, model and account. Settlement and the
+next launch check that selector against the sealed applied route; no mutable
+account-registry lookup or home scan can redirect identity. The provider receives
+the exact saved session ID, its stream decoder must confirm identity and route,
+and missing, expired, unreadable or contradictory state stays not-continued.
+Native account state is never scanned or copied into the successor, and
+settlement scratch cleanup preserves the predecessor's session state until the
+continuation has launched. A refused continuation keeps closed facts (authority
+rule, field, failure kind) into its settled reason; provider output and identity
+values never supply that explanation.
+
+The guardian preserves the typed `steered` stop through exit publication, and run
+admits the continuation only when the interrupt was delivered before exit. A live
+identity conflict (and incomplete identity evidence from oversized, undecodable or
+unreadable output) is sealed separately from the bounded stdout tail, and the
+guardian routes a conflict through its protocol-rejection stop. A conflict is
+fatal at every setting; for incomplete evidence settlement warns with the policy
+source by default, and `policy.PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE` can silence
+the warning or refuse settlement and continuation. An undecodable frame reports a
+line-numbered `MalformedFrame` defect and leaves the result unsettled. An
+incomplete final JSON fragment is tolerated only after a delivered
+`ExplicitCancellation` or `Steered` stop, and a parseable final record still
+passes the shared adapter checks.
+
+The receipt says `queued` only once the text is durable and claims no interrupt
+or continuation. Status exposes `queued`, `resumed` or `not_continued`, the
+operation and message IDs and the successor when known; the text itself stays in
+the private ledger and is never echoed. `resumed` needs the child's observed
+session to match the predecessor's and its sealed route to keep provider, model
+and account; a fresh fallback records `fresh_session` on a conflict-free child
+session and never claims to have resumed. Missing optional model telemetry does
+not negate the acknowledgement, but a known contradiction fences continuation.
+Busy, skipped, empty and uncertain launch results stay `queued`; a terminal
+refusal, verified session mismatch or incomplete terminal proof under strict
+policy becomes `not_continued` with a closed safe cause, durable in run. Replaying
+an operation with the same text returns the same intent; reusing its ID with
+different text conflicts. The host verifies launch evidence and ownership before
+reading steering input and stamps graph, node and attempt identity from the work
+key. If natural completion races readiness, settlement adopts the durable intent
+when terminal session evidence is valid; a different typed stop wins.
+
+Owner cancellation and continuation admission serialise on the parent attempt's
+publication fence. A cancellation accepted before a child exists leaves a durable
+explicit-stop intent; once the child exists, graph cancellation follows the
+validated continuation chain to its current leaf. The intent never asserts signal
+delivery. Steer and owner stops use supervisor's scoped `stop-intent.json`, and
+`cancel.json` accepts explicit cancellation only. Settlement may preserve
+committed work under an exact delivered steer or a current explicit cancellation;
+a later cancellation vetoes continuation without rewriting the earlier stop
+evidence, and a replacement intent, foreign requester or malformed record vetoes
+the in-flight preservation token. Only the current live continuation leaf may
+receive control, authenticated peer requests must match origin and receiver
+identities, and missing, conflicting, terminal or unverifiable ownership is
+refused.
 - Why: stop meaning must not vary between admission, import, publication and
-  continuation. A request Run cannot positively match supplies no authority.
-
-This is continuation transport for #3318, not live input injection. Adapters
-advertise support as `continuation` only when their run path can retain and
-resume the provider session; other routes remain `unsupported`. The shared
-live decoder uses each adapter's existing stream parser, so readiness does not
-need a second provider parser or a new control protocol. Live injection may
-later optimise the same contract without changing its receipt or control
-identity.
-Only the current live continuation leaf may receive control; authenticated
-peer requests must also match the origin and receiver identities. Missing,
-conflicting, terminal or unverifiable ownership is refused.
-
-- Why: a lane must not direct another attempt.
+  continuation, and a lane must not direct another attempt.
+- Owner: `crates/run/src/holder.rs`, `crates/run/src/settlement.rs`,
+  `src/fabric/steer.rs`
 
 ### Graph cancellation intent
 
-`stop` first writes a bounded request under a short control lock that is separate
-from the graph journal lock. The request is bound to the graph plan and instance,
-and may name the graph or one node subtree. A launch owner checks requests at
-graph and attempt binding boundaries; it saves the cancellation fence before
-acknowledging and removing the request. A stop that finds the graph journal busy
-returns `cancellation_requested` with its request ID and pending acknowledgement
-state. Re-reading status does not enqueue another request. The owner preserves
-the accepted attempt receipt before applying cancellation, and a resume cannot
-clear a newly acknowledged stop in the same advance.
-- Why: a launch may hold the journal lock while preparing a writer, but stop
-  must remain durable and available during that work.
+`stop` first writes a bounded request under a short control lock separate from
+the graph journal lock, bound to the graph plan and instance and naming the graph
+or one node subtree. A launch owner checks requests at graph and attempt binding
+boundaries and saves the cancellation fence before acknowledging and removing the
+request. A stop that finds the journal busy returns `cancellation_requested` with
+its request ID and pending acknowledgement; re-reading status enqueues nothing.
+The owner keeps the accepted attempt receipt before applying cancellation, and a
+resume cannot clear a newly acknowledged stop in the same advance.
+- Why: a launch may hold the journal lock while preparing a writer, but stop must
+  stay durable and available during that work.
 
 ### Sources and read roots
 
 Read roots grant reading only, limited to the project, its linked worktrees and
 configured roots. A pinned `source` fixes a node's subject before its first
-attempt and is materialised as an attempt-owned tree, so later edits cannot
-change what a reviewer sees; a missing subject fails closed. A `head` source
-pins the newest commit of a writer's continuation chain. The runtime never
-resets or creates a worktree to satisfy a binding.
-Registered linked worktrees are verified at their real paths wherever they
-live, including `.claude/worktrees` and locations outside the project.
-Declared credential stores refuse overlapping source or grant access under
-isolated lane access; host access warns and proceeds with the resolved access
-and source. Project-local agent configuration is advisory, with overlap warnings off by
-default and configurable through `CONFINEMENT_SOURCE_AGENT_CONFIG_NONE`. Explanation checks source identity and state boundaries, and reports credential
-admission as `pending_route`: the selected route's access receipt decides it
-during launch preparation.
-- Why: scouts share read access while review and repair keep one immutable subject.
+attempt and is materialised as an attempt-owned tree, so later edits cannot change
+what a reviewer sees; a missing subject fails closed. A `head` source pins the
+newest commit of a writer's continuation chain, and the runtime never resets or
+creates a worktree to satisfy a binding. Credential-store and project-local agent
+configuration overlaps follow
+[plans refuse unsafe roots](supervisor.md#plans-refuse-unsafe-roots).
+- Why: scouts share read access while review and repair keep one immutable
+  subject.
 
-A relay admission stores one schema-versioned typed receipt with its request digest in the patch record; replay returns that receipt with `replayed=true`, independent of current worktree-layout configuration. A missing or malformed receipt is invalid.
+A relay admission stores one schema-versioned typed receipt with its request
+digest in the patch record; replay returns it with `replayed=true` whatever the
+current worktree-layout configuration, and a missing or malformed receipt is
+invalid.
 
 ### Writer continuation
 
@@ -446,76 +375,65 @@ force and refuses a mismatched branch.
 ### Deterministic gates
 
 Gates decide without a model or attempt and save the decision before dependants
-run. CI gates query the exact pinned SHA; unavailable checks or policy fail
-explicitly. The shared forge observer uses conditional validators by default,
-controlled by `domains.wait.pr_conditional_requests`. Its cached result age
-uses `pr_slow_interval_ms` while checks run and returns to `pr_interval_ms`
-within `pr_near_end_window_ms` of the median duration for that check name,
-learned from the latest 64 cached commit pages in the repository observer.
-These settings change request cadence only; they do not change a gate verdict.
-Their sources are shown by `provenant config show --full`.
+run. CI gates query the exact pinned SHA, and unavailable checks or policy fail
+explicitly. The `domains.wait.pr_*` settings (conditional requests, intervals)
+change forge-observer request cadence only, never a gate verdict.
 - Why: deterministic decisions need durable evidence without a launch.
 
 ### Bounded loops
 
-Admission counts every possible round. A body writer integrates by
-fast-forward only and never merges. Exhaustion pauses the graph without
-delivery, and an extension never adds rounds twice.
-- Why: repeated review and repair needs bounded admission and a human decision
-  at the bound.
+Admission counts every possible round. A body writer integrates by fast-forward
+only and never merges. Exhaustion pauses the graph without delivery, and an
+extension never adds rounds twice.
+- Why: repeated review and repair needs bounded admission and a human decision at
+  the bound.
 
 ### Node asks and decide nodes
 
-The inbox owns the question and answer; graph checkpoints link to it. Replay
-must not create another request. A stored decide request carries its optional default and effective configurable timeout with source.
-Decision outcomes distinguish owner answers, answers by declared default or policy, and unanswered deadlines; an unanswered outcome carries no option and follows its declared disposition without releasing dependants as if an option were chosen.
-Answers require held authority and the exact target; cancellation closes owned requests. A timed-out authority gate has no default and never grants authority through silence.
-
+The inbox owns the question and answer; graph checkpoints link to it, and replay
+never creates another request. A decide request stores its optional default and
+effective timeout with source. Outcomes distinguish owner answers, answers by
+declared default or policy and unanswered deadlines; an unanswered outcome
+carries no option and follows its declared disposition without releasing
+dependants as if one were chosen. Answers need held authority and the exact
+target, and cancellation closes owned requests. A timed-out authority gate has no
+default and never grants authority through silence.
 - Why: the owner and chair need one authoritative answer.
 
 ### Land nodes
 
-Graph landing uses the [landing authority policy](cli.md#landing-adds-no-merge-authority). An inbox answer alone never approves a land.
-
+Graph landing uses the [landing authority policy](cli.md#landing-adds-no-merge-authority).
+An inbox answer alone never approves a land.
 - Why: a graph cannot confer authority through an inbox answer.
 
 ### Typed node outputs
 
 Settled outputs are bounded and passed to dependants as untrusted data. Invalid
-verdict evidence fails a consuming gate; full findings remain retrievable.
-Oversized findings use content-addressed graph text while the checkpoint retains a bounded summary and reference.
-
+verdict evidence fails a consuming gate and full findings stay retrievable.
+Oversized findings use content-addressed graph text while the checkpoint keeps a
+bounded summary and reference.
 - Why: dependants need evidence without copying or trusting transcripts.
 
 ### Publication boundary
 
-Local execution, graph inputs and retained state remain raw and lossless under
-their custody and integrity controls. The `redaction` modes govern publication:
-`off` passes text unchanged; `secrets` masks credential values and token shapes
-at egress. Local execution text is never masked. A retired `full` value is
-accepted as `secrets` with a warning naming its source. Graph and peer exports,
-forge content and fixture exports are egress. Metadata is never hidden. When
-masking is enabled, projection failure withholds the affected publication. Raw
-and published byte lengths and digests are bound separately.
+Local execution, graph inputs and retained state stay raw and lossless under their
+custody and integrity controls. The [disclosure policy](supervisor.md#disclosure-and-safe-git-evidence)
+governs egress only: graph and peer exports, forge content and fixture exports.
 
-`PeerAction::Output` declares an `OutputAudience`. A graph execution claim is
-not authorisation: the receiver must bind the authenticated actor, retained
-launch receipt, origin work key and requested attempt before allowing graph
-transport. The sender derives the claim from the retained upstream attempt and
-the receiver checks its actor namespace, launch receipt, origin and target.
-All cross-host payloads, including authenticated execution submissions and
-results, pass through `CrossHostTransport`; authentication never exempts
-disclosure policy. Same-host execution always stays raw. When masking is enabled,
-encoded hand-off attachments are decoded and
-projected as text, or withheld when they cannot be inspected. Peer
-output projects the complete verified text before paging, with published lengths
-and digests. Cross-host projection selects declared free-text fields (prompts,
-decoded attachments, output text and messages), preserving envelope keys, tags,
-identifiers and metadata. A projected stop handoff retains its sealed cause and
-passes the existing stop validation; the retained stop stays raw. Already projected
-output pages pass through response encoding untouched, including pages split
-inside a mask or a word. Binary output, over-bound projections
-and event pages that cannot be fully projected are withheld on projection failure.
+`PeerAction::Output` declares an `OutputAudience`. A graph execution claim is not
+authorisation: the receiver binds the authenticated actor, retained launch
+receipt, origin work key and requested attempt before allowing graph transport,
+and the sender derives the claim from the retained upstream attempt. All
+cross-host payloads, authenticated execution submissions and results included,
+pass through `CrossHostTransport`, and authentication never exempts disclosure
+policy; same-host execution stays raw. With masking enabled, hand-off attachments
+are decoded and projected as text or withheld when they cannot be inspected, and
+peer output projects the complete verified text before paging with published
+lengths and digests. Projection selects declared free-text fields and keeps
+envelope keys, tags, identifiers and metadata; a projected stop handoff keeps its
+sealed cause, and already projected pages pass through encoding untouched.
+Binary output, over-bound projections and event pages that cannot be fully
+projected are withheld.
 
 ### Checkpoint before launch
 
@@ -526,68 +444,56 @@ checkpoint missing launch evidence or its actor is refused.
 
 ### Checkpoint envelope
 
-Admission bounds the worst-case checkpoint before saving the plan.
-Graph text, identity fields and object keys retain their exact bytes in local
-state and execution context. Heuristic content inspection warns with the field
-and rule, without revealing matched values or refusing admission. Captured
-fragments, retries, template substitutions and expansions retain the same
-property. Schema, cycle, conflict and journal-integrity checks remain mandatory.
-Content-addressed storage externalises bytes without rewriting them, and digest
-checks verify the stored bytes. Publication requires a destination-aware disclosure
-projection; cross-host execution transport is projected as well. Resume
-never fills templates or rewrites a
-sealed submission. A resume path or document hash selects the retained graph
-identity and its sealed execution, just as an exact graph ID does. Journal binding and compilation move admitted text without
-another normalisation pass. Every strict read and every digest check verifies the
-stored bytes as stored and never normalises again. Normalising is idempotent.
-Content-addressed storage only externalises bytes and never rewrites digested
-content. The journal strictly validates the stored representation before
-publishing it. The strict checkpoint decoder verifies both the envelope digest
-and the base plan digest, so publication and landing review reads reject the same
-corrupt state. Save validates the inline checkpoint before externalising text,
-then verifies that durable blobs reconstruct the same representation before
-publication. The observation index uses the validated published value; recovery
-independently loads and validates the committed checkpoint. A host tick read of
-a checkpoint that fails validation quarantines its exact bytes once with the
-typed reason, reports it once, and skips identical bytes on later ticks; changed
-bytes or an explicit retire reopen the report. Status and strict reads still
-surface the corrupt record.
-`graph::checkpoint_digest` owns the envelope payload and domain;
-`graph::graph_plan_digest` derives the shared plan identity from a persisted
-document. Hand-built journal fixtures use `FileJournal::prepare_fixture_checkpoint`
-to assign that identity before save; production saves never repair a supplied
-plan digest. Landing skips unusable review sources and retains their graph
-identities in structured report warnings, including when another source
-supplies a valid approval. Enumeration and source-read failures are warnings
-too; evaluation continues through the other configured sources, and refuses
-landing only when no independent approval remains.
+Admission bounds the worst-case checkpoint before saving the plan. Graph text,
+identity fields and object keys keep their exact bytes in local state and
+execution context, through captured fragments, retries, template substitutions
+and expansions; heuristic content inspection warns with the field and rule
+without revealing the match or refusing. Schema, cycle, conflict and
+journal-integrity checks stay mandatory. Content-addressed storage externalises
+bytes without rewriting them, every strict read and digest check verifies the
+stored bytes as stored, and normalising is idempotent and never repeated after
+admission. Resume never fills templates or rewrites a sealed submission, and a
+resume path or document hash selects the retained graph identity and its sealed
+execution as an exact graph ID does.
 
-- Why: an accepted graph must be able to save its checkpoint.
+Save validates the inline checkpoint before externalising text, then verifies
+that durable blobs reconstruct the same representation before publication. The
+strict decoder verifies both the envelope digest and the base plan digest, so
+publication and landing review reject the same corrupt state; the observation
+index uses the validated published value and recovery loads and validates the
+committed checkpoint independently. `graph::checkpoint_digest` and
+`graph::graph_plan_digest` own the identities; hand-built fixtures use
+`FileJournal::prepare_fixture_checkpoint`, and production saves never repair a
+supplied plan digest. Corrupt-checkpoint reporting and quarantine are in
+[state](state.md#graph-checkpoints-cover-persisted-text). Landing skips unusable
+review sources, keeps their graph identities in report warnings, and refuses only
+when no independent approval remains.
+- Why: an accepted graph must be able to save its checkpoint, and no reader may
+  see a state another reader rejects.
 
 ### Fallback only for unavailability
 
-A node moves to its next route only on a typed pre-launch authentication, quota
-or adapter refusal with custody released, or a classified refusal of a launched
-read-only attempt within its [retry](retry-owner.md) budget. Launched writers
-and uncertain launches never switch.
+A node moves to its next route only on a typed pre-launch authentication, quota or
+adapter refusal with custody released, or a classified refusal of a launched
+read-only attempt within its [retry](retry-owner.md) budget. Launched writers and
+uncertain launches never switch.
 - Why: a launched writer may already have had effects.
 
 ### Graph delivery
 
-Graph delivery opens at most one final PR, only after every active path
-succeeds and custody is released; settlement advances only the matching graph.
-- Why: a partial graph must never publish, and settlement must not scan unrelated graphs.
+Graph delivery opens at most one final PR, only after every active path succeeds
+and custody is released; settlement advances only the matching graph.
+- Why: a partial graph must never publish, and settlement must not scan unrelated
+  graphs.
 
 ## Peer hosts
 
 Each host owns its records and liveness; an unreachable peer is unknown, not
 dead. An uncertain remote mutation is resolved by the owner's receipt, never
-resent. Remote attempts bind the origin identity, and transferred Git objects
-are verified before use. Protocol mismatch is refused before decoding;
-cross-host text follows the configured disclosure policy.
-
-A peer locator identifies a registered Git common directory. Git's verified
-worktree inventory selects the checkout that owns project configuration; a
-bare common directory remains its own host-only layout root.
-
+resent. Remote attempts bind the origin identity, transferred Git objects are
+verified before use, and a protocol mismatch is refused before decoding;
+cross-host text follows the configured disclosure policy. A peer locator
+identifies a registered Git common directory, Git's verified worktree inventory
+selects the checkout that owns project configuration, and a bare common directory
+stays its own host-only layout root.
 - Why: a remote guess or resent mutation could free a live lane or apply twice.
