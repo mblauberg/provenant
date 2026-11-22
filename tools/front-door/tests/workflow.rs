@@ -863,8 +863,9 @@ fn session_save_accepts_same_project_across_linked_worktrees() -> Result {
 }
 
 #[test]
-fn session_save_refuses_conflicting_explicit_project() -> Result {
+fn session_save_warns_and_uses_explicit_project() -> Result {
     let rig = TestRig::new()?;
+    let cwd = rig.project.clone();
     let other = rig.root.join("other");
     std::fs::create_dir(&other)?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
@@ -874,7 +875,13 @@ fn session_save_refuses_conflicting_explicit_project() -> Result {
     );
     let source = rig.root.join("checkpoint.md");
     std::fs::write(&source, "checkpoint\n")?;
-    let refused = call(
+    let source = source.to_str().ok_or("source")?;
+    let cwd_path = cwd.to_str().ok_or("cwd")?;
+    let selected_path = other.to_str().ok_or("other")?;
+    let identity = call(&rig, &["fabric", "identity"], 0)?["data"].clone();
+    let cwd_project = identity["project"].as_str().ok_or("cwd project")?;
+
+    let saved = call(
         &rig,
         &[
             "workflow",
@@ -882,31 +889,75 @@ fn session_save_refuses_conflicting_explicit_project() -> Result {
             "save",
             "conflict",
             "--file",
-            source.to_str().ok_or("source")?,
+            source,
             "--project",
-            other.to_str().ok_or("other")?,
+            selected_path,
         ],
-        1,
+        0,
     )?;
-    assert_eq!(refused["error"]["code"], "SESSION_PROJECT_MISMATCH");
-    assert!(!rig.state.join("workflow").exists());
+    assert_eq!(saved["data"]["revision"], 1);
+    let selected_project = saved["data"]["project"]
+        .as_str()
+        .ok_or("selected project")?;
+    assert_ne!(selected_project, cwd_project);
+    assert!(
+        rig.state
+            .join(format!(
+                "workflow/projects/{selected_project}/sessions/conflict/revisions.json"
+            ))
+            .is_file()
+    );
+    assert!(
+        !rig.state
+            .join(format!("workflow/projects/{cwd_project}/sessions/conflict"))
+            .exists()
+    );
+    let warnings = saved["data"]["warnings"].as_array().ok_or("warnings")?;
+    assert!(
+        warnings
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|warning| warning.contains(cwd_path) && warning.contains(selected_path)),
+        "{warnings:?}"
+    );
+
+    let human = rig.command(&[
+        "workflow",
+        "session",
+        "save",
+        "conflict",
+        "--file",
+        source,
+        "--project",
+        selected_path,
+    ])?;
+    assert_eq!(code(&human), 0);
+    let text = String::from_utf8(human.stdout.bytes)?;
+    assert!(text.contains("warning:"), "{text}");
+    assert!(
+        text.contains(cwd_path) && text.contains(selected_path),
+        "{text}"
+    );
     Ok(())
 }
 
 #[test]
-fn session_save_refuses_another_registered_project() -> Result {
+fn session_save_explicit_project_warns_and_wins_over_registered_session() -> Result {
     let mut rig = TestRig::new()?;
+    let original = rig.project.clone();
     let source = rig.root.join("checkpoint.md");
     std::fs::write(&source, "checkpoint\n")?;
+    let source = source.to_str().ok_or("source")?;
     let args = [
         "workflow",
         "session",
         "save",
         "registered",
         "--file",
-        source.to_str().ok_or("source")?,
+        source,
     ];
-    call(&rig, &args, 0)?;
+    let first = call(&rig, &args, 0)?;
+    let registered = first["data"]["project"].clone();
     let other = rig.root.join("other");
     std::fs::create_dir(&other)?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
@@ -914,15 +965,40 @@ fn session_save_refuses_another_registered_project() -> Result {
         code(&rig.execute(&git, &["init", "-q", other.to_str().ok_or("other")?], None)?),
         0
     );
+    rig.project = other.clone();
+    let other_identity = call(&rig, &["fabric", "identity"], 0)?["data"].clone();
+    let other_project = other_identity["project"].as_str().ok_or("other project")?;
     let before = state_snapshot(&rig.state.join("workflow"))?;
-    rig.project = other;
     let refused = call(&rig, &args, 1)?;
     assert_eq!(refused["error"]["code"], "SESSION_PROJECT");
     assert_eq!(state_snapshot(&rig.state.join("workflow"))?, before);
-    // An explicit selection can deliberately use the same ID in this project.
+
+    let cwd_path = other.to_str().ok_or("other")?;
+    let selected_path = original.to_str().ok_or("original")?;
+    // A save under the selected project continues the registered session's
+    // history: new content is a new revision, not a fresh session.
+    std::fs::write(source, "checkpoint after the explicit selection\n")?;
     let mut explicit = args.to_vec();
-    explicit.extend(["--project", rig.project.to_str().ok_or("other")?]);
-    assert_eq!(call(&rig, &explicit, 0)?["data"]["revision"], 1);
+    explicit.extend(["--project", selected_path]);
+    let saved = call(&rig, &explicit, 0)?;
+    assert_eq!(saved["data"]["project"], registered);
+    assert_eq!(saved["data"]["revision"], 2);
+    assert_eq!(saved["data"]["unchanged"], false);
+    assert!(
+        !rig.state
+            .join(format!(
+                "workflow/projects/{other_project}/sessions/registered"
+            ))
+            .exists()
+    );
+    let warnings = saved["data"]["warnings"].as_array().ok_or("warnings")?;
+    assert!(
+        warnings
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|warning| warning.contains(cwd_path) && warning.contains(selected_path)),
+        "{warnings:?}"
+    );
     Ok(())
 }
 

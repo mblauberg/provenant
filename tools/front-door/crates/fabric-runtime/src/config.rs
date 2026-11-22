@@ -536,11 +536,8 @@ pub struct Lanes {
     pub start_spacing_ms: Option<u64>,
     pub memory_pressure_threshold: provenant_config::MemoryPressureThreshold,
     pub priority: LanePriority,
-    pub cargo_seed: CargoSeed,
     /// Source directories in host CARGO_HOME are read-only unless enabled.
     pub cargo_source_writes: Option<bool>,
-    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
-    pub cargo_build_jobs: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub max_lanes: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
@@ -555,10 +552,6 @@ pub struct Lanes {
     pub lane_port_block: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub lane_port_blocks: Option<u64>,
-    /// `CARGO_INCREMENTAL` for lanes; off unless set.
-    pub cargo_incremental: Option<bool>,
-    /// `CARGO_PROFILE_DEV_DEBUG` for lanes; `line-tables-only` unless set.
-    pub cargo_debug: Option<String>,
     /// Seconds after its newest write during which a profile directory is
     /// never removed; 15 minutes unless set.
     pub build_dir_grace_seconds: Option<u64>,
@@ -593,10 +586,7 @@ impl Lanes {
         provenant_config::LaneBuildSettings {
             start_spacing_ms: self.start_spacing_ms,
             memory_pressure_threshold: Some(self.memory_pressure_threshold),
-            cargo_build_jobs: self.cargo_build_jobs,
             cargo_source_writes: self.cargo_source_writes,
-            cargo_incremental: self.cargo_incremental,
-            cargo_debug: self.cargo_debug.clone(),
             build_dir_grace_seconds: self.build_dir_grace_seconds,
             max_lanes: self.max_lanes,
             max_project_lanes: self.max_project_lanes,
@@ -605,28 +595,6 @@ impl Lanes {
             lane_port_base: self.lane_port_base,
             lane_port_block: self.lane_port_block,
             lane_port_blocks: self.lane_port_blocks,
-        }
-    }
-}
-
-/// Host Cargo seeds for writer lanes: on by default, and a no-op off macOS.
-/// Cloning that the filesystem cannot do falls back to an empty target.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct CargoSeed {
-    pub enabled: bool,
-    /// Maximum published target generations to retain per project.
-    pub max_generations: usize,
-    /// Maximum total allocated bytes across all published target generations.
-    pub max_bytes: u64,
-}
-
-impl Default for CargoSeed {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_generations: 3,
-            max_bytes: 20 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -985,10 +953,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
         &["warning", "critical", "never"],
     ),
     FieldMetadata::int("lanes.start_spacing_ms", 0, 600_000),
-    FieldMetadata::int("lanes.cargo_build_jobs", 1, 1024),
     FieldMetadata::int("lanes.build_dir_grace_seconds", 0, i64::MAX),
-    FieldMetadata::enumeration("lanes.cargo_debug", &provenant_config::CARGO_DEBUG_LEVELS),
-    FieldMetadata::new("lanes.cargo_incremental", "bool"),
     FieldMetadata::new("lanes.cargo_source_writes", "bool"),
     FieldMetadata::int("lanes.max_lanes", 1, 64),
     FieldMetadata::int("lanes.max_project_lanes", 1, 32),
@@ -1186,17 +1151,15 @@ mod tests {
     }
 
     #[test]
-    fn lane_build_settings_validate_shared_bounds_and_auto() {
-        let lanes: Lanes = serde_json::from_str(r#"{"cargo_build_jobs": -1}"#).unwrap();
-        assert_eq!(lanes.cargo_build_jobs, None);
+    fn lane_settings_validate_shared_bounds_and_auto() {
+        let lanes: Lanes = serde_json::from_str(r#"{"max_lanes": -1}"#).unwrap();
+        assert_eq!(lanes.max_lanes, None);
         let mut config = config();
-        config.lanes.cargo_build_jobs = Some(1025);
         config.lanes.max_lanes = Some(65);
         config.lanes.max_project_lanes = Some(0);
         config.lanes.max_writer_lanes = Some(65);
         config.lanes.max_project_writer_lanes = Some(0);
         let errors = config.validate();
-        assert!(errors.iter().any(|e| e.field == "lanes.cargo_build_jobs"));
         for key in [
             "max_lanes",
             "max_project_lanes",
@@ -1334,37 +1297,11 @@ mod tests {
     #[test]
     fn lane_priority_defaults_and_bounds() {
         let mut config = config();
-        assert!(config.lanes.cargo_seed.enabled);
-        assert_eq!(config.lanes.cargo_seed.max_generations, 3);
-        assert_eq!(config.lanes.cargo_seed.max_bytes, 20 * 1024 * 1024 * 1024);
         assert_eq!(config.lanes.priority.for_lane(true, false), 10);
         assert_eq!(config.lanes.priority.for_lane(false, false), 5);
         assert_eq!(config.lanes.priority.for_lane(true, true), 15);
         assert_eq!(config.lanes.priority.for_lane(false, true), 15);
-        let mut value = serde_json::to_value(&config).unwrap();
-        value["lanes"]["cargo_seed"]["enabled"] = true.into();
-        value["lanes"]["cargo_seed"]["max_generations"] = 0.into();
-        value["lanes"]["cargo_seed"]["max_bytes"] = 0.into();
-        let limits = serde_json::from_value::<FabricConfig>(value.clone())
-            .unwrap()
-            .lanes
-            .cargo_seed;
-        assert_eq!((limits.max_generations, limits.max_bytes), (0, 0));
-        assert!(
-            serde_json::from_value::<FabricConfig>(value.clone())
-                .unwrap()
-                .lanes
-                .cargo_seed
-                .enabled
-        );
-        value.as_object_mut().unwrap().remove("lanes");
-        assert!(
-            serde_json::from_value::<FabricConfig>(value.clone())
-                .unwrap()
-                .lanes
-                .cargo_seed
-                .enabled
-        );
+        let value = serde_json::to_value(&config).unwrap();
         assert_eq!(
             serde_json::from_value::<FabricConfig>(value)
                 .unwrap()

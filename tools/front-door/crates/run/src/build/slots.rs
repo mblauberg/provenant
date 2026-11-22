@@ -521,11 +521,14 @@ pub fn execute_staged(
     let path = staged.paths.job.clone();
     let owner = owned_job.owner.clone();
     let mut on_spawn = move |pid| match mark_job(&path, pid, &owner) {
-        Ok(identity) => {
+        Ok(Some(identity)) => {
             if let Ok(mut slot) = callback_identity.lock() {
                 *slot = Some(identity);
             }
         }
+        // The leader exited before observation; the inherited intent lease
+        // already fences the slot until its whole process tree is gone.
+        Ok(None) => {}
         Err(error) => {
             let termination_error = terminate_untracked_group(pid).err();
             if let Ok(mut slot) = callback_error.lock() {
@@ -1069,15 +1072,6 @@ fn digest_prepare(prepare: &[Vec<String>]) -> String {
         .collect()
 }
 fn build_context(job: &Job, context: &RunContext) -> BuildContext {
-    if let Some(value) = job
-        .env
-        .iter()
-        .find(|(key, _)| key == provenant_core::consumer_env::BUILD_CONTEXT)
-        .and_then(|(_, value)| value.to_str())
-        && let Ok(context) = BuildContext::from_json(value)
-    {
-        return context;
-    }
     let get = |name: &str| {
         job.env
             .iter()
@@ -1085,7 +1079,6 @@ fn build_context(job: &Job, context: &RunContext) -> BuildContext {
             .map(|(_, value)| PathBuf::from(value))
     };
     BuildContext {
-        schema: 1,
         project: job.project.clone(),
         project_key: job.project_key.clone(),
         worktree: super::job_root(job).to_path_buf(),
@@ -1193,9 +1186,17 @@ fn mark_job(
     path: &Path,
     pid: u32,
     owner: &str,
-) -> std::io::Result<provenant_supervisor::census::ProcessIdentity> {
+) -> std::io::Result<Option<provenant_supervisor::census::ProcessIdentity>> {
+    // A step can finish before the launcher observes it. A zombie still
+    // carries the start time, group and session that let the marker find and
+    // stop any surviving descendant, so record that identity instead of
+    // failing an already-completed step as an infrastructure error. Where the
+    // platform reports no record for the exited leader, leave the intent
+    // marker in place: the inherited intent lease already keeps the slot
+    // occupied until the whole process tree has exited.
     let identity = match SystemProcessObserver.observe(i64::from(pid)) {
-        ProcessObservation::Present(fact) if !fact.zombie => fact.identity,
+        ProcessObservation::Present(fact) => fact.identity,
+        ProcessObservation::Absent => return Ok(None),
         _ => return Err(std::io::Error::other("child start time unavailable")),
     };
     let marker = JobMarker {
@@ -1208,7 +1209,7 @@ fn mark_job(
         state: JobMarkerState::Running,
     };
     write_marker(path, &marker)?;
-    Ok(identity)
+    Ok(Some(identity))
 }
 /// Delete a stale job marker. Only a holder of the slot's custody may clear a
 /// running marker (and signal its recorded group), so a live build cannot lose
@@ -1236,7 +1237,7 @@ fn reap_orphan(path: &Path, _custody: &SlotCustody) -> std::io::Result<bool> {
 
 fn terminate_untracked_group(pid: u32) -> std::io::Result<()> {
     let identity = match SystemProcessObserver.observe(i64::from(pid)) {
-        ProcessObservation::Present(fact) if !fact.zombie => fact.identity,
+        ProcessObservation::Present(fact) => fact.identity,
         _ => {
             return Err(std::io::Error::other(
                 "spawned process identity unavailable",
@@ -1705,10 +1706,68 @@ mod tests {
             .process_group(0)
             .spawn()
             .unwrap();
-        mark_job(&paths.job, child.id(), "test-owner").unwrap();
+        mark_job(&paths.job, child.id(), "test-owner")
+            .unwrap()
+            .unwrap();
         reap_orphan(&paths.job, &custody).unwrap();
         let status = child.wait().unwrap();
         assert!(!status.success());
+        assert!(!paths.job.exists());
+    }
+
+    #[test]
+    fn job_marker_tolerates_a_leader_that_exited_before_observation() {
+        use std::os::unix::process::CommandExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = SlotPaths::new(&tmp.path().join("home"), "project", 0);
+        std::fs::create_dir_all(&paths.root).unwrap();
+        mark_intent(&paths.job, "test-owner").unwrap();
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        // An admitted step may exit before the launcher observes it. Leave the
+        // leader a zombie and wait until the platform no longer reports it as
+        // running, which is the state that used to fail the step.
+        provenant_test_support::wait_for(
+            "admitted step leader exit",
+            Duration::from_secs(5),
+            || match SystemProcessObserver.observe(i64::from(child.id())) {
+                ProcessObservation::Present(fact) => Some(fact.zombie),
+                ProcessObservation::Absent => Some(true),
+                _ => None,
+            },
+            |exited| *exited == Some(true),
+        )
+        .expect("leader exits");
+        let recorded = mark_job(&paths.job, child.id(), "test-owner")
+            .expect("an exited leader is not an observation failure");
+        match recorded {
+            // Linux still exposes the zombie with the identity a later cleanup
+            // needs; the marker names the leader's group.
+            Some(identity) => {
+                let marker: JobMarker =
+                    serde_json::from_slice(&std::fs::read(&paths.job).unwrap()).unwrap();
+                assert_eq!(marker.state, JobMarkerState::Running);
+                assert_eq!(marker.start_time, identity.native_start);
+                assert_eq!(marker.pgid, i32::try_from(child.id()).unwrap());
+            }
+            // Where the exited leader has no record, the intent marker and its
+            // inherited lease already fence the slot; no Running marker claims
+            // an identity that cannot be verified.
+            None => {
+                let marker: JobMarker =
+                    serde_json::from_slice(&std::fs::read(&paths.job).unwrap()).unwrap();
+                assert_eq!(marker.state, JobMarkerState::Intent);
+            }
+        }
+        assert!(child.wait().unwrap().success());
+        let custody = SlotCustody::from_guards(
+            slot_lock(&paths.lock).unwrap(),
+            acquire_intent_lease(&paths.root).unwrap(),
+        );
+        assert!(!reap_orphan(&paths.job, &custody).unwrap());
         assert!(!paths.job.exists());
     }
 }

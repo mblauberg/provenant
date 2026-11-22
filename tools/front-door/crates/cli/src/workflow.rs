@@ -1248,11 +1248,9 @@ pub fn session_revisions(roots: &Roots) -> u64 {
         })
 }
 
-fn add_session_warning(data: &mut Value, warning: Option<String>) {
-    if let Some(warning) = warning
-        && let Some(warnings) = data.get_mut("warnings").and_then(Value::as_array_mut)
-    {
-        warnings.push(Value::String(warning));
+fn add_session_warnings(data: &mut Value, warnings: Vec<String>) {
+    if let Some(values) = data.get_mut("warnings").and_then(Value::as_array_mut) {
+        values.extend(warnings.into_iter().map(Value::String));
     }
 }
 
@@ -1262,7 +1260,7 @@ pub fn run(
     roots: &Roots,
     home: &Path,
     cwd: &Path,
-    disk_warning: impl FnOnce() -> Option<String>,
+    session_warnings: impl FnOnce() -> Vec<String>,
 ) -> u8 {
     let command = cmd.path();
     let read_only = cmd.read_only();
@@ -1308,7 +1306,7 @@ pub fn run(
         }
     };
     if command == "workflow session save" && out.error.is_none() {
-        add_session_warning(&mut out.data, disk_warning());
+        add_session_warnings(&mut out.data, session_warnings());
     }
     // Incomplete or failed coverage is a result, not an error.
     if command == "workflow review"
@@ -1508,20 +1506,24 @@ mod tests {
     }
 
     #[test]
-    fn disk_warning_is_once_in_save_data_and_human_output() {
-        let warning = "Disk pressure: 1 byte free; run `provenant disk report` or `provenant gc`.";
-        for observed in [None, Some(warning.to_owned())] {
+    fn session_warnings_are_once_in_save_data_and_human_output() {
+        let disk = "Disk pressure: 1 byte free; run `provenant disk report` or `provenant gc`.";
+        let project = "working directory resolves to /cwd, but --project resolves to /project; saving the checkpoint under the selected project";
+        for observed in [
+            Vec::new(),
+            vec![disk.to_owned()],
+            vec![disk.to_owned(), project.to_owned()],
+        ] {
             let mut data = serde_json::json!({"saved_bytes": 5, "warnings": []});
-            super::add_session_warning(&mut data, observed.clone());
+            super::add_session_warnings(&mut data, observed.clone());
             let rendered = super::human_text("workflow session save", &data);
             assert_eq!(
-                rendered.matches(warning).count(),
-                usize::from(observed.is_some())
-            );
-            assert_eq!(
                 data["warnings"].as_array().map(Vec::len),
-                Some(usize::from(observed.is_some()))
+                Some(observed.len())
             );
+            for warning in observed {
+                assert_eq!(rendered.matches(warning.as_str()).count(), 1);
+            }
         }
     }
 

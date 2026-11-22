@@ -38,8 +38,7 @@ const BRANCH_TOKEN: &str = "<branch>";
 
 /// Hash a repository's canonical common Git directory into a stable project
 /// key. Linked checkouts share that directory and therefore share this key.
-/// This is the single definition used by target-seed ownership and by the
-/// host-project configuration layer.
+/// This is the single definition used by the host-project configuration layer.
 pub fn project_key(common_git_dir: &Path) -> String {
     provenant_core::hex(&Sha256::digest(
         common_git_dir.as_os_str().as_encoded_bytes(),
@@ -456,48 +455,8 @@ impl WorktreeLayoutPort {
     }
 }
 
-/// Seed-build staleness policy. A later slice consumes this through
-/// [`BuildSeed::stale_after_duration`], warning and falling back to the default
-/// when the value is malformed rather than refusing the port table.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BuildSeed {
-    #[serde(default = "default_seed_stale_after")]
-    pub stale_after: String,
-}
-
-fn default_seed_stale_after() -> String {
-    "24h".to_owned()
-}
-
-impl Default for BuildSeed {
-    fn default() -> Self {
-        Self {
-            stale_after: default_seed_stale_after(),
-        }
-    }
-}
-
-impl BuildSeed {
-    /// Parse `stale_after` with the host-gc duration parser so there is one
-    /// duration syntax. Errors are reported to a reader that warns and falls
-    /// back to 24h; this never panics.
-    pub fn stale_after_duration(&self) -> Result<Duration, String> {
-        crate::gc::parse_gc_idle_duration(&self.stale_after)
-            .map(Duration::from_secs)
-            .map_err(|error| error.to_owned())
-    }
-}
-
-/// A declared argv for a build wrapper or command. Empty by default; a later
-/// slice consumes these once it selects the corresponding build strategy.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BuildArgv {
-    #[serde(default)]
-    pub argv: Vec<String>,
-}
-
 fn default_build_strategy() -> String {
-    "lane_seed".to_owned()
+    "slots".to_owned()
 }
 fn default_build_offload() -> String {
     "auto".to_owned()
@@ -528,37 +487,6 @@ fn default_build_pre_warm_budget() -> u64 {
     1
 }
 
-fn default_build_command() -> PortCommand {
-    PortCommand {
-        argv: Vec::new(),
-        exit_codes: CommandExitCodes {
-            success: vec![0],
-            unknown: Vec::new(),
-            other: ExitDisposition::Refused,
-        },
-    }
-}
-
-fn deserialize_build_command<'de, D>(deserializer: D) -> Result<PortCommand, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    struct CommandDeclaration {
-        #[serde(default)]
-        argv: Vec<String>,
-        #[serde(default)]
-        exit_codes: Option<CommandExitCodes>,
-    }
-
-    let declaration = CommandDeclaration::deserialize(deserializer)?;
-    let default = default_build_command();
-    Ok(PortCommand {
-        argv: declaration.argv,
-        exit_codes: declaration.exit_codes.unwrap_or(default.exit_codes),
-    })
-}
-
 fn default_build_priority() -> BTreeMap<String, String> {
     BTreeMap::from([
         ("check".to_owned(), "interactive".to_owned()),
@@ -576,27 +504,17 @@ fn default_build_soak() -> BuildSoakPort {
     BuildSoakPort::default()
 }
 
-/// The build port declares the seed-build interface. Only the shape is
-/// declared here: a consumer repository may override any leaf in a lower layer
-/// and higher layers override them independently. A later slice consumes the
-/// strategy, wrapper, command, offload, overflow, clean, stack and retention
-/// fields; `build.prepare` and `build.seed.stale_after` are already in use.
+/// The build port declares how the chair's host-owned warm check runs. Only
+/// the shape is declared here: a consumer repository may override any leaf in
+/// a lower layer and higher layers override them independently. Lanes never
+/// compile, so this port has no lane strategy, wrapper or seed leaves.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BuildPort {
     pub source: PortSource,
     #[serde(default)]
     pub prepare: Vec<Vec<String>>,
-    #[serde(default)]
-    pub seed: BuildSeed,
     #[serde(default = "default_build_strategy")]
     pub strategy: String,
-    #[serde(default)]
-    pub wrapper: BuildArgv,
-    #[serde(
-        default = "default_build_command",
-        deserialize_with = "deserialize_build_command"
-    )]
-    pub command: PortCommand,
     #[serde(default = "default_build_offload")]
     pub offload: String,
     #[serde(default = "default_build_overflow")]
@@ -693,20 +611,10 @@ pub struct ResolvedBuildValue<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildStrategyName {
     Slots,
-    LaneSeed,
-    Lane,
-    Command,
-    Wrapper,
 }
-/// The configured spelling of each build strategy. Build strategies are not
-/// adapters: this table is the one place their names are spelled.
-const BUILD_STRATEGY_NAMES: [(&str, BuildStrategyName); 5] = [
-    ("slots", BuildStrategyName::Slots),
-    ("lane_seed", BuildStrategyName::LaneSeed),
-    ("lane", BuildStrategyName::Lane),
-    ("command", BuildStrategyName::Command),
-    ("wrapper", BuildStrategyName::Wrapper),
-];
+/// The chair's one warm-check strategy. Build strategies are not adapters:
+/// this table is the one place their names are spelled.
+const BUILD_STRATEGY_NAMES: [(&str, BuildStrategyName); 1] = [("slots", BuildStrategyName::Slots)];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildOverflow {
     Auto,
@@ -776,13 +684,13 @@ impl BuildPort {
         }
     }
 
-    /// Resolve `build.strategy`, warning and falling back to `lane_seed` for
-    /// unknown names.
+    /// Resolve `build.strategy`, warning and falling back to the chair's
+    /// `slots` strategy for unknown names.
     pub fn strategy_name(&self) -> ResolvedBuildValue<BuildStrategyName> {
         self.string_value(
             "strategy",
             &self.strategy,
-            BuildStrategyName::LaneSeed,
+            BuildStrategyName::Slots,
             |value| {
                 BUILD_STRATEGY_NAMES
                     .iter()
@@ -914,12 +822,6 @@ impl BuildPort {
         let leaves = [
             "strategy",
             "prepare",
-            "seed.stale_after",
-            "wrapper.argv",
-            "command.argv",
-            "command.exit_codes.success",
-            "command.exit_codes.unknown",
-            "command.exit_codes.other",
             "offload",
             "overflow",
             "clean",
@@ -972,8 +874,6 @@ impl PortEntry for BuildPort {
     fn valid(&self) -> bool {
         let declared = |argv: &[String]| argv.first().is_some_and(|program| !program.is_empty());
         self.prepare.iter().all(|argv| declared(argv))
-            && (self.wrapper.argv.is_empty() || declared(&self.wrapper.argv))
-            && (self.command.argv.is_empty() || self.command.is_valid())
     }
 }
 
@@ -2473,14 +2373,12 @@ mod tests {
     }
 
     #[test]
-    fn build_defaults_are_lane_seed_and_generic() {
+    fn build_defaults_are_slots_and_generic() {
         let table = PortTable::builtin();
         let build = &table.build;
         assert_eq!(build.source, PortSource::Builtin);
         assert!(build.prepare.is_empty());
-        assert_eq!(build.strategy, "lane_seed");
-        assert!(build.wrapper.argv.is_empty());
-        assert!(build.command.argv.is_empty());
+        assert_eq!(build.strategy, "slots");
         assert_eq!(build.offload, "auto");
         assert_eq!(build.overflow, "auto");
         assert_eq!(build.clean, "untracked");
@@ -2492,17 +2390,12 @@ mod tests {
         assert_eq!(build.canary_every, "24h");
         assert_eq!(build.slot_idle, "7d");
         assert_eq!(build.soak, BuildSoakPort::default());
-        assert_eq!(build.strategy_name().value, BuildStrategyName::LaneSeed);
+        assert_eq!(build.strategy_name().value, BuildStrategyName::Slots);
         assert_eq!(build.overflow_policy().value, BuildOverflow::Auto);
         assert_eq!(build.clean_policy().value, BuildClean::Untracked);
         assert_eq!(build.offload_policy().value, BuildOffload::Auto);
         assert_eq!(build.priority_for("test").value, BuildPriority::Test);
         assert_eq!(build.queue_aging_duration().value, Duration::from_secs(120));
-        assert_eq!(build.seed, BuildSeed::default());
-        assert_eq!(
-            build.seed.stale_after_duration().unwrap(),
-            Duration::from_secs(24 * 60 * 60)
-        );
         let (_, source, backend, valid, reason) =
             table.entries().find(|entry| entry.0 == "build").unwrap();
         assert_eq!(source, PortSource::Builtin);
@@ -2531,15 +2424,10 @@ mod tests {
         )
         .unwrap();
 
-        // No project layer: the host value and its source survive, and the
-        // omitted seed inherits the compiled 24h default.
+        // No project layer: the host value and its source survive.
         let table = PortTable::read_for(None, &host).unwrap();
         assert_eq!(table.build.prepare, host_prepare);
         assert_eq!(table.build.source, PortSource::Host);
-        assert_eq!(
-            table.build.seed.stale_after_duration().unwrap(),
-            Duration::from_secs(24 * 60 * 60)
-        );
 
         // A project layer that sets build.prepare wins and reports its source.
         std::fs::write(
@@ -2557,12 +2445,6 @@ mod tests {
 
         assert_eq!(table.build.source_for_leaf("strategy"), PortSource::Builtin);
         assert_eq!(table.build.source_for_leaf("offload"), PortSource::Builtin);
-        // Neither layer declares the seed leaf; it comes from the builtin asset
-        // even though another build leaf is project-sourced.
-        assert_eq!(
-            table.build.source_for_leaf("seed.stale_after"),
-            PortSource::Builtin
-        );
         // Arrays replace rather than concatenate across layers.
         assert_eq!(table.build.prepare.len(), 1);
 
@@ -2609,35 +2491,6 @@ mod tests {
         assert!(table.validate().is_ok());
     }
 
-    #[test]
-    fn stale_after_bad_value_is_reported_not_panicking() {
-        let bad = BuildSeed {
-            stale_after: "not-a-duration".to_owned(),
-        };
-        assert!(bad.stale_after_duration().is_err());
-
-        // A bad duration stays a well-typed port: readers warn and fall back
-        // to 24h rather than the table refusing to load.
-        let mut table = PortTable::builtin();
-        table.build.seed = bad;
-        assert!(table.validate().is_ok());
-
-        for (text, expected) in [
-            ("36h", Some(36 * 60 * 60)),
-            ("0", Some(0)),
-            ("999999999999999999999w", None),
-        ] {
-            let seed = BuildSeed {
-                stale_after: text.to_owned(),
-            };
-            assert_eq!(
-                seed.stale_after_duration().ok(),
-                expected.map(Duration::from_secs),
-                "{text}"
-            );
-        }
-    }
-
     fn checkout_with_key(temp: &Path) -> (PathBuf, PathBuf, PathBuf) {
         let host = temp.join("host");
         let project = temp.join("project");
@@ -2669,7 +2522,7 @@ mod tests {
             keyed.join("ports.json"),
             serde_json::to_vec(&serde_json::json!({
                 "verify": {"base": "host-project/main"},
-                "build": {"strategy": "wrapper"},
+                "build": {"strategy": "slots"},
             }))
             .unwrap(),
         )
@@ -2686,7 +2539,7 @@ mod tests {
         let table = PortTable::read_for(Some(&project), &host).unwrap();
         assert_eq!(table.verify.base, "project/main");
         assert_eq!(table.verify.remote, "host-remote");
-        assert_eq!(table.build.strategy, "wrapper");
+        assert_eq!(table.build.strategy, "slots");
 
         let provenance = table.provenance();
         assert_eq!(provenance.get("verify.base"), Some(&PortSource::Project));
@@ -2732,7 +2585,7 @@ mod tests {
         std::fs::write(
             project.join(PORTS_CONFIG),
             serde_json::to_vec(&serde_json::json!({
-                "build": {"seed": {"stale_after": "36h"}},
+                "build": {"clean": "none"},
             }))
             .unwrap(),
         )
@@ -2745,10 +2598,7 @@ mod tests {
             Some(&PortSource::HostProject)
         );
         assert_eq!(provenance.get("build.offload"), Some(&PortSource::Host));
-        assert_eq!(
-            provenance.get("build.seed.stale_after"),
-            Some(&PortSource::Project)
-        );
+        assert_eq!(provenance.get("build.clean"), Some(&PortSource::Project));
         assert_eq!(provenance.get("build.strategy"), Some(&PortSource::Builtin));
         assert_eq!(provenance.get("verify.base"), Some(&PortSource::Host));
         assert_eq!(table.build.source, PortSource::Project);
@@ -2788,7 +2638,7 @@ mod tests {
             .insert("build.queue_aging".into(), PortSource::Host);
 
         let strategy = build.strategy_name();
-        assert_eq!(strategy.value, BuildStrategyName::LaneSeed);
+        assert_eq!(strategy.value, BuildStrategyName::Slots);
         assert_eq!(strategy.source, PortSource::Builtin);
         assert!(strategy.warnings[0].contains("build.strategy"));
         assert!(strategy.warnings[0].contains("project"));
@@ -2816,13 +2666,13 @@ mod tests {
         std::fs::create_dir_all(project.join(".provenant")).unwrap();
         std::fs::write(
             host.join("ports.json"),
-            serde_json::to_vec(&serde_json::json!({"build": {"strategy": "lane"}})).unwrap(),
+            serde_json::to_vec(&serde_json::json!({"build": {"strategy": "slots"}})).unwrap(),
         )
         .unwrap();
 
         // No key (a directory with no checkout marker) skips the layer.
         let table = PortTable::read_for(Some(&project), &host).unwrap();
-        assert_eq!(table.build.strategy, "lane");
+        assert_eq!(table.build.strategy, "slots");
         assert_eq!(table.build.source, PortSource::Host);
         assert!(
             table
@@ -2834,7 +2684,7 @@ mod tests {
         // A key with no layer directory also skips it silently.
         std::fs::create_dir_all(project.join(".git")).unwrap();
         let table = PortTable::read_for(Some(&project), &host).unwrap();
-        assert_eq!(table.build.strategy, "lane");
+        assert_eq!(table.build.strategy, "slots");
         assert_eq!(table.build.source, PortSource::Host);
         assert!(
             table
@@ -2844,7 +2694,7 @@ mod tests {
         );
         std::fs::write(host.join("projects"), "not a directory").unwrap();
         let table = PortTable::read_for(Some(&project), &host).unwrap();
-        assert_eq!(table.build.strategy, "lane");
+        assert_eq!(table.build.strategy, "slots");
         assert_eq!(table.build.source, PortSource::Host);
     }
 

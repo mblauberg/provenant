@@ -21,21 +21,16 @@ mod schema;
 pub use cache_budget::resolve as cargo_cache_budget;
 pub use cache_budget::{CargoCacheBudget, KNOB as CARGO_CACHE_MAX_KNOB};
 pub use gc::{
-    ByteObservation, CARGO_DEBUG_LEVELS, CargoBuildProfile, DISK_FLOOR, DiskGate, DiskLevel,
-    DiskLimits, ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold,
-    PROJECT_WRITER_LANES_CEILING, ProjectGcSettings, RETENTION_CLASSES, RemoteBranches,
-    RetentionAdapter, RetentionBytes, RetentionClass, RetentionCollector, RetentionEligibility,
-    RetentionIssue, RetentionKind, RetentionMeasurements, RetentionOwner, RetentionTrigger,
-    STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings, WRITER_LANES_CEILING, deserialize_auto,
-    parse_cache_size, parse_gc_idle_duration, retention_schedule,
+    ByteObservation, DISK_FLOOR, DiskGate, DiskLevel, DiskLimits, ForeignWorktrees, GcSettings,
+    LaneBuildSettings, MemoryPressureThreshold, PROJECT_WRITER_LANES_CEILING, ProjectGcSettings,
+    RETENTION_CLASSES, RemoteBranches, RetentionAdapter, RetentionBytes, RetentionClass,
+    RetentionCollector, RetentionEligibility, RetentionIssue, RetentionKind, RetentionMeasurements,
+    RetentionOwner, RetentionTrigger, STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings,
+    WRITER_LANES_CEILING, deserialize_auto, parse_cache_size, parse_gc_idle_duration,
+    retention_schedule,
 };
 pub use github_policy::{
     DEFAULT_GH_BUDGET, GH_INVOCATIONS_FILE, GithubPolicy, label_events_trigger_ci,
-};
-mod cargo_seed_budget;
-pub use cargo_seed_budget::{
-    DEFAULT as CARGO_SEED_BUDGET_DEFAULT, KNOB as CARGO_SEED_BUDGET_KNOB, SeedBudgetSetting,
-    is_valid_setting as is_valid_cargo_seed_budget, resolve as cargo_seed_budget,
 };
 mod harness;
 mod hooks;
@@ -104,11 +99,11 @@ pub use loader::{
 };
 pub use presets::Profile;
 pub use project_binding::{
-    GcProjectSelection, GcProjectStatus, ProjectBinding, ProjectLocation, bind_host, bind_project,
-    host_project_dir, lookup_gc_project, lookup_host, lookup_project, lookup_project_at_state,
-    project_binding_dir, registered_gc_project_selection,
-    registered_gc_project_selection_with_progress, registered_gc_projects, registered_projects,
-    transient_location,
+    GcProjectSelection, GcProjectStatus, ProjectBinding, ProjectLocation, Retirement, bind_host,
+    bind_project, forget_project, forget_project_at_state, host_project_dir, lookup_gc_project,
+    lookup_host, lookup_project, lookup_project_at_state, project_binding_dir,
+    registered_gc_project_selection, registered_gc_project_selection_with_progress,
+    registered_gc_projects, registered_projects, retire_vanished_projects, transient_location,
 };
 pub use provenant_records::Finding;
 pub use schema::{

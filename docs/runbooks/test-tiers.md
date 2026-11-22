@@ -3,19 +3,15 @@ Owner: repository maintainers
 Anchor: scripts/verify-tier
 
 The tiers describe what each place runs; they are not a checklist for a lane.
-A lane runs `cargo check` and clippy for touched crates on its configured
-`CARGO_TARGET_DIR` (the worktree's own seeded target by default), plus tests
-filtered to changed code only when that target is warm. It never starts a cold
-build. When `CARGO_BUILD_BUILD_DIR` is set, point it at the same warm directory
-so Cargo does not put intermediate output in a cold one. The whole workspace
-suite runs in CI.
+A lane runs formatting only: it never compiles, seeds or admits a build. The
+chair merges slices into one integration worktree and runs one warm host-owned
+integrated check per epic. CI runs clippy and the tests on the integration pull
+request. `.worktrees/.cargo/config.toml` is the single mechanism that disables
+lane cargo.
 
-`lanes.verification` defaults to `targeted`; host or project configuration, or
-a brief's `Verification scope:` line, overrides it, and the lane preamble names
-the source. `lanes.local_cargo` can warn when a command exceeds the host's
-preferred scope; it never refuses one. Build admission, the `cargo` shims and the
-Cargo target knobs are in [configuration](configuration.md#named-admission-classes)
-and [lane Cargo target](configuration.md#lane-cargo-target); how a repository's
+`provenant verify` runs the tiers below through the chair's one host-owned
+build slot; the host cap and slot hygiene are in
+[configuration](configuration.md#named-admission-classes). How a repository's
 stack and tiers are detected is in
 [stack discovery](configuration.md#stack-discovery).
 
@@ -37,9 +33,8 @@ profile skips fixtures that need host control (hard links, pathname sockets);
 CI's `ci` profile runs them (`tools/front-door/.config/nextest.toml`).
 
 `provenant verify [TIER]` runs one job whose single step is the verify engine, so
-a tier is one hold under slots. `--commit REV` verifies an exact revision: slots
-pin the commit in the slot, and the lane strategies use a temporary detached
-checkout that is removed afterwards. `--affected`, or the `verify` port's
+a tier is one hold under the host's slot. `--commit REV` verifies an exact
+revision by pinning the commit in the slot. `--affected`, or the `verify` port's
 `affected` policy ([selection](configuration.md#affected-package-selection)), passes `PROVENANT_VERIFY_SELECTION` (`packages`, `full`,
 `reason`) to `scripts/verify-tier`, which uses it for `selection: packages`
 tiers in place of its own path mapping; `full` selects every workspace member. A

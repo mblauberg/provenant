@@ -6,6 +6,15 @@ The required check, suite tiers and green-evidence rules are in the
 [CI spec](../specs/ci.md); the design is in
 [ADR 0041](../adr/0041-tiered-ci-from-green-evidence.md).
 
+## Build tiers
+
+There is one build model with three tiers. Lanes run formatting only and never
+compile, seed or admit a build. The chair merges slices into one integration
+worktree and runs one warm, host-owned integrated check per epic. CI runs
+clippy and the tests on the integration pull request. `.worktrees/.cargo/config.toml`
+is the single mechanism that disables lane cargo; there is no lane build
+strategy, port row or admission knob to configure.
+
 ## Rust front-door tests
 
 Keep fixtures independent of host capacity and time: inject `Resources`

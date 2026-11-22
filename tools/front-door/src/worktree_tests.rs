@@ -276,7 +276,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
     provenant_supervisor::fixture::run_libtest(
         args,
         &[
-            "graph_stop_cancels_live_delivery_fetch_and_seed_preparation",
+            "graph_stop_cancels_live_delivery_fetch",
             "gc_fetches_default_and_removes_only_clean_merged_worktrees",
             "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links",
             "gc_collects_a_settled_lane_whose_completion_attempt_failed",
@@ -284,15 +284,12 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "gc_collects_a_fast_forwarded_lane_its_settlement_missed",
             "gc_reports_settled_lane_store_error_and_continues",
             "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch",
-            "graph_run_refuses_low_disk_writers",
+            "graph_run_refuses_unavailable_reader_route",
             "gc_reports_terminal_tmp_details_and_compact_text_count",
             "lane_prepare_isolates_nested_state",
             "lane_prepare_isolates_nested_claude_state",
             "lane_prepare_isolates_nested_writer_state",
             "lane_prepare_isolates_nested_publishing_state",
-            "lane_builds_and_tests_swift_in_a_registered_worktree",
-            "read_only_lane_builds_and_tests_swift_in_scratch",
-            "read_only_lane_builds_and_tests_cargo_in_scratch",
             "read_only_dispatch_applies_bound_git_and_project_writes",
             "writer_dispatch_uses_lane_cache_and_narrow_provider_state",
             "writer_graph_output_preserves_lens_diff_base",
@@ -368,7 +365,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "pr_contribution_land_warns_when_binding_fails" => crate::pr_land_tests::pr_contribution_land_warns_when_binding_fails(),
                 "pr_contribution_unbound_project" => crate::pr_land_tests::pr_contribution_unbound_project(),
                 "pr_contribution_roundtrip" => crate::pr_land_tests::pr_contribution_roundtrip(),
-                "graph_stop_cancels_live_delivery_fetch_and_seed_preparation" => graph_stop_cancels_live_delivery_fetch_and_seed_preparation(),
+                "graph_stop_cancels_live_delivery_fetch" => graph_stop_cancels_live_delivery_fetch(),
                 "gc_fetches_default_and_removes_only_clean_merged_worktrees" => gc_fetches_default_and_removes_only_clean_merged_worktrees(),
                 "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links" => gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links(),
                 "gc_collects_a_settled_lane_whose_completion_attempt_failed" => gc_collects_a_settled_lane_whose_completion_attempt_failed(),
@@ -376,21 +373,14 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "gc_collects_a_fast_forwarded_lane_its_settlement_missed" => gc_collects_a_fast_forwarded_lane_its_settlement_missed(),
                 "gc_reports_settled_lane_store_error_and_continues" => gc_reports_settled_lane_store_error_and_continues(),
                 "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch" => gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch(),
-                "graph_run_refuses_low_disk_writers" => graph_run_refuses_low_disk_writers(),
+                "graph_run_refuses_unavailable_reader_route" => {
+                    graph_run_refuses_unavailable_reader_route()
+                }
                 "gc_reports_terminal_tmp_details_and_compact_text_count" => gc_reports_terminal_tmp_details_and_compact_text_count(),
                 "lane_prepare_isolates_nested_state" => lane_prepare_isolates_nested_state(),
                 "lane_prepare_isolates_nested_claude_state" => lane_prepare_isolates_nested_claude_state(),
                 "lane_prepare_isolates_nested_writer_state" => {
                     lane_prepare_isolates_nested_writer_state()
-                }
-                "lane_builds_and_tests_swift_in_a_registered_worktree" => {
-                    lane_builds_and_tests_swift_in_a_registered_worktree()
-                }
-                "read_only_lane_builds_and_tests_swift_in_scratch" => {
-                    read_only_lane_builds_and_tests_swift_in_scratch()
-                }
-                "read_only_lane_builds_and_tests_cargo_in_scratch" => {
-                    read_only_lane_builds_and_tests_cargo_in_scratch()
                 }
                 "lane_prepare_isolates_nested_publishing_state" => {
                     lane_prepare_isolates_nested_publishing_state()
@@ -1088,7 +1078,6 @@ impl provenant_run::Providers for WriterProvider {
                         |_| None,
                     )
                     .unwrap(),
-                    cargo_target_seed: false,
                     state_root: self.state.clone(),
                     roots: None,
                     sandbox: provenant_confinement::run_config::SandboxMode::required(
@@ -1098,7 +1087,6 @@ impl provenant_run::Providers for WriterProvider {
                         None,
                     ),
                     backend: None,
-                    cargo_target: Default::default(),
                     cargo_cache_budget: None,
                     cargo_target_protection: Default::default(),
                 }),
@@ -1602,9 +1590,8 @@ fn age_gc_output(path: &Path) -> Result {
     Ok(())
 }
 
-// Port the former dispatch preparation cancellation regression through the
-// graph front door. Entering seeding a second time proves the first launcher
-// released the same worktree's custody before stop returned.
+// The dispatch preparation cancellation regression is covered through the
+// graph front door in `graph_cases`.
 
 #[cfg(test)]
 mod predicate_tests {

@@ -92,8 +92,6 @@ port commands, and `caller` ones are read only from the caller.
 | `PROVENANT_ADMISSION_OWNER_PID` | port_command | evolving | The Provenant process that owns the admission. | admission port commands |
 | `PROVENANT_ADMISSION_EPOCH` | port_command | evolving | The worktree lease epoch the admission holds. | admission port commands |
 | `PROVENANT_PORT_OPERATION` | port_command | evolving | The typed forge operation requested from the repository adapter. | forge port commands |
-| `PROVENANT_PORT_SOURCE` | port_command | evolving | Source of the selected build admission wrapper. | build admission port commands |
-| `PROVENANT_SEED_ORIGIN` | port_command | evolving | The absolute path of the origin checkout a standalone seed clone was made from. | build.prepare children of a standalone seed clone |
 | `PROVENANT_PORT_REQUEST_PATH` | port_command | evolving | The forge request path, such as `repos/{owner}/{repo}`. | CI observation and repository discovery port commands |
 | `PROVENANT_PORT_IF_NONE_MATCH` | port_command | evolving | The cached validator to send, or empty when none is sent. | CI observation and repository discovery port commands |
 | `PROVENANT_VERIFY_SELECTION` | port_command | internal | The affected package selection for the verify engine. | verify port commands |
@@ -102,18 +100,16 @@ port commands, and `caller` ones are read only from the caller.
 | `PROVENANT_VERIFY_EFFECTIVE_CONFIG_JSON` | port_command | internal | The resolved verify declaration, for Provenant's builtin verify engine. | verify port commands |
 | `PROVENANT_RUN_STATE_DIR` | lane | internal | Run storage for children the lane submits. | every lane |
 | `PROVENANT_ROOT` | lane | internal | Installed release assets. | every lane |
-| `PROVENANT_CARGO_SOURCE_WRITES` | lane | internal | Whether lane Cargo may write registry sources; the cargo shim explains offline failures with it. | lanes with a Cargo home |
+| `PROVENANT_CARGO_SOURCE_WRITES` | lane | internal | Whether the lane Cargo home may write registry sources. | lanes with a Cargo home |
 | `PROVENANT_CARGO_SOURCE_WRITES_SOURCE` | lane | internal | Where the Cargo source-write setting came from. | lanes with a Cargo home |
 | `PROVENANT_ADMISSION_CLASS` | lane | internal | The admission class name (e.g. `build`). | only for admitted commands |
 | `PROVENANT_ADMISSION_SLOT` | lane | internal | Marks a process that holds an admission class slot. | only for admitted commands |
 | `PROVENANT_ADMISSION_SLOT_STATE` | lane | internal | The host admission state directory. | only for admitted commands |
 | `PROVENANT_ADMISSION_SLOTS` | lane | internal | The host admission class slot count. | only for admitted commands |
 | `PROVENANT_ADMISSION_WAIT_DIR` | lane | internal | The lane scratch directory for admission wait signal. | only for admitted commands |
-| `PROVENANT_BUILD_CONTEXT` | lane | internal | Frozen host-side build strategy, repository and toolchain context. | every lane and its build shim |
 | `PROVENANT_ADMISSION_DISK_LIMITS` | lane | internal | Encoded admission disk limits. | only for admitted commands |
 | `PROVENANT_ADMISSION_MEMORY_LIMIT` | lane | internal | Admission memory limit in bytes. | only for admitted commands |
 | `PROVENANT_ADMISSION_TRIM_ACTION` | lane | internal | Trim action executed on disk floor or memory pressure. | only for admitted commands |
-| `PROVENANT_LOCAL_CARGO` | lane | internal | The real cargo the shim runs. | only for the cargo child of the lane's cargo shim |
 
 - Why: a repository's scripts detect and adapt to a lane only through these names.
 - Owner: `crates/core/src/consumer_env.rs`

@@ -905,8 +905,6 @@ pub(super) enum PrepareError {
     SourceView(super::source_tree::SourceViewError),
     #[error("write grants overlap a host index")]
     HostIndexOverlap,
-    #[error("write grants overlap the host target seed store")]
-    TargetSeedOverlap,
     #[error("{0}")]
     GraphInputsAuthority(String),
     #[error("{0}")]
@@ -1276,24 +1274,14 @@ impl PrepareError {
                 refusal.resource = error.resource_fact();
                 refusal
             }
-            error @ (Self::HostIndexOverlap | Self::TargetSeedOverlap) => {
+            error @ Self::HostIndexOverlap => {
                 let mut refusal = run::PrepareRefusal::boxed(
                     provenant_records::run::TerminalCause::AccessPolicyRefused,
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Integrity;
-                refusal.policy_code = Some(
-                    match &error {
-                        Self::HostIndexOverlap => {
-                            "CONFINEMENT_HOST_INDEXES_PROTECTED_DATA_INTEGRITY"
-                        }
-                        Self::TargetSeedOverlap => {
-                            "CONFINEMENT_TARGET_SEEDS_PROTECTED_DATA_INTEGRITY"
-                        }
-                        _ => return refusal,
-                    }
-                    .into(),
-                );
+                refusal.policy_code =
+                    Some("CONFINEMENT_HOST_INDEXES_PROTECTED_DATA_INTEGRITY".into());
                 refusal
             }
             Self::WriterPinMismatch {
@@ -1538,14 +1526,9 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
             BoundaryClass::Authority
         );
     }
-    for error in [
-        PrepareError::HostIndexOverlap,
-        PrepareError::TargetSeedOverlap,
-    ] {
-        let refusal = error.into_refusal();
-        assert_eq!(refusal.boundary_class, BoundaryClass::Integrity);
-        assert!(refusal.message.contains("overlap"));
-    }
+    let refusal = PrepareError::HostIndexOverlap.into_refusal();
+    assert_eq!(refusal.boundary_class, BoundaryClass::Integrity);
+    assert!(refusal.message.contains("overlap"));
     let candidate = || {
         let mut route = skip("fixture/model", SkipKind::Unavailable, "plan refused");
         route.set_cause(provenant_records::RouteExclusionReason::ConfinementUnavailable);
@@ -3205,7 +3188,7 @@ pub(super) fn prepare_candidates_inner(
         &launch_policy,
     )?;
     let github_roots = github_roots(registry);
-    let protected_worktrees = protected_worktrees(registry, &source, &git)?;
+    let (protected_worktrees, protection_warnings) = protected_worktrees(registry, &source, &git)?;
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.clone().into_values().collect();
     let mut default_failures = std::collections::BTreeMap::new();
@@ -4506,7 +4489,6 @@ pub(super) fn prepare_candidates_inner(
             Some(&source),
             provenant_config::project_key_for(&source).as_deref(),
         );
-        let cargo_target = run::ResolvedCargoTarget::resolve_with_brief(&task.profile, prompt_text);
         let (cargo_cache_budget, cargo_cache_budget_warning) =
             match provenant_config::cargo_cache_budget(
                 &task.profile,
@@ -4552,7 +4534,6 @@ pub(super) fn prepare_candidates_inner(
                 prompt_text,
             )),
             build_cap: Some(run::BuildCap::from(&build_class)),
-            cargo_target: Some(cargo_target.clone()),
             cargo_cache_budget: cargo_cache_budget.clone(),
         };
         let text = format!(
@@ -4784,10 +4765,6 @@ pub(super) fn prepare_candidates_inner(
         provider_route.set_user_skills(user_skills_mode.is_discover());
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
-        let lane_worktree = match &plan.permissions().mode {
-            AccessMode::WorktreeWrite(_) => writer.as_ref().map(|w| w.worktree.path()),
-            AccessMode::ReadOnly => None,
-        };
         let common_git_path = repository
             .as_ref()
             .map(|path| path.to_path_buf())
@@ -4801,21 +4778,8 @@ pub(super) fn prepare_candidates_inner(
             AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,
             AccessMode::ReadOnly => &plan.permissions().scratch.path,
         };
-        let cargo_workspace = cargo_target.project_workspace(lane_worktree, state_root);
-        let (cargo_target_dir, cargo_target_lint) =
-            cargo_target.target_paths(cargo_workspace.as_deref(), private_cache);
-        // A configured target lies outside the lane cache. Create it here so a
-        // sandboxed lane's grants can anchor to it; Cargo would create it
-        // itself only after the profile is fixed. A project target lies in the
-        // writer-controlled worktree, where the host never creates anything.
-        let cargo_target_warning = [&cargo_target_dir, &cargo_target_lint]
-            .into_iter()
-            .filter(|path| !path.starts_with(private_cache) && cargo_workspace.is_none())
-            .find_map(|path| {
-                std::fs::create_dir_all(path)
-                    .err()
-                    .map(|error| format!("cannot create Cargo target {}: {error}", path.display()))
-            });
+        let cargo_target_dir = private_cache.join("target");
+        let cargo_target_lint = private_cache.join("target-lint");
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
                 credential_roots: credential_roots.clone(),
@@ -5026,32 +4990,8 @@ pub(super) fn prepare_candidates_inner(
             build_settings.cargo_source_writes,
             plan.permissions().network,
         );
-        let build_project = writer
-            .as_ref()
-            .and_then(|writer| writer.project_root())
-            .unwrap_or(registry.cwd.unwrap_or(&source));
-        let coordination_reads = configure_build_slots(
-            &mut spec,
-            &build_settings,
-            build_project,
-            &cwd,
-            &git,
-            &home,
-            scratch,
-            &provenant_executable,
-            roots.state.as_path(),
-            &task.profile.knobs,
-            &launch_policy,
-            task.context
-                .as_ref()
-                .and_then(|context| context.node_id.as_deref())
-                .or(task.title.as_deref())
-                .unwrap_or("lane"),
-        )?;
         if let Some(policy) = plan.policy_mut() {
-            for root in std::iter::once(process_tree_read).chain(coordination_reads) {
-                policy.mandatory_mut().add_state_read(root)?;
-            }
+            policy.mandatory_mut().add_state_read(process_tree_read)?;
         }
         if !host_indexes_protected(
             roots.state.as_path(),
@@ -5065,18 +5005,6 @@ pub(super) fn prepare_candidates_inner(
                 return Err(PrepareError::HostIndexOverlap);
             }
         }
-        if !target_seeds_protected(
-            roots.state.as_path(),
-            &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
-        ) {
-            let effect = launch_policy.check(
-                "CONFINEMENT_TARGET_SEEDS_PROTECTED_DATA_INTEGRITY",
-                provenant_records::policy::Facts::violation("write grants overlap target seeds"),
-            );
-            if effect.blocks() {
-                return Err(PrepareError::TargetSeedOverlap);
-            }
-        }
         if let Some(head) = &task.head {
             spec.env
                 .push((provenant_core::consumer_env::LANE_HEAD.into(), head.into()));
@@ -5085,22 +5013,12 @@ pub(super) fn prepare_candidates_inner(
                     .push((provenant_core::consumer_env::LANE_BASE.into(), base.into()));
             }
         }
-        set_cargo_profile(&mut spec.env, &build_settings, !sandbox.effective);
         spec.env.extend(
             model_policy
                 .launch_env(adapter.id())
                 .into_iter()
                 .map(|(key, value)| (key.into(), value.into())),
         );
-        {
-            set_cargo_jobs(
-                &mut spec.env,
-                registry
-                    .host
-                    .and_then(|host| host.cargo_build_jobs.as_deref()),
-                build_settings.jobs(),
-            );
-        }
         if let Some(adapter_spec) = adapter_spec {
             spec.configure_shell(scratch, adapter_spec);
         }
@@ -5314,9 +5232,6 @@ pub(super) fn prepare_candidates_inner(
         if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
             push_launch_warning(&mut route, warning);
         }
-        if let Some(warning) = &cargo_target_warning {
-            push_launch_warning(&mut route, warning.clone());
-        }
         if let Some(warning) = &cargo_cache_budget_warning {
             push_launch_warning(&mut route, warning.clone());
         }
@@ -5388,6 +5303,9 @@ pub(super) fn prepare_candidates_inner(
                 .opus_writer_advisory(&catalogue, &route)
         {
             push_launch_warning(&mut route, advisory);
+        }
+        for warning in &protection_warnings {
+            push_launch_warning(&mut route, warning.clone());
         }
         // The record was created before launch preparation added diagnostics.
         provider.launch_warnings = route.diagnostics.launch_warnings.clone();
@@ -5676,12 +5594,10 @@ pub(super) fn prepare_candidates_inner(
                 writer,
                 home: home.clone(),
                 cargo_home,
-                cargo_target_seed: config.domains.fabric.lanes.cargo_seed.enabled,
                 state_root: roots.state.as_path().to_path_buf(),
                 roots: Some(roots.clone()),
                 sandbox,
                 backend: None,
-                cargo_target: cargo_target.clone(),
                 cargo_cache_budget,
                 cargo_target_protection,
             }),

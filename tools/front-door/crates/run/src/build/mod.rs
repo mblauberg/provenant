@@ -1,12 +1,10 @@
 //! Shared build-strategy runtime seam.
 //!
-//! Strategies and their persisted rows live here so lane admission, verification
-//! and landing can use one dispatch point and one outcome ledger.
+//! The chair's host-owned warm check, verification and landing share one
+//! dispatch point and one outcome ledger here. Lanes never compile.
 
-pub mod command;
 pub mod context;
 pub mod hygiene;
-pub mod lane;
 pub mod ledger;
 pub mod local;
 pub mod pathmap;
@@ -39,15 +37,11 @@ pub struct Resolved<T> {
     pub warnings: Vec<String>,
 }
 
-/// Strategies available in this slice. `wrapper` deliberately resolves to
-/// lane_seed until the separate wrapper strategy is implemented.
+/// The chair's one host-owned warm-check strategy. Lanes never compile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StrategyName {
     Slots,
-    LaneSeed,
-    Lane,
-    Command,
 }
 
 /// The resolved strategy and frozen configuration used for one job.
@@ -58,61 +52,23 @@ pub struct Strategy {
     pub port: BuildPort,
 }
 
-/// Preparation done by the lane writer before starting its provider.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LanePreparation {
-    pub seed_target: bool,
-}
-
-impl Strategy {
-    /// Whether launch should seed Cargo's target directory for this strategy.
-    pub fn lane_preparation(&self) -> LanePreparation {
-        LanePreparation {
-            seed_target: matches!(self.name, StrategyName::LaneSeed | StrategyName::Slots),
-        }
-    }
-}
-
-/// Resolve a configured strategy without refusing a job for an unknown value.
+/// Resolve the chair's configured warm-check strategy. An unknown value warns
+/// generically at the config layer and falls back to slots here.
 pub fn strategy(port: &BuildPort) -> Resolved<Strategy> {
-    use provenant_config::BuildStrategyName as ConfigStrategy;
     let resolved = port.strategy_name();
-    let mut source = resolved.source;
-    let mut warnings = resolved.warnings;
-    let name = match resolved.value {
-        ConfigStrategy::Slots => StrategyName::Slots,
-        ConfigStrategy::LaneSeed => StrategyName::LaneSeed,
-        ConfigStrategy::Lane => StrategyName::Lane,
-        ConfigStrategy::Command => StrategyName::Command,
-        ConfigStrategy::Wrapper => {
-            warnings.push(format!(
-                "BUILD_STRATEGY_UNAVAILABLE: build.strategy=wrapper (source: {}); using lane_seed",
-                source_name(source)
-            ));
-            StrategyName::LaneSeed
-        }
+    let source = if resolved.warnings.is_empty() {
+        resolved.source
+    } else {
+        PortSource::Builtin
     };
-    if !warnings.is_empty() && port.strategy_name().source == PortSource::Builtin {
-        source = PortSource::Builtin;
-    }
     Resolved {
         value: Strategy {
-            name,
+            name: StrategyName::Slots,
             source,
             port: port.clone(),
         },
         source,
-        warnings,
-    }
-}
-
-fn source_name(source: PortSource) -> &'static str {
-    match source {
-        PortSource::Builtin => "default",
-        PortSource::Detected => "detected",
-        PortSource::Host => "host",
-        PortSource::HostProject => "host_project",
-        PortSource::Project => "project",
+        warnings: resolved.warnings,
     }
 }
 
@@ -491,11 +447,8 @@ fn dispatch(
         return local::execute(&mut job, ctx, outcome, ExecPlace::Local, None, 0);
     }
 
-    if matches!(
-        strategy,
-        StrategyName::Lane | StrategyName::LaneSeed | StrategyName::Slots | StrategyName::Command
-    ) {
-        if strategy == StrategyName::Slots && job.sandboxed {
+    if strategy == StrategyName::Slots {
+        if job.sandboxed {
             warn_and_record(
                 &mut outcome,
                 "build slots unavailable in a sandboxed lane; building locally",
@@ -504,13 +457,13 @@ fn dispatch(
             clear_admission_marker(&mut job);
             return local::execute(&mut job, ctx, outcome, ExecPlace::Local, None, 0);
         }
-        if strategy == StrategyName::Slots && offload.value == provenant_config::BuildOffload::Off {
+        if offload.value == provenant_config::BuildOffload::Off {
             outcome.exception = Some(Exception::OffloadOff);
             clear_admission_marker(&mut job);
             return local::execute(&mut job, ctx, outcome, ExecPlace::Local, None, 0);
         }
 
-        if strategy == StrategyName::Slots {
+        {
             if let rust::RustClass::Local { exception } = rust::classify(&job) {
                 outcome.exception = Some(exception);
                 warn_and_record(
@@ -530,10 +483,7 @@ fn dispatch(
             }
         }
         let request = queue::request_for_job(&job, ctx);
-        if strategy == StrategyName::Slots
-            && request.limit > 0
-            && request.excluded.len() as u64 == request.limit
-        {
+        if request.limit > 0 && request.excluded.len() as u64 == request.limit {
             clear_admission_marker(&mut job);
             outcome.exception = Some(Exception::AllQuarantined);
             warn_and_record(
@@ -571,7 +521,7 @@ fn dispatch(
                     );
                 }
                 outcome.waited_ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX);
-                if strategy == StrategyName::Slots {
+                {
                     outcome.slot = Some(index);
                     let prelude = job.prelude.take();
                     let execution = if let Some(prelude) = prelude {
@@ -679,11 +629,7 @@ fn execute_local_strategy(
     outcome: JobOutcome,
     waited: u64,
 ) -> Result<JobResult, DispatchFailure> {
-    if ctx.strategy.name == StrategyName::Command {
-        command::execute(job, ctx, outcome)
-    } else {
-        local::execute(job, ctx, outcome, ExecPlace::Local, None, waited)
-    }
+    local::execute(job, ctx, outcome, ExecPlace::Local, None, waited)
 }
 
 fn effective_job_priority(job: &Job, port: &BuildPort) -> (Priority, Vec<String>) {

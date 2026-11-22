@@ -119,7 +119,6 @@ fn failed_settlement_does_not_advance_unrelated_graphs() -> Result<(), Box<dyn s
         credential_roots: Default::default(),
         github_roots: Default::default(),
         provider_path_environment: Default::default(),
-        cargo_build_jobs: None,
         fixture_state_write: false,
     });
     let error = advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)
@@ -248,7 +247,6 @@ fn unavailable_steer_session_with_refuse_setting_has_no_successor()
         credential_roots: Default::default(),
         github_roots: Default::default(),
         provider_path_environment: Default::default(),
-        cargo_build_jobs: None,
         fixture_state_write: false,
     });
     advance_graphs_after_settlement(&settled, &FreeWorkers)?;
@@ -399,7 +397,6 @@ fn terminal_steer_refusal_settles_without_losing_private_text_or_graph_progress(
         credential_roots: Default::default(),
         github_roots: Default::default(),
         provider_path_environment: Default::default(),
-        cargo_build_jobs: None,
         fixture_state_write: false,
     });
     assert!(matches!(

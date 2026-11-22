@@ -117,29 +117,6 @@ pub(super) fn host_indexes_protected(
     })
 }
 
-pub(super) fn target_seeds_protected(
-    state: &Path,
-    grants: &[provenant_confinement::permissions::WriteGrant],
-) -> bool {
-    let resolve = |path: &Path| {
-        provenant_core::PathResolver::resolve_existing_ancestor(
-            &provenant_os::fs::SystemPathResolver,
-            path,
-        )
-        .ok()
-    };
-    let Some(store) = resolve(&run::target_seed::store_path(state)) else {
-        return false;
-    };
-    grants.iter().all(|grant| {
-        resolve(&grant.path).is_some_and(|root| {
-            !root.starts_with(&store)
-                && !(store.starts_with(&root)
-                    && (grant.scope == PathScope::Subtree || root.is_dir()))
-        })
-    })
-}
-
 /// Read access to the primary checkout's project scratch (`.provenant/scratch`, or
 /// `.agent-run`), where briefs and graph documents live. Git excludes it, so a
 /// writer's linked worktree does not hold it. Final-component links are refused;
@@ -641,11 +618,15 @@ fn resolve_policy_path(
     provenant_confinement::permissions::resolve_boundary_path(path)
 }
 
+/// Protect other projects' worktrees from a lane. A binding whose common
+/// directory is gone has nothing to protect and is skipped. When a present
+/// project's layout cannot be read, its whole root is protected instead of
+/// refusing the launch, and the reason is returned as a preparation warning.
 pub(super) fn protected_worktrees(
     registry: &Registry<'_>,
     source: &Path,
     git: &Path,
-) -> Result<Vec<PathGrant>, String> {
+) -> Result<(Vec<PathGrant>, Vec<String>), String> {
     let roots = registry.roots.ok_or("routing context is unavailable")?;
     let utility_home = host_git_home(roots.state.as_path())?;
     let utility =
@@ -658,6 +639,7 @@ pub(super) fn protected_worktrees(
     let ancestor = source.ancestors().find(|path| path.join(".git").exists());
     let selected = ancestor.unwrap_or(source);
     let mut paths = Vec::new();
+    let mut warnings = Vec::new();
     if let Some(ancestor) = ancestor {
         let repo = utility
             .open_read_repo(&executor, ancestor, budget, &cancel)
@@ -673,19 +655,55 @@ pub(super) fn protected_worktrees(
         .map_err(|error| format!("cannot read registered project inventory: {error}"))?
     {
         let common = binding.common_dir();
+        if !binding.common_dir_present() {
+            continue;
+        }
         let is_git = common.file_name() == Some(std::ffi::OsStr::new(".git"))
             || (common.join("HEAD").is_file() && common.join("objects").is_dir());
         if !is_git {
             continue;
         }
-        let layout = utility
-            .project_layout_for_binding(&executor, &binding, budget, &cancel)
-            .map_err(|error| {
-                format!(
-                    "cannot verify registered Git project layout at {}: {error}",
-                    common.display()
-                )
-            })?;
+        let layout = match utility.project_layout_for_binding(&executor, &binding, budget, &cancel)
+        {
+            Ok(layout) => layout,
+            Err(error) => {
+                // Do not refuse an unrelated launch for another project's
+                // unreadable layout. Protect its whole root so its worktrees
+                // stay out of reach, and name the degradation.
+                let root = binding
+                    .primary_checkout_hint()
+                    .filter(|path| path.is_dir())
+                    .map(Path::to_path_buf)
+                    .or_else(|| common.parent().map(Path::to_path_buf));
+                match root {
+                    Some(root)
+                        if !selected.starts_with(&root)
+                            && !root.starts_with(selected)
+                            && !roots.state.as_path().starts_with(&root) =>
+                    {
+                        warnings.push(format!(
+                            "registered project {} at {} could not be verified ({error}); protecting {}",
+                            binding.project_id(),
+                            common.display(),
+                            root.display()
+                        ));
+                        paths.push(root);
+                    }
+                    Some(root) => warnings.push(format!(
+                        "registered project {} at {} could not be verified ({error}); its root {} overlaps the launching checkout or host state, so no grant was added",
+                        binding.project_id(),
+                        common.display(),
+                        root.display()
+                    )),
+                    None => warnings.push(format!(
+                        "registered project {} at {} could not be verified ({error}); no project root could be protected",
+                        binding.project_id(),
+                        common.display()
+                    )),
+                }
+                continue;
+            }
+        };
         let ports = provenant_config::PortTable::read_for(layout.project(), roots.state.as_path())
             .map_err(|error| {
                 format!(
@@ -714,7 +732,7 @@ pub(super) fn protected_worktrees(
     }
     protected.sort_by(|left, right| left.path.cmp(&right.path));
     protected.dedup();
-    Ok(protected)
+    Ok((protected, warnings))
 }
 
 fn credential_declarations(

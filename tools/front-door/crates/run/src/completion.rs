@@ -304,7 +304,6 @@ pub struct PreambleExtras {
     pub location: Option<LaneLocation>,
     pub verification: Option<crate::VerificationResolution>,
     pub build_cap: Option<BuildCap>,
-    pub cargo_target: Option<crate::ResolvedCargoTarget>,
     pub cargo_cache_budget: Option<provenant_config::CargoCacheBudget>,
 }
 
@@ -425,11 +424,6 @@ pub fn lane_preamble_with(
                 .as_ref()
                 .map(crate::VerificationResolution::paragraph)
                 .unwrap_or_else(|| crate::verification::CHECK_PARAGRAPH.to_string());
-            let cargo_target = extras
-                .cargo_target
-                .as_ref()
-                .map(crate::ResolvedCargoTarget::preamble)
-                .unwrap_or_else(|| crate::ResolvedCargoTarget::default().preamble());
             let cargo_cache_budget = extras
                 .cargo_cache_budget
                 .as_ref()
@@ -448,7 +442,7 @@ pub fn lane_preamble_with(
                 .map(LaneLocation::preamble)
                 .unwrap_or_default();
             format!(
-                "{location}{verification}{cargo_target}{cargo_cache_budget}In a shared worktree, commit only your own paths with `git commit -- <paths>`; coordinate overlapping edits with the owning lane.\n{}{}{budget}{PULL_REQUEST_GUIDANCE}",
+                "{location}{verification}{cargo_cache_budget}In a shared worktree, commit only your own paths with `git commit -- <paths>`; coordinate overlapping edits with the owning lane.\n{}{}{budget}{PULL_REQUEST_GUIDANCE}",
                 slot_guidance(extras.build_cap),
                 scope.preamble()
             )
@@ -511,14 +505,19 @@ mod tests {
         );
         assert!(writer.contains(crate::verification::CHECK_PARAGRAPH));
         assert!(writer.contains("source: default"));
+        // #3790: lanes never compile, so the writer preamble states the
+        // formatting duty and no Cargo target or build directory.
+        assert!(writer.contains("format only"));
+        assert!(!writer.contains("Cargo target"));
+        assert!(!writer.contains("CARGO_TARGET_DIR"));
         assert!(writer.contains("Build slots:"));
         assert!(writer.contains("CI scope:"));
         assert!(writer.contains("git commit -- <paths>"));
-        assert!(writer.contains("Cargo target:"));
         assert!(writer.contains(&format!("Progress handoff JSON: {}", handoff.display())));
         let reader = lane_preamble("Model policy.", &Default::default(), None, Some(handoff));
         assert!(!reader.contains("Build slots"));
         assert!(!reader.contains("CI scope:"));
+        assert!(!reader.contains("format only"));
         assert!(!reader.contains("Cargo target"));
         assert!(reader.contains("Progress handoff JSON:"));
         assert!(

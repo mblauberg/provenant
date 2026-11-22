@@ -19,29 +19,24 @@ fn writer_access_receipt_for_plan(
 
 #[test]
 fn writer_plan_stages_scratch_missing_auth() -> Result<(), Box<dyn std::error::Error>> {
-    writer_preparation_fixture(false, false, "missing")
+    writer_preparation_fixture(false, "missing")
 }
 
 #[test]
 fn writer_plan_stages_scratch_symlink_auth() -> Result<(), Box<dyn std::error::Error>> {
-    writer_preparation_fixture(false, false, "symlink")
+    writer_preparation_fixture(false, "symlink")
 }
 
 #[test]
 fn writer_plan_stages_scratch_symlink_xdg_auth() -> Result<(), Box<dyn std::error::Error>> {
-    writer_preparation_fixture(false, false, "symlink-xdg")
+    writer_preparation_fixture(false, "symlink-xdg")
 }
 
 // Medium: real provider fences, routing and preparation, with synthetic CLIs.
 #[test]
 fn provider_fence_preparation_reports_causes_and_selects_available_candidate()
 -> Result<(), Box<dyn std::error::Error>> {
-    writer_preparation_fixture(true, false, "missing")
-}
-
-#[test]
-fn build_slot_preparation_does_not_require_a_target() -> Result<(), Box<dyn std::error::Error>> {
-    writer_preparation_fixture(false, true, "missing")
+    writer_preparation_fixture(true, "missing")
 }
 
 thread_local! {
@@ -55,10 +50,9 @@ fn phase(name: &'static str) {
 
 fn writer_preparation_fixture(
     fence_only: bool,
-    gate_only: bool,
     auth_layout: &'static str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    writer_preparation_steps(fence_only, gate_only, auth_layout)
+    writer_preparation_steps(fence_only, auth_layout)
         .map_err(|error| format!("{error:?} during fixture phase \"{}\"", PHASE.get()).into())
 }
 
@@ -86,7 +80,6 @@ fn find_retained_transcript(root: &Path) -> Result<PathBuf, Box<dyn std::error::
 
 fn writer_preparation_steps(
     fence_only: bool,
-    gate_only: bool,
     auth_layout: &'static str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
@@ -110,8 +103,6 @@ fn writer_preparation_steps(
         // credential state or on a shared slow-test budget.
         let test = if fence_only {
             "provider_fence_preparation_reports_causes_and_selects_available_candidate"
-        } else if gate_only {
-            "build_slot_preparation_does_not_require_a_target"
         } else {
             match auth_layout {
                 "missing" => "writer_plan_stages_scratch_missing_auth",
@@ -1236,7 +1227,7 @@ printf 'agy 1.0.0\n'
     let launch_policy = provenant_records::policy::Policy::default();
     let images = vec![PathBuf::from("/outside/shot.png")];
     let codex_runtime = assets.join("provenant");
-    let mut codex = provenant_providers::Adapter::prepare(
+    let codex = provenant_providers::Adapter::prepare(
         &provenant_providers::codex::Codex,
         provenant_providers::PrepareInput {
             credential_roots: confinement.plan.permissions().credential_roots.clone(),
@@ -1278,128 +1269,8 @@ printf 'agy 1.0.0\n'
     );
     assert!(
         codex.env.iter().any(|(key, _)| key == "CARGO_TARGET_DIR"),
-        "the lane builds into its own target"
+        "the lane has its own target directory"
     );
-    // A writer may receive its target later; admission must not depend on it.
-    let target = codex.env.iter().find(|(key, _)| key == "CARGO_TARGET_DIR").cloned().unwrap();
-    codex.env.retain(|(key, _)| key != "CARGO_TARGET_DIR");
-    let writer_worktree = project.join(".worktrees/writer");
-    let coordination_reads = configure_build_slots(
-        &mut codex,
-        &provenant_config::LaneBuildSettings::default(),
-        &project,
-        &writer_worktree,
-        &git,
-        &home,
-        &confinement.plan.permissions().scratch.path,
-        &codex_runtime,
-        &state,
-        &std::collections::BTreeMap::new(),
-        &provenant_records::policy::Policy::default(),
-        "test-lane",
-    )
-    .expect("sandboxed lanes receive their build context and admission shim");
-    let context_json = codex
-        .env
-        .iter()
-        .find(|(key, _)| key == provenant_core::consumer_env::BUILD_CONTEXT)
-        .and_then(|(_, value)| value.to_str())
-        .ok_or("lane build context")?;
-    let build_context = provenant_run::build::BuildContext::from_json(context_json)?;
-    assert_eq!(build_context.project, project);
-    assert_eq!(build_context.worktree, writer_worktree);
-    assert!(build_context.git.is_some(), "writer Git binding is frozen at launch");
-    assert!(
-        coordination_reads
-            .iter()
-            .all(|root| root.scope == PathScope::Exact)
-    );
-    assert!(
-        coordination_reads
-            .iter()
-            .any(|root| root.path.ends_with("slot-0.lock"))
-    );
-    codex.env.push(target);
-    // An unrepresentable shim input warns and leaves preparation intact without
-    // new grants. The frozen build context is still republished for verify.
-    let context_before = codex
-        .env
-        .iter()
-        .find(|(name, _)| name == provenant_core::consumer_env::BUILD_CONTEXT)
-        .cloned()
-        .ok_or("lane build context before skipped shim")?;
-    let env_before: Vec<_> = codex
-        .env
-        .iter()
-        .filter(|(name, _)| name != provenant_core::consumer_env::BUILD_CONTEXT)
-        .cloned()
-        .collect();
-    let profile_before = codex.profile.spec.clone();
-    let setup_count = codex.setup.len();
-    let skipped_coordination_reads = configure_build_slots(
-        &mut codex,
-        &provenant_config::LaneBuildSettings::default(),
-        &project,
-        &writer_worktree,
-        &git,
-        &home,
-        &confinement.plan.permissions().scratch.path,
-        Path::new("relative-runtime"),
-        &state,
-        &std::collections::BTreeMap::new(),
-        &provenant_records::policy::Policy::default(),
-        "test-lane",
-    )
-    .expect("an unrepresentable shim leaves launch preparation intact");
-    assert!(skipped_coordination_reads.is_empty());
-    let skipped_context = codex
-        .env
-        .iter()
-        .find(|(name, _)| name == provenant_core::consumer_env::BUILD_CONTEXT)
-        .cloned()
-        .ok_or("lane build context after skipped shim")?;
-    assert_eq!(
-        skipped_context, context_before,
-        "the frozen build context survives a skipped shim"
-    );
-    let env_after: Vec<_> = codex
-        .env
-        .iter()
-        .filter(|(name, _)| name != provenant_core::consumer_env::BUILD_CONTEXT)
-        .cloned()
-        .collect();
-    assert_eq!(env_after, env_before);
-    assert_eq!(codex.profile.spec, profile_before);
-    assert_eq!(codex.setup.len(), setup_count);
-    let slots = state.join("admission");
-    assert!(
-        codex
-            .profile
-            .spec
-            .runtime_reads
-            .iter()
-            .any(|grant| grant.path == slots && grant.scope == PathScope::Subtree),
-        "build slots were set up for this lane"
-    );
-    let grants =
-        provenant_confinement::write_grants(confinement.plan.permissions(), &codex.profile);
-    assert!(!grants.is_empty(), "the profile lists its write grants");
-    for grant in &grants {
-        let reaches = match grant.scope {
-            PathScope::Exact => grant.path == slots,
-            PathScope::Subtree => slots.starts_with(&grant.path),
-        };
-        assert!(
-            !reaches,
-            "{:?} grant {} reaches {}",
-            grant.source,
-            grant.path.display(),
-            slots.display()
-        );
-    }
-    if gate_only {
-        return Ok(());
-    }
     phase("host project policy shim");
     // Exercise the host project policy through preparation and the actual
     // generated shim, with a fake gh so no GitHub access is needed.
@@ -2205,12 +2076,6 @@ printf 'agy 1.0.0\n'
             path: base.join("a-locks"),
             scope: PathScope::Subtree,
         }]
-    );
-    // The default config enables the cargo seed, and prepare hands that to the
-    // lane's launch confinement, where `seed_target` reads it.
-    assert!(
-        confinement.cargo_target_seed,
-        "the default FabricConfig must reach the writer launch with the seed enabled"
     );
     assert!(!confinement.plan.permissions().writer_publishing());
     assert!(!scratch.join("publishing.gitconfig").exists());

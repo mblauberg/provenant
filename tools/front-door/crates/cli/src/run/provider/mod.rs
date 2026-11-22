@@ -45,9 +45,5 @@ use preparation::PrepareError;
 pub(super) use preparation::prepare;
 
 #[cfg(test)]
-mod cargo_jobs_tests;
-#[cfg(test)]
-mod cargo_profile_tests;
-#[cfg(test)]
 mod tests;
 include!("confinement_test.rs");

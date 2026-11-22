@@ -359,10 +359,6 @@ fn config_detection_and_project_path_are_inspectable() -> Result {
     let out = rig.command(&["config", "show", "--full", "--json"])?;
     assert_eq!(code(&out), 0, "{out:?}");
     let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
-    assert_eq!(
-        value["data"]["port_leaves"]["build.strategy"]["source"],
-        "builtin"
-    );
     assert_eq!(value["data"]["detection"]["stacks"][0]["stack"], "node");
     Ok(())
 }
@@ -715,12 +711,7 @@ fn config_set_validates_edits_with_same_domain_findings() -> Result {
         let path = rig.state.join("config.toml");
         let original = format!("schema_version=1\n[domains.fabric.lanes]\n{existing} # retained\n");
         std::fs::write(&path, &original)?;
-        let edited = rig.command(&[
-            "config",
-            "set",
-            "domains.fabric.lanes.cargo_build_jobs",
-            "4",
-        ])?;
+        let edited = rig.command(&["config", "set", "domains.fabric.lanes.max_lanes", "4"])?;
         assert_eq!(code(&edited), 0, "{edited:?}");
         let warning = String::from_utf8_lossy(&edited.stderr.bytes);
         assert!(
@@ -729,14 +720,9 @@ fn config_set_validates_edits_with_same_domain_findings() -> Result {
         );
         let after = std::fs::read_to_string(&path)?;
         assert!(after.contains(&format!("{existing} # retained")), "{after}");
-        assert!(after.contains("cargo_build_jobs = 4"), "{after}");
+        assert!(after.contains("max_lanes = 4"), "{after}");
 
-        let invalid = rig.command(&[
-            "config",
-            "set",
-            "domains.fabric.lanes.cargo_build_jobs",
-            "0",
-        ])?;
+        let invalid = rig.command(&["config", "set", "domains.fabric.lanes.max_lanes", "0"])?;
         assert_ne!(code(&invalid), 0, "{invalid:?}");
         assert_eq!(std::fs::read_to_string(&path)?, after);
     }

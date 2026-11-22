@@ -10,7 +10,7 @@
 //! re-entrancy and passes through.
 use provenant_core::consumer_env::{
     ADMISSION_CLASS, ADMISSION_DISK_LIMITS, ADMISSION_SLOT, ADMISSION_SLOT_STATE, ADMISSION_SLOTS,
-    ADMISSION_WAIT_DIR, CARGO_SOURCE_WRITES, CARGO_SOURCE_WRITES_SOURCE, LOCAL_CARGO,
+    ADMISSION_WAIT_DIR, CARGO_SOURCE_WRITES, CARGO_SOURCE_WRITES_SOURCE,
 };
 use provenant_os::admission::{
     HeldGuard, HostHeldGuard, mark_held_with_command, mark_host_held_with_command,
@@ -22,51 +22,6 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-
-/// The compiling cargo commands a lane may run locally.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Local {
-    #[default]
-    All,
-    /// Warn on compiling commands other than `cargo check`.
-    Check,
-    None,
-}
-
-impl Local {
-    pub(crate) fn from_env(env: &[(OsString, OsString)]) -> Self {
-        match env
-            .iter()
-            .find(|(key, _)| key == OsStr::new(LOCAL_CARGO))
-            .and_then(|(_, value)| value.to_str())
-        {
-            Some("check") => Self::Check,
-            Some("none") => Self::None,
-            _ => Self::All,
-        }
-    }
-    fn name(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::Check => "check",
-            Self::None => "none",
-        }
-    }
-    pub(crate) fn warning(self, args: &[OsString]) -> Option<String> {
-        let command = subcommand(args)?;
-        let allowed = match self {
-            Self::All => true,
-            Self::Check => matches!(command, "check" | "c") || !GATED.contains(&command),
-            Self::None => !GATED.contains(&command),
-        };
-        (!allowed).then(|| {
-            format!(
-                "cargo {command} exceeds lanes.local_cargo = {}; continuing. Set lanes.local_cargo or attempt.local_cargo to change this advisory policy",
-                self.name()
-            )
-        })
-    }
-}
 
 fn subcommand(args: &[OsString]) -> Option<&str> {
     let mut args = args.iter().map(OsString::as_os_str);
@@ -374,14 +329,6 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
 
     let is_nested = nested_for_class(class, &env, &SystemProcessObserver);
 
-    // Local cargo warning if class == "build"
-    if class == "build" && !is_nested {
-        let local = Local::from_env(&env);
-        if let Some(msg) = local.warning(args) {
-            say(&format!("warning: {msg}"));
-        }
-    }
-
     // Disk & Memory checks with trim
     let requires_disk_check =
         class != "build" || subcommand(args).is_some_and(|cmd| GATED.contains(&cmd));
@@ -401,34 +348,19 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
     }
 
     if class == "build" {
-        let raw_context = get_env(provenant_core::consumer_env::BUILD_CONTEXT);
-        let parsed_context = raw_context
-            .and_then(|value| {
-                serde_json::from_str::<provenant_run::build::BuildContext>(value).ok()
-            })
-            .filter(|context| context.schema == 1);
-        let context_was_invalid = raw_context.is_some() && parsed_context.is_none();
-        let context = match parsed_context {
-            Some(context) => context,
-            None => match host_build_context(&env, state_buf.as_deref()) {
-                Ok(context) => context,
-                Err(error) => {
-                    say(&format!(
-                        "warning: build context unavailable: {error}; running command locally"
-                    ));
-                    let code = execute_and_forward(program, args, &env);
-                    if code != 0 {
-                        warn_readonly_sources(&env);
-                    }
-                    return code;
+        let context = match host_build_context(&env, state_buf.as_deref()) {
+            Ok(context) => context,
+            Err(error) => {
+                say(&format!(
+                    "warning: build context unavailable: {error}; running command locally"
+                ));
+                let code = execute_and_forward(program, args, &env);
+                if code != 0 {
+                    warn_readonly_sources(&env);
                 }
-            },
+                return code;
+            }
         };
-        if context_was_invalid {
-            say(
-                "warning: PROVENANT_BUILD_CONTEXT was invalid; resolving build context on the host",
-            );
-        }
         return run_build_job(
             context,
             program,
@@ -874,7 +806,6 @@ pub(crate) fn host_build_context(
         .and_then(|value| value.into_string().ok())
         .is_some_and(|value| value == "on");
     Ok(BuildContext {
-        schema: 1,
         project: project.clone(),
         project_key,
         worktree: project,

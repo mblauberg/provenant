@@ -1507,28 +1507,28 @@ fn host_lane_build_settings_read_and_validate() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(
         temp.path().join("config.toml"),
-        "schema_version=1\n[domains.fabric.lanes]\ncargo_build_jobs=5\n",
+        "schema_version=1\n[domains.fabric.lanes]\nmax_lanes=5\n",
     )
     .unwrap();
     let settings = crate::LaneBuildSettings::read(temp.path()).unwrap();
-    assert_eq!(settings.cargo_build_jobs, Some(5));
+    assert_eq!(settings.max_lanes, Some(5));
     std::fs::write(
         temp.path().join("config.toml"),
-        "schema_version=1\n[domains.fabric.lanes]\ncargo_build_jobs=0\n",
+        "schema_version=1\n[domains.fabric.lanes]\nmax_lanes=0\n",
     )
     .unwrap();
-    // Zero remains invalid for per-build compiler jobs.
+    // Zero remains invalid for host lane caps.
     let settings = crate::LaneBuildSettings::read(temp.path()).unwrap();
-    assert_eq!(settings.cargo_build_jobs, None);
+    assert_eq!(settings.max_lanes, None);
     std::fs::write(
         temp.path().join("config.toml"),
-        "schema_version=1\n[domains.fabric.lanes]\ncargo_build_jobs=-2\n",
+        "schema_version=1\n[domains.fabric.lanes]\nmax_lanes=-2\n",
     )
     .unwrap();
     assert_eq!(
         crate::LaneBuildSettings::read(temp.path())
             .unwrap()
-            .cargo_build_jobs,
+            .max_lanes,
         None
     );
 }
@@ -1713,20 +1713,24 @@ fn set_rejects_out_of_range_values_and_unknown_knobs() {
     assert!(!roots.state.as_path().join("config.toml").exists());
 }
 #[test]
-fn cargo_target_knob_accepts_project_private_and_absolute_paths_and_rejects_relative() {
+fn removed_cargo_target_knob_is_unknown_for_every_value() {
     let dir = tempfile::tempdir().unwrap();
     let roots = state_roots(dir.path());
     let set = |name, value| knob_edit(&roots, KnobEdit::Set { name, value });
-    assert!(matches!(
-        set("lanes.cargo_target", "relative/path"),
-        Err(ConfigError::KnobValue {
-            rule: "unknown_value",
-            ..
-        })
-    ));
-    assert!(set("lanes.cargo_target", "project").is_ok());
-    assert!(set("lanes.cargo_target", "private").is_ok());
-    assert!(set("lanes.cargo_target", "/var/cache/cargo-target").is_ok());
+    for value in [
+        "relative/path",
+        "project",
+        "private",
+        "/var/cache/cargo-target",
+    ] {
+        assert!(
+            matches!(
+                set("lanes.cargo_target", value),
+                Err(ConfigError::UnknownKnob { .. })
+            ),
+            "{value}"
+        );
+    }
 }
 #[test]
 fn knob_edit_preserves_unknown_keys_while_applying_the_edit() {
@@ -1845,7 +1849,7 @@ fn read_knobs_ignores_domain_sections_it_does_not_know() {
     std::fs::create_dir(state).unwrap();
     std::fs::write(
         fixture.config(),
-        "schema_version = 1\n[domains.fabric.lanes.cargo_seed]\nenabled = false\n",
+        "schema_version = 1\n[domains.unknown.section]\nenabled = false\n",
     )
     .unwrap();
     // Without the domain sections every configured domain is an unknown key.

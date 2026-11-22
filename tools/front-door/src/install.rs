@@ -2041,6 +2041,23 @@ impl SmokeProject {
     }
 }
 
+/// The smoke child binds the scratch project under the host state root. Remove
+/// that binding when the run ends, success or failure, so deleting the fixture
+/// cannot leave a registered project whose layout no longer resolves.
+fn forget_smoke_binding(state_dir: &Path, project: &Path) -> Result<(), String> {
+    let Some(directory) = provenant_config::host_project_dir(state_dir, project) else {
+        return Ok(());
+    };
+    let project = directory
+        .file_name()
+        .and_then(OsStr::to_str)
+        .and_then(|name| provenant_core::ProjectId::parse(name).ok())
+        .ok_or_else(|| "smoke project binding name is invalid".to_owned())?;
+    provenant_config::forget_project_at_state(state_dir, project)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 fn runner_for_verify(targets: &provenant_config::Targets) -> Result<UpgradeRunner, String> {
     Ok(UpgradeRunner {
         executor: provenant_os::exec::SystemExecutor::new(1).map_err(|error| error.to_string())?,
@@ -2141,52 +2158,73 @@ fn verify_smoke_with(
         }
         run.extend(["--set".into(), setting.into()]);
     }
-    let launched = runner.execute(&run, None, 1_048_576, 3600)?;
-    let wait = runner.execute(
-        &[
-            program.clone(),
-            "--state-dir".into(),
-            state_dir.as_os_str().to_owned(),
-            "--json".into(),
-            "wait".into(),
-            graph.clone().into(),
-            "--timeout".into(),
-            "3600".into(),
-        ],
-        None,
-        1_048_576,
-        3700,
-    );
-    let status = runner.execute(
-        &[
-            program,
-            "--state-dir".into(),
-            state_dir.as_os_str().to_owned(),
-            "--json".into(),
-            "status".into(),
-            graph.into(),
-        ],
-        None,
-        1_048_576,
-        60,
-    );
-    match (wait, status) {
-        (Ok(wait), Ok(status)) => Ok(format!(
-            "{}{}{}",
-            String::from_utf8_lossy(&launched),
-            String::from_utf8_lossy(&wait),
-            String::from_utf8_lossy(&status)
-        )),
-        (Err(error), status) => Err(format!(
-            "{}\nsmoke node report: {}",
-            error,
-            status
-                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                .unwrap_or_else(|err| err)
-        )),
+    let outcome = match runner.execute(&run, None, 1_048_576, 3600) {
+        Ok(launched) => {
+            let wait = runner.execute(
+                &[
+                    program.clone(),
+                    "--state-dir".into(),
+                    state_dir.as_os_str().to_owned(),
+                    "--json".into(),
+                    "wait".into(),
+                    graph.clone().into(),
+                    "--timeout".into(),
+                    "3600".into(),
+                ],
+                None,
+                1_048_576,
+                3700,
+            );
+            let status = runner.execute(
+                &[
+                    program,
+                    "--state-dir".into(),
+                    state_dir.as_os_str().to_owned(),
+                    "--json".into(),
+                    "status".into(),
+                    graph.into(),
+                ],
+                None,
+                1_048_576,
+                60,
+            );
+            match (wait, status) {
+                (Ok(wait), Ok(status)) => Ok(format!(
+                    "{}{}{}",
+                    String::from_utf8_lossy(&launched),
+                    String::from_utf8_lossy(&wait),
+                    String::from_utf8_lossy(&status)
+                )),
+                (Err(error), status) => Err(format!(
+                    "{}\nsmoke node report: {}",
+                    error,
+                    status
+                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                        .unwrap_or_else(|err| err)
+                )),
+                (Ok(_), Err(error)) => Err(format!(
+                    "{error}\nsmoke launch: {}",
+                    String::from_utf8_lossy(&launched)
+                )),
+            }
+        }
+        Err(error) => Err(error),
+    };
+    report_smoke_cleanup(outcome, forget_smoke_binding(state_dir, project.path()))
+}
+
+fn report_smoke_cleanup<T>(
+    outcome: Result<T, String>,
+    cleanup: Result<(), String>,
+) -> Result<T, String> {
+    match (outcome, cleanup) {
+        (Ok(output), Ok(())) => Ok(output),
+        (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(error)) => Err(format!(
-            "{error}\nsmoke launch: {}",
-            String::from_utf8_lossy(&launched)
+            "smoke passed but its scratch project binding was not removed: {error}"
+        )),
+        (Err(error), Err(cleanup)) => Err(format!(
+            "{error}\nsmoke project binding cleanup failed: {cleanup}"
         )),
     }
 }
@@ -2218,7 +2256,8 @@ fn preview_smoke(
     for setting in &args.set {
         argv.extend(["--set".into(), setting.into()]);
     }
-    runner.execute(&argv, None, 1_048_576, 60)
+    let outcome = runner.execute(&argv, None, 1_048_576, 60);
+    report_smoke_cleanup(outcome, forget_smoke_binding(state_dir, project.path()))
 }
 
 impl UpgradeRunner {
@@ -2982,11 +3021,41 @@ mod tests {
     }
 
     #[test]
+    fn smoke_cleanup_forgets_the_scratch_project_binding() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use super::*;
+
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        provenant_os::fixture::private_state_dir(roots.state.as_path())?;
+        let scratch = root.join("provenant-smoke-project-fixture");
+        std::fs::create_dir(&scratch)?;
+        provenant_os::fixture::run_git(&scratch, &["init", "-q"])?;
+        let location = provenant_config::ProjectLocation::new(scratch.join(".git"))?;
+        provenant_config::bind_project(&roots, location.clone())?;
+        assert!(provenant_config::lookup_project(&roots, &location)?.is_some());
+
+        forget_smoke_binding(roots.state.as_path(), &scratch).map_err(std::io::Error::other)?;
+        assert!(provenant_config::lookup_project(&roots, &location)?.is_none());
+        // A second cleanup is not an error: the smoke run may have created none.
+        forget_smoke_binding(roots.state.as_path(), &scratch).map_err(std::io::Error::other)?;
+        Ok(())
+    }
+
+    #[test]
     fn failed_smoke_node_is_reported_by_verify() -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir()?;
+        let state = tmp.path().join("state");
+        std::fs::create_dir(&state)?;
+        // The host state root is private in an installed host, and project
+        // bindings refuse a public one.
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
         let launcher = tmp.path().join("provenant");
         std::fs::write(
             &launcher,
@@ -3001,7 +3070,7 @@ mod tests {
         let error = match verify_smoke_with(
             &runner,
             &launcher,
-            tmp.path(),
+            &state,
             tmp.path(),
             &cli::Upgrade {
                 yes: false,
@@ -3032,6 +3101,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir()?;
+        let state = tmp.path().join("state");
+        std::fs::create_dir(&state)?;
+        // The host state root is private in an installed host, and project
+        // bindings refuse a public one.
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
         let launcher = tmp.path().join("provenant");
         let calls = tmp.path().join("calls");
         std::fs::write(
@@ -3050,7 +3124,7 @@ mod tests {
         let output = preview_smoke(
             &runner,
             &launcher,
-            tmp.path(),
+            &state,
             &cli::Upgrade {
                 yes: false,
                 from_source: None,

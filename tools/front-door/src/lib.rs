@@ -55,7 +55,6 @@ mod staging_gc;
 mod state_handoff;
 mod status_wait;
 mod stranded_work;
-mod target_seed_build;
 mod usage;
 mod verify;
 #[cfg(test)]
@@ -1653,7 +1652,6 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Internal(provenant_cli::Internal::EventListen { repository }) => {
             event_delivery::listen(&repository, globals)
         }
-        Command::Internal(provenant_cli::Internal::TickSeed) => tick::seed_worker(globals),
         Command::Internal(provenant_cli::Internal::Launch {
             attempt,
             provider_lease_wait,
@@ -2082,13 +2080,19 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             provenant_cli::workflow::Session::Handoff(args),
         )) => handoff::run(*args, globals, process.workers()),
         Command::Workflow(cmd) => {
-            let workspace = if matches!(
+            let session_save = matches!(
                 cmd,
                 provenant_cli::Workflow::Session(provenant_cli::workflow::Session::Save { .. })
-            ) {
+            );
+            let workspace = if session_save {
                 Workspace::SessionSave
             } else {
                 Workspace::Project
+            };
+            let project_warning = if session_save {
+                roots::session_project_warning(globals.project.as_deref())
+            } else {
+                None
             };
             match roots::resolve(globals, workspace, Product::Required) {
                 Ok(resolved) => {
@@ -2102,16 +2106,18 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                         &resolved.home,
                         &resolved.project,
                         move || {
-                            bounded_session_warning(move || {
+                            let mut warnings: Vec<String> = Vec::new();
+                            warnings.extend(project_warning);
+                            warnings.extend(bounded_session_warning(move || {
                                 disk_guard::session_warning(&state, &home, &project)
-                            })
+                            }));
+                            warnings
                         },
                     )
                 }
                 Err(error) => {
                     let outcome = match error {
-                        roots::RootError::SessionProjectMissing
-                        | roots::RootError::SessionProjectMismatch { .. } => Outcome::Refused,
+                        roots::RootError::SessionProjectMissing => Outcome::Refused,
                         _ => Outcome::Error,
                     };
                     fail(

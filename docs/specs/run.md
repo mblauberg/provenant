@@ -25,94 +25,21 @@ else `HOME/.cargo`). Adapters and the launching shell cannot replace it.
 
 Lanes share the host's registry, Git databases and checkouts and may write them, so a build
 fetches once for every later build. `domains.fabric.lanes.cargo_source_writes = false` makes them
-read-only and Cargo offline; a missing dependency then fails and the Cargo shim names the setting,
-its source and the host fetch to run. `credentials` and `credentials.toml` are always denied read
-and write, including in relocated homes; host `config` files are read-only data.
+read-only and Cargo offline; a missing dependency then fails offline, and the admission wrapper
+names the setting, its source and the host fetch to run. A lane's own manual cargo invocation sees
+the read-only Cargo home and `PROVENANT_CARGO_SOURCE_WRITES`. `credentials` and `credentials.toml`
+are always denied read and write, including in relocated homes; host `config` files are read-only
+data.
 
-## Cargo target directory
+## Lanes do not build
 
-`lanes.cargo_target` chooses how a lane acquires its Cargo target:
-- `private` (default): the worktree's own target in its lane cache, seeded by cloning the project's
-  host seed generation ([below](#cargo-target-seed)). Where the filesystem cannot clone, the
-  target is unseeded with a `clone_failed` outcome and one host warning; a copy is never made,
-  because it cannot finish inside the seed budget. Settlement removes the target once writer
-  custody is free; worktree removal and lane-cache GC catch any missed.
-  `provenant worktree seed-target PATH` seeds the same directory for a checkout outside a lane.
-- `project`: the writer worktree's own `target/`, shared with the chair's builds in that
-  checkout. The host does not grant it separately; it lies in the worktree the lane already
-  writes. Read-only lanes and projects without a Cargo manifest use the lane cache.
-- An absolute path comes only from host or project configuration or the launch knob. A
-  `Cargo target:` brief line may pick `project` or `private`, never a path, because a path
-  grants read, write and exec and a brief is requester text.
-
-No mode shares one target between worktrees; `provenant config check` reports an
-unrecognised value with its path and line, and the default applies.
-The preamble and `provenant config show` report the resolved directory and its source;
-`cargo-target-setup.json` records each lane's seed outcome. Every fallback carries `expected`
-and `found` text free of paths and environment values, and a repair step.
-- Why: Cargo hashes a workspace member's units by workspace-relative path and judges freshness
-  from source mtimes, so a worktree older than another's build reuses artifacts and reports
-  symbols missing that exist in its source.
-- Why the seed is the host generation, not a settled lane's target: generations are built by
-  the host from the verify base (landed code), and record the compiler, host triple and
-  profile a clone must match.
-
-## Cargo target seed
-
-One seed store serves every registered repository on the host. A generation is current
-for a lane only when its project key, identity hash and `deps` contents match. The identity
-hashes only Git-tracked files (Cargo.lock, manifest dependency, feature, patch and profile
-tables, Cargo configuration profiles, rustc version, host triple and effective build
-profile) and runs no Cargo metadata, so a lane computes it before confinement. Failure to
-compute it leaves the lane cold with a warning. Hash rules live in `crates/run/src/target_seed.rs`.
-- Why: reuse must not introduce incompatible or partially collected build output.
-
-A lane never builds a seed. A private lane with no matching generation queues a request
-for its project; tick admits it into its single-flight queue. The host checks out the
-requested commit, recomputes its identity and publishes only on a match; a mismatch
-records `identity_mismatch` and publishes nothing. Busy and failed projects retry with
-exponential backoff capped at one hour, and one project's skip or failure never stops
-or hides another's. A scheduled refresh uses the verify base. The last outcome is kept
-per project and `provenant tick` summarises it without persisted command output, repository
-paths or environment values.
-
-A seed build is not a lane: it removes inherited compiler-selection keys
-(`RUSTC_WRAPPER`, `RUSTUP_*`, `RUSTFLAGS`, `CARGO_BUILD_TARGET` and the rest) from its
-children, warns once with the key names (never values) and records them in
-`seed-result.json`. A lane whose own environment changes the compiler cannot use such a seed
-and stays cold with a warning.
-
-`build.prepare` is an ordered list of argv arrays run in the checkout root before the
-first Cargo command, in the seed build's sanitised environment, with
-`PROVENANT_SEED_ORIGIN` (the origin checkout's path) set for seed-clone prepares only. An
-unreadable or invalid port table warns and runs no prepare command. A failing command
-fails that build as `prepare_failed`: the last 2 KiB of output goes to `seed-result.json`
-and, for `provenant worktree seed-build`, to the human cause and `error.cause`; the
-operator note never echoes it.
-
-A generation holds dependency units only (`contents: "deps"`): the seed build runs
-`cargo clean -p` for every path package. A generation without that marker is full, is not
-current, and lane selection skips it with `full_generation`; collection removes it as
-`obsolete_full_generation` without displacing a deps generation from a retained slot.
-- Why: member units whose sources move with a lane must not be reused as fresh.
-
-A clone ages every dep-info file to the epoch before publication, so workspace members
-rebuild once against the worktree while registry packages stay fresh. It finds those files
-from the fingerprints, not Cargo's directory layout. A fingerprint that cannot be read, a
-named dep-info outside the target, or a non-empty clone naming none is not published: the
-outcome is `seed_layout_unrecognised` and the lane builds cold.
-- Why: an un-aged unit reintroduces the stale-mtime reuse above.
-
-Private writer lanes seed `target` and `target-lint` independently, and one fallback does not
-block the other. `lanes.cargo_seed_budget` bounds each step with its own deadline; a timeout
-names the step and the setting with its source. Published generations are immutable, collection
-never races an active clone, and each project's newest complete generation always stays
-(`domains.fabric.lanes.cargo_seed.max_generations` and `max_bytes` bound the rest).
-
-Seed health is advisory and refuses no lane: a private writer lane warns once at start when no
-complete generation exists, the newest is older than `build.seed.stale_after` or the last refresh
-failed, naming the outcome, the setting with its source and `provenant worktree seed-build`.
-`provenant worktree doctor` shows the same facts.
+Lanes format and coordinate only. There is no per-lane Cargo target allocation,
+no host target seed, no `seed-build`/`seed-target` command and no target-seed
+generation GC. The chair runs one warm host-owned integrated check per epic and
+CI runs clippy and the tests. `.worktrees/.cargo/config.toml` is the single
+mechanism that disables lane cargo; a leftover `lanes.cargo_target`,
+`lanes.cargo_seed_budget` or `domains.fabric.lanes.cargo_seed` key warns as
+unknown.
 
 ## Publication order
 
@@ -141,15 +68,15 @@ its source layer, and the fresh tokens counted. A missing figure is never a gues
 
 ## Build strategy
 
-Lane admission, verification and landing dispatch build work through one runtime in
-`crates/run/src/build/`. `build::run` is the only entry point and appends exactly one
-`JobOutcome` row per job on every path. `build.*` leaves are typed when read: an unknown value
-warns with the leaf and its source and falls back to the builtin value, so one bad leaf never
-refuses a port table. The strategy and its source are frozen in `PROVENANT_BUILD_CONTEXT` at
-lane launch; the strategies (`slots`, `lane_seed`, `lane`, `command`) and leaves are the `BuildPort`
-in `crates/config/src/ports.rs`. `wrapper` is declared but unavailable: it warns
-`BUILD_STRATEGY_UNAVAILABLE` and uses `lane_seed`. One host cap (`[admission.build].slots`) serves every
-strategy.
+The chair's host-owned warm check, `provenant verify` tiers and a landing Commands
+gate dispatch build work through one runtime in `crates/run/src/build/`.
+`build::run` is the only entry point and appends exactly one `JobOutcome` row per
+job on every path. `build.*` leaves are typed when read: an unknown value warns
+with the leaf and its source and falls back to the builtin value, so one bad leaf
+never refuses a port table. There is one strategy, `slots`, declared by the
+`BuildPort` in `crates/config/src/ports.rs`; lane strategies, wrapper layers and
+command wrappers are removed. One host cap (`[admission.build].slots`) serves
+every job. Lanes never enter this runtime.
 
 Under `slots`, work runs in a host slot cloned from a bare store; layout and paths are in
 [state](state.md#build-state-has-one-host-root). A slot holds one job at a time: custody
@@ -162,7 +89,7 @@ the worktree; no `--message-format` flag is injected.
 
 A job runs locally, with its `exception` recorded and a warning, when it is sandboxed, not
 eligible, offload is off, staging or the pool is unavailable or quarantined, or no snapshot
-exists. A pool problem warns and runs locally; it never fails a lane's `cargo check`.
+exists. A pool problem warns and runs locally; it never fails the chair's check.
 
 Priority orders waiters and never preempts a running job. A free slot is taken at once;
 only a busy pool writes a queue ticket whose liveness is its flock, so a killed waiter's
@@ -175,7 +102,7 @@ hygiene and best-effort prewarm (`build maintain`) after collection; a schedulin
 and never fails the tick.
 
 `build report` derives its figures from `<state>/build/jobs.jsonl` (schema and field order:
-`crates/run/src/build/ledger.rs`); an unknown row cannot pass. Lane shims (`provenant admit build`),
+`crates/run/src/build/ledger.rs`); an unknown row cannot pass. The host warm check,
 `provenant verify` and a landing Commands gate each build one job through this runtime.
 
 | Failure | Effect |
@@ -187,24 +114,26 @@ and never fails the tick.
 | OS purges Caches | slot recreated with its record |
 | ledger unwritable | row goes to the attempt scratch ledger and the report counts it missing |
 
-- Why: lanes, the chair and landing must get one strategy, one outcome row and one host cap.
+- Why: the chair and landing share one strategy, one outcome row and one host cap; lanes do not build.
 - Owner: `crates/run/src/build/`, `src/admit.rs`, `src/verify.rs`, `src/pr/landing/gate.rs`
 
-## Lane verification and build admission
+## Verification and admission
 
-A writer preamble's verification paragraph is `lanes.verification` (default `targeted`: build
-in the worktree's warm target, check, clippy on touched crates and targeted tests, leaving the
-workspace suite to CI). A brief line `Verification scope: check|targeted|full` overrides it and
-the paragraph names source `brief`; when they disagree the paragraph follows the brief and
-the stop cause names both.
+A writer preamble describes its verification scope (`lanes.verification`,
+default `targeted`) but the lane performs no build; the summary names what the
+chair's integrated check and CI will run. A brief line `Verification scope:
+check|targeted|full` overrides the paragraph and names source `brief`.
 
-Admission attribution has host scope. Before confinement each lane registers under
-`<state>/admission/<class>/lanes/`, and `admission::host_holders` and `host_waiters` combine
-registered and standalone markers across projects. Status and wait reasons name the holding
-project and lane. A stale registration after a crash does not imply occupancy; a registration
-failure warns and the build proceeds. Registration grants no write to host state or other lanes' records.
-- Why: a chair brief must be able to widen what a lane verifies, and parallel lanes must share
-  one host cap.
+Admission attribution has host scope and serves the chair's host-owned warm
+check. Before confinement each lane registers under
+`<state>/admission/<class>/lanes/` for coordination; `admission::host_holders`
+and `host_waiters` combine registered and standalone markers across projects.
+Status and wait reasons name the holding project and lane. A stale registration
+after a crash does not imply occupancy; a registration failure warns and the
+host job proceeds. Registration grants no write to host state or other lanes'
+records.
+- Why: the chair can widen what the integrated check covers, and one host cap
+  bounds all compilation.
 
 ## Every limit names the layer that set it
 

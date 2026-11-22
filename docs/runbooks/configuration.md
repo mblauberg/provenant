@@ -22,7 +22,10 @@ Layers apply lowest to highest: `builtin` < `detected` < `host` (`<state>/ports.
 [`ports.json`](../../tools/front-door/crates/config/assets/ports.json). The
 host-project directory is the ProjectId binding directory that
 `provenant config path --project` prints, so a repository can be configured from
-host state with no files in its tree. A missing layer is skipped silently.
+host state with no files in its tree. A missing layer is skipped silently. The
+binding record can be forgotten when its common directory is gone; the
+host-project directory and its `ports.json` stay for a later bind of the same
+location.
 
 - A layer sets only the fields it changes. Objects deep-merge, so
   `{"verify": {"base": "origin/master"}}` keeps the other verify fields. Arrays
@@ -61,17 +64,18 @@ Discovery rules (Rust, Node, mixed tiers) are in
 
 ### Build port
 
-`build` selects how intercepted compiler jobs and whole verify or gate jobs run;
-leaves and defaults are in `ports.json`, and an unknown value warns with the leaf
-and its source and falls back to the builtin.
+`build` configures the chair's one host-owned warm check. There is no lane
+build: lanes run formatting only, the chair runs one warm integrated check per
+epic, and CI runs clippy and the tests. `strategy` accepts only `slots`, with
+`[admission.build].slots` as the host-wide concurrency cap; a leftover
+`lane_seed`, `lane`, `wrapper` or `command` value, or a `build.wrapper`,
+`build.command` or `build.seed` key, now warns as unknown.
 
-- `strategy`: `lane_seed` and `lane` run locally (`lane_seed` also requests
-  target seeding at launch); `slots` runs jobs in a warm slot, with
-  `[admission.build].slots` the one concurrency cap; `command` runs
-  `command.argv` before the intercepted argv, with `command.exit_codes` mapping
-  exits to success, unknown or (`other`) refused. `wrapper` is not implemented
-  and uses `lane_seed` with a warning.
-- `offload = "off"` runs every build locally with exception `offload_off`.
+- `prepare` is an ordered list of argv arrays run from the checkout root before
+  a slot job's first step. A failing command fails that job with
+  `prepare_failed`, recording the command and the last 2 KiB of its output. An
+  unreadable table warns and runs nothing. Arrays replace across layers.
+- `offload = "off"` runs every job locally with exception `offload_off`.
   `overflow`: `auto` queues under slots and waits a bounded time otherwise;
   `queue` always waits; `local` runs locally after the admission wait.
 - `clean` before a slot job: `none` keeps files, `untracked` runs
@@ -79,23 +83,10 @@ and its source and falls back to the builtin.
 - `priority` maps a job class to a queue level and orders waiters; it never
   preempts a running job. `queue_aging` raises a waiter's effective level to
   bound lower-priority waits.
-- `prepare` is an ordered list of argv arrays run from the checkout root before
-  each seed build and before a slot job's first step. A failing command fails that
-  build with `prepare_failed`, recording the command and the last 2 KiB of its
-  output. Seed prepares also see `PROVENANT_SEED_ORIGIN`, the origin checkout.
-  An unreadable table warns and runs nothing. Arrays replace across layers.
-- `seed.stale_after` uses the host-gc duration syntax; an invalid value warns and
-  reports source `default`.
-
-```json
-{ "build": { "prepare": [["node", "tools/ensure-generated.mjs"]], "strategy": "slots" } }
-```
-
-A writer lane with a private Cargo target warns once, and never refuses the lane,
-when the project has no complete seed generation, the newest is older than
-`build.seed.stale_after`, or the last refresh failed. The warning names the knob
-and its source and says to run `provenant worktree seed-build` in the repository.
-`provenant worktree doctor PATH` shows the same generation age and last outcome.
+- `snapshot_retention`, `canary_every`, `slot_idle` and `soak.*` govern host slot
+  hygiene and the build report. Leaves and defaults are in `ports.json`, and an
+  unknown value warns with the leaf and its source and falls back to the
+  builtin.
 
 ### Affected-package selection
 
@@ -125,33 +116,14 @@ Set `domains.lanes.user_skills` at host or project scope, or per route in
 `exec_roots` for writer access, or `domains.run.writer_writes` for host-wide
 write grants. `provenant fabric identity` prints the project ID.
 
-## Lane Cargo target
+## Lanes do not build
 
-`lanes.cargo_target` picks each writer lane's `CARGO_TARGET_DIR`:
-
-- `private` (default): the worktree's own target in its lane cache, cloned warm
-  from the project's host seed (cold, with a warning, where the filesystem cannot
-  clone).
-- `project`: the worktree's own `target/`, cold.
-- An absolute path, used as given. Never point several worktrees of one
-  repository at it: Cargo serves one branch's artifacts to another
-  ([run spec](../specs/run.md#cargo-target-directory)).
-
-The lane preamble names the value and its source. `cargo_incremental` and
-`cargo_debug` under `[domains.fabric.lanes]` set `CARGO_INCREMENTAL` and
-`CARGO_PROFILE_DEV_DEBUG`. `LaneBuildSettings` resolves them once per launch and
-the host seed build resolves them the same way, so both compile alike; a value
-already in the lane environment wins in both. A changed default reaches only
-future builds, so an existing target is not shrunk until it is rebuilt or removed.
-
-To build warm in a checkout outside a lane:
-
-```sh
-export CARGO_TARGET_DIR="$(provenant worktree seed-target .worktrees/my-branch)"
-```
-
-It needs no lane environment, prints where its verified Cargo home came from, and
-names what differed (for example the pinned and seeded compiler) when it cannot seed.
+Lanes format and coordinate only: they never provision, seed or admit a
+compiler job. There is no `lanes.cargo_target`, `lanes.cargo_seed_budget`,
+`lanes.cargo_build_jobs`, `lanes.cargo_incremental`, `lanes.cargo_debug` or
+`domains.fabric.lanes.cargo_seed` setting; a leftover key warns as unknown.
+The chair runs one warm integrated check per epic through the build port, and
+CI runs clippy and the tests.
 
 ## Git pre-push hook and local gate
 
@@ -265,12 +237,12 @@ trim_action = "cargo clean --package test-artifacts"
 - `disk_floor`: minimum free disk before running.
 - `trim_action`: shell command run to free resources when a limit is exceeded,
   before re-sampling.
-- `wait_seconds`: bounded local wait (default 15) for the lane strategies. On expiry
-  the command runs without a slot and records an `overflow` exception. Under
-  `build.strategy = "slots"` with `build.overflow = auto`, waiters queue until a
-  slot frees or the job is cancelled. No saturated class refuses a command.
+- `wait_seconds`: bounded local wait (default 15). On expiry the command runs
+  without a slot and records an `overflow` exception. With `build.overflow =
+  auto`, waiters queue until a slot frees or the job is cancelled. No saturated
+  class refuses a command.
 
-`provenant admit <CLASS> -- <COMMAND> [ARGS...]` takes a slot by hand. Every lane's
-`cargo`, `cargo-nextest` and `nextest` already go through `build`; a nested call
-inside an admitted command passes through on the inherited lease. `provenant status`
-shows holders, waiters, wait times and classes.
+`provenant admit <CLASS> -- <COMMAND> [ARGS...]` takes a slot by hand for a
+host job such as the chair's warm check; lanes never call it. A nested call
+inside an admitted command passes through on the inherited lease.
+`provenant status` shows holders, waiters, wait times and classes.

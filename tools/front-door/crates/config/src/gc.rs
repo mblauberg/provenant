@@ -2,7 +2,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    ffi::OsString,
     path::{Component, Path, PathBuf},
 };
 
@@ -210,14 +209,6 @@ retention_classes! {
         settings: ["retention.chair_log_days", "retention.chair_log_replay_days", "retention.chair_log_entries", "retention.chair_log_bytes"],
         triggers: FULL_GC
     },
-    TargetSeeds => {
-        owner: Run,
-        adapter: target_seeds,
-        eligibility: Declared,
-        detail: "free store/clone and staging build locks",
-        settings: ["domains.fabric.lanes.cargo_seed.max_generations", "domains.fabric.lanes.cargo_seed.max_bytes"],
-        triggers: GC
-    },
     BuildDirectories => {
         owner: Run,
         adapter: build_directories,
@@ -351,9 +342,6 @@ pub struct LaneBuildSettings {
     pub start_spacing_ms: Option<u64>,
     /// Kernel pressure threshold for admission; Critical unless set.
     pub memory_pressure_threshold: Option<MemoryPressureThreshold>,
-    #[serde(default, deserialize_with = "deserialize_auto")]
-    /// Compiler jobs per lane; at most two by default to bound memory on laptops.
-    pub cargo_build_jobs: Option<u64>,
     /// Most lanes of any class live at once across the host.
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub max_lanes: Option<u64>,
@@ -375,10 +363,6 @@ pub struct LaneBuildSettings {
     /// Blocks in the range; 0 turns port allocation off.
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub lane_port_blocks: Option<u64>,
-    /// `CARGO_INCREMENTAL` for lanes; off unless set.
-    pub cargo_incremental: Option<bool>,
-    /// `CARGO_PROFILE_DEV_DEBUG` for lanes; `line-tables-only` unless set.
-    pub cargo_debug: Option<String>,
     /// Allow dependency downloads and source updates in the host Cargo home.
     pub cargo_source_writes: Option<bool>,
     /// Seconds after its newest write during which a profile directory is
@@ -388,34 +372,6 @@ pub struct LaneBuildSettings {
     /// grace without writing is unprotected unless a Cargo lock is held. 15
     /// minutes unless set.
     pub build_dir_grace_seconds: Option<u64>,
-}
-
-/// The two Cargo settings that define the writer lane's development profile.
-/// Seed builds and lane builds use this same value so Cargo can reuse the
-/// seeded fingerprints.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CargoBuildProfile {
-    pub incremental: String,
-    pub debug: String,
-}
-
-impl Default for CargoBuildProfile {
-    fn default() -> Self {
-        Self {
-            incremental: "0".into(),
-            debug: "line-tables-only".into(),
-        }
-    }
-}
-
-impl CargoBuildProfile {
-    pub fn environment(&self) -> [(OsString, OsString); 2] {
-        [
-            ("CARGO_INCREMENTAL".into(), self.incremental.clone().into()),
-            ("CARGO_PROFILE_DEV_DEBUG".into(), self.debug.clone().into()),
-        ]
-    }
 }
 
 /// Longest configurable gap between lane starts: ten minutes.
@@ -428,19 +384,6 @@ pub const DEFAULT_LANE_PORT_BLOCKS: u64 = 64;
 /// Hard ceilings on the configurable lane caps.
 pub const WRITER_LANES_CEILING: u64 = 64;
 pub const PROJECT_WRITER_LANES_CEILING: u64 = 32;
-/// Cargo's accepted `debug` levels, including current numeric and boolean forms.
-pub const CARGO_DEBUG_LEVELS: [&str; 10] = [
-    "none",
-    "line-directives-only",
-    "line-tables-only",
-    "limited",
-    "full",
-    "0",
-    "1",
-    "2",
-    "true",
-    "false",
-];
 /// Recency grace for lane build output when `build_dir_grace_seconds` is unset.
 pub const DEFAULT_BUILD_DIR_GRACE_SECONDS: u64 = 15 * 60;
 /// The asset's -1 sentinel selects the host-dependent default.
@@ -455,59 +398,6 @@ pub fn deserialize_auto<'de, D: serde::Deserializer<'de>>(
     }
 }
 impl LaneBuildSettings {
-    fn configured_cargo_profile(&self) -> CargoBuildProfile {
-        CargoBuildProfile {
-            incremental: if self.incremental() { "1" } else { "0" }.into(),
-            debug: self.debug_level().into(),
-        }
-    }
-
-    /// Resolve the profile values for this lane, preserving explicit values
-    /// already present in its environment. Non-UTF-8 values cannot be sealed
-    /// into a generation manifest, so callers may fall back to an unseeded
-    /// build.
-    pub fn cargo_build_profile(
-        &self,
-        environment: &[(OsString, OsString)],
-    ) -> Option<CargoBuildProfile> {
-        let configured = self.configured_cargo_profile();
-        let value = |name: &str, fallback: &str| {
-            environment
-                .iter()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.to_str().map(str::to_owned))
-                .unwrap_or_else(|| Some(fallback.to_owned()))
-        };
-        Some(CargoBuildProfile {
-            incremental: value("CARGO_INCREMENTAL", &configured.incremental)?,
-            debug: value("CARGO_PROFILE_DEV_DEBUG", &configured.debug)?,
-        })
-    }
-
-    /// Insert configured defaults only when an explicit environment value is
-    /// absent, except that provider defaults are replaced with the configured
-    /// profile. Values explicitly inherited from the host take precedence.
-    pub fn apply_cargo_build_profile(
-        &self,
-        environment: &mut Vec<(OsString, OsString)>,
-        explicit_environment: &[(OsString, OsString)],
-    ) -> Option<CargoBuildProfile> {
-        let defaults = self.configured_cargo_profile();
-        for (name, configured) in defaults.environment() {
-            let value = explicit_environment
-                .iter()
-                .find(|(key, _)| key == &name)
-                .map(|(_, value)| value.clone())
-                .unwrap_or(configured);
-            if let Some((_, current)) = environment.iter_mut().find(|(key, _)| key == &name) {
-                *current = value;
-            } else {
-                environment.push((name, value));
-            }
-        }
-        self.cargo_build_profile(environment)
-    }
-
     pub fn memory_pressure_threshold(&self) -> MemoryPressureThreshold {
         self.memory_pressure_threshold.unwrap_or_default()
     }
@@ -538,9 +428,6 @@ impl LaneBuildSettings {
             .is_some_and(|spacing| spacing > MAX_START_SPACING_MS)
         {
             invalid.push("start_spacing_ms");
-        }
-        if !in_range(self.cargo_build_jobs, 1024) {
-            invalid.push("cargo_build_jobs");
         }
         if !in_range(self.max_lanes, WRITER_LANES_CEILING) {
             invalid.push("max_lanes");
@@ -583,13 +470,6 @@ impl LaneBuildSettings {
         {
             invalid.push("lane_port_blocks");
         }
-        if self
-            .cargo_debug
-            .as_deref()
-            .is_some_and(|level| !CARGO_DEBUG_LEVELS.contains(&level))
-        {
-            invalid.push("cargo_debug");
-        }
         invalid
     }
     pub fn lane_port_base_value(&self) -> u64 {
@@ -600,15 +480,6 @@ impl LaneBuildSettings {
     }
     pub fn lane_port_blocks(&self) -> u64 {
         self.lane_port_blocks.unwrap_or(DEFAULT_LANE_PORT_BLOCKS)
-    }
-    /// Incremental compilation is off by default: its sessions grow without
-    /// bound in a lane's target and are rarely reused.
-    pub fn incremental(&self) -> bool {
-        self.cargo_incremental.unwrap_or(false)
-    }
-    /// Line tables keep backtraces useful at a fraction of full debug info.
-    pub fn debug_level(&self) -> &str {
-        self.cargo_debug.as_deref().unwrap_or("line-tables-only")
     }
     pub fn build_dir_grace_seconds(&self) -> u64 {
         self.build_dir_grace_seconds
@@ -654,9 +525,7 @@ impl LaneBuildSettings {
     }
 
     pub fn jobs(&self) -> u64 {
-        self.cargo_build_jobs.unwrap_or_else(|| {
-            std::thread::available_parallelism().map_or(1, |n| n.get().clamp(1, 2) as u64)
-        })
+        std::thread::available_parallelism().map_or(1, |n| n.get().clamp(1, 2) as u64)
     }
 }
 
@@ -1092,68 +961,6 @@ mod tests {
     }
 
     #[test]
-    fn cargo_build_profile_resolves_config_and_preserves_explicit_environment() {
-        use super::*;
-
-        let defaults = LaneBuildSettings::default();
-        assert_eq!(
-            defaults.cargo_build_profile(&[]).unwrap(),
-            CargoBuildProfile {
-                incremental: "0".into(),
-                debug: "line-tables-only".into(),
-            }
-        );
-
-        let configured: LaneBuildSettings =
-            toml_edit::de::from_str("cargo_incremental = true\ncargo_debug = 'full'").unwrap();
-        let mut environment = vec![
-            ("CARGO_INCREMENTAL".into(), "0".into()),
-            ("CARGO_PROFILE_DEV_DEBUG".into(), "line-tables-only".into()),
-        ];
-        let profile = configured
-            .apply_cargo_build_profile(&mut environment, &[])
-            .unwrap();
-        assert_eq!(
-            profile,
-            CargoBuildProfile {
-                incremental: "1".into(),
-                debug: "full".into(),
-            }
-        );
-        assert!(
-            environment
-                .iter()
-                .any(|(key, value)| { key == "CARGO_INCREMENTAL" && value == "1" })
-        );
-        assert!(
-            environment
-                .iter()
-                .any(|(key, value)| { key == "CARGO_PROFILE_DEV_DEBUG" && value == "full" })
-        );
-
-        let mut environment = vec![
-            ("CARGO_INCREMENTAL".into(), "1".into()),
-            ("CARGO_PROFILE_DEV_DEBUG".into(), "line-tables-only".into()),
-        ];
-        let explicit_environment = vec![("CARGO_INCREMENTAL".into(), "0".into())];
-        let profile = configured
-            .apply_cargo_build_profile(&mut environment, &explicit_environment)
-            .unwrap();
-        assert_eq!(
-            profile,
-            CargoBuildProfile {
-                incremental: "0".into(),
-                debug: "full".into(),
-            }
-        );
-        assert!(
-            environment
-                .iter()
-                .any(|(key, value)| { key == "CARGO_PROFILE_DEV_DEBUG" && value == "full" })
-        );
-    }
-
-    #[test]
     fn retention_registry_rows_round_trip_to_declared_kinds() {
         use super::*;
         for class in RETENTION_CLASSES {
@@ -1207,13 +1014,13 @@ mod tests {
         let temp = tempfile::tempdir()?;
         std::fs::write(
             temp.path().join("config.toml"),
-            "schema_version=1\n[gc]\nidle='invalid'\nschedule=false\nfuture_option=true\n[domains.fabric.lanes]\ncargo_build_jobs=-2\nmemory_pressure_threshold='unknown'\n",
+            "schema_version=1\n[gc]\nidle='invalid'\nschedule=false\nfuture_option=true\n[domains.fabric.lanes]\nmax_lanes=-2\nmemory_pressure_threshold='unknown'\n",
         )?;
         let gc = super::GcSettings::read(temp.path())?;
         assert_eq!(gc.idle, super::GcSettings::default().idle);
         assert!(!gc.schedule);
         let lanes = super::LaneBuildSettings::read(temp.path())?;
-        assert_eq!(lanes.cargo_build_jobs, None);
+        assert_eq!(lanes.max_lanes, None);
         assert_eq!(
             lanes.memory_pressure_threshold(),
             super::MemoryPressureThreshold::Critical
@@ -1419,14 +1226,12 @@ mod build_tests {
         );
     }
     #[test]
-    fn automatic_and_invalid_build_values() {
-        let automatic: LaneBuildSettings =
-            toml_edit::de::from_str("cargo_build_jobs = -1").unwrap();
+    fn automatic_and_invalid_lane_values() {
+        let automatic: LaneBuildSettings = toml_edit::de::from_str("max_lanes = -1").unwrap();
         assert_eq!(automatic, LaneBuildSettings::default());
-        let invalid: LaneBuildSettings =
-            toml_edit::de::from_str("cargo_build_jobs = 1025").unwrap();
-        assert_eq!(invalid.invalid_keys(), ["cargo_build_jobs"]);
-        assert!(toml_edit::de::from_str::<LaneBuildSettings>("cargo_build_jobs = -2").is_err());
+        let invalid: LaneBuildSettings = toml_edit::de::from_str("max_lanes = 65").unwrap();
+        assert_eq!(invalid.invalid_keys(), ["max_lanes"]);
+        assert!(toml_edit::de::from_str::<LaneBuildSettings>("max_lanes = -2").is_err());
     }
     #[test]
     fn lane_port_space_defaults_validates_and_can_be_switched_off() {
@@ -1496,12 +1301,7 @@ mod build_tests {
         assert_eq!(LaneBuildSettings::automatic_builds(2, 8, 4 * gib), 1);
     }
     #[test]
-    fn defaults_and_overrides() {
-        let settings = LaneBuildSettings {
-            cargo_build_jobs: Some(7),
-            ..LaneBuildSettings::default()
-        };
-        assert_eq!(settings.jobs(), 7);
+    fn automatic_build_jobs_default_to_a_small_bound() {
         assert!((1..=2).contains(&LaneBuildSettings::default().jobs()));
         assert!(LaneBuildSettings::default().automatic_build_limit(0) >= 1);
     }
@@ -1523,21 +1323,13 @@ mod build_tests {
     }
 
     #[test]
-    fn cargo_profile_defaults_and_overrides() {
+    fn build_dir_grace_defaults_and_overrides() {
         let settings = LaneBuildSettings::default();
-        assert!(!settings.incremental());
-        assert_eq!(settings.debug_level(), "line-tables-only");
         assert_eq!(settings.build_dir_grace_seconds(), 900);
-        let settings: LaneBuildSettings = toml_edit::de::from_str(
-            "cargo_incremental = true\ncargo_debug = \"full\"\nbuild_dir_grace_seconds = 0",
-        )
-        .unwrap();
-        assert!(settings.incremental());
-        assert_eq!(settings.debug_level(), "full");
+        let settings: LaneBuildSettings =
+            toml_edit::de::from_str("build_dir_grace_seconds = 0").unwrap();
         assert_eq!(settings.build_dir_grace_seconds(), 0);
         assert!(settings.invalid_keys().is_empty());
-        let invalid: LaneBuildSettings = toml_edit::de::from_str("cargo_debug = \"loud\"").unwrap();
-        assert_eq!(invalid.invalid_keys(), ["cargo_debug"]);
     }
 }
 

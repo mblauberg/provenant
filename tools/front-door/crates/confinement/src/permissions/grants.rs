@@ -241,25 +241,12 @@ fn create_derived_directory(
                     PublishMode::Replace,
                 )
                 .map_err(PermissionError::Filesystem)?;
-            // One tag covers every target under the cache, including a seed
-            // clone or `target-lint` that Cargo did not create.
+            // One tag covers every target under the cache, including a
+            // `target-lint` that Cargo did not create.
             crate::cache::tag_cache_directory(&directory).map_err(PermissionError::Filesystem)?;
         }
     }
     Ok(())
-}
-
-/// Create a worktree's lane cache with its owner marker for a host command
-/// outside any lane, such as `provenant worktree seed-target`. The writer path
-/// uses [`prepare_writer_directories`]; both derive the same directory.
-pub fn prepare_worktree_cargo_cache(
-    home: &Path,
-    worktree: &VerifiedWorktree,
-    credentials: &provenant_core::CredentialRoots,
-) -> Result<PathBuf, PermissionError> {
-    let grant = worktree_cargo_cache(home, worktree, credentials)?;
-    create_derived_directory(&grant.path, &grant.path, worktree)?;
-    Ok(grant.path)
 }
 
 pub(super) fn validate_writer_cache(

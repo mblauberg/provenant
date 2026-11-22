@@ -736,10 +736,6 @@ jobs:
           PROVENANT_POSTGRES_REQUIRED: "1"
         run: |
           PROVENANT_STATE_DIR="$RUNNER_TEMP/provenant-native-host" ../../scripts/run-native-test-group census cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --success-output immediate -E '(test(=worktrees::census_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree) | test(=worktrees::census_tests::native_full_census_places_clean_merged_worktree_and_same_user_sleep) | (package(=provenant-os) & test(sys::pid::tests::native_)))'
-      - name: Run macOS Cargo seed tests
-        if: ${{ !cancelled() && matrix.group == 'light' }}
-        working-directory: tools/front-door
-        run: ../../scripts/run-native-test-group cargo-seed cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite -E 'package(=provenant-run) & test(cargo_seed)'
       - name: Run dispatch confinement integration tests
         if: ${{ !cancelled() && matrix.group == 'dispatch' }}
         working-directory: tools/front-door
@@ -751,10 +747,7 @@ jobs:
         run: >-
           ../../scripts/run-native-test-group dispatch cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE/tools/front-door" --extract-to "$GITHUB_WORKSPACE/tools/front-door" --extract-overwrite --test-threads 1
           -E 'binary(=worktrees) & (test(=lane_prepare_isolates_nested_state) | test(=lane_prepare_isolates_nested_publishing_state)
-          | test(=read_only_lane_builds_and_tests_swift_in_scratch)
-          | test(=read_only_lane_builds_and_tests_cargo_in_scratch)
           | test(=read_only_dispatch_applies_bound_git_and_project_writes)
-          | test(=writer_dispatch_uses_lane_cache_and_narrow_provider_state)
           | test(=writer_dispatch_edits_a_linked_worktree)
           | test(=shared_holders_both_launch_and_removal_refused_while_holder_is_live)
           | test(=writer_terminal_refuses_sequencer_state)

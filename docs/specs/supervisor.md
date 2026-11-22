@@ -76,8 +76,9 @@ attempt state.
 ### Tick-driven settlement
 
 `provenant tick` queues recovery for settling and unattended attempts in every
-registered project from one bounded process census per pass; a failed project
-never blocks the others. A sealed exit stays settlement evidence when the census
+registered project from one bounded process census per pass; a binding whose
+common directory is gone is skipped, and a failed project never blocks the
+others. A sealed exit stays settlement evidence when the census
 is unavailable. Unknown attempts get proof-only recovery: the original guardian,
 custody and attempt holder locks and a fresh empty worktree census must prove
 absence before same-boot settlement, and unknown evidence never clears custody.
@@ -193,19 +194,16 @@ replayable authority.
   leave the old or new file whole.
 - Owner: `crates/os/src/fs.rs`
 
-### Build strategy context
+### Build context
 
-Lane `cargo`, `nextest` and `cargo-nextest` PATH shims run
-`provenant admit build -- <real>` and carry the host-resolved build port in
-`PROVENANT_BUILD_CONTEXT`: strategy and source, host toolchain paths and the
-lane's private Git binding. The strategy selects local lane execution, a
-repository command wrapper or a reusable build slot (an unavailable pool falls
-back locally with a recorded exception) and never changes attempt custody. The
-local-Cargo advisory still applies to shim invocations. Admission limits are
+Lanes have no Cargo shims and receive no host build context: they never
+compile, seed or admit a build. The chair's host-owned warm check and
+`provenant verify` tiers use the one `slots` strategy, bounded by
 `[admission.build].slots`; layered `build.*` ports are in
-[state](state.md#configuration).
-- Why: build coordination varies by repository without changing custody.
-- Owner: `crates/providers/src/lane.rs`; `src/admit.rs`; `crates/run/src/build/`
+[state](state.md#configuration). `.worktrees/.cargo/config.toml` is the single
+mechanism that disables lane cargo.
+- Why: one build model keeps lane custody independent of host compilation.
+- Owner: `src/admit.rs`; `src/verify.rs`; `crates/run/src/build/`
 
 ## Permission policy
 
@@ -236,11 +234,15 @@ standalone tools stay under the lane profile. The client needs loopback access.
 ### Host inventory problems stay local
 
 Host confinement inventories registered projects, worktree allocations, owned
-worktrees and writer custody. An unusable sibling entry is protected as a denied
-root and reported through the host warning channel with its path and reason; it
-never refuses an unrelated launch. If the entry's directory cannot be named,
-inventory refuses with that path and stage. The selected writer's own slot stays
-fail-closed, including unresolved guardian evidence, until reconciled.
+worktrees and writer custody. A binding whose common directory is gone protects
+nothing and is skipped by launch confinement, settlement and forge polling. A
+present project whose layout cannot be read warns through launch preparation and
+protects that project's root, so it never refuses an unrelated launch. An
+unusable sibling entry is protected as a denied root and reported through the
+host warning channel with its path and reason; it never refuses an unrelated
+launch. If the entry's directory cannot be named, inventory refuses with that
+path and stage. The selected writer's own slot stays fail-closed, including
+unresolved guardian evidence, until reconciled.
 - Why: retained sibling evidence must not become a host-wide launch outage.
 - Owner: `crates/confinement/src/permissions/policy/host.rs`,
   `crates/supervisor/src/custody.rs`

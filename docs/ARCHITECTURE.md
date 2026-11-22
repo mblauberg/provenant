@@ -39,7 +39,7 @@ is a defect: fix it or link the issue that tracks it.
 | Providers | `providers` (adapter facts in `records::adapters`) | adapter launch and decode, accounts, live quota probes, package caches, skill staging, updates | routing decisions |
 | Quota and routing | `quota`, `routing` | pure admission, readiness and schedule; catalogue, model policy, pools and route resolution | process or state effects |
 | Run | `run` | the attempt: admission ledger, holder, launch hand-off, settlement, delivery, writer, controls, run store | coordination across attempts |
-| Builds and caches | `run::build`, `run::target_seed`, `confinement::cache` | build strategy, slots, seeds, lane caches | repository files |
+| Builds and caches | `run::build`, `confinement::cache` | the chair's one host-owned warm check, build slots, host caches | lane builds (lanes run fmt only) |
 | Reclamation | retention and gc owners in `run`, `confinement` and `src/` (one engine: #3775) | what is reclaimable, budgets, sweeps driven by `tick` | another lane's refs or uncommitted work |
 | Fabric | `fabric-store`, `fabric-runtime` | the coordination store, graphs, lane relay, peers over SSH, inbox, notes, event journal | a second run status |
 | Workflow and landing | `workflow`, `records::landing`, `src/pr` | risk, review coverage, receipts, session checkpoints; PR, CI evidence and landing | merging without the owner's rules |

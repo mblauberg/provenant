@@ -541,8 +541,6 @@ pub struct HostLaunchContext {
     /// mechanism and Git configuration files after the guardian clears its
     /// process environment.
     pub provider_path_environment: std::collections::BTreeMap<String, std::ffi::OsString>,
-    #[serde(default)]
-    pub cargo_build_jobs: Option<String>,
     /// Synthetic fake-provider evidence; absent from installed builds.
     #[cfg(feature = "fixture")]
     #[serde(default)]
@@ -617,7 +615,6 @@ impl HostLaunchContext {
             credential_roots: Self::credential_roots(),
             github_roots: Self::github_roots(),
             provider_path_environment: Self::provider_path_environment(),
-            cargo_build_jobs: std::env::var("CARGO_BUILD_JOBS").ok(),
             #[cfg(feature = "fixture")]
             fixture_state_write: false,
         }
@@ -4516,7 +4513,6 @@ mod disk_admission_tests {
                 credential_roots: Default::default(),
                 github_roots: Default::default(),
                 provider_path_environment: Default::default(),
-                cargo_build_jobs: None,
                 #[cfg(feature = "fixture")]
                 fixture_state_write: false,
             }),
