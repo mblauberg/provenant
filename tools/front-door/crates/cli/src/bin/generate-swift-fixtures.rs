@@ -35,13 +35,9 @@ fn error_envelope(command: &str, code: &str, message: &str, repair: &str) -> Res
         command: command.to_owned(),
         status: Outcome::Error,
         data: Value::Null,
-        error: Some(provenant_records::CommandError {
-            code: code.to_owned(),
-            message: message.to_owned(),
-            cause: None,
-            repair: Some(repair.to_owned()),
-            diagnostic: None,
-        }),
+        error: Some(provenant_records::CommandError::new(
+            code, message, None, repair,
+        )),
     };
     serde_json::to_value(result).map_err(|error| format!("error envelope: {error}"))
 }
