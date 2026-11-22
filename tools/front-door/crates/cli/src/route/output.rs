@@ -286,6 +286,35 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
         preview.model_policy.sources.join(", "),
         preview.compaction_break_even_turns
     ));
+    if let Ok(model) =
+        provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model))
+    {
+        if let Some(source) = preview.catalogue_sources.model_source(&model) {
+            text.push_str(&format!("catalogue model source={source}\n"));
+        }
+        if let Some(selection) = &route.pool_selection {
+            if let Some(source) = preview
+                .catalogue_sources
+                .membership_source(&selection.pool, &model)
+            {
+                text.push_str(&format!("catalogue pool membership source={source}\n"));
+            }
+            if let Some(source) = preview
+                .catalogue_sources
+                .weight_source(&selection.pool, &model)
+            {
+                text.push_str(&format!("catalogue weight source={source}\n"));
+            }
+        }
+    }
+    for (name, source) in &preview.catalogue_sources.capability_preferences {
+        text.push_str(&format!(
+            "catalogue capability preferences {name} source={source}\n"
+        ));
+    }
+    for warning in &preview.overlay_warnings {
+        text.push_str(&format!("warning: {warning}\n"));
+    }
     for note in &preview.exclusion_notes {
         text.push_str(&format!("note: {note}\n"));
     }
@@ -497,7 +526,7 @@ pub fn run(
                         .iter()
                         .map(|member| {
                             format!(
-                                "{} source={} weight={} weight_layer={} pacing={:?}{}{}",
+                                "{} source={} weight={} weight_layer={} pacing={:?}{}{} membership_source={} weight_source={}",
                                 member.model.as_str(),
                                 member.source,
                                 member.weight,
@@ -508,12 +537,20 @@ pub fn run(
                                     .as_ref()
                                     .map_or(String::new(), |effort| format!(" effort={effort}")),
                                 unobserved_model(&member.model, list),
+                                member.membership_source,
+                                member.weight_source,
                             )
                         })
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!("route pool {name} = {models}")
                 }));
+                for (route, source) in &list.catalogue_sources.capability_preferences {
+                    lines.push(format!("capability preferences {route} source={source}"));
+                }
+                for warning in &list.overlay_warnings {
+                    lines.push(format!("warning: {warning}"));
+                }
                 format!("{}\n", lines.join("\n"))
             }
             Some(Data::Resolved(preview)) => resolved_text(preview),

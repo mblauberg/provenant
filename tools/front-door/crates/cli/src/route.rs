@@ -978,6 +978,10 @@ pub struct RoutePreview {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admission_refusal: Option<String>,
     pub provider_refusals: Vec<String>,
+    /// Sources of catalogue facts supplied by host or project overlays.
+    pub catalogue_sources: provenant_routing::CatalogueSources,
+    /// Catalogue overlay entries that were skipped, with layer and reason.
+    pub overlay_warnings: Vec<provenant_config::OverlayWarning>,
 }
 #[derive(Serialize)]
 pub struct RecordedReadiness {

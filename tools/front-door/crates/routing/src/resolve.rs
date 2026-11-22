@@ -140,6 +140,10 @@ pub struct RouteList {
     pub model_exclusions: Vec<ModelExclusion>,
     /// Rows that were repaired or ignored while reading the configuration.
     pub exclusion_notes: Vec<String>,
+    /// Catalogue overlay entries that were skipped, with their layer and reason.
+    pub overlay_warnings: Vec<provenant_config::OverlayWarning>,
+    /// Sources of facts supplied by host or project catalogue overlays.
+    pub catalogue_sources: crate::CatalogueSources,
 }
 #[derive(Debug, Serialize)]
 pub struct MonthlyAccountView {
@@ -210,6 +214,10 @@ fn pool_weight_layer(config: &crate::RoutingConfig, name: &str) -> WeightLayer {
 pub struct RoutePoolMemberView {
     pub model: ModelId,
     pub source: String,
+    /// Layer that supplied this pool membership (`bundled`, `host`, `project`).
+    pub membership_source: String,
+    /// Layer that supplied this member's weight.
+    pub weight_source: String,
     pub weight: u8,
     pub weight_layer: WeightLayer,
     pub effort: Option<String>,
@@ -256,17 +264,29 @@ pub fn list(
             .filter(|member| matches(member.model.adapter()))
         {
             admissible(&member.model, member.effort.as_deref(), context)?;
+            let bundled_source = if context.config.pools.contains_key(&name) {
+                "user"
+            } else {
+                context
+                    .catalogue
+                    .model(&member.model)
+                    .map_or("bundled", |entry| entry.source.as_str())
+            };
             views.push(RoutePoolMemberView {
                 model: member.model.clone(),
-                source: if context.config.pools.contains_key(&name) {
-                    "user".into()
-                } else {
-                    context
-                        .catalogue
-                        .model(&member.model)
-                        .map_or("bundled", |entry| entry.source.as_str())
-                        .into()
-                },
+                source: bundled_source.into(),
+                membership_source: context
+                    .catalogue
+                    .overlay_sources()
+                    .membership_source(&name, &member.model)
+                    .unwrap_or(bundled_source)
+                    .into(),
+                weight_source: context
+                    .catalogue
+                    .overlay_sources()
+                    .weight_source(&name, &member.model)
+                    .unwrap_or(weight_layer.as_str())
+                    .into(),
                 weight: member.weight,
                 weight_layer,
                 effort: member.effort.clone(),
@@ -387,6 +407,8 @@ pub fn list(
         configured_free: context.config.pacing.free.clone(),
         model_exclusions: context.config.model_exclusions.to_vec(),
         exclusion_notes: context.config.model_exclusions.notes().to_vec(),
+        overlay_warnings: context.catalogue.overlay_warnings().to_vec(),
+        catalogue_sources: context.catalogue.overlay_sources().clone(),
         active_overrides: context
             .config
             .pacing_overrides

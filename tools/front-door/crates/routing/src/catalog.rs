@@ -1481,12 +1481,19 @@ pub struct Catalogue {
     pub(crate) models: Vec<ModelEntry>,
     pub(crate) pools: BTreeMap<String, Vec<RoutePoolMember>>,
     #[serde(skip)]
-    pool_selectors: BTreeMap<String, Vec<String>>,
+    pub(crate) pool_selectors: BTreeMap<String, Vec<String>>,
     pub(crate) pacing: BTreeMap<String, PacingPolicy>,
     pub(crate) writer_advisory: WriterAdvisory,
     #[serde(skip)]
-    writer_selectors: BundledWriterAdvisory,
+    pub(crate) writer_selectors: BundledWriterAdvisory,
     pub(crate) capability_preferences: crate::CapabilityPreferences,
+    /// Skipped overlay entries and the layer that supplied them. Populated by
+    /// `with_overlays`; bundled-only catalogues have none.
+    #[serde(skip)]
+    pub(crate) overlay_warnings: Vec<provenant_config::OverlayWarning>,
+    /// Source of each effective catalogue fact, keyed by fact path.
+    #[serde(skip)]
+    pub(crate) overlay_sources: crate::overlay::CatalogueSources,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1503,7 +1510,7 @@ struct CatalogueAsset {
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BundledWriterAdvisory {
+pub(crate) struct BundledWriterAdvisory {
     label: Option<String>,
     warn_selectors: Vec<String>,
     cheaper_selectors: Vec<String>,
@@ -1735,6 +1742,8 @@ impl Catalogue {
             pacing: asset.pacing,
             writer_advisory,
             writer_selectors,
+            overlay_warnings: Vec::new(),
+            overlay_sources: crate::overlay::CatalogueSources::default(),
         };
         value.validate()?;
         Ok(value)
@@ -1865,6 +1874,24 @@ impl Catalogue {
     }
     pub fn revision(&self) -> &str {
         &self.revision
+    }
+    /// Apply owner catalogue overlays after discovery. An invalid entry is
+    /// skipped with a warning; the effective catalogue always remains usable.
+    pub fn with_overlays(
+        mut self,
+        layers: &[provenant_config::OverlayLayer],
+        warnings: Vec<provenant_config::OverlayWarning>,
+    ) -> Self {
+        crate::overlay::apply(&mut self, layers, warnings);
+        self
+    }
+    /// Skipped entries from the host and project overlay layers.
+    pub fn overlay_warnings(&self) -> &[provenant_config::OverlayWarning] {
+        &self.overlay_warnings
+    }
+    /// Provenance for each catalogue fact supplied by an overlay layer.
+    pub fn overlay_sources(&self) -> &crate::overlay::CatalogueSources {
+        &self.overlay_sources
     }
     /// Similar recorded model IDs in the same adapter and OpenCode namespace.
     /// Results are ordered by edit distance and exclude unrelated names.
