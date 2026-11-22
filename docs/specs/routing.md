@@ -187,6 +187,11 @@ facts so role-less work contributes comparable priors.
 Selection rules, exclusion sources, exploration and weights are typed receipt
 fields. Candidate ranking and route diagnostics have typed owners; unknown
 forward fields alone use `ExtraFields`. Malformed known fields fail decoding.
+Exhaustion is classified before weights, so a draw never offers a member
+routing already judged spent and dispatch records no refuted pick for it. A
+preview has no live probe: it draws the pool in order, judges each member's
+cached accounts, and the route it shows carries a redraw receipt naming the
+pick it refused and that refusal's typed cause.
 Account ranking scales reset-adjusted usable headroom by sourced
 penalties and divides by one plus live lanes.
 

@@ -925,25 +925,24 @@
         Ok(())
     }
 
-    /// The redraw receipt rides on the candidate admission accepted, so a
-    /// dispatched route shows which pick was refused and why.
+    /// The redraw receipt rides on the candidate admission accepted, so the
+    /// route a preview shows names the pool member it passed over and why.
+    ///
+    /// Dispatch cannot carry this receipt for a spent member: routing classifies
+    /// exhaustion before weights, so the draw only offers members it judged
+    /// ready and the spent one is an exclusion, not a refuted pick. A preview
+    /// has no live probe, so it draws the pool in order, judges each member's
+    /// cached accounts and redraws on the first member it refuses.
     #[test]
-    fn dispatched_pool_candidate_carries_the_redraw_receipt() -> Result<(), Box<dyn Error>> {
-        let mut redrawn = 0;
-        for spent_claude in [true, false] {
-            let fixture = pair_fixture(
-                |record| {
-                    if spent_claude {
-                        exhaust(record)
-                    }
-                },
-                |record| {
-                    if !spent_claude {
-                        exhaust(record)
-                    }
-                },
-            )?;
-            let request = super::RouteRequest {
+    fn preview_route_carries_the_redraw_receipt() -> Result<(), Box<dyn Error>> {
+        use provenant_os::clock::SystemClock;
+        use super::{config::execute_in, Data, Route, RouteResolve};
+        let fixture = pair_fixture(exhaust, |_| {})?;
+        let query = RouteResolve {
+            writes: false,
+            account: None,
+            name: None,
+            request: super::RouteRequest {
                 read_heavy: false,
                 model: None,
                 route: Some("principal".into()),
@@ -951,36 +950,39 @@
                 confidential: false,
                 fallback: vec![],
                 exclude: vec![],
-            }
-            .to_domain()?;
-            let dispatch = super::resolve_dispatch(
-                &request,
-                &fixture.roots,
-                None,
-                ("fixture", 0),
-                &fixture.availability,
-                &fixture.access,
-                "fixture",
-                None,
-                &[],
-            )?;
-            let spent = if spent_claude {
-                "claude/claude-haiku-5-5"
-            } else {
-                "codex/gpt-6-luna"
-            };
-            assert_ne!(format!("{}/{}", dispatch.adapter, dispatch.model), spent);
-            let selection = dispatch.pool_selection.as_ref().ok_or("pool selection")?;
-            if let Some(redraw) = selection.redraws.last() {
-                redrawn += 1;
-                assert_eq!(redraw.rejected_pick, spent);
-                assert_eq!(
-                    redraw.cause,
-                    Some(provenant_records::RouteExclusionReason::Exhausted)
-                );
-            }
-        }
-        assert!(redrawn > 0, "one ordering must pick the spent member first");
+            },
+        };
+        let Data::Resolved(preview) = execute_in(
+            &Route::Resolve(query),
+            &fixture.roots,
+            provenant_core::Clock::wall_now(&SystemClock::new())?,
+            &fixture._temp.path().join("home"),
+            &fixture._temp.path().join("checkout"),
+        )? else {
+            return Err("expected a resolved route preview".into());
+        };
+        assert_eq!(
+            format!("{}/{}", preview.route.adapter, preview.route.model),
+            "codex/gpt-6-luna",
+            "the spent first member cannot be shown"
+        );
+        let selection = preview
+            .route
+            .pool_selection
+            .as_ref()
+            .ok_or("pool selection")?;
+        assert_eq!(selection.redraws.len(), 1, "{selection:?}");
+        let redraw = &selection.redraws[0];
+        assert_eq!(redraw.rejected_pick, "claude/claude-haiku-5-5");
+        assert_eq!(
+            redraw.cause,
+            Some(provenant_records::RouteExclusionReason::AdmissionRefused)
+        );
+        assert!(
+            redraw.reason.contains("allowance exhausted"),
+            "{}",
+            redraw.reason
+        );
         Ok(())
     }
 
