@@ -22,10 +22,6 @@ pub enum RootError {
         "session save requires a Git checkout from the working directory or --project PATH; change to the project checkout or pass --project PATH"
     )]
     SessionProjectMissing,
-    #[error(
-        "working directory resolves to {cwd}, but --project resolves to {selected}; change directory to the intended project or correct --project PATH"
-    )]
-    SessionProjectMismatch { cwd: PathBuf, selected: PathBuf },
     #[error("invalid state root: {0}")]
     State(#[from] provenant_core::RootError),
 }
@@ -36,7 +32,6 @@ impl RootError {
             Self::Checkout | Self::State(_) => "INVALID",
             Self::Io(_) | Self::Uninstalled | Self::Home => "ROOT",
             Self::SessionProjectMissing => "SESSION_PROJECT_MISSING",
-            Self::SessionProjectMismatch { .. } => "SESSION_PROJECT_MISMATCH",
         }
     }
 }
@@ -108,17 +103,31 @@ fn session_project(selected: Option<&Path>) -> Result<PathBuf, RootError> {
     if !selected.is_dir() {
         return Err(RootError::SessionProjectMissing);
     }
+    Ok(git_checkout(&selected).unwrap_or(selected))
+}
+
+/// Warn when an explicit `--project` names a project other than the working
+/// directory's. Saving the chair's own checkpoint crosses no real boundary, so
+/// it proceeds under the selected project and names both paths here. A failed
+/// observation is advisory: the save still resolves and reports real failures.
+pub fn session_project_warning(selected: Option<&Path>) -> Option<String> {
+    let selected = selected?;
+    let cwd = fs::canonicalize(std::env::current_dir().ok()?).ok()?;
+    let selected = fs::canonicalize(selected).ok()?;
     let cwd_checkout = git_checkout(&cwd).ok();
-    let selected_checkout = git_checkout(&selected).ok();
-    // Outside a checkout an explicit project is the caller's choice; inside
-    // one, the selection must name the same project.
-    if cwd_checkout.is_some()
-        && project_identity(&cwd, cwd_checkout.as_deref())?
-            != project_identity(&selected, selected_checkout.as_deref())?
-    {
-        return Err(RootError::SessionProjectMismatch { cwd, selected });
+    if cwd_checkout.is_none() {
+        return None;
     }
-    Ok(selected_checkout.unwrap_or(selected))
+    let selected_checkout = git_checkout(&selected).ok();
+    let cwd_identity = project_identity(&cwd, cwd_checkout.as_deref()).ok()?;
+    let selected_identity = project_identity(&selected, selected_checkout.as_deref()).ok()?;
+    (cwd_identity != selected_identity).then(|| {
+        format!(
+            "working directory resolves to {}, but --project resolves to {}; saving the checkpoint under the selected project",
+            cwd.display(),
+            selected.display()
+        )
+    })
 }
 
 /// Git worktrees share one project identity. A non-Git directory is its own
@@ -166,7 +175,7 @@ pub enum Workspace<'a> {
     Project,
     /// The Git checkout holding the selected or working directory.
     Checkout,
-    /// Session saves require a checkout and reject conflicting selections.
+    /// Session saves require a checkout and warn on conflicting selections.
     SessionSave,
     /// The home directory, for host-wide commands.
     Home,
@@ -589,14 +598,6 @@ mod tests {
         assert_eq!(
             RootError::SessionProjectMissing.code(),
             "SESSION_PROJECT_MISSING"
-        );
-        assert_eq!(
-            RootError::SessionProjectMismatch {
-                cwd: "/cwd".into(),
-                selected: "/project".into(),
-            }
-            .code(),
-            "SESSION_PROJECT_MISMATCH"
         );
     }
 
