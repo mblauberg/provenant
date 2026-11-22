@@ -319,12 +319,13 @@ pub struct ConfigInspection {
 }
 
 pub use managed::{
-    AccountHome, AccountState, AccountStatus, Action, Disposition, EntryIdentity, HOOKS_UNAVAILABLE_DETAIL, HarnessTarget,
-    InstallContext, InstallError, InstallFinding, InstallInspection, InstallOutcome, InstallPlan,
-    InstallReporter, ManualInclude, ReleaseSmoke, STABLE_BINARY_NAME, SelectorChange, Snapshots,
-    Targets, inspect_accounts, inspect_install, install, installed_binary, peer_agent_plist,
-    plan_and_install, plan_install, private_directory, release_instruction_asset, release_root,
-    systemd_user_dir, tick_agent_plist, tick_service_path, tick_timer_path, uninstall, user_dir_in,
+    AccountHome, AccountState, AccountStatus, Action, Disposition, EntryIdentity,
+    HOOKS_UNAVAILABLE_DETAIL, HarnessTarget, InstallContext, InstallError, InstallFinding,
+    InstallInspection, InstallOutcome, InstallPlan, InstallReporter, ManualInclude, ReleaseSmoke,
+    STABLE_BINARY_NAME, SelectorChange, Snapshots, Targets, inspect_accounts, inspect_install,
+    install, installed_binary, peer_agent_plist, plan_and_install, plan_install, private_directory,
+    release_instruction_asset, release_root, systemd_user_dir, tick_agent_plist, tick_service_path,
+    tick_timer_path, uninstall, user_dir_in,
 };
 pub use provenant_records::Harness;
 pub use release::{Release, package_release};
