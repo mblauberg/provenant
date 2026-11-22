@@ -248,11 +248,12 @@ fn catalogue_read_only() -> Result {
         2
     );
     let first = call(&rig, &["console", "sessions", "--limit", "1"], 0)?;
-    assert_eq!(first["data"]["sessions"][0]["summary"], Value::Null);
+    assert_eq!(first["data"]["sessions"][0]["summary_line"], Value::Null);
     assert_eq!(
-        first["data"]["sessions"][0]["summary_status"],
+        first["data"]["sessions"][0]["summary_source"],
         "unavailable"
     );
+    assert!(first["data"]["sessions"][0].get("summary").is_none());
     let cursor = first["data"]["next_cursor"].as_str().ok_or("cursor")?;
     let second = call(
         &rig,

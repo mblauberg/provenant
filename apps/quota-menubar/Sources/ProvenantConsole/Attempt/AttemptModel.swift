@@ -16,8 +16,9 @@ final class AttemptModel {
     private(set) var attemptID: String?
     var part: Part = .result
     private let client: ConsoleClient
+    private let now: () -> Date
 
-    init(client: ConsoleClient) { self.client = client }
+    init(client: ConsoleClient, now: @escaping () -> Date = { .now }) { self.client = client; self.now = now }
 
     /// Points the inspector at an attempt and reads it. The same attempt again only reloads.
     func show(_ id: String) async {
@@ -32,7 +33,7 @@ final class AttemptModel {
     func reload() async {
         guard let id = attemptID else { return }
         async let body: Void = loadOutput(id)
-        await detail.load { [client] in try await client.detail(id) }
+        await detail.load(now: now) { [client] in try await client.detail(id) }
         await body
     }
 
@@ -43,6 +44,6 @@ final class AttemptModel {
     }
 
     private func loadOutput(_ id: String) async {
-        await output.load { [client, part] in try await client.output(id, part: part.rawValue) }
+        await output.load(now: now) { [client, part] in try await client.output(id, part: part.rawValue) }
     }
 }

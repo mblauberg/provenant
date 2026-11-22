@@ -380,6 +380,11 @@ pub(crate) fn local(
     if let Some(warning) = legacy_state_warning(home) {
         warnings.push(warning.into());
     }
+    if let Some(app) = crate::apps::status(home, env!("CARGO_PKG_VERSION"))
+        && app.warning.is_some()
+    {
+        warnings.push(crate::apps::advisory(&app));
+    }
     let login_accounts = match provenant_cli::quota::recorded_login_rows(roots) {
         Ok(rows) => rows.into_iter().map(login_account).collect(),
         Err(_) => {

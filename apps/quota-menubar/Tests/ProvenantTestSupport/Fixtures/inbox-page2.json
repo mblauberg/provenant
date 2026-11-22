@@ -1,42 +1,41 @@
 {
- "schema_version": 1,
- "command": "inbox",
- "status": "ok",
- "data": {
-  "result": "listed",
-  "items": [
-   {
-    "schema_version": 1,
-    "id": "44444444444444444444444444444444",
-    "revision": 1,
-    "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "created_at": "2026-10-30T01:00:00Z",
-    "updated_at": "2026-10-30T01:05:00Z",
-    "project_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "project_key": "provenant",
-    "owner_host": "cccccccccccccccccccccccccccccccc",
-    "chair_session_id": "3f9c2a10d4e84b7f",
-    "chair_actor": "dddddddddddddddddddddddddddddddd",
-    "request": {
-     "kind": "question",
-     "title": "Which name?",
-     "body": "Body of Which name?",
-     "blocking": false,
-     "options": [],
-     "recommended_option_id": null,
-     "proceeding_with": null,
-     "deadline": null,
-     "work": null,
-     "supersedes": null
-    },
-    "state": "open",
-    "answer_id": null,
-    "closure_reason": null
-   }
-  ],
-  "next_cursor": null,
-  "truncated": false,
-  "coverage": "local"
- },
- "error": null
+  "command": "inbox",
+  "data": {
+    "coverage": "local",
+    "items": [
+      {
+        "answer_id": null,
+        "chair_actor": "dddddddddddddddddddddddddddddddd",
+        "chair_session_id": "3f9c2a10d4e84b7f",
+        "closure_reason": null,
+        "created_at": "2026-10-30T01:00:00.000000Z",
+        "id": "44444444444444444444444444444444",
+        "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "owner_host": "cccccccccccccccccccccccccccccccc",
+        "project_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "project_key": "provenant",
+        "request": {
+          "blocking": false,
+          "body": "Body of Which name?",
+          "kind": "question",
+          "options": [],
+          "proceeding_with": null,
+          "recommended_option_id": null,
+          "title": "Which name?"
+        },
+        "revision": 1,
+        "schema_version": 1,
+        "state": "open",
+        "updated_at": "2026-10-30T01:05:00.000000Z"
+      }
+    ],
+    "next_cursor": null,
+    "peers": [],
+    "projects": {},
+    "result": "listed",
+    "truncated": false
+  },
+  "error": null,
+  "schema_version": 1,
+  "status": "ok"
 }

@@ -11,8 +11,9 @@ final class SearchModel {
     private(set) var query = ""
     private(set) var part: Part = .result
     private let client: ConsoleClient
+    private let now: () -> Date
 
-    init(client: ConsoleClient) { self.client = client }
+    init(client: ConsoleClient, now: @escaping () -> Date = { .now }) { self.client = client; self.now = now }
 
     func run(_ query: String, part: Part) async {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -20,7 +21,7 @@ final class SearchModel {
         if trimmed != self.query || part != self.part { reader.reset() }
         self.query = trimmed
         self.part = part
-        await reader.load { [client] in try await client.search(trimmed, part: part.rawValue) }
+        await reader.load(now: now) { [client] in try await client.search(trimmed, part: part.rawValue) }
     }
 
     func rerun() async { if !query.isEmpty { await run(query, part: part) } }

@@ -59,6 +59,23 @@ public struct Notice: View {
     }
 }
 
+/// Information about coverage that is not a failure: an info symbol, no warning colour.
+public struct InfoNotice: View {
+    let message: String
+    public init(_ message: String) { self.message = message }
+    public var body: some View {
+        Label {
+            Text(message).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        } icon: {
+            Image(systemName: "info.circle").foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, Space.medium)
+        .padding(.vertical, Space.small)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+}
+
 /// A status as symbol and word together, so colour is never the only signal.
 public struct StatusLabel: View {
     let style: StatusStyle

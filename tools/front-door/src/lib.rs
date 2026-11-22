@@ -5,6 +5,7 @@ mod graph_support;
 // file and dispatches with its fixture seams. Plain comments only: `include!`
 // refuses inner attributes.
 mod admit;
+mod apps;
 mod build_cmd;
 mod chair;
 mod check_providers;

@@ -78,6 +78,26 @@ fixture. `provenant run smoke` by hand, from any checkout, runs only the read-on
 nodes (the receipt names the skipped write node); add `--branch B --base REF` or
 `--worktree PATH` to run the write node too.
 
+### Bundled macOS app
+
+Release packages carry a separate signed asset,
+`provenant-apps-aarch64-apple-darwin.tar.gz`, built by the release workflow with
+`apps/quota-menubar/bundle`. The shell installer downloads and verifies its
+checksum, installs `Provenant Console.app` into `~/Applications`, migrates the
+`dev.provenant.quota-menubar` LaunchAgent to the app's nested menu helper and
+restarts it when it was running. `provenant upgrade` and `provenant install`
+report the installed app's `CFBundleShortVersionString`; when it trails the CLI
+they say `app is behind CLI`, and `provenant hosts doctor` repeats that advisory.
+A source build (`--source`) has no signed app asset, so install and upgrade warn
+and leave the existing app in place rather than refusing the CLI installation.
+A missing asset, bad checksum or damaged archive is likewise a warning: the CLI
+is still installed and the previous app is left untouched.
+
+Set `PROVENANT_APPS_DIR` to an absolute directory to keep the app somewhere
+other than `~/Applications`; install, upgrade, doctor and the installer all
+honour it. LaunchServices opens the console by bundle identifier regardless of
+the directory.
+
 ### Test a candidate binary
 
 When a release changes a persisted schema, add its previous shape to the

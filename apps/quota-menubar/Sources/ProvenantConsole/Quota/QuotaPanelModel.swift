@@ -61,11 +61,12 @@ struct QuotaSnapshot: Equatable, Sendable {
 final class QuotaPanelModel {
     let reader = Reader<QuotaSnapshot>()
     private let client: ConsoleClient
+    private let now: () -> Date
 
-    init(client: ConsoleClient) { self.client = client }
+    init(client: ConsoleClient, now: @escaping () -> Date = { .now }) { self.client = client; self.now = now }
 
     func refresh() async {
-        await reader.load { [client] in
+        await reader.load(now: now) { [client] in
             async let show = client.quota()
             async let history = try? await client.quotaHistory()
             return Self.snapshot(try await show, history: await history)

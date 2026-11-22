@@ -1,16 +1,17 @@
 import AppKit
+import ProvenantDesign
 import ProvenantKit
 import SwiftUI
 
 /// `provenant-console --render <screen> <out.png> --fixtures <dir> [--dark] [--now ISO] [--size WxH] [--scale N]`
 /// draws a screen offscreen from recorded CLI output, without running the CLI. `screen` is `overview`, `inbox`,
 /// `runs`, `tree`, `detail` (the attempt inspector on its own: an offscreen window cannot draw the live inspector pane), `quota`, `chairs` or `search`. The fixtures
-/// directory holds the recordings in `Tests/ProvenantTestSupport/Fixtures`; the clock defaults to a fixed day so a
-/// fixture draws the same way on any day.
+/// directory holds the recordings in `Tests/ProvenantTestSupport/Fixtures`. Without `--now`, the clock is the
+/// newest observation in those recordings: it stays deterministic but never puts a saved session in the future.
 @MainActor
 enum Render {
     static func start(_ arguments: [String]) {
-        var positional: [String] = [], dark = false, fixtures: String?, now = "2026-11-02T09:00:00Z"
+        var positional: [String] = [], dark = false, fixtures: String?, now: String?
         var size = NSSize(width: 1_180, height: 720), scale = 2
         var rest = arguments[...]
         while let argument = rest.popFirst() {
@@ -25,9 +26,19 @@ enum Render {
             default: positional.append(argument)
             }
         }
-        guard positional.count == 2, let fixtures, let date = try? Date(now, strategy: .iso8601) else {
+        guard positional.count == 2, let fixtures else {
             FileHandle.standardError.write(Data("usage: provenant-console --render <screen> <out.png> --fixtures <dir> [--dark] [--now ISO] [--size WxH] [--scale N]\n".utf8))
             exit(2)
+        }
+        let date: Date
+        if let now {
+            guard let given = try? Date(now, strategy: .iso8601) else {
+                FileHandle.standardError.write(Data("--now must be an ISO 8601 timestamp\n".utf8))
+                exit(2)
+            }
+            date = given
+        } else {
+            date = fixtureClock(in: URL(fileURLWithPath: fixtures)) ?? .now
         }
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
@@ -35,6 +46,38 @@ enum Render {
                       now: date, size: size, scale: scale)
         Task { exit(await job.run()) }
         app.run()
+    }
+
+    /// The newest observation in the recordings, so a fixture never claims its saved sessions are in the future.
+    /// Reset and expiry times are deliberately ignored: they describe the future, not when the data was read.
+    static func fixtureClock(in directory: URL) -> Date? {
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        var newest: Date?
+        func note(_ date: Date) { newest = newest.map { max($0, date) } ?? date }
+        func walk(_ value: Any) {
+            switch value {
+            case let object as [String: Any]:
+                for (key, child) in object {
+                    if ["generated_unix_seconds", "observed_unix_seconds"].contains(key), let number = child as? NSNumber {
+                        note(Date(timeIntervalSince1970: number.doubleValue))
+                    } else if ["observed_at", "queued_at", "created_at", "last_saved_at", "saved_at", "updated_at"].contains(key),
+                              let text = child as? String, let date = Stamp.parse(text) {
+                        note(date)
+                    } else {
+                        walk(child)
+                    }
+                }
+            case let list as [Any]:
+                for child in list { walk(child) }
+            default:
+                break
+            }
+        }
+        for file in files where file.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: file), let json = try? JSONSerialization.jsonObject(with: data) else { continue }
+            walk(json)
+        }
+        return newest
     }
 
     @MainActor struct Job {
