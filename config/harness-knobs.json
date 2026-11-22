@@ -349,7 +349,8 @@
       "forge_source": {"type": "string", "allowed": "auto, webhook or poll", "default": "auto", "effect": "Host forge event source for waits: auto detects, webhook listens for events, poll samples the forge."},
       "max_targets": {"type": "int", "allowed": "1 to 1024", "min": 1, "max": 1024, "default": "64", "effect": "Maximum number of targets a single wait may track."},
       "pr_read_timeout_seconds": {"type": "int", "allowed": "1 to 600 seconds", "min": 1, "max": 600, "default": "60", "effect": "Timeout for one pull request read before the wait retries."},
-      "actions_grace_seconds": {"type": "int", "allowed": "0 to 600 seconds", "min": 0, "max": 600, "default": "60", "effect": "How long a pull request wait holds a settling reading while Actions reports no run for its head; zero settles at once."}
+      "actions_grace_seconds": {"type": "int", "allowed": "0 to 600 seconds", "min": 0, "max": 600, "default": "60", "effect": "How long a pull request wait holds a settling reading while Actions reports no run for its head; zero settles at once."},
+      "preflight_busy_timeout_ms": {"type": "int", "allowed": "0 to 60000 milliseconds", "min": 0, "max": 60000, "default": "2000", "effect": "How long a wait tolerates a momentarily busy store during preflight before it reports the store busy; the final snapshot stays nonblocking. Zero fails at once."}
     }
   },
   "host_graph_settings": {
