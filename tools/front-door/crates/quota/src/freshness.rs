@@ -149,7 +149,6 @@ mod tests {
             refusal_seconds: 21,
             free_pool_recheck_seconds: 22,
             readiness_min_seconds: 23,
-            ..FreshnessSettings::default()
         };
         let policy = FreshnessPolicy::from_settings(settings).with_source(FreshnessSource::Config);
         assert_eq!(policy.snapshot_seconds, 17);
