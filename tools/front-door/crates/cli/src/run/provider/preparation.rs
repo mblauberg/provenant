@@ -5013,22 +5013,12 @@ pub(super) fn prepare_candidates_inner(
                     .push((provenant_core::consumer_env::LANE_BASE.into(), base.into()));
             }
         }
-        set_cargo_profile(&mut spec.env, &build_settings, !sandbox.effective);
         spec.env.extend(
             model_policy
                 .launch_env(adapter.id())
                 .into_iter()
                 .map(|(key, value)| (key.into(), value.into())),
         );
-        {
-            set_cargo_jobs(
-                &mut spec.env,
-                registry
-                    .host
-                    .and_then(|host| host.cargo_build_jobs.as_deref()),
-                build_settings.jobs(),
-            );
-        }
         if let Some(adapter_spec) = adapter_spec {
             spec.configure_shell(scratch, adapter_spec);
         }

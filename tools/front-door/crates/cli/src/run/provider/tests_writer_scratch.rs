@@ -1227,7 +1227,7 @@ printf 'agy 1.0.0\n'
     let launch_policy = provenant_records::policy::Policy::default();
     let images = vec![PathBuf::from("/outside/shot.png")];
     let codex_runtime = assets.join("provenant");
-    let mut codex = provenant_providers::Adapter::prepare(
+    let codex = provenant_providers::Adapter::prepare(
         &provenant_providers::codex::Codex,
         provenant_providers::PrepareInput {
             credential_roots: confinement.plan.permissions().credential_roots.clone(),
