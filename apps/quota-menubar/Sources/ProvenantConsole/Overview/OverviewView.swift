@@ -48,7 +48,7 @@ struct OverviewView: View {
             }
             Section("Lanes in progress") {
                 if snapshot.overview.lanes.isEmpty {
-                    Text(snapshot.overview.coverage.runs == "complete" ? "No lanes are running." : "Run state is unavailable here.")
+                    Text(Self.lanesMessage(snapshot.overview.coverage.runs))
                         .foregroundStyle(.secondary)
                 }
                 ForEach(snapshot.overview.lanes) { lane in
@@ -64,6 +64,17 @@ struct OverviewView: View {
         console.inbox.show(.all)
         console.inbox.selection = row.id
         console.show(.inbox)
+    }
+
+    /// Only an unreadable store hides run state. `partial` still reports a
+    /// valid lower bound, and `empty` is a fresh host with no lanes. A missing
+    /// coverage value is unknown state, so it reads as unavailable.
+    static func lanesMessage(_ coverage: String?) -> String {
+        switch coverage {
+        case "complete", "empty": return "No lanes are running."
+        case "partial": return "No lanes are running in the observed run state; counts may be incomplete."
+        default: return "Run state is unavailable here."
+        }
     }
 
     /// A count, or a dash when the CLI could not count it.

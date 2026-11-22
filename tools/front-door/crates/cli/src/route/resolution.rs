@@ -234,6 +234,67 @@ pub(crate) fn recorded_model_readiness(
         .collect()
 }
 
+/// Remove accounts whose recorded offer list excludes the model. A pinned
+/// account is kept with a warning: an explicit choice is attempted even when
+/// its recorded offers say the model is unavailable.
+pub(crate) fn filter_unoffered_readiness(
+    rows: Vec<RecordedReadiness>,
+    model: &ModelId,
+    catalogue: &provenant_routing::Catalogue,
+    accounts: &[provenant_quota::AccountRecord],
+    pinned: Option<&str>,
+) -> (Vec<RecordedReadiness>, Vec<String>, Vec<String>) {
+    let mut kept = Vec::new();
+    let mut exclusions = Vec::new();
+    let mut warnings = Vec::new();
+    for row in rows {
+        let reports_offers = provenant_records::AdapterSpec::get(model.adapter())
+            .is_some_and(|spec| spec.offered_models);
+        let offered = reports_offers
+            .then(|| {
+                accounts.iter().find(|record| {
+                    record.account.adapter == model.adapter()
+                        && record.account.account_key == row.account_key
+                })
+            })
+            .flatten()
+            .and_then(|record| record.snapshot.as_ref()?.details.as_ref())
+            .filter(|details| !details.models.is_empty())
+            .map(|details| details.models.as_slice());
+        let (serves, offers) = match offered {
+            Some(list) => (
+                provenant_routing::offered_models_serve(list, model, catalogue),
+                list,
+            ),
+            None => (true, &[][..]),
+        };
+        if serves {
+            kept.push(row);
+            continue;
+        }
+        let offered = offers;
+        let is_pinned = pinned.is_some_and(|pin| {
+            let key = pin.split_once('/').map_or(pin, |(_, key)| key);
+            key == row.account_key || key == row.account
+        });
+        let detail = format!(
+            "account {} does not offer {} (recorded offers: {})",
+            row.account_key,
+            model.as_str(),
+            offered.join(", ")
+        );
+        if is_pinned {
+            warnings.push(format!(
+                "{detail}; pinned, so the launch is attempted anyway"
+            ));
+            kept.push(row);
+        } else {
+            exclusions.push(detail);
+        }
+    }
+    (kept, exclusions, warnings)
+}
+
 /// The OpenCode snapshot reports the Go plan's pools, which only govern models
 /// served by the `opencode-go` provider. Free (Zen) and other configured
 /// providers must not inherit its account-level exhaustion.

@@ -123,10 +123,10 @@ fn overview_needs_you() -> Result {
     let overview = call(&empty, &["console", "overview"])?;
     assert_eq!(overview["data"]["needs_you"], json!([]));
     assert_eq!(overview["data"]["counts"]["needs_you"], Value::Null);
-    assert_eq!(overview["data"]["counts"]["running"], Value::Null);
-    assert_eq!(overview["data"]["counts"]["attention"], Value::Null);
+    assert_eq!(overview["data"]["counts"]["running"], 0);
+    assert_eq!(overview["data"]["counts"]["attention"], 0);
     assert_eq!(overview["data"]["coverage"]["inbox"], "unavailable");
-    assert_eq!(overview["data"]["coverage"]["runs"], "unavailable");
+    assert_eq!(overview["data"]["coverage"]["runs"], "empty");
     assert!(
         !empty.state.exists(),
         "overview created an absent state root"

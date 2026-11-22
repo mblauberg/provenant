@@ -727,3 +727,92 @@ fn agy_account_offered_models_supersede_legacy_models_in_pools_and_select_capabl
     );
     Ok(())
 }
+
+// Spec: docs/specs/routing.md#provider-model-discovery
+#[test]
+fn known_quota_offers_withhold_an_unoffered_agy_account_unpinned()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    config.provider_scopes.insert(
+        "agy".into(),
+        provenant_config::ProviderSettings {
+            models: Some(vec!["*".into()]),
+            ..provenant_config::ProviderSettings::default()
+        },
+    );
+    for (adapter, settings) in &mut config.provider_scopes {
+        if adapter != "agy" {
+            settings.models = Some(Vec::new());
+        }
+    }
+    // The isolated account has no usage probe: its availability offer list is
+    // empty, but its quota snapshot records which models it actually offers.
+    let availability = [agy_account("home-agy"), agy_account("isolated-agy")];
+    let account_with_offers = |key: &str, models: &[&str]| {
+        let scope = provenant_quota::AccountScope {
+            extra: Default::default(),
+            adapter: "agy".into(),
+            account_key: key.into(),
+            label: key.into(),
+        };
+        let mut record = provenant_quota::AccountRecord::empty(scope.clone());
+        record.snapshot = Some(provenant_quota::QuotaSnapshot {
+            extra: Default::default(),
+            schema_version: 1,
+            account: scope,
+            revision: 1,
+            status: provenant_quota::QuotaStatus::Available,
+            observed_unix_seconds: 80,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: Some(provenant_quota::QuotaDetails {
+                extra: Default::default(),
+                models: models.iter().map(|model| (*model).into()).collect(),
+                ..Default::default()
+            }),
+            windows: Vec::new(),
+        });
+        record
+    };
+    let accounts = [
+        account_with_offers("home-agy", &["Gemini 4 Neon", "Gemini 3.8 Flash"]),
+        account_with_offers(
+            "isolated-agy",
+            &[
+                "Gemini 3.8 Flash",
+                "Claude Sonnet 4.6",
+                "GPT-OSS 120B (Medium)",
+            ],
+        ),
+    ];
+    let access = readiness_access();
+    let ctx = RoutingContext {
+        availability: &availability,
+        accounts: &accounts,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    let query = request("agy/gemini-4-neon")?;
+    for seed in 0..16 {
+        let route = resolve_for_account_with_seed_excluding(
+            &query,
+            &ctx,
+            None,
+            "known-offers",
+            seed,
+            &[],
+            &[],
+        )?;
+        assert_eq!(
+            route.account_key.as_deref(),
+            Some("home-agy"),
+            "unpinned seed {seed} must use the offering account"
+        );
+    }
+    // An explicit pin is still attempted: warn and proceed, never refuse.
+    let pinned =
+        resolve_for_account_with_seed(&query, &ctx, Some("isolated-agy"), "known-offers", 0)?;
+    assert_eq!(pinned.account_key.as_deref(), Some("isolated-agy"));
+    Ok(())
+}

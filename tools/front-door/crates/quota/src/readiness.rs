@@ -561,13 +561,18 @@ impl ReadinessFile {
         } else if self.records.len() < MAX_READINESS_RECORDS
             // A deferred refresh completed no probe, so it reports nothing.
             && account.last_error.is_none()
-            && account
-                .snapshot
-                .as_ref()
-                .is_none_or(|snapshot| snapshot.windows.is_empty())
         {
-            // Informational only: a full file keeps its refusals and skips this
-            // note rather than failing a successful probe.
+            // A completed probe with figures is positive readiness evidence:
+            // without it a successful tick still reads as "not probed", and
+            // telling the owner to tick again cannot help. A probe with no
+            // figures stays informational rather than claiming readiness.
+            let (state, reason) = match account.snapshot.as_ref() {
+                Some(snapshot) if !snapshot.windows.is_empty() => (ReadinessState::Ready, None),
+                _ => (
+                    ReadinessState::Unknown,
+                    Some(ReadinessReason::ProbedNoFigures),
+                ),
+            };
             let interval = i64::try_from(interval_seconds).unwrap_or(i64::MAX);
             let expires = now.saturating_add(interval.max(1));
             self.records.push(RouteReadiness {
@@ -579,8 +584,8 @@ impl ReadinessFile {
                     || account_scope.clone(),
                     |record| record.scope.updated_from(&account_scope),
                 ),
-                state: ReadinessState::Unknown,
-                reason: Some(ReadinessReason::ProbedNoFigures),
+                state,
+                reason,
                 observed_unix_seconds: now,
                 expires_unix_seconds: expires,
                 reset_unix_seconds: None,
