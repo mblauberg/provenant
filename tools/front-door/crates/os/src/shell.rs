@@ -118,7 +118,7 @@ mod tests {
         assert_eq!(quote_os(OsStr::from_bytes(b"it's")).unwrap(), "'it'\\''s'");
         assert_eq!(
             quote_os(OsStr::from_bytes(&[b'a', 0x80])).unwrap(),
-            "'a'$(printf '\\200')'"
+            "'a'$(printf '\\200')''"
         );
     }
 }
