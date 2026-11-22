@@ -30,6 +30,13 @@ pub struct QuotaTick {
     pub power: Power,
 }
 
+/// When a refresh is judged due: what asked for it and the host's power state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Due {
+    pub trigger: Trigger,
+    pub power: Power,
+}
+
 pub const TICK_BUDGET_SECONDS: i64 = crate::DEFAULT_WALL_BUDGET_SECONDS as i64;
 /// A probe must finish before its durable claim expires, even when the tick's
 /// configured wall budget is longer than the claim window.
@@ -229,10 +236,10 @@ pub fn reserve(
     account: &AccountScope,
     now: i64,
     token: &str,
-    trigger: Trigger,
-    power: Power,
+    due: Due,
     freshness: &FreshnessPolicy,
 ) -> Result<UpdateIntent, QuotaError> {
+    let Due { trigger, power } = due;
     account.validate()?;
     if !component(token) {
         return Err(QuotaError::Invalid("claim token"));
@@ -853,8 +860,10 @@ mod tests {
             &r.account,
             400,
             "new",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
             &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
@@ -877,8 +886,10 @@ mod tests {
                 &r.account,
                 399,
                 "new",
-                Trigger::Manual,
-                Power::Ac,
+                Due {
+                    trigger: Trigger::Manual,
+                    power: Power::Ac
+                },
                 &crate::DEFAULT_FRESHNESS,
             ),
             Err(QuotaError::Conflict)
@@ -917,8 +928,10 @@ mod tests {
                 &record.account,
                 110,
                 "claim",
-                tick.trigger,
-                tick.power,
+                Due {
+                    trigger: tick.trigger,
+                    power: tick.power
+                },
                 &crate::DEFAULT_FRESHNESS,
             )
             .is_ok()
@@ -935,8 +948,10 @@ mod tests {
                 &record.account,
                 110,
                 "claim",
-                tick.trigger,
-                tick.power,
+                Due {
+                    trigger: tick.trigger,
+                    power: tick.power
+                },
                 &crate::DEFAULT_FRESHNESS,
             )
             .is_err()
@@ -1117,8 +1132,10 @@ mod tests {
             &agy,
             100,
             "first",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
             &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
@@ -1169,8 +1186,10 @@ mod tests {
             &agy,
             170,
             "second",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
             &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
@@ -1270,8 +1289,10 @@ mod tests {
                 &record.account,
                 110,
                 "claim",
-                trigger,
-                Power::Ac,
+                Due {
+                    trigger,
+                    power: Power::Ac,
+                },
                 &crate::DEFAULT_FRESHNESS,
             )
             .unwrap()
@@ -1287,8 +1308,10 @@ mod tests {
                     &record.account,
                     111,
                     "second",
-                    trigger,
-                    Power::Ac,
+                    Due {
+                        trigger,
+                        power: Power::Ac
+                    },
                     &crate::DEFAULT_FRESHNESS,
                 )
                 .is_err()
@@ -1540,8 +1563,10 @@ mod tests {
             &renamed,
             400,
             "claim",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
             &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
@@ -1615,8 +1640,10 @@ mod tests {
             &a,
             400,
             "claim",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
             &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
@@ -1754,8 +1781,10 @@ mod tests {
                 &a,
                 400,
                 "claim",
-                Trigger::Manual,
-                Power::Ac,
+                Due {
+                    trigger: Trigger::Manual,
+                    power: Power::Ac,
+                },
                 &crate::DEFAULT_FRESHNESS,
             )
             .unwrap()
@@ -1873,8 +1902,10 @@ mod tests {
             &a,
             400,
             "claim",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
             &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
@@ -1915,8 +1946,10 @@ mod tests {
             &a,
             2000,
             "next",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
             &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
@@ -1933,8 +1966,10 @@ mod tests {
             &a,
             4000,
             "verified",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
             &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
@@ -2092,8 +2127,10 @@ mod transition_tests {
             &r.account,
             100,
             "first",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
             &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
@@ -2103,8 +2140,10 @@ mod transition_tests {
             &r.account,
             100,
             "second",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
             &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
@@ -2117,8 +2156,10 @@ mod transition_tests {
                 &r.account,
                 110,
                 "third",
-                Trigger::Manual,
-                Power::Ac,
+                Due {
+                    trigger: Trigger::Manual,
+                    power: Power::Ac
+                },
                 &crate::DEFAULT_FRESHNESS,
             )
             .is_err()
@@ -2129,8 +2170,10 @@ mod transition_tests {
             &r.account,
             160,
             "third",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
             &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
@@ -2146,8 +2189,10 @@ mod transition_tests {
             &r.account,
             125,
             "recreated",
-            Trigger::Manual,
-            Power::Ac,
+            Due {
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            },
             &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
@@ -2167,8 +2212,10 @@ mod transition_tests {
                 &r.account,
                 100,
                 "overflow",
-                Trigger::Manual,
-                Power::Ac,
+                Due {
+                    trigger: Trigger::Manual,
+                    power: Power::Ac
+                },
                 &crate::DEFAULT_FRESHNESS,
             ),
             Err(QuotaError::NumberOutOfRange)

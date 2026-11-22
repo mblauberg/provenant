@@ -2205,8 +2205,10 @@ pub(crate) fn execute(
                 account,
                 at,
                 &token,
-                trigger,
-                tick.power,
+                provenant_quota::schedule::Due {
+                    trigger,
+                    power: tick.power,
+                },
                 &freshness,
             ) {
                 Ok(intent) => intent,
@@ -4680,8 +4682,10 @@ mod tests {
             &account,
             110,
             "fake",
-            tick.trigger,
-            tick.power,
+            provenant_quota::schedule::Due {
+                trigger: tick.trigger,
+                power: tick.power,
+            },
             &provenant_quota::DEFAULT_FRESHNESS,
         )?
         .replacement
@@ -5415,8 +5419,10 @@ mod tests {
             &account,
             1002,
             "live-probe",
-            schedule::Trigger::Manual,
-            schedule::Power::Ac,
+            provenant_quota::schedule::Due {
+                trigger: schedule::Trigger::Manual,
+                power: schedule::Power::Ac,
+            },
             &provenant_quota::DEFAULT_FRESHNESS,
         )?;
         write_intent_at(&directory, temp.path(), &intent, &mut records, 1002)?;
@@ -5469,8 +5475,10 @@ mod tests {
             &account,
             2000,
             "newer-probe",
-            schedule::Trigger::Manual,
-            schedule::Power::Ac,
+            provenant_quota::schedule::Due {
+                trigger: schedule::Trigger::Manual,
+                power: schedule::Power::Ac,
+            },
             &provenant_quota::DEFAULT_FRESHNESS,
         )?;
         let mut records = records;
