@@ -1040,7 +1040,7 @@ pub(crate) fn readiness_inputs(
 
 /// Resolve the freshness policy from the quota config domain, carrying the
 /// layer that supplied its values so reports can show the source.
-pub(crate) fn quota_freshness(
+pub fn quota_freshness(
     origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
     settings: &provenant_quota::Settings,
 ) -> provenant_quota::FreshnessPolicy {
@@ -1055,12 +1055,36 @@ pub(crate) fn quota_freshness(
     provenant_quota::FreshnessPolicy::from_settings(settings.freshness).with_source(source)
 }
 
+/// The freshness policy for a writer that holds only the state directory (a
+/// provider settlement, a launch reservation). It reads the same quota
+/// domain the resolved config does, through the state-keyed reader, so the
+/// derived readiness a writer publishes expires under the policy every
+/// reader applies. An unreadable domain warns and keeps the defaults.
+pub(crate) fn state_freshness(state: &Path) -> provenant_quota::FreshnessPolicy {
+    match provenant_config::read_domain::<provenant_quota::Settings>(state, "quota") {
+        Ok(settings) => provenant_quota::FreshnessPolicy::from_settings(settings.freshness),
+        Err(error) => {
+            use std::io::Write;
+            let _ = writeln!(
+                io::stderr().lock(),
+                "Warning: quota freshness settings unavailable ({error}); using defaults"
+            );
+            provenant_quota::FreshnessPolicy::default()
+        }
+    }
+}
+
 /// The readiness of one route, read without locks, directory creation or
 /// provider I/O. A missing, stale, mismatched or damaged record is unknown;
 /// nothing here reads as ready unless fresh evidence says so. Routing and the
 /// route and host commands read through this.
-pub(crate) fn read_readiness(state: &Path, scope: &ReadinessScope, now: i64) -> ReadinessRead {
-    read_readiness_after_probe(state, scope, now, None)
+pub(crate) fn read_readiness(
+    state: &Path,
+    scope: &ReadinessScope,
+    now: i64,
+    freshness: &provenant_quota::FreshnessPolicy,
+) -> ReadinessRead {
+    read_readiness_after_probe(state, scope, now, None, freshness)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1082,6 +1106,7 @@ pub(crate) fn read_readiness_after_probe(
     scope: &ReadinessScope,
     now: i64,
     reprobe: Option<LoginEvidence>,
+    freshness: &provenant_quota::FreshnessPolicy,
 ) -> ReadinessRead {
     if !component(&scope.adapter) || !component(&scope.account_key) {
         return ReadinessRead::unknown(ReadinessReason::InvalidEvidence);
@@ -1111,7 +1136,7 @@ pub(crate) fn read_readiness_after_probe(
                     file.login = None;
                 }
             }
-            file.get(scope, now)
+            file.get(scope, now, freshness)
         }
         Ok(None) => ReadinessRead::absent(),
         Err(_) => ReadinessRead::unknown(ReadinessReason::InvalidEvidence),
@@ -1125,6 +1150,7 @@ pub(crate) fn read_readiness_after_probe(
 fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), EdgeError> {
     // Host-wide quota evidence has no project.
     let policy = provenant_config::policy::read(state, "", &Default::default());
+    let freshness = state_freshness(state);
     let (adapter, key) = (&intent.account.adapter, &intent.account.account_key);
     let name = format!("{adapter}.json");
     let existing = open_readiness_account(state, key)?;
@@ -1146,7 +1172,7 @@ fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), E
         // only moves when a fresh reading stops counting as fresh.
         let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
         let admission = Admission {
-            freshness: &provenant_quota::DEFAULT_FRESHNESS,
+            freshness: &freshness,
             policy: &policy,
             policies: &policies,
             now_unix_seconds: now,
@@ -1158,7 +1184,7 @@ fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), E
                 .iter()
                 .find(|policy| policy.adapter == adapter)
                 .map_or(300, |policy| policy.timer_seconds);
-            file.sync_probe_result(record, LOCAL_HOST, now, interval, reason)?;
+            file.sync_probe_result(record, LOCAL_HOST, now, interval, reason, &freshness)?;
         }
         if let Some((expiry, interval)) = intent.login_probe_expiry {
             file.login = Some(LoginObservation {
@@ -1716,6 +1742,7 @@ fn decorate_login(
     accounts: &provenant_providers::accounts::Settings,
     warning_seconds: u64,
     now: i64,
+    freshness: &provenant_quota::FreshnessPolicy,
 ) {
     for row in &mut report.accounts {
         row.readiness = Some(read_readiness(
@@ -1728,6 +1755,7 @@ fn decorate_login(
                 route: provenant_quota::ReadinessRoute::Account,
             },
             now,
+            freshness,
         ));
         row.login_expiry = Some(login_expiry_at(state, &row.account, warning_seconds, now));
         if row.repair.is_none()
@@ -1848,6 +1876,7 @@ fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError
         &accounts,
         domains.quota.login_expiry_warning_seconds,
         now,
+        &freshness,
     );
     Ok(report.accounts)
 }
@@ -2015,6 +2044,7 @@ pub(crate) fn execute(
             &entries,
             settings.login_expiry_warning_seconds,
             now,
+            &freshness,
         );
         return Ok(report);
     };
@@ -2104,6 +2134,7 @@ pub(crate) fn execute(
                 tick.trigger,
                 tick.power,
                 missing_readiness,
+                &freshness,
             )?;
             let intent = match schedule::reserve(
                 &policies,
@@ -2113,6 +2144,7 @@ pub(crate) fn execute(
                 &token,
                 trigger,
                 tick.power,
+                &freshness,
             ) {
                 Ok(intent) => intent,
                 Err(QuotaError::Conflict) => continue,
@@ -2289,6 +2321,7 @@ pub(crate) fn execute(
         &entries,
         settings.login_expiry_warning_seconds,
         now,
+        &freshness,
     );
     let bytes = serde_json::to_vec(&report)?;
     if bytes.len() as u64 > MAX_RECORD_BYTES {
@@ -2324,6 +2357,7 @@ pub(crate) fn execute(
         &entries,
         settings.login_expiry_warning_seconds,
         now,
+        &freshness,
     );
     // Fabric delivery must not hold the quota lock. A deterministic operation
     // ID makes retry safe if the process stops after delivery.
@@ -2659,8 +2693,9 @@ impl ReadingClear<'_> {
             return Ok(Vec::new());
         };
         let current = &self.records[index];
+        let freshness = state_freshness(self.state);
         let admission = Admission {
-            freshness: &provenant_quota::DEFAULT_FRESHNESS,
+            freshness: &freshness,
             policy: self.policy,
             policies: self.policies,
             now_unix_seconds: now,
@@ -3351,7 +3386,13 @@ mod tests {
             route: provenant_quota::ReadinessRoute::from_text("cursor/composer-2.5"),
         };
         assert_eq!(
-            read_readiness(roots.state.as_path(), &scope, now).reason,
+            read_readiness(
+                roots.state.as_path(),
+                &scope,
+                now,
+                &provenant_quota::DEFAULT_FRESHNESS
+            )
+            .reason,
             Some(ReadinessReason::ProbeTimeout)
         );
         let readiness_path = roots.state.as_path().join("readiness/local/cursor.json");
@@ -3394,7 +3435,13 @@ mod tests {
             assert_eq!(records, vec![ledger_only]);
             assert!(!readiness_path.exists());
             assert_eq!(
-                read_readiness(roots.state.as_path(), &scope, now).state,
+                read_readiness(
+                    roots.state.as_path(),
+                    &scope,
+                    now,
+                    &provenant_quota::DEFAULT_FRESHNESS
+                )
+                .state,
                 ReadinessState::Unknown
             );
         }
@@ -3736,6 +3783,7 @@ mod tests {
                 route: provenant_quota::ReadinessRoute::from_text("claude/model"),
             },
             read_at,
+            &provenant_quota::DEFAULT_FRESHNESS,
         );
         assert_eq!(readiness.reason, Some(ReadinessReason::LoginExpired));
         assert_eq!(rows[0].readiness.as_ref(), Some(&readiness));
@@ -3749,7 +3797,14 @@ mod tests {
             &[],
             Some("key"),
             None,
-            |scope| read_readiness(roots.state.as_path(), scope, read_at),
+            |scope| {
+                read_readiness(
+                    roots.state.as_path(),
+                    scope,
+                    read_at,
+                    &provenant_quota::DEFAULT_FRESHNESS,
+                )
+            },
         );
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].observation, readiness);
@@ -4562,6 +4617,7 @@ mod tests {
             "fake",
             tick.trigger,
             tick.power,
+            &provenant_quota::DEFAULT_FRESHNESS,
         )?
         .replacement
         .unwrap();
@@ -5209,11 +5265,24 @@ mod tests {
         };
         for now in [101, 1000] {
             assert_eq!(
-                read_readiness(temp.path(), &scope, now).reason,
+                read_readiness(
+                    temp.path(),
+                    &scope,
+                    now,
+                    &provenant_quota::DEFAULT_FRESHNESS
+                )
+                .reason,
                 Some(ReadinessReason::SignedOut)
             );
             assert_eq!(
-                read_readiness_after_probe(temp.path(), &scope, now, None).state,
+                read_readiness_after_probe(
+                    temp.path(),
+                    &scope,
+                    now,
+                    None,
+                    &provenant_quota::DEFAULT_FRESHNESS
+                )
+                .state,
                 ReadinessState::Unavailable
             );
         }
@@ -5223,7 +5292,8 @@ mod tests {
                     temp.path(),
                     &scope,
                     1000,
-                    Some(LoginEvidence::Unverified(at))
+                    Some(LoginEvidence::Unverified(at)),
+                    &provenant_quota::DEFAULT_FRESHNESS,
                 )
                 .reason,
                 Some(ReadinessReason::SignedOut)
@@ -5234,7 +5304,8 @@ mod tests {
                 temp.path(),
                 &scope,
                 1000,
-                Some(LoginEvidence::Unverified(999))
+                Some(LoginEvidence::Unverified(999)),
+                &provenant_quota::DEFAULT_FRESHNESS,
             )
             .reason,
             Some(ReadinessReason::NotProbed)
@@ -5247,12 +5318,24 @@ mod tests {
         };
         persist_provider_success(temp.path(), &route, 1001)?;
         assert_eq!(
-            read_readiness(temp.path(), &scope, 1001).reason,
+            read_readiness(
+                temp.path(),
+                &scope,
+                1001,
+                &provenant_quota::DEFAULT_FRESHNESS
+            )
+            .reason,
             Some(ReadinessReason::SignedOut)
         );
         persist_login_probe_success(temp.path(), &route, 1001)?;
         assert_eq!(
-            read_readiness(temp.path(), &scope, 1001).reason,
+            read_readiness(
+                temp.path(),
+                &scope,
+                1001,
+                &provenant_quota::DEFAULT_FRESHNESS
+            )
+            .reason,
             Some(ReadinessReason::ProbedNoFigures)
         );
         // Publishing a failure during quota I/O keeps the in-flight probe claim.
@@ -5268,6 +5351,7 @@ mod tests {
             "live-probe",
             schedule::Trigger::Manual,
             schedule::Power::Ac,
+            &provenant_quota::DEFAULT_FRESHNESS,
         )?;
         write_intent_at(&directory, temp.path(), &intent, &mut records, 1002)?;
         persist_preparation_login_failure(
@@ -5282,7 +5366,13 @@ mod tests {
             Some("live-probe")
         );
         assert_eq!(
-            read_readiness(temp.path(), &scope, 1003).reason,
+            read_readiness(
+                temp.path(),
+                &scope,
+                1003,
+                &provenant_quota::DEFAULT_FRESHNESS
+            )
+            .reason,
             Some(ReadinessReason::LoginExpired)
         );
         // A healthy probe started before the new failure cannot clear it,
@@ -5295,7 +5385,13 @@ mod tests {
             Some("live-probe")
         );
         assert_eq!(
-            read_readiness(temp.path(), &scope, 1004).reason,
+            read_readiness(
+                temp.path(),
+                &scope,
+                1004,
+                &provenant_quota::DEFAULT_FRESHNESS
+            )
+            .reason,
             Some(ReadinessReason::LoginExpired)
         );
         // A newer reservation retaining an old auth error is not a newer
@@ -5309,6 +5405,7 @@ mod tests {
             "newer-probe",
             schedule::Trigger::Manual,
             schedule::Power::Ac,
+            &provenant_quota::DEFAULT_FRESHNESS,
         )?;
         let mut records = records;
         write_intent_at(&directory, temp.path(), &intent, &mut records, 2000)?;
@@ -5320,7 +5417,13 @@ mod tests {
             Some("newer-probe")
         );
         assert_eq!(
-            read_readiness(temp.path(), &scope, 2001).reason,
+            read_readiness(
+                temp.path(),
+                &scope,
+                2001,
+                &provenant_quota::DEFAULT_FRESHNESS
+            )
+            .reason,
             Some(ReadinessReason::ProbedNoFigures)
         );
         Ok(())
@@ -5362,22 +5465,35 @@ mod tests {
             100,
             300,
             Some(ReadinessReason::SignedOut),
+            &provenant_quota::DEFAULT_FRESHNESS,
         )?;
         let path = directory.join("codex.json");
         std::fs::write(&path, serde_json::to_vec(&file)?)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         assert_eq!(
-            read_readiness(state, &scope, 150).reason,
+            read_readiness(state, &scope, 150, &provenant_quota::DEFAULT_FRESHNESS).reason,
             Some(ReadinessReason::SignedOut)
         );
         assert_eq!(
-            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Verified(120)))
-                .reason,
+            read_readiness_after_probe(
+                state,
+                &scope,
+                150,
+                Some(LoginEvidence::Verified(120)),
+                &provenant_quota::DEFAULT_FRESHNESS
+            )
+            .reason,
             Some(ReadinessReason::NotProbed)
         );
         assert_eq!(
-            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Verified(90)))
-                .reason,
+            read_readiness_after_probe(
+                state,
+                &scope,
+                150,
+                Some(LoginEvidence::Verified(90)),
+                &provenant_quota::DEFAULT_FRESHNESS
+            )
+            .reason,
             Some(ReadinessReason::SignedOut)
         );
         Ok(())
@@ -5420,16 +5536,29 @@ mod tests {
             100,
             300,
             Some(ReadinessReason::SignedOut),
+            &provenant_quota::DEFAULT_FRESHNESS,
         )?;
         write(&file)?;
         assert_eq!(
-            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(120)))
-                .reason,
+            read_readiness_after_probe(
+                state,
+                &scope,
+                150,
+                Some(LoginEvidence::Unverified(120)),
+                &provenant_quota::DEFAULT_FRESHNESS
+            )
+            .reason,
             Some(ReadinessReason::NotProbed)
         );
         assert_eq!(
-            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(90)))
-                .reason,
+            read_readiness_after_probe(
+                state,
+                &scope,
+                150,
+                Some(LoginEvidence::Unverified(90)),
+                &provenant_quota::DEFAULT_FRESHNESS
+            )
+            .reason,
             Some(ReadinessReason::SignedOut)
         );
         file = ReadinessFile::default();
@@ -5445,16 +5574,27 @@ mod tests {
         });
         write(&file)?;
         // Login expiry is display metadata, not route readiness evidence.
-        let expiry_only = read_readiness(state, &scope, 150);
+        let expiry_only = read_readiness(state, &scope, 150, &provenant_quota::DEFAULT_FRESHNESS);
         assert_eq!(expiry_only.reason, Some(ReadinessReason::NotProbed));
         assert!(expiry_only.observed_scope.is_none());
         assert_eq!(
-            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(120)))
-                .reason,
+            read_readiness_after_probe(
+                state,
+                &scope,
+                150,
+                Some(LoginEvidence::Unverified(120)),
+                &provenant_quota::DEFAULT_FRESHNESS
+            )
+            .reason,
             Some(ReadinessReason::NotProbed)
         );
-        let older_probe =
-            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(90)));
+        let older_probe = read_readiness_after_probe(
+            state,
+            &scope,
+            150,
+            Some(LoginEvidence::Unverified(90)),
+            &provenant_quota::DEFAULT_FRESHNESS,
+        );
         assert_eq!(older_probe.reason, Some(ReadinessReason::NotProbed));
         assert!(older_probe.observed_scope.is_none());
         file.login = None;
@@ -5464,11 +5604,18 @@ mod tests {
             100,
             300,
             Some(ReadinessReason::AccountMismatch),
+            &provenant_quota::DEFAULT_FRESHNESS,
         )?;
         write(&file)?;
         assert_eq!(
-            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(120)))
-                .reason,
+            read_readiness_after_probe(
+                state,
+                &scope,
+                150,
+                Some(LoginEvidence::Unverified(120)),
+                &provenant_quota::DEFAULT_FRESHNESS
+            )
+            .reason,
             Some(ReadinessReason::AccountMismatch)
         );
         file = ReadinessFile::default();
@@ -5478,11 +5625,18 @@ mod tests {
             100,
             300,
             Some(ReadinessReason::ProviderRefusal),
+            &provenant_quota::DEFAULT_FRESHNESS,
         )?;
         write(&file)?;
         assert_eq!(
-            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(120)))
-                .reason,
+            read_readiness_after_probe(
+                state,
+                &scope,
+                150,
+                Some(LoginEvidence::Unverified(120)),
+                &provenant_quota::DEFAULT_FRESHNESS
+            )
+            .reason,
             Some(ReadinessReason::ProviderRefusal)
         );
         Ok(())
@@ -5553,7 +5707,10 @@ mod tests {
         };
         let pool = scope("claude", "key", "pool");
         // No file reads as unknown, never ready.
-        assert_eq!(read_readiness(state, &pool, now), ReadinessRead::absent());
+        assert_eq!(
+            read_readiness(state, &pool, now, &provenant_quota::DEFAULT_FRESHNESS),
+            ReadinessRead::absent()
+        );
 
         let refuse = |pool: Option<&str>, model: &str| {
             persist_provider_refusal(
@@ -5572,13 +5729,15 @@ mod tests {
         };
         refuse(Some("pool"), "claude/one")?;
         refuse(None, "claude/two")?;
-        let held = read_readiness(state, &pool, now);
+        let held = read_readiness(state, &pool, now, &provenant_quota::DEFAULT_FRESHNESS);
         assert_eq!(held.state, ReadinessState::Unavailable);
         assert_eq!(held.reason, Some(ReadinessReason::ProviderRefusal));
         assert_eq!(held.reset_unix_seconds, Some(now + 600));
         // The pool refusal covers its pool, the model refusal only its model,
         // and neither covers another pool or another account.
-        let state_of = |s: &ReadinessScope| read_readiness(state, s, now).state;
+        let state_of = |s: &ReadinessScope| {
+            read_readiness(state, s, now, &provenant_quota::DEFAULT_FRESHNESS).state
+        };
         assert_eq!(
             state_of(&scope("claude", "key", "claude/two")),
             ReadinessState::Unavailable
@@ -5602,7 +5761,7 @@ mod tests {
         assert_eq!(read_cache_at(state)?.len(), 1);
         // A reset time passing does not turn the refusal into ready.
         assert_eq!(
-            read_readiness(state, &pool, now + 600).state,
+            read_readiness(state, &pool, now + 600, &provenant_quota::DEFAULT_FRESHNESS).state,
             ReadinessState::Unknown
         );
 
@@ -5917,6 +6076,7 @@ mod tests {
                     route: provenant_quota::ReadinessRoute::Account,
                 },
                 SystemClock::new().unix_seconds(),
+                &provenant_quota::DEFAULT_FRESHNESS,
             );
             assert_eq!(read.reason, expected_reason, "{failure:?}/{malformed}");
             assert_eq!(read.state, expected_state, "{failure:?}/{malformed}");
@@ -5970,7 +6130,12 @@ mod tests {
         ] {
             std::fs::write(&path, bytes)?;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
-            let read = read_readiness(temp.path(), &scope, 150);
+            let read = read_readiness(
+                temp.path(),
+                &scope,
+                150,
+                &provenant_quota::DEFAULT_FRESHNESS,
+            );
             assert_eq!(read.state, expected);
             if expected == ReadinessState::Unknown {
                 assert_eq!(read.reason, Some(ReadinessReason::InvalidEvidence));
@@ -6041,7 +6206,12 @@ mod tests {
             account_key: "work".into(),
             route: provenant_quota::ReadinessRoute::from_text("agy/model"),
         };
-        let held = read_readiness(state, &route, SystemClock::new().unix_seconds());
+        let held = read_readiness(
+            state,
+            &route,
+            SystemClock::new().unix_seconds(),
+            &provenant_quota::DEFAULT_FRESHNESS,
+        );
         assert_eq!(held.state, ReadinessState::Unavailable);
         assert_eq!(held.reason, Some(ReadinessReason::ProbeTimeout));
 
@@ -6059,7 +6229,13 @@ mod tests {
         };
         write_intent(&dir, state, &success, &mut records)?;
         assert_eq!(
-            read_readiness(state, &route, SystemClock::new().unix_seconds()).state,
+            read_readiness(
+                state,
+                &route,
+                SystemClock::new().unix_seconds(),
+                &provenant_quota::DEFAULT_FRESHNESS
+            )
+            .state,
             ReadinessState::Unknown
         );
         let pool = ReadinessScope {
@@ -6067,7 +6243,13 @@ mod tests {
             ..route.clone()
         };
         assert_eq!(
-            read_readiness(state, &pool, SystemClock::new().unix_seconds()).reason,
+            read_readiness(
+                state,
+                &pool,
+                SystemClock::new().unix_seconds(),
+                &provenant_quota::DEFAULT_FRESHNESS
+            )
+            .reason,
             Some(ReadinessReason::ProviderRefusal)
         );
         let bytes = std::fs::read(state.join("quota/work/agy.json"))?;
@@ -6599,6 +6781,26 @@ mod tests {
             &effects,
         )?;
         assert_eq!(effects.0.get(), 2);
+        Ok(())
+    }
+
+    // Writers that hold only the state directory publish derived readiness
+    // under the configured freshness, not the compiled default.
+    #[test]
+    fn state_writers_read_the_configured_freshness() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        assert_eq!(
+            state_freshness(temp.path()),
+            provenant_quota::FreshnessPolicy::default()
+        );
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "schema_version=1\n[domains.quota.freshness]\nreadiness_min_seconds=500\nrefusal_seconds=60\n",
+        )?;
+        let freshness = state_freshness(temp.path());
+        assert_eq!(freshness.readiness_min_seconds, 500);
+        assert_eq!(freshness.refusal_seconds, 60);
+        assert_eq!(freshness.readiness_expiry(100, 60), 600);
         Ok(())
     }
 }

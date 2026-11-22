@@ -50,6 +50,8 @@ pub(super) fn display_list_data(
 ) -> Result<Box<RouteListDisplay>, EdgeError> {
     let (routes, accounts) = list_data_and_accounts(roots, query)?;
     let catalogue = crate::model_discovery::effective(roots)?;
+    let resolved = crate::config_reads::read_for(roots, "route")?;
+    let freshness = crate::quota::quota_freshness(&resolved.origins, &resolved.domains.quota);
     let now = SystemClock::new().unix_seconds();
     let mut models = BTreeSet::new();
     models.extend(routes.models.iter().map(|entry| entry.model.clone()));
@@ -81,7 +83,7 @@ pub(super) fn display_list_data(
             .map_err(|_| ())
         });
         match file {
-            Ok(Some(file)) => file.get(scope, now),
+            Ok(Some(file)) => file.get(scope, now, &freshness),
             Ok(None) => provenant_quota::ReadinessRead::absent(),
             Err(()) => provenant_quota::ReadinessRead::unknown(
                 provenant_quota::ReadinessReason::InvalidEvidence,
@@ -857,6 +859,7 @@ pub(super) fn execute_in(
                 // of each pool member, so a spent member cannot be shown as
                 // the route a dispatch would pick.
                 let facts = super::admission::AdmissionFacts {
+                    freshness: &context.config.freshness,
                     policy: &context.config.launch_policy,
                     policies,
                     now_unix_seconds: context.now.as_timestamp().as_second(),
@@ -964,6 +967,7 @@ pub(super) fn execute_in(
                             roots.state.as_path(),
                             scope,
                             now.unix_seconds(),
+                            &context.config.freshness,
                         )
                     },
                 );

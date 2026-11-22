@@ -703,6 +703,7 @@ fn writer_preparation_steps(
         now - 1,
         300,
         Some(provenant_quota::ReadinessReason::SignedOut),
+        &provenant_quota::DEFAULT_FRESHNESS,
     )?;
     let readiness_dir = state.join("readiness/local");
     std::fs::create_dir_all(&readiness_dir)?;

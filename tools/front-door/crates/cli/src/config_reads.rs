@@ -45,7 +45,7 @@ reads! {
     "reconcile" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy"],
     "telemetry" => ["accounts", "routing"], "native" => ["accounts"],
     "quota" => ["accounts", "quota"], "console" => ["fabric"],
-    "chair" => ["fabric", "accounts", "routing"], "worktree" => [],
+    "chair" => ["fabric", "accounts", "routing", "quota"], "worktree" => [],
     "pr" => ["fabric", "routing", "accounts", "pr"],
     "pr contributions" => ["fabric"],
     "gc" => ["fabric"], "tick" => ["fabric", "quota", "accounts", "routing", "steward"],

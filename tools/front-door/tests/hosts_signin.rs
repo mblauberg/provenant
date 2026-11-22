@@ -73,6 +73,7 @@ fn quota_route_and_doctor_share_account_readiness_fixture() -> Result {
         observed,
         300,
         Some(ReadinessReason::SignedOut),
+        &provenant_quota::DEFAULT_FRESHNESS,
     )?;
     let dir = rig.state.join("readiness/fixture-key");
     fs::create_dir_all(&dir)?;

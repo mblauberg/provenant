@@ -395,6 +395,7 @@ fn consecutive_preparations_skip_the_account_after_its_first_login_failure()
             &fixture.state,
             &scope,
             provenant_os::clock::SystemClock::new().unix_seconds(),
+            &provenant_quota::DEFAULT_FRESHNESS,
         );
         assert_eq!(observed.state, provenant_quota::ReadinessState::Unavailable);
         assert_eq!(
@@ -432,7 +433,7 @@ fn successful_login_probe_recovers_an_expired_preparation_failure()
         route: provenant_quota::ReadinessRoute::from_text("cursor/composer-2.5"),
     };
     assert_eq!(
-        crate::quota::read_readiness(&fixture.state, &scope, now).state,
+        crate::quota::read_readiness(&fixture.state, &scope, now, &provenant_quota::DEFAULT_FRESHNESS).state,
         provenant_quota::ReadinessState::Unavailable
     );
     let launch = fixture.prepare()?;
@@ -441,7 +442,8 @@ fn successful_login_probe_recovers_an_expired_preparation_failure()
         crate::quota::read_readiness(
             &fixture.state,
             &scope,
-            provenant_os::clock::SystemClock::new().unix_seconds()
+            provenant_os::clock::SystemClock::new().unix_seconds(),
+            &provenant_quota::DEFAULT_FRESHNESS,
         )
         .reason,
         Some(provenant_quota::ReadinessReason::ProbedNoFigures)

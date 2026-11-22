@@ -735,8 +735,11 @@ fn pools_never_draw_unresolved_or_login_required_accounts() -> Result<(), Box<dy
         10,
         30,
         Some(ReadinessReason::SignedOut),
+        &provenant_quota::DEFAULT_FRESHNESS,
     )?;
-    let readiness = |scope: &provenant_quota::ReadinessScope, now| file.get(scope, now);
+    let readiness = |scope: &provenant_quota::ReadinessScope, now| {
+        file.get(scope, now, &provenant_quota::DEFAULT_FRESHNESS)
+    };
     let mut ctx = context(&catalogue, &mixed, now()?);
     ctx.availability = &records;
     ctx.access = &access;
@@ -753,8 +756,17 @@ fn pools_never_draw_unresolved_or_login_required_accounts() -> Result<(), Box<dy
         observed_unix_seconds: Some(80),
         ..Default::default()
     });
-    file.sync_probe_result(&account, provenant_quota::LOCAL_HOST, 80, 30, None)?;
-    let readiness = |scope: &provenant_quota::ReadinessScope, now| file.get(scope, now);
+    file.sync_probe_result(
+        &account,
+        provenant_quota::LOCAL_HOST,
+        80,
+        30,
+        None,
+        &provenant_quota::DEFAULT_FRESHNESS,
+    )?;
+    let readiness = |scope: &provenant_quota::ReadinessScope, now| {
+        file.get(scope, now, &provenant_quota::DEFAULT_FRESHNESS)
+    };
     let mut ctx = context(&catalogue, &mixed, now()?);
     ctx.availability = &records;
     ctx.access = &access;

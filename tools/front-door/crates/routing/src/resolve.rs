@@ -1785,7 +1785,7 @@ fn account_block_reason(
 ) -> Option<RouteExclusionReason> {
     let pools = context.catalogue.admission_pools(model);
     let admission = provenant_quota::Admission {
-        freshness: &provenant_quota::DEFAULT_FRESHNESS,
+        freshness: &context.config.freshness,
         policy: &context.config.launch_policy,
         policies: context.quota_policies,
         now_unix_seconds: context.now_seconds(),

@@ -69,6 +69,7 @@ pub fn next_due(
     record: &AccountRecord,
     trigger: Trigger,
     power: Power,
+    freshness: &FreshnessPolicy,
 ) -> Result<Option<i64>, QuotaError> {
     let Some(ttl) = interval(policies, &record.account.adapter, trigger, power) else {
         return Ok(None);
@@ -95,7 +96,7 @@ pub fn next_due(
     // when the adapter registers a quota probe. It is still subject to the
     // backoff and claim bounds below, so a confirmed refusal is not re-probed
     // on every tick.
-    if let Some(recheck) = crate::free_pool_recheck_due(record)? {
+    if let Some(recheck) = crate::free_pool_recheck_due(record, freshness)? {
         due = due.min(recheck);
     }
     if let Some(backoff) = record.backoff_until_unix_seconds
@@ -117,12 +118,13 @@ pub fn trigger_for_readiness(
     trigger: Trigger,
     power: Power,
     missing: bool,
+    freshness: &FreshnessPolicy,
 ) -> Result<Trigger, QuotaError> {
     let Some(record) = record.filter(|_| missing) else {
         return Ok(trigger);
     };
-    let normal = next_due(policies, record, trigger, power)?;
-    let readiness = next_due(policies, record, Trigger::Panel, power)?;
+    let normal = next_due(policies, record, trigger, power, freshness)?;
+    let readiness = next_due(policies, record, Trigger::Panel, power, freshness)?;
     Ok(match (normal, readiness) {
         (Some(normal), Some(readiness)) if readiness < normal => Trigger::Panel,
         _ => trigger,
@@ -229,6 +231,7 @@ pub fn reserve(
     token: &str,
     trigger: Trigger,
     power: Power,
+    freshness: &FreshnessPolicy,
 ) -> Result<UpdateIntent, QuotaError> {
     account.validate()?;
     if !component(token) {
@@ -241,7 +244,7 @@ pub fn reserve(
     // Identity is adapter and key; a changed display label is adopted below.
     if record.account.adapter != account.adapter
         || record.account.account_key != account.account_key
-        || next_due(policies, &record, trigger, power)?.is_none_or(|due| due > now)
+        || next_due(policies, &record, trigger, power, freshness)?.is_none_or(|due| due > now)
     {
         return Err(QuotaError::Conflict);
     }
@@ -390,6 +393,7 @@ pub fn plan_tick_with_settings(
     missing_readiness: &[(String, String)],
 ) -> Result<TickPlan, QuotaError> {
     use provenant_config::DomainConfig;
+    let freshness = FreshnessPolicy::from_settings(settings.freshness);
     if !settings.validate().is_empty() {
         return Err(QuotaError::Invalid("scheduling settings"));
     }
@@ -471,9 +475,16 @@ pub fn plan_tick_with_settings(
         let missing = missing_readiness
             .iter()
             .any(|(adapter, key)| adapter == &account.adapter && key == &account.account_key);
-        let trigger = trigger_for_readiness(policies, current, tick.trigger, tick.power, missing)?;
+        let trigger = trigger_for_readiness(
+            policies,
+            current,
+            tick.trigger,
+            tick.power,
+            missing,
+            &freshness,
+        )?;
         let due = match current {
-            Some(record) => next_due(policies, record, trigger, tick.power)?,
+            Some(record) => next_due(policies, record, trigger, tick.power, &freshness)?,
             None => interval(policies, &account.adapter, trigger, tick.power).map(|_| i64::MIN),
         };
         if due.is_some_and(|due| due <= now) {
@@ -613,8 +624,14 @@ pub fn report(
             free_pool_refusal: effective.free_pool_refusal,
             models: effective.models,
             age_seconds: age,
-            next_due_unix_seconds: next_due(policies, record, Trigger::Timer, Power::Ac)?
-                .map(|d| d.max(now)),
+            next_due_unix_seconds: next_due(
+                policies,
+                record,
+                Trigger::Timer,
+                Power::Ac,
+                freshness,
+            )?
+            .map(|d| d.max(now)),
             refreshing: record
                 .claim
                 .as_ref()
@@ -695,10 +712,18 @@ mod tests {
             Trigger::Timer,
             Power::Ac,
             true,
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         assert_eq!(
-            next_due(crate::source::TEST_POLICIES, &record, trigger, Power::Ac).unwrap(),
+            next_due(
+                crate::source::TEST_POLICIES,
+                &record,
+                trigger,
+                Power::Ac,
+                &crate::DEFAULT_FRESHNESS
+            )
+            .unwrap(),
             Some(220)
         );
         record.backoff_until_unix_seconds = Some(250);
@@ -713,10 +738,18 @@ mod tests {
             Trigger::Timer,
             Power::Ac,
             true,
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         assert_eq!(
-            next_due(crate::source::TEST_POLICIES, &record, trigger, Power::Ac).unwrap(),
+            next_due(
+                crate::source::TEST_POLICIES,
+                &record,
+                trigger,
+                Power::Ac,
+                &crate::DEFAULT_FRESHNESS
+            )
+            .unwrap(),
             Some(280)
         );
         assert_eq!(
@@ -726,6 +759,7 @@ mod tests {
                 Trigger::Timer,
                 Power::Ac,
                 false,
+                &crate::DEFAULT_FRESHNESS,
             )
             .unwrap(),
             Trigger::Timer
@@ -757,7 +791,8 @@ mod tests {
                     crate::source::TEST_POLICIES,
                     &record,
                     Trigger::Timer,
-                    Power::Ac
+                    Power::Ac,
+                    &crate::DEFAULT_FRESHNESS,
                 )
                 .unwrap(),
                 Some(115)
@@ -797,7 +832,14 @@ mod tests {
             deadline_unix_seconds: 155,
         });
         assert_eq!(
-            next_due(crate::source::TEST_POLICIES, &r, Trigger::Manual, Power::Ac).unwrap(),
+            next_due(
+                crate::source::TEST_POLICIES,
+                &r,
+                Trigger::Manual,
+                Power::Ac,
+                &crate::DEFAULT_FRESHNESS
+            )
+            .unwrap(),
             Some(400)
         );
         let claim = reserve(
@@ -808,6 +850,7 @@ mod tests {
             "new",
             Trigger::Manual,
             Power::Ac,
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         assert!(claim.check(Some(&r)).is_ok());
@@ -830,7 +873,8 @@ mod tests {
                 399,
                 "new",
                 Trigger::Manual,
-                Power::Ac
+                Power::Ac,
+                &crate::DEFAULT_FRESHNESS,
             ),
             Err(QuotaError::Conflict)
         ));
@@ -869,7 +913,8 @@ mod tests {
                 110,
                 "claim",
                 tick.trigger,
-                tick.power
+                tick.power,
+                &crate::DEFAULT_FRESHNESS,
             )
             .is_ok()
         );
@@ -886,7 +931,8 @@ mod tests {
                 110,
                 "claim",
                 tick.trigger,
-                tick.power
+                tick.power,
+                &crate::DEFAULT_FRESHNESS,
             )
             .is_err()
         );
@@ -926,7 +972,14 @@ mod tests {
             solo: false,
         }];
         assert_eq!(
-            next_due(&policies, &record, Trigger::Timer, Power::Ac).unwrap(),
+            next_due(
+                &policies,
+                &record,
+                Trigger::Timer,
+                Power::Ac,
+                &crate::DEFAULT_FRESHNESS
+            )
+            .unwrap(),
             Some(100 + crate::DEFAULT_FRESHNESS.free_pool_recheck_seconds as i64)
         );
         let detection = Detection {
@@ -963,6 +1016,91 @@ mod tests {
         assert_eq!(record.refusals[0].resets_unix_seconds, Some(100 + 50_000));
     }
 
+    // One resolved policy decides every consumer: a configured recheck
+    // interval moves the due time, and the tick plan reads the same setting.
+    #[test]
+    fn configured_free_pool_recheck_moves_next_due_and_the_tick_plan() {
+        let spec = provenant_records::ADAPTER_SPECS
+            .iter()
+            .find(|spec| {
+                spec.free_pool.is_some()
+                    && spec.quota_probe != provenant_records::QuotaProbeKind::None
+            })
+            .expect("free pool adapter with a quota probe");
+        let account = AccountScope {
+            extra: Default::default(),
+            adapter: spec.name.into(),
+            account_key: "key".into(),
+            label: "zen".into(),
+        };
+        let mut record = AccountRecord::empty(account.clone());
+        record.last_attempt_unix_seconds = Some(100);
+        record.refusals.push(crate::Refusal {
+            extra: Default::default(),
+            account: account.clone(),
+            model: "free-model".into(),
+            pool: spec.free_pool.map(str::to_owned),
+            observed_unix_seconds: 100,
+            resets_unix_seconds: Some(100 + 50_000),
+        });
+        let policies = [QuotaPolicy {
+            adapter: spec.name,
+            timer_seconds: 7200,
+            panel_seconds: 3600,
+            probe_seconds: 14,
+            low_power: true,
+            solo: false,
+        }];
+        let settings = Settings {
+            freshness: crate::FreshnessSettings {
+                free_pool_recheck_seconds: 30,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let configured = FreshnessPolicy::from_settings(settings.freshness);
+        assert_eq!(
+            next_due(&policies, &record, Trigger::Timer, Power::Ac, &configured).unwrap(),
+            Some(130)
+        );
+        assert_ne!(
+            next_due(
+                &policies,
+                &record,
+                Trigger::Timer,
+                Power::Ac,
+                &crate::DEFAULT_FRESHNESS
+            )
+            .unwrap(),
+            Some(130)
+        );
+        let detection = Detection {
+            adapter: account.adapter.clone(),
+            accounts: Some(vec![account.clone()]),
+            status: QuotaStatus::Available,
+        };
+        let tick = QuotaTick {
+            adapter: None,
+            trigger: Trigger::Timer,
+            power: Power::Ac,
+        };
+        let plan = |now| {
+            plan_tick_with_settings(
+                &policies,
+                std::slice::from_ref(&record),
+                std::slice::from_ref(&detection),
+                &tick,
+                now,
+                &settings,
+                &[],
+            )
+            .unwrap()
+            .batches
+        };
+        assert!(plan(129).is_empty());
+        assert_eq!(plan(130), vec![vec![account]]);
+    }
+
     #[test]
     fn next_owner_tick_reprobes_a_repaired_isolated_keychain() {
         let mut agy = account();
@@ -976,6 +1114,7 @@ mod tests {
             "first",
             Trigger::Manual,
             Power::Ac,
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
         .replacement
@@ -1027,6 +1166,7 @@ mod tests {
             "second",
             Trigger::Manual,
             Power::Ac,
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
         .replacement
@@ -1083,7 +1223,8 @@ mod tests {
                 crate::source::TEST_POLICIES,
                 &record,
                 Trigger::Manual,
-                Power::Ac
+                Power::Ac,
+                &crate::DEFAULT_FRESHNESS,
             )
             .unwrap(),
             Some(220)
@@ -1125,6 +1266,7 @@ mod tests {
                 "claim",
                 trigger,
                 Power::Ac,
+                &crate::DEFAULT_FRESHNESS,
             )
             .unwrap()
             .replacement
@@ -1140,7 +1282,8 @@ mod tests {
                     111,
                     "second",
                     trigger,
-                    Power::Ac
+                    Power::Ac,
+                    &crate::DEFAULT_FRESHNESS,
                 )
                 .is_err()
             );
@@ -1149,7 +1292,14 @@ mod tests {
                 .replacement
                 .unwrap();
             assert_eq!(
-                next_due(crate::source::TEST_POLICIES, &failed, trigger, Power::Ac).unwrap(),
+                next_due(
+                    crate::source::TEST_POLICIES,
+                    &failed,
+                    trigger,
+                    Power::Ac,
+                    &crate::DEFAULT_FRESHNESS
+                )
+                .unwrap(),
                 Some(1012)
             );
         }
@@ -1382,6 +1532,7 @@ mod tests {
             "claim",
             Trigger::Manual,
             Power::Ac,
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         intent.check(Some(&r)).unwrap();
@@ -1456,6 +1607,7 @@ mod tests {
             "claim",
             Trigger::Manual,
             Power::Ac,
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         let current = intent.replacement.unwrap();
@@ -1592,6 +1744,7 @@ mod tests {
                 "claim",
                 Trigger::Manual,
                 Power::Ac,
+                &crate::DEFAULT_FRESHNESS,
             )
             .unwrap()
             .replacement
@@ -1708,6 +1861,7 @@ mod tests {
             "claim",
             Trigger::Manual,
             Power::Ac,
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         let current = intent.replacement.unwrap();
@@ -1748,6 +1902,7 @@ mod tests {
             "next",
             Trigger::Manual,
             Power::Ac,
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
         .replacement
@@ -1765,6 +1920,7 @@ mod tests {
             "verified",
             Trigger::Manual,
             Power::Ac,
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
         .replacement
@@ -1923,6 +2079,7 @@ mod transition_tests {
             "first",
             Trigger::Manual,
             Power::Ac,
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         let second = reserve(
@@ -1933,6 +2090,7 @@ mod transition_tests {
             "second",
             Trigger::Manual,
             Power::Ac,
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         let claimed = first.replacement.as_ref().unwrap();
@@ -1945,7 +2103,8 @@ mod transition_tests {
                 110,
                 "third",
                 Trigger::Manual,
-                Power::Ac
+                Power::Ac,
+                &crate::DEFAULT_FRESHNESS,
             )
             .is_err()
         );
@@ -1957,6 +2116,7 @@ mod transition_tests {
             "third",
             Trigger::Manual,
             Power::Ac,
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
         .replacement
@@ -1973,6 +2133,7 @@ mod transition_tests {
             "recreated",
             Trigger::Manual,
             Power::Ac,
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap()
         .replacement
@@ -1992,7 +2153,8 @@ mod transition_tests {
                 100,
                 "overflow",
                 Trigger::Manual,
-                Power::Ac
+                Power::Ac,
+                &crate::DEFAULT_FRESHNESS,
             ),
             Err(QuotaError::NumberOutOfRange)
         ));

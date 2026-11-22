@@ -216,7 +216,7 @@ pub fn effective_status(input: &StatusInput<'_>) -> Result<EffectiveStatus, Quot
         account_key: account_key.clone(),
         route: ReadinessRoute::Account,
     };
-    let account_read = readiness.map(|file| file.get_with(&account_scope, now, freshness));
+    let account_read = readiness.map(|file| file.get(&account_scope, now, freshness));
     if let Some(read) = &account_read
         && read.state == ReadinessState::Unavailable
         && read
@@ -261,7 +261,7 @@ pub fn effective_status(input: &StatusInput<'_>) -> Result<EffectiveStatus, Quot
             ..account_scope.clone()
         };
         let read = readiness
-            .map(|file| file.get_with(&scope, now, freshness))
+            .map(|file| file.get(&scope, now, freshness))
             .unwrap_or_else(ReadinessRead::absent);
         let mut reason = if read.state == ReadinessState::Unavailable {
             Some(exclusion(read.reason))
@@ -276,7 +276,7 @@ pub fn effective_status(input: &StatusInput<'_>) -> Result<EffectiveStatus, Quot
                 ..account_scope.clone()
             };
             let pool_read = readiness
-                .map(|file| file.get_with(&pool_scope, now, freshness))
+                .map(|file| file.get(&pool_scope, now, freshness))
                 .unwrap_or_else(ReadinessRead::absent);
             if pool_read.state == ReadinessState::Unavailable {
                 reason = Some(exclusion(pool_read.reason));
@@ -476,7 +476,7 @@ mod tests {
             account_key: "key".into(),
             route: ReadinessRoute::Account,
         };
-        let read = file.get_with(&scope, 250, &freshness);
+        let read = file.get(&scope, 250, &freshness);
         assert_ne!(read.state, ReadinessState::Ready);
         assert_eq!(read.reason, Some(ReadinessReason::Stale));
         assert!(!matches!(

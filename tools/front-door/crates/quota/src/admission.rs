@@ -611,7 +611,10 @@ fn matches_pool(adapter: &str, window: &str, pool: &str) -> bool {
 /// cheap way to re-check, so the refusal keeps its provider reset. The last
 /// attempt anchors the interval, so a probe that confirms the refusal buys
 /// another bounded window instead of re-probing on every tick.
-pub fn free_pool_recheck_due(record: &AccountRecord) -> Result<Option<i64>, QuotaError> {
+pub fn free_pool_recheck_due(
+    record: &AccountRecord,
+    freshness: &FreshnessPolicy,
+) -> Result<Option<i64>, QuotaError> {
     let Some(spec) = provenant_records::AdapterSpec::get(&record.account.adapter) else {
         return Ok(None);
     };
@@ -632,12 +635,12 @@ pub fn free_pool_recheck_due(record: &AccountRecord) -> Result<Option<i64>, Quot
             .map_or(refusal.observed_unix_seconds, |at| {
                 at.max(refusal.observed_unix_seconds)
             });
-        let expires = refusal.expires_unix_seconds(&crate::DEFAULT_FRESHNESS)?;
+        let expires = refusal.expires_unix_seconds(freshness)?;
         if expires <= observed {
             continue;
         }
         let next = observed
-            .checked_add(crate::DEFAULT_FRESHNESS.free_pool_recheck_seconds as i64)
+            .checked_add(freshness.free_pool_recheck_seconds as i64)
             .ok_or(QuotaError::TimeRange)?
             .min(expires);
         due = Some(due.map_or(next, |earlier: i64| earlier.min(next)));
@@ -1441,7 +1444,7 @@ mod admission_tests {
             resets_unix_seconds: Some(50_900),
         });
         assert_eq!(
-            free_pool_recheck_due(&record).unwrap(),
+            free_pool_recheck_due(&record, &crate::DEFAULT_FRESHNESS).unwrap(),
             Some(1000 + crate::DEFAULT_FRESHNESS.free_pool_recheck_seconds as i64)
         );
         // A probe that confirms the refusal buys another bounded window; the
@@ -1449,14 +1452,17 @@ mod admission_tests {
         record.last_attempt_unix_seconds =
             Some(1000 + crate::DEFAULT_FRESHNESS.free_pool_recheck_seconds as i64);
         assert_eq!(
-            free_pool_recheck_due(&record).unwrap(),
+            free_pool_recheck_due(&record, &crate::DEFAULT_FRESHNESS).unwrap(),
             Some(1000 + 2 * crate::DEFAULT_FRESHNESS.free_pool_recheck_seconds as i64)
         );
         assert_eq!(record.refusals[0].resets_unix_seconds, Some(50_900));
         // Model and account-wide refusals are not free-pool rechecks.
         let mut scoped = record.clone();
         scoped.refusals[0].pool = None;
-        assert_eq!(free_pool_recheck_due(&scoped).unwrap(), None);
+        assert_eq!(
+            free_pool_recheck_due(&scoped, &crate::DEFAULT_FRESHNESS).unwrap(),
+            None
+        );
         // An adapter with no registered free pool cannot re-check cheaply.
         let plain = provenant_records::ADAPTER_SPECS
             .iter()
@@ -1464,7 +1470,10 @@ mod admission_tests {
             .expect("adapter without a free pool");
         let mut no_pool = record.clone();
         no_pool.account.adapter = plain.name.into();
-        assert_eq!(free_pool_recheck_due(&no_pool).unwrap(), None);
+        assert_eq!(
+            free_pool_recheck_due(&no_pool, &crate::DEFAULT_FRESHNESS).unwrap(),
+            None
+        );
     }
 
     // Spec: docs/specs/routing.md#unknown-never-means-ready
@@ -1532,7 +1541,8 @@ mod admission_tests {
                 ..Default::default()
             };
             assert_eq!(
-                file.get(&scope, now).state == crate::ReadinessState::Unavailable,
+                file.get(&scope, now, &crate::DEFAULT_FRESHNESS).state
+                    == crate::ReadinessState::Unavailable,
                 holds
             );
         }
@@ -1669,7 +1679,7 @@ mod admission_tests {
                     account_key: "opaque".into(),
                     route: ReadinessRoute::Account,
                 };
-                let read = readiness.get(&scope, 1_600);
+                let read = readiness.get(&scope, 1_600, &crate::DEFAULT_FRESHNESS);
                 assert_eq!(read.state, crate::ReadinessState::Unknown);
                 assert_eq!(read.reason, Some(crate::ReadinessReason::NotProbed));
                 assert!(readiness.records.iter().all(|record| {

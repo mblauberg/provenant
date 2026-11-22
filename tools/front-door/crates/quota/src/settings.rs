@@ -420,7 +420,14 @@ mod tests {
         });
         record.last_attempt_unix_seconds = Some(100);
         assert_eq!(
-            next_due(&policies, &record, Trigger::Timer, Power::Ac).unwrap(),
+            next_due(
+                &policies,
+                &record,
+                Trigger::Timer,
+                Power::Ac,
+                &crate::DEFAULT_FRESHNESS
+            )
+            .unwrap(),
             Some(100 + interval(&policies, "claude", Trigger::Timer, Power::Ac).unwrap() as i64)
         );
         assert_eq!(

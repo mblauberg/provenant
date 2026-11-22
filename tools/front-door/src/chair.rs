@@ -290,7 +290,7 @@ fn switch(
         threshold,
         context.now(),
         automatic,
-        &provenant_quota::DEFAULT_FRESHNESS,
+        &provenant_cli::quota::quota_freshness(&config.origins, &config.domains.quota),
     );
     let (target, reason) = match decision {
         SwitchDecision::Stay => {

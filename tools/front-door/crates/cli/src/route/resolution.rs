@@ -632,8 +632,14 @@ pub(super) fn with_context<T>(
         &scope.account_key,
         now,
     ) {
-        Some(reprobe) => crate::quota::read_readiness_after_probe(state, scope, now, Some(reprobe)),
-        None => crate::quota::read_readiness(state, scope, now),
+        Some(reprobe) => crate::quota::read_readiness_after_probe(
+            state,
+            scope,
+            now,
+            Some(reprobe),
+            &config.freshness,
+        ),
+        None => crate::quota::read_readiness(state, scope, now, &config.freshness),
     };
     action(
         &RoutingContext {
@@ -1004,6 +1010,7 @@ pub(crate) fn resolve_dispatch_excluding_family(
             };
             let context = &scoped;
             let facts = super::admission::AdmissionFacts {
+                freshness: &context.config.freshness,
                 policy: &context.config.launch_policy,
                 policies,
                 now_unix_seconds: context.now.as_timestamp().as_second(),
@@ -1146,13 +1153,15 @@ pub(crate) fn check_dispatch_candidate(
     let catalogue = crate::model_discovery::effective(roots)?;
     let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
     let resolved_config = crate::config_reads::read_for(roots, "route")?;
+    let freshness =
+        crate::quota::quota_freshness(&resolved_config.origins, &resolved_config.domains.quota);
     let domains = resolved_config.domains;
     let pools = catalogue.admission_pools(&model);
     let now = SystemClock::new().unix_seconds();
     let records = crate::quota::read_cache(roots)?;
     let (records, policies) = account_evidence(&domains.quota, records, now, registry);
     provenant_quota::Admission {
-        freshness: &provenant_quota::DEFAULT_FRESHNESS,
+        freshness: &freshness,
         policy,
         policies: &policies,
         now_unix_seconds: now,
@@ -1255,7 +1264,7 @@ pub fn resolve_review_family(
                         let pools = context.catalogue.admission_pools(&model);
                         let now = context.now.as_timestamp().as_second();
                         let admission = provenant_quota::Admission {
-                            freshness: &provenant_quota::DEFAULT_FRESHNESS,
+                            freshness: &context.config.freshness,
                             policy: &context.config.launch_policy,
                             policies,
                             now_unix_seconds: now,

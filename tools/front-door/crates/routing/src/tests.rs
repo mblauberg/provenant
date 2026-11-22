@@ -378,7 +378,7 @@ fn readiness_over(
                 .cloned()
                 .collect(),
         }
-        .get(scope, now)
+        .get(scope, now, &provenant_quota::DEFAULT_FRESHNESS)
     }
 }
 

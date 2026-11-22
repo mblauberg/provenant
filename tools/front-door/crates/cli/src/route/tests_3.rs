@@ -94,11 +94,13 @@
         });
         std::fs::write(&readiness_path, serde_json::to_vec(&file)?)?;
         std::fs::set_permissions(&readiness_path, std::fs::Permissions::from_mode(0o600))?;
-        let read = crate::quota::read_readiness(&state, &file.records[0].scope, now);
+        let read = crate::quota::read_readiness(&state, &file.records[0].scope, now, &provenant_quota::DEFAULT_FRESHNESS);
         assert_eq!(read.state, provenant_quota::ReadinessState::Ready, "{read:?}");
         assert_eq!(preview()?, "cursor", "real readiness remains a candidate");
         file.sync_probe_result(&record, provenant_quota::LOCAL_HOST, now, 300,
-            Some(provenant_quota::ReadinessReason::ProbeTimeout))?;
+            Some(provenant_quota::ReadinessReason::ProbeTimeout),
+            &provenant_quota::DEFAULT_FRESHNESS,
+)?;
         std::fs::write(&readiness_path, serde_json::to_vec(&file)?)?;
         assert!(preview().is_err(), "a published local probe failure still constrains preview");
         std::fs::remove_file(&readiness_path)?;

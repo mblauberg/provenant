@@ -28,6 +28,7 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
             let request = resolve_request(&query, context)?;
             let rules = effective_exclusion_rules(exclude, roots)?;
             let facts = super::admission::AdmissionFacts {
+                freshness: &context.config.freshness,
                 policy: &context.config.launch_policy,
                 policies,
                 now_unix_seconds: context.now.as_timestamp().as_second(),

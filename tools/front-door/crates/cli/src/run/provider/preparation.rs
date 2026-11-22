@@ -298,6 +298,7 @@ fn pinned_refusal_warning(
     records: &[provenant_quota::AccountRecord],
     reason: &provenant_records::RouteExclusionReason,
     now: i64,
+    freshness: &provenant_quota::FreshnessPolicy,
 ) -> Option<(String, i64)> {
     use provenant_records::RouteExclusionReason;
     use provenant_records::diagnostic::{Diagnostic, ResourceFact};
@@ -331,9 +332,7 @@ fn pinned_refusal_warning(
                     } else {
                         return None;
                     };
-                    let expiry = refusal
-                        .expires_unix_seconds(&provenant_quota::DEFAULT_FRESHNESS)
-                        .ok()?;
+                    let expiry = refusal.expires_unix_seconds(freshness).ok()?;
                     (expiry > now).then_some((scope, expiry, refusal))
                 })
                 .max_by_key(|(scope, expiry, _)| (*scope, *expiry))
@@ -3120,6 +3119,10 @@ pub(super) fn prepare_candidates_inner(
         .ok_or("routing context is unavailable")?
         .map_err(|error| error.to_string())?;
     config.domains.routing.launch_policy = launch_policy.clone();
+    // One resolved freshness policy for every admission, readiness and
+    // pacing decision this launch makes.
+    let freshness = crate::quota::quota_freshness(&config.origins, &config.domains.quota);
+    config.domains.routing.freshness = freshness;
     // Continue the applied decision rather than redrawing the named pool
     // using the new operation seed.
     let (mut request, retained_identity) = match resume {
@@ -3378,8 +3381,12 @@ pub(super) fn prepare_candidates_inner(
                         account_key: entry.key.clone(),
                         route: provenant_quota::ReadinessRoute::Account,
                     };
-                    let recorded =
-                        crate::quota::read_readiness(roots.state.as_path(), &scope, timestamp);
+                    let recorded = crate::quota::read_readiness(
+                        roots.state.as_path(),
+                        &scope,
+                        timestamp,
+                        &freshness,
+                    );
                     let mismatch = recorded.reason
                         == Some(provenant_quota::ReadinessReason::AccountMismatch)
                         || diagnostic_records.iter().any(|r| {
@@ -3938,6 +3945,7 @@ pub(super) fn prepare_candidates_inner(
                 &diagnostic_records,
                 reason,
                 clock.unix_seconds(),
+                &freshness,
             ) {
                 let availability_ref = route
                     .diagnostics
@@ -4151,6 +4159,7 @@ pub(super) fn prepare_candidates_inner(
                             &diagnostic_records,
                             &provenant_records::RouteExclusionReason::Exhausted,
                             clock.unix_seconds(),
+                            &freshness,
                         )
                         .map(|(warning, _)| warning)
                     } else {
@@ -6932,6 +6941,7 @@ mod candidate_walk_regressions {
             &[],
             &provenant_records::RouteExclusionReason::Exhausted,
             0,
+            &provenant_quota::DEFAULT_FRESHNESS,
         )
         .expect("availability evidence");
         assert!(warning.contains("cursor/legacy"), "{warning}");
@@ -6945,6 +6955,7 @@ mod candidate_walk_regressions {
                 &[],
                 &provenant_records::RouteExclusionReason::Exhausted,
                 0,
+                &provenant_quota::DEFAULT_FRESHNESS,
             )
             .is_none(),
             "no record means no source or expiry to claim"
@@ -6987,6 +6998,7 @@ mod candidate_walk_regressions {
             std::slice::from_ref(&record),
             &provenant_records::RouteExclusionReason::Exhausted,
             0,
+            &provenant_quota::DEFAULT_FRESHNESS,
         )
         .expect("record evidence");
         assert!(warning.contains(&expected_source), "{warning}");
@@ -7015,9 +7027,15 @@ mod candidate_walk_regressions {
             resets_unix_seconds: Some(9_000),
         });
         let reason = provenant_records::RouteExclusionReason::ProviderRefused;
-        let (warning, expiry) =
-            pinned_refusal_warning(&pinned, &[], std::slice::from_ref(&record), &reason, 3_000)
-                .expect("refusal evidence");
+        let (warning, expiry) = pinned_refusal_warning(
+            &pinned,
+            &[],
+            std::slice::from_ref(&record),
+            &reason,
+            3_000,
+            &provenant_quota::DEFAULT_FRESHNESS,
+        )
+        .expect("refusal evidence");
         assert!(warning.contains("cursor/legacy"), "{warning}");
         assert!(
             warning.contains("source: provider refusal observed unix seconds 2000"),
@@ -7026,8 +7044,15 @@ mod candidate_walk_regressions {
         assert!(warning.contains("expiry unix seconds: 9000"), "{warning}");
         assert_eq!(expiry, 9_000);
         assert!(
-            pinned_refusal_warning(&pinned, &[], std::slice::from_ref(&record), &reason, 9_000)
-                .is_none(),
+            pinned_refusal_warning(
+                &pinned,
+                &[],
+                std::slice::from_ref(&record),
+                &reason,
+                9_000,
+                &provenant_quota::DEFAULT_FRESHNESS
+            )
+            .is_none(),
             "an expired refusal is not evidence for an advisory launch"
         );
     }
@@ -7059,6 +7084,7 @@ mod candidate_walk_regressions {
             &records,
             &provenant_records::RouteExclusionReason::ProviderRefused,
             5_001,
+            &provenant_quota::DEFAULT_FRESHNESS,
         )
         .expect("persisted refusal evidence");
         assert!(

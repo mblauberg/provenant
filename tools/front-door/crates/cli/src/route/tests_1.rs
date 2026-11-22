@@ -104,7 +104,7 @@
             &[],
             None,
             Some("one"),
-            |requested| file.get(requested, 15),
+            |requested| file.get(requested, 15, &provenant_quota::DEFAULT_FRESHNESS),
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].host, provenant_quota::LOCAL_HOST);
@@ -122,7 +122,7 @@
             &[],
             None,
             Some("two"),
-            |requested| file.get(requested, 15),
+            |requested| file.get(requested, 15, &provenant_quota::DEFAULT_FRESHNESS),
         );
         assert_eq!(other[0].observation.state, ReadinessState::Ready);
         assert_eq!(other[0].observation.observed_unix_seconds, Some(11));
@@ -132,7 +132,7 @@
             &["verified-pool".into()],
             None,
             Some("two"),
-            |requested| file.get(requested, 15),
+            |requested| file.get(requested, 15, &provenant_quota::DEFAULT_FRESHNESS),
         );
         assert_eq!(
             pooled[0].observation.reason,
@@ -149,7 +149,7 @@
             &[],
             None,
             Some("one"),
-            |requested| file.get(requested, 15),
+            |requested| file.get(requested, 15, &provenant_quota::DEFAULT_FRESHNESS),
         );
         assert_eq!(other[0].observation.state, ReadinessState::Unknown);
         Ok(())
@@ -388,6 +388,7 @@
                 now - 10,
                 300,
                 Some(ReadinessReason::SignedOut),
+                &provenant_quota::DEFAULT_FRESHNESS,
             )?;
             let path = dir.join(format!("{adapter}.json"));
             std::fs::write(&path, serde_json::to_vec(&file)?)?;
@@ -489,6 +490,7 @@
             now - 10,
             300,
             Some(ReadinessReason::SignedOut),
+            &provenant_quota::DEFAULT_FRESHNESS,
         )?;
         let path = dir.join("opencode.json");
         std::fs::write(&path, serde_json::to_vec(&file)?)?;
@@ -563,7 +565,8 @@
                     account_key: "go".into(),
                     route: provenant_quota::ReadinessRoute::from_text("opencode/opencode-go/deepseek-v4.1-flash")
                 },
-                now
+                now,
+                &provenant_quota::DEFAULT_FRESHNESS,
             )
             .reason,
             Some(ReadinessReason::SignedOut)
@@ -583,6 +586,7 @@
             now - 10,
             300,
             Some(ReadinessReason::SignedOut),
+            &provenant_quota::DEFAULT_FRESHNESS,
         )?;
         let zen_path = zen_dir.join("opencode.json");
         std::fs::write(&zen_path, serde_json::to_vec(&zen_readiness)?)?;

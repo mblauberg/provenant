@@ -582,7 +582,13 @@ fn expired_login_observation_warns_and_remains_selectable() -> Result<(), Box<dy
     let records = [availability()];
     let access = readiness_access();
     for cached in [false, true] {
-        let lookup = |scope: &ReadinessScope, time| file.get(scope, if cached { 90 } else { time });
+        let lookup = |scope: &ReadinessScope, time| {
+            file.get(
+                scope,
+                if cached { 90 } else { time },
+                &provenant_quota::DEFAULT_FRESHNESS,
+            )
+        };
         let context = RoutingContext {
             availability: &records,
             access: &access,

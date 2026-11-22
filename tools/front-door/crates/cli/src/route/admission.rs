@@ -93,6 +93,7 @@ pub(crate) struct AdmissionOptions<'a> {
 /// Quota facts one resolution admits against. Built once from the same cache
 /// and policies for every candidate in the search.
 pub(crate) struct AdmissionFacts<'a> {
+    pub freshness: &'a provenant_quota::FreshnessPolicy,
     pub policy: &'a provenant_records::policy::Policy,
     pub policies: &'a [provenant_quota::QuotaPolicy],
     pub now_unix_seconds: i64,
@@ -103,7 +104,7 @@ pub(crate) struct AdmissionFacts<'a> {
 impl AdmissionFacts<'_> {
     fn admission<'a>(&'a self, pools: &'a [String]) -> provenant_quota::Admission<'a> {
         provenant_quota::Admission {
-            freshness: &provenant_quota::DEFAULT_FRESHNESS,
+            freshness: self.freshness,
             policy: self.policy,
             policies: self.policies,
             now_unix_seconds: self.now_unix_seconds,

@@ -393,16 +393,11 @@ impl ReadinessFile {
         Ok(())
     }
 
-    /// The readiness of one route. An account-wide unavailable observation
-    /// covers every route of that account; any other gap reads as unknown.
-    pub fn get(&self, scope: &ReadinessScope, now: i64) -> ReadinessRead {
-        self.get_with(scope, now, &crate::DEFAULT_FRESHNESS)
-    }
-
-    /// Readiness under an explicit [`crate::FreshnessPolicy`]. Reporting,
-    /// routing and admission pass their resolved policy here so one rule set
-    /// decides every observation's lifetime.
-    pub fn get_with(
+    /// The readiness of one route under the caller's resolved
+    /// [`crate::FreshnessPolicy`], so one rule set decides every
+    /// observation's lifetime. An account-wide unavailable observation covers
+    /// every route of that account; any other gap reads as unknown.
+    pub fn get(
         &self,
         scope: &ReadinessScope,
         now: i64,
@@ -525,7 +520,7 @@ impl ReadinessFile {
         };
         // The account-wide failure supersedes this host's per-route facts.
         // The account record remains the source for restoring held refusals.
-        let account_read = self.get(&scope, now);
+        let account_read = self.get(&scope, now, admission.freshness);
         if account_read.state == ReadinessState::Unavailable
             && account_read.evidence_ref.as_deref() == Some(QUOTA_PROBE)
         {
@@ -601,6 +596,7 @@ impl ReadinessFile {
         now: i64,
         interval_seconds: u64,
         reason: Option<ReadinessReason>,
+        freshness: &crate::FreshnessPolicy,
     ) -> Result<(), QuotaError> {
         let account_scope = ReadinessScope {
             extra: Default::default(),
@@ -638,7 +634,7 @@ impl ReadinessFile {
                             && record.evidence_ref.as_deref() == Some(QUOTA_PROBE))))
         });
         if let Some(reason) = reason {
-            let expires = crate::DEFAULT_FRESHNESS.readiness_expiry(now, interval_seconds);
+            let expires = freshness.readiness_expiry(now, interval_seconds);
             self.records.push(RouteReadiness {
                 extra: previous
                     .as_ref()
@@ -670,7 +666,7 @@ impl ReadinessFile {
                     Some(ReadinessReason::ProbedNoFigures),
                 ),
             };
-            let expires = crate::DEFAULT_FRESHNESS.readiness_expiry(now, interval_seconds);
+            let expires = freshness.readiness_expiry(now, interval_seconds);
             self.records.push(RouteReadiness {
                 extra: previous
                     .as_ref()
@@ -758,15 +754,15 @@ mod tests {
             route: ReadinessRoute::from_text("claude/model"),
         };
         assert_eq!(
-            file.get(&route, 199).reason,
+            file.get(&route, 199, &crate::DEFAULT_FRESHNESS).reason,
             Some(ReadinessReason::NotProbed)
         );
-        let expired = file.get(&route, 200);
+        let expired = file.get(&route, 200, &crate::DEFAULT_FRESHNESS);
         assert_eq!(expired.state, ReadinessState::Unknown);
         assert_eq!(expired.reason, Some(ReadinessReason::NotProbed));
         assert!(expired.project().is_unknown());
         assert_eq!(
-            file.get(&route, 300).reason,
+            file.get(&route, 300, &crate::DEFAULT_FRESHNESS).reason,
             Some(ReadinessReason::NotProbed)
         );
         let other = ReadinessScope {
@@ -775,7 +771,7 @@ mod tests {
             ..route.clone()
         };
         assert_eq!(
-            file.get(&other, 200).reason,
+            file.get(&other, 200, &crate::DEFAULT_FRESHNESS).reason,
             Some(ReadinessReason::NotProbed)
         );
         let remote = ReadinessScope {
@@ -784,7 +780,7 @@ mod tests {
             ..route
         };
         assert_eq!(
-            file.get(&remote, 200).reason,
+            file.get(&remote, 200, &crate::DEFAULT_FRESHNESS).reason,
             Some(ReadinessReason::NotProbed)
         );
     }
@@ -810,22 +806,91 @@ mod tests {
             ReadinessReason::AccountMismatch,
         ] {
             let mut file = ReadinessFile::default();
-            file.sync_probe_result(&account, LOCAL_HOST, 100, 60, Some(reason))
-                .unwrap();
-            file.sync_probe_result(&account, LOCAL_HOST, 120, 60, None)
-                .unwrap();
-            assert_eq!(file.get(&scope, 159).reason, Some(reason));
+            file.sync_probe_result(
+                &account,
+                LOCAL_HOST,
+                100,
+                60,
+                Some(reason),
+                &crate::DEFAULT_FRESHNESS,
+            )
+            .unwrap();
+            file.sync_probe_result(
+                &account,
+                LOCAL_HOST,
+                120,
+                60,
+                None,
+                &crate::DEFAULT_FRESHNESS,
+            )
+            .unwrap();
+            assert_eq!(
+                file.get(&scope, 159, &crate::DEFAULT_FRESHNESS).reason,
+                Some(reason)
+            );
             if reason == ReadinessReason::AccountMismatch {
-                file.sync_probe_result(&account, LOCAL_HOST, 161, 60, None)
-                    .unwrap();
-                assert_eq!(file.get(&scope, 161).reason, Some(reason));
+                file.sync_probe_result(
+                    &account,
+                    LOCAL_HOST,
+                    161,
+                    60,
+                    None,
+                    &crate::DEFAULT_FRESHNESS,
+                )
+                .unwrap();
+                assert_eq!(
+                    file.get(&scope, 161, &crate::DEFAULT_FRESHNESS).reason,
+                    Some(reason)
+                );
             } else {
-                assert_ne!(file.get(&scope, 160).state, ReadinessState::Unavailable);
-                file.sync_probe_result(&account, LOCAL_HOST, 161, 60, None)
-                    .unwrap();
-                assert_ne!(file.get(&scope, 161).state, ReadinessState::Unavailable);
+                assert_ne!(
+                    file.get(&scope, 160, &crate::DEFAULT_FRESHNESS).state,
+                    ReadinessState::Unavailable
+                );
+                file.sync_probe_result(
+                    &account,
+                    LOCAL_HOST,
+                    161,
+                    60,
+                    None,
+                    &crate::DEFAULT_FRESHNESS,
+                )
+                .unwrap();
+                assert_ne!(
+                    file.get(&scope, 161, &crate::DEFAULT_FRESHNESS).state,
+                    ReadinessState::Unavailable
+                );
             }
         }
+    }
+
+    #[test]
+    fn readiness_lifetime_follows_the_configured_freshness() {
+        let account = crate::AccountRecord::empty(crate::AccountScope {
+            extra: Default::default(),
+            adapter: "opencode".into(),
+            account_key: "key".into(),
+            label: "label".into(),
+        });
+        let configured = crate::FreshnessPolicy::from_settings(crate::FreshnessSettings {
+            readiness_min_seconds: 500,
+            ..Default::default()
+        });
+        let expiry = |freshness: &crate::FreshnessPolicy| {
+            let mut file = ReadinessFile::default();
+            file.sync_probe_result(
+                &account,
+                LOCAL_HOST,
+                100,
+                60,
+                Some(ReadinessReason::SignedOut),
+                freshness,
+            )
+            .unwrap();
+            file.records[0].expires_unix_seconds
+        };
+        assert_eq!(expiry(&crate::DEFAULT_FRESHNESS), 160);
+        assert_eq!(expiry(&configured), 600);
     }
 
     #[test]
@@ -845,6 +910,7 @@ mod tests {
             100,
             60,
             Some(ReadinessReason::LoginExpired),
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         let scope = ReadinessScope {
@@ -855,7 +921,7 @@ mod tests {
             route: ReadinessRoute::from_text("claude/model"),
         };
         assert_eq!(
-            file.get(&scope, 159).reason,
+            file.get(&scope, 159, &crate::DEFAULT_FRESHNESS).reason,
             Some(ReadinessReason::LoginExpired)
         );
         let account_scope = ReadinessScope {
@@ -864,7 +930,8 @@ mod tests {
             ..scope.clone()
         };
         assert_eq!(
-            file.get(&account_scope, 160).reason,
+            file.get(&account_scope, 160, &crate::DEFAULT_FRESHNESS)
+                .reason,
             Some(ReadinessReason::LoginExpired)
         );
         file.sync_probe_result(
@@ -873,28 +940,50 @@ mod tests {
             500,
             60,
             Some(ReadinessReason::ProbeTimeout),
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         file.sync_refusals(&account, LOCAL_HOST, &at(&account, 500))
             .unwrap();
         assert_eq!(
-            file.get(&scope, 500).reason,
+            file.get(&scope, 500, &crate::DEFAULT_FRESHNESS).reason,
             Some(ReadinessReason::LoginExpired)
         );
-        file.sync_probe_result(&account, LOCAL_HOST, 99, 60, None)
-            .unwrap();
-        file.sync_probe_result(&account, LOCAL_HOST, 100, 60, None)
-            .unwrap();
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            99,
+            60,
+            None,
+            &crate::DEFAULT_FRESHNESS,
+        )
+        .unwrap();
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            100,
+            60,
+            None,
+            &crate::DEFAULT_FRESHNESS,
+        )
+        .unwrap();
         assert_eq!(
-            file.get(&scope, 500).reason,
+            file.get(&scope, 500, &crate::DEFAULT_FRESHNESS).reason,
             Some(ReadinessReason::LoginExpired)
         );
         // #3342: a successful probe with no figures reads as probed, not as
         // "not probed", so the hint to run `quota tick` is not repeated.
-        file.sync_probe_result(&account, LOCAL_HOST, 501, 60, None)
-            .unwrap();
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            501,
+            60,
+            None,
+            &crate::DEFAULT_FRESHNESS,
+        )
+        .unwrap();
         assert_eq!(
-            file.get(&scope, 501).reason,
+            file.get(&scope, 501, &crate::DEFAULT_FRESHNESS).reason,
             Some(ReadinessReason::LoginExpired)
         );
         account.auth_state = Some(crate::AuthState {
@@ -902,10 +991,17 @@ mod tests {
             observed_unix_seconds: Some(100),
             ..Default::default()
         });
-        file.sync_probe_result(&account, LOCAL_HOST, 501, 60, None)
-            .unwrap();
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            501,
+            60,
+            None,
+            &crate::DEFAULT_FRESHNESS,
+        )
+        .unwrap();
         assert_eq!(
-            file.get(&scope, 501).reason,
+            file.get(&scope, 501, &crate::DEFAULT_FRESHNESS).reason,
             Some(ReadinessReason::LoginExpired)
         );
         account.auth_state = Some(crate::AuthState {
@@ -913,10 +1009,17 @@ mod tests {
             observed_unix_seconds: Some(501),
             ..Default::default()
         });
-        file.sync_probe_result(&account, LOCAL_HOST, 501, 60, None)
-            .unwrap();
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            501,
+            60,
+            None,
+            &crate::DEFAULT_FRESHNESS,
+        )
+        .unwrap();
         assert_eq!(
-            file.get(&scope, 501).reason,
+            file.get(&scope, 501, &crate::DEFAULT_FRESHNESS).reason,
             Some(ReadinessReason::ProbedNoFigures)
         );
     }
@@ -955,7 +1058,7 @@ mod tests {
             (19, None),
             (20, Some(ReadinessReason::Stale)),
         ] {
-            let read = file.get(&scope, now);
+            let read = file.get(&scope, now, &crate::DEFAULT_FRESHNESS);
             if let Some(reason) = reason {
                 assert_eq!(read.state, ReadinessState::Unknown);
                 assert_eq!(read.reason, Some(reason));
@@ -976,25 +1079,31 @@ mod tests {
         }
         let mut other = scope.clone();
         other.route = ReadinessRoute::from_text("other");
-        assert_eq!(file.get(&other, 15), ReadinessRead::absent());
+        assert_eq!(
+            file.get(&other, 15, &crate::DEFAULT_FRESHNESS),
+            ReadinessRead::absent()
+        );
         for evidence in ["".into(), "x".repeat(257), "bad/path".into()] {
             file.records[0].evidence_ref = Some(evidence);
             assert_eq!(
-                file.get(&scope, 15),
+                file.get(&scope, 15, &crate::DEFAULT_FRESHNESS),
                 ReadinessRead::unknown(ReadinessReason::InvalidEvidence)
             );
         }
         file.records[0].evidence_ref = Some("x".repeat(256));
-        assert_eq!(file.get(&scope, 15).state, ReadinessState::Unavailable);
+        assert_eq!(
+            file.get(&scope, 15, &crate::DEFAULT_FRESHNESS).state,
+            ReadinessState::Unavailable
+        );
         file.records[0].expires_unix_seconds = 10;
         assert_eq!(
-            file.get(&scope, 15),
+            file.get(&scope, 15, &crate::DEFAULT_FRESHNESS),
             ReadinessRead::unknown(ReadinessReason::InvalidEvidence)
         );
         file.records[0].expires_unix_seconds = 20;
         file.records[0].schema_version = 2;
         assert_eq!(
-            file.get(&scope, 15),
+            file.get(&scope, 15, &crate::DEFAULT_FRESHNESS),
             ReadinessRead::unknown(ReadinessReason::InvalidEvidence)
         );
     }
@@ -1023,15 +1132,36 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert_eq!(file.get(&scope, 10).state, ReadinessState::Ready);
-        assert_eq!(file.get(&scope, 10).observed_unix_seconds, Some(10));
-        assert_eq!(file.get(&scope, 9).observed_unix_seconds, None);
-        assert_eq!(file.get(&scope, 20).observed_unix_seconds, Some(10));
-        assert_eq!(file.get(&scope, 9).state, ReadinessState::Unknown);
-        assert_eq!(file.get(&scope, 20).state, ReadinessState::Unknown);
+        assert_eq!(
+            file.get(&scope, 10, &crate::DEFAULT_FRESHNESS).state,
+            ReadinessState::Ready
+        );
+        assert_eq!(
+            file.get(&scope, 10, &crate::DEFAULT_FRESHNESS)
+                .observed_unix_seconds,
+            Some(10)
+        );
+        assert_eq!(
+            file.get(&scope, 9, &crate::DEFAULT_FRESHNESS)
+                .observed_unix_seconds,
+            None
+        );
+        assert_eq!(
+            file.get(&scope, 20, &crate::DEFAULT_FRESHNESS)
+                .observed_unix_seconds,
+            Some(10)
+        );
+        assert_eq!(
+            file.get(&scope, 9, &crate::DEFAULT_FRESHNESS).state,
+            ReadinessState::Unknown
+        );
+        assert_eq!(
+            file.get(&scope, 20, &crate::DEFAULT_FRESHNESS).state,
+            ReadinessState::Unknown
+        );
         let mut account_only = file.clone();
         account_only.records[0].scope.route = ReadinessRoute::Account;
-        let model_read = account_only.get(&scope, 10);
+        let model_read = account_only.get(&scope, 10, &crate::DEFAULT_FRESHNESS);
         assert_eq!(model_read.state, ReadinessState::Unknown);
         assert!(model_read.observed_scope.is_none());
         for other in [
@@ -1056,7 +1186,10 @@ mod tests {
                 ..scope.clone()
             },
         ] {
-            assert_eq!(file.get(&other, 10).state, ReadinessState::Unknown);
+            assert_eq!(
+                file.get(&other, 10, &crate::DEFAULT_FRESHNESS).state,
+                ReadinessState::Unknown
+            );
         }
     }
 
@@ -1182,23 +1315,33 @@ mod tests {
             150,
             300,
             Some(ReadinessReason::ProbeTimeout),
+            &crate::DEFAULT_FRESHNESS,
         )
         .unwrap();
         file = ReadinessFile::decode(&serde_json::to_vec(&file).unwrap(), "claude", "key").unwrap();
         assert_eq!(
-            file.get(&route("pool-0"), 150).reason,
+            file.get(&route("pool-0"), 150, &crate::DEFAULT_FRESHNESS)
+                .reason,
             Some(ReadinessReason::ProbeTimeout)
         );
         file.sync_refusals(&account, LOCAL_HOST, &at(&account, 160))
             .unwrap();
         assert!(file.records.len() <= MAX_READINESS_RECORDS);
-        file.sync_probe_result(&account, LOCAL_HOST, 170, 300, None)
-            .unwrap();
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            170,
+            300,
+            None,
+            &crate::DEFAULT_FRESHNESS,
+        )
+        .unwrap();
         file.sync_refusals(&account, LOCAL_HOST, &at(&account, 170))
             .unwrap();
         assert_eq!(file.records.len(), MAX_READINESS_RECORDS);
         assert_eq!(
-            file.get(&route("pool-0"), 170).reason,
+            file.get(&route("pool-0"), 170, &crate::DEFAULT_FRESHNESS)
+                .reason,
             Some(ReadinessReason::ProviderRefusal)
         );
     }
@@ -1248,7 +1391,10 @@ mod tests {
         let mut file = ReadinessFile::default();
         let mut record = crate::AccountRecord::empty(account());
         // Nothing recorded reads as unknown, never ready.
-        assert_eq!(file.get(&route("claude/m"), 150), ReadinessRead::absent());
+        assert_eq!(
+            file.get(&route("claude/m"), 150, &crate::DEFAULT_FRESHNESS),
+            ReadinessRead::absent()
+        );
         record.refusals = vec![
             refused(Some("pool"), "m", Some(500)),
             refused(None, "other", None),
@@ -1287,7 +1433,8 @@ mod tests {
         file.sync_refusals(&record, LOCAL_HOST, &at(&record, 150))
             .unwrap();
         assert_eq!(
-            file.get(&route("pool"), 150).state,
+            file.get(&route("pool"), 150, &crate::DEFAULT_FRESHNESS)
+                .state,
             ReadinessState::Unavailable
         );
         file.sync_refusals(&record, LOCAL_HOST, &at(&record, 160))
@@ -1305,27 +1452,32 @@ mod tests {
         let bytes = serde_json::to_vec(&file).unwrap();
         file = ReadinessFile::decode(&bytes, "claude", "key").unwrap();
         // A pool refusal covers its pool only; a model refusal only its model.
-        let pool = file.get(&route("pool"), 150);
+        let pool = file.get(&route("pool"), 150, &crate::DEFAULT_FRESHNESS);
         assert_eq!(pool.state, ReadinessState::Unavailable);
         assert_eq!(pool.reason, Some(ReadinessReason::ProviderRefusal));
         assert_eq!(pool.reset_unix_seconds, Some(500));
         assert!(!pool.project().is_unknown());
         assert_eq!(
-            file.get(&route("claude/m"), 150).state,
+            file.get(&route("claude/m"), 150, &crate::DEFAULT_FRESHNESS)
+                .state,
             ReadinessState::Unknown
         );
         assert_eq!(
-            file.get(&route("claude/other"), 150).expires_unix_seconds,
+            file.get(&route("claude/other"), 150, &crate::DEFAULT_FRESHNESS)
+                .expires_unix_seconds,
             Some(3700)
         );
         // Expiry reads as unknown and the reset alone never makes it ready.
-        let lapsed = file.get(&route("pool"), 500);
+        let lapsed = file.get(&route("pool"), 500, &crate::DEFAULT_FRESHNESS);
         assert_eq!(lapsed.state, ReadinessState::Unknown);
         assert!(lapsed.project().is_unknown());
         // Another account's identity is not covered.
         let mut elsewhere = route("pool");
         elsewhere.account_key = "other".into();
-        assert_eq!(file.get(&elsewhere, 150).state, ReadinessState::Unknown);
+        assert_eq!(
+            file.get(&elsewhere, 150, &crate::DEFAULT_FRESHNESS).state,
+            ReadinessState::Unknown
+        );
         // Pool headroom clears that pool's refusal. A model with no pool
         // remains refused while any reported window lacks headroom (#3450).
         record.snapshot = Some(crate::QuotaSnapshot {
@@ -1357,9 +1509,14 @@ mod tests {
         });
         file.sync_refusals(&record, LOCAL_HOST, &at(&record, 200))
             .unwrap();
-        assert_eq!(file.get(&route("pool"), 200).state, ReadinessState::Unknown);
         assert_eq!(
-            file.get(&route("claude/other"), 200).state,
+            file.get(&route("pool"), 200, &crate::DEFAULT_FRESHNESS)
+                .state,
+            ReadinessState::Unknown
+        );
+        assert_eq!(
+            file.get(&route("claude/other"), 200, &crate::DEFAULT_FRESHNESS)
+                .state,
             ReadinessState::Unavailable
         );
         // Once every window has headroom, the unbound model refusal clears
@@ -1368,7 +1525,8 @@ mod tests {
         file.sync_refusals(&record, LOCAL_HOST, &at(&record, 210))
             .unwrap();
         assert_eq!(
-            file.get(&route("claude/other"), 210).state,
+            file.get(&route("claude/other"), 210, &crate::DEFAULT_FRESHNESS)
+                .state,
             ReadinessState::Unknown
         );
         // The file refuses another account's records.
@@ -1379,8 +1537,15 @@ mod tests {
     fn probed_no_figures_does_not_mask_route_unavailable() {
         let mut account_record = crate::AccountRecord::empty(account());
         let mut file = ReadinessFile::default();
-        file.sync_probe_result(&account_record, LOCAL_HOST, 100, 60, None)
-            .unwrap();
+        file.sync_probe_result(
+            &account_record,
+            LOCAL_HOST,
+            100,
+            60,
+            None,
+            &crate::DEFAULT_FRESHNESS,
+        )
+        .unwrap();
 
         let refused_scope = route("claude/refused");
         file.records.push(RouteReadiness {
@@ -1412,7 +1577,7 @@ mod tests {
                 Some(ReadinessReason::ProbedNoFigures),
             ),
         ] {
-            let read = file.get(query_scope, 120);
+            let read = file.get(query_scope, 120, &crate::DEFAULT_FRESHNESS);
             assert_eq!(read.state, expected_state);
             assert_eq!(read.reason, expected_reason);
         }
@@ -1435,7 +1600,7 @@ mod tests {
                 Some(ReadinessReason::ProbedNoFigures),
             ),
         ] {
-            let read = file.get(query_scope, 120);
+            let read = file.get(query_scope, 120, &crate::DEFAULT_FRESHNESS);
             assert_eq!(read.state, expected_state);
             assert_eq!(read.reason, expected_reason);
         }
