@@ -186,14 +186,30 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
         roots::Product::Required,
     ) {
         Ok(resolved) => resolved,
-        Err(error) => return fail(LEAF, Outcome::Invalid, "PR", &error.to_string(), globals),
+        Err(error) => {
+            return fail(
+                LEAF,
+                Outcome::Invalid,
+                "PR",
+                &error.to_string(),
+                crate::REPAIR_ROOT,
+                globals,
+            );
+        }
     };
     let project = resolved.project.clone();
     let plan = match plan(&command, globals, &project, &resolved) {
         Ok(plan) => plan,
         Err(error) => {
             let code = code_of(error.as_ref(), "PR");
-            return fail(LEAF, Outcome::Invalid, code, &error.to_string(), globals);
+            return fail(
+                LEAF,
+                Outcome::Invalid,
+                code,
+                &error.to_string(),
+                "correct the reported pull request plan error and rerun `provenant pr open`",
+                globals,
+            );
         }
     };
     let mut data = json!({
@@ -276,7 +292,14 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
                 false,
             )
         }
-        Err(error) => fail(LEAF, Outcome::Error, "PR", &error.to_string(), globals),
+        Err(error) => fail(
+            LEAF,
+            Outcome::Error,
+            "PR",
+            &error.to_string(),
+            "resolve the reported pull request error and rerun `provenant pr open`",
+            globals,
+        ),
     }
 }
 

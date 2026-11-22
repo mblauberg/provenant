@@ -125,10 +125,39 @@ impl Error {
         }
     }
 
-    pub(crate) fn repair(&self) -> Option<&'static str> {
+    /// The concrete next step for every worktree refusal. Inner worktree
+    /// errors with no declared step fall back to a real inspection command, so
+    /// no refusal reaches `command_error` without an actionable repair.
+    pub(crate) fn repair(&self) -> &'static str {
         match self {
-            Self::Worktree(error) => error.repair(),
-            _ => None,
+            Self::Worktree(error) => error.repair().unwrap_or(
+                "run `provenant worktree list` to inspect the condition, then retry the worktree command",
+            ),
+            Self::Root(_) => crate::REPAIR_ROOT,
+            Self::Fabric(_) => {
+                "resolve the reported fabric error, then retry the worktree command"
+            }
+            Self::Permissions(_) => {
+                "correct the reported permission and rerun the worktree command"
+            }
+            Self::CacheGc(..) | Self::RetentionCollection(_) | Self::GcObservation(_) => {
+                "resolve the reported collection error, then rerun `provenant worktree gc`"
+            }
+            Self::Utility(_) => "correct the reported utility error and retry the worktree command",
+            Self::Config(_) | Self::GitConfigRead(_) => crate::REPAIR_CONFIG,
+            Self::Fs(_) | Self::Exec(_) | Self::DiskSpace(_) => crate::REPAIR_IO,
+            Self::GitUnavailable => "install Git on PATH, then retry the worktree command",
+            Self::Budget => "wait for the running worktree operation to finish, then retry",
+            Self::GraphGc(_) => {
+                "resolve the reported graph collection error, then rerun `provenant graph gc`"
+            }
+            Self::InvalidScope => {
+                "name a worktree or pass --all to `provenant worktree remove`"
+            }
+            Self::SeedBuild { .. } => {
+                "fix the reported build.prepare failure, then rerun `provenant worktree seed-build`"
+            }
+            Self::Settlement(_) => "wait for the writer to settle, then retry the worktree command",
         }
     }
 
@@ -247,6 +276,7 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
                 Outcome::Error,
                 "ENCODE",
                 "cannot encode worktree result",
+                "rerun the worktree command with `--json`, or report the encoding failure if it persists",
                 globals,
             ),
         },
@@ -936,13 +966,12 @@ const GC_REPAIR: &str =
 
 fn gc_failure<'a>(data: &'a GcData, message: &str, detailed: bool) -> CommandResult<GcOutput<'a>> {
     let mut result = CommandResult::new("gc", Outcome::Error, gc_result_data(data, detailed));
-    result.error = Some(provenant_records::CommandError {
-        diagnostic: None,
-        code: "GC".into(),
-        message: format!("{message}\n{}{GC_REPAIR}", gc_data_summary(data)),
-        cause: None,
-        repair: Some(GC_REPAIR.into()),
-    });
+    result.error = Some(provenant_records::CommandError::new(
+        "GC",
+        format!("{message}\n{}{GC_REPAIR}", gc_data_summary(data)),
+        None,
+        GC_REPAIR,
+    ));
     result
 }
 
@@ -1018,7 +1047,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 Outcome::Refused,
                 "GC",
                 "targeted scratch collection requires --apply and excludes --dry-run",
-                Some(GC_REPAIR),
+                GC_REPAIR,
                 globals,
             );
         }
@@ -1088,7 +1117,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
             error.outcome(),
             "GC",
             &error.local_message(),
-            Some(GC_REPAIR),
+            GC_REPAIR,
             globals,
         ),
     }

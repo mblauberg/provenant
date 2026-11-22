@@ -189,13 +189,16 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
                 _ => (Outcome::Error, "CATALOGUE"),
             };
             let mut result = CommandResult::new(leaf, status, None);
-            result.error = Some(CommandError {
-                diagnostic: None,
-                code: code.into(),
-                message: error.to_string(),
-                cause: None,
-                repair: None,
-            });
+            result.error = Some(CommandError::new(
+                code,
+                error.to_string(),
+                None,
+                if code == "CATALOGUE_INPUT" {
+                    "pass a valid cursor or generation, then rerun the console command"
+                } else {
+                    "check the reported console catalogue error, then rerun the console command"
+                },
+            ));
             result
         }
     };
@@ -349,13 +352,12 @@ fn open(globals: &Globals) -> u8 {
 
 fn unavailable(message: String) -> CommandResult<Option<serde_json::Value>> {
     let mut result = CommandResult::new("console open", Outcome::Error, None);
-    result.error = Some(CommandError {
-        diagnostic: None,
-        code: "CONSOLE_APP_UNAVAILABLE".into(),
+    result.error = Some(CommandError::new(
+        "CONSOLE_APP_UNAVAILABLE",
         message,
-        cause: None,
-        repair: None,
-    });
+        None,
+        "run `provenant install` to provide the console app, then rerun `provenant console open`",
+    ));
     result
 }
 
@@ -576,13 +578,12 @@ fn render(
         }
         Err(error) => {
             let mut failure = CommandResult::new(&result.command, Outcome::Error, ());
-            failure.error = Some(CommandError {
-                diagnostic: None,
-                code: "IO".into(),
-                message: error.to_string(),
-                cause: None,
-                repair: None,
-            });
+            failure.error = Some(CommandError::new(
+                "IO",
+                error.to_string(),
+                None,
+                crate::REPAIR_IO,
+            ));
             if json {
                 let _ = provenant_cli::render(&failure, RenderMode::Json, stdout);
             } else {

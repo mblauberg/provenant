@@ -527,6 +527,7 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
             Outcome::Error,
             "tick_gc",
             &error.to_string(),
+            "resolve the reported GC error and rerun `provenant tick`",
             globals,
         ),
     }
@@ -1504,6 +1505,7 @@ pub(crate) fn seed_worker(globals: &Globals) -> u8 {
             Outcome::Error,
             "tick_seed",
             &error.to_string(),
+            "wait for the seed worker to release its lock, then rerun `provenant tick`",
             globals,
         ),
     }
@@ -1973,7 +1975,14 @@ pub(crate) fn run(globals: &Globals, workers: &'static dyn WorkerObserver) -> u8
                 Some(&summary),
             )
         }
-        Err(error) => crate::fail("tick", Outcome::Error, "tick", &error.to_string(), globals),
+        Err(error) => crate::fail(
+            "tick",
+            Outcome::Error,
+            "tick",
+            &error.to_string(),
+            "correct the reported tick error and rerun `provenant tick`",
+            globals,
+        ),
     }
 }
 

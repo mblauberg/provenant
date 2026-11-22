@@ -343,16 +343,7 @@ pub fn render_within<T: Serialize>(
     writer: &mut impl Write,
     limit: usize,
 ) -> Result<(), RenderError> {
-    let mut error = result.error.clone();
-    if let Some(error) = &mut error {
-        error.repair.get_or_insert_with(|| {
-            let command = match result.command.as_str() {
-                "parse" | "help" => "--all",
-                command => command,
-            };
-            format!("run `provenant help {command}`")
-        });
-    }
+    let error = result.error.clone();
     let result = CommandResult {
         schema_version: result.schema_version,
         command: result.command.clone(),
@@ -720,13 +711,12 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let cause = "npm ERR! Cannot find package 'zod'\nnext line of output";
         let mut result = CommandResult::new("worktree seed-build", Outcome::Error, ());
-        result.error = Some(provenant_records::CommandError {
-            diagnostic: None,
-            code: "WORKTREE".into(),
-            message: "target seed build: build.prepare[0] command failed (exit 1)".into(),
-            cause: Some(cause.into()),
-            repair: Some("run `provenant worktree seed-build`".into()),
-        });
+        result.error = Some(provenant_records::CommandError::new(
+            "WORKTREE",
+            "target seed build: build.prepare[0] command failed (exit 1)",
+            Some(cause),
+            "run `provenant worktree seed-build`",
+        ));
         let human_mode = || RenderMode::Human {
             text: "",
             read_only: false,
@@ -774,13 +764,12 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let cause = format!("npm ERR! {}\nsecond line\nthird line", "z".repeat(300));
         let mut result = CommandResult::new("worktree seed-build", Outcome::Error, ());
-        result.error = Some(provenant_records::CommandError {
-            diagnostic: None,
-            code: "WORKTREE".into(),
-            message: "target seed build: build.prepare[0] command failed".into(),
-            cause: Some(cause),
-            repair: None,
-        });
+        result.error = Some(provenant_records::CommandError::new(
+            "WORKTREE",
+            "target seed build: build.prepare[0] command failed",
+            Some(cause.as_str()),
+            "run `provenant worktree seed-build`",
+        ));
         let mut compact = Vec::new();
         render(
             &result,
@@ -841,13 +830,12 @@ mod tests {
         );
         assert!(cause.len() <= 2 * ERROR_CAUSE_BYTES, "{cause}");
         let mut result = CommandResult::new("worktree seed-build", Outcome::Error, ());
-        result.error = Some(provenant_records::CommandError {
-            diagnostic: None,
-            code: "WORKTREE".into(),
-            message: "build failed".into(),
-            cause: Some(cause),
-            repair: None,
-        });
+        result.error = Some(provenant_records::CommandError::new(
+            "WORKTREE",
+            "build failed",
+            Some(cause.as_str()),
+            "run `provenant worktree seed-build`",
+        ));
         let mut human = Vec::new();
         render(
             &result,
@@ -1136,27 +1124,25 @@ pub fn render_or_publish<T: Serialize>(
             let published = publish(result);
             match policy {
                 OverflowPolicy::Refuse => {
-                    let (code, message, artifact) = match &published {
+                    let (code, message, artifact, repair) = match &published {
                         Ok(path) => (
                             "RESULT_TOO_LARGE",
                             "result exceeds 1 MiB; read the published artifact",
                             Some(path.clone()),
+                            "Read the published artifact named in data.artifact for the full result; request a smaller page.",
                         ),
                         Err(_) => (
                             "IO",
                             "cannot publish oversized result; the recorded operation must not be repeated",
                             None,
+                            "Inspect the artifact publication error, correct the output path or permissions, then rerun the command.",
                         ),
                     };
                     let mut failure =
                         CommandResult::new(&result.command, Outcome::Error, Overflow { artifact });
-                    failure.error = Some(provenant_records::CommandError {
-                        diagnostic: None,
-                        code: code.into(),
-                        message: message.into(),
-                        cause: None,
-                        repair: None,
-                    });
+                    failure.error = Some(provenant_records::CommandError::new(
+                        code, message, None, repair,
+                    ));
                     // Human transport includes the pointer using the same typed
                     // path record, escaped as JSON; JSON carries it in data.
                     let human = match &failure.data.artifact {
@@ -1237,15 +1223,12 @@ pub fn render_or_publish<T: Serialize>(
                             Outcome::Error,
                             Overflow { artifact: None },
                         );
-                        failure.error = Some(provenant_records::CommandError {
-                            diagnostic: None,
-                            code: "IO".into(),
-                            message:
-                                "cannot publish oversized result; the recorded operation must not be repeated"
-                                    .into(),
-                            cause: None,
-                            repair: None,
-                        });
+                        failure.error = Some(provenant_records::CommandError::new(
+                            "IO",
+                            "cannot publish oversized result; the recorded operation must not be repeated",
+                            None,
+                            "Inspect the artifact publication error, correct the output path or permissions, then rerun the command.",
+                        ));
                         let human = "provenant: IO: cannot publish oversized result; the recorded operation must not be repeated\n";
                         let fallback_mode = match mode {
                             RenderMode::Json => RenderMode::Json,
@@ -1278,13 +1261,12 @@ mod overflow_tests {
     fn refused_launch_keeps_its_human_receipt_and_error_on_separate_streams()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut result = CommandResult::new("run", Outcome::Refused, ());
-        result.error = Some(provenant_records::CommandError {
-            diagnostic: None,
-            code: "REFUSED".into(),
-            message: "both lanes refused".into(),
-            cause: None,
-            repair: None,
-        });
+        result.error = Some(provenant_records::CommandError::new(
+            "REFUSED",
+            "both lanes refused",
+            None,
+            "Resolve both lane rejection reasons, then rerun `provenant run`.",
+        ));
         let receipt = "run run-id\nworktree /fixture/lane (branch)\nfirst rejected: disk floor\nsecond rejected: preparation refused\n";
         let mut output = Vec::new();
         let mut errors = Vec::new();

@@ -3245,14 +3245,29 @@ pub fn run(
                 EdgeError::Fs(FsError::Cancelled { .. }) => Outcome::Cancelled,
                 _ => Outcome::Error,
             };
+            let repair = match &error {
+                EdgeError::Quota(
+                    QuotaError::AllowanceExhausted | QuotaError::Refused(_) | QuotaError::Disabled,
+                ) => {
+                    "Run `provenant quota show --json` to inspect the allowance; wait for the reset window or select another adapter with --adapter."
+                }
+                EdgeError::TooLarge => {
+                    "Rerun with --adapter to reduce the quota report below 1 MiB."
+                }
+                EdgeError::HistoryTooLarge => {
+                    "Rerun with --account, --since, --until or a lower --limit to reduce the history report."
+                }
+                EdgeError::Adapter => "Select a configured adapter with --adapter.",
+                EdgeError::Config(provenant_config::ConfigError::Read { .. }) => {
+                    "Correct the configuration file named in the error, then retry."
+                }
+                EdgeError::Fs(FsError::Cancelled { .. }) => {
+                    "The operation was cancelled; retry when ready."
+                }
+                _ => "Inspect the reported error, resolve its cause, then retry the command.",
+            };
             let mut result = CommandResult::new(name, status, None);
-            result.error = Some(CommandError {
-                diagnostic: None,
-                code: "QUOTA".into(),
-                message: error.to_string(),
-                cause: None,
-                repair: None,
-            });
+            result.error = Some(CommandError::new("QUOTA", error.to_string(), None, repair));
             (result, String::new())
         }
     };

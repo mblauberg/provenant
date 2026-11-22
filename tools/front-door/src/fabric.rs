@@ -977,6 +977,7 @@ pub fn events(
                     .unwrap_or(provenant_records::Outcome::Error),
                 typed.as_ref().map_or("events_read", FacadeError::code),
                 &error.to_string(),
+                "resolve the reported coordination error and retry the events read",
                 globals,
             )
         }

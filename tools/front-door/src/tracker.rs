@@ -203,6 +203,7 @@ pub fn run(command: Tracker, globals: &Globals) -> u8 {
                     Outcome::Invalid,
                     "ROOT",
                     &error.to_string(),
+                    crate::REPAIR_ROOT,
                     globals,
                 );
             }

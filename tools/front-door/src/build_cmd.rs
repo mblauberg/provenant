@@ -209,6 +209,7 @@ pub fn run(command: Build, globals: &Globals) -> u8 {
                     Outcome::Invalid,
                     "ROOT",
                     &error.to_string(),
+                    crate::REPAIR_ROOT,
                     globals,
                 );
             }
@@ -249,6 +250,7 @@ pub fn run(command: Build, globals: &Globals) -> u8 {
                 Outcome::Invalid,
                 "ROOT",
                 &error.to_string(),
+                crate::REPAIR_ROOT,
                 globals,
             );
         }
@@ -269,6 +271,7 @@ pub fn run(command: Build, globals: &Globals) -> u8 {
                         Outcome::Error,
                         "CONFIG",
                         &error.to_string(),
+                        crate::REPAIR_CONFIG,
                         globals,
                     );
                 }

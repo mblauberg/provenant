@@ -265,19 +265,29 @@ impl From<run::RunError> for Fail {
     }
 }
 fn command_error(fail: &Fail) -> CommandError {
-    CommandError {
-        diagnostic: fail.projection.as_deref().map(Into::into),
-        code: fail.kind.code().into(),
-        message: fail.message.clone(),
-        cause: fail
-            .projection
-            .as_ref()
-            .and_then(|projection| projection.detail.clone()),
-        repair: fail
-            .projection
-            .as_ref()
-            .and_then(|projection| projection.next.clone()),
-    }
+    let cause = fail
+        .projection
+        .as_ref()
+        .and_then(|projection| projection.detail.clone());
+    let repair = fail
+        .projection
+        .as_ref()
+        .and_then(|projection| projection.next.clone())
+        .or_else(|| fail.kind.diagnostic().next)
+        .unwrap_or_else(|| {
+            format!(
+                "Resolve the {} condition named in the error, then retry the command.",
+                fail.kind.code()
+            )
+        });
+    let mut error = CommandError::new(
+        fail.kind.code(),
+        fail.message.clone(),
+        cause.as_deref(),
+        repair,
+    );
+    error.diagnostic = fail.projection.as_deref().map(Into::into);
+    error
 }
 
 /// The upstream head a stale read-only checkout should review. `head` is kept

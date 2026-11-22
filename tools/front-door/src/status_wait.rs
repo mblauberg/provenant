@@ -1267,7 +1267,14 @@ fn emit_child_wait(
     };
     human.push_str(&format!("next: {states}; provenant status\n"));
     if let Some(error) = write_error {
-        return crate::fail("wait", Outcome::Error, "IO", &error.to_string(), globals);
+        return crate::fail(
+            "wait",
+            Outcome::Error,
+            "IO",
+            &error.to_string(),
+            "check the reported output path and its permissions, then rerun `provenant wait`",
+            globals,
+        );
     }
     let outcome = child_wait_outcome(children, mode, settled_order);
     let summary = provenant_cli::Summary::new(
@@ -1300,6 +1307,7 @@ fn preflight_error(
             Outcome::Cancelled,
             "CANCELLED",
             "wait cancelled; the work continues",
+            "run `provenant status` to see the work, then rerun `provenant wait` to resume observing",
             globals,
         )
     } else if Instant::now() >= deadline {
@@ -1308,6 +1316,7 @@ fn preflight_error(
             Outcome::Timeout,
             "TIMEOUT",
             "wait timed out; the work continues",
+            "rerun `provenant wait` with a longer `--timeout`, or check `provenant status`; the work continues",
             globals,
         )
     } else {
@@ -1321,7 +1330,14 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
     let resolved = match crate::roots::resolve(globals, Workspace::Project, Product::Required) {
         Ok(resolved) => resolved,
         Err(error) => {
-            return crate::fail("wait", Outcome::Error, "ROOT", &error.to_string(), globals);
+            return crate::fail(
+                "wait",
+                Outcome::Error,
+                "ROOT",
+                &error.to_string(),
+                "run from a project checkout or pass `--project PATH`",
+                globals,
+            );
         }
     };
     let (settings, origin) = match provenant_cli::wait::Settings::resolve(&resolved.roots) {
@@ -1332,6 +1348,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                 Outcome::Error,
                 "CONFIG",
                 &error.to_string(),
+                "run `provenant check config --json` and correct the reported wait setting",
                 globals,
             );
         }
@@ -1352,6 +1369,11 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         settings.timeout(command.timeout, &origin)
     };
     let deadline = Instant::now() + Duration::from_secs(budget);
+    // Preflight reads tolerate a momentarily busy store instead of failing a
+    // wait the instant another writer holds a lock. Capped by the wait's own
+    // deadline, and configurable through `domains.wait.preflight_busy_timeout_ms`.
+    let preflight_busy = Duration::from_millis(settings.preflight_busy_timeout_ms)
+        .min(deadline.saturating_duration_since(Instant::now()));
     let stop = Stop::default();
     let cadence = origin.local_cadence(&settings);
     let interval = cadence.interval;
@@ -1470,7 +1492,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
         false,
     )));
     let mut validation = std::collections::BTreeMap::new();
-    if let Err(error) = provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
+    if let Err(error) = provenant_sqlite::with_busy_timeout(preflight_busy, || {
         crate::fabric::check_targets(
             &command.targets,
             &edge,
@@ -1571,6 +1593,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         Outcome::Cancelled,
                         "CANCELLED",
                         "wait cancelled; the work continues",
+                        "run `provenant status` to see the children, then rerun `provenant wait`",
                         globals,
                     ),
                     "timeout" => crate::fail(
@@ -1578,6 +1601,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         Outcome::Timeout,
                         "TIMEOUT",
                         "wait timed out; the work continues",
+                        "rerun `provenant wait` with a longer `--timeout` or check `provenant status`",
                         globals,
                     ),
                     _ => crate::fail(
@@ -1585,12 +1609,13 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
                         Outcome::Error,
                         "CHILD_WAIT",
                         &format!("cannot wait on this lane's children: {error}"),
+                        "check the lane relay and rerun `provenant wait`",
                         globals,
                     ),
                 },
             };
         }
-        match provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
+        match provenant_sqlite::with_busy_timeout(preflight_busy, || {
             crate::fabric::unsettled_graphs(&edge, deadline, &stop.cancel)
         }) {
             Ok(graphs) => {
@@ -1621,6 +1646,7 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             Outcome::Invalid,
             "TOO_MANY_TARGETS",
             &format!("wait takes at most {} targets", settings.max_targets),
+            "remove targets or raise `domains.wait.max_targets`, then rerun `provenant wait`",
             globals,
         );
     }
@@ -2173,7 +2199,14 @@ pub(crate) fn run(command: provenant_cli::Wait, globals: &Globals) -> u8 {
             &mut transition,
         );
     if let Some(error) = write_error {
-        return crate::fail("wait", Outcome::Error, "IO", &error.to_string(), globals);
+        return crate::fail(
+            "wait",
+            Outcome::Error,
+            "IO",
+            &error.to_string(),
+            "check the reported output path and its permissions, then rerun `provenant wait`",
+            globals,
+        );
     }
     let outcome = outcome(&latest, &settled, done, mode);
     let mut human = mode_heading(mode);

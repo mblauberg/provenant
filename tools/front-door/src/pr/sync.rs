@@ -144,6 +144,7 @@ pub(crate) fn run(numbers: Vec<u64>, no_lane: bool, globals: &Globals) -> u8 {
                 Outcome::Error,
                 "PR_SYNC",
                 &error.to_string(),
+                crate::REPAIR_ROOT,
                 globals,
             );
         }
@@ -157,6 +158,7 @@ pub(crate) fn run(numbers: Vec<u64>, no_lane: bool, globals: &Globals) -> u8 {
                     Outcome::Error,
                     "PR_SYNC",
                     &error.to_string(),
+                    crate::REPAIR_ROOT,
                     globals,
                 );
             }
@@ -170,6 +172,7 @@ pub(crate) fn run(numbers: Vec<u64>, no_lane: bool, globals: &Globals) -> u8 {
                 Outcome::Error,
                 "PR_SYNC",
                 &error.to_string(),
+                "register this project's binding, then rerun `provenant pr sync`",
                 globals,
             );
         }
@@ -183,6 +186,7 @@ pub(crate) fn run(numbers: Vec<u64>, no_lane: bool, globals: &Globals) -> u8 {
                     Outcome::Error,
                     "PR_SYNC",
                     &error.to_string(),
+                    "wait for the repository state to settle, then rerun `provenant pr sync`",
                     globals,
                 );
             }
@@ -195,6 +199,7 @@ pub(crate) fn run(numbers: Vec<u64>, no_lane: bool, globals: &Globals) -> u8 {
                 Outcome::Error,
                 "PR_SYNC",
                 &error.to_string(),
+                crate::REPAIR_IO,
                 globals,
             );
         }
@@ -239,13 +244,12 @@ pub(crate) fn run(numbers: Vec<u64>, no_lane: bool, globals: &Globals) -> u8 {
     };
     let mut report = CommandResult::new("pr sync", outcome, serde_json::json!({"pulls": results}));
     if !errors.is_empty() {
-        report.error = Some(provenant_records::CommandError {
-            diagnostic: None,
-            code: "PR_SYNC".into(),
-            message: errors.join("; "),
-            cause: None,
-            repair: None,
-        });
+        report.error = Some(provenant_records::CommandError::new(
+            "PR_SYNC",
+            errors.join("; "),
+            None,
+            "resolve the reported per-PR sync errors and rerun `provenant pr sync`",
+        ));
     }
     emit(&report, globals, &lines, true)
 }
