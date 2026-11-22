@@ -67,8 +67,9 @@ struct OverviewView: View {
     }
 
     /// Only an unreadable store hides run state. `partial` still reports a
-    /// valid lower bound, and `empty` is a fresh host with no lanes.
-    static func lanesMessage(_ coverage: String) -> String {
+    /// valid lower bound, and `empty` is a fresh host with no lanes. A missing
+    /// coverage value is unknown state, so it reads as unavailable.
+    static func lanesMessage(_ coverage: String?) -> String {
         switch coverage {
         case "complete", "empty": return "No lanes are running."
         case "partial": return "No lanes are running in the observed run state; counts may be incomplete."
