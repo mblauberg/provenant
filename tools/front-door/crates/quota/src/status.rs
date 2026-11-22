@@ -43,13 +43,16 @@ pub struct ReadinessInput<'a> {
     pub file: &'a ReadinessFile,
 }
 
+/// The pools a model draws on, by adapter and model.
+pub type ModelPools<'a> = &'a dyn Fn(&str, &str) -> Vec<String>;
+
 /// Inputs owned by the caller. Readiness is the account's whole file: the
 /// account-wide observation and every model and pool scope it contains.
 pub struct StatusInput<'a> {
     pub record: &'a AccountRecord,
     pub detections: &'a [Detection],
     pub readiness: Option<&'a ReadinessFile>,
-    pub pools: &'a [String],
+    pub pools: ModelPools<'a>,
     pub now: i64,
     pub freshness: &'a FreshnessPolicy,
     pub policies: &'a [QuotaPolicy],
@@ -246,16 +249,17 @@ pub fn effective_status(input: &StatusInput<'_>) -> Result<EffectiveStatus, Quot
         .as_ref()
         .and_then(|snapshot| snapshot.details.as_ref())
         .map_or(&[], |details| details.models.as_slice());
-    let admission = Admission {
-        policy,
-        policies,
-        freshness,
-        now_unix_seconds: now,
-        records: std::slice::from_ref(record),
-        pools,
-    };
     let mut models = Vec::with_capacity(offered.len());
     for model in offered {
+        let pools = &pools(adapter.as_str(), model.as_str());
+        let admission = Admission {
+            policy,
+            policies,
+            freshness,
+            now_unix_seconds: now,
+            records: std::slice::from_ref(record),
+            pools,
+        };
         let scope = ReadinessScope {
             route: ReadinessRoute::model(adapter, model),
             ..account_scope.clone()
@@ -422,7 +426,7 @@ mod tests {
             record,
             detections: &[],
             readiness: file,
-            pools: &[],
+            pools: &|_, _| Vec::new(),
             now,
             freshness,
             policies: crate::source::TEST_POLICIES,
@@ -487,6 +491,39 @@ mod tests {
         let effective = status_of(&record, Some(&file), 250, &policy, &freshness)?;
         assert_ne!(effective.status, QuotaStatus::Available);
         assert!(effective.models.iter().all(|model| !model.servable));
+        Ok(())
+    }
+
+    #[test]
+    fn a_models_pool_scope_decides_whether_it_is_servable() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let record = record(QuotaStatus::Available, 100, &["model"]);
+        let mut file = observation(ReadinessState::Ready, None);
+        let mut pool = file.records[0].clone();
+        pool.scope.route = ReadinessRoute::pool("shared");
+        pool.state = ReadinessState::Unavailable;
+        pool.reason = Some(ReadinessReason::Exhausted);
+        file.records.push(pool);
+        let policy = provenant_records::policy::Policy::default();
+        let freshness = DEFAULT_FRESHNESS;
+        let status = |pools: ModelPools<'_>| {
+            effective_status(&StatusInput {
+                record: &record,
+                detections: &[],
+                readiness: Some(&file),
+                pools,
+                now: 150,
+                freshness: &freshness,
+                policies: crate::source::TEST_POLICIES,
+                policy: &policy,
+            })
+        };
+        // Without the catalogue's pool the pool-scoped refusal is invisible.
+        assert!(status(&|_, _| Vec::new())?.models[0].servable);
+        // With it, the model reads as dispatch would judge it.
+        let scoped = status(&|_, _| vec!["shared".to_owned()])?;
+        assert!(!scoped.models[0].servable);
+        assert!(scoped.models[0].reason.is_some());
         Ok(())
     }
 }

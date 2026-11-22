@@ -559,6 +559,9 @@ pub struct ReportInputs<'a> {
     pub policy: &'a provenant_records::policy::Policy,
     pub freshness: &'a FreshnessPolicy,
     pub readiness: &'a [ReadinessInput<'a>],
+    /// The pools each model draws on, from the catalogue dispatch admits with,
+    /// so a model's servable flag agrees with the verdict dispatch reaches.
+    pub pools: ModelPools<'a>,
 }
 
 pub fn report(
@@ -574,6 +577,7 @@ pub fn report(
         policy,
         freshness,
         readiness,
+        pools,
     } = inputs;
     validate_inputs(records, detections)?;
     let selected = |id: &str| query.adapter.as_ref().is_none_or(|s| s == id);
@@ -606,7 +610,7 @@ pub fn report(
             record,
             detections,
             readiness: readiness_file,
-            pools: &[],
+            pools,
             now,
             freshness,
             policies,
@@ -807,6 +811,7 @@ mod tests {
         record.last_error = Some(ProbeFailure::IsolatedKeychainUnavailable);
         let report = report(
             ReportInputs {
+                pools: &|_, _| Vec::new(),
                 policies: crate::source::TEST_POLICIES,
                 records: &[record],
                 detections: &[],
@@ -1194,6 +1199,7 @@ mod tests {
         .unwrap();
         let row = report(
             ReportInputs {
+                pools: &|_, _| Vec::new(),
                 policies: crate::source::TEST_POLICIES,
                 records: &[repaired],
                 detections: std::slice::from_ref(&detection),
@@ -1345,6 +1351,7 @@ mod tests {
             assert_eq!(after.batches, vec![vec![record.account.clone()]]);
             let current = report(
                 ReportInputs {
+                    pools: &|_, _| Vec::new(),
                     policies: crate::source::TEST_POLICIES,
                     records: &[record.clone()],
                     detections: std::slice::from_ref(&detection),
@@ -1372,6 +1379,7 @@ mod tests {
         let query = QuotaQuery { adapter: None };
         let recent = report(
             ReportInputs {
+                pools: &|_, _| Vec::new(),
                 policies: crate::source::TEST_POLICIES,
                 records: &[record.clone()],
                 detections: std::slice::from_ref(&detection),
@@ -1387,6 +1395,7 @@ mod tests {
         assert_eq!(recent.accounts[0].status, QuotaStatus::Unknown);
         let expired = report(
             ReportInputs {
+                pools: &|_, _| Vec::new(),
                 policies: crate::source::TEST_POLICIES,
                 records: &[record],
                 detections: &[detection],
@@ -1453,6 +1462,7 @@ mod tests {
         let row = |now| {
             report(
                 ReportInputs {
+                    pools: &|_, _| Vec::new(),
                     policies: crate::source::TEST_POLICIES,
                     records: &[record.clone()],
                     detections: &[],
@@ -1619,6 +1629,7 @@ mod tests {
         assert_eq!(failed.replacement.as_ref().unwrap().snapshot, r.snapshot);
         let row = report(
             ReportInputs {
+                pools: &|_, _| Vec::new(),
                 policies: crate::source::TEST_POLICIES,
                 records: &[failed.replacement.clone().unwrap()],
                 detections: &[],
@@ -1696,6 +1707,7 @@ mod tests {
             });
             let report = report(
                 ReportInputs {
+                    pools: &|_, _| Vec::new(),
                     policies: crate::source::TEST_POLICIES,
                     records: &[record],
                     detections: &[],
@@ -1757,6 +1769,7 @@ mod tests {
             assert!(failed.refusals.is_empty());
             let row = report(
                 ReportInputs {
+                    pools: &|_, _| Vec::new(),
                     policies: crate::source::TEST_POLICIES,
                     records: &[failed],
                     detections: &[],
@@ -1815,6 +1828,7 @@ mod tests {
         for (now, expected_refusals) in [(150, 1), (200, 0)] {
             let row = report(
                 ReportInputs {
+                    pools: &|_, _| Vec::new(),
                     policies: crate::source::TEST_POLICIES,
                     records: &[record.clone()],
                     detections: &[],
@@ -1877,6 +1891,7 @@ mod tests {
         .unwrap();
         let row = report(
             ReportInputs {
+                pools: &|_, _| Vec::new(),
                 policies: crate::source::TEST_POLICIES,
                 records: std::slice::from_ref(&failed),
                 detections: &[],
@@ -2170,6 +2185,7 @@ mod transition_tests {
         record.last_attempt_unix_seconds = Some(45);
         let report = report(
             ReportInputs {
+                pools: &|_, _| Vec::new(),
                 policies: crate::source::TEST_POLICIES,
                 records: &[record.clone()],
                 detections: &[],
@@ -2193,6 +2209,7 @@ mod transition_tests {
     fn report_for_bad(record: AccountRecord) -> Result<QuotaReport, QuotaError> {
         report(
             ReportInputs {
+                pools: &|_, _| Vec::new(),
                 policies: crate::source::TEST_POLICIES,
                 records: &[record],
                 detections: &[],
@@ -2220,6 +2237,7 @@ mod transition_tests {
         }];
         let rep = report(
             ReportInputs {
+                pools: &|_, _| Vec::new(),
                 policies: crate::source::TEST_POLICIES,
                 records: &records,
                 detections: &detections,
@@ -2387,6 +2405,7 @@ mod transition_tests {
             }];
             let report = report(
                 ReportInputs {
+                    pools: &|_, _| Vec::new(),
                     policies: crate::source::TEST_POLICIES,
                     records: &records,
                     detections: &detections,
@@ -2524,6 +2543,7 @@ mod zen_tests {
                 }];
                 let report = report(
                     ReportInputs {
+                        pools: &|_, _| Vec::new(),
                         policies: crate::source::TEST_POLICIES,
                         records: &records,
                         detections: &detections,
@@ -2597,6 +2617,7 @@ mod zen_tests {
         ] {
             let report = report(
                 ReportInputs {
+                    pools: &|_, _| Vec::new(),
                     policies: crate::source::TEST_POLICIES,
                     records: std::slice::from_ref(&record),
                     detections: &detections,
@@ -2635,6 +2656,7 @@ mod zen_tests {
         });
         let report_with_reset = report(
             ReportInputs {
+                pools: &|_, _| Vec::new(),
                 policies: crate::source::TEST_POLICIES,
                 records: &[record.clone()],
                 detections: &[Detection {
@@ -2672,6 +2694,7 @@ mod zen_tests {
         });
         let mixed_report = report(
             ReportInputs {
+                pools: &|_, _| Vec::new(),
                 policies: crate::source::TEST_POLICIES,
                 records: &[mixed],
                 detections: &[Detection {
@@ -2711,6 +2734,7 @@ mod zen_tests {
         });
         let report = report(
             ReportInputs {
+                pools: &|_, _| Vec::new(),
                 policies: crate::source::TEST_POLICIES,
                 records: &[record],
                 detections: &[Detection {

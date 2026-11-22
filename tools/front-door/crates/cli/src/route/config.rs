@@ -1054,7 +1054,7 @@ pub(super) fn execute_in(
                                     record,
                                     detections: &[],
                                     readiness: file.as_ref(),
-                                    pools: &pools,
+                                    pools: &|_, _| pools.clone(),
                                     now: now.unix_seconds(),
                                     freshness: &context.config.freshness,
                                     policies,

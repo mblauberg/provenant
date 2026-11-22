@@ -1074,6 +1074,30 @@ pub(crate) fn state_freshness(state: &Path) -> provenant_quota::FreshnessPolicy 
     }
 }
 
+/// The pools each model draws on, from the effective catalogue dispatch admits
+/// with, so a report's servable flags agree with dispatch. An unreadable
+/// catalogue warns and leaves models without pool scope.
+fn catalogue_pools(roots: &Roots) -> impl Fn(&str, &str) -> Vec<String> {
+    let catalogue = match crate::route::effective_catalogue(roots) {
+        Ok(catalogue) => Some(catalogue),
+        Err(error) => {
+            use std::io::Write;
+            let _ = writeln!(
+                io::stderr().lock(),
+                "Warning: model catalogue unavailable ({error}); model pools are not applied"
+            );
+            None
+        }
+    };
+    move |adapter, model| {
+        catalogue
+            .as_ref()
+            .zip(provenant_routing::ModelId::parse(&format!("{adapter}/{model}")).ok())
+            .map(|(catalogue, id)| catalogue.admission_pools(&id))
+            .unwrap_or_default()
+    }
+}
+
 /// The readiness of one route, read without locks, directory creation or
 /// provider I/O. A missing, stale, mismatched or damaged record is unknown;
 /// nothing here reads as ready unless fresh evidence says so. Routing and the
@@ -1858,6 +1882,7 @@ fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError
     let inputs = readiness_inputs(&owned);
     let mut report = schedule::report(
         schedule::ReportInputs {
+            pools: &catalogue_pools(roots),
             policies: &policies,
             records: &records,
             detections: &[],
@@ -2026,6 +2051,7 @@ pub(crate) fn execute(
         let inputs = readiness_inputs(&owned);
         let mut report = schedule::report(
             schedule::ReportInputs {
+                pools: &catalogue_pools(roots),
                 policies: &policies,
                 records: &records,
                 detections: &detected,
@@ -2303,6 +2329,7 @@ pub(crate) fn execute(
     let inputs = readiness_inputs(&owned);
     let mut report = schedule::report(
         schedule::ReportInputs {
+            pools: &catalogue_pools(roots),
             policies: &policies,
             records: &records,
             detections: &detected,
@@ -2339,6 +2366,7 @@ pub(crate) fn execute(
     // Publish all accounts even when the caller requests a filtered projection.
     let mut shown = schedule::report(
         schedule::ReportInputs {
+            pools: &catalogue_pools(roots),
             policies: &policies,
             records: &records,
             detections: &detected,
@@ -4735,6 +4763,7 @@ mod tests {
         }
         let report = schedule::report(
             schedule::ReportInputs {
+                pools: &|_, _| Vec::new(),
                 policies: &[],
                 records: &records,
                 detections: &[],
@@ -5653,6 +5682,7 @@ mod tests {
         // No rows are shown, as when an adapter filter excludes the icon account.
         let mut report = schedule::report(
             schedule::ReportInputs {
+                pools: &|_, _| Vec::new(),
                 policies: &[],
                 records: &[],
                 detections: &[],
@@ -6352,6 +6382,7 @@ mod tests {
         settings.apply_calibration(&mut records, 100);
         let report = schedule::report(
             schedule::ReportInputs {
+                pools: &|_, _| Vec::new(),
                 policies: &provenant_providers::quota_policies(provenant_providers::REGISTRY),
                 records: &records,
                 detections: &[Detection {
@@ -6474,6 +6505,7 @@ mod tests {
         ];
         let rep = schedule::report(
             schedule::ReportInputs {
+                pools: &|_, _| Vec::new(),
                 policies: &policies,
                 records: &all_records,
                 detections: &detections,
