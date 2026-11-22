@@ -1,4 +1,5 @@
 //! Routing's frozen clap leaves and read-only composition/rendering edge.
+pub(crate) mod admission;
 mod config;
 mod output;
 mod resolution;
@@ -22,8 +23,9 @@ use provenant_routing::{
 pub use resolution::fixture_resolve_dispatch;
 use resolution::*;
 pub(crate) use resolution::{
-    DispatchError, check_dispatch_candidate, quota_observations, recorded_model_readiness,
-    resolve_dispatch_rejecting_family, resolve_pacing_accounts, selection_evidence,
+    DispatchError, admission_family_resolve, check_dispatch_candidate, quota_observations,
+    recorded_model_readiness, resolve_dispatch_rejecting_family, resolve_pacing_accounts,
+    selection_evidence,
 };
 pub use resolution::{depletion_facts, resolve_review_family};
 use serde::Serialize;
