@@ -13,4 +13,4 @@ exports = [
 worktree = { type = "string", default = "", doc = "Scratch worktree for the writer node (--worktree, or --branch to create one); without one the writer node is skipped and reported." }
 write_attempt = { type = "table", default = {}, doc = "Attempt settings for the writer node, such as a new worktree; bound from --branch and --base." }
 smoke-write = { type = "boolean", default = false, doc = "Whether to run the write node; enabled when worktree is provided and local." }
-diff_base = { type = "string", default = "HEAD^", doc = "Commit the review nodes compare against; a launch supplies the fixture's base, and the default is the checkout's first parent." }
+diff_base = { type = "string", default = "", doc = "Commit the review nodes compare against; a launch supplies the fixture's base. Empty leaves the review nodes unbound, so the per-node no-base refusal applies." }

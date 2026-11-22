@@ -976,40 +976,50 @@ fn smoke_template_compiles_the_read_review_and_write_nodes() {
 }
 
 #[test]
-fn smoke_template_gives_its_review_nodes_a_base() {
+fn smoke_template_pins_its_review_nodes_only_when_a_base_is_supplied() {
     let library = library();
-    let review_bases = |with: Value| -> Vec<String> {
+    let review_bases = |with: Value| -> Vec<Option<String>> {
         let compiled = Compiler::new(&library)
             .compile(&json!({"id":"smoke", "use":"smoke", "with":with}))
             .unwrap();
-        let review = compiled
-            .composite
-            .unwrap()
+        let composite = compiled.composite.unwrap();
+        // The read and write nodes stay in the graph in either case.
+        assert_eq!(
+            composite
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            ["read", "review", "write"]
+        );
+        composite
             .nodes
             .into_iter()
             .find(|node| node.id == "review")
-            .unwrap();
-        review
+            .unwrap()
             .composite
             .unwrap()
             .nodes
             .into_iter()
-            .map(|lens| match lens.review_base {
-                Some(base) => base,
-                None => panic!("smoke review lens {} has no review base", lens.id),
-            })
+            .map(|lens| lens.review_base)
             .collect()
     };
-    // The default range is the checkout's first parent, never empty.
-    for base in review_bases(json!({})) {
-        assert!(!base.is_empty(), "smoke review base is empty");
-    }
-    // A launch pins the fixture's base so the review range is known.
+    // A launch binds the fixture's base so every review lens has that range.
     let base = "1111111111111111111111111111111111111111";
+    let bound = review_bases(json!({"diff_base":base}));
+    assert_eq!(bound.len(), 2);
+    assert!(bound.iter().all(|value| value.as_deref() == Some(base)));
+
+    // Without a launch binding no review lens is pinned; an empty value is
+    // the template's unbound spelling, so the per-node no-base refusal still
+    // applies to the review nodes while read and write compile unchanged.
+    let unbound = review_bases(json!({}));
+    assert_eq!(unbound.len(), bound.len());
     assert!(
-        review_bases(json!({"diff_base":base}))
+        unbound
             .iter()
-            .all(|bound| bound == base)
+            .all(|value| value.as_deref().is_none_or(str::is_empty)),
+        "a smoke review lens was pinned without diff_base: {unbound:?}"
     );
 }
 

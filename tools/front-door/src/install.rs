@@ -3428,6 +3428,60 @@ mod tests {
     }
 
     #[test]
+    fn smoke_dry_run_pins_the_fixture_base_and_drops_a_user_base()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir()?;
+        let state = tmp.path().join("state");
+        std::fs::create_dir(&state)?;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        let launcher = tmp.path().join("provenant");
+        let calls = tmp.path().join("calls");
+        // The host owns the review range: the launch must carry the fixture's
+        // own base (its first commit), never a caller-supplied one.
+        std::fs::write(
+            &launcher,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nargs=\"$*\"\nproject=\"\"\ndiff_base=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --project) project=\"$2\"; shift 2;;\n    --set) case \"$2\" in diff_base=*) diff_base=\"${{2#diff_base=}}\";; esac; shift 2;;\n    *) shift;;\n  esac\ndone\nexpected=$(git -C \"$project\" rev-parse HEAD^) || exit 90\n[ \"$diff_base\" = \"$expected\" ] || exit 91\ncase \"$args\" in\n  *'run smoke --explain'*) printf '%s\\n' '{{\"nodes\":[{{\"id\":\"read\"}},{{\"id\":\"review\"}},{{\"id\":\"write\"}}]}}';;\n  *) exit 77;;\nesac\n",
+                calls.display()
+            ),
+        )?;
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
+        let runner = UpgradeRunner {
+            executor: provenant_os::exec::SystemExecutor::new(1)?,
+            environment: std::env::vars_os().collect(),
+            cwd: tmp.path().to_owned(),
+        };
+        let output = preview_smoke(
+            &runner,
+            &launcher,
+            &state,
+            &cli::Upgrade {
+                yes: false,
+                from_source: None,
+                hosts: "all".into(),
+                verify: true,
+                dry_run: true,
+                host: None,
+                route: None,
+                set: vec!["diff_base=2222222222222222222222222222222222222222".into()],
+            },
+        )?;
+        assert!(String::from_utf8(output)?.contains("\"review\""));
+        let calls = std::fs::read_to_string(calls)?;
+        let run = calls.lines().next().ok_or("run call")?;
+        assert!(run.contains("run smoke --explain"), "{calls}");
+        assert_eq!(run.matches("--set diff_base=").count(), 1, "{calls}");
+        assert!(
+            !run.contains("2222222222222222222222222222222222222222"),
+            "{calls}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn orphan_detection_keeps_default_environment_and_registered_targets()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
