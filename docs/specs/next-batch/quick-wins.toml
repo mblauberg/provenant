@@ -1,0 +1,28 @@
+# Next batch quick wins: independent items that touch no shared seam; land before wave 1.
+# Design: docs/specs/next-batch-quick-wins.md. Launch from the root of the checkout holding this file:
+#   provenant run --file docs/specs/next-batch/quick-wins.toml --explain
+# Create the repair checkout first: provenant worktree create batch/quick-wins-repair --base main
+# qw-check-install-roots waits for #3816 and qw-help-and-grammar for #3817; drop them from items until then.
+use = "batch"
+integration_branch = "batch/quick-wins"
+review_base = "origin/main"
+
+[with]
+worktree = "/Users/user/Repos/provenant/.worktrees/batch-quick-wins-repair"
+integration_branch = "batch/quick-wins"
+max_parallel = 6
+items = [
+  { id = "qw-check-install-roots", brief_file = "docs/specs/next-batch/briefs/qw-check-install-roots.md", model = "opencode/opencode-go/hy4-flash-free", write_scope = ["tools/front-door/src/checks.rs", "tools/front-door/crates/config/src/managed.rs", "tools/front-door/crates/cli/src/check/mod.rs"] },
+  { id = "qw-tier-command-string", brief_file = "docs/specs/next-batch/briefs/qw-tier-command-string.md", model = "opencode/opencode-go/hy4-flash-free", write_scope = ["tools/front-door/crates/config/src/ports.rs"] },
+  { id = "qw-install-upkeep", brief_file = "docs/specs/next-batch/briefs/qw-install-upkeep.md", model = "opencode/opencode-go/hy4-flash-free", write_scope = ["tools/front-door/src/install.rs", "tools/front-door/src/release_smoke.rs", "tools/front-door/src/tick.rs"] },
+  { id = "qw-output-null-headers", brief_file = "docs/specs/next-batch/briefs/qw-output-null-headers.md", model = "opencode/opencode-go/hy4-flash-free", write_scope = ["tools/front-door/crates/cli/src/run/output.rs"] },
+  { id = "qw-opencode-archived", brief_file = "docs/specs/next-batch/briefs/qw-opencode-archived.md", model = "opencode/opencode-go/hy4-flash-free", write_scope = ["tools/front-door/crates/providers/src/opencode.rs"] },
+  { id = "qw-help-and-grammar", brief_file = "docs/specs/next-batch/briefs/qw-help-and-grammar.md", model = "opencode/opencode-go/hy4-flash-free", write_scope = ["tools/front-door/crates/cli/src/lib.rs", "tools/front-door/crates/cli/src/grammar.rs", "tools/front-door/src/lib.rs"] },
+  { id = "qw-output-running-partial", brief_file = "docs/specs/next-batch/briefs/qw-output-running-partial.md", model = "opencode/opencode-go/hy4-flash-free", write_scope = ["tools/front-door/crates/run/src/reader.rs", "tools/front-door/crates/cli/src/run/output.rs"] },
+  { id = "qw-budget-completeness", brief_file = "docs/specs/next-batch/briefs/qw-budget-completeness.md", model = "opencode/opencode-go/hy4-flash-free", write_scope = ["tools/front-door/crates/run/src/holder.rs"] },
+  { id = "qw-lane-reads-chair-graphs", brief_file = "docs/specs/next-batch/briefs/qw-lane-reads-chair-graphs.md", model = "opencode/opencode-go/hy4-flash-free", write_scope = ["tools/front-door/crates/cli/src/fabric/graph_relay.rs", "tools/front-door/crates/fabric-runtime/src/coordination/facade.rs", "tools/front-door/src/fabric/lane_read_tests.rs"] },
+  { id = "qw-smoke-retry-steer", brief_file = "docs/specs/next-batch/briefs/qw-smoke-retry-steer.md", model = "opencode/opencode-go/hy4-flash-free", write_scope = ["tools/front-door/crates/fabric-runtime/assets/templates/smoke.toml", "tools/front-door/src/install.rs"] },
+  { id = "qw-gc-default-branch", brief_file = "docs/specs/next-batch/briefs/qw-gc-default-branch.md", model = "opencode/opencode-go/hy4-flash-free", write_scope = ["tools/front-door/src/lane_cleanup.rs", "tools/front-door/crates/confinement/src/worktrees/gc.rs"] },
+  { id = "qw-pinned-redraw-fidelity", brief_file = "docs/specs/next-batch/briefs/qw-pinned-redraw-fidelity.md", model = "opencode/opencode-go/deepseek-v4.1-flash", write_scope = ["tools/front-door/crates/cli/src/run/provider/preparation.rs", "tools/front-door/crates/routing/src/"] },
+  { id = "qw-docs", brief_file = "docs/specs/next-batch/briefs/qw-docs.md", model = "opencode/opencode-go/hy4-flash-free", write_scope = ["skills/orchestrate/SKILL.md", "docs/quickstart.md", "docs/README.md", "README.md", "docs/runbooks/install.md"] },
+]
