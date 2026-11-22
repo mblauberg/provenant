@@ -381,6 +381,7 @@ fn names_finding(finding: &Finding, id: &str) -> bool {
 
 /// Findings recovered from a result block, separated by whether their defects
 /// leave the block usable as evidence.
+#[derive(Debug)]
 struct ParsedFindings {
     findings: Vec<Finding>,
     /// Entry-level defects: finding them means the block is not complete evidence.
