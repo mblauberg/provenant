@@ -196,7 +196,7 @@ replayable authority.
 
 ### Build context
 
-Lanes have no Cargo shims and carry no `PROVENANT_BUILD_CONTEXT`: they never
+Lanes have no Cargo shims and receive no host build context: they never
 compile, seed or admit a build. The chair's host-owned warm check and
 `provenant verify` tiers use the one `slots` strategy, bounded by
 `[admission.build].slots`; layered `build.*` ports are in
