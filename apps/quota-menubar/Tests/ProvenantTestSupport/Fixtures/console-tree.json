@@ -1,80 +1,91 @@
 {
-  "schema_version": 1,
   "command": "console tree",
-  "status": "ok",
   "data": {
-    "schema_version": 1,
+    "children_absent": 0,
+    "coverage": {
+      "host": null,
+      "nested_runs": "unavailable",
+      "runs": "complete",
+      "scope": "local"
+    },
+    "edges": [],
+    "identity_conflicts": [],
+    "limits": {
+      "depth": 8,
+      "nodes": 100
+    },
     "nodes": [
       {
+        "children": [
+          {
+            "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+            "kind": "dispatch"
+          },
+          {
+            "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+            "kind": "dispatch"
+          }
+        ],
+        "depth": 0,
         "lane_id": {
+          "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
           "host": null,
           "key": {
             "attempt": 1,
             "graph": "implement-console-overview",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          },
-          "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+          }
         },
-        "depth": 0,
-        "store_parent_attempt": null,
-        "store_path": "x",
         "metadata": {
           "attempt": {
-            "admission_deadline": null,
+            "account": null,
             "applied_route": null,
             "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
             "attempt_number": 1,
-            "authority_digest": "sha256:0505050505050505050505050505050505050505050505050505050505050505",
+            "cache_read_share": null,
+            "cause": null,
+            "continuation": null,
+            "delivery": null,
             "delivery_id": null,
-            "exit_evidence": null,
-            "generation": 0,
+            "exit_code": null,
+            "finished_at": null,
+            "git_grants_digest": null,
+            "graph": "implement-console-overview",
             "head": null,
+            "lane_class": null,
+            "last_event_at": "2026-11-02T01:57:31.075623Z",
+            "last_event_source": "queued",
+            "last_output_at": null,
+            "node": "task",
             "observed_route": null,
-            "operation_id": "board-101",
+            "overdue": null,
+            "partial_signals": [],
+            "presence": "unknown",
+            "priority": null,
             "project_id": "01010101010101010101010101010101",
-            "prompt": {
-              "bytes": 12,
-              "complete": true,
-              "digest": "sha256:aaecb569221e2e49869a9b3e5d61280a2098fb65b08bae1198e892e8f6f00aba",
-              "path": {
-                "encoding": "utf8",
-                "path": "attempts/65656565656565656565656565656565/prompt.txt"
-              },
-              "redacted": false
-            },
             "protected_paths": [],
-            "provider_launched": null,
-            "provider_ms": null,
-            "publication_error": null,
-            "queued_at": "2026-11-02T08:41:00.000000Z",
+            "queued_at": "2026-11-02T01:57:31.075623Z",
             "read_only_writable": [],
+            "reason": "the writer process state cannot be verified; run `provenant reconcile implement-console-overview/task#1` to inspect recovery before retrying",
+            "recorded_state": "running",
             "requested_route": {
+              "effort": "high",
               "kind": "model",
-              "provider": "claude",
-              "model": "claude/opus-5-5",
-              "effort": "high"
+              "model": "fixture/model",
+              "provider": "fixture"
             },
-            "resolved_route": null,
-            "result": null,
+            "result_path": null,
             "retry_of": null,
-            "revision": 1,
             "runtime_deadline": null,
-            "schema_version": 1,
-            "session": null,
-            "started_at": "2026-11-02T08:42:10.000000Z",
-            "state": "running",
-            "subject": null,
-            "title": "task",
-            "trace": {
-              "actor": "02020202020202020202020202020202",
-              "attempt": "65656565656565656565656565656565",
-              "host": null,
-              "operation": "board-101",
-              "parent": null,
-              "project": "01010101010101010101010101010101",
-              "run": "65656565656565656565656565656565"
-            },
+            "settlement": null,
+            "skipped_routes": [],
+            "stale": null,
+            "started_at": null,
+            "state": "unknown",
+            "superseded_by": null,
+            "title": "node implement-console-overview",
+            "transcript": null,
             "usage": {
               "cache_read": null,
               "cache_write": null,
@@ -85,110 +96,83 @@
               "source": null,
               "uncached_input": null
             },
-            "verified_owner": "02020202020202020202020202020202"
-          },
-          "run": {
-            "actor_id": "02020202020202020202020202020202",
-            "children": [],
-            "closed_at": null,
-            "closure": "open",
-            "created_at": "2026-11-02T01:57:31.075623Z",
-            "generation": 0,
-            "operation_id": "board-101",
-            "parent": null,
-            "project_id": "01010101010101010101010101010101",
-            "request_digest": "sha256:240445ed9495544e614ca567929b19a69ab8f97bf299bd678e6b93c20357988b",
-            "revision": 1,
-            "run_id": "65656565656565656565656565656565",
-            "schema_version": 1,
-            "task_ids": [
-              "03030303030303030303030303030303"
-            ]
+            "waiting_for": null,
+            "write_grants": []
           }
         },
-        "children": [
-          {
-            "kind": "dispatch",
-            "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"
-          },
-          {
-            "kind": "dispatch",
-            "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
-          }
-        ],
-        "status": "running",
-        "title": "task"
+        "parents": {
+          "continuation": null,
+          "dispatch": null
+        },
+        "status": "running"
       },
       {
+        "children": [
+          {
+            "attempt_id": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
+            "kind": "retry"
+          }
+        ],
+        "depth": 1,
         "lane_id": {
+          "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
           "host": null,
           "key": {
             "attempt": 1,
             "graph": "review-the-change-set",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          },
-          "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"
+          }
         },
-        "depth": 1,
-        "store_parent_attempt": null,
-        "store_path": "x",
         "metadata": {
           "attempt": {
-            "admission_deadline": null,
+            "account": null,
             "applied_route": null,
             "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
             "attempt_number": 1,
-            "authority_digest": "sha256:0505050505050505050505050505050505050505050505050505050505050505",
+            "cache_read_share": null,
+            "cause": null,
+            "continuation": null,
+            "delivery": null,
             "delivery_id": null,
-            "exit_evidence": null,
-            "generation": 0,
+            "exit_code": null,
+            "finished_at": null,
+            "git_grants_digest": null,
+            "graph": "review-the-change-set",
             "head": null,
+            "lane_class": null,
+            "last_event_at": "2026-11-02T01:57:31.075623Z",
+            "last_event_source": "queued",
+            "last_output_at": null,
+            "node": "task",
             "observed_route": null,
-            "operation_id": "board-101",
+            "overdue": null,
+            "partial_signals": [],
+            "presence": "unknown",
+            "priority": null,
             "project_id": "01010101010101010101010101010101",
-            "prompt": {
-              "bytes": 12,
-              "complete": true,
-              "digest": "sha256:aaecb569221e2e49869a9b3e5d61280a2098fb65b08bae1198e892e8f6f00aba",
-              "path": {
-                "encoding": "utf8",
-                "path": "attempts/65656565656565656565656565656565/prompt.txt"
-              },
-              "redacted": false
-            },
             "protected_paths": [],
-            "provider_launched": null,
-            "provider_ms": null,
-            "publication_error": null,
-            "queued_at": "2026-11-02T08:41:00.000000Z",
+            "queued_at": "2026-11-02T01:57:31.075623Z",
             "read_only_writable": [],
+            "reason": "the writer process state cannot be verified; run `provenant reconcile review-the-change-set/task#1` to inspect recovery before retrying",
+            "recorded_state": "running",
             "requested_route": {
+              "effort": "high",
               "kind": "model",
-              "provider": "claude",
-              "model": "claude/sonnet-5-5",
-              "effort": "medium"
+              "model": "fixture/model",
+              "provider": "fixture"
             },
-            "resolved_route": null,
-            "result": null,
+            "result_path": null,
             "retry_of": null,
-            "revision": 1,
             "runtime_deadline": null,
-            "schema_version": 1,
-            "session": null,
-            "started_at": "2026-11-02T08:42:10.000000Z",
-            "state": "running",
-            "subject": null,
-            "title": "task",
-            "trace": {
-              "actor": "02020202020202020202020202020202",
-              "attempt": "65656565656565656565656565656565",
-              "host": null,
-              "operation": "board-101",
-              "parent": null,
-              "project": "01010101010101010101010101010101",
-              "run": "65656565656565656565656565656565"
-            },
+            "settlement": null,
+            "skipped_routes": [],
+            "stale": null,
+            "started_at": null,
+            "state": "unknown",
+            "superseded_by": null,
+            "title": "node review-the-change-set",
+            "transcript": null,
             "usage": {
               "cache_read": null,
               "cache_write": null,
@@ -199,106 +183,78 @@
               "source": null,
               "uncached_input": null
             },
-            "verified_owner": "02020202020202020202020202020202"
-          },
-          "run": {
-            "actor_id": "02020202020202020202020202020202",
-            "children": [],
-            "closed_at": null,
-            "closure": "open",
-            "created_at": "2026-11-02T01:57:31.075623Z",
-            "generation": 0,
-            "operation_id": "board-101",
-            "parent": null,
-            "project_id": "01010101010101010101010101010101",
-            "request_digest": "sha256:240445ed9495544e614ca567929b19a69ab8f97bf299bd678e6b93c20357988b",
-            "revision": 1,
-            "run_id": "65656565656565656565656565656565",
-            "schema_version": 1,
-            "task_ids": [
-              "03030303030303030303030303030303"
-            ]
+            "waiting_for": null,
+            "write_grants": []
           }
         },
-        "children": [
-          {
-            "kind": "retry",
-            "attempt_id": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4"
-          }
-        ],
-        "status": "running",
-        "title": "task"
+        "parents": {
+          "continuation": null,
+          "dispatch": null
+        },
+        "status": "running"
       },
       {
+        "children": [],
+        "depth": 1,
         "lane_id": {
+          "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
           "host": null,
           "key": {
             "attempt": 1,
-            "graph": "write-the-migration-notes",
+            "graph": "review-the-change-set",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          },
-          "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+          }
         },
-        "depth": 1,
-        "store_parent_attempt": null,
-        "store_path": "x",
         "metadata": {
           "attempt": {
-            "admission_deadline": null,
+            "account": null,
             "applied_route": null,
             "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
             "attempt_number": 1,
-            "authority_digest": "sha256:0505050505050505050505050505050505050505050505050505050505050505",
+            "cache_read_share": null,
+            "cause": null,
+            "continuation": null,
+            "delivery": null,
             "delivery_id": null,
-            "exit_evidence": null,
-            "generation": 0,
+            "exit_code": null,
+            "finished_at": null,
+            "git_grants_digest": null,
+            "graph": "review-the-change-set",
             "head": null,
+            "lane_class": null,
+            "last_event_at": "2026-11-02T01:57:31.075623Z",
+            "last_event_source": "queued",
+            "last_output_at": null,
+            "node": "task",
             "observed_route": null,
-            "operation_id": "board-101",
+            "overdue": null,
+            "partial_signals": [],
+            "presence": "unknown",
+            "priority": null,
             "project_id": "01010101010101010101010101010101",
-            "prompt": {
-              "bytes": 12,
-              "complete": true,
-              "digest": "sha256:aaecb569221e2e49869a9b3e5d61280a2098fb65b08bae1198e892e8f6f00aba",
-              "path": {
-                "encoding": "utf8",
-                "path": "attempts/65656565656565656565656565656565/prompt.txt"
-              },
-              "redacted": false
-            },
             "protected_paths": [],
-            "provider_launched": null,
-            "provider_ms": null,
-            "publication_error": null,
-            "queued_at": "2026-11-02T08:41:00.000000Z",
+            "queued_at": "2026-11-02T01:57:31.075623Z",
             "read_only_writable": [],
+            "reason": "the writer process state cannot be verified; run `provenant reconcile review-the-change-set/task#1` to inspect recovery before retrying",
+            "recorded_state": "running",
             "requested_route": {
+              "effort": "high",
               "kind": "model",
-              "provider": "claude",
-              "model": "claude/sonnet-5-5",
-              "effort": "low"
+              "model": "fixture/model",
+              "provider": "fixture"
             },
-            "resolved_route": null,
-            "result": null,
+            "result_path": null,
             "retry_of": null,
-            "revision": 1,
             "runtime_deadline": null,
-            "schema_version": 1,
-            "session": null,
+            "settlement": null,
+            "skipped_routes": [],
+            "stale": null,
             "started_at": null,
-            "state": "queued",
-            "subject": null,
-            "title": "task",
-            "trace": {
-              "actor": "02020202020202020202020202020202",
-              "attempt": "65656565656565656565656565656565",
-              "host": null,
-              "operation": "board-101",
-              "parent": null,
-              "project": "01010101010101010101010101010101",
-              "run": "65656565656565656565656565656565"
-            },
+            "state": "unknown",
+            "superseded_by": null,
+            "title": "node review-the-change-set",
+            "transcript": null,
             "usage": {
               "cache_read": null,
               "cache_write": null,
@@ -309,101 +265,78 @@
               "source": null,
               "uncached_input": null
             },
-            "verified_owner": "02020202020202020202020202020202"
-          },
-          "run": {
-            "actor_id": "02020202020202020202020202020202",
-            "children": [],
-            "closed_at": null,
-            "closure": "open",
-            "created_at": "2026-11-02T01:57:31.075623Z",
-            "generation": 0,
-            "operation_id": "board-101",
-            "parent": null,
-            "project_id": "01010101010101010101010101010101",
-            "request_digest": "sha256:240445ed9495544e614ca567929b19a69ab8f97bf299bd678e6b93c20357988b",
-            "revision": 1,
-            "run_id": "65656565656565656565656565656565",
-            "schema_version": 1,
-            "task_ids": [
-              "03030303030303030303030303030303"
-            ]
+            "waiting_for": null,
+            "write_grants": []
           }
         },
-        "children": [],
-        "status": "queued",
-        "title": "task"
+        "parents": {
+          "continuation": null,
+          "dispatch": null
+        },
+        "status": "running"
       },
       {
+        "children": [],
+        "depth": 2,
         "lane_id": {
+          "attempt_id": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
           "host": null,
           "key": {
             "attempt": 1,
-            "graph": "settle-quota-fixtures",
+            "graph": "run-the-whole-test-suite",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          },
-          "attempt_id": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4"
+          }
         },
-        "depth": 2,
-        "store_parent_attempt": null,
-        "store_path": "x",
         "metadata": {
           "attempt": {
-            "admission_deadline": null,
+            "account": null,
             "applied_route": null,
             "attempt_id": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
             "attempt_number": 1,
-            "authority_digest": "sha256:0505050505050505050505050505050505050505050505050505050505050505",
+            "cache_read_share": null,
+            "cause": null,
+            "continuation": null,
+            "delivery": null,
             "delivery_id": null,
-            "exit_evidence": null,
-            "generation": 0,
+            "exit_code": null,
+            "finished_at": null,
+            "git_grants_digest": null,
+            "graph": "run-the-whole-test-suite",
             "head": null,
+            "lane_class": null,
+            "last_event_at": "2026-11-02T01:57:31.075623Z",
+            "last_event_source": "queued",
+            "last_output_at": null,
+            "node": "task",
             "observed_route": null,
-            "operation_id": "board-101",
+            "overdue": null,
+            "partial_signals": [],
+            "presence": "unknown",
+            "priority": null,
             "project_id": "01010101010101010101010101010101",
-            "prompt": {
-              "bytes": 12,
-              "complete": true,
-              "digest": "sha256:aaecb569221e2e49869a9b3e5d61280a2098fb65b08bae1198e892e8f6f00aba",
-              "path": {
-                "encoding": "utf8",
-                "path": "attempts/65656565656565656565656565656565/prompt.txt"
-              },
-              "redacted": false
-            },
             "protected_paths": [],
-            "provider_launched": null,
-            "provider_ms": null,
-            "publication_error": null,
-            "queued_at": "2026-11-02T08:41:00.000000Z",
+            "queued_at": "2026-11-02T01:57:31.075623Z",
             "read_only_writable": [],
+            "reason": "the writer process state cannot be verified; run `provenant reconcile run-the-whole-test-suite/task#1` to inspect recovery before retrying",
+            "recorded_state": "running",
             "requested_route": {
+              "effort": "high",
               "kind": "model",
-              "provider": "claude",
-              "model": "claude/haiku-5-5",
-              "effort": "low"
+              "model": "fixture/model",
+              "provider": "fixture"
             },
-            "resolved_route": null,
-            "result": null,
+            "result_path": null,
             "retry_of": null,
-            "revision": 1,
             "runtime_deadline": null,
-            "schema_version": 1,
-            "session": null,
-            "started_at": "2026-11-02T08:42:10.000000Z",
-            "state": "settling",
-            "subject": null,
-            "title": "task",
-            "trace": {
-              "actor": "02020202020202020202020202020202",
-              "attempt": "65656565656565656565656565656565",
-              "host": null,
-              "operation": "board-101",
-              "parent": null,
-              "project": "01010101010101010101010101010101",
-              "run": "65656565656565656565656565656565"
-            },
+            "settlement": null,
+            "skipped_routes": [],
+            "stale": null,
+            "started_at": null,
+            "state": "unknown",
+            "superseded_by": null,
+            "title": "node run-the-whole-test-suite",
+            "transcript": null,
             "usage": {
               "cache_read": null,
               "cache_write": null,
@@ -414,101 +347,78 @@
               "source": null,
               "uncached_input": null
             },
-            "verified_owner": "02020202020202020202020202020202"
-          },
-          "run": {
-            "actor_id": "02020202020202020202020202020202",
-            "children": [],
-            "closed_at": null,
-            "closure": "open",
-            "created_at": "2026-11-02T01:57:31.075623Z",
-            "generation": 0,
-            "operation_id": "board-101",
-            "parent": null,
-            "project_id": "01010101010101010101010101010101",
-            "request_digest": "sha256:240445ed9495544e614ca567929b19a69ab8f97bf299bd678e6b93c20357988b",
-            "revision": 1,
-            "run_id": "65656565656565656565656565656565",
-            "schema_version": 1,
-            "task_ids": [
-              "03030303030303030303030303030303"
-            ]
+            "waiting_for": null,
+            "write_grants": []
           }
         },
-        "children": [],
-        "status": "settling",
-        "title": "task"
+        "parents": {
+          "continuation": null,
+          "dispatch": null
+        },
+        "status": "running"
       },
       {
+        "children": [],
+        "depth": 0,
         "lane_id": {
+          "attempt_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
           "host": null,
           "key": {
             "attempt": 1,
-            "graph": "regenerate-cli-fixtures",
+            "graph": "fixture",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          },
-          "attempt_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5"
+          }
         },
-        "depth": 0,
-        "store_parent_attempt": null,
-        "store_path": "x",
         "metadata": {
           "attempt": {
-            "admission_deadline": null,
+            "account": null,
             "applied_route": null,
             "attempt_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
             "attempt_number": 1,
-            "authority_digest": "sha256:0505050505050505050505050505050505050505050505050505050505050505",
+            "cache_read_share": null,
+            "cause": null,
+            "continuation": null,
+            "delivery": null,
             "delivery_id": null,
-            "exit_evidence": null,
-            "generation": 0,
+            "exit_code": null,
+            "finished_at": null,
+            "git_grants_digest": null,
+            "graph": "fixture",
             "head": null,
+            "lane_class": null,
+            "last_event_at": "2026-11-02T01:57:31.075623Z",
+            "last_event_source": "queued",
+            "last_output_at": null,
+            "node": "task",
             "observed_route": null,
-            "operation_id": "board-101",
+            "overdue": null,
+            "partial_signals": [],
+            "presence": "unknown",
+            "priority": null,
             "project_id": "01010101010101010101010101010101",
-            "prompt": {
-              "bytes": 12,
-              "complete": true,
-              "digest": "sha256:aaecb569221e2e49869a9b3e5d61280a2098fb65b08bae1198e892e8f6f00aba",
-              "path": {
-                "encoding": "utf8",
-                "path": "attempts/65656565656565656565656565656565/prompt.txt"
-              },
-              "redacted": false
-            },
             "protected_paths": [],
-            "provider_launched": null,
-            "provider_ms": null,
-            "publication_error": null,
-            "queued_at": "2026-11-02T08:41:00.000000Z",
+            "queued_at": "2026-11-02T01:57:31.075623Z",
             "read_only_writable": [],
+            "reason": "the writer process state cannot be verified; run `provenant reconcile fixture/task#1` to inspect recovery before retrying",
+            "recorded_state": "running",
             "requested_route": {
+              "effort": "high",
               "kind": "model",
-              "provider": "claude",
-              "model": "codex/gpt-6",
-              "effort": "high"
+              "model": "fixture/model",
+              "provider": "fixture"
             },
-            "resolved_route": null,
-            "result": null,
+            "result_path": null,
             "retry_of": null,
-            "revision": 1,
             "runtime_deadline": null,
-            "schema_version": 1,
-            "session": null,
-            "started_at": "2026-11-02T08:42:10.000000Z",
-            "state": "terminal",
-            "subject": null,
-            "title": "task",
-            "trace": {
-              "actor": "02020202020202020202020202020202",
-              "attempt": "65656565656565656565656565656565",
-              "host": null,
-              "operation": "board-101",
-              "parent": null,
-              "project": "01010101010101010101010101010101",
-              "run": "65656565656565656565656565656565"
-            },
+            "settlement": null,
+            "skipped_routes": [],
+            "stale": null,
+            "started_at": null,
+            "state": "unknown",
+            "superseded_by": null,
+            "title": "node fixture",
+            "transcript": null,
             "usage": {
               "cache_read": null,
               "cache_write": null,
@@ -519,104 +429,78 @@
               "source": null,
               "uncached_input": null
             },
-            "verified_owner": "02020202020202020202020202020202",
-            "outcome": "succeeded",
-            "exit_code": 0,
-            "finished_at": "2026-11-02T08:50:00Z"
-          },
-          "run": {
-            "actor_id": "02020202020202020202020202020202",
-            "children": [],
-            "closed_at": null,
-            "closure": "open",
-            "created_at": "2026-11-02T01:57:31.075623Z",
-            "generation": 0,
-            "operation_id": "board-101",
-            "parent": null,
-            "project_id": "01010101010101010101010101010101",
-            "request_digest": "sha256:240445ed9495544e614ca567929b19a69ab8f97bf299bd678e6b93c20357988b",
-            "revision": 1,
-            "run_id": "65656565656565656565656565656565",
-            "schema_version": 1,
-            "task_ids": [
-              "03030303030303030303030303030303"
-            ]
+            "waiting_for": null,
+            "write_grants": []
           }
         },
-        "children": [],
-        "status": "terminal",
-        "title": "task"
+        "parents": {
+          "continuation": null,
+          "dispatch": null
+        },
+        "status": "running"
       },
       {
+        "children": [],
+        "depth": 0,
         "lane_id": {
+          "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
           "host": null,
           "key": {
-            "attempt": 2,
-            "graph": "run-the-whole-test-suite",
-            "node": "task--writer",
+            "attempt": 1,
+            "graph": "fixture",
+            "node": "task",
             "project": "01010101010101010101010101010101"
-          },
-          "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"
+          }
         },
-        "depth": 0,
-        "store_parent_attempt": null,
-        "store_path": "x",
         "metadata": {
           "attempt": {
-            "admission_deadline": null,
+            "account": null,
             "applied_route": null,
             "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
             "attempt_number": 1,
-            "authority_digest": "sha256:0505050505050505050505050505050505050505050505050505050505050505",
+            "cache_read_share": null,
+            "cause": null,
+            "continuation": null,
+            "delivery": null,
             "delivery_id": null,
-            "exit_evidence": null,
-            "generation": 0,
+            "exit_code": null,
+            "finished_at": null,
+            "git_grants_digest": null,
+            "graph": "fixture",
             "head": null,
+            "lane_class": null,
+            "last_event_at": "2026-11-02T01:57:31.075623Z",
+            "last_event_source": "queued",
+            "last_output_at": null,
+            "node": "task",
             "observed_route": null,
-            "operation_id": "board-101",
+            "overdue": null,
+            "partial_signals": [],
+            "presence": "unknown",
+            "priority": null,
             "project_id": "01010101010101010101010101010101",
-            "prompt": {
-              "bytes": 12,
-              "complete": true,
-              "digest": "sha256:aaecb569221e2e49869a9b3e5d61280a2098fb65b08bae1198e892e8f6f00aba",
-              "path": {
-                "encoding": "utf8",
-                "path": "attempts/65656565656565656565656565656565/prompt.txt"
-              },
-              "redacted": false
-            },
             "protected_paths": [],
-            "provider_launched": null,
-            "provider_ms": null,
-            "publication_error": null,
-            "queued_at": "2026-11-02T08:41:00.000000Z",
+            "queued_at": "2026-11-02T01:57:31.075623Z",
             "read_only_writable": [],
+            "reason": "the writer process state cannot be verified; run `provenant reconcile fixture/task#1` to inspect recovery before retrying",
+            "recorded_state": "running",
             "requested_route": {
+              "effort": "high",
               "kind": "model",
-              "provider": "claude",
-              "model": "codex/gpt-6",
-              "effort": "high"
+              "model": "fixture/model",
+              "provider": "fixture"
             },
-            "resolved_route": null,
-            "result": null,
+            "result_path": null,
             "retry_of": null,
-            "revision": 1,
             "runtime_deadline": null,
-            "schema_version": 1,
-            "session": null,
-            "started_at": "2026-11-02T08:42:10.000000Z",
-            "state": "terminal",
-            "subject": null,
-            "title": "task",
-            "trace": {
-              "actor": "02020202020202020202020202020202",
-              "attempt": "65656565656565656565656565656565",
-              "host": null,
-              "operation": "board-101",
-              "parent": null,
-              "project": "01010101010101010101010101010101",
-              "run": "65656565656565656565656565656565"
-            },
+            "settlement": null,
+            "skipped_routes": [],
+            "stale": null,
+            "started_at": null,
+            "state": "unknown",
+            "superseded_by": null,
+            "title": "node fixture",
+            "transcript": null,
             "usage": {
               "cache_read": null,
               "cache_write": null,
@@ -627,51 +511,27 @@
               "source": null,
               "uncached_input": null
             },
-            "verified_owner": "02020202020202020202020202020202",
-            "outcome": "task_failed",
-            "exit_code": 1,
-            "finished_at": "2026-11-02T08:55:00Z",
-            "reason": "2 tests failed"
-          },
-          "run": {
-            "actor_id": "02020202020202020202020202020202",
-            "children": [],
-            "closed_at": null,
-            "closure": "open",
-            "created_at": "2026-11-02T01:57:31.075623Z",
-            "generation": 0,
-            "operation_id": "board-101",
-            "parent": null,
-            "project_id": "01010101010101010101010101010101",
-            "request_digest": "sha256:240445ed9495544e614ca567929b19a69ab8f97bf299bd678e6b93c20357988b",
-            "revision": 1,
-            "run_id": "65656565656565656565656565656565",
-            "schema_version": 1,
-            "task_ids": [
-              "03030303030303030303030303030303"
-            ]
+            "waiting_for": null,
+            "write_grants": []
           }
         },
-        "children": [],
-        "status": "terminal",
-        "title": "task"
+        "parents": {
+          "continuation": null,
+          "dispatch": null
+        },
+        "status": "running"
       }
     ],
-    "edges": [],
+    "schema_version": 1,
     "totals": {
-      "attempts": 6
+      "attempts": 6,
+      "duplicate_observations": 0,
+      "usage": {}
     },
     "truncated": false,
-    "coverage": {
-      "scope": "local",
-      "host": null,
-      "runs": "complete",
-      "nested_runs": "complete"
-    },
-    "limits": {
-      "depth": 8,
-      "nodes": 100
-    }
+    "unfetched_children": []
   },
-  "error": null
+  "error": null,
+  "schema_version": 1,
+  "status": "ok"
 }

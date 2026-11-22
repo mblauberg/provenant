@@ -1,7 +1,5 @@
 {
-  "schema_version": 1,
   "command": "console changes",
-  "status": "ok",
   "data": {
     "changed": {
       "board": true,
@@ -22,5 +20,7 @@
     },
     "schema_version": 2
   },
-  "error": null
+  "error": null,
+  "schema_version": 1,
+  "status": "ok"
 }
