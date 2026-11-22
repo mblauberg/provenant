@@ -3062,6 +3062,7 @@ mod tests {
         ),
         Box<dyn std::error::Error>,
     > {
+        use super::*;
         use provenant_confinement::{UtilityBudget, UtilityRuntime};
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         // UtilityRuntime needs an owner-only home for its isolated Git reads.
@@ -3193,7 +3194,6 @@ mod tests {
                 set: Vec::new(),
             },
         )?;
-        let output = String::from_utf8(output)?;
         assert!(output.contains("complete"), "{output}");
 
         let calls = std::fs::read_to_string(&calls)?;
