@@ -211,7 +211,7 @@ fn resolve_reports_effort_controls_and_nearby_models() -> Result {
     );
     assert_eq!(
         known["data"]["recorded_readiness"][0]["observation"]["observed_scope"]["route"],
-        "codex/gpt-6-luna"
+        serde_json::json!({"kind": "model", "value": "codex/gpt-6-luna"})
     );
     assert_eq!(
         known["data"]["recorded_readiness"][0]["observation"]["observed_unix_seconds"],
