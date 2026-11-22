@@ -14,7 +14,7 @@
         "record": {
           "chair_actor": "c7b11347fb1be62dc783521ee94e45bf",
           "checkpoint": {
-            "bytes": 204,
+            "bytes": 21,
             "parent": null,
             "revision": 2,
             "saved_at": "2026-11-02T01:58:26.745295Z",
@@ -37,16 +37,8 @@
           }
         },
         "role": "chair",
-        "summary": {
-          "needs_you": [],
-          "next": "Review",
-          "now": "Implementing console",
-          "revision": 1,
-          "risk": "none",
-          "schema_version": 1,
-          "updated_at": "2026-11-02T01:58:26.745295Z"
-        },
-        "summary_status": "available"
+        "summary": "Implementing console",
+        "summary_status": "structured"
       },
       {
         "consistency": "current",
@@ -54,7 +46,7 @@
         "record": {
           "chair_actor": "c7b11347fb1be62dc783521ee94e45bf",
           "checkpoint": {
-            "bytes": 204,
+            "bytes": 21,
             "parent": 2,
             "revision": 3,
             "saved_at": "2026-11-02T02:18:00Z",
@@ -77,16 +69,8 @@
           }
         },
         "role": "chair",
-        "summary": {
-          "needs_you": [],
-          "next": "Review",
-          "now": "Implementing the console",
-          "revision": 1,
-          "risk": "none",
-          "schema_version": 1,
-          "updated_at": "2026-11-02T02:18:00Z"
-        },
-        "summary_status": "available"
+        "summary": "Implementing the console",
+        "summary_status": "structured"
       }
     ],
     "snapshot": "sha256:9b20d92ab3bb05518444148548bdfcce45638cbac982608e2e274fc8ce398f1f",

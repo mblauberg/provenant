@@ -201,7 +201,7 @@
           "host": null,
           "key": {
             "attempt": 1,
-            "graph": "review-the-change-set",
+            "graph": "write-the-migration-notes",
             "node": "task",
             "project": "01010101010101010101010101010101"
           }
@@ -220,7 +220,7 @@
             "exit_code": null,
             "finished_at": null,
             "git_grants_digest": null,
-            "graph": "review-the-change-set",
+            "graph": "write-the-migration-notes",
             "head": null,
             "lane_class": null,
             "last_event_at": "2026-11-02T01:57:31.075623Z",
@@ -236,7 +236,7 @@
             "protected_paths": [],
             "queued_at": "2026-11-02T01:57:31.075623Z",
             "read_only_writable": [],
-            "reason": "the writer process state cannot be verified; run `provenant reconcile review-the-change-set/task#1` to inspect recovery before retrying",
+            "reason": "the writer process state cannot be verified; run `provenant reconcile write-the-migration-notes/task#1` to inspect recovery before retrying",
             "recorded_state": "running",
             "requested_route": {
               "effort": "high",
@@ -253,7 +253,7 @@
             "started_at": null,
             "state": "unknown",
             "superseded_by": null,
-            "title": "node review-the-change-set",
+            "title": "node write-the-migration-notes",
             "transcript": null,
             "usage": {
               "cache_read": null,
@@ -283,7 +283,7 @@
           "host": null,
           "key": {
             "attempt": 1,
-            "graph": "run-the-whole-test-suite",
+            "graph": "settle-quota-fixtures",
             "node": "task",
             "project": "01010101010101010101010101010101"
           }
@@ -293,6 +293,170 @@
             "account": null,
             "applied_route": null,
             "attempt_id": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
+            "attempt_number": 1,
+            "cache_read_share": null,
+            "cause": null,
+            "continuation": null,
+            "delivery": null,
+            "delivery_id": null,
+            "exit_code": null,
+            "finished_at": null,
+            "git_grants_digest": null,
+            "graph": "settle-quota-fixtures",
+            "head": null,
+            "lane_class": null,
+            "last_event_at": "2026-11-02T01:57:31.075623Z",
+            "last_event_source": "queued",
+            "last_output_at": null,
+            "node": "task",
+            "observed_route": null,
+            "overdue": null,
+            "partial_signals": [],
+            "presence": "unknown",
+            "priority": null,
+            "project_id": "01010101010101010101010101010101",
+            "protected_paths": [],
+            "queued_at": "2026-11-02T01:57:31.075623Z",
+            "read_only_writable": [],
+            "reason": "the writer process state cannot be verified; run `provenant reconcile settle-quota-fixtures/task#1` to inspect recovery before retrying",
+            "recorded_state": "running",
+            "requested_route": {
+              "effort": "high",
+              "kind": "model",
+              "model": "fixture/model",
+              "provider": "fixture"
+            },
+            "result_path": null,
+            "retry_of": null,
+            "runtime_deadline": null,
+            "settlement": null,
+            "skipped_routes": [],
+            "stale": null,
+            "started_at": null,
+            "state": "unknown",
+            "superseded_by": null,
+            "title": "node settle-quota-fixtures",
+            "transcript": null,
+            "usage": {
+              "cache_read": null,
+              "cache_write": null,
+              "cache_write_1h": null,
+              "context_basis_points": null,
+              "output_excluding_reasoning": null,
+              "reasoning": null,
+              "source": null,
+              "uncached_input": null
+            },
+            "waiting_for": null,
+            "write_grants": []
+          }
+        },
+        "parents": {
+          "continuation": null,
+          "dispatch": null
+        },
+        "status": "running"
+      },
+      {
+        "children": [],
+        "depth": 0,
+        "lane_id": {
+          "attempt_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
+          "host": null,
+          "key": {
+            "attempt": 1,
+            "graph": "regenerate-cli-fixtures",
+            "node": "task",
+            "project": "01010101010101010101010101010101"
+          }
+        },
+        "metadata": {
+          "attempt": {
+            "account": null,
+            "applied_route": null,
+            "attempt_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
+            "attempt_number": 1,
+            "cache_read_share": null,
+            "cause": null,
+            "continuation": null,
+            "delivery": null,
+            "delivery_id": null,
+            "exit_code": null,
+            "finished_at": null,
+            "git_grants_digest": null,
+            "graph": "regenerate-cli-fixtures",
+            "head": null,
+            "lane_class": null,
+            "last_event_at": "2026-11-02T01:57:31.075623Z",
+            "last_event_source": "queued",
+            "last_output_at": null,
+            "node": "task",
+            "observed_route": null,
+            "overdue": null,
+            "partial_signals": [],
+            "presence": "unknown",
+            "priority": null,
+            "project_id": "01010101010101010101010101010101",
+            "protected_paths": [],
+            "queued_at": "2026-11-02T01:57:31.075623Z",
+            "read_only_writable": [],
+            "reason": "the writer process state cannot be verified; run `provenant reconcile regenerate-cli-fixtures/task#1` to inspect recovery before retrying",
+            "recorded_state": "running",
+            "requested_route": {
+              "effort": "high",
+              "kind": "model",
+              "model": "fixture/model",
+              "provider": "fixture"
+            },
+            "result_path": null,
+            "retry_of": null,
+            "runtime_deadline": null,
+            "settlement": null,
+            "skipped_routes": [],
+            "stale": null,
+            "started_at": null,
+            "state": "unknown",
+            "superseded_by": null,
+            "title": "node regenerate-cli-fixtures",
+            "transcript": null,
+            "usage": {
+              "cache_read": null,
+              "cache_write": null,
+              "cache_write_1h": null,
+              "context_basis_points": null,
+              "output_excluding_reasoning": null,
+              "reasoning": null,
+              "source": null,
+              "uncached_input": null
+            },
+            "waiting_for": null,
+            "write_grants": []
+          }
+        },
+        "parents": {
+          "continuation": null,
+          "dispatch": null
+        },
+        "status": "running"
+      },
+      {
+        "children": [],
+        "depth": 0,
+        "lane_id": {
+          "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
+          "host": null,
+          "key": {
+            "attempt": 2,
+            "graph": "run-the-whole-test-suite",
+            "node": "task--writer",
+            "project": "01010101010101010101010101010101"
+          }
+        },
+        "metadata": {
+          "attempt": {
+            "account": null,
+            "applied_route": null,
+            "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
             "attempt_number": 1,
             "cache_read_share": null,
             "cause": null,
@@ -336,170 +500,6 @@
             "state": "unknown",
             "superseded_by": null,
             "title": "node run-the-whole-test-suite",
-            "transcript": null,
-            "usage": {
-              "cache_read": null,
-              "cache_write": null,
-              "cache_write_1h": null,
-              "context_basis_points": null,
-              "output_excluding_reasoning": null,
-              "reasoning": null,
-              "source": null,
-              "uncached_input": null
-            },
-            "waiting_for": null,
-            "write_grants": []
-          }
-        },
-        "parents": {
-          "continuation": null,
-          "dispatch": null
-        },
-        "status": "running"
-      },
-      {
-        "children": [],
-        "depth": 0,
-        "lane_id": {
-          "attempt_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
-          "host": null,
-          "key": {
-            "attempt": 1,
-            "graph": "fixture",
-            "node": "task",
-            "project": "01010101010101010101010101010101"
-          }
-        },
-        "metadata": {
-          "attempt": {
-            "account": null,
-            "applied_route": null,
-            "attempt_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
-            "attempt_number": 1,
-            "cache_read_share": null,
-            "cause": null,
-            "continuation": null,
-            "delivery": null,
-            "delivery_id": null,
-            "exit_code": null,
-            "finished_at": null,
-            "git_grants_digest": null,
-            "graph": "fixture",
-            "head": null,
-            "lane_class": null,
-            "last_event_at": "2026-11-02T01:57:31.075623Z",
-            "last_event_source": "queued",
-            "last_output_at": null,
-            "node": "task",
-            "observed_route": null,
-            "overdue": null,
-            "partial_signals": [],
-            "presence": "unknown",
-            "priority": null,
-            "project_id": "01010101010101010101010101010101",
-            "protected_paths": [],
-            "queued_at": "2026-11-02T01:57:31.075623Z",
-            "read_only_writable": [],
-            "reason": "the writer process state cannot be verified; run `provenant reconcile fixture/task#1` to inspect recovery before retrying",
-            "recorded_state": "running",
-            "requested_route": {
-              "effort": "high",
-              "kind": "model",
-              "model": "fixture/model",
-              "provider": "fixture"
-            },
-            "result_path": null,
-            "retry_of": null,
-            "runtime_deadline": null,
-            "settlement": null,
-            "skipped_routes": [],
-            "stale": null,
-            "started_at": null,
-            "state": "unknown",
-            "superseded_by": null,
-            "title": "node fixture",
-            "transcript": null,
-            "usage": {
-              "cache_read": null,
-              "cache_write": null,
-              "cache_write_1h": null,
-              "context_basis_points": null,
-              "output_excluding_reasoning": null,
-              "reasoning": null,
-              "source": null,
-              "uncached_input": null
-            },
-            "waiting_for": null,
-            "write_grants": []
-          }
-        },
-        "parents": {
-          "continuation": null,
-          "dispatch": null
-        },
-        "status": "running"
-      },
-      {
-        "children": [],
-        "depth": 0,
-        "lane_id": {
-          "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
-          "host": null,
-          "key": {
-            "attempt": 1,
-            "graph": "fixture",
-            "node": "task",
-            "project": "01010101010101010101010101010101"
-          }
-        },
-        "metadata": {
-          "attempt": {
-            "account": null,
-            "applied_route": null,
-            "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
-            "attempt_number": 1,
-            "cache_read_share": null,
-            "cause": null,
-            "continuation": null,
-            "delivery": null,
-            "delivery_id": null,
-            "exit_code": null,
-            "finished_at": null,
-            "git_grants_digest": null,
-            "graph": "fixture",
-            "head": null,
-            "lane_class": null,
-            "last_event_at": "2026-11-02T01:57:31.075623Z",
-            "last_event_source": "queued",
-            "last_output_at": null,
-            "node": "task",
-            "observed_route": null,
-            "overdue": null,
-            "partial_signals": [],
-            "presence": "unknown",
-            "priority": null,
-            "project_id": "01010101010101010101010101010101",
-            "protected_paths": [],
-            "queued_at": "2026-11-02T01:57:31.075623Z",
-            "read_only_writable": [],
-            "reason": "the writer process state cannot be verified; run `provenant reconcile fixture/task#1` to inspect recovery before retrying",
-            "recorded_state": "running",
-            "requested_route": {
-              "effort": "high",
-              "kind": "model",
-              "model": "fixture/model",
-              "provider": "fixture"
-            },
-            "result_path": null,
-            "retry_of": null,
-            "runtime_deadline": null,
-            "settlement": null,
-            "skipped_routes": [],
-            "stale": null,
-            "started_at": null,
-            "state": "unknown",
-            "superseded_by": null,
-            "title": "node fixture",
             "transcript": null,
             "usage": {
               "cache_read": null,
