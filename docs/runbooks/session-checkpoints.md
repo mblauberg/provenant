@@ -26,6 +26,13 @@ A save under a changed label or an old binding returns `IDENTITY`. Recover with
 provenant workflow session save SESSION --file FILE --client HARNESS --rebind
 ```
 
+With `--project PATH`, the checkpoint lands under that selected project. If
+`PATH` names a project other than the working directory's, the save proceeds
+with a warning naming both paths in the JSON `warnings` and the human output;
+it no longer refuses with `SESSION_PROJECT_MISMATCH`. A session registered under
+another project still needs an explicit `--project PATH` to be saved from
+elsewhere.
+
 The record keeps the last 8 bindings. Corrupt discovery JSON returns `HISTORY`
 and an unreadable file `IO`: restore the discovery record from backup. Discovery
 (the per-cwd lookup hooks read) is advisory: if publishing fails after the

@@ -38,10 +38,12 @@ Before compaction, handoff or a long interruption, rewrite a checkpoint near
 the standing record and an Intent section as the
 [continuity contract](references/continuity.md) sets out. Save it with
 `provenant workflow session save` and append milestones with
-`provenant chair log append`; `--help` on each gives the flags. Use the
-host-supplied session ID and the actual harness. History lives in the log,
-current context in the checkpoint. Move needed results out of scratch to their
-durable owner before it expires.
+`provenant chair log append`; `--help` on each gives the flags. An explicit
+`--project PATH` selects where the checkpoint lands: when it names another
+project than the working directory's, the save proceeds with a warning naming
+both paths. Use the host-supplied session ID and the actual harness. History
+lives in the log, current context in the checkpoint. Move needed results out of
+scratch to their durable owner before it expires.
 
 When the chair's account runs low, `provenant chair switch` checkpoints and
 continues under another registered Claude account. `provenant workflow session

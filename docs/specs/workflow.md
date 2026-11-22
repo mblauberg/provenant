@@ -41,8 +41,12 @@ receipt at an expected revision: one winner, never a torn file.
 ## Sessions
 
 A checkpoint is keyed exactly by project and host session; a session
-registered to another project requires an explicit project selection. Each save
-keeps the text it replaces as a bounded, hashed revision. Hooks are advisory:
+registered to another project requires an explicit project selection, and a
+save without one stays in the working directory's checkout. From inside a
+checkout, an explicit `--project PATH` naming another project warns and saves
+under the selected project, naming both the working directory and the selected
+path in the JSON warnings and human output. Each save keeps the text it
+replaces as a bounded, hashed revision. Hooks are advisory:
 they emit only their own key's checkpoint, and mark a missing or slow
 source unavailable, never empty. Autosave never writes the chair's
 `checkpoint.md`.
