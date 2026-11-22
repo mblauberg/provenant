@@ -1,5 +1,6 @@
 //! Process-edge wiring for installation. State operations stay in config;
 //! every child is supervised with a bounded wait and isolated environment.
+use crate::apps;
 use crate::release_smoke::SystemSmoke;
 use crate::roots::{self, Product, Resolved, Workspace};
 use provenant_cli as cli;
@@ -454,6 +455,9 @@ struct InstallData {
     /// Advisory when this release changes live-attempt records under live lanes.
     #[serde(skip_serializing_if = "Option::is_none")]
     live_record_warning: Option<String>,
+    /// Version and staleness of the installed bundled app.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    app: Option<apps::Status>,
 }
 impl InstallData {
     fn empty() -> Self {
@@ -465,6 +469,7 @@ impl InstallData {
             tick_agent: None,
             state_copy: None,
             live_record_warning: None,
+            app: None,
         }
     }
     fn success(outcome: InstallOutcome) -> Self {
@@ -476,6 +481,7 @@ impl InstallData {
             tick_agent: None,
             state_copy: None,
             live_record_warning: None,
+            app: None,
         }
     }
     fn failure(error: &InstallError) -> Self {
@@ -492,6 +498,7 @@ impl InstallData {
                 tick_agent: None,
                 state_copy: None,
                 live_record_warning: None,
+                app: None,
             },
             _ => Self::empty(),
         }
@@ -764,10 +771,20 @@ fn output_install_with(
             if let Some(super::tick_agent::Installed::Failed { message }) = &tick_agent {
                 human.push_str(&format!("host tick: failed: {message}\n"));
             }
+            let app = apps::status(&apps::home(), env!("CARGO_PKG_VERSION"));
+            human.push_str(&format!(
+                "  app: {} ({})\n",
+                app.path,
+                app.version.as_deref().unwrap_or("version unknown")
+            ));
+            if app.behind_cli {
+                human.push_str(&format!("  {}\n", apps::advisory(&app)));
+            }
             let read_only = outcome.dry_run;
             let mut data = InstallData::success(outcome);
             data.peer_agent = peer_agent;
             data.tick_agent = tick_agent;
+            data.app = Some(app);
             extend(&mut data);
             super::emit(
                 &CommandResult::new(command, Outcome::Ok, data),
@@ -2290,6 +2307,9 @@ struct HostUpgrade {
     host: String,
     success: bool,
     output: String,
+    /// Installed app version, reported for the local host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    app: Option<apps::Status>,
 }
 
 pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
@@ -2339,6 +2359,9 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         }
         Err(error) => return install_error("upgrade", &error, globals),
     }
+    // The release tag resolved here is also the version the app asset was built
+    // from. Keep it so the final report can compare it with the installed app.
+    let mut upgrade_version: Option<String> = None;
     let upgraded = (|| -> Result<Vec<HostUpgrade>, String> {
         let config = provenant_cli::config_reads::read_for(&targets.roots, "install")
             .map_err(|error| error.to_string())?;
@@ -2415,6 +2438,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
                 })
                 .ok_or("Latest release has no valid tag")?;
+            upgrade_version = Some(tag.trim_start_matches('v').to_owned());
             install_args.extend(["--tag".into(), tag.into()]);
             script = format!(
                 "release_tag='{tag}'\n{}",
@@ -2450,11 +2474,13 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 host,
                 success: true,
                 output: String::from_utf8_lossy(&bytes).into_owned(),
+                app: None,
             },
             Err(output) => HostUpgrade {
                 host,
                 success: false,
                 output,
+                app: None,
             },
         };
         let mut commands: Vec<(String, Vec<std::ffi::OsString>, &[u8])> =
@@ -2543,24 +2569,44 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                         host: "smoke".into(),
                         success: true,
                         output,
+                        app: None,
                     }),
                     Err(output) => hosts.push(HostUpgrade {
                         host: "smoke".into(),
                         success: false,
                         output,
+                        app: None,
                     }),
                 }
+            }
+            let cli_version = upgrade_version
+                .as_deref()
+                .unwrap_or(env!("CARGO_PKG_VERSION"));
+            let app_status = apps::status(&targets.home, cli_version);
+            if let Some(local) = hosts.iter_mut().find(|host| host.host == "local") {
+                local.app = Some(app_status);
             }
             let success = hosts.iter().all(|host| host.success);
             let human = hosts
                 .iter()
                 .map(|host| {
-                    format!(
+                    let mut line = format!(
                         "{}: {}\n{}\n",
                         host.host,
                         if host.success { "upgraded" } else { "failed" },
                         host.output
-                    )
+                    );
+                    if let Some(app) = &host.app {
+                        line.push_str(&format!(
+                            "  app: {} ({})\n",
+                            app.path,
+                            app.version.as_deref().unwrap_or("version unknown")
+                        ));
+                        if app.behind_cli {
+                            line.push_str(&format!("  {}\n", apps::advisory(app)));
+                        }
+                    }
+                    line
                 })
                 .collect::<String>();
             let mut result = CommandResult::new(
