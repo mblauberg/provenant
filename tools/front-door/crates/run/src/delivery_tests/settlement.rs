@@ -742,8 +742,10 @@ fn prepare_failures_name_step_and_bound_git_stderr()
         let mut fixture = PrepareFixture::new()?;
         let git = fixture.root.join("git");
         let real_git = provenant_os::git::git_executable().ok_or("git executable")?;
+        // Git's final error is last, so the padding comes first: the kept tail
+        // is the failure text and the dropped head is only padding.
         fixture.executable(&git, &format!(
-            "#!/bin/sh\ncase \"$*\" in\n*'{pattern}'*)\nprintf '%s' 'fixture git failure: private-token https://user:password@example.invalid/ https://secret-user@example.invalid/ scp-secret@example.invalid:repo https://malformed-secret:password/ {}' >&2\nexit 2;;\nesac\nexec '{}' \"$@\"\n", "é".repeat(5000), real_git.display()))?;
+            "#!/bin/sh\ncase \"$*\" in\n*'{pattern}'*)\nprintf '%s' '{}fixture git failure: private-token https://user:password@example.invalid/ https://secret-user@example.invalid/ scp-secret@example.invalid:repo https://malformed-secret:password/ fixture tail marker' >&2\nexit 2;;\nesac\nexec '{}' \"$@\"\n", "é".repeat(5000), real_git.display()))?;
         fixture
             .environment
             .push(("PROVENANT_GIT".into(), git.into_os_string()));
@@ -784,7 +786,20 @@ fn prepare_failures_name_step_and_bound_git_stderr()
             other => panic!("unexpected failure class: {other:?}"),
         };
         if prepare {
+            // Git's final error is what the tail keeps, and the owner chose raw
+            // stderr in receipts, so the secret-shaped text is reported as is.
+            assert!(reason.contains("fixture tail marker"), "{reason}");
             assert!(reason.contains("private-token"), "{reason}");
+            assert!(
+                reason.contains("https://user:password@example.invalid/"),
+                "{reason}"
+            );
+            assert!(
+                reason.contains(PREPARE_REASON_TRUNCATION_MARKER),
+                "a long stderr is bounded with a marker: {reason}"
+            );
+            // The cut lands on a character boundary, never inside the padding.
+            assert!(!reason.contains('\u{FFFD}'), "{reason}");
         }
         assert!(!reason.contains("[REDACTED]"), "{reason}");
         assert!(reason.len() <= PREPARE_REASON_LIMIT + PREPARE_REASON_TRUNCATION_MARKER.len());
