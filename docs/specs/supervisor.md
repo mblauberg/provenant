@@ -376,6 +376,8 @@ sampler.
 
 `redaction` is one sourced setting, `off` by default
 ([ADR 0035](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md)).
+An unrecognised value warns and falls back to `secrets`, naming the restrictive
+value; only an absent value takes `off`.
 Under `off` nothing is masked and no per-field warning appears; `config show`
 reports the value and source. `secrets` masks credential values and token
 shapes in text leaving the host: GitHub publication, cross-host peer and relay

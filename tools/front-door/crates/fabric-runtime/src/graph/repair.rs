@@ -47,7 +47,7 @@ pub(super) fn clean_start(
         && outputs.iter().all(|output| {
             output.findings_available == Some(true)
                 && approved(output)
-                && !output.findings.iter().any(blocking)
+                && !output.findings.iter().any(repair_eligible)
         })
 }
 
@@ -108,59 +108,78 @@ fn no_repair_work(
                 && output
                     .findings
                     .iter()
-                    .all(|finding| finding.triage().is_some() && !blocking(finding))
+                    .all(|finding| finding.triage().is_some() && !repair_eligible(finding))
         })
 }
 
-pub(super) fn blocking(finding: &Finding) -> bool {
-    if finding.boundary_or_data_loss() {
-        return !finding.falsified_with_evidence();
-    }
-    if finding.spec_defect()
+/// A finding its own record has settled: a spec defect routed to the chair, or
+/// a status or disposition that ends it. Neither acceptance nor repair reads it.
+fn answered(finding: &Finding) -> bool {
+    finding.spec_defect()
         || matches!(finding.status.as_str(), "closed" | "resolved" | "fixed")
         || matches!(
             finding.disposition.as_deref(),
             Some("rejected" | "resolved" | "fixed" | "disputed" | "removed-the-case")
         )
-    {
+}
+
+fn confirmed_worth_fixing(finding: &Finding) -> bool {
+    finding
+        .triage()
+        .is_some_and(|triage| triage.decision == "confirmed" && triage.worth_fixing)
+}
+
+/// The PASS contract: an unresolved boundary or data-loss finding needs
+/// falsifying evidence, and a default-path finding blocks at blocking severity
+/// whether or not it is triaged. Once triage confirms a finding is worth
+/// fixing, either blocking class also blocks. A confirmed should-fix does not
+/// contradict PASS.
+pub(super) fn blocks_acceptance(finding: &Finding) -> bool {
+    if finding.boundary_or_data_loss() {
+        return !finding.falsified_with_evidence();
+    }
+    if answered(finding) || !finding.default_path() {
         return false;
     }
-    let Some(triage) = finding.triage() else {
-        return false;
-    };
-    if triage.decision != "confirmed" {
+    blocking_severity(finding)
+        || finding.triage().is_some_and(|triage| {
+            triage.decision == "confirmed"
+                && triage.worth_fixing
+                && matches!(
+                    triage.blocking_class.as_str(),
+                    "acceptance" | "default_path_defect"
+                )
+        })
+}
+
+/// Work a repair writer must take: everything that blocks acceptance, plus a
+/// confirmed, worth-fixing should-fix on the default path. A note without a
+/// blocking class is reported, never repaired, and a finding that still needs
+/// judgement is escalated rather than rewritten.
+pub(super) fn repair_eligible(finding: &Finding) -> bool {
+    if finding.boundary_or_data_loss() {
+        return !finding.falsified_with_evidence();
+    }
+    // Triage that rejects a finding, or calls it not worth fixing, keeps it from
+    // a writer even at blocking severity; an untriaged blocking finding is work.
+    let declined = finding
+        .triage()
+        .is_some_and(|triage| !(triage.decision == "confirmed" && triage.worth_fixing));
+    if answered(finding) || declined {
         return false;
     }
-    if !triage.worth_fixing {
-        return false;
-    }
-    if !finding.default_path() {
-        return false;
-    }
-    matches!(
-        triage.blocking_class.as_str(),
-        "acceptance" | "default_path_defect"
-    ) || blocking_severity(finding)
+    blocks_acceptance(finding)
+        || (confirmed_worth_fixing(finding)
+            && finding.default_path()
+            && severity_class(finding.effective_severity()) == Some(SeverityClass::ShouldFix))
 }
 
 pub(super) fn blocking_severity(finding: &Finding) -> bool {
-    matches!(
-        finding.effective_severity().to_ascii_lowercase().as_str(),
-        "critical"
-            | "blocker"
-            | "blocking"
-            | "p0"
-            | "high"
-            | "error"
-            | "p1"
-            | "medium"
-            | "moderate"
-            | "should-fix"
-    )
+    severity_class(finding.effective_severity()) == Some(SeverityClass::Blocking)
 }
 
 fn design_defect(finding: &Finding) -> bool {
-    blocking(finding)
+    repair_eligible(finding)
         && finding.design_defect == Some(true)
         && finding
             .evidence
@@ -386,7 +405,7 @@ pub(super) fn panel_failure(checkpoint: &GraphCheckpoint, expansion: &Expansion)
     if progress.state != NodeState::Succeeded
         || outputs.findings_available != Some(true)
         || !approved(outputs)
-        || outputs.findings.iter().any(blocking)
+        || outputs.findings.iter().any(blocks_acceptance)
     {
         return Some("replanned panel did not pass".into());
     }
@@ -515,7 +534,7 @@ pub(super) fn escalation(
     let initial: Vec<_> = initial_outputs(node, checkpoint, positions)
         .into_iter()
         .flat_map(|outputs| outputs.findings.iter())
-        .filter(|finding| blocking(finding))
+        .filter(|finding| repair_eligible(finding))
         .collect();
     if shared_flaw(&initial) {
         return Some("checked findings share a design flaw");
@@ -564,7 +583,7 @@ pub(super) fn escalation(
         let current: Vec<_> = outputs
             .findings
             .iter()
-            .filter(|finding| blocking(finding))
+            .filter(|finding| repair_eligible(finding))
             .collect();
         if shared_flaw(&current) {
             return Some("checked findings share a design flaw");
@@ -658,7 +677,10 @@ pub(super) fn inactive_lens(
         return false;
     }
     let mut known = false;
-    for (_, finding) in findings.iter().filter(|(_, finding)| blocking(finding)) {
+    for (_, finding) in findings
+        .iter()
+        .filter(|(_, finding)| repair_eligible(finding))
+    {
         let Some(raising) = finding.lens.as_deref().filter(|lens| !lens.is_empty()) else {
             return false;
         };
@@ -738,60 +760,101 @@ mod tests {
     fn finding(id: &str, lens: &str) -> Finding {
         serde_json::from_value(serde_json::json!({"id":id,"lens":lens,"severity":"high", "file":"a.rs", "summary":"constraint", "status":"open", "evidence":"counterexample", "trigger":{"sequence":"default invocation","reach":"default_path","observed":true}, "triage":{"decision":"confirmed","reason":"observed","worth_fixing":true,"root_cause":"constraint","blocking_class":"default_path_defect","shared_flaw":false}})).unwrap()
     }
+    /// One vocabulary map classifies the reviewer's severity word. A confirmed
+    /// should-fix does not block acceptance but does start a repair writer; a
+    /// note is reported and never repaired.
     #[test]
-    fn repair_eligibility_uses_checked_reach_and_preserves_boundaries() {
-        let mut item = finding("F1", "correctness");
-        item.triage.as_mut().unwrap().blocking_class = "none".into();
-        for severity in [
-            "critical",
-            "BLOCKER",
-            "p0",
-            "HIGH",
-            "error",
-            "p1",
-            "should-fix",
+    fn blocks_acceptance_follows_the_pass_contract_and_repair_adds_should_fix() {
+        for (severity, class, acceptance, repairable) in [
+            ("blocking", "none", true, true),
+            ("critical", "none", true, true),
+            ("p0", "none", true, true),
+            ("HIGH", "none", true, true),
+            ("should-fix", "none", false, true),
+            ("medium", "none", false, true),
+            ("moderate", "none", false, true),
+            ("p2", "none", false, true),
+            ("note", "none", false, false),
+            ("low", "none", false, false),
+            ("blocking", "acceptance", true, true),
+            ("should-fix", "acceptance", true, true),
+            ("note", "acceptance", true, true),
+            ("blocking", "default_path_defect", true, true),
+            ("should-fix", "default_path_defect", true, true),
+            ("note", "default_path_defect", true, true),
         ] {
+            let mut item = finding("F1", "correctness");
             item.severity = severity.into();
-            assert!(blocking(&item), "{severity}");
-        }
-        item.severity = "MEDIUM".into();
-        assert!(blocking(&item));
-        item.severity = "p2".into();
-        assert!(!blocking(&item));
-        item.severity = "should-fix".into();
-        item.trigger.as_mut().unwrap().reach = FindingReach::OperatorMistake;
-        assert!(!blocking(&item));
-        for class in ["boundary", "data_loss"] {
             item.triage.as_mut().unwrap().blocking_class = class.into();
-            assert!(blocking(&item));
+            assert_eq!(
+                blocks_acceptance(&item),
+                acceptance,
+                "acceptance {severity}/{class}"
+            );
+            assert_eq!(
+                repair_eligible(&item),
+                repairable,
+                "repair {severity}/{class}"
+            );
         }
-        item.kind = Some("spec_defect".into());
-        assert!(blocking(&item));
-        item.kind = None;
-        item.triage.as_mut().unwrap().decision = "rejected".into();
-        item.disposition = Some("rejected".into());
-        assert!(blocking(&item));
-        item.verification = Some("falsified".into());
-        item.evidence = None;
-        assert!(blocking(&item));
-        item.evidence = Some("test disproves trigger".into());
-        assert!(!blocking(&item));
     }
 
     #[test]
-    fn rejected_boundaries_require_falsification_with_evidence() {
+    fn only_a_checked_default_path_blocks_and_boundaries_need_falsification() {
+        let mut item = finding("F1", "correctness");
+        item.severity = "blocking".into();
+        item.triage.as_mut().unwrap().blocking_class = "none".into();
+        assert!(blocks_acceptance(&item));
+        item.trigger.as_mut().unwrap().reach = FindingReach::OperatorMistake;
+        assert!(!blocks_acceptance(&item));
+        assert!(!repair_eligible(&item));
+        item.trigger.as_mut().unwrap().reach = FindingReach::AttackerOrUnreachable;
+        assert!(!blocks_acceptance(&item));
+        assert!(!repair_eligible(&item));
+
         for class in ["boundary", "data_loss"] {
             let mut item = finding("F1", "security");
+            item.severity = "should-fix".into();
             item.triage.as_mut().unwrap().blocking_class = class.into();
             item.triage.as_mut().unwrap().decision = "rejected".into();
             item.triage.as_mut().unwrap().worth_fixing = false;
             item.disposition = Some("rejected".into());
-            assert!(blocking(&item));
+            assert!(blocks_acceptance(&item));
+            assert!(repair_eligible(&item));
             item.verification = Some("falsified".into());
             item.evidence = None;
-            assert!(blocking(&item));
+            assert!(blocks_acceptance(&item), "falsification without evidence");
+            assert!(repair_eligible(&item), "falsification without evidence");
             item.evidence = Some("test disproves trigger".into());
-            assert!(!blocking(&item));
+            assert!(!blocks_acceptance(&item));
+            assert!(!repair_eligible(&item));
+        }
+
+        // A spec defect is routed to the chair: it neither contradicts PASS nor
+        // takes a repair writer.
+        let mut defect = finding("F1", "spec");
+        defect.severity = "note".into();
+        defect.triage.as_mut().unwrap().blocking_class = "none".into();
+        defect.kind = Some("spec_defect".into());
+        assert!(!blocks_acceptance(&defect));
+        assert!(!repair_eligible(&defect));
+    }
+
+    #[test]
+    fn a_settled_or_unconfirmed_should_fix_takes_no_writer() {
+        let mutations: [fn(&mut Finding); 4] = [
+            |item: &mut Finding| item.triage.as_mut().unwrap().worth_fixing = false,
+            |item: &mut Finding| item.triage.as_mut().unwrap().decision = "rejected".into(),
+            |item: &mut Finding| item.disposition = Some("disputed".into()),
+            |item: &mut Finding| item.status = "fixed".into(),
+        ];
+        for mutate in mutations {
+            let mut item = finding("F1", "correctness");
+            item.severity = "should-fix".into();
+            item.triage.as_mut().unwrap().blocking_class = "none".into();
+            mutate(&mut item);
+            assert!(!blocks_acceptance(&item));
+            assert!(!repair_eligible(&item));
         }
     }
 

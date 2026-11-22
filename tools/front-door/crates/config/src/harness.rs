@@ -137,106 +137,13 @@ fn set_selector(bytes: &[u8], sel: &str, value: Option<&Json>) -> Result<Vec<u8>
     Err(InstallError::InvalidConfig("unknown selector"))
 }
 
-fn uses_toml_config(harness: Harness) -> bool {
-    harness
-        .spec()
-        .install
-        .is_some_and(|install| install.config.ends_with(".toml"))
-}
 fn declares_instruction_array(harness: Harness) -> bool {
     harness
         .spec()
         .install
         .is_some_and(|install| install.instruction_array)
 }
-fn json_legacy_selector(harness: Harness, selector: &str) -> bool {
-    !uses_toml_config(harness) && selector.starts_with("json:/")
-}
-fn toml_legacy_selector(harness: Harness, selector: &str) -> bool {
-    uses_toml_config(harness) && selector.starts_with("toml:")
-}
 
-fn remove_legacy_selectors(
-    harness: Harness,
-    bytes: &[u8],
-) -> Result<(Vec<u8>, Vec<SelectorChange>), InstallError> {
-    let mut updated = bytes.to_vec();
-    let mut changes = Vec::new();
-    for artifact in crate::LEGACY_1X_ARTIFACTS {
-        let crate::LegacyArtifact::HarnessSelector {
-            selector,
-            disposition: crate::ArtifactDisposition::Remove,
-        } = artifact
-        else {
-            continue;
-        };
-        if !json_legacy_selector(harness, selector) && !toml_legacy_selector(harness, selector) {
-            continue;
-        }
-        let Some(before) = get_selector(&updated, selector)? else {
-            continue;
-        };
-        updated = set_selector(&updated, selector, None)?;
-        changes.push(SelectorChange {
-            selector: (*selector).into(),
-            before: Some(before),
-            after: None,
-        });
-    }
-    Ok((updated, changes))
-}
-
-/// Inspect declared legacy MCP names in all default adapter configs and
-/// registered account configs. No receipt or 1.x state is opened.
-pub fn legacy_harness_selectors(
-    roots: &provenant_core::Roots,
-    home: &Path,
-    accounts: &[crate::AccountHome],
-    policy: std::sync::Arc<provenant_records::policy::Policy>,
-) -> Result<Vec<(PathBuf, &'static str)>, InstallError> {
-    let harnesses: Vec<_> = provenant_records::ADAPTER_SPECS
-        .iter()
-        .map(|spec| spec.id)
-        .filter(|harness| harness.spec().install.is_some())
-        .collect();
-    let mut targets = Targets::new(roots.clone(), home, &harnesses, policy);
-    targets.accounts = accounts.to_vec();
-    let mut seen = BTreeSet::new();
-    let mut found = Vec::new();
-    for target in targets
-        .harnesses
-        .iter()
-        .cloned()
-        .chain(targets.accounts.iter().map(|account| account.target(home)))
-    {
-        if target.config_file.as_os_str().is_empty() || !seen.insert(target.config_file.clone()) {
-            continue;
-        }
-        let Some(Snapshot {
-            value: Value::File { bytes, .. },
-            ..
-        }) = managed::snapshot(&target.config_file)?
-        else {
-            continue;
-        };
-        for artifact in crate::LEGACY_1X_ARTIFACTS {
-            let crate::LegacyArtifact::HarnessSelector {
-                selector,
-                disposition: crate::ArtifactDisposition::Remove,
-            } = artifact
-            else {
-                continue;
-            };
-            if (json_legacy_selector(target.harness, selector)
-                || toml_legacy_selector(target.harness, selector))
-                && get_selector(&bytes, selector)?.is_some()
-            {
-                found.push((target.config_file.clone(), *selector));
-            }
-        }
-    }
-    Ok(found)
-}
 fn file(snapshot: &Option<Snapshot>, path: &Path) -> Result<(Vec<u8>, u64), InstallError> {
     let limits = Limits::CONFIG;
     match snapshot {
@@ -284,27 +191,7 @@ pub(crate) fn capture(
     for target in &targets.harnesses {
         let path = &target.config_file;
         if !path.as_os_str().is_empty() {
-            let snap = capture_one(path, entries)?;
-            if let Some(Snapshot {
-                value: Value::File { bytes, mode },
-                ..
-            }) = &snap
-            {
-                let (updated, changes) = remove_legacy_selectors(target.harness, bytes)?;
-                if updated != *bytes {
-                    plan.files.insert(
-                        path.clone(),
-                        Value::File {
-                            bytes: updated,
-                            mode: *mode,
-                        },
-                    );
-                    plan.changes
-                        .entry(path.clone())
-                        .or_default()
-                        .extend(changes);
-                }
-            }
+            let _ = capture_one(path, entries)?;
         }
         // Hooks are one choice for every target of a harness. A target whose
         // account directory has none yet follows the targets that do.

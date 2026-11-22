@@ -1,6 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
-use crate::{ArtifactDisposition, LEGACY_1X_ARTIFACTS, LegacyArtifact, STABLE_BINARY_NAME};
 use provenant_core::RootInputs;
 use provenant_os::clock::SystemClock;
 use provenant_records::{SourceInput, source_digest};
@@ -191,7 +190,7 @@ fn targets_retain_supplied_project_policy() {
 }
 
 #[test]
-fn first_install_cleans_declared_legacy_names_and_foreign_release_links() {
+fn first_install_replaces_foreign_release_links_and_current_agents() {
     let mut f = Fixture::new();
     fs::create_dir_all(f.source.join("instructions")).unwrap();
     fs::write(
@@ -222,47 +221,12 @@ fn first_install_cleans_declared_legacy_names_and_foreign_release_links() {
         .home
         .join(".local/share/provenant/foreign-root/releases")
         .join(release.manifest.source_digest.to_string());
-    let selectors: Vec<_> = LEGACY_1X_ARTIFACTS
-        .iter()
-        .filter_map(|artifact| match artifact {
-            LegacyArtifact::HarnessSelector {
-                selector,
-                disposition: ArtifactDisposition::Remove,
-            } => Some(*selector),
-            _ => None,
-        })
-        .collect();
-    assert!(!selectors.is_empty());
     for target in &f.targets.harnesses {
         if target.harness == Harness::Codex {
-            let mut text = String::from("user_setting = 'preserved'\n");
-            for selector in selectors
-                .iter()
-                .filter(|selector| selector.starts_with("toml:"))
-            {
-                let path = selector.strip_prefix("toml:").unwrap();
-                text.push_str(&format!("{path} = {{ command = 'legacy' }}\n"));
-            }
             fs::create_dir_all(target.config_file.parent().unwrap()).unwrap();
-            fs::write(&target.config_file, text).unwrap();
+            fs::write(&target.config_file, "user_setting = 'preserved'\n").unwrap();
         } else {
             let mut bytes = b"{\"user\":{\"preserved\":true}}".to_vec();
-            for selector in selectors
-                .iter()
-                .filter(|selector| selector.starts_with("json:/"))
-            {
-                let path: Vec<_> = selector
-                    .strip_prefix("json:/")
-                    .unwrap()
-                    .split('/')
-                    .collect();
-                bytes = crate::splice::set(
-                    &bytes,
-                    &path,
-                    Some(&serde_json::json!({"command":"legacy"})),
-                )
-                .unwrap();
-            }
             if target.harness == Harness::Opencode {
                 let old_one = old_root.join("instructions/AGENTS.md");
                 let old_two = legacy.join("instructions/AGENTS.md");
@@ -306,17 +270,13 @@ fn first_install_cleans_declared_legacy_names_and_foreign_release_links() {
     let current_agent = b"current agent\n";
     f.targets.peer_agent = Some(current_agent.to_vec());
     f.targets.tick_agent = Some(current_agent.to_vec());
-    for artifact in LEGACY_1X_ARTIFACTS {
-        if let LegacyArtifact::LaunchAgent {
-            plist,
-            disposition: ArtifactDisposition::Replace,
-            ..
-        } = artifact
-        {
-            let path = f.home.join(plist);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, b"legacy agent\n").unwrap();
-        }
+    let agents = [
+        f.home.join("Library/LaunchAgents/dev.provenant.peer.plist"),
+        f.home.join("Library/LaunchAgents/dev.provenant.tick.plist"),
+    ];
+    for path in &agents {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"previous agent\n").unwrap();
     }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -337,25 +297,16 @@ fn first_install_cleans_declared_legacy_names_and_foreign_release_links() {
         assert!(fs::read_link(link).unwrap().starts_with(&current_root));
     }
     let receipt = read_receipt(&f.targets).unwrap().unwrap();
-    for artifact in LEGACY_1X_ARTIFACTS {
-        if let LegacyArtifact::LaunchAgent {
-            plist,
-            selector,
-            disposition: ArtifactDisposition::Replace,
-            ..
-        } = artifact
-        {
-            let path = f.home.join(plist);
-            assert_eq!(fs::read(&path).unwrap(), current_agent);
-            assert_eq!(
-                receipt
-                    .entries
-                    .iter()
-                    .filter(|entry| entry.selector == *selector)
-                    .count(),
-                1
-            );
-        }
+    for (path, selector) in agents.iter().zip(["peer-agent", "tick-agent"]) {
+        assert_eq!(fs::read(path).unwrap(), current_agent);
+        assert_eq!(
+            receipt
+                .entries
+                .iter()
+                .filter(|entry| entry.selector == selector)
+                .count(),
+            1
+        );
     }
     for link in [&binary, &skill, instruction, &f.targets.shared_instruction] {
         let count = receipt
@@ -389,38 +340,10 @@ fn first_install_cleans_declared_legacy_names_and_foreign_release_links() {
             let text = fs::read_to_string(&target.config_file).unwrap();
             let document = text.parse::<toml_edit::DocumentMut>().unwrap();
             assert_eq!(document["user_setting"].as_str(), Some("preserved"));
-            for selector in selectors
-                .iter()
-                .filter(|selector| selector.starts_with("toml:"))
-            {
-                let path = selector.strip_prefix("toml:").unwrap();
-                let (_, key) = path.split_once('.').unwrap();
-                assert!(
-                    document
-                        .get("mcp_servers")
-                        .and_then(toml_edit::Item::as_table_like)
-                        .is_none_or(|table| !table.contains_key(key))
-                );
-            }
         } else {
             let value: serde_json::Value =
                 serde_json::from_slice(&fs::read(&target.config_file).unwrap()).unwrap();
             assert!(value["user"]["preserved"].as_bool().unwrap());
-            for selector in selectors
-                .iter()
-                .filter(|selector| selector.starts_with("json:/"))
-            {
-                let mut current = &value;
-                let mut present = true;
-                for component in selector.strip_prefix("json:/").unwrap().split('/') {
-                    let Some(next) = current.get(component) else {
-                        present = false;
-                        break;
-                    };
-                    current = next;
-                }
-                assert!(!present);
-            }
             if target.harness == Harness::Opencode {
                 assert_eq!(value["instructions"].as_array().unwrap().len(), 1);
                 assert_eq!(

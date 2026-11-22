@@ -30,13 +30,12 @@ reuses the recorded targets and binary directory.
 ### First 2.0 install after 1.x
 
 Wind down every lane first. The installer validates the release and staged
-install before stopping agents, then installs into the fresh v2 root. It copies
+install before publishing, then installs into the fresh v2 root. It copies
 only `<state>/config.toml` and `host-id` from the default 1.x root and never writes that
 root, so reinstalling 1.x rolls back; run state and the old receipt are not
 migrated, and work started under 2.x stays in the v2 root (collect it with
-`provenant output` before rolling back). Install replaces or removes its declared
-Provenant artifact names, including 1.x Fabric MCP registrations and
-LaunchAgents. Select harnesses again by autodetection or `--harness`, then inspect
+`provenant output` before rolling back). Install replaces its declared current
+artifact names. Select harnesses again by autodetection or `--harness`, then inspect
 the 1.x root and client configuration yourself: leftovers outside the declared
 names are yours to remove. A custom 1.x root is not copied; use a fresh custom root
 and configure it by hand.

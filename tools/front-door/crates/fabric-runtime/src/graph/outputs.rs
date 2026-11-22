@@ -87,29 +87,38 @@ pub(super) fn make_outputs_with_upstream(
         result.is_some_and(|capture| !capture.source_truncated)
             && parsed
                 .as_ref()
-                .is_ok_and(|(_, skipped, _)| skipped.is_empty()),
+                .is_ok_and(|parsed| parsed.skipped.is_empty()),
     );
     let findings = parsed
-        .map(|(findings, skipped, trimmed)| {
-            if trimmed > 0 {
+        .map(|parsed| {
+            if parsed.trimmed > 0 {
                 warnings.push(bounded(
-                    &format!("findings metadata trimmed for {trimmed} entries in checkpoint"),
+                    &format!(
+                        "findings metadata trimmed for {} entries in checkpoint",
+                        parsed.trimmed
+                    ),
                     WARNING_BYTES,
                 ));
             }
+            for warning in &parsed.warnings {
+                warnings.push(bounded(warning, WARNING_BYTES));
+            }
             let available = MAX_WARNINGS.saturating_sub(warnings.len());
-            let named = if skipped.len() > available {
+            let named = if parsed.skipped.len() > available {
                 available.saturating_sub(1)
             } else {
                 available
             };
-            for warning in skipped.iter().take(named) {
+            for warning in parsed.skipped.iter().take(named) {
                 warnings.push(bounded(warning, WARNING_BYTES));
             }
-            if skipped.len() > named && available > 0 {
-                warnings.push(format!("{} more finding warnings", skipped.len() - named));
+            if parsed.skipped.len() > named && available > 0 {
+                warnings.push(format!(
+                    "{} more finding warnings",
+                    parsed.skipped.len() - named
+                ));
             }
-            findings
+            parsed.findings
         })
         .unwrap_or_else(|error| {
             if result.is_some() {
@@ -370,18 +379,24 @@ fn names_finding(finding: &Finding, id: &str) -> bool {
         || finding.propagates.as_deref() == Some(id)
 }
 
+/// Findings recovered from a result block, separated by whether their defects
+/// leave the block usable as evidence.
+#[derive(Debug)]
+struct ParsedFindings {
+    findings: Vec<Finding>,
+    /// Entry-level defects: finding them means the block is not complete evidence.
+    skipped: Vec<String>,
+    /// Recoverable reclassifications that keep every entry usable.
+    warnings: Vec<String>,
+    trimmed: usize,
+}
+
 /// Parse entries individually, preserving usable evidence when a field is malformed.
-fn parse_findings(
-    block: &str,
-    upstream: &[Finding],
-) -> Result<(Vec<Finding>, Vec<String>, usize), String> {
+fn parse_findings(block: &str, upstream: &[Finding]) -> Result<ParsedFindings, String> {
     parse_findings_mode(block, upstream, false)
 }
 
-fn parse_findings_ingress(
-    block: &str,
-    upstream: &[Finding],
-) -> Result<(Vec<Finding>, Vec<String>, usize), String> {
+fn parse_findings_ingress(block: &str, upstream: &[Finding]) -> Result<ParsedFindings, String> {
     parse_findings_mode(block, upstream, true)
 }
 
@@ -389,7 +404,7 @@ fn parse_findings_mode(
     block: &str,
     upstream: &[Finding],
     ingress: bool,
-) -> Result<(Vec<Finding>, Vec<String>, usize), String> {
+) -> Result<ParsedFindings, String> {
     let block: serde_json::Value = serde_json::from_str(block).map_err(|error| {
         format!(
             "field findings: invalid JSON at line {} column {}",
@@ -420,6 +435,7 @@ fn parse_findings_mode(
     };
     let mut findings = Vec::new();
     let mut skipped = Vec::new();
+    let mut warnings = Vec::new();
     for (index, (key, entry)) in entries.into_iter().enumerate() {
         let id = entry
             .get("id")
@@ -547,38 +563,26 @@ fn parse_findings_mode(
             ));
             entry.remove("line");
         }
-        if entry
-            .get("severity")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|severity| {
-                !matches!(
-                    severity.to_ascii_lowercase().as_str(),
-                    "critical"
-                        | "blocker"
-                        | "blocking"
-                        | "p0"
-                        | "high"
-                        | "error"
-                        | "p1"
-                        | "medium"
-                        | "moderate"
-                        | "should-fix"
-                        | "p2"
-                        | "low"
-                        | "warning"
-                        | "p3"
-                        | "info"
-                        | "informational"
-                        | "note"
-                        | "p4"
-                )
-            })
+        // A blank severity is missing, not a word, and keeps the fail-safe below.
+        if let Some(severity) = entry.get("severity").and_then(serde_json::Value::as_str)
+            && !severity.trim().is_empty()
+            && severity_class(severity).is_none()
         {
-            skipped.push(format!(
-                "malformed finding: {}",
-                fail("severity", "unrecognised value")
+            warnings.push(format!(
+                "finding: {}; treating it as should-fix",
+                fail(
+                    "severity",
+                    &format!(
+                        "unrecognised value; accepted words are {}",
+                        SEVERITY_VOCABULARY
+                            .iter()
+                            .map(|(word, _, _)| *word)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                )
             ));
-            entry.insert("severity".into(), "blocking".into());
+            entry.insert("severity".into(), "should-fix".into());
         }
         // Expand one disposition to all copies, inheriting each separately.
         let copies: Vec<_> = source.map_or_else(
@@ -631,7 +635,9 @@ fn parse_findings_mode(
                             fail(field, "missing string")
                         ));
                     }
-                    // Unknown severity must retain blocking priority during compaction.
+                    // A missing severity keeps the fail-safe blocking priority
+                    // during compaction; an unrecognised word was already
+                    // reclassified as should-fix.
                     entry.insert(
                         field.into(),
                         match field {
@@ -707,7 +713,12 @@ fn parse_findings_mode(
     {
         return Err(warning.clone());
     }
-    Ok((findings, skipped, trimmed))
+    Ok(ParsedFindings {
+        findings,
+        skipped,
+        warnings,
+        trimmed,
+    })
 }
 
 /// Read only a complete findings block from the captured head or tail.
@@ -801,7 +812,7 @@ pub(super) fn compact_findings(
 
 /// A display projection only: consumers resolve full findings from artifacts.
 fn summarise_findings(findings: &mut Vec<Finding>, cap: usize) {
-    findings.sort_by_key(|finding| !repair::blocking(finding));
+    findings.sort_by_key(|finding| !repair::repair_eligible(finding));
     findings.truncate(MAX_FINDINGS);
     for finding in findings.iter_mut() {
         finding.id = bounded(&finding.id, 128);
@@ -940,7 +951,7 @@ pub(super) fn materialised_findings(
             .map(|(source, finding)| upstream_finding(node, &source, finding))
             .collect();
         let mut findings = parse_findings(block, &upstream)
-            .map(|(findings, _, _)| findings)
+            .map(|parsed| parsed.findings)
             .unwrap_or_default();
         if let Some(lens) = node
             .role
@@ -964,7 +975,7 @@ pub(super) fn materialised_findings(
         .map(|(source, finding)| upstream_finding(&plan.nodes[index], &source, finding))
         .collect();
     parse_findings(block, &upstream)
-        .map(|(findings, _, _)| findings)
+        .map(|parsed| parsed.findings)
         .unwrap_or_default()
 }
 
@@ -1250,7 +1261,7 @@ pub(super) fn selected_findings(
 ) -> Vec<(String, Finding)> {
     resolved_inputs(node, plan, checkpoint, positions, false)
         .into_iter()
-        .filter(|item| !repair_writer(node) || repair::blocking(&item.finding))
+        .filter(|item| !repair_writer(node) || repair::repair_eligible(&item.finding))
         .map(|item| (item.source, item.finding))
         .collect()
 }
@@ -1993,11 +2004,13 @@ mod alias_tests {
             "id":"F1","severity":"high","file":"a.rs","summary":"hypothesis","status":"open"
         }]})
         .to_string();
-        let (findings, warnings, _) = parse_findings(&block, &[]).unwrap();
-        assert!(warnings.is_empty());
+        let parsed = parse_findings(&block, &[]).unwrap();
+        assert!(parsed.warnings.is_empty());
+        assert!(parsed.skipped.is_empty());
+        let findings = parsed.findings;
         assert_eq!(findings[0].severity, "high");
         assert_eq!(findings[0].effective_severity(), "note");
-        assert!(!repair::blocking(&findings[0]));
+        assert!(!repair::repair_eligible(&findings[0]));
         let mut restored = findings[0].clone();
         restored.trigger = Some(FindingTrigger {
             sequence: "default invocation".into(),
@@ -2005,6 +2018,52 @@ mod alias_tests {
             observed: true,
         });
         assert_eq!(restored.effective_severity(), "high");
+    }
+
+    #[test]
+    fn unrecognised_severity_is_a_warned_should_fix_not_an_invalid_review() {
+        let block = serde_json::json!({"schema_version":1,"findings":[{
+            "id":"F1","severity":"urgent","file":"a.rs","summary":"s","status":"open",
+            "trigger":{"sequence":"invoke the default operation","reach":"default_path","observed":true},
+            "triage":{"decision":"confirmed","reason":"reproduced","worth_fixing":true,
+                "root_cause":"constraint","blocking_class":"none","shared_flaw":false}
+        }]})
+        .to_string();
+        let text = format!("```findings\n{block}\n```\nVERDICT: PASS\n");
+        let mut capture = crate::result_capture::ResultCapture::new(None);
+        capture.push(text.as_bytes());
+        let outputs = make_outputs(Some(&capture.finish()), None, None, None, None);
+        assert_eq!(outputs.findings_available, Some(true));
+        assert_eq!(outputs.findings.len(), 1);
+        assert_eq!(outputs.findings[0].severity, "should-fix");
+        assert!(
+            outputs
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unrecognised value")
+                    && warning.contains("critical, blocker, blocking")),
+            "{:?}",
+            outputs.warnings
+        );
+        assert!(repair::repair_eligible(&outputs.findings[0]));
+        assert!(!repair::blocks_acceptance(&outputs.findings[0]));
+    }
+
+    #[test]
+    fn missing_severity_keeps_the_fail_safe_and_marks_findings_incomplete() {
+        let block = serde_json::json!({"schema_version":1,"findings":[{
+            "id":"F1","file":"a.rs","summary":"s","status":"open"
+        }]})
+        .to_string();
+        let parsed = parse_findings(&block, &[]).unwrap();
+        assert_eq!(parsed.findings[0].severity, "blocking");
+        assert!(
+            parsed
+                .skipped
+                .iter()
+                .any(|warning| warning.contains("field severity"))
+        );
+        assert!(parsed.warnings.is_empty());
     }
 
     #[test]
@@ -2184,8 +2243,8 @@ mod alias_tests {
             &[finding("lens-a:F1", "suffix"), finding("F1", "exact")],
         )
         .unwrap();
-        assert_eq!(result.0[0].id, "F1");
-        assert_eq!(result.0[0].summary, "exact");
+        assert_eq!(result.findings[0].id, "F1");
+        assert_eq!(result.findings[0].summary, "exact");
     }
 
     #[test]
@@ -2263,8 +2322,8 @@ mod alias_tests {
             let block = format!(
                 r#"{{"schema_version":1,"findings":[{{"id":"{named}","disposition":"rejected","reason":"no"}}]}}"#
             );
-            let (findings, _, _) = parse_findings(&block, std::slice::from_ref(&verified)).unwrap();
-            assert_eq!(findings[0].id, "F1", "{named}");
+            let parsed = parse_findings(&block, std::slice::from_ref(&verified)).unwrap();
+            assert_eq!(parsed.findings[0].id, "F1", "{named}");
         }
     }
 

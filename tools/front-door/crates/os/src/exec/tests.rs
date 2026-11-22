@@ -553,25 +553,40 @@ fn prepared_ref_transaction_commits_or_aborts_after_prepare_ack()
 }
 
 #[test]
-fn prepared_ref_transaction_cannot_commit_after_callback_deadline_or_cancellation() {
-    for (requested, cancelled, before_deadline, expected) in [
-        (true, false, true, true),
-        (true, true, true, false),
-        (true, false, false, false),
-        (false, false, true, false),
+fn prepared_ref_transaction_decision_names_one_cause_per_abort() {
+    for (invoked, requested, cancelled, before_deadline, expected) in [
+        (true, true, false, true, PreparedRefDecision::Committed),
+        // Cancellation suppresses a requested commit; a deadline that also
+        // passed did not act alone.
+        (true, true, true, true, PreparedRefDecision::Cancelled),
+        (true, true, true, false, PreparedRefDecision::Cancelled),
+        (false, false, true, true, PreparedRefDecision::Cancelled),
+        // The deadline alone suppressed a commit that was still wanted.
+        (true, true, false, false, PreparedRefDecision::Deadline),
+        (false, false, false, false, PreparedRefDecision::Deadline),
+        // A callback refusal is the caller's own answer, even past the deadline.
+        (true, false, false, true, PreparedRefDecision::Refused),
+        (true, false, false, false, PreparedRefDecision::Refused),
     ] {
         assert_eq!(
-            prepared_ref_commit_allowed(requested, cancelled, before_deadline),
-            expected
+            prepared_ref_decision(invoked, requested, cancelled, before_deadline),
+            expected,
+            "{invoked}/{requested}/{cancelled}/{before_deadline}"
         );
     }
 }
 
 #[test]
 #[allow(clippy::disallowed_methods)] // The callback must outlive the native process deadline.
-fn prepared_ref_transaction_keeps_ref_when_callback_expires_or_is_cancelled()
+fn prepared_ref_transaction_keeps_ref_and_reports_the_abort_cause()
 -> Result<(), Box<dyn std::error::Error>> {
-    for expires in [false, true] {
+    // The expiry deadline is far shorter than the callback's sleep, so the
+    // decision is certain to land after expiry rather than racing a narrow
+    // margin. The prepare acknowledgement still arrives well within the
+    // deadline on a loaded runner.
+    const EXPIRY_DEADLINE: Duration = Duration::from_millis(500);
+    const CALLBACK_SLEEP: Duration = Duration::from_secs(2);
+    for case in ["cancel", "expire", "refuse"] {
         let temp = tempfile::tempdir()?;
         for args in [
             vec!["init", "-q"],
@@ -604,10 +619,10 @@ fn prepared_ref_transaction_keeps_ref_when_callback_expires_or_is_cancelled()
         ];
         let env = crate::fixture::git_env();
         let cancel = CancelToken::new();
-        let timeout = if expires {
-            Duration::from_secs(2)
-        } else {
+        let timeout = if case == "cancel" {
             Duration::from_secs(10)
+        } else {
+            EXPIRY_DEADLINE
         };
         let mut options = ExecOptions::new(&argv, temp.path(), timeout);
         options.env = Some(&env);
@@ -615,12 +630,12 @@ fn prepared_ref_transaction_keeps_ref_when_callback_expires_or_is_cancelled()
         let mut called = false;
         let mut decide = || {
             called = true;
-            if expires {
-                std::thread::sleep(Duration::from_millis(2_100));
-            } else {
-                cancel.cancel();
+            match case {
+                "cancel" => cancel.cancel(),
+                "expire" | "refuse" => std::thread::sleep(CALLBACK_SLEEP),
+                _ => unreachable!("declared case"),
             }
-            true
+            case != "refuse"
         };
         let commands = format!("start\ndelete {branch} {tip}\nprepare\n");
         let outcome = SystemExecutor::new(1)?.execute_prepared_ref_transaction(
@@ -629,8 +644,15 @@ fn prepared_ref_transaction_keeps_ref_when_callback_expires_or_is_cancelled()
             &mut decide,
         )?;
         assert!(called, "Git must prepare before asking for the decision");
-        if expires {
-            assert!(outcome.timed_out, "{outcome:?}");
+        match case {
+            "expire" => assert!(outcome.timed_out, "{outcome:?}"),
+            "cancel" => assert!(outcome.cancelled, "cancellation: {outcome:?}"),
+            // A refusal is the caller's own answer, so it reports neither
+            // expiry nor cancellation and the prepared check decides.
+            _ => assert!(
+                !outcome.timed_out && !outcome.cancelled,
+                "a refusal is neither: {outcome:?}"
+            ),
         }
 
         let retained = crate::fixture::git_command()

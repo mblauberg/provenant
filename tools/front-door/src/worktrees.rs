@@ -707,11 +707,6 @@ struct GcData {
     chair_logs: crate::chair_log_retention::Report,
     target_seeds: provenant_run::target_seed_gc::Report,
     build_dirs: provenant_run::build_dir_gc::Report,
-    #[serde(
-        default,
-        skip_serializing_if = "provenant_run::build_dir_gc::SharedRetirement::is_empty"
-    )]
-    shared_targets: provenant_run::build_dir_gc::SharedRetirement,
     graph_checkpoints_removed: usize,
     /// Import-extra pins removed (apply) or that would be removed (preview).
     import_pins: usize,
@@ -1094,7 +1089,6 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 chair_logs: Default::default(),
                 target_seeds: Default::default(),
                 build_dirs: Default::default(),
-                shared_targets: Default::default(),
                 graph_checkpoints_removed: 0,
                 stale_graphs: Vec::new(),
                 graph_bytes: None,
@@ -1346,36 +1340,6 @@ fn gc_data_summary(data: &GcData) -> String {
     }
     for kept in &data.provider_state.kept {
         human.push_str(&format!("kept {}: {}\n", kept.path.display(), kept.reason));
-    }
-    let shared = &data.shared_targets;
-    if !shared.found.is_empty() {
-        human.push_str(&format!(
-            "{} of {} retired shared Cargo target(s), {} allocated bytes {}; {} kept{}\n",
-            shared.removed.len(),
-            shared.found.len(),
-            shared.bytes,
-            if data.report.dry_run {
-                "removable"
-            } else {
-                "removed"
-            },
-            shared.kept.len(),
-            shared
-                .interrupted_at
-                .as_deref()
-                .map(|path| format!("; resumes at {}", path.display()))
-                .unwrap_or_default(),
-        ));
-    }
-    for kept in &shared.kept {
-        human.push_str(&format!(
-            "kept retired shared Cargo target {}: {}\n",
-            kept.path.display(),
-            kept.cause
-        ));
-    }
-    for error in &shared.errors {
-        human.push_str(&format!("retired shared Cargo target: {error}\n"));
     }
     for temporary in &data.provider_state.attempt_tmp {
         human.push_str(&format!(
@@ -3946,40 +3910,7 @@ impl provenant_config::RetentionCollector for GcAdapters<'_> {
         let config = self.config;
         let free_floor = self.free_floor;
         let sweep_deadline = self.deadline;
-        // A retirement cursor and a target census epoch both resume this
-        // class; each goes only to its own step.
         let resume_detail = self.resume_detail().map(str::to_owned);
-        let retirement_resume = self.resume_candidate().map(Path::to_path_buf).zip(
-            resume_detail
-                .clone()
-                .filter(|detail| provenant_run::build_dir_gc::is_retirement_detail(detail)),
-        );
-        let resume_detail = resume_detail
-            .filter(|detail| !provenant_run::build_dir_gc::is_retirement_detail(detail));
-        self.data.shared_targets = {
-            let lease = self.lease.as_ref();
-            let mut should_stop = || !sweep_should_continue(sweep_deadline, lease);
-            provenant_run::build_dir_gc::retire_shared_targets(
-                home,
-                config
-                    .domains
-                    .fabric
-                    .lanes
-                    .build_settings()
-                    .build_dir_grace_seconds(),
-                command.dry_run,
-                self.now_ns,
-                retirement_resume
-                    .as_ref()
-                    .map(|(path, detail)| (path.as_path(), detail.as_str())),
-                &mut should_stop,
-            )
-        };
-        if let Some(stopped) = self.data.shared_targets.interrupted_at.clone() {
-            let detail = self.data.shared_targets.cursor_detail.clone();
-            self.stop_at(None, Some(stopped), detail)?;
-            return Ok(());
-        }
         let profile = config.dispatch_profile(&[])?;
         let cache_root = provenant_run::build_dir_gc::shared_cache_root(home);
         let budget = match provenant_config::cargo_cache_budget(&profile, &cache_root) {

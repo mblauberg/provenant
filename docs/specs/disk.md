@@ -70,7 +70,7 @@ detaching anything (newest file time, stamps and the cache root's activity
 marker); newer use keeps it for a later pass. Cargo locks and live attempt
 custody protect targets whatever their size or age, a failed lock probe keeps
 the target with its cause, and the newest seed generation and recent writes
-stay protected. A retired shared target is renamed to a tombstone under its held
+stay protected. A managed target is renamed to a tombstone under its held
 locks before deletion, so an interrupted pass never leaves a partial target
 where Cargo builds. A preview names exactly what apply removes from the same
 state. Measurement stops only at the sweep deadline, preview included; a
@@ -130,7 +130,8 @@ Collection belongs to [worktrees](supervisor.md#worktrees) and
 
 Submission, admission and new builds take one decision, `DiskGate::decide`: the
 thresholds from `GcSettings::disk_limits` plus the strength of the declared
-`DISK_FLOOR` policy rule. Below `gc.free_floor` it warns and proceeds. Below
+`DISK_FLOOR` policy rule. `gc.free_floor` defaults to 1% of the state volume,
+capped at 5 GiB. Below `gc.free_floor` it warns and proceeds. Below
 `gc.critical_free` `DISK_FLOOR` decides: it warns and proceeds by default for
 every lane class, `policy.DISK_FLOOR = "refuse"` holds new work and `"off"`
 silences it. Messages report available bytes, both thresholds, their sources and

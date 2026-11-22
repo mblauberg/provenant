@@ -310,30 +310,6 @@ fn legacy_state_warning(home: &Path) -> Option<&'static str> {
     }
 }
 
-/// Report obsolete Provenant LaunchAgent plists from the shared artifact
-/// declaration. Current peer and tick agents are deliberately excluded.
-fn legacy_agent_warning(home: &Path) -> Option<&'static str> {
-    use provenant_config::{ArtifactDisposition, LegacyArtifact};
-
-    provenant_config::LEGACY_1X_ARTIFACTS
-        .iter()
-        .any(|artifact| match artifact {
-            LegacyArtifact::LaunchAgent {
-                plist,
-                disposition: ArtifactDisposition::Remove,
-                ..
-            } => match fs::symlink_metadata(home.join(plist)) {
-                Ok(_) => true,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                Err(_) => true,
-            },
-            _ => false,
-        })
-        .then_some(
-            "obsolete Provenant launch-agent files remain on this host; run the 2.0 install after lanes are wound down to remove them by name",
-        )
-}
-
 pub(crate) fn local(
     home: &Path,
     roots: &provenant_core::Roots,
@@ -396,10 +372,6 @@ pub(crate) fn local(
     }
     let (managed, managed_error) = managed(roots, home);
     let account_config = provenant_cli::config_reads::read_for(roots, "accounts").ok();
-    let registered_accounts = account_config
-        .as_ref()
-        .map(|config| provenant_cli::accounts::homes(&config.domains.accounts))
-        .unwrap_or_default();
     let agy_accounts = account_config
         .as_ref()
         .map(|config| agy_accounts(&config.domains.accounts, home))
@@ -408,24 +380,10 @@ pub(crate) fn local(
     if let Some(warning) = legacy_state_warning(home) {
         warnings.push(warning.into());
     }
-    if let Some(warning) = legacy_agent_warning(home) {
-        warnings.push(warning.into());
-    }
     if let Some(app) = crate::apps::status(home, env!("CARGO_PKG_VERSION"))
         && app.warning.is_some()
     {
         warnings.push(crate::apps::advisory(&app));
-    }
-    match provenant_config::legacy_harness_selectors(roots, home, &registered_accounts,
-        // Host inspection has no project binding.
-        std::sync::Arc::new(provenant_config::policy::read(roots.state.as_path(), "", &Default::default()))) {
-        Ok(leftovers) if !leftovers.is_empty() => warnings.push(
-            "obsolete Provenant Fabric entries remain in harness configuration; run the 2.0 install to remove them by name".into(),
-        ),
-        Ok(_) => {}
-        Err(_) => warnings.push(
-            "could not inspect known 1.x Provenant harness entries".into(),
-        ),
     }
     let login_accounts = match provenant_cli::quota::recorded_login_rows(roots) {
         Ok(rows) => rows.into_iter().map(login_account).collect(),
@@ -923,39 +881,6 @@ mod tests {
         assert!(super::legacy_state_warning(home.path()).is_some());
         std::fs::remove_dir(&legacy).unwrap();
         assert!(super::legacy_state_warning(home.path()).is_none());
-    }
-
-    #[test]
-    fn doctor_warns_only_for_declared_removed_launch_agents() {
-        use provenant_config::{ArtifactDisposition, LegacyArtifact};
-
-        let home = tempfile::tempdir().unwrap();
-        assert!(super::legacy_agent_warning(home.path()).is_none());
-        for artifact in provenant_config::LEGACY_1X_ARTIFACTS {
-            if let LegacyArtifact::LaunchAgent {
-                plist, disposition, ..
-            } = artifact
-                && matches!(disposition, ArtifactDisposition::Replace)
-            {
-                let path = home.path().join(plist);
-                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                std::fs::write(path, b"current agent").unwrap();
-            }
-        }
-        assert!(super::legacy_agent_warning(home.path()).is_none());
-        for artifact in provenant_config::LEGACY_1X_ARTIFACTS {
-            if let LegacyArtifact::LaunchAgent {
-                plist,
-                disposition: ArtifactDisposition::Remove,
-                ..
-            } = artifact
-            {
-                let path = home.path().join(plist);
-                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                std::fs::write(path, b"leftover").unwrap();
-            }
-        }
-        assert!(super::legacy_agent_warning(home.path()).is_some());
     }
 
     #[test]
