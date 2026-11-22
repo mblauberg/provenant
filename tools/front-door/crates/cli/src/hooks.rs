@@ -3,6 +3,7 @@ use crate::{GitHook, Hook};
 use provenant_records::{ADAPTER_SPECS, Harness, HookAction, HookEvent, HookProtocol};
 
 pub const PRE_TOOL_USE: &str = "pre-tool-use";
+pub const POST_TOOL_USE: &str = "post-tool-use";
 pub const PRE_COMPACT: &str = "pre-compact";
 pub const COMPACT: &str = "compact";
 pub const CHAIR_PROMPT: &str = "chair-prompt";
@@ -45,7 +46,8 @@ pub fn delivery_capabilities() -> Vec<provenant_records::inbox::DeliveryCapabili
 
 #[derive(Clone, Copy)]
 pub enum Handler {
-    Guard,
+    /// Offers queued inbox answers on the adapter's declared tool hook event.
+    AnswerDelivery,
     PreCompact,
     Compact,
     PrePush,
@@ -69,7 +71,7 @@ pub struct ResolvedHook {
 
 fn handler(action: HookAction) -> Handler {
     match action {
-        HookAction::PreToolUse => Handler::Guard,
+        HookAction::PreToolUse | HookAction::PostToolUse => Handler::AnswerDelivery,
         HookAction::PreCompact => Handler::PreCompact,
         HookAction::Compact => Handler::Compact,
         HookAction::ChairPrompt => Handler::ChairPrompt,
@@ -89,7 +91,7 @@ fn resolve_provider(name: &str, command: &str) -> Option<ResolvedHook> {
         .iter()
         .copied()
         .find(|action| action.command() == command)?;
-    if requested == HookAction::PreToolUse && !install.answer_delivery.is_supported() {
+    if requested.is_answer_delivery() && !install.answer_delivery.is_supported() {
         return None;
     }
     let HookEvent::Supported { event, .. } = install.hook_events.iter().find(
@@ -192,6 +194,40 @@ mod tests {
                 assert_eq!(hook.protocol, install.hook_protocol);
             }
         }
+    }
+
+    #[test]
+    fn answer_delivery_actions_resolve_to_the_non_blocking_handler() {
+        for action in HookAction::ALL
+            .iter()
+            .copied()
+            .filter(|action| action.is_answer_delivery())
+        {
+            for spec in ADAPTER_SPECS {
+                if let Some(hook) = Hook::Provider(vec![
+                    OsString::from(spec.name),
+                    OsString::from(action.command()),
+                ])
+                .spec()
+                {
+                    assert!(
+                        matches!(hook.handler, Handler::AnswerDelivery),
+                        "{} {:?}",
+                        spec.name,
+                        action
+                    );
+                    assert!(hook.client.is_some_and(|client| client == spec.id));
+                }
+            }
+        }
+        assert!(
+            Hook::Provider(vec![
+                OsString::from(provenant_records::Harness::Claude.spec().name),
+                OsString::from(POST_TOOL_USE),
+            ])
+            .spec()
+            .is_some()
+        );
     }
 
     #[test]

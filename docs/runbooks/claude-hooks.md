@@ -16,7 +16,7 @@ checks can refuse with exit 2. Stdout holds only the native protocol response.
 
 | Event | Handler | What it does |
 |---|---|---|
-| `PreToolUse` (`Bash`) | `hook claude pre-tool-use` | Leaves tool policy to confinement, then optionally offers human answers |
+| `PostToolUse` | `hook claude post-tool-use` | After the tool has run, optionally offers human answers through `additionalContext` |
 | `SessionStart` (`startup`, `resume`, `clear`) | `hook claude session-start` | Reports checkpoint status, then the state digest |
 | `SessionStart` (`compact`) | `hook claude compact` | The same report after compaction |
 | `PreCompact` | `hook claude pre-compact` | Writes derived state to `autosave.md` and prints the summary instruction below |
@@ -25,8 +25,20 @@ checks can refuse with exit 2. Stdout holds only the native protocol response.
 | `WorktreeRemove` | `hook claude worktree-remove` | Runs `provenant worktree remove <name>` |
 | chair prompt, start, stop | `hook claude chair-prompt`, `chair-start`, `chair-stop` | Account switching; see [configuration](configuration.md#chair-account-switching) |
 
-Unavailable hook state is a diagnostic and never denies the tool. The
-[human inbox](human-inbox.md#delivery-service) owns how the hook offers answers.
+Unavailable hook state is a diagnostic and never denies the tool. Answer
+delivery deliberately runs on `PostToolUse`: Claude Code treats a failed
+`PreToolUse` hook as a refusal of the tool, while a `PostToolUse` failure cannot
+undo a call that already ran. `UserPromptSubmit` would block the prompt for the
+same reason. Install rewrites the hooks it manages, so an upgrade removes the
+old `PreToolUse` entry; foreign hooks on that event are left alone. Hook events
+and per-harness decisions live in [`AdapterSpec`](../../tools/front-door/crates/records/src/adapters.rs):
+Claude uses `PostToolUse`, Codex keeps its declared `PreToolUse` mapping because
+no non-blocking alternative is verified for it, and Cursor, Antigravity and
+OpenCode declare their pre-tool answer response unsupported. A hook that fails
+inside Provenant still exits 0, but records the cause and elapsed duration under
+`<state>/hooks/diagnostics/failures.jsonl`.
+
+The [human inbox](human-inbox.md#delivery-service) owns how the hook offers answers.
 
 ## SessionStart output
 

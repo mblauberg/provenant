@@ -236,7 +236,7 @@ fn state_refuses_legacy_aliases_and_checks_select_the_caller_checkout() -> Resul
     assert_eq!(code(&invalid_project), 2);
     let value: serde_json::Value = serde_json::from_slice(&invalid_project.stdout.bytes)?;
     assert_eq!(value["command"], "root");
-    let hook = rig.command(&["hook", "claude", "pre-tool-use", "--json"])?;
+    let hook = rig.command(&["hook", "claude", "post-tool-use", "--json"])?;
     assert_eq!(code(&hook), 2);
     rig.assert_v1_root_untouched()
 }

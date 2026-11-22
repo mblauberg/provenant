@@ -31,6 +31,7 @@ mod events;
 mod gc_support;
 mod gc_sweep;
 mod handoff;
+mod hook_diagnostics;
 mod hook_state;
 mod hook_worktree;
 mod hooks;

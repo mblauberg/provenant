@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure the Claude pre-tool hook using an empty or disposable populated state root."""
+"""Measure the Claude answer-delivery hook using an empty or disposable populated state root."""
 import argparse
 import json
 import math
@@ -20,7 +20,7 @@ def delivered(output, session):
     try:
         wire = json.loads(output)
         hook = wire["hookSpecificOutput"]
-        if hook["hookEventName"] != "PreToolUse":
+        if hook["hookEventName"] != "PostToolUse":
             return False
         context = hook["additionalContext"]
         prefix, suffix = "<untrusted_answer_data>\n", "\n</untrusted_answer_data>"
@@ -43,8 +43,8 @@ def measure(args, root):
     environment = os.environ.copy()
     for key in ("PROVENANT_RUN_STATE_DIR", "PROVENANT_LANE_DEPTH", "PROVENANT_PARENT_ATTEMPT_ID", "PROVENANT_AGENT_LABEL"):
         environment.pop(key, None)  # Represent a chair, even when run from a lane.
-    command = [args.binary, "--state-dir", root, "hook", "claude", "pre-tool-use"]
-    event = {"hook_event_name": "PreToolUse", "cwd": args.cwd, "tool_name": "Read", "tool_input": {"file_path": "/dev/null"}}
+    command = [args.binary, "--state-dir", root, "hook", "claude", "post-tool-use"]
+    event = {"hook_event_name": "PostToolUse", "cwd": args.cwd, "tool_name": "Read", "tool_input": {"file_path": "/dev/null"}}
     durations = {"baseline": [], "session": []}
     diagnostics = {"baseline": set(), "session": set()}
     output_bytes = {"baseline": 0, "session": 0}
