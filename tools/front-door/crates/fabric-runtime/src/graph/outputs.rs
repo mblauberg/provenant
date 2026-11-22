@@ -550,29 +550,7 @@ fn parse_findings_mode(
         if entry
             .get("severity")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|severity| {
-                !matches!(
-                    severity.to_ascii_lowercase().as_str(),
-                    "critical"
-                        | "blocker"
-                        | "blocking"
-                        | "p0"
-                        | "high"
-                        | "error"
-                        | "p1"
-                        | "medium"
-                        | "moderate"
-                        | "should-fix"
-                        | "p2"
-                        | "low"
-                        | "warning"
-                        | "p3"
-                        | "info"
-                        | "informational"
-                        | "note"
-                        | "p4"
-                )
-            })
+            .is_some_and(|severity| severity_class(severity).is_none())
         {
             skipped.push(format!(
                 "malformed finding: {}",

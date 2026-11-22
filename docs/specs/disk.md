@@ -154,7 +154,8 @@ Collection belongs to [worktrees](supervisor.md#worktrees) and
 
 Submission, admission and new builds take one decision, `DiskGate::decide`:
 the thresholds from `GcSettings::disk_limits` plus the effective strength of
-the declared `DISK_FLOOR` policy rule. Below `gc.free_floor`, warn and proceed.
+the declared `DISK_FLOOR` policy rule. `gc.free_floor` defaults to 1% of the
+state volume, capped at 5 GiB. Below `gc.free_floor`, warn and proceed.
 Below `gc.critical_free` (default 2 GiB; `0B` disables it) `DISK_FLOOR` decides:
 it warns and proceeds by default, for every lane class; `policy.DISK_FLOOR =
 "refuse"` holds new work and `"off"` silences it. Messages report available

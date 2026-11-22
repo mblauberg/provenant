@@ -892,18 +892,8 @@ fn outputs(
 /// Reserve each member's strongest finding when all such reservations fit,
 /// then fill remaining space in severity order. Ties preserve export order.
 fn bounded_findings(findings: Vec<Finding>) -> Vec<Finding> {
-    fn severity(value: &str) -> u8 {
-        match value.to_ascii_lowercase().as_str() {
-            "critical" | "blocker" | "blocking" | "p0" => 0,
-            "high" | "error" | "p1" => 1,
-            "medium" | "moderate" | "should-fix" | "p2" => 2,
-            "low" | "warning" | "p3" => 3,
-            "info" | "informational" | "note" | "p4" => 4,
-            _ => 5,
-        }
-    }
     let mut order: Vec<usize> = (0..findings.len()).collect();
-    order.sort_by_key(|&index| severity(&findings[index].severity));
+    order.sort_by_key(|&index| severity_rank(&findings[index].severity));
     let mut members = BTreeSet::new();
     let mut reserved = Vec::new();
     for &index in &order {

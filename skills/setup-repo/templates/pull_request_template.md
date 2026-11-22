@@ -36,7 +36,7 @@ Review a later commit's delta; a clean base merge needs only CI.
 - Reviewer role:
 - Independence from authorship/implementation context:
 - Exact head reviewed:
-- Unresolved P0-P2 findings:
+- Unresolved blocking findings:
 
 <details>
 <summary>Implementation detail</summary>

@@ -166,6 +166,8 @@ fn plan(
             head,
             author: &author,
             reviews: &reviews,
+            // The runbook owns merge authority; no decision is outstanding.
+            decision: None,
         },
     )?;
     Ok(Plan {
