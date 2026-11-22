@@ -1,6 +1,7 @@
 //! Typed TOML asset schema and price-table validation. The composition edge loads the asset.
 use std::collections::BTreeMap;
 
+use provenant_config::OverlayWarning;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -119,6 +120,10 @@ pub struct PriceTable {
     pub(crate) identity: PriceIdentity,
     max_review_age_days: Option<u32>,
     models: BTreeMap<(String, String), (Rates, BillingKind)>,
+    /// Layer that supplied each overlaid (provider, model) price.
+    pub(crate) sources: BTreeMap<(String, String), String>,
+    /// Skipped overlay entries, with their layer and reason.
+    pub(crate) warnings: Vec<OverlayWarning>,
 }
 impl PriceTable {
     /// Review age at `today`; stale only when the sheet configures a limit.
@@ -142,6 +147,34 @@ impl PriceTable {
     pub(crate) fn get(&self, provider: &str, model: &str) -> Option<&(Rates, BillingKind)> {
         self.models.get(&(provider.to_owned(), model.to_owned()))
     }
+    /// `bundled`, `host` or `project` for one priced model.
+    pub fn source(&self, provider: &str, model: &str) -> &str {
+        self.sources
+            .get(&(provider.to_owned(), model.to_owned()))
+            .map_or("bundled", String::as_str)
+    }
+    /// Skipped overlay entries, named with their layer and reason.
+    pub fn warnings(&self) -> &[OverlayWarning] {
+        &self.warnings
+    }
+    /// Provenance of every price supplied by a host or project overlay.
+    pub fn sources(&self) -> Vec<PriceSource> {
+        self.sources
+            .iter()
+            .map(|((provider, model), source)| PriceSource {
+                provider: provider.clone(),
+                model: model.clone(),
+                source: source.clone(),
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PriceSource {
+    pub provider: String,
+    pub model: String,
+    pub source: String,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -250,5 +283,7 @@ pub fn validate_prices(config: &ConfiguredPrices) -> Result<PriceTable, PriceErr
         },
         max_review_age_days: config.max_review_age_days,
         models,
+        sources: BTreeMap::new(),
+        warnings: Vec::new(),
     })
 }

@@ -67,11 +67,19 @@ pub(crate) fn effective(roots: &Roots) -> Result<Catalogue, RoutingError> {
         .filter_map(|(spec, _)| read(roots, spec.name))
         .collect();
     let bundled = Catalogue::bundled()?;
+    let project = roots.checkout();
+    let key = provenant_config::project_key_for(project);
+    let (layers, warnings) = provenant_config::overlays::read_layers(
+        roots.state.as_path(),
+        Some(project),
+        key.as_deref(),
+        "catalogue",
+    );
     match bundled.clone().with_discovery(&snapshots) {
-        Ok(catalogue) => Ok(catalogue),
+        Ok(catalogue) => Ok(catalogue.with_overlays(&layers, warnings)),
         Err(_) => {
             eprintln!("warning: invalid provider model discovery cache; using bundled catalogue");
-            Ok(bundled)
+            Ok(bundled.with_overlays(&layers, warnings))
         }
     }
 }

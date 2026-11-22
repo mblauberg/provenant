@@ -1115,6 +1115,8 @@ pub(super) fn execute_in(
                     quota,
                     admission_refusal,
                     provider_refusals,
+                    catalogue_sources: context.catalogue.overlay_sources().clone(),
+                    overlay_warnings: context.catalogue.overlay_warnings().to_vec(),
                 })))
             },
         ),

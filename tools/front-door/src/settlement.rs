@@ -340,7 +340,7 @@ fn record_usage(
     )?;
     let fact = store.attempt(reaction.attempt, &call)?;
     let key = store.work_key(reaction.attempt, &call)?;
-    let prices = crate::fabric::load_graph_prices(assets)?;
+    let prices = crate::fabric::load_graph_prices_layered(assets, roots)?;
     let row = provenant_telemetry::ledger::row(&fact, &key, Some(&prices))?;
     provenant_telemetry::ledger::append(roots.state.as_path(), &[row], &clock, &cancel)?;
     Ok(())

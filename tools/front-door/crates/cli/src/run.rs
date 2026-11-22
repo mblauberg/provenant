@@ -1715,6 +1715,19 @@ fn attach_freshness(
         ));
     }
     data["price_freshness"] = json!(freshness);
+    let sources = prices.sources();
+    if !sources.is_empty() {
+        data["price_sources"] = json!(sources);
+        for source in &sources {
+            human.push_str(&format!(
+                "price {}/{} source={}\n",
+                source.provider, source.model, source.source
+            ));
+        }
+    }
+    for warning in prices.warnings() {
+        human.push_str(&format!("warning: {warning}\n"));
+    }
     Ok(())
 }
 
@@ -2051,9 +2064,16 @@ fn load_price_sheet(
     })?;
     let config = toml_edit::de::from_str::<provenant_telemetry::ConfiguredPrices>(&text)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error.to_string()))?;
-    let table = provenant_telemetry::validate_prices(&config)
-        .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error.to_string()))?;
-    Ok((config, table))
+    let project = edge.roots.checkout();
+    let key = provenant_config::project_key_for(project);
+    let layered = provenant_telemetry::prices_overlay::load(
+        edge.assets,
+        edge.roots.state.as_path(),
+        Some(project),
+        key.as_deref(),
+    )
+    .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error.to_string()))?;
+    Ok((config, layered.table))
 }
 
 /// Read one price document from a file or fetch it over HTTPS.

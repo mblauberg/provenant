@@ -92,6 +92,95 @@ Configure policy under `[domains.routing.model_policy]`. Run
 and `provenant config check` to find invalid rules. The
 [routing spec](../specs/routing.md) owns the routing behaviour.
 
+## Catalogue and price overlays
+
+The bundled catalogue (`tools/front-door/crates/routing/assets/catalogue.toml`)
+and the bundled price sheet (`config/telemetry-prices.toml`) can be extended
+without a rebuild. Owner entries live in the same config files the other
+cross-cutting domains use, resolved in this order:
+
+1. bundled asset (always present);
+2. host `<state>/config.toml`;
+3. host-project `<state>/projects/<project-key>/config.toml` (reported as
+   `host`);
+4. project `<project>/.provenant/config.toml`.
+
+Later layers replace an entry with the same key or add it; they never merge
+one entry into another. A catalogue model is keyed by `model`, a pool member by
+`(pool, model)`, a capability-preference row by route name, and a price by
+`(provider, model)`. Removal is explicit with `remove = true`. Removing a model
+also drops its pool memberships and writer-advice references.
+
+```toml
+# <state>/config.toml or <project>/.provenant/config.toml
+[[catalogue.models]]
+model = "vendor/new-model"
+capability = "strong"
+efforts = ["low", "high"]
+effort_suffix = true
+evidence_ref = "vendor model card 2026-11-01"
+family = "new"
+service_tiers = ["standard"]
+
+[[catalogue.pool_members]]
+pool = "senior"
+model = "vendor/new-model"
+weight = 3
+efforts = ["high"]
+effort = "high"
+
+[catalogue.capability_preferences.senior]
+strong = 5
+frontier = 7
+
+[[prices.models]]
+provider = "vendor"
+model = "vendor/new-model"
+billing = "api"
+sources = ["https://vendor.example/pricing"]
+[prices.models.rates]
+uncached_input = 1000000
+cache_read = 100000
+cache_write = 1000000
+output_excluding_reasoning = 4000000
+```
+
+An entry is a full replacement: fields left out take type defaults rather than
+the values in the layer below. Per-model policy rules remain owned by
+`[domains.routing.model_policy]`; the catalogue overlay carries facts only.
+Weights are integers 0–100, `efforts` must be a subset of the model's efforts,
+and a zero rate needs `zero_rate_verified = true`. To remove an entry:
+
+```toml
+[[catalogue.models]]
+model = "vendor/old-model"
+remove = true
+
+[[catalogue.pool_members]]
+pool = "senior"
+model = "vendor/old-model"
+remove = true
+
+[catalogue.capability_preferences.senior]
+remove = true
+
+[[prices.models]]
+provider = "vendor"
+model = "vendor/old-model"
+remove = true
+```
+
+An unreadable or malformed layer, or an entry that is malformed or would leave
+the effective catalogue or price sheet invalid, is skipped with a warning that
+names the layer and the reason; the remaining entries still apply. `route list`
+reports `models[].source`, pool members' `membership_source` and
+`weight_source`, `catalogue_sources` and `overlay_warnings` in JSON, and the
+same sources and warnings in human output. `route resolve` reports
+`catalogue model source`, `catalogue pool membership source`,
+`catalogue weight source` and `catalogue capability preferences ... source`.
+`telemetry stats` reports `price_sources`, per-price `source=` lines and
+skipped-entry warnings. Sources are `bundled`, `host` or `project`.
+
 ## Review panels
 
 Configure review shapes and selection under `[domains.routing.review]`; inspect

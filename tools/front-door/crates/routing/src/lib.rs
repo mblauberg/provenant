@@ -4,6 +4,8 @@ mod catalog;
 mod discovery;
 mod monthly;
 pub use monthly::*;
+mod overlay;
+pub use overlay::CatalogueSources;
 mod exclusion;
 mod facts;
 mod fallback;

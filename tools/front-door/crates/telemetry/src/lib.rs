@@ -13,6 +13,7 @@ pub mod mileage;
 pub mod native_attempts;
 pub mod outcome;
 mod prices;
+pub mod prices_overlay;
 mod reducer;
 pub mod refresh;
 pub mod route_outcomes;
@@ -24,7 +25,7 @@ pub mod usage;
 pub use chair::{ChairModelUsage, Unread, attach_usage as attach_chair_usage};
 pub use prices::{
     BillingKind, Categories, ConfiguredModel, ConfiguredPrices, Freshness, PriceError,
-    PriceIdentity, PriceTable, Rates, validate_prices,
+    PriceIdentity, PriceSource, PriceTable, Rates, validate_prices,
 };
 pub use reducer::*;
 pub use trace::{Hosts, trace};
