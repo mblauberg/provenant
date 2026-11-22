@@ -371,37 +371,30 @@ impl Admission<'_> {
                 .iter()
                 .find(|r| r.account.adapter == route.adapter && r.account.account_key == *key);
             if let Some(record) = record {
-                // Exhaustion is a property of the selected model's own windows,
-                // read from a fresh reading: a failed probe keeps a recent
-                // exhaustion, a stale or partial one never manufactures it, and
-                // an account-level label says nothing about this route's pool.
-                if let Some(snapshot) = self.fresh_snapshot(Some(record))
-                    && partial_headroom(
+                // Only a fresh reading decides here. An older sign-out or
+                // exhaustion is evidence that has expired: the readiness
+                // observation owns its lifetime, and launch re-checks the login
+                // and warns instead of refusing on a stale persisted failure.
+                if let Some(snapshot) = self.fresh_snapshot(Some(record)) {
+                    if snapshot.status == QuotaStatus::AuthRequired {
+                        return Err(QuotaError::Refused(
+                            "authentication required; sign in to the selected account",
+                        ));
+                    }
+                    // Exhaustion is a property of the selected model's own
+                    // windows: a failed probe keeps a recent exhaustion, a
+                    // partial reading never manufactures it, and an account
+                    // label says nothing about this route's pool.
+                    if partial_headroom(
                         snapshot,
                         &route.adapter,
                         &route.model,
                         self.pools,
                         self.now_unix_seconds,
                     ) == PartialHeadroom::Exhausted
-                {
-                    return Err(QuotaError::AllowanceExhausted);
-                }
-                // The same derivation that fills quota show and the menu list
-                // decides whether the account needs a sign-in.
-                let effective = crate::effective_status(&crate::StatusInput {
-                    record,
-                    detections: &[],
-                    readiness: None,
-                    pools: self.pools,
-                    now: self.now_unix_seconds,
-                    freshness: self.freshness,
-                    policies: self.policies,
-                    policy,
-                })?;
-                if effective.status == QuotaStatus::AuthRequired {
-                    return Err(QuotaError::Refused(
-                        "authentication required; sign in to the selected account",
-                    ));
+                    {
+                        return Err(QuotaError::AllowanceExhausted);
+                    }
                 }
             }
         }
