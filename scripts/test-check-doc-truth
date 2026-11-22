@@ -265,6 +265,51 @@ class DocTruthTests(unittest.TestCase):
         self.assertEqual(result.stdout.count("error:"), 1)
         self.assertIn("unresolved command `provenant config vanished`", result.stdout)
 
+    def test_named_codes_variables_and_config_keys_must_exist(self):
+        (self.root / "tools/front-door/src/main.rs").write_text(
+            'const CODE: &str = "LAND_PENDING"; const ENV: &str = "PROVENANT_KNOWN";\n')
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        subprocess.run(["git", "-C", str(self.root), "add", "tools"], check=True)
+        schema = self.root / "schema.json"
+        schema.write_text(json.dumps({"data": {"fields": [
+            {"path": "lanes.access"}, {"path": "domains.steward.repositories.{name}.directory"}]}}))
+        self.document("# Symbols\nOwner: maintainers\nAnchor: tools/front-door/src/main.rs\n"
+                      "Codes `LAND_PENDING`, `PROVENANT_KNOWN` and `LAND_GONE`.\n"
+                      "Keys `lanes.access`, `domains.steward.repositories.x.directory`, `lanes.vanished`,\n"
+                      "`lanes` and files `lanes.toml`.\n"
+                      "Placeholders `provenant route list --pool HOST_POOL_ID` and `--issued-at UNIX_SECONDS`;\n"
+                      "a path `.github/ISSUE_TEMPLATE/bug.yml` and `other.tool`.\n")
+        result = self.check("--schema-json", str(schema))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "docs/runbooks/example.md:4: error: unresolved code or variable `LAND_GONE`",
+            "docs/runbooks/example.md:5: error: unresolved config key `lanes.vanished`",
+        ])
+        spec = self.root / "docs/specs/example.md"
+        spec.write_text("# Spec\nOwner: maintainers\nAnchor: tools/front-door/src/main.rs\n\nUses `LAND_GONE`.\n")
+        self.document("# Symbols\nOwner: maintainers\nAnchor: tools/front-door/src/main.rs\n")
+        result = self.check("--schema-json", str(schema))
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("docs/specs/example.md:5: error: unresolved code or variable", result.stdout)
+        spec.write_text("# Spec\nOwner: maintainers\nAnchor: tools/front-door/src/main.rs\n\nRemoved `LAND_GONE`.\n")
+        self.assertEqual(self.check("--schema-json", str(schema)).stdout, "")
+        adr = self.root / "docs/adr/0001-example.md"
+        adr.write_text("# Example\nUses `LAND_GONE`.\n")
+        result = self.check("--schema-json", str(schema))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("warning: unresolved code or variable", result.stdout)
+
+    def test_every_runbook_and_adr_is_listed_in_its_index(self):
+        (self.root / "docs/runbooks/README.md").write_text("# Runbooks\n\n[Listed](listed.md)\n")
+        (self.root / "docs/runbooks/listed.md").write_text("# Listed\n")
+        (self.root / "docs/runbooks/orphan.md").write_text("# Orphan\n")
+        (self.root / "docs/adr/README.md").write_text("# ADRs\n")
+        result = self.check("--inventory-only", "--strict-inventory", source=False)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("unresolved runbook index entry `orphan.md`", result.stdout)
+        self.assertIn("unresolved ADR index entry `0001-example.md`", result.stdout)
+        self.assertNotIn("index entry `listed.md`", result.stdout)
+
     def test_missing_headers_are_advisory_unless_inventory_gate_is_requested(self):
         self.document("# Missing inventory\n\nProse first.\n\nOwner: too late\nAnchor: too late\n")
         result = self.check("--inventory-only", source=False)
@@ -395,8 +440,12 @@ class DocTruthTests(unittest.TestCase):
 
     def test_binary_is_used_only_for_help_and_document_snippets_never_run(self):
         binary = self.root / "provenant"
-        binary.write_text("#!/bin/sh\n[ \"$*\" = 'help --all --json' ] || exit 1\n"
-                          f"cat '{FIXTURES / 'help.json'}'\n")
+        binary.write_text("#!/bin/sh\n"
+                          "case \"$*\" in\n"
+                          f"  'help --all --json') cat '{FIXTURES / 'help.json'}' ;;\n"
+                          "  'config schema --all --json') echo '{\"data\": {\"fields\": []}}' ;;\n"
+                          "  *) exit 1 ;;\n"
+                          "esac\n")
         binary.chmod(0o755)
         marker = self.root / "executed"
         self.document("# Execution\nOwner: maintainers\nAnchor: tools/front-door/src/main.rs\n"
