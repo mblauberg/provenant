@@ -198,7 +198,7 @@ impl Error {
 enum Data {
     Created(Box<worktrees::WorktreeInfo>),
     Listed(Vec<worktrees::WorktreeInfo>),
-    Diagnosed(worktrees::WorktreeDiagnosis),
+    Diagnosed(Box<worktrees::WorktreeDiagnosis>),
     Removed(worktrees::RemoveOutcome),
 }
 
@@ -371,7 +371,7 @@ fn execute(
                             .unwrap_or(false)
                     };
                     let diagnosis = worktrees::doctor(context, &path, &terminal, cancel)?;
-                    Data::Diagnosed(diagnosis)
+                    Data::Diagnosed(Box::new(diagnosis))
                 }
                 Worktree::SessionList => unreachable!(),
                 Worktree::Remove(mut args) => {
@@ -4678,16 +4678,15 @@ mod gc_preview_tests {
                 .contains(&RetentionKind::LaneCargoCaches)
         );
         let rows = gc_retention_bytes(&data);
-        for class in [RetentionKind::BuildDirectories] {
-            assert_eq!(
-                rows.iter()
-                    .find(|row| row.class == class)
-                    .unwrap()
-                    .observation,
-                ByteObservation::Unknown,
-                "{class:?}"
-            );
-        }
+        let class = RetentionKind::BuildDirectories;
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.class == class)
+                .unwrap()
+                .observation,
+            ByteObservation::Unknown,
+            "{class:?}"
+        );
         let summary = gc_data_summary(&data);
         assert!(
             summary.contains("Cargo targets: not run in this pass\n"),

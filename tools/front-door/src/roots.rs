@@ -115,9 +115,7 @@ pub fn session_project_warning(selected: Option<&Path>) -> Option<String> {
     let cwd = fs::canonicalize(std::env::current_dir().ok()?).ok()?;
     let selected = fs::canonicalize(selected).ok()?;
     let cwd_checkout = git_checkout(&cwd).ok();
-    if cwd_checkout.is_none() {
-        return None;
-    }
+    cwd_checkout.as_ref()?;
     let selected_checkout = git_checkout(&selected).ok();
     let cwd_identity = project_identity(&cwd, cwd_checkout.as_deref()).ok()?;
     let selected_identity = project_identity(&selected, selected_checkout.as_deref()).ok()?;
