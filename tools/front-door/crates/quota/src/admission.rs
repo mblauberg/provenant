@@ -371,8 +371,23 @@ impl Admission<'_> {
                 .iter()
                 .find(|r| r.account.adapter == route.adapter && r.account.account_key == *key);
             if let Some(record) = record {
+                // Exhaustion is a property of the selected model's own windows,
+                // read from a fresh reading: a failed probe keeps a recent
+                // exhaustion, a stale or partial one never manufactures it, and
+                // an account-level label says nothing about this route's pool.
+                if let Some(snapshot) = self.fresh_snapshot(Some(record))
+                    && partial_headroom(
+                        snapshot,
+                        &route.adapter,
+                        &route.model,
+                        self.pools,
+                        self.now_unix_seconds,
+                    ) == PartialHeadroom::Exhausted
+                {
+                    return Err(QuotaError::AllowanceExhausted);
+                }
                 // The same derivation that fills quota show and the menu list
-                // decides admission: no second snapshot-only verdict.
+                // decides whether the account needs a sign-in.
                 let effective = crate::effective_status(&crate::StatusInput {
                     record,
                     detections: &[],
@@ -383,14 +398,10 @@ impl Admission<'_> {
                     policies: self.policies,
                     policy,
                 })?;
-                match effective.status {
-                    QuotaStatus::AuthRequired => {
-                        return Err(QuotaError::Refused(
-                            "authentication required; sign in to the selected account",
-                        ));
-                    }
-                    QuotaStatus::Exhausted => return Err(QuotaError::AllowanceExhausted),
-                    _ => {}
+                if effective.status == QuotaStatus::AuthRequired {
+                    return Err(QuotaError::Refused(
+                        "authentication required; sign in to the selected account",
+                    ));
                 }
             }
         }
