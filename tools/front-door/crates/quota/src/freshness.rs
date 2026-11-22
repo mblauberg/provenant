@@ -141,13 +141,15 @@ mod tests {
 
     #[test]
     fn every_expiry_comes_from_the_policy() {
-        let mut settings = FreshnessSettings::default();
-        settings.snapshot_seconds = 17;
-        settings.login_verification_seconds = 18;
-        settings.chair_seconds = 19;
-        settings.availability_grace_seconds = 20;
-        settings.refusal_seconds = 21;
-        settings.free_pool_recheck_seconds = 22;
+        let settings = FreshnessSettings {
+            snapshot_seconds: 17,
+            login_verification_seconds: 18,
+            chair_seconds: 19,
+            availability_grace_seconds: 20,
+            refusal_seconds: 21,
+            free_pool_recheck_seconds: 22,
+            ..FreshnessSettings::default()
+        };
         settings.readiness_min_seconds = 23;
         let policy = FreshnessPolicy::from_settings(settings).with_source(FreshnessSource::Config);
         assert_eq!(policy.snapshot_seconds, 17);

@@ -539,17 +539,31 @@ fn validate_inputs(records: &[AccountRecord], detections: &[Detection]) -> Resul
     }
     Ok(())
 }
+/// The facts and policy one quota report judges accounts against.
+#[derive(Clone, Copy)]
+pub struct ReportInputs<'a> {
+    pub policies: &'a [QuotaPolicy],
+    pub records: &'a [AccountRecord],
+    pub detections: &'a [Detection],
+    pub policy: &'a provenant_records::policy::Policy,
+    pub freshness: &'a FreshnessPolicy,
+    pub readiness: &'a [ReadinessInput<'a>],
+}
+
 pub fn report(
-    policies: &[QuotaPolicy],
-    records: &[AccountRecord],
-    detections: &[Detection],
+    inputs: ReportInputs<'_>,
     query: &QuotaQuery,
     now: i64,
     path: String,
-    policy: &provenant_records::policy::Policy,
-    freshness: &FreshnessPolicy,
-    readiness: &[ReadinessInput<'_>],
 ) -> Result<QuotaReport, QuotaError> {
+    let ReportInputs {
+        policies,
+        records,
+        detections,
+        policy,
+        freshness,
+        readiness,
+    } = inputs;
     validate_inputs(records, detections)?;
     let selected = |id: &str| query.adapter.as_ref().is_none_or(|s| s == id);
     let mut accounts = Vec::new();
@@ -757,15 +771,17 @@ mod tests {
         let mut record = AccountRecord::empty(account);
         record.last_error = Some(ProbeFailure::IsolatedKeychainUnavailable);
         let report = report(
-            crate::source::TEST_POLICIES,
-            &[record],
-            &[],
+            ReportInputs {
+                policies: crate::source::TEST_POLICIES,
+                records: &[record],
+                detections: &[],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             100,
             "fixture".into(),
-            crate::source::test_policy(),
-            &crate::DEFAULT_FRESHNESS,
-            &[],
         )
         .unwrap();
         assert_eq!(report.accounts[0].status, QuotaStatus::KeychainUnavailable);
@@ -1037,15 +1053,17 @@ mod tests {
         .replacement
         .unwrap();
         let row = report(
-            crate::source::TEST_POLICIES,
-            &[repaired],
-            std::slice::from_ref(&detection),
+            ReportInputs {
+                policies: crate::source::TEST_POLICIES,
+                records: &[repaired],
+                detections: std::slice::from_ref(&detection),
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             180,
             "report.json".into(),
-            crate::source::test_policy(),
-            &crate::DEFAULT_FRESHNESS,
-            &[],
         )
         .unwrap()
         .accounts
@@ -1176,15 +1194,17 @@ mod tests {
             .unwrap();
             assert_eq!(after.batches, vec![vec![record.account.clone()]]);
             let current = report(
-                crate::source::TEST_POLICIES,
-                &[record.clone()],
-                std::slice::from_ref(&detection),
+                ReportInputs {
+                    policies: crate::source::TEST_POLICIES,
+                    records: &[record.clone()],
+                    detections: std::slice::from_ref(&detection),
+                    policy: crate::source::test_policy(),
+                    freshness: &crate::DEFAULT_FRESHNESS,
+                    readiness: &[],
+                },
                 &QuotaQuery { adapter: None },
                 due,
                 "report.json".into(),
-                crate::source::test_policy(),
-                &crate::DEFAULT_FRESHNESS,
-                &[],
             )
             .unwrap();
             assert_eq!(current.accounts[0].status, QuotaStatus::AuthRequired);
@@ -1201,28 +1221,32 @@ mod tests {
         };
         let query = QuotaQuery { adapter: None };
         let recent = report(
-            crate::source::TEST_POLICIES,
-            &[record.clone()],
-            std::slice::from_ref(&detection),
+            ReportInputs {
+                policies: crate::source::TEST_POLICIES,
+                records: &[record.clone()],
+                detections: std::slice::from_ref(&detection),
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &query,
             101,
             "/report".into(),
-            crate::source::test_policy(),
-            &crate::DEFAULT_FRESHNESS,
-            &[],
         )
         .unwrap();
         assert_eq!(recent.accounts[0].status, QuotaStatus::Unknown);
         let expired = report(
-            crate::source::TEST_POLICIES,
-            &[record],
-            &[detection],
+            ReportInputs {
+                policies: crate::source::TEST_POLICIES,
+                records: &[record],
+                detections: &[detection],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &query,
             1000,
             "/report".into(),
-            crate::source::test_policy(),
-            &crate::DEFAULT_FRESHNESS,
-            &[],
         )
         .unwrap();
         assert_eq!(expired.accounts[0].status, QuotaStatus::AuthRequired);
@@ -1278,15 +1302,17 @@ mod tests {
         });
         let row = |now| {
             report(
-                crate::source::TEST_POLICIES,
-                &[record.clone()],
-                &[],
+                ReportInputs {
+                    policies: crate::source::TEST_POLICIES,
+                    records: &[record.clone()],
+                    detections: &[],
+                    policy: crate::source::test_policy(),
+                    freshness: &crate::DEFAULT_FRESHNESS,
+                    readiness: &[],
+                },
                 &QuotaQuery { adapter: None },
                 now,
                 "report.json".into(),
-                crate::source::test_policy(),
-                &crate::DEFAULT_FRESHNESS,
-                &[],
             )
             .unwrap()
             .accounts
@@ -1440,15 +1466,17 @@ mod tests {
         let failed = complete(&current, "claim", 420, Err(ProbeFailure::Auth), None).unwrap();
         assert_eq!(failed.replacement.as_ref().unwrap().snapshot, r.snapshot);
         let row = report(
-            crate::source::TEST_POLICIES,
-            &[failed.replacement.clone().unwrap()],
-            &[],
+            ReportInputs {
+                policies: crate::source::TEST_POLICIES,
+                records: &[failed.replacement.clone().unwrap()],
+                detections: &[],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             420,
             "report.json".into(),
-            crate::source::test_policy(),
-            &crate::DEFAULT_FRESHNESS,
-            &[],
         )
         .unwrap()
         .accounts
@@ -1515,15 +1543,17 @@ mod tests {
                 observed_unix_seconds: Some(observed),
             });
             let report = report(
-                crate::source::TEST_POLICIES,
-                &[record],
-                &[],
+                ReportInputs {
+                    policies: crate::source::TEST_POLICIES,
+                    records: &[record],
+                    detections: &[],
+                    policy: crate::source::test_policy(),
+                    freshness: &crate::DEFAULT_FRESHNESS,
+                    readiness: &[],
+                },
                 &QuotaQuery { adapter: None },
                 420,
                 "report.json".into(),
-                crate::source::test_policy(),
-                &crate::DEFAULT_FRESHNESS,
-                &[],
             )
             .unwrap();
             assert_eq!(
@@ -1573,15 +1603,17 @@ mod tests {
             assert_eq!(failed.snapshot, record.snapshot);
             assert!(failed.refusals.is_empty());
             let row = report(
-                crate::source::TEST_POLICIES,
-                &[failed],
-                &[],
+                ReportInputs {
+                    policies: crate::source::TEST_POLICIES,
+                    records: &[failed],
+                    detections: &[],
+                    policy: crate::source::test_policy(),
+                    freshness: &crate::DEFAULT_FRESHNESS,
+                    readiness: &[],
+                },
                 &QuotaQuery { adapter: None },
                 420,
                 "report.json".into(),
-                crate::source::test_policy(),
-                &crate::DEFAULT_FRESHNESS,
-                &[],
             )
             .unwrap()
             .accounts
@@ -1629,15 +1661,17 @@ mod tests {
         });
         for (now, expected_refusals) in [(150, 1), (200, 0)] {
             let row = report(
-                crate::source::TEST_POLICIES,
-                &[record.clone()],
-                &[],
+                ReportInputs {
+                    policies: crate::source::TEST_POLICIES,
+                    records: &[record.clone()],
+                    detections: &[],
+                    policy: crate::source::test_policy(),
+                    freshness: &crate::DEFAULT_FRESHNESS,
+                    readiness: &[],
+                },
                 &QuotaQuery { adapter: None },
                 now,
                 "fixture".into(),
-                crate::source::test_policy(),
-                &crate::DEFAULT_FRESHNESS,
-                &[],
             )
             .unwrap()
             .accounts
@@ -1688,15 +1722,17 @@ mod tests {
         .replacement
         .unwrap();
         let row = report(
-            crate::source::TEST_POLICIES,
-            std::slice::from_ref(&failed),
-            &[],
+            ReportInputs {
+                policies: crate::source::TEST_POLICIES,
+                records: std::slice::from_ref(&failed),
+                detections: &[],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             420,
             "report.json".into(),
-            crate::source::test_policy(),
-            &crate::DEFAULT_FRESHNESS,
-            &[],
         )
         .unwrap()
         .accounts
@@ -1971,15 +2007,17 @@ mod transition_tests {
         });
         record.last_attempt_unix_seconds = Some(45);
         let report = report(
-            crate::source::TEST_POLICIES,
-            &[record.clone()],
-            &[],
+            ReportInputs {
+                policies: crate::source::TEST_POLICIES,
+                records: &[record.clone()],
+                detections: &[],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             100,
             "fixture".into(),
-            crate::source::test_policy(),
-            &crate::DEFAULT_FRESHNESS,
-            &[],
         )
         .unwrap();
         assert!(report.refreshing_ids.is_empty());
@@ -1992,15 +2030,17 @@ mod transition_tests {
     }
     fn report_for_bad(record: AccountRecord) -> Result<QuotaReport, QuotaError> {
         report(
-            crate::source::TEST_POLICIES,
-            &[record],
-            &[],
+            ReportInputs {
+                policies: crate::source::TEST_POLICIES,
+                records: &[record],
+                detections: &[],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             100,
             "fixture".into(),
-            crate::source::test_policy(),
-            &crate::DEFAULT_FRESHNESS,
-            &[],
         )
     }
     #[test]
@@ -2017,15 +2057,17 @@ mod transition_tests {
             status: QuotaStatus::Available,
         }];
         let rep = report(
-            crate::source::TEST_POLICIES,
-            &records,
-            &detections,
+            ReportInputs {
+                policies: crate::source::TEST_POLICIES,
+                records: &records,
+                detections: &detections,
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             100,
             "report.json".into(),
-            crate::source::test_policy(),
-            &crate::DEFAULT_FRESHNESS,
-            &[],
         )
         .unwrap();
         assert_eq!(rep.accounts.len(), 1);
@@ -2182,15 +2224,17 @@ mod transition_tests {
                 status: QuotaStatus::AuthRequired,
             }];
             let report = report(
-                crate::source::TEST_POLICIES,
-                &records,
-                &detections,
+                ReportInputs {
+                    policies: crate::source::TEST_POLICIES,
+                    records: &records,
+                    detections: &detections,
+                    policy: crate::source::test_policy(),
+                    freshness: &crate::DEFAULT_FRESHNESS,
+                    readiness: &[],
+                },
                 &QuotaQuery { adapter: None },
                 now,
                 "report.json".into(),
-                crate::source::test_policy(),
-                &crate::DEFAULT_FRESHNESS,
-                &[],
             )
             .unwrap();
             let observed = report
@@ -2317,15 +2361,17 @@ mod zen_tests {
                     status: QuotaStatus::Available,
                 }];
                 let report = report(
-                    crate::source::TEST_POLICIES,
-                    &records,
-                    &detections,
+                    ReportInputs {
+                        policies: crate::source::TEST_POLICIES,
+                        records: &records,
+                        detections: &detections,
+                        policy: crate::source::test_policy(),
+                        freshness: &crate::DEFAULT_FRESHNESS,
+                        readiness: &[],
+                    },
                     &QuotaQuery { adapter: None },
                     now,
                     "report.json".into(),
-                    crate::source::test_policy(),
-                    &crate::DEFAULT_FRESHNESS,
-                    &[],
                 )
                 .unwrap();
                 for record in &records {
@@ -2388,15 +2434,17 @@ mod zen_tests {
             (5_000, QuotaStatus::Unknown, None),
         ] {
             let report = report(
-                crate::source::TEST_POLICIES,
-                std::slice::from_ref(&record),
-                &detections,
+                ReportInputs {
+                    policies: crate::source::TEST_POLICIES,
+                    records: std::slice::from_ref(&record),
+                    detections: &detections,
+                    policy: crate::source::test_policy(),
+                    freshness: &crate::DEFAULT_FRESHNESS,
+                    readiness: &[],
+                },
                 &QuotaQuery { adapter: None },
                 now,
                 "report.json".into(),
-                crate::source::test_policy(),
-                &crate::DEFAULT_FRESHNESS,
-                &[],
             )
             .unwrap();
             let row = &report.accounts[0];
@@ -2424,19 +2472,21 @@ mod zen_tests {
             resets_unix_seconds: Some(200),
         });
         let report_with_reset = report(
-            crate::source::TEST_POLICIES,
-            &[record.clone()],
-            &[Detection {
-                adapter: "opencode".into(),
-                accounts: Some(vec![account.clone()]),
-                status: QuotaStatus::Available,
-            }],
+            ReportInputs {
+                policies: crate::source::TEST_POLICIES,
+                records: &[record.clone()],
+                detections: &[Detection {
+                    adapter: "opencode".into(),
+                    accounts: Some(vec![account.clone()]),
+                    status: QuotaStatus::Available,
+                }],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             101,
             "report.json".into(),
-            crate::source::test_policy(),
-            &crate::DEFAULT_FRESHNESS,
-            &[],
         )
         .unwrap();
         assert_eq!(report_with_reset.accounts[0].status, QuotaStatus::Exhausted);
@@ -2459,19 +2509,21 @@ mod zen_tests {
             resets_unix_seconds: None,
         });
         let mixed_report = report(
-            crate::source::TEST_POLICIES,
-            &[mixed],
-            &[Detection {
-                adapter: "opencode".into(),
-                accounts: Some(vec![account]),
-                status: QuotaStatus::Available,
-            }],
+            ReportInputs {
+                policies: crate::source::TEST_POLICIES,
+                records: &[mixed],
+                detections: &[Detection {
+                    adapter: "opencode".into(),
+                    accounts: Some(vec![account]),
+                    status: QuotaStatus::Available,
+                }],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             101,
             "report.json".into(),
-            crate::source::test_policy(),
-            &crate::DEFAULT_FRESHNESS,
-            &[],
         )
         .unwrap();
         assert_eq!(mixed_report.accounts[0].status, QuotaStatus::Exhausted);
@@ -2496,19 +2548,21 @@ mod zen_tests {
             resets_unix_seconds: Some(200),
         });
         let report = report(
-            crate::source::TEST_POLICIES,
-            &[record],
-            &[Detection {
-                adapter: "opencode".into(),
-                accounts: Some(vec![account]),
-                status: QuotaStatus::Available,
-            }],
+            ReportInputs {
+                policies: crate::source::TEST_POLICIES,
+                records: &[record],
+                detections: &[Detection {
+                    adapter: "opencode".into(),
+                    accounts: Some(vec![account]),
+                    status: QuotaStatus::Available,
+                }],
+                policy: crate::source::test_policy(),
+                freshness: &crate::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             101,
             "report.json".into(),
-            crate::source::test_policy(),
-            &crate::DEFAULT_FRESHNESS,
-            &[],
         )
         .unwrap();
         let row = &report.accounts[0];

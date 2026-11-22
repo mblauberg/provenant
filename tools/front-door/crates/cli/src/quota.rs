@@ -1829,15 +1829,17 @@ fn recorded_login_rows_inner(roots: &Roots) -> Result<Vec<AccountRow>, EdgeError
     let owned = recorded_readiness(roots.state.as_path(), &records);
     let inputs = readiness_inputs(&owned);
     let mut report = schedule::report(
-        &policies,
-        &records,
-        &[],
+        schedule::ReportInputs {
+            policies: &policies,
+            records: &records,
+            detections: &[],
+            policy: &policy,
+            freshness: &freshness,
+            readiness: &inputs,
+        },
         &QuotaQuery { adapter: None },
         now,
         String::new(),
-        &policy,
-        &freshness,
-        &inputs,
     )?;
     decorate(&mut report, &accounts, &domains.quota.display);
     decorate_login(
@@ -1994,15 +1996,17 @@ pub(crate) fn execute(
         let owned = recorded_readiness(roots.state.as_path(), &records);
         let inputs = readiness_inputs(&owned);
         let mut report = schedule::report(
-            &policies,
-            &records,
-            &detected,
+            schedule::ReportInputs {
+                policies: &policies,
+                records: &records,
+                detections: &detected,
+                policy: &policy,
+                freshness: &freshness,
+                readiness: &inputs,
+            },
             &query,
             now,
             report_path,
-            &policy,
-            &freshness,
-            &inputs,
         )?;
         decorate(&mut report, &entries, &settings.display);
         decorate_login(
@@ -2266,15 +2270,17 @@ pub(crate) fn execute(
     let owned = recorded_readiness(roots.state.as_path(), &records);
     let inputs = readiness_inputs(&owned);
     let mut report = schedule::report(
-        &policies,
-        &records,
-        &detected,
+        schedule::ReportInputs {
+            policies: &policies,
+            records: &records,
+            detections: &detected,
+            policy: &policy,
+            freshness: &freshness,
+            readiness: &inputs,
+        },
         &QuotaQuery { adapter: None },
         now,
         report_path,
-        &policy,
-        &freshness,
-        &inputs,
     )?;
     decorate(&mut report, &entries, &settings.display);
     decorate_login(
@@ -2299,15 +2305,17 @@ pub(crate) fn execute(
     signal_quota(roots.state.as_path());
     // Publish all accounts even when the caller requests a filtered projection.
     let mut shown = schedule::report(
-        &policies,
-        &records,
-        &detected,
+        schedule::ReportInputs {
+            policies: &policies,
+            records: &records,
+            detections: &detected,
+            policy: &policy,
+            freshness: &freshness,
+            readiness: &inputs,
+        },
         &query,
         now,
         report.report_path.clone(),
-        &policy,
-        &freshness,
-        &inputs,
     )?;
     decorate(&mut shown, &entries, &settings.display);
     decorate_login(
@@ -4670,18 +4678,20 @@ mod tests {
             )?;
         }
         let report = schedule::report(
-            &[],
-            &records,
-            &[],
+            schedule::ReportInputs {
+                policies: &[],
+                records: &records,
+                detections: &[],
+                policy: &provenant_records::policy::Policy::default(),
+                freshness: &provenant_quota::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             110,
             temp.path()
                 .join("quota/report.json")
                 .to_string_lossy()
                 .into_owned(),
-            &provenant_records::policy::Policy::default(),
-            &provenant_quota::DEFAULT_FRESHNESS,
-            &[],
         )?;
         let bytes = serde_json::to_vec(&report)?;
         durable(provenant_os::fs::Directory::atomic_write_with_permissions(
@@ -5488,15 +5498,17 @@ mod tests {
         }))?;
         // No rows are shown, as when an adapter filter excludes the icon account.
         let mut report = schedule::report(
-            &[],
-            &[],
-            &[],
+            schedule::ReportInputs {
+                policies: &[],
+                records: &[],
+                detections: &[],
+                policy: &provenant_records::policy::Policy::default(),
+                freshness: &provenant_quota::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             0,
             "/report.json".into(),
-            &provenant_records::policy::Policy::default(),
-            &provenant_quota::DEFAULT_FRESHNESS,
-            &[],
         )?;
         for (icon, expected) in [
             ("codex-removed", MOST_CONSTRAINED),
@@ -6157,19 +6169,21 @@ mod tests {
         );
         settings.apply_calibration(&mut records, 100);
         let report = schedule::report(
-            &provenant_providers::quota_policies(provenant_providers::REGISTRY),
-            &records,
-            &[Detection {
-                adapter: "opencode".into(),
-                accounts: Some(vec![account]),
-                status: QuotaStatus::Available,
-            }],
+            schedule::ReportInputs {
+                policies: &provenant_providers::quota_policies(provenant_providers::REGISTRY),
+                records: &records,
+                detections: &[Detection {
+                    adapter: "opencode".into(),
+                    accounts: Some(vec![account]),
+                    status: QuotaStatus::Available,
+                }],
+                policy: &provenant_records::policy::Policy::default(),
+                freshness: &provenant_quota::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             100,
             "/report.json".into(),
-            &provenant_records::policy::Policy::default(),
-            &provenant_quota::DEFAULT_FRESHNESS,
-            &[],
         )?;
         let human = quota_human(&report);
         let snapshot = report.accounts[0].snapshot.as_ref().unwrap();
@@ -6277,15 +6291,17 @@ mod tests {
             },
         ];
         let rep = schedule::report(
-            &policies,
-            &all_records,
-            &detections,
+            schedule::ReportInputs {
+                policies: &policies,
+                records: &all_records,
+                detections: &detections,
+                policy: &provenant_records::policy::Policy::default(),
+                freshness: &provenant_quota::DEFAULT_FRESHNESS,
+                readiness: &[],
+            },
             &QuotaQuery { adapter: None },
             100,
             "/report.json".into(),
-            &provenant_records::policy::Policy::default(),
-            &provenant_quota::DEFAULT_FRESHNESS,
-            &[],
         )
         .unwrap();
         assert_eq!(rep.coverage.known, 3);
