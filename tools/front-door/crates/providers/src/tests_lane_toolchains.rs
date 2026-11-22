@@ -618,63 +618,11 @@ fn codex_opt_out_skill_scan_succeeds_under_confinement() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn cargo_build_dir_is_pinned_to_lane_target_for_each_access() -> Result<(), ProviderError> {
+fn cargo_build_dir_is_pinned_to_scratch_for_read_only_and_absent_for_writers()
+-> Result<(), ProviderError> {
     let mut route = route("codex", "fixture-model");
     route.account_key = None;
     let prompt = Prompt::new("fixture".into());
-    for (access, target) in [
-        (Access::ReadOnly, "/fixture/scratch/target"),
-        (
-            Access::WorktreeWrite,
-            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
-        ),
-    ] {
-        let plan = fixture_access_plan(access, Some("login"), false);
-        let launch = crate::codex::Codex.prepare(fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            Path::new("/fixture/repo"),
-            None,
-        ))?;
-        for key in ["CARGO_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"] {
-            assert!(
-                launch.env.iter().any(|(k, v)| k == key && v == target),
-                "{access:?}: {key} must be {target}"
-            );
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn writer_lint_target_is_a_lane_cache_sibling_of_the_build_target() -> Result<(), ProviderError> {
-    let mut route = route("codex", "fixture-model");
-    route.account_key = None;
-    let prompt = Prompt::new("fixture".into());
-    let cache = "/fixture/home/Library/Caches/provenant-lane-cargo/fixture";
-    let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
-    let launch = crate::codex::Codex.prepare(fixture_input(
-        &route,
-        &plan,
-        &prompt,
-        Path::new("/fixture/repo"),
-        None,
-    ))?;
-    // Lint-only cargo runs take their own build directory, so they do not
-    // queue on the lock that test and build runs hold.
-    let lint = format!("{cache}/target-lint");
-    assert!(
-        launch
-            .env
-            .iter()
-            .any(|(k, v)| k == "PROVENANT_LANE_CARGO_LINT_TARGET" && v == lint.as_str()),
-        "PROVENANT_LANE_CARGO_LINT_TARGET must be {lint}"
-    );
-    assert!(
-        Path::new(&lint).starts_with(cache),
-        "the lint target must sit inside the granted lane cache"
-    );
     let read_only = fixture_access_plan(Access::ReadOnly, Some("login"), false);
     let launch = crate::codex::Codex.prepare(fixture_input(
         &route,
@@ -683,13 +631,33 @@ fn writer_lint_target_is_a_lane_cache_sibling_of_the_build_target() -> Result<()
         Path::new("/fixture/repo"),
         None,
     ))?;
-    assert!(
-        launch
-            .env
-            .iter()
-            .all(|(k, _)| k != "PROVENANT_LANE_CARGO_LINT_TARGET"),
-        "read-only lanes have no lane cache to hold a lint target"
-    );
+    for key in ["CARGO_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"] {
+        assert!(
+            launch
+                .env
+                .iter()
+                .any(|(k, v)| k == key && v == "/fixture/scratch/target"),
+            "read-only: {key} must be the scratch target"
+        );
+    }
+    let writer = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+    let launch = crate::codex::Codex.prepare(fixture_input(
+        &route,
+        &writer,
+        &prompt,
+        Path::new("/fixture/repo"),
+        None,
+    ))?;
+    for key in [
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_BUILD_DIR",
+        "PROVENANT_LANE_CARGO_LINT_TARGET",
+    ] {
+        assert!(
+            launch.env.iter().all(|(k, _)| k != key),
+            "a writer launch must not export {key}"
+        );
+    }
     Ok(())
 }
 
@@ -750,10 +718,7 @@ fn node_tool_stores_are_read_only() -> Result<(), ProviderError> {
                     .map(|(_, v)| std::path::PathBuf::from(v))
             };
             assert_declared_cargo_access(&launch);
-            let cache = match access {
-                Access::ReadOnly => std::path::PathBuf::from("/fixture/scratch"),
-                _ => "/fixture/home/Library/Caches/provenant-lane-cargo/fixture".into(),
-            };
+            let cache = std::path::PathBuf::from("/fixture/scratch");
             // Node variables appear only where a Homebrew Node exists. The
             // store stays at the host setting, so a native install's recorded
             // configuration matches; only the caches move into the lane.
@@ -1545,10 +1510,6 @@ fn native_and_confined_writers_receive_the_same_seed_environment() -> Result<(),
             assert_declared_cargo_access(&launch);
         }
         for (key, expected) in [
-            (
-                "CARGO_TARGET_DIR",
-                "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
-            ),
             ("RUSTUP_HOME", "/fixture/home/.rustup"),
             ("RUSTUP_AUTO_INSTALL", "0"),
             ("CARGO_CACHE_AUTO_CLEAN_FREQUENCY", "never"),
@@ -1556,6 +1517,12 @@ fn native_and_confined_writers_receive_the_same_seed_environment() -> Result<(),
             let values: Vec<_> = launch.env.iter().filter(|(name, _)| name == key).collect();
             assert_eq!(values.len(), 1, "{key} sandboxed={sandboxed}");
             assert_eq!(values[0].1, expected);
+        }
+        for key in ["CARGO_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"] {
+            assert!(
+                launch.env.iter().all(|(name, _)| name != key),
+                "a writer launch must not export {key} sandboxed={sandboxed}"
+            );
         }
     }
     Ok(())
@@ -1663,10 +1630,7 @@ fn native_adapter_finalisation_supplies_cargo_environment_without_tool_discovery
     assert_eq!(cargo_home_path(&launch), Path::new("/fixture/home/.cargo"));
     for (name, expected) in [
         ("RUSTUP_HOME", "/fixture/home/.rustup"),
-        (
-            "PROVENANT_LANE_CARGO_LINT_TARGET",
-            "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target-lint",
-        ),
+        ("CARGO_CACHE_AUTO_CLEAN_FREQUENCY", "never"),
     ] {
         let values: Vec<_> = launch.env.iter().filter(|(key, _)| key == name).collect();
         assert_eq!(values.len(), 1, "{name}");

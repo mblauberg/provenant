@@ -145,31 +145,49 @@ impl CargoHome {
         environment.extend(selectors.map(|(key, value)| (key.into(), value.into())));
     }
 
-    pub fn lane_cargo_environment(
-        &self,
-        home: &Path,
-        cache: &Path,
-        environment: &mut Vec<(OsString, OsString)>,
-    ) {
-        self.lane_cargo_environment_with_target(home, &cache.join("target"), environment)
+    /// Bind Cargo's home selectors without a build target. The caller's
+    /// inherited `CARGO_TARGET_DIR` selectors are removed too, so Cargo uses
+    /// its own worktree default.
+    pub fn lane_cargo_environment(&self, home: &Path, environment: &mut Vec<(OsString, OsString)>) {
+        self.write_lane_environment(home, None, environment);
     }
 
+    /// Bind Cargo's home selectors and a private build target.
     pub fn lane_cargo_environment_with_target(
         &self,
         home: &Path,
         target: &Path,
         environment: &mut Vec<(OsString, OsString)>,
     ) {
-        let selectors = [
+        self.write_lane_environment(home, Some(target), environment);
+    }
+
+    fn write_lane_environment(
+        &self,
+        home: &Path,
+        target: Option<&Path>,
+        environment: &mut Vec<(OsString, OsString)>,
+    ) {
+        let mut selectors = vec![
             ("CARGO_HOME", self.path.clone().into_os_string()),
             ("RUSTUP_HOME", home.join(".rustup").into_os_string()),
             ("RUSTUP_AUTO_INSTALL", "0".into()),
-            ("CARGO_TARGET_DIR", target.as_os_str().to_os_string()),
-            ("CARGO_BUILD_BUILD_DIR", target.as_os_str().to_os_string()),
             ("CARGO_CACHE_AUTO_CLEAN_FREQUENCY", "never".into()),
         ];
-        environment.retain(|(key, _)| !selectors.iter().any(|(name, _)| key == *name));
-        environment.extend(selectors.map(|(key, value)| (key.into(), value)));
+        if let Some(target) = target {
+            selectors.push(("CARGO_TARGET_DIR", target.as_os_str().to_os_string()));
+            selectors.push(("CARGO_BUILD_BUILD_DIR", target.as_os_str().to_os_string()));
+        }
+        environment.retain(|(key, _)| {
+            key != "CARGO_TARGET_DIR"
+                && key != "CARGO_BUILD_BUILD_DIR"
+                && !selectors.iter().any(|(name, _)| key == *name)
+        });
+        environment.extend(
+            selectors
+                .into_iter()
+                .map(|(key, value)| (key.into(), value)),
+        );
     }
 }
 
@@ -192,7 +210,7 @@ mod tests {
                     ("CARGO_HOME".into(), "/launch/two".into()),
                 ],
             ] {
-                binding.lane_cargo_environment(home, Path::new("/lane/cache"), &mut env);
+                binding.lane_cargo_environment(home, &mut env);
                 let values: Vec<_> = env
                     .iter()
                     .filter(|(key, _)| key == "CARGO_HOME")

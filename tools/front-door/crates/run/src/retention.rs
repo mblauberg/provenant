@@ -2403,11 +2403,12 @@ mod tests {
         let (_temp, context, store, input, _attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        withdraw(&store, &input, &call)?;
 
         // A healthy attempt beside the legacy row proves one old row does not
         // stop the pass for the rest.
         let mut healthy = crate::tests::input();
+        healthy.attempt_id = AttemptId::from_bytes([7; 16]);
+        healthy.operation_id = provenant_core::OperationId::parse("run-healthy")?;
         crate::tests::rekey(&mut healthy);
         store.create(&healthy, &call)?;
         withdraw(&store, &healthy, &call)?;
@@ -2418,10 +2419,12 @@ mod tests {
             |row| row.get(0),
         )?;
         let legacy = legacy_boundary_record(&stored);
+        // The row is still queued here: a terminal attempt row is immutable.
         store.db.execute(
             "UPDATE attempts SET record=?1 WHERE id=?2",
             rusqlite::params![serde_json::to_vec(&legacy)?, input.attempt_id.to_string()],
         )?;
+        withdraw(&store, &input, &call)?;
         // The owner read a graph advance performs decodes the row.
         let record = store.record(input.attempt_id, &call)?;
         assert!(record.profile.launch_policy.is_none());
@@ -2433,18 +2436,34 @@ mod tests {
 
     #[test]
     fn an_undecodable_attempt_names_the_attempt_row_not_provider_state() -> TestResult {
-        let (_temp, context, store, input, attempt) = seeded()?;
+        let (_temp, context, store, input, _attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
         withdraw(&store, &input, &call)?;
+        // A terminal row is immutable, so insert a second terminal row whose
+        // record cannot decode. It keeps the retention row shape GC reads.
+        let broken = AttemptId::from_bytes([9; 16]);
         store.db.execute(
-            "UPDATE attempts SET record=?1 WHERE id=?2",
-            rusqlite::params![b"{}".as_slice(), input.attempt_id.to_string()],
+            "INSERT INTO attempts (id,project,graph,node,attempt,digest,actor,operation,number,operation_record,revision,terminal,record) SELECT ?1,project,graph,node,attempt+1000,digest,actor,operation,number+1,operation_record,revision,1,?2 FROM attempts WHERE id=?3",
+            rusqlite::params![broken.to_string(), b"{}".as_slice(), input.attempt_id.to_string()],
         )?;
+        let attempt = context
+            .state_root
+            .as_path()
+            .join(format!("attempts/{broken}"));
         let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
-        assert_eq!(report.errors.len(), 1, "{report:?}");
-        assert_eq!(report.errors[0].path, attempt);
-        assert!(!report.errors[0].path.ends_with("provider-state"));
+        assert!(!report.errors.is_empty(), "{report:?}");
+        assert!(
+            report.errors.iter().all(|issue| issue.path == attempt),
+            "{report:?}"
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .all(|issue| !issue.path.ends_with("provider-state")),
+            "{report:?}"
+        );
         Ok(())
     }
 

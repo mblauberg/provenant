@@ -142,10 +142,6 @@ fn same_sandbox_process_info_is_open_and_host_process_info_is_private()
                             .into(),
                     scope: PathScope::Subtree,
                 },
-                cargo_cache: PathGrant {
-                    path: root.join("cache"),
-                    scope: PathScope::Subtree,
-                },
             }))
         } else {
             AccessMode::ReadOnly
@@ -422,10 +418,6 @@ fn ambient_profiles_deny_host_task_memory_ptrace_and_keychain_ipc()
                             .into(),
                     scope: PathScope::Subtree,
                 },
-                cargo_cache: PathGrant {
-                    path: root.join("cache"),
-                    scope: PathScope::Subtree,
-                },
             }))
         } else {
             AccessMode::ReadOnly
@@ -514,10 +506,6 @@ fn ambient_pty_creation_keeps_host_terminals_private() -> Result<(), Box<dyn std
                     path:
                         "/fixture/home/Library/Application Support/provenant/worktree-git/fixture"
                             .into(),
-                    scope: PathScope::Subtree,
-                },
-                cargo_cache: PathGrant {
-                    path: root.join("cache"),
                     scope: PathScope::Subtree,
                 },
             }))

@@ -129,8 +129,7 @@ impl Providers for Confined {
                 "git_grants_digest": vec![7; 32],
                 "publishing": true,
                 "common_git_dir": "/fixture/repo/.git",
-                "git_state": {"path": "/fixture/git-state", "scope": "subtree"},
-                "cargo_cache": {"path": "/fixture/cache", "scope": "subtree"}
+                "git_state": {"path": "/fixture/git-state", "scope": "subtree"}
             }))
             .map_err(|e| crate::fixture_refusal(e.to_string()))?;
             AccessMode::WorktreeWrite(Box::new(authority))
@@ -183,7 +182,6 @@ impl Providers for Confined {
             )
             .unwrap(),
             state_root: std::path::PathBuf::from("/fixture/state"),
-            roots: None,
             // This fixture tests grant recording and stops at a fake handoff;
             // it never launches a provider, so native sandbox availability is
             // outside the invariant under test.
@@ -194,8 +192,6 @@ impl Providers for Confined {
                 None,
             ),
             backend: None,
-            cargo_cache_budget: None,
-            cargo_target_protection: Default::default(),
         });
         Ok(launch)
     }

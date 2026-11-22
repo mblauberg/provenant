@@ -910,7 +910,7 @@ printf 'agy 1.0.0\n'
                     authority,
                     &home,
                     &confinement.plan.permissions().credential_roots,
-            &writer_access_receipt_for_plan(&confinement.plan),
+                    &writer_access_receipt_for_plan(&confinement.plan),
                 )?;
             }
             let directories =
@@ -1267,10 +1267,12 @@ printf 'agy 1.0.0\n'
             .windows(2)
             .any(|pair| pair == ["--image", "/outside/shot.png"])
     );
-    assert!(
-        codex.env.iter().any(|(key, _)| key == "CARGO_TARGET_DIR"),
-        "the lane has its own target directory"
-    );
+    for key in ["CARGO_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"] {
+        assert!(
+            codex.env.iter().all(|(name, _)| name != key),
+            "a writer launch must not export {key}"
+        );
+    }
     phase("host project policy shim");
     // Exercise the host project policy through preparation and the actual
     // generated shim, with a fake gh so no GitHub access is needed.
@@ -1523,7 +1525,7 @@ printf 'agy 1.0.0\n'
             worktree,
             branch,
             authority,
-            &home,
+            &confinement.home,
             &confinement.plan.permissions().credential_roots,
             &writer_access_receipt_for_plan(&confinement.plan),
         )?;

@@ -157,7 +157,7 @@ retention_classes! {
         owner: Confinement,
         adapter: lane_cargo_caches,
         eligibility: Declared,
-        detail: "settled lane; verified cache owner and free writer custody",
+        detail: "legacy cache left before lane builds were removed; verified owner and free writer custody",
         settings: ["gc.idle", "lanes.cargo_cache_max"],
         triggers: GC_SETTLEMENT
     },

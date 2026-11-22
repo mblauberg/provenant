@@ -36,7 +36,6 @@ impl Service<'_> {
                 WriteSource::WriteRoot
                     | WriteSource::ToolWrite
                     | WriteSource::ReadOnlyException
-                    | WriteSource::LaneCache
                     | WriteSource::GitState
             )
         });

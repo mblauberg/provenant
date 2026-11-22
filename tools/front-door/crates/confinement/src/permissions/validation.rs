@@ -66,11 +66,10 @@ fn verify_worktree_authority_inner(
     if authority.git_state != expected_git_state {
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
-    validate_writer_cache(authority, verified, anchors.home, credentials)?;
     if authority.common_git_dir() != grants.common_git_dir.path.as_path() {
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
-    if grants.digest(&authority.cargo_cache, &authority.git_state) != authority.git_grants_digest {
+    if grants.digest(&authority.git_state) != authority.git_grants_digest {
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
     verify_selected_head(verified, selected_ref.short_name())?;

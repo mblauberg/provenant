@@ -6,6 +6,8 @@ Procedure for `provenant disk report` and `provenant gc`. The rules are in the
 [disk spec](../specs/disk.md) and [state spec](../specs/state.md#retention-keeps-evidence).
 Keys, defaults and their sources are in `provenant config schema --all`
 (`gc.*`, `retention.*`, `lanes.cargo_cache_max`) and `provenant config show --full`.
+A lane cache that holds only its ownership marker and `CACHEDIR.TAG` is
+reclaimed in one pass; lane launches no longer create one.
 
 ## Inspect, preview, apply
 

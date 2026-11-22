@@ -3124,11 +3124,8 @@ mod policy_reporting_tests {
                 )
                 .unwrap(),
                 state_root: "/fixture/state".into(),
-                roots: None,
                 sandbox: inherited_sandbox,
                 backend: None,
-                cargo_cache_budget: None,
-                cargo_target_protection: Default::default(),
             }),
         };
         prepared.bind_sandbox_backend(&cancel, &Default::default())?;

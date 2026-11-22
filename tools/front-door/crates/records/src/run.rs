@@ -2016,7 +2016,6 @@ pub enum WriteSource {
     Scratch,
     PrivateState,
     ReadOnlyException,
-    LaneCache,
     GitState,
 }
 

@@ -7,7 +7,7 @@ Owner: `crates/os/src/disk.rs` (measurement), `crates/confinement/src/disk.rs`
 `crates/run/src/retention.rs` (scratch)
 Anchor: `crates/os/src/disk.rs`, `crates/run/src/disk.rs`, `src/gc_sweep.rs`
 
-`provenant disk report` inventories lane caches, worktrees and the host state
+`provenant disk report` inventories leftover lane caches, worktrees and the host state
 root; `DiskReport` documents the fields and the [disk and GC runbook](../runbooks/gc.md)
 the procedure. Paths are relative to `tools/front-door/`.
 
@@ -56,12 +56,15 @@ any `CACHEDIR.TAG` directory) and expire after `gc.discard_archive_retention`.
 In shared targets, unlocked `debug/incremental/*` sessions older than `gc.idle`
 are trimmed; held or unprobeable locks report busy and are spared.
 
-`lanes.cargo_cache_max` budgets private lane and shared Cargo targets together;
-its effective value and source are observable. Launch and disk-floor collection
-reclaim eligible targets least recently used first. Full GC also removes, within
-or beyond the budget and whoever made the worktree, a managed target whose
-worktree is gone or replaced and one unused for `gc.cargo_target_idle`. One owner
-classification (live, foreign, replaced, gone) serves lane caches and targets.
+`lanes.cargo_cache_max` budgets shared Cargo targets; its effective value and
+source are observable. Explicit GC and disk-floor collection reclaim eligible
+targets least recently used first. Full GC also removes, within or beyond the budget and
+whoever made the worktree, a managed target whose worktree is gone or replaced
+and one unused for `gc.cargo_target_idle`. Lane launches no longer create
+private Cargo caches; a leftover directory holding only its ownership marker and
+`CACHEDIR.TAG` is reclaimed in one pass whatever its owning project. One owner
+classification (live, foreign, replaced, gone) serves the leftover lane caches
+and shared targets.
 Last use is the newer of the launch stamp and the newest file time,
 and every removal names its target, owning worktree, reason and dating
 evidence. Each removal rechecks last use under the Cargo locks immediately before

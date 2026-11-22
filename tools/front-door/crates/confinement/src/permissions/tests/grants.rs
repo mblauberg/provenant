@@ -106,16 +106,7 @@ fn write_grants_list_every_write_source() {
             path: "/fixture/home/Library/Application Support/provenant/worktree-git/fixture".into(),
             scope: PathScope::Subtree,
         },
-        cargo_cache: PathGrant {
-            path: "/fixture/cache".into(),
-            scope: PathScope::Subtree,
-        },
     }));
-    expected.push(grant(
-        WriteSource::LaneCache,
-        "/fixture/cache",
-        PathScope::Subtree,
-    ));
     expected.extend(["git-common", "git-objects"].map(|name| {
         grant(
             WriteSource::GitState,
@@ -172,10 +163,6 @@ fn writer_grants_do_not_include_shared_branch_paths() {
         common,
         "lane/other",
     );
-    let cache = PathGrant {
-        path: "/fixture/cache".into(),
-        scope: PathScope::Subtree,
-    };
     let git_state = PathGrant {
         path: "/fixture/home/Library/Application Support/provenant/worktree-git/fixture".into(),
         scope: PathScope::Subtree,
@@ -184,14 +171,8 @@ fn writer_grants_do_not_include_shared_branch_paths() {
         path: "/fixture/home/Library/Application Support/provenant/worktree-git/other".into(),
         scope: PathScope::Subtree,
     };
-    assert_ne!(
-        grants.digest(&cache, &git_state),
-        other.digest(&cache, &git_state)
-    );
-    assert_ne!(
-        grants.digest(&cache, &git_state),
-        grants.digest(&cache, &other_git_state)
-    );
+    assert_ne!(grants.digest(&git_state), other.digest(&git_state));
+    assert_ne!(grants.digest(&git_state), grants.digest(&other_git_state));
 }
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
@@ -237,10 +218,6 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
                     path:
                         "/fixture/home/Library/Application Support/provenant/worktree-git/fixture"
                             .into(),
-                    scope: PathScope::Subtree,
-                },
-                cargo_cache: PathGrant {
-                    path: "/fixture/cache".into(),
                     scope: PathScope::Subtree,
                 },
             }));
@@ -349,10 +326,6 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
 fn write_grants_cover_every_rendered_file_write() -> Result<(), Box<dyn std::error::Error>> {
     let (mut plan, profile) = write_grants_fixture();
     let git = worktree_grants_fixture();
-    let subtree = |path: &str| PathGrant {
-        path: path.into(),
-        scope: PathScope::Subtree,
-    };
     for writer in [false, true] {
         if writer {
             plan.read_only = None;
@@ -366,7 +339,6 @@ fn write_grants_cover_every_rendered_file_write() -> Result<(), Box<dyn std::err
                             .into(),
                     scope: PathScope::Subtree,
                 },
-                cargo_cache: subtree("/fixture/cache"),
             }));
         }
         let credentials = &profile.spec.authentication[1].in_place_writes;
@@ -423,7 +395,9 @@ fn write_grants_cover_every_rendered_file_write() -> Result<(), Box<dyn std::err
             );
             checked += 1;
         }
-        assert_eq!(checked, 7);
+        // A read-only plan adds its exception; a writer adds shared Git state
+        // and no longer a lane cache.
+        assert_eq!(checked, if writer { 6 } else { 7 });
     }
     Ok(())
 }
@@ -437,10 +411,6 @@ fn serialised_digest_cannot_authorise_without_a_verified_worktree() {
         common_git_dir: "/fixture/git".into(),
         git_state: PathGrant {
             path: "/fixture/home/Library/Application Support/provenant/worktree-git/fixture".into(),
-            scope: PathScope::Subtree,
-        },
-        cargo_cache: PathGrant {
-            path: "/fixture/home/Library/Caches/provenant-lane-cargo/fixture".into(),
             scope: PathScope::Subtree,
         },
     };
@@ -464,7 +434,7 @@ fn serialised_digest_cannot_authorise_without_a_verified_worktree() {
 
 #[test]
 #[allow(clippy::disallowed_methods)]
-fn concurrent_writers_prepare_caches_and_shared_git_state_in_one_home()
+fn concurrent_writers_prepare_shared_git_state_in_one_home()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = crate::test_support::Fixture::new()?;
     let home = provenant_os::fs::canonicalize(&fixture.home)?;
@@ -529,15 +499,6 @@ fn concurrent_writers_prepare_caches_and_shared_git_state_in_one_home()
             Ok(())
         })?;
         for (_, _, authority) in &writers {
-            let cache = Directory::open_anchor(&authority.cargo_cache.path)?;
-            verify_cache_metadata(&cache.metadata()?)?;
-            assert!(
-                authority
-                    .cargo_cache
-                    .path
-                    .join(crate::cache::CARGO_CACHE_OWNER)
-                    .is_file()
-            );
             for path in [
                 authority
                     .git_state
@@ -552,22 +513,18 @@ fn concurrent_writers_prepare_caches_and_shared_git_state_in_one_home()
                 let directory = Directory::open_anchor(&path)?;
                 verify_cache_metadata(&directory.metadata()?)?;
             }
-            assert_eq!(
-                std::fs::read(
-                    authority
-                        .cargo_cache
-                        .path
-                        .join(crate::cache::CACHE_DIRECTORY_TAG)
-                )?,
-                crate::cache::CACHE_DIRECTORY_TAG_CONTENT
-            );
         }
+        assert!(
+            !home.join("Library/Caches/provenant-lane-cargo").exists(),
+            "a writer launch creates no lane cargo cache"
+        );
     }
     Ok(())
 }
 
 #[test]
-fn writer_cache_credential_overlap_follows_lane_access() -> Result<(), Box<dyn std::error::Error>> {
+fn writer_git_state_credential_overlap_follows_lane_access()
+-> Result<(), Box<dyn std::error::Error>> {
     use crate::repo::verify_worktree;
 
     let fixture = crate::test_support::Fixture::new()?;
@@ -592,7 +549,7 @@ fn writer_cache_credential_overlap_follows_lane_access() -> Result<(), Box<dyn s
     )?;
     let mut overlapping = credentials;
     overlapping.add(
-        authority.cargo_cache.path.clone(),
+        authority.git_state.path.clone(),
         provenant_core::CredentialScope::Subtree,
         "fixture credential declaration",
         provenant_core::CredentialKind::Store,
@@ -605,7 +562,7 @@ fn writer_cache_credential_overlap_follows_lane_access() -> Result<(), Box<dyn s
             &authority,
             &home,
             &overlapping,
-            &isolated_access_receipt(),
+            &isolated_access_receipt()
         )
         .is_err()
     );
@@ -621,10 +578,9 @@ fn writer_cache_credential_overlap_follows_lane_access() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
+fn writer_shared_git_state_binds_to_repository_and_worktree_identity()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::repo::verify_worktree;
-    use std::os::unix::fs::PermissionsExt;
 
     let fixture = crate::test_support::Fixture::new()?;
     let other = crate::test_support::Fixture::new()?;
@@ -651,7 +607,7 @@ fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
         &provenant_core::CredentialRoots::for_home(&home),
         &isolated_access_receipt(),
     )?;
-    let cache = &authority.cargo_cache.path;
+    let cache = worktree_cargo_cache_path(&home, &linked)?;
     let git_state = authority.git_state.path.clone();
     assert_eq!(
         cache.parent(),
@@ -689,18 +645,7 @@ fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
     assert!(worktree_git_state(&home, &linked, &selected_ref, &credential_roots).is_err());
 
     let other_linked = add(&other, &other._temp.path().join("package"), "cache-test")?;
-    assert_ne!(
-        *cache,
-        WorktreeWriteAuthority::for_worktree(
-            &other_linked,
-            &selected_ref,
-            &home,
-            &provenant_core::CredentialRoots::for_home(&home),
-            &isolated_access_receipt()
-        )?
-        .cargo_cache
-        .path
-    );
+    assert_ne!(cache, worktree_cargo_cache_path(&home, &other_linked)?);
     assert_ne!(
         git_state,
         WorktreeWriteAuthority::for_worktree(
@@ -716,18 +661,7 @@ fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
     let sibling_path = fixture._temp.path().join("nested/package");
     std::fs::create_dir(sibling_path.parent().ok_or("parent")?)?;
     let sibling = add(&fixture, &sibling_path, "sibling")?;
-    assert_ne!(
-        *cache,
-        WorktreeWriteAuthority::for_worktree(
-            &sibling,
-            &GitRefName::branch("sibling")?,
-            &home,
-            &provenant_core::CredentialRoots::for_home(&home),
-            &isolated_access_receipt()
-        )?
-        .cargo_cache
-        .path
-    );
+    assert_ne!(cache, worktree_cargo_cache_path(&home, &sibling)?);
     assert_ne!(
         git_state,
         WorktreeWriteAuthority::for_worktree(
@@ -757,46 +691,6 @@ fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
         &provenant_core::CredentialRoots::for_home(&home),
         &isolated_access_receipt(),
     )?;
-    let mut metadata = Directory::open_anchor(cache)?.metadata()?;
-    verify_cache_metadata(&metadata)?;
-    metadata.uid = metadata.uid.wrapping_add(1);
-    assert!(matches!(
-        verify_cache_metadata(&metadata),
-        Err(PermissionError::AnchorMismatch)
-    ));
-    for mode in [0o755, 0o770, 0o1700] {
-        std::fs::set_permissions(cache, std::fs::Permissions::from_mode(mode))?;
-        assert!(
-            matches!(
-                prepare_writer_directories(
-                    &linked,
-                    &selected_ref,
-                    &authority,
-                    &home,
-                    &provenant_core::CredentialRoots::for_home(&home),
-                    &isolated_access_receipt()
-                ),
-                Err(PermissionError::AnchorMismatch)
-            ),
-            "mode {mode:o}"
-        );
-    }
-    std::fs::set_permissions(cache, std::fs::Permissions::from_mode(0o700))?;
-    let namespace = cache.parent().ok_or("namespace")?;
-    std::fs::set_permissions(namespace, std::fs::Permissions::from_mode(0o755))?;
-    assert!(matches!(
-        prepare_writer_directories(
-            &linked,
-            &selected_ref,
-            &authority,
-            &home,
-            &provenant_core::CredentialRoots::for_home(&home),
-            &isolated_access_receipt()
-        ),
-        Err(PermissionError::AnchorMismatch)
-    ));
-    std::fs::set_permissions(namespace, std::fs::Permissions::from_mode(0o700))?;
-
     let moved = fixture._temp.path().join("retired");
     fixture.run(&[
         "worktree",
@@ -805,18 +699,7 @@ fn writer_cache_and_shared_git_state_bind_to_repository_and_worktree_identity()
         moved.to_str().ok_or("path")?,
     ])?;
     let recreated = add(&fixture, &path, "recreated")?;
-    assert_ne!(
-        *cache,
-        WorktreeWriteAuthority::for_worktree(
-            &recreated,
-            &GitRefName::branch("recreated")?,
-            &home,
-            &provenant_core::CredentialRoots::for_home(&home),
-            &isolated_access_receipt()
-        )?
-        .cargo_cache
-        .path
-    );
+    assert_ne!(cache, worktree_cargo_cache_path(&home, &recreated)?);
     assert_ne!(
         git_state,
         WorktreeWriteAuthority::for_worktree(
@@ -903,7 +786,7 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
     );
     assert_eq!(
         authority.git_grants_digest,
-        grants.digest(&authority.cargo_cache, &authority.git_state)
+        grants.digest(&authority.git_state)
     );
     assert_eq!(grants.common_git_dir.path, common);
     assert_eq!(grants.private_git_dir.path, private);
@@ -921,7 +804,6 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
         common.clone(),
         common.join("info"),
         common.join("objects"),
-        authority.cargo_cache.path.clone(),
         authority
             .git_state
             .path

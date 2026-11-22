@@ -91,10 +91,6 @@ fn database_profile(
                     .into(),
                 scope: PathScope::Subtree,
             },
-            cargo_cache: PathGrant {
-                path: scratch.join("cache"),
-                scope: PathScope::Subtree,
-            },
         }))
     } else {
         AccessMode::ReadOnly

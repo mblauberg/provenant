@@ -124,7 +124,7 @@ pub fn lane_caches(home: &Path, policy: &CacheGcPolicy, report: &mut DiskReport)
         entry.owner = owner.map(|path| path.to_string_lossy().into_owned());
         if matches!(
             state,
-            "orphaned" | "replaced" | "idle" | "foreign_idle" | "tombstone"
+            "orphaned" | "replaced" | "idle" | "foreign_idle" | "tombstone" | "vacant"
         ) {
             entry.reclaim = Some("gc".into());
         }
@@ -179,6 +179,11 @@ fn classify_lane_cache(
         }
         return Ok(("refused", None));
     };
+    if !policy.protected_owners.contains_key(&owner.path)
+        && crate::cache::cache_is_vacant(cache, relative)?
+    {
+        return Ok(("vacant", Some(owner.path)));
+    }
     let state = match cache_gc_reason_with_newest(relative, &owner, policy, || Ok(newest_write_ns))?
     {
         Some(CacheGcReason::Orphaned) => "orphaned",
@@ -190,6 +195,7 @@ fn classify_lane_cache(
         Some(CacheGcReason::Live) => "live",
         Some(CacheGcReason::Busy) => "busy",
         Some(CacheGcReason::Unobservable) => "unobservable",
+        Some(CacheGcReason::Vacant) => "vacant",
         None => "live",
     };
     Ok((state, Some(owner.path)))
@@ -499,6 +505,7 @@ mod tests {
         std::fs::create_dir(&cache)?;
         std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700))?;
         marker(&cache, &owner)?;
+        std::fs::write(cache.join("artifact"), b"build output")?;
         let directory = Directory::open_anchor(&cache)?;
         let relative = Path::new(cache.file_name().ok_or("cache name")?);
         let mut policy = CacheGcPolicy {

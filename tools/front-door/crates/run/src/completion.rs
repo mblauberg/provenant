@@ -304,7 +304,6 @@ pub struct PreambleExtras {
     pub location: Option<LaneLocation>,
     pub verification: Option<crate::VerificationResolution>,
     pub build_cap: Option<BuildCap>,
-    pub cargo_cache_budget: Option<provenant_config::CargoCacheBudget>,
 }
 
 /// Format an applied route without repeating a provider already on the model.
@@ -424,25 +423,13 @@ pub fn lane_preamble_with(
                 .as_ref()
                 .map(crate::VerificationResolution::paragraph)
                 .unwrap_or_else(|| crate::verification::CHECK_PARAGRAPH.to_string());
-            let cargo_cache_budget = extras
-                .cargo_cache_budget
-                .as_ref()
-                .map(|budget| {
-                    format!(
-                        "Cargo cache budget: {} bytes (setting {}; source: {}; lanes.cargo_cache_max).\n",
-                        budget.bytes,
-                        budget.setting,
-                        budget.source.as_str(),
-                    )
-                })
-                .unwrap_or_default();
             let location = extras
                 .location
                 .as_ref()
                 .map(LaneLocation::preamble)
                 .unwrap_or_default();
             format!(
-                "{location}{verification}{cargo_cache_budget}In a shared worktree, commit only your own paths with `git commit -- <paths>`; coordinate overlapping edits with the owning lane.\n{}{}{budget}{PULL_REQUEST_GUIDANCE}",
+                "{location}{verification}In a shared worktree, commit only your own paths with `git commit -- <paths>`; coordinate overlapping edits with the owning lane.\n{}{}{budget}{PULL_REQUEST_GUIDANCE}",
                 slot_guidance(extras.build_cap),
                 scope.preamble()
             )

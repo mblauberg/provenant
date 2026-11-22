@@ -352,7 +352,6 @@ pub(super) fn check_writer_disk(
         policy,
         state,
         worktree,
-        home,
         |mut path| {
             loop {
                 match provenant_os::fs::Directory::open_anchor(path) {
@@ -408,10 +407,9 @@ pub(super) fn check_writer_disk_with(
     policy: &provenant_records::policy::Policy,
     state: &Path,
     worktree: &Path,
-    home: &Path,
     available: impl FnMut(&Path) -> Result<u64, String>,
 ) -> Result<(), DiskCheck> {
-    check_writer_disk_with_collection(settings, policy, state, worktree, home, available, || false)
+    check_writer_disk_with_collection(settings, policy, state, worktree, available, || false)
 }
 
 #[allow(clippy::print_stderr)]
@@ -420,7 +418,6 @@ pub(super) fn check_writer_disk_with_collection(
     policy: &provenant_records::policy::Policy,
     state: &Path,
     worktree: &Path,
-    home: &Path,
     mut available: impl FnMut(&Path) -> Result<u64, String>,
     mut schedule_gc: impl FnMut() -> bool,
 ) -> Result<(), DiskCheck> {
@@ -428,9 +425,8 @@ pub(super) fn check_writer_disk_with_collection(
         let limits = settings
             .disk_limits(state)
             .map_err(|error| DiskCheck::Unobserved(error.to_string()))?;
-        let cache = home.join("Library/Caches/provenant-lane-cargo");
         let (mut limiting, mut minimum) = (worktree, u64::MAX);
-        for path in [worktree, state, cache.as_path()] {
+        for path in [worktree, state] {
             let bytes = available(path).map_err(DiskCheck::Unobserved)?;
             if bytes < minimum {
                 (limiting, minimum) = (path, bytes);
