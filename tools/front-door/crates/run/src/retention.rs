@@ -715,7 +715,9 @@ impl RunStore {
                         report.interrupted_at = Some(attempt_path);
                         return Ok(report);
                     }
-                    record_issue(&mut report, path, &error);
+                    // This closure can fail before provider state is touched, so
+                    // name the attempt row that failed to read, not a child path.
+                    record_issue(&mut report, attempt_path, &error);
                 }
             }
         }
@@ -2358,6 +2360,92 @@ mod tests {
 
     fn logs_retention_days() -> u64 {
         provenant_config::RetentionSettings::default().logs_days
+    }
+
+    fn legacy_boundary_record(record: &[u8]) -> serde_json::Value {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(record).expect("stored attempt record");
+        value["schema_version"] = 2.into();
+        value["profile"] = serde_json::json!({
+            "name": "rigorous",
+            "knobs": {},
+            "overrides": [],
+            "launch_policy": {"rules": [
+                {
+                    "code": "GIT_ISOLATION",
+                    "boundary": "git_isolation",
+                    "strength": "refuse",
+                    "knob": null,
+                    "justification": "pre-rename boundary",
+                    "site": "fixture",
+                    "threshold": null,
+                    "refusable": false,
+                    "source": "dispatch"
+                },
+                {
+                    "code": "DATA_INTEGRITY",
+                    "boundary": "data_integrity",
+                    "strength": "refuse",
+                    "knob": null,
+                    "justification": "pre-rename boundary",
+                    "site": "fixture",
+                    "threshold": null,
+                    "refusable": false,
+                    "source": "dispatch"
+                }
+            ]}
+        });
+        value
+    }
+
+    #[test]
+    fn a_legacy_boundary_record_is_retained_without_an_error() -> TestResult {
+        let (_temp, context, store, input, _attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+
+        // A healthy attempt beside the legacy row proves one old row does not
+        // stop the pass for the rest.
+        let mut healthy = crate::tests::input();
+        crate::tests::rekey(&mut healthy);
+        store.create(&healthy, &call)?;
+        withdraw(&store, &healthy, &call)?;
+
+        let stored: Vec<u8> = store.db.query_row(
+            "SELECT record FROM attempts WHERE id=?1",
+            [input.attempt_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let legacy = legacy_boundary_record(&stored);
+        store.db.execute(
+            "UPDATE attempts SET record=?1 WHERE id=?2",
+            rusqlite::params![serde_json::to_vec(&legacy)?, input.attempt_id.to_string()],
+        )?;
+        // The owner read a graph advance performs decodes the row.
+        let record = store.record(input.attempt_id, &call)?;
+        assert!(record.profile.launch_policy.is_none());
+
+        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        Ok(())
+    }
+
+    #[test]
+    fn an_undecodable_attempt_names_the_attempt_row_not_provider_state() -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        store.db.execute(
+            "UPDATE attempts SET record=?1 WHERE id=?2",
+            rusqlite::params![b"{}".as_slice(), input.attempt_id.to_string()],
+        )?;
+        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert_eq!(report.errors.len(), 1, "{report:?}");
+        assert_eq!(report.errors[0].path, attempt);
+        assert!(!report.errors[0].path.ends_with("provider-state"));
+        Ok(())
     }
 
     fn logs_retention_age() -> i64 {

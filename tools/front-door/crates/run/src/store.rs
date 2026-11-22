@@ -976,6 +976,10 @@ impl RunStore {
             let queued: i64 = tx.query_row("SELECT COUNT(*) FROM admission WHERE active=0", [], |r| r.get(0))?;
             if queued >= sql_int(crate::admission::HOST_QUEUED)? { return Err(RunError::Capacity); }
             let attempt_id = input.attempt_id;
+            // Launch policy is enforced from the request and never read from an
+            // attempt; keep the in-memory record identical to its stored form.
+            let mut attempt_profile = task.profile.clone();
+            attempt_profile.launch_policy = None;
             let attempt = AttemptRecord {extra: Default::default(), peer: Default::default(),
                 budget_overrun: None, budget_wrap_up_refused: None,
                 repository_admission_binding: None,
@@ -983,7 +987,7 @@ impl RunStore {
                 context: task.context.clone(),
                 title: task.title.clone(),
                 continuation: input.request.fresh_continuation.as_ref().map(|_| "fresh".into()),
-                profile: task.profile.clone(),
+                profile: attempt_profile,
                 limits: None,
                 schema_version: 2, attempt_id, project_id: context.project_id, attempt_number: u64::from(key.attempt()), revision: 1, generation: 0,
                 delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, steering: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, stop_work: None, verified_owner: Some(context.actor_id), session: None,
