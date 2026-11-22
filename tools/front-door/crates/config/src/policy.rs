@@ -72,7 +72,7 @@ impl Settings {
     }
 }
 /// Resolve one immutable launch snapshot. Invalid optional policy settings warn
-/// and retain compiled defaults, without changing the four boundaries.
+/// and retain compiled defaults, without changing the boundaries or operation errors.
 pub fn read(state: &Path, project: &str, dispatch: &BTreeMap<String, Strength>) -> Policy {
     read_reporting(state, project, dispatch, |error| {
         use std::io::Write;

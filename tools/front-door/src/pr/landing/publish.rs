@@ -21,12 +21,12 @@ pub fn decide(
         Publication::FastForward => {
             if method != MergeMethod::Merge {
                 return Err(LandingError::Failed(
-                    "fast_forward requires the merge method".into(),
+                    "land.publish=fast_forward requires the merge method; set land.method=merge or land.publish=auto".into(),
                 ));
             }
             if !forge.may_push_directly(target)? {
                 return Err(LandingError::Failed(format!(
-                    "land.publish=fast_forward requires direct push permission for {target}"
+                    "land.publish=fast_forward requires direct push permission for {target}; set land.publish=auto or rest_ordered to publish through a pull request"
                 )));
             }
             Ok(PublishDecision {

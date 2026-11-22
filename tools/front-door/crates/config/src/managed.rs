@@ -34,6 +34,10 @@ struct ReleaseLayout {
     instructions: &'static str,
 }
 
+/// Why a hooks request cannot be honoured; shown with the `INSTALL_HOOKS_UNAVAILABLE` policy source.
+pub const HOOKS_UNAVAILABLE_DETAIL: &str =
+    "hooks requested but no selected harness has a hook specification; installing without hooks";
+
 #[derive(Debug, Error)]
 pub enum InstallError {
     #[error(transparent)]
@@ -70,7 +74,9 @@ pub enum InstallError {
     Drift(PathBuf),
     #[error("select at least one harness explicitly, without duplicates")]
     HarnessSelection,
-    #[error("hook registration refused: no fixture-backed HookSpec is available")]
+    #[error(
+        "hooks requested but no selected harness has a hook specification; set policy.INSTALL_HOOKS_UNAVAILABLE=warn to install without hooks"
+    )]
     HooksUnavailable,
     #[error("invalid installation receipt: {0}; reinstall Provenant")]
     ReceiptDecode(#[source] provenant_records::DecodeError),
@@ -338,14 +344,22 @@ impl Targets {
         {
             return Err(InstallError::HarnessSelection);
         }
-        // Hooks apply to the selected harnesses that have specs; refuse only
-        // when none does, so one install can cover every client.
+        // Hooks apply to the selected harnesses that have specs. When none does
+        // the install proceeds without hooks (the installer reports the skip once);
+        // only an owner who set INSTALL_HOOKS_UNAVAILABLE=refuse gets a stop.
         if self.hooks
             && !self.harnesses.iter().any(|target| {
                 self.hook_specs
                     .iter()
                     .any(|spec| spec.harness == target.harness)
             })
+            && self
+                .policy
+                .check(
+                    "INSTALL_HOOKS_UNAVAILABLE",
+                    provenant_records::policy::Facts::violation(HOOKS_UNAVAILABLE_DETAIL),
+                )
+                .blocks()
         {
             return Err(InstallError::HooksUnavailable);
         }

@@ -98,14 +98,15 @@ fn plan(
         .map_err(fail)?
         .remove(0);
     if !matches!(author.state.as_str(), "succeeded" | "review_required") {
-        return Err(Refused::new(
-            "PR_ATTEMPT_STATE",
-            format!(
-                "attempt {} ended {}; only a succeeded or review_required attempt can back a pull request",
-                author.attempt_id, author.state
-            ),
-        )
-        .into());
+        // Opening a pull request is not an authority act: landing still gates
+        // on CI and review. Say what backs the body and carry on.
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: [PR_ATTEMPT_STATE] attempt {} ended {}, not succeeded or review_required; opening the pull request from its recorded branch and head anyway (source: attempt record)",
+            author.attempt_id,
+            author.state
+        );
     }
     // Reviews named on the command resolve as targets; the receipt's own
     // reviews are already attempt ids.
@@ -120,10 +121,10 @@ fn plan(
         .branch
         .clone()
         .or_else(|| author.branch.clone())
-        .ok_or("the attempt delivered no branch; pass --branch")?;
+        .ok_or("the attempt delivered no branch; pass --branch BRANCH, or push the lane branch and retry")?;
     let head = author
         .head
-        .ok_or("the attempt recorded no head, so there is nothing to open")?;
+        .ok_or("the attempt recorded no head, so there is nothing to open; open the pull request from an attempt that committed")?;
     let base = match &command.base {
         Some(base) => base.clone(),
         None => default_branch(resolved.roots.state.as_path(), project)?,
@@ -153,7 +154,7 @@ fn plan(
     }
     let (title, summary) = pr_body::split_summary(&summary);
     if title.is_empty() {
-        return Err("the summary file has no title line".into());
+        return Err("the summary file has no title line; start it with a one-line title (a Markdown heading is fine)".into());
     }
     let body = pr_body::fill(
         &template,

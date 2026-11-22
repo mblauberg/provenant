@@ -495,7 +495,7 @@ fn prepare_resolved(
             });
         if !errors.is_empty() {
             return Err(format!(
-                "invalid effective landing policy: {}",
+                "invalid effective landing policy: {}; correct the land settings named above (see provenant land --explain for each source)",
                 errors
                     .iter()
                     .map(ToString::to_string)
