@@ -174,7 +174,9 @@ review-family and dispatch read one route-scoped exhaustion verdict: a snapshot
 governs only the models its plan serves and only the windows bound to the
 route's pools or allowance windows; the whole-snapshot reading applies only to a
 route with no pool mapping. A spent paid window therefore cannot hide a
-free-pool member the same account serves.
+free-pool member the same account serves. Complete coverage still establishes
+exhaustion when a window governing the route is spent; partial coverage remains
+advisory and never refuses on its own.
 
 - Why: capability is a preference, while attributed comparable outcomes supply
   the evidence that adjusts declared route weights.

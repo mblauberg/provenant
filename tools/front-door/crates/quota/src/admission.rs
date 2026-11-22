@@ -1120,6 +1120,28 @@ mod admission_tests {
     }
 
     #[test]
+    // Spec: docs/specs/routing.md#unknown-never-means-ready
+    fn complete_snapshot_still_refuses_allowance_exhausted() {
+        let mut exhausted = record(QuotaStatus::Exhausted);
+        exhausted.snapshot.as_mut().unwrap().details = Some(crate::QuotaDetails {
+            coverage: Some("complete".into()),
+            ..Default::default()
+        });
+        let admission = Admission {
+            freshness: &crate::DEFAULT_FRESHNESS,
+            policy: crate::source::test_policy(),
+            policies: crate::source::TEST_POLICIES,
+            now_unix_seconds: 1000,
+            records: std::slice::from_ref(&exhausted),
+            pools: &[],
+        };
+        assert!(matches!(
+            admission.check(&route()),
+            Err(QuotaError::AllowanceExhausted)
+        ));
+    }
+
+    #[test]
     fn opencode_free_refusal_cools_the_identity_pool_across_models() {
         let mut route = route();
         route.adapter = "opencode".into();

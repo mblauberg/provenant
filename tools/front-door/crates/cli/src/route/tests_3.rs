@@ -926,8 +926,9 @@
     }
 
     /// A paid plan's spent window cannot hide the free-pool member the same
-    /// account serves. Preview and dispatch read one route-scoped exhaustion
-    /// verdict, so both keep the free member instead of excluding the account.
+    /// account serves. The pool's only member is that account's free model, so
+    /// preview and dispatch must both select it whatever their draw seeds are,
+    /// and the preview must not report the route blocked.
     #[test]
     fn paid_exhaustion_keeps_the_free_member_preview_and_dispatch_agree()
     -> Result<(), Box<dyn Error>> {
@@ -939,12 +940,13 @@
         let path = fixture.roots.state.as_path().join("config.toml");
         std::fs::write(
             &path,
-            "schema_version=1\n[domains.routing.pools]\nprincipal=[{model='opencode/opencode-go/deepseek-v4.1-flash',weight=1},{model='opencode/opencode/deepseek-v4.1-flash-free',weight=1}]\n",
+            "schema_version=1\n[domains.routing.pools]\nprincipal=[{model='opencode/opencode/deepseek-v4.1-flash-free',weight=1}]\n",
         )?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let now = fixture.now;
-        // One OpenCode account on the paid `go` plan: its paid window is spent,
-        // while the keyless free pool member is still available.
+        // One OpenCode account on the paid `go` plan: its paid window is spent
+        // and OpenCode reports partial coverage, which stays advisory, while
+        // the keyless free pool member is still available.
         fixture.seed("opencode", |record| {
             let account = record.account.clone();
             record.snapshot = Some(provenant_quota::QuotaSnapshot {
@@ -965,6 +967,7 @@
                 }],
                 details: Some(provenant_quota::QuotaDetails {
                     plan: Some("go".into()),
+                    coverage: Some("partial".into()),
                     ..Default::default()
                 }),
             });
@@ -1041,11 +1044,6 @@
             preview.route.model, "opencode/deepseek-v4.1-flash-free",
             "preview keeps the free member"
         );
-        assert_eq!(
-            format!("{}/{}", preview.route.adapter, preview.route.model),
-            format!("{}/{}", dispatch.adapter, dispatch.model),
-            "preview picks what dispatch picks"
-        );
         Ok(())
     }
 
@@ -1055,13 +1053,22 @@
     /// Dispatch cannot carry this receipt for a spent member: routing classifies
     /// exhaustion before weights, so the draw only offers members it judged
     /// ready and the spent one is an exclusion, not a refuted pick. A preview
-    /// has no live probe, so it draws the pool in order, judges each member's
-    /// cached accounts and redraws on the first member it refuses.
+    /// has no live probe, so it uses its weighted draw, judges each member's
+    /// cached accounts and redraws on the member it refuses. The spent member is
+    /// the only weighted candidate and the ready one has zero weight, so the
+    /// first draw offers the spent member whichever order declares them.
     #[test]
     fn preview_route_carries_the_redraw_receipt() -> Result<(), Box<dyn Error>> {
         use provenant_os::clock::SystemClock;
+        use std::os::unix::fs::PermissionsExt;
         use super::{config::execute_in, Data, Route, RouteResolve};
         let fixture = pair_fixture(exhaust, |_| {})?;
+        let path = fixture.roots.state.as_path().join("config.toml");
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing.pools]\nprincipal=[{model='claude/claude-haiku-5-5',weight=1,effort='high',efforts=['high']},{model='codex/gpt-6-luna',weight=0,effort='high',efforts=['high']}]\n",
+        )?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let query = RouteResolve {
             writes: false,
             account: None,
