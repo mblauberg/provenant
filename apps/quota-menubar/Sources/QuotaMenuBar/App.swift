@@ -6,6 +6,7 @@ enum Main {
     static func main() {
         let arguments = Array(CommandLine.arguments.dropFirst())
         if arguments.first == "--render" { exit(MainActor.assumeIsolated { Render.run(Array(arguments.dropFirst())) }) }
+        SingleInstance.takeOver()
         MainActor.assumeIsolated {
             let app = NSApplication.shared, delegate = AppDelegate()
             app.delegate = delegate

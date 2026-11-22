@@ -497,6 +497,13 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                     )
                 })
             }));
+            let login_item = crate::apps::stale_login_item(&crate::apps::dir(&home));
+            if login_item.exists() {
+                result.warnings.push(format!(
+                    "the old menu login item is still installed at {}; run `provenant install` or `provenant upgrade` to remove its registration so only the LaunchAgent starts the menu bar",
+                    login_item.display()
+                ));
+            }
             Ok(result)
         }),
         Inspectable::Release { base, head, page } => {
