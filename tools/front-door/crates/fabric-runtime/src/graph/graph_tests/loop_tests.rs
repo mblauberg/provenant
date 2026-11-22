@@ -2176,7 +2176,7 @@ fn confirmed_should_fix_on_the_default_path_runs_a_repair_writer() {
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert!(run.checkpoint.successful());
     let nodes: Vec<_> = owner.calls.iter().map(|call| call.0.node_id.as_str()).collect();
-    assert_eq!(nodes, vec!["initial", "fix", "check"]);
+    assert_eq!(nodes, vec!["initial", "repair--r1--fix", "repair--r1--check"]);
     assert_eq!(
         advance(&document, &mut FakeOwner::default(), &mut journal)
             .unwrap()

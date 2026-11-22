@@ -563,7 +563,9 @@ fn parse_findings_mode(
             ));
             entry.remove("line");
         }
+        // A blank severity is missing, not a word, and keeps the fail-safe below.
         if let Some(severity) = entry.get("severity").and_then(serde_json::Value::as_str)
+            && !severity.trim().is_empty()
             && severity_class(severity).is_none()
         {
             warnings.push(format!(
