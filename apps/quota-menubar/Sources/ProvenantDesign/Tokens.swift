@@ -35,21 +35,19 @@ public struct StatusStyle: Equatable, Sendable {
 
     public init(label: String, symbol: String, tone: Tone) { self.label = label; self.symbol = symbol; self.tone = tone }
 
-    /// `state` is the lifecycle (`queued`…`terminal`); `outcome` refines a terminal state.
-    public static func attempt(state: String, outcome: String? = nil) -> StatusStyle {
+    /// The CLI now reports the lifecycle and the terminal outcome in one `state` string.
+    public static func attempt(state: String) -> StatusStyle {
         switch state {
         case "queued": return StatusStyle(label: "Queued", symbol: "clock", tone: .neutral)
         case "starting": return StatusStyle(label: "Starting", symbol: "play.circle", tone: .active)
         case "running": return StatusStyle(label: "Running", symbol: "bolt.circle.fill", tone: .active)
         case "settling": return StatusStyle(label: "Settling", symbol: "hourglass", tone: .active)
-        case "terminal":
-            switch outcome {
-            case "succeeded", nil: return StatusStyle(label: outcome == nil ? "Finished" : "Succeeded", symbol: "checkmark.circle.fill", tone: .good)
-            case "cancelled", "canceled": return StatusStyle(label: "Cancelled", symbol: "minus.circle", tone: .neutral)
-            case "task_failed": return StatusStyle(label: "Task failed", symbol: "xmark.circle.fill", tone: .bad)
-            default: return StatusStyle(label: (outcome ?? "").replacingOccurrences(of: "_", with: " ").capitalized,
-                                        symbol: "exclamationmark.circle.fill", tone: .bad)
-            }
+        case "succeeded": return StatusStyle(label: "Succeeded", symbol: "checkmark.circle.fill", tone: .good)
+        case "cancelled", "canceled": return StatusStyle(label: "Cancelled", symbol: "minus.circle", tone: .neutral)
+        case "failed", "task_failed": return StatusStyle(label: "Task failed", symbol: "xmark.circle.fill", tone: .bad)
+        case "rejected", "quota_limited", "review_required", "timed_out":
+            return StatusStyle(label: state.replacingOccurrences(of: "_", with: " ").capitalized,
+                               symbol: "exclamationmark.circle.fill", tone: .caution)
         default: return StatusStyle(label: state.replacingOccurrences(of: "_", with: " ").capitalized, symbol: "circle.dashed", tone: .neutral)
         }
     }

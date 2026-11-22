@@ -37,11 +37,15 @@
     },
     "delivery": null,
     "lane_id": {
-      "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
       "host": null,
       "project_id": "01010101010101010101010101010101",
-      "run_id": "65656565656565656565656565656565",
-      "task_id": "03030303030303030303030303030303"
+      "key": {
+        "attempt": 1,
+        "graph": "fixture-graph",
+        "node": "task",
+        "project": "01010101010101010101010101010101"
+      },
+      "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
     },
     "linked_inbox_requests": [
       {

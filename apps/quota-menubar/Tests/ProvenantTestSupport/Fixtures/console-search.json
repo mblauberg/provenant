@@ -10,21 +10,29 @@
     "matches": [
       {
         "lane_id": {
-          "attempt_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
           "host": null,
-          "run_id": "dddddddddddddddddddddddddddddddd",
-          "task_id": "03030303030303030303030303030303"
+          "key": {
+            "attempt": 1,
+            "graph": "fixture",
+            "node": "task",
+            "project": null
+          },
+          "attempt_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5"
         },
         "part": "result",
-        "snippet": "\u2026regenerated every fixture under tests/fixtures/console\u2026",
+        "snippet": "…regenerated every fixture under tests/fixtures/console…",
         "artifact_bytes": 512
       },
       {
         "lane_id": {
-          "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
           "host": null,
-          "run_id": "dededededededededededededededede",
-          "task_id": "03030303030303030303030303030303"
+          "key": {
+            "attempt": 1,
+            "graph": "fixture",
+            "node": "task",
+            "project": null
+          },
+          "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"
         },
         "part": "result",
         "snippet": "2 tests failed: fixture drift in board.json",

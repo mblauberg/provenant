@@ -10,12 +10,24 @@ struct TrendPoint: Equatable, Sendable, Identifiable {
 }
 
 struct QuotaRow: Identifiable, Equatable, Sendable {
-    struct Window: Equatable, Sendable {
-        let pool: String
+    struct Window: Equatable, Sendable, QuotaWindow {
+        /// The wire pool key, kept for accessibility and reset reporting.
+        let name: String
+        /// The adapter's pool group, nil for a window that stands alone.
+        let pool: String?
+        /// One human label, e.g. "Gemini weekly", not the raw key.
+        let label: String
         let percent: Double
         let resetsAt: Date?
         let lowerBound: Bool
-        var displayPercent: Int { Int(percent.rounded(lowerBound ? .down : .toNearestOrAwayFromZero)) }
+        let windowMinutes: Int?
+
+        var resetAt: Date? { resetsAt }
+        var usedPercent: Double? { percent }
+        var advisory: Bool? { false }
+        var paceState: String { percent >= 100 ? "exhausted" : "on_pace" }
+        /// The menu bar floors a used percentage; use the same rule so both surfaces read the same number.
+        var displayPercent: Int { Int(max(percent, 0).rounded(.down)) }
         var value: String { "\(lowerBound ? "≥" : "")\(displayPercent)%" }
     }
     struct Refusal: Equatable, Sendable {
@@ -30,12 +42,11 @@ struct QuotaRow: Identifiable, Equatable, Sendable {
     let status: String
     let refusals: [Refusal]
     let windows: [Window]
+    /// The same headline window the menu bar shows for this account.
+    let headlineWindow: Window?
     let checkedAgo: TimeInterval?
     let error: String?
     let trend: [TrendPoint]
-
-    /// The window closest to its limit, the one that binds the account.
-    var binding: Window? { windows.max { $0.percent < $1.percent } }
 }
 
 struct QuotaSnapshot: Equatable, Sendable {
@@ -62,26 +73,47 @@ final class QuotaPanelModel {
     }
 
     nonisolated static func snapshot(_ show: QuotaShow, history: QuotaHistory?) -> QuotaSnapshot {
+        let generatedAt = Date(timeIntervalSince1970: TimeInterval(show.generatedUnixSeconds))
         let rows = show.accounts.map { account -> QuotaRow in
-            let windows = (account.snapshot?.windows ?? []).map {
-                QuotaRow.Window(pool: $0.pool, percent: Double($0.usedBasisPoints) / 100,
-                                resetsAt: $0.resetsUnixSeconds.map { Date(timeIntervalSince1970: TimeInterval($0)) },
-                                lowerBound: account.snapshot?.details?.coverage == "partial")
+            let adapter = account.account.adapter
+            let lowerBound = account.snapshot?.details?.coverage == "partial"
+            let windows = (account.snapshot?.windows ?? []).map { item -> QuotaRow.Window in
+                let presentation = QuotaPresentation.presentation(adapter: adapter, name: item.pool, seconds: item.windowSeconds)
+                return QuotaRow.Window(name: item.pool, pool: presentation.pool,
+                                       label: QuotaPresentation.windowName(presentation.title, poolLabel: presentation.poolLabel),
+                                       percent: Double(item.usedBasisPoints) / 100,
+                                       resetsAt: item.resetsUnixSeconds.map { Date(timeIntervalSince1970: TimeInterval($0)) },
+                                       lowerBound: lowerBound,
+                                       windowMinutes: QuotaPresentation.windowMinutes(adapter: adapter, name: item.pool,
+                                                                                     seconds: item.windowSeconds))
             }
+            let choice = QuotaPresentation.Headline(wire: account.display?.headline ?? show.display?.headline)
             let trend = (history?.readings ?? [])
-                .filter { $0.provider == account.account.adapter && $0.accountKey == account.account.accountKey }
+                .filter { $0.provider == adapter && $0.accountKey == account.account.accountKey }
                 .compactMap { reading -> TrendPoint? in
-                    guard let top = reading.windows.map(\.usedBasisPoints).max() else { return nil }
-                    return TrendPoint(date: Date(timeIntervalSince1970: TimeInterval(reading.observedUnixSeconds)), percent: Double(top) / 100)
+                    let readingWindows = reading.windows.map { item -> QuotaRow.Window in
+                        let presentation = QuotaPresentation.presentation(adapter: adapter, name: item.pool, seconds: item.windowSeconds)
+                        return QuotaRow.Window(name: item.pool, pool: presentation.pool, label: presentation.title,
+                                               percent: Double(item.usedBasisPoints) / 100,
+                                               resetsAt: item.resetsUnixSeconds.map { Date(timeIntervalSince1970: TimeInterval($0)) },
+                                               lowerBound: false,
+                                               windowMinutes: QuotaPresentation.windowMinutes(adapter: adapter, name: item.pool,
+                                                                                             seconds: item.windowSeconds))
+                    }
+                    guard let top = QuotaPresentation.headline(readingWindows, now: generatedAt,
+                                                               alert: QuotaPresentation.alertPercent, choice: choice) else { return nil }
+                    return TrendPoint(date: Date(timeIntervalSince1970: TimeInterval(reading.observedUnixSeconds)), percent: top.percent)
                 }
                 .sorted { $0.date < $1.date }
-            return QuotaRow(id: account.id, title: account.account.label, provider: account.account.adapter, status: account.status,
+            return QuotaRow(id: account.id, title: account.account.label, provider: adapter, status: account.status,
                             refusals: (account.refusals ?? []).map {
                                 QuotaRow.Refusal(model: $0.model, pool: $0.pool, resetsAt: Stamp.parse($0.resetsAt))
                             },
-                            windows: windows, checkedAgo: account.ageSeconds.map(TimeInterval.init), error: account.error, trend: trend)
+                            windows: windows,
+                            headlineWindow: QuotaPresentation.headline(windows, now: generatedAt,
+                                                                       alert: QuotaPresentation.alertPercent, choice: choice),
+                            checkedAgo: account.ageSeconds.map(TimeInterval.init), error: account.error, trend: trend)
         }
-        return QuotaSnapshot(rows: rows, generatedAt: Date(timeIntervalSince1970: TimeInterval(show.generatedUnixSeconds)),
-                             historyAvailable: history != nil)
+        return QuotaSnapshot(rows: rows, generatedAt: generatedAt, historyAvailable: history != nil)
     }
 }

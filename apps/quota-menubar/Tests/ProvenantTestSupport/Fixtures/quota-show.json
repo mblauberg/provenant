@@ -15,21 +15,28 @@
         "snapshot": {
           "windows": [
             {
-              "pool": "claude-5h",
+              "pool": "five_hour",
               "used_basis_points": 8400,
-              "resets_unix_seconds": 1793620800
+              "resets_unix_seconds": 1793620800,
+              "window_seconds": 18000
             },
             {
-              "pool": "claude-weekly",
+              "pool": "seven_day",
               "used_basis_points": 5200,
-              "resets_unix_seconds": 1793869200
+              "resets_unix_seconds": 1793869200,
+              "window_seconds": 604800
             }
           ]
         },
         "status": "available",
         "age_seconds": 120,
         "refreshing": false,
-        "error": null
+        "error": null,
+        "display": {
+          "id": "claude-anese",
+          "headline": "5h",
+          "hidden": false
+        }
       },
       {
         "account": {
@@ -40,9 +47,10 @@
         "snapshot": {
           "windows": [
             {
-              "pool": "codex-weekly",
+              "pool": "primary",
               "used_basis_points": 10000,
-              "resets_unix_seconds": 1793782800
+              "resets_unix_seconds": 1793782800,
+              "window_seconds": 604800
             }
           ]
         },
@@ -60,15 +68,21 @@
         "snapshot": {
           "windows": [
             {
-              "pool": "agy-daily",
+              "pool": "gemini.weekly",
               "used_basis_points": 2100,
-              "resets_unix_seconds": 1793642400
+              "resets_unix_seconds": 1793642400,
+              "window_seconds": 604800
             }
           ]
         },
         "status": "available",
-        "refusals": [{"model": "agy/claude-sonnet", "pool": "claude",
-          "resets_at": "2026-11-02T03:00:00Z"}],
+        "refusals": [
+          {
+            "model": "agy/claude-sonnet",
+            "pool": "claude",
+            "resets_at": "2026-11-02T03:00:00Z"
+          }
+        ],
         "age_seconds": 120,
         "refreshing": false,
         "error": null
@@ -79,7 +93,11 @@
       "known": 3
     },
     "refreshing_ids": [],
-    "report_path": "/tmp/provenant/quota/report.json"
+    "report_path": "/tmp/provenant/quota/report.json",
+    "display": {
+      "headline": "auto",
+      "icon": "most_constrained"
+    }
   },
   "error": null
 }

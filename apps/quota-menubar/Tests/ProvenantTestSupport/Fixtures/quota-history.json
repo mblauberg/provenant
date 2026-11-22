@@ -22,7 +22,8 @@
           {
             "pool": "p",
             "used_basis_points": 2000,
-            "resets_unix_seconds": 1793527200
+            "resets_unix_seconds": 1793527200,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -41,7 +42,8 @@
           {
             "pool": "p",
             "used_basis_points": 500,
-            "resets_unix_seconds": 1793527200
+            "resets_unix_seconds": 1793527200,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -60,7 +62,8 @@
           {
             "pool": "p",
             "used_basis_points": 1000,
-            "resets_unix_seconds": 1793527200
+            "resets_unix_seconds": 1793527200,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -79,7 +82,8 @@
           {
             "pool": "p",
             "used_basis_points": 2270,
-            "resets_unix_seconds": 1793530800
+            "resets_unix_seconds": 1793530800,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -98,7 +102,8 @@
           {
             "pool": "p",
             "used_basis_points": 570,
-            "resets_unix_seconds": 1793530800
+            "resets_unix_seconds": 1793530800,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -117,7 +122,8 @@
           {
             "pool": "p",
             "used_basis_points": 1400,
-            "resets_unix_seconds": 1793530800
+            "resets_unix_seconds": 1793530800,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -136,7 +142,8 @@
           {
             "pool": "p",
             "used_basis_points": 2540,
-            "resets_unix_seconds": 1793534400
+            "resets_unix_seconds": 1793534400,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -155,7 +162,8 @@
           {
             "pool": "p",
             "used_basis_points": 640,
-            "resets_unix_seconds": 1793534400
+            "resets_unix_seconds": 1793534400,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -174,7 +182,8 @@
           {
             "pool": "p",
             "used_basis_points": 1800,
-            "resets_unix_seconds": 1793534400
+            "resets_unix_seconds": 1793534400,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -193,7 +202,8 @@
           {
             "pool": "p",
             "used_basis_points": 2810,
-            "resets_unix_seconds": 1793538000
+            "resets_unix_seconds": 1793538000,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -212,7 +222,8 @@
           {
             "pool": "p",
             "used_basis_points": 710,
-            "resets_unix_seconds": 1793538000
+            "resets_unix_seconds": 1793538000,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -231,7 +242,8 @@
           {
             "pool": "p",
             "used_basis_points": 2200,
-            "resets_unix_seconds": 1793538000
+            "resets_unix_seconds": 1793538000,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -250,7 +262,8 @@
           {
             "pool": "p",
             "used_basis_points": 3080,
-            "resets_unix_seconds": 1793541600
+            "resets_unix_seconds": 1793541600,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -269,7 +282,8 @@
           {
             "pool": "p",
             "used_basis_points": 780,
-            "resets_unix_seconds": 1793541600
+            "resets_unix_seconds": 1793541600,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -288,7 +302,8 @@
           {
             "pool": "p",
             "used_basis_points": 2600,
-            "resets_unix_seconds": 1793541600
+            "resets_unix_seconds": 1793541600,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -307,7 +322,8 @@
           {
             "pool": "p",
             "used_basis_points": 3350,
-            "resets_unix_seconds": 1793545200
+            "resets_unix_seconds": 1793545200,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -326,7 +342,8 @@
           {
             "pool": "p",
             "used_basis_points": 850,
-            "resets_unix_seconds": 1793545200
+            "resets_unix_seconds": 1793545200,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -345,7 +362,8 @@
           {
             "pool": "p",
             "used_basis_points": 3000,
-            "resets_unix_seconds": 1793545200
+            "resets_unix_seconds": 1793545200,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -364,7 +382,8 @@
           {
             "pool": "p",
             "used_basis_points": 3620,
-            "resets_unix_seconds": 1793548800
+            "resets_unix_seconds": 1793548800,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -383,7 +402,8 @@
           {
             "pool": "p",
             "used_basis_points": 920,
-            "resets_unix_seconds": 1793548800
+            "resets_unix_seconds": 1793548800,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -402,7 +422,8 @@
           {
             "pool": "p",
             "used_basis_points": 3400,
-            "resets_unix_seconds": 1793548800
+            "resets_unix_seconds": 1793548800,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -421,7 +442,8 @@
           {
             "pool": "p",
             "used_basis_points": 3890,
-            "resets_unix_seconds": 1793552400
+            "resets_unix_seconds": 1793552400,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -440,7 +462,8 @@
           {
             "pool": "p",
             "used_basis_points": 990,
-            "resets_unix_seconds": 1793552400
+            "resets_unix_seconds": 1793552400,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -459,7 +482,8 @@
           {
             "pool": "p",
             "used_basis_points": 3800,
-            "resets_unix_seconds": 1793552400
+            "resets_unix_seconds": 1793552400,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -478,7 +502,8 @@
           {
             "pool": "p",
             "used_basis_points": 4160,
-            "resets_unix_seconds": 1793556000
+            "resets_unix_seconds": 1793556000,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -497,7 +522,8 @@
           {
             "pool": "p",
             "used_basis_points": 1060,
-            "resets_unix_seconds": 1793556000
+            "resets_unix_seconds": 1793556000,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -516,7 +542,8 @@
           {
             "pool": "p",
             "used_basis_points": 4200,
-            "resets_unix_seconds": 1793556000
+            "resets_unix_seconds": 1793556000,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -535,7 +562,8 @@
           {
             "pool": "p",
             "used_basis_points": 4430,
-            "resets_unix_seconds": 1793559600
+            "resets_unix_seconds": 1793559600,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -554,7 +582,8 @@
           {
             "pool": "p",
             "used_basis_points": 1130,
-            "resets_unix_seconds": 1793559600
+            "resets_unix_seconds": 1793559600,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -573,7 +602,8 @@
           {
             "pool": "p",
             "used_basis_points": 4600,
-            "resets_unix_seconds": 1793559600
+            "resets_unix_seconds": 1793559600,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -592,7 +622,8 @@
           {
             "pool": "p",
             "used_basis_points": 4700,
-            "resets_unix_seconds": 1793563200
+            "resets_unix_seconds": 1793563200,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -611,7 +642,8 @@
           {
             "pool": "p",
             "used_basis_points": 1200,
-            "resets_unix_seconds": 1793563200
+            "resets_unix_seconds": 1793563200,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -630,7 +662,8 @@
           {
             "pool": "p",
             "used_basis_points": 5000,
-            "resets_unix_seconds": 1793563200
+            "resets_unix_seconds": 1793563200,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -649,7 +682,8 @@
           {
             "pool": "p",
             "used_basis_points": 4970,
-            "resets_unix_seconds": 1793566800
+            "resets_unix_seconds": 1793566800,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -668,7 +702,8 @@
           {
             "pool": "p",
             "used_basis_points": 1270,
-            "resets_unix_seconds": 1793566800
+            "resets_unix_seconds": 1793566800,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -687,7 +722,8 @@
           {
             "pool": "p",
             "used_basis_points": 5400,
-            "resets_unix_seconds": 1793566800
+            "resets_unix_seconds": 1793566800,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -706,7 +742,8 @@
           {
             "pool": "p",
             "used_basis_points": 5240,
-            "resets_unix_seconds": 1793570400
+            "resets_unix_seconds": 1793570400,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -725,7 +762,8 @@
           {
             "pool": "p",
             "used_basis_points": 1340,
-            "resets_unix_seconds": 1793570400
+            "resets_unix_seconds": 1793570400,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -744,7 +782,8 @@
           {
             "pool": "p",
             "used_basis_points": 5800,
-            "resets_unix_seconds": 1793570400
+            "resets_unix_seconds": 1793570400,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -763,7 +802,8 @@
           {
             "pool": "p",
             "used_basis_points": 5510,
-            "resets_unix_seconds": 1793574000
+            "resets_unix_seconds": 1793574000,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -782,7 +822,8 @@
           {
             "pool": "p",
             "used_basis_points": 1410,
-            "resets_unix_seconds": 1793574000
+            "resets_unix_seconds": 1793574000,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -801,7 +842,8 @@
           {
             "pool": "p",
             "used_basis_points": 6200,
-            "resets_unix_seconds": 1793574000
+            "resets_unix_seconds": 1793574000,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -820,7 +862,8 @@
           {
             "pool": "p",
             "used_basis_points": 5780,
-            "resets_unix_seconds": 1793577600
+            "resets_unix_seconds": 1793577600,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -839,7 +882,8 @@
           {
             "pool": "p",
             "used_basis_points": 1480,
-            "resets_unix_seconds": 1793577600
+            "resets_unix_seconds": 1793577600,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -858,7 +902,8 @@
           {
             "pool": "p",
             "used_basis_points": 6600,
-            "resets_unix_seconds": 1793577600
+            "resets_unix_seconds": 1793577600,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -877,7 +922,8 @@
           {
             "pool": "p",
             "used_basis_points": 6050,
-            "resets_unix_seconds": 1793581200
+            "resets_unix_seconds": 1793581200,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -896,7 +942,8 @@
           {
             "pool": "p",
             "used_basis_points": 1550,
-            "resets_unix_seconds": 1793581200
+            "resets_unix_seconds": 1793581200,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -915,7 +962,8 @@
           {
             "pool": "p",
             "used_basis_points": 7000,
-            "resets_unix_seconds": 1793581200
+            "resets_unix_seconds": 1793581200,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -934,7 +982,8 @@
           {
             "pool": "p",
             "used_basis_points": 6320,
-            "resets_unix_seconds": 1793584800
+            "resets_unix_seconds": 1793584800,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -953,7 +1002,8 @@
           {
             "pool": "p",
             "used_basis_points": 1620,
-            "resets_unix_seconds": 1793584800
+            "resets_unix_seconds": 1793584800,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -972,7 +1022,8 @@
           {
             "pool": "p",
             "used_basis_points": 7400,
-            "resets_unix_seconds": 1793584800
+            "resets_unix_seconds": 1793584800,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -991,7 +1042,8 @@
           {
             "pool": "p",
             "used_basis_points": 6590,
-            "resets_unix_seconds": 1793588400
+            "resets_unix_seconds": 1793588400,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1010,7 +1062,8 @@
           {
             "pool": "p",
             "used_basis_points": 1690,
-            "resets_unix_seconds": 1793588400
+            "resets_unix_seconds": 1793588400,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1029,7 +1082,8 @@
           {
             "pool": "p",
             "used_basis_points": 7800,
-            "resets_unix_seconds": 1793588400
+            "resets_unix_seconds": 1793588400,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1048,7 +1102,8 @@
           {
             "pool": "p",
             "used_basis_points": 6860,
-            "resets_unix_seconds": 1793592000
+            "resets_unix_seconds": 1793592000,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1067,7 +1122,8 @@
           {
             "pool": "p",
             "used_basis_points": 1760,
-            "resets_unix_seconds": 1793592000
+            "resets_unix_seconds": 1793592000,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1086,7 +1142,8 @@
           {
             "pool": "p",
             "used_basis_points": 8200,
-            "resets_unix_seconds": 1793592000
+            "resets_unix_seconds": 1793592000,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1105,7 +1162,8 @@
           {
             "pool": "p",
             "used_basis_points": 7130,
-            "resets_unix_seconds": 1793595600
+            "resets_unix_seconds": 1793595600,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1124,7 +1182,8 @@
           {
             "pool": "p",
             "used_basis_points": 1830,
-            "resets_unix_seconds": 1793595600
+            "resets_unix_seconds": 1793595600,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1143,7 +1202,8 @@
           {
             "pool": "p",
             "used_basis_points": 8600,
-            "resets_unix_seconds": 1793595600
+            "resets_unix_seconds": 1793595600,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1162,7 +1222,8 @@
           {
             "pool": "p",
             "used_basis_points": 7400,
-            "resets_unix_seconds": 1793599200
+            "resets_unix_seconds": 1793599200,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1181,7 +1242,8 @@
           {
             "pool": "p",
             "used_basis_points": 1900,
-            "resets_unix_seconds": 1793599200
+            "resets_unix_seconds": 1793599200,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1200,7 +1262,8 @@
           {
             "pool": "p",
             "used_basis_points": 9000,
-            "resets_unix_seconds": 1793599200
+            "resets_unix_seconds": 1793599200,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1219,7 +1282,8 @@
           {
             "pool": "p",
             "used_basis_points": 7670,
-            "resets_unix_seconds": 1793602800
+            "resets_unix_seconds": 1793602800,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1238,7 +1302,8 @@
           {
             "pool": "p",
             "used_basis_points": 1970,
-            "resets_unix_seconds": 1793602800
+            "resets_unix_seconds": 1793602800,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1257,7 +1322,8 @@
           {
             "pool": "p",
             "used_basis_points": 9400,
-            "resets_unix_seconds": 1793602800
+            "resets_unix_seconds": 1793602800,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1276,7 +1342,8 @@
           {
             "pool": "p",
             "used_basis_points": 7940,
-            "resets_unix_seconds": 1793606400
+            "resets_unix_seconds": 1793606400,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1295,7 +1362,8 @@
           {
             "pool": "p",
             "used_basis_points": 2040,
-            "resets_unix_seconds": 1793606400
+            "resets_unix_seconds": 1793606400,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1314,7 +1382,8 @@
           {
             "pool": "p",
             "used_basis_points": 9800,
-            "resets_unix_seconds": 1793606400
+            "resets_unix_seconds": 1793606400,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1333,7 +1402,8 @@
           {
             "pool": "p",
             "used_basis_points": 8210,
-            "resets_unix_seconds": 1793610000
+            "resets_unix_seconds": 1793610000,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1352,7 +1422,8 @@
           {
             "pool": "p",
             "used_basis_points": 2110,
-            "resets_unix_seconds": 1793610000
+            "resets_unix_seconds": 1793610000,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,
@@ -1371,7 +1442,8 @@
           {
             "pool": "p",
             "used_basis_points": 10000,
-            "resets_unix_seconds": 1793610000
+            "resets_unix_seconds": 1793610000,
+            "window_seconds": null
           }
         ],
         "credit_balance": null,

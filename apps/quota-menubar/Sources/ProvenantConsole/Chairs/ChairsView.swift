@@ -50,12 +50,15 @@ private struct SessionRow: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// Enough of the id to tell saved sessions apart: several share the same first eight characters.
+    private var shortID: String { String(session.id.prefix(18)) }
+
     private var summaryLine: String {
-        session.summary?.now ?? (session.summaryStatus == "available" ? "Session \(session.id.prefix(8))" : "No summary yet")
+        session.summary?.now ?? (session.summaryStatus == "available" ? "Session \(shortID)" : "No summary yet")
     }
 
     private var detailLine: String {
-        [project, "Session \(session.id.prefix(8))", session.summary?.next.map { "Next: \($0)" },
+        [project, "Session \(shortID)", session.summary?.next.map { "Next: \($0)" },
          session.summary?.risk.flatMap { $0 == "none" ? nil : "Risk: \($0)" },
          session.record.lastSavedAt.map { "saved \(Stamp.relative($0, now: now))" }]
             .compactMap { $0 }.joined(separator: " · ")

@@ -1,5 +1,6 @@
 import Foundation
 import ProvenantDesign
+import ProvenantKit
 
 /// What choosing a menu item does.
 enum MenuAction: Equatable {
@@ -321,8 +322,7 @@ enum QuotaMenu {
 
     /// "Gemini weekly" or "5-hour": a window's name as a short phrase.
     static func windowName(_ window: QuotaReport.Window) -> String {
-        guard let pool = window.poolLabel else { return window.title }
-        return "\(pool) \(window.title.prefix(1).lowercased() + window.title.dropFirst())"
+        QuotaPresentation.windowName(window.title, poolLabel: window.poolLabel)
     }
 
     /// "checked 7h ago" for a reading older than half an hour; nil while it is fresh.
