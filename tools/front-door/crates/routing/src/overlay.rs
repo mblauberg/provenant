@@ -1,5 +1,8 @@
 //! Host and project overlays for the model catalogue.
 //!
+//! Overlays carry catalogue facts only: replacing a model keeps the policy
+//! rules it already has, which belong to `domains.routing.model_policy`.
+//!
 //! Overlays reuse the config layers already used by admission and ports: host
 //! `<state>/config.toml`, host-project `<state>/projects/<key>/config.toml` and
 //! project `<project>/.provenant/config.toml`, in that order. Each entry
@@ -88,7 +91,13 @@ struct ModelOverlay {
 }
 
 impl ModelOverlay {
-    fn into_entry(self, source: OverlaySource) -> ModelEntry {
+    /// `policy_rules` are the rules the model already carries: an overlay
+    /// changes catalogue facts and never replaces a model's policy rules.
+    fn into_entry(
+        self,
+        source: OverlaySource,
+        policy_rules: Vec<crate::ModelPolicyRule>,
+    ) -> ModelEntry {
         ModelEntry {
             model: self.model,
             capability: self.capability,
@@ -98,9 +107,7 @@ impl ModelOverlay {
             evidence_ref: self.evidence_ref,
             source: source.as_str().to_owned(),
             service_tiers: self.service_tiers,
-            // Per-model policy rules remain owned by `domains.routing.model_policy`;
-            // an overlay changes catalogue facts, not policy authority.
-            policy_rules: Vec::new(),
+            policy_rules,
             family: self.family,
             trains_on_prompts: self.trains_on_prompts,
             monthly_allowance_usd: self.monthly_allowance_usd,
@@ -205,9 +212,10 @@ pub(crate) fn apply(
                     if let Some(existing) =
                         catalogue.models.iter_mut().find(|row| row.model == model)
                     {
-                        *existing = entry.into_entry(source);
+                        let rules = std::mem::take(&mut existing.policy_rules);
+                        *existing = entry.into_entry(source, rules);
                     } else {
-                        catalogue.models.push(entry.into_entry(source));
+                        catalogue.models.push(entry.into_entry(source, Vec::new()));
                     }
                     CatalogueSources::record(
                         &mut catalogue.overlay_sources.models,
@@ -446,5 +454,41 @@ fn apply_pool_member(catalogue: &mut Catalogue, entry: PoolMemberOverlay, source
             source,
         );
         CatalogueSources::record(&mut catalogue.overlay_sources.weights, key, source);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_overlay_of_an_existing_model_keeps_its_bundled_policy_rules()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bundled = Catalogue::bundled()?;
+        let entry = bundled
+            .models
+            .iter()
+            .find(|entry| !entry.policy_rules.is_empty())
+            .ok_or("the bundled catalogue carries a model with policy rules")?;
+        let (model, rules) = (entry.model.clone(), entry.policy_rules.len());
+        let efforts = format!("{:?}", entry.efforts).replace('"', "'");
+        let layer = provenant_config::OverlayLayer {
+            source: OverlaySource::Host,
+            text: format!(
+                "[[catalogue.models]]\nmodel = '{}'\nefforts = {efforts}\nevidence_ref = 'owner fact'\nfamily = 'overlay-family'\n",
+                model.as_str()
+            ),
+        };
+        let effective = bundled.with_overlays(&[layer], Vec::new());
+        assert!(effective.overlay_warnings().is_empty());
+        let after = effective
+            .models
+            .iter()
+            .find(|entry| entry.model == model)
+            .ok_or("the overlaid model remains")?;
+        assert_eq!(after.family.as_deref(), Some("overlay-family"));
+        assert_eq!(after.source, "host");
+        assert_eq!(after.policy_rules.len(), rules);
+        Ok(())
     }
 }
