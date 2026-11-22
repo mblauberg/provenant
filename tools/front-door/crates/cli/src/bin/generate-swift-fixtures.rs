@@ -236,25 +236,27 @@ mod fixtures {
         ];
         let active_lanes: Vec<Value> = overview_active
             .iter()
-            .map(|(id, graph, state, title, attention)| {
-                let row = lane(&attempt(id, graph, state.clone(), title)?)?;
-                json!({
-                    "project_id": "01010101010101010101010101010101",
-                    "project_label": "provenant",
-                    "key": lane_id(graph, id)["key"],
-                    "attempt_id": id,
-                    "task_label": title,
-                    "state": row["state"],
-                    "reason": row["reason"],
-                    "presence": row["presence"],
-                    "queued_at": row["queued_at"],
-                    "cause": row["cause"],
-                    "retry_of": row["retry_of"],
-                    "superseded_by": row["superseded_by"],
-                    "attention": attention
-                })
-            })
-            .collect();
+            .map(
+                |(id, graph, state, title, attention)| -> Result<Value, String> {
+                    let row = lane(&attempt(id, graph, state.clone(), title)?)?;
+                    Ok(json!({
+                        "project_id": "01010101010101010101010101010101",
+                        "project_label": "provenant",
+                        "key": lane_id(graph, id)["key"],
+                        "attempt_id": id,
+                        "task_label": title,
+                        "state": row["state"],
+                        "reason": row["reason"],
+                        "presence": row["presence"],
+                        "queued_at": row["queued_at"],
+                        "cause": row["cause"],
+                        "retry_of": row["retry_of"],
+                        "superseded_by": row["superseded_by"],
+                        "attention": attention
+                    }))
+                },
+            )
+            .collect::<Result<_, _>>()?;
         let active_needs_you = json!([
             {"id":"11111111111111111111111111111111","title":"Pick the storage layer","chair_session_id":"3f9c2a10d4e84b7f","project_id":"dadadadadadadadadadadadadadadada","project_label":"Alpha"},
             {"id":"55555555555555555555555555555555","title":"Should the queue retry?","chair_session_id":"3f9c2a10d4e84b7f","project_id":null,"project_label":null},
@@ -293,18 +295,18 @@ mod fixtures {
             ("c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6", "fixture", 0, json!([])),
         ]
         .iter()
-        .map(|(id, graph, depth, children)| {
+        .map(|(id, graph, depth, children)| -> Result<Value, String> {
             let row = lane(&attempt(id, graph, running(), &format!("node {graph}"))?)?;
-            json!({
+            Ok(json!({
                 "lane_id": lane_id(graph, id),
                 "depth": depth,
                 "metadata": {"attempt": row},
                 "children": children,
                 "status": "running",
                 "parents": {"continuation": null, "dispatch": null}
-            })
+            }))
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
 
         let search_matches = json!([
             {"lane_id": lane_id("fixture", "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5"), "part": "result",
@@ -652,7 +654,7 @@ mod fixtures {
         state: &str,
         revision: u64,
     ) -> Result<Value, String> {
-        human_request(identity, title, kind, blocking, state, revision, json!([]))?
+        human_request(identity, title, kind, blocking, state, revision, json!([]))
     }
 
     fn listed(
