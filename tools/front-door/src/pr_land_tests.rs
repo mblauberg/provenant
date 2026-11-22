@@ -2523,7 +2523,9 @@ pub(crate) fn pr_open_refuses_what_the_receipts_cannot_support() -> Result {
             "--dry-run",
         ],
     )?;
-    assert_eq!(refusal, "PR_ATTEMPT_STATE");
+    // An attempt in another state only warns; this one never delivered a
+    // branch, so there is nothing to open.
+    assert_eq!(refusal, "PR");
     // A malformed target is a usage error before anything is read.
     let invalid = command(
         &rig,

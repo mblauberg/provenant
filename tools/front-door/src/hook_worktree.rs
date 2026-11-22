@@ -75,22 +75,36 @@ fn warn_adopt(hook: &str, reason: &dyn std::fmt::Display) {
     );
 }
 
-/// Claude's suggested slug becomes the branch `claude/<slug>`. Anything outside
-/// a plain slug is refused, since the name reaches a branch and a directory.
-fn branch_for(name: &str) -> Result<String, Error> {
-    let plain = !name.is_empty()
-        && name.len() <= 64
-        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-        && !name.contains("..")
-        && !name.ends_with('.')
-        && !name.ends_with(".lock");
-    if !plain {
-        return Err("worktree name must be 1-64 letters, digits, '.', '_' or '-'".into());
+/// Claude's suggested slug becomes the branch `claude/<slug>`. The name reaches
+/// a branch and a directory, so anything outside a plain slug (1-64 letters,
+/// digits, '.', '_' or '-') is rewritten to one, never refused. A plain slug is
+/// kept as given.
+fn branch_for(name: &str) -> String {
+    let mut slug: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while slug.contains("..") {
+        slug = slug.replace("..", "-");
     }
-    Ok(format!("claude/{name}"))
+    let mut slug: String = slug
+        .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
+        .chars()
+        .take(64)
+        .collect();
+    while slug.ends_with('.') || slug.ends_with(".lock") {
+        slug.truncate(slug.len() - if slug.ends_with('.') { 1 } else { 5 });
+    }
+    if slug.is_empty() {
+        slug.push_str("worktree");
+    }
+    format!("claude/{slug}")
 }
 
 /// The absolute path of an entry a `worktree create` or `list` returned.
@@ -257,10 +271,14 @@ pub fn create(globals: &Globals) -> u8 {
     if input.hook_event_name != "WorktreeCreate" || !input.cwd.is_absolute() {
         return abstain("worktree-create", &"unrecognised hook input");
     }
-    let branch = match branch_for(&input.name) {
-        Ok(branch) => branch,
-        Err(error) => return fail("worktree-create", &error),
-    };
+    let branch = branch_for(&input.name);
+    if branch != format!("claude/{}", input.name) {
+        let _ = writeln!(
+            io::stderr().lock(),
+            "worktree-create: warning: worktree name {:?} is not a plain slug; using branch {branch} (source: hook input name)",
+            input.name.chars().take(64).collect::<String>()
+        );
+    }
     let result = (|| -> Result<PathBuf, Error> {
         let executor = SystemExecutor::new(1)?;
         let cli = Cli::new(globals, &input.cwd, &executor)?;
@@ -393,26 +411,26 @@ pub fn remove(globals: &Globals) -> u8 {
 mod tests {
 
     #[test]
-    fn only_plain_slugs_become_branches() {
+    fn plain_slugs_are_kept_and_other_names_are_rewritten_to_plain_ones() {
         use super::*;
-        assert_eq!(
-            branch_for("bright-fox-3").unwrap_or_default(),
-            "claude/bright-fox-3"
-        );
-        for bad in [
-            "",
-            "-x",
-            ".x",
-            "a/b",
-            "a..b",
-            "a b",
-            "x.lock",
-            "x.",
-            "é",
-            &"a".repeat(65),
+        assert_eq!(branch_for("bright-fox-3"), "claude/bright-fox-3");
+        for (name, expected) in [
+            ("", "claude/worktree"),
+            ("-x", "claude/x"),
+            (".x", "claude/x"),
+            ("a/b", "claude/a-b"),
+            ("a..b", "claude/a-b"),
+            ("a b", "claude/a-b"),
+            ("x.lock", "claude/x"),
+            ("x.", "claude/x"),
+            ("é", "claude/worktree"),
         ] {
-            assert!(branch_for(bad).is_err(), "{bad:?}");
+            assert_eq!(branch_for(name), expected, "{name:?}");
         }
+        assert_eq!(
+            branch_for(&"a".repeat(65)),
+            format!("claude/{}", "a".repeat(64))
+        );
     }
 
     #[test]

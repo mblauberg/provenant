@@ -121,15 +121,23 @@ pub use reader::{
 pub use store::{PreparedRun, TerminalPublication};
 use thiserror::Error;
 
-/// Return the depth of the run being dispatched under this lane.
+/// Return the depth of the run being dispatched under this lane. Depth above
+/// `domains.run.max_lane_depth` warns and proceeds by default; the owner can
+/// make it a stop with `policy.LANE_DEPTH=refuse`.
 pub fn next_lane_depth(
     parent_depth: u64,
     max_depth: u64,
-    _policy: &provenant_records::policy::Policy,
+    policy: &provenant_records::policy::Policy,
 ) -> Result<u64> {
     let depth = parent_depth.checked_add(1).ok_or(RunError::DepthOverflow)?;
     if depth > max_depth {
-        return Err(RunError::DepthExceeded { depth, max_depth });
+        policy.warn_or(
+            "LANE_DEPTH",
+            provenant_records::policy::Facts::violation(format!(
+                "nested lane depth {depth} exceeds domains.run.max_lane_depth {max_depth}; raise that setting or set policy.LANE_DEPTH=refuse to stop here"
+            )),
+            |_| RunError::DepthExceeded { depth, max_depth },
+        )?;
     }
     Ok(depth)
 }

@@ -341,17 +341,22 @@ fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult
     Ok(())
 }
 #[test]
-fn nested_lane_depth_stops_at_the_configured_maximum() {
+fn nested_lane_depth_above_the_maximum_warns_and_proceeds_unless_configured_to_stop() {
+    use provenant_records::policy::{Policy, Source, Strength};
+    let policy = Policy::default();
+    assert!(matches!(next_lane_depth(0, 2, &policy), Ok(1)));
+    assert!(matches!(next_lane_depth(1, 2, &policy), Ok(2)));
+    assert!(
+        matches!(next_lane_depth(2, 2, &policy), Ok(3)),
+        "depth above the maximum warns and proceeds by default"
+    );
+    let mut strict = Policy::default();
+    strict.overlay(
+        &std::collections::BTreeMap::from([("LANE_DEPTH".to_owned(), Strength::Refuse)]),
+        Source::Host,
+    );
     assert!(matches!(
-        next_lane_depth(0, 2, &provenant_records::policy::Policy::default()),
-        Ok(1)
-    ));
-    assert!(matches!(
-        next_lane_depth(1, 2, &provenant_records::policy::Policy::default()),
-        Ok(2)
-    ));
-    assert!(matches!(
-        next_lane_depth(2, 2, &provenant_records::policy::Policy::default()),
+        next_lane_depth(2, 2, &strict),
         Err(RunError::DepthExceeded {
             depth: 3,
             max_depth: 2

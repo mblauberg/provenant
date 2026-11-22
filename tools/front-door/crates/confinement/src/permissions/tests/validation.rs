@@ -123,7 +123,7 @@ fn only_git_control_files_are_checked_for_other_names() -> Result<(), Box<dyn st
         let rule = policy.rule("VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION");
         assert_eq!(
             rule.rule.boundary,
-            provenant_records::policy::Boundary::GitIsolation
+            provenant_records::policy::Boundary::OtherWork
         );
         assert_eq!(
             rule.rule.strength,

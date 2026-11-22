@@ -1018,7 +1018,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 Outcome::Refused,
                 "GC",
                 "targeted scratch collection requires --apply and excludes --dry-run",
-                Some(GC_REPAIR),
+                Some("pass --apply and drop --dry-run"),
                 globals,
             );
         }
@@ -1847,7 +1847,7 @@ fn gc_project(
             };
             if !valid_owner {
                 return Err(Error::GcObservation(
-                    "GC requires a verified primary checkout or bound bare owner",
+                    "GC requires a verified primary checkout or bound bare owner; run it from the primary checkout (provenant worktree list shows it)",
                 ));
             }
             let lanes = if read_only {
@@ -2764,7 +2764,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         };
         let binding = if command.dry_run || bare == Some(true) {
             provenant_config::lookup_project(&roots, &location)?.ok_or(Error::GcObservation(
-                "GC requires an existing project binding for a preview or bare repository",
+                "GC requires an existing project binding for a preview or bare repository; run any provenant command from the project checkout once to bind it",
             ))?
         } else {
             provenant_config::bind_project(&roots, location)?
@@ -4476,7 +4476,7 @@ fn with_context_mode_with_owner_cancel<T>(
         };
         let binding = if read_only || bare == Some(true) {
             provenant_config::lookup_project(roots, &location)?.ok_or(Error::GcObservation(
-                "GC preview requires an existing project binding",
+                "GC preview requires an existing project binding; run any provenant command from the project checkout once to bind it",
             ))?
         } else {
             provenant_config::bind_project(roots, location)?

@@ -1313,7 +1313,11 @@ fn preflight_install(
         prepare_agents_at(batch, destination)?;
     }
     if matches!(args.hooks, Some(cli::Switch::On)) && !batches.iter().any(supports_hooks) {
-        return Err(InstallError::HooksUnavailable.into());
+        batches[0].policy.warn_or(
+            "INSTALL_HOOKS_UNAVAILABLE",
+            provenant_records::policy::Facts::violation(provenant_config::HOOKS_UNAVAILABLE_DETAIL),
+            |_| InstallError::HooksUnavailable,
+        )?;
     }
     let mut preview = InstallOutcome {
         actions: Vec::new(),

@@ -4119,7 +4119,7 @@ mod tests {
         let rule = &policy.rule("LANE_LANERUNTIME_ENVIRONMENT_AUTHORITY").rule;
         assert_eq!(
             rule.boundary,
-            provenant_records::policy::Boundary::Authority
+            provenant_records::policy::Boundary::Operation
         );
         assert_eq!(rule.strength, provenant_records::policy::Strength::Refuse);
         assert!(rule.knob.is_none());
