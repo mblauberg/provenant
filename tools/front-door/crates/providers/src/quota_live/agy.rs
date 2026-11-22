@@ -112,7 +112,10 @@ impl LiveQuota {
                     Ok(false) => {}
                     Err(error) => {
                         *self.last_reconcile_error.borrow_mut() = Some(error.to_string());
-                        eprintln!("provenant: failed to reconcile account switch: {error}");
+                        eprintln!(
+                            "provenant: failed to reconcile {} account switch: {error}",
+                            provenant_records::Harness::Agy.spec().name
+                        );
                     }
                 }
             }
