@@ -925,6 +925,130 @@
         Ok(())
     }
 
+    /// A paid plan's spent window cannot hide the free-pool member the same
+    /// account serves. Preview and dispatch read one route-scoped exhaustion
+    /// verdict, so both keep the free member instead of excluding the account.
+    #[test]
+    fn paid_exhaustion_keeps_the_free_member_preview_and_dispatch_agree()
+    -> Result<(), Box<dyn Error>> {
+        use provenant_os::clock::SystemClock;
+        use std::os::unix::fs::PermissionsExt;
+        use super::{config::execute_in, Data, Route, RouteResolve};
+
+        let fixture = ReviewFixture::new()?;
+        let path = fixture.roots.state.as_path().join("config.toml");
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing.pools]\nprincipal=[{model='opencode/opencode-go/deepseek-v4.1-flash',weight=1},{model='opencode/opencode/deepseek-v4.1-flash-free',weight=1}]\n",
+        )?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let now = fixture.now;
+        // One OpenCode account on the paid `go` plan: its paid window is spent,
+        // while the keyless free pool member is still available.
+        fixture.seed("opencode", |record| {
+            let account = record.account.clone();
+            record.snapshot = Some(provenant_quota::QuotaSnapshot {
+                extra: Default::default(),
+                schema_version: 1,
+                account,
+                revision: 0,
+                status: provenant_quota::QuotaStatus::Exhausted,
+                observed_unix_seconds: now,
+                source_ref: "fixture".into(),
+                authority_ref: None,
+                windows: vec![provenant_quota::QuotaWindow {
+                    extra: Default::default(),
+                    pool: "five_hour".into(),
+                    window_seconds: Some(18_000),
+                    used_basis_points: 10_000,
+                    resets_unix_seconds: Some(now + 3_600),
+                }],
+                details: Some(provenant_quota::QuotaDetails {
+                    plan: Some("go".into()),
+                    ..Default::default()
+                }),
+            });
+        })?;
+        let availability = [provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "opencode".into(),
+            executable: "/fixture/opencode".into(),
+            version: "fixture".into(),
+            last_update: None,
+            fixture_ref: "fixture".into(),
+            catalogue_revision: super::Catalogue::bundled()?.revision().into(),
+            account_key: Some("opencode-account".into()),
+            plan: None,
+            observed_models: vec![
+                "opencode-go/deepseek-v4.1-flash".into(),
+                "opencode/deepseek-v4.1-flash-free".into(),
+            ],
+            observed_unix_seconds: now,
+            expires_unix_seconds: now + 300,
+        }];
+        let access = [provenant_routing::AccessContext {
+            adapter: "opencode",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        }];
+        let request = super::RouteRequest {
+            read_heavy: false,
+            model: None,
+            route: Some("principal".into()),
+            effort: None,
+            confidential: false,
+            fallback: vec![],
+            exclude: vec![],
+        };
+        let dispatch = super::resolve_dispatch(
+            &request.to_domain()?,
+            &fixture.roots,
+            None,
+            ("fixture", 0),
+            &availability,
+            &access,
+            "fixture",
+            None,
+            &[],
+        )?;
+        assert_eq!(
+            dispatch.model, "opencode/deepseek-v4.1-flash-free",
+            "the spent paid window cannot exclude the free member"
+        );
+        // The preview admission shares this verdict: an account-wide reading
+        // would report the whole route blocked even though dispatch serves it.
+        assert_eq!(
+            super::route_blocked("principal", &[], &fixture.roots),
+            None,
+            "the preview must not block a free member its own dispatch admits"
+        );
+        let query = RouteResolve {
+            writes: false,
+            account: None,
+            name: None,
+            request,
+        };
+        let Data::Resolved(preview) = execute_in(
+            &Route::Resolve(query),
+            &fixture.roots,
+            provenant_core::Clock::wall_now(&SystemClock::new())?,
+            &fixture._temp.path().join("home"),
+            &fixture._temp.path().join("checkout"),
+        )? else {
+            return Err("expected a resolved route preview".into());
+        };
+        assert_eq!(
+            preview.route.model, "opencode/deepseek-v4.1-flash-free",
+            "preview keeps the free member"
+        );
+        assert_eq!(
+            format!("{}/{}", preview.route.adapter, preview.route.model),
+            format!("{}/{}", dispatch.adapter, dispatch.model),
+            "preview picks what dispatch picks"
+        );
+        Ok(())
+    }
+
     /// The redraw receipt rides on the candidate admission accepted, so the
     /// route a preview shows names the pool member it passed over and why.
     ///
@@ -976,7 +1100,7 @@
         assert_eq!(redraw.rejected_pick, "claude/claude-haiku-5-5");
         assert_eq!(
             redraw.cause,
-            Some(provenant_records::RouteExclusionReason::AdmissionRefused)
+            Some(provenant_records::RouteExclusionReason::Exhausted)
         );
         assert!(
             redraw.reason.contains("allowance exhausted"),

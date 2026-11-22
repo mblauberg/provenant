@@ -101,8 +101,9 @@ pub(crate) enum AdmitMode {
     /// its provider readiness is known. Preview has no probe of its own.
     SelectedAccount,
     /// A read-only preview: no account is selected, so every cached account of
-    /// the candidate's provider is probed as if it were ready. A snapshot that
-    /// says the window is spent still cannot serve.
+    /// the candidate's provider is probed as if it were ready. The route-scoped
+    /// exhaustion verdict still applies, so a spent window bound to this route
+    /// cannot serve.
     CachedAccounts,
 }
 
@@ -149,23 +150,11 @@ impl AdmissionFacts<'_> {
     }
 }
 
-/// A snapshot whose status says spent and whose window has not reset still
-/// cannot serve, even when the rest of admission would allow it.
-pub(super) fn spent(record: &provenant_quota::AccountRecord, now: i64) -> bool {
-    record.snapshot.as_ref().is_some_and(|snapshot| {
-        snapshot.status == provenant_quota::QuotaStatus::Exhausted
-            && snapshot.observed_unix_seconds <= now
-            && snapshot.windows.iter().any(|window| {
-                window.used_basis_points >= 10_000
-                    && window.resets_unix_seconds.is_none_or(|reset| reset > now)
-            })
-    })
-}
-
 /// The typed cause of an admission error, shared by redraw receipts and skips.
 pub(crate) fn exclusion_reason(error: &provenant_quota::QuotaError) -> RouteExclusionReason {
     match error {
         provenant_quota::QuotaError::AllowanceExhausted => RouteExclusionReason::Exhausted,
+        provenant_quota::QuotaError::Blocked(block) => block.exclusion_reason(),
         provenant_quota::QuotaError::Refused("uncalibrated partial coverage") => {
             RouteExclusionReason::UnknownPartialHeadroom
         }
@@ -215,6 +204,8 @@ fn judge(
         }
         AdmitMode::CachedAccounts => {
             let mut members = Vec::new();
+            let mut reasons = Vec::new();
+            let mut first_error = None;
             for record in facts
                 .records
                 .iter()
@@ -240,10 +231,16 @@ fn judge(
                     availability_ref: "preview".into(),
                     expires_unix_seconds: facts.now_unix_seconds.saturating_add(60),
                 };
+                // The cached account is judged by the same typed admission
+                // dispatch runs, including the one route-scoped exhaustion
+                // verdict: a spent paid window cannot refuse a free member.
                 match admission.check(&probe) {
-                    Ok(()) if !spent(record, facts.now_unix_seconds) => return Ok(()),
-                    Ok(()) => members.push("allowance exhausted".to_owned()),
-                    Err(error) => members.push(error.to_string()),
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        members.push(error.to_string());
+                        reasons.push(exclusion_reason(&error));
+                        first_error.get_or_insert(error);
+                    }
                 }
             }
             if members.is_empty() {
@@ -251,13 +248,21 @@ fn judge(
                 // dispatch probes it, so a preview cannot block it.
                 return Ok(());
             }
+            // One typed cause stays typed; accounts that disagree report the
+            // generic admission refusal rather than inventing a single cause.
+            let reason = reasons
+                .first()
+                .cloned()
+                .filter(|first| reasons.iter().all(|reason| reason == first))
+                .unwrap_or(RouteExclusionReason::AdmissionRefused);
             Err(Refusal {
-                reason: RouteExclusionReason::AdmissionRefused,
+                reason,
                 detail: format!("{}/{}: {}", route.adapter, route.model, members.join("; ")),
                 account: None,
-                error: Box::new(EdgeError::Quota(provenant_quota::QuotaError::Refused(
-                    "provider readiness",
-                ))),
+                error: Box::new(EdgeError::Quota(
+                    first_error
+                        .unwrap_or(provenant_quota::QuotaError::Refused("provider readiness")),
+                )),
             })
         }
     }

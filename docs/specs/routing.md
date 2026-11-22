@@ -191,7 +191,12 @@ Exhaustion is classified before weights, so a draw never offers a member
 routing already judged spent and dispatch records no refuted pick for it. A
 preview has no live probe: it draws the pool in order, judges each member's
 cached accounts, and the route it shows carries a redraw receipt naming the
-pick it refused and that refusal's typed cause.
+pick it refused and that refusal's typed cause. Preview, review-family and
+dispatch read one route-scoped exhaustion verdict: a snapshot governs only the
+models its plan serves and only the windows bound to the route's pools or
+allowance windows; the whole-snapshot reading applies only to a route with no
+pool mapping. A spent paid window therefore cannot hide a free-pool member the
+same account serves.
 Account ranking scales reset-adjusted usable headroom by sourced
 penalties and divides by one plus live lanes.
 
@@ -262,7 +267,11 @@ recorded refusals on owner request and reports exactly what it removed (saying
 so when nothing matched). Each clearing is recorded with its source: `reading`,
 `run`, `observed_success` or `manual`.
 One function, `Admission::account_block`, decides account blocks for both
-resolution and the pre-launch recheck. Readiness is stored apart from quota records; a failed
+resolution and the pre-launch recheck. `Admission::route_exhausted` is the one
+route-scoped allowance verdict preview, review-family and dispatch share. A
+typed `AccountBlock` travels through admission, so an exclusion keeps its
+provider, free-tier or mismatch cause while its text stays operator detail.
+Readiness is stored apart from quota records; a failed
 publication leaves readiness unknown and never erases held refusals.
 A pool cannot draw a current login-required account, even when every other
 member is unavailable. A missing availability observation reaches preparation

@@ -1348,10 +1348,11 @@ pub fn resolve_review_family(
                                 availability_warning: None,
                                 extra: Default::default(), availability_ref: "preview".into(), expires_unix_seconds: now + 60,
                             };
-                            let spent = records.iter().any(|record| record.account.adapter == selected.adapter && record.account.account_key == key && super::admission::spent(record, now));
                             match admission.check(&probe) {
-                                Ok(()) if !spent => { accounts.clear(); break; }
-                                Ok(()) => accounts.push(format!("account {key}: allowance exhausted")),
+                                Ok(()) => {
+                                    accounts.clear();
+                                    break;
+                                }
                                 Err(error) => accounts.push(format!("account {key}: {error}")),
                             }
                         }

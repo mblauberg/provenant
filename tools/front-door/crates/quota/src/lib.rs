@@ -41,6 +41,10 @@ pub enum QuotaError {
     Conflict,
     #[error("quota admission refused: allowance exhausted")]
     AllowanceExhausted,
+    /// Persisted account evidence blocks the route. The typed block carries the
+    /// provider, free-tier or mismatch cause to the exclusion reason.
+    #[error("quota admission refused: {0}")]
+    Blocked(AccountBlock),
     #[error("quota admission refused: {0}")]
     Refused(&'static str),
 }

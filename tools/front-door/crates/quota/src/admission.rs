@@ -208,6 +208,11 @@ impl AccountBlock {
             .find(|block| block.exclusion_reason() == *reason)
     }
 }
+impl std::fmt::Display for AccountBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.repair())
+    }
+}
 
 impl Admission<'_> {
     /// The account's snapshot when it is still fresh at `now`.
@@ -364,7 +369,7 @@ impl Admission<'_> {
         };
         if let Some(key) = key {
             if let Some(block) = self.account_block(&route.adapter, key, &route.model)? {
-                return Err(QuotaError::Refused(block.repair()));
+                return Err(QuotaError::Blocked(block));
             }
             let record = self
                 .records
@@ -375,30 +380,47 @@ impl Admission<'_> {
                 // exhaustion is evidence that has expired: the readiness
                 // observation owns its lifetime, and launch re-checks the login
                 // and warns instead of refusing on a stale persisted failure.
-                if let Some(snapshot) = self.fresh_snapshot(Some(record)) {
-                    if snapshot.status == QuotaStatus::AuthRequired {
-                        return Err(QuotaError::Refused(
-                            "authentication required; sign in to the selected account",
-                        ));
-                    }
-                    // Exhaustion is a property of the selected model's own
-                    // windows: a failed probe keeps a recent exhaustion, a
-                    // partial reading never manufactures it, and an account
-                    // label says nothing about this route's pool.
-                    if partial_headroom(
-                        snapshot,
-                        &route.adapter,
-                        &route.model,
-                        self.pools,
-                        self.now_unix_seconds,
-                    ) == PartialHeadroom::Exhausted
-                    {
-                        return Err(QuotaError::AllowanceExhausted);
-                    }
+                if let Some(snapshot) = self.fresh_snapshot(Some(record))
+                    && snapshot.status == QuotaStatus::AuthRequired
+                {
+                    return Err(QuotaError::Refused(
+                        "authentication required; sign in to the selected account",
+                    ));
+                }
+                if self.route_exhausted(route)? {
+                    return Err(QuotaError::AllowanceExhausted);
                 }
             }
         }
         Ok(())
+    }
+
+    /// Whether the fresh evidence for this route's selected account says the
+    /// route's own allowance is spent. This is the one exhaustion verdict
+    /// preview, review-family and dispatch read: it binds the snapshot's plan
+    /// and windows to the route, so a spent paid window never hides a free-pool
+    /// member the same account serves.
+    pub fn route_exhausted(&self, route: &ResolvedRoute) -> Result<bool, QuotaError> {
+        let Some(key) = route.account_key.as_deref() else {
+            return Ok(false);
+        };
+        let record = self
+            .records
+            .iter()
+            .find(|r| r.account.adapter == route.adapter && r.account.account_key == key);
+        let Some(record) = record else {
+            return Ok(false);
+        };
+        if self.fresh_snapshot(Some(record)).is_none() {
+            return Ok(false);
+        }
+        Ok(route_exhausted(
+            record,
+            &route.adapter,
+            &route.model,
+            self.pools,
+            self.now_unix_seconds,
+        ))
     }
 }
 
@@ -461,6 +483,57 @@ pub fn partial_headroom(
         return PartialHeadroom::Unknown;
     }
     PartialHeadroom::Known
+}
+
+/// Whether this account's evidence says this route's own allowance is spent.
+///
+/// The verdict is route-scoped: the snapshot governs only a model its plan
+/// serves, and only the windows bound to the route's pools or its adapter's
+/// allowance windows can exhaust it. A route with no pool mapping has no window
+/// to narrow, so its whole snapshot decides instead. Partial coverage never
+/// establishes exhaustion; `partial_headroom` owns that advisory reading when a
+/// mapping exists.
+pub fn route_exhausted(
+    record: &AccountRecord,
+    adapter: &str,
+    model: &str,
+    pools: &[String],
+    now: i64,
+) -> bool {
+    let spec = provenant_records::AdapterSpec::get(adapter);
+    let plan = record
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.details.as_ref())
+        .and_then(|details| details.plan.as_deref());
+    if spec.is_some_and(|spec| !spec.account_serves_model(plan, model)) {
+        return false;
+    }
+    let Some(snapshot) = record.snapshot.as_ref() else {
+        return false;
+    };
+    if snapshot.observed_unix_seconds > now {
+        return false;
+    }
+    let mapped = !pools.is_empty()
+        || spec.is_some_and(|spec| {
+            spec.allowance_prefix
+                .is_some_and(|prefix| model.starts_with(prefix))
+        });
+    if mapped {
+        return partial_headroom(snapshot, adapter, model, pools, now)
+            == PartialHeadroom::Exhausted;
+    }
+    let partial = snapshot
+        .details
+        .as_ref()
+        .is_some_and(|details| details.coverage.as_deref() == Some("partial"));
+    !partial
+        && snapshot.status == QuotaStatus::Exhausted
+        && snapshot.windows.iter().any(|window| {
+            window.used_basis_points >= 10_000
+                && window.resets_unix_seconds.is_none_or(|reset| reset > now)
+        })
 }
 
 /// Build a compare-and-swap update for structured provider quota evidence.

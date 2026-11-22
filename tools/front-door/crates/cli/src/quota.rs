@@ -3350,14 +3350,20 @@ pub fn run(
                     QuotaError::Invalid(_) | QuotaError::Record(_) | QuotaError::NumberOutOfRange,
                 ) => Outcome::Invalid,
                 EdgeError::Quota(
-                    QuotaError::AllowanceExhausted | QuotaError::Refused(_) | QuotaError::Disabled,
+                    QuotaError::AllowanceExhausted
+                    | QuotaError::Blocked(_)
+                    | QuotaError::Refused(_)
+                    | QuotaError::Disabled,
                 ) => Outcome::Refused,
                 EdgeError::Fs(FsError::Cancelled { .. }) => Outcome::Cancelled,
                 _ => Outcome::Error,
             };
             let repair = match &error {
                 EdgeError::Quota(
-                    QuotaError::AllowanceExhausted | QuotaError::Refused(_) | QuotaError::Disabled,
+                    QuotaError::AllowanceExhausted
+                    | QuotaError::Blocked(_)
+                    | QuotaError::Refused(_)
+                    | QuotaError::Disabled,
                 ) => {
                     "Run `provenant quota show --json` to inspect the allowance; wait for the reset window or select another adapter with --adapter."
                 }
