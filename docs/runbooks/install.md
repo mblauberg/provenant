@@ -72,11 +72,13 @@ you to rerun the original install command with its original options (`--source`,
 
 `provenant upgrade --verify` then runs the bundled smoke graph (`--host PEER`
 places it on a peer; `--route` and repeatable `--set NAME=VALUE` override its
-routes and parameters), and adding `--dry-run` previews it without upgrading. Its
-write node runs in a worktree the verification creates on a branch of a scratch
-fixture. The scratch project's host binding is removed when the verification
-ends, including on failure, so the deleted fixture never becomes a registered
-project. `provenant run smoke` by hand, from any checkout, runs only the read-only
+routes and parameters), and adding `--dry-run` previews it without upgrading. The
+scratch fixture commits a base and a fixture change, so the review nodes have a
+non-empty range, and its write node runs in a worktree the verification creates
+on a branch of that fixture. The scratch project's host binding is removed when
+the verification ends, including on failure, so the deleted fixture never
+becomes a registered project. `provenant run smoke` by hand, from any checkout,
+runs only the read-only
 nodes (the receipt names the skipped write node); add `--branch B --base REF` or
 `--worktree PATH` to run the write node too.
 

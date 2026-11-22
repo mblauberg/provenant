@@ -976,6 +976,44 @@ fn smoke_template_compiles_the_read_review_and_write_nodes() {
 }
 
 #[test]
+fn smoke_template_gives_its_review_nodes_a_base() {
+    let library = library();
+    let review_bases = |with: Value| -> Vec<String> {
+        let compiled = Compiler::new(&library)
+            .compile(&json!({"id":"smoke", "use":"smoke", "with":with}))
+            .unwrap();
+        let review = compiled
+            .composite
+            .unwrap()
+            .nodes
+            .into_iter()
+            .find(|node| node.id == "review")
+            .unwrap();
+        review
+            .composite
+            .unwrap()
+            .nodes
+            .into_iter()
+            .map(|lens| match lens.review_base {
+                Some(base) => base,
+                None => panic!("smoke review lens {} has no review base", lens.id),
+            })
+            .collect()
+    };
+    // The default range is the checkout's first parent, never empty.
+    for base in review_bases(json!({})) {
+        assert!(!base.is_empty(), "smoke review base is empty");
+    }
+    // A launch pins the fixture's base so the review range is known.
+    let base = "1111111111111111111111111111111111111111";
+    assert!(
+        review_bases(json!({"diff_base":base}))
+            .iter()
+            .all(|bound| bound == base)
+    );
+}
+
+#[test]
 fn malformed_review_repair_behaviour_reports_an_error() {
     let mut library = library();
     library
