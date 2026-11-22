@@ -57,17 +57,6 @@ finding a `trigger` with:
 
 For example: `"trigger":{"sequence":"Run the command, then observe the refusal","reach":"default_path","observed":true}`.
 
-## Result contract
-
-Write one findings block, then exactly one standalone verdict line outside all
-fenced blocks: `VERDICT: PASS`, `VERDICT: FAIL` or `VERDICT: INCONCLUSIVE`.
-Put the final fenced handoff after the verdict and leave no text after it. Do
-not repeat a findings block, handoff block or verdict line. The host captures
-exactly one canonical verdict outside fenced blocks. The canonical order is
-verdict then final handoff; if a provider emits one recognised standalone
-verdict as the only content after a valid closed handoff, the host accepts it
-and records that ordering tolerance. Other trailing text remains malformed.
-
 `proposed_fix` removes the cause, because a patch at the symptom leaves the
 next case open. A proposed guard says whether a design would make the state
 unreachable, and proposes that design first. Do not ask for a guard against an
@@ -77,18 +66,26 @@ design, such as a list that gains a member each round, set
 `design_defect: true` so the host escalates to principal design instead of
 another patch.
 
+## Result contract
+
+Write one findings block, then exactly one standalone verdict line outside all
+fenced blocks: `VERDICT: PASS`, `VERDICT: FAIL` or `VERDICT: INCONCLUSIVE`.
+Put the final fenced handoff after the verdict and leave no text after it. Do
+not repeat a findings block, handoff block or verdict line. The host also
+accepts one standalone verdict as the only content after a closed handoff and
+records that ordering; any other trailing text is malformed.
+
 ## What not to report
 
 Do not report style that lint covers, tests for states the types make impossible,
-or work beyond the spec. A disclosed,
-evidenced divergence that serves the stated outcome and stays in write scope is
-a note, not scope growth. So is a request to restore a format the spec retires:
-that is a spec conflict, not a defect.
+or work beyond the spec. A disclosed, evidenced divergence that serves the stated
+outcome and stays in write scope is a note, not scope growth. So is a request to
+restore a format the spec retires: that is a spec conflict, not a defect.
 
 ## Evolvability and rigidity
 
 Flag hand-kept parallel lists, per-host, project or provider branches, silent
 fallbacks, compatibility code, and rigid tests or snapshots that do not pin an
-invariant. Flag new refusals, locks, queues or waits outside those boundaries.
+invariant. Flag new refusals, locks, queues or waits outside the real boundaries.
 Designing for foreseeable cases, including a core before a second use, is not
 itself a defect. See `deliver`.

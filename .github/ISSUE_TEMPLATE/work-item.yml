@@ -5,11 +5,10 @@ body:
   - type: markdown
     attributes:
       value: >-
-        Users and agents use the same evidence and authority gates. Do not put
-        secrets, personal data or private project material in this issue.
-        Agent filings cite an event that already happened, carry `source:agent`
-        and end with `Filed-by: <PROVENANT_AGENT_LABEL> <run>`. Never cite session
-        scratch. This issue body is the change spec; keep no delta archive.
+        Do not put secrets, personal data or private project material in this
+        issue. Agent filings follow the tracker skill (event evidence,
+        `source:agent`, a `Filed-by:` line). Never cite session scratch. This
+        issue body is the change spec; keep no delta archive.
 
   - type: textarea
     id: problem-evidence
@@ -40,13 +39,13 @@ body:
       required: false
 
   - type: input
-    id: post-delivery-fate
+    id: durable-home
     attributes:
-      label: Post-delivery fate
+      label: Durable home
       description: >-
-        State the spec's post-delivery fate: None, or name the surviving invariant
-        and the durable document it moves to. The change spec expires with the PR.
-      placeholder: None, or invariant name and durable document link
+        The doc that absorbs any settled rule in the same PR, or None. The change
+        spec expires with the PR.
+      placeholder: None, or a link to the durable document
     validations:
       required: false
 
@@ -64,8 +63,8 @@ body:
       label: Acceptance evidence
       description: >-
         For a small change, list two to five criteria. Tag each with [test],
-        [command output], [review] or [observation]. Risky work keeps a reviewer
-        check outside the writer's context; do not publish that check here.
+        [command], [capture] or [review]. Risky work keeps a reviewer check
+        outside the writer's context; do not publish that check here.
     validations:
       required: true
 
@@ -75,7 +74,7 @@ body:
       label: Visual (optional)
       description: >-
         Add a Mermaid diagram or table wherever it makes the problem, flow, state
-        or dependencies faster to grasp than prose — GitHub renders Mermaid.
+        or dependencies faster to grasp than prose. GitHub renders Mermaid.
         Strong candidates: multi-step flows and roundtrips, state machines,
         decision trees for open decisions, cross-issue dependencies. Skip it only
         when prose is already clear; a diagram that does not save the reader time

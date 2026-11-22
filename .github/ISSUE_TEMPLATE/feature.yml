@@ -5,8 +5,7 @@ body:
   - type: markdown
     attributes:
       value: >-
-        Proposing a new Agent Skill? Use the skill proposal form instead; it asks
-        for the promotion bar in MAINTAINING.md.
+        Proposing a new Agent Skill? Use the skill proposal form instead.
 
 
         This form asks for the problem, not the solution. A well-described
@@ -49,11 +48,11 @@ body:
       description: A guess is fine. It routes the issue; it does not commit anyone to a design.
       options:
         - A skill
-        - The lifecycle or its gates (GLOBAL-AGENTS.md)
-        - Risk, authority or review policy
+        - The global agent rules (GLOBAL-AGENTS.md)
+        - Boundaries, authority or review policy
         - Routing and models
-        - Installer or scripts
-        - Agent Fabric runtime
+        - CLI, installer or scripts
+        - Fabric coordination
         - Documentation
         - Not sure
     validations:
@@ -64,9 +63,9 @@ body:
     attributes:
       label: Possible direction
       description: >-
-        Optional, and only if you have one. If you already know it changes
-        authority, a gate or a contract, say so: those need an approved spec
-        before any code.
+        Optional, and only if you have one. If you already know it changes a
+        hard boundary or a consumer contract, say so: those need an approved
+        spec before any code.
     validations:
       required: false
 
@@ -76,7 +75,7 @@ body:
       label: Visual (optional)
       description: >-
         Add a Mermaid diagram or table wherever it makes the problem, the flow
-        that broke, or the surfaces involved faster to grasp than prose — GitHub
+        that broke, or the surfaces involved faster to grasp than prose. GitHub
         renders Mermaid. Skip it only when prose is already clear; a diagram that
         does not save the reader time is noise.
     validations:
@@ -87,7 +86,7 @@ body:
     attributes:
       label: Before you file
       options:
-        - label: I understand that changes to authority, gates or contracts need an approved spec first.
+        - label: I understand that changes to a hard boundary or a consumer contract need an approved spec first.
           required: true
         - label: This is not a security vulnerability. Those go through SECURITY.md.
           required: true

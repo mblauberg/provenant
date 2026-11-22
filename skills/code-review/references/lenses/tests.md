@@ -4,8 +4,8 @@ Judge each test by the invariant it proves and the defect it would catch. Tests
 should survive behaviour-preserving changes. Prefer invariants and property-style checks at
 public boundaries over rigid tests, example snapshots or exact string/count
 assertions.
-Use the test-design judgement and boundary references for the full standard.
-Cite the exact command and result used for anything you ran.
+The `test-design` skill holds the full standard. Cite the exact command and
+result used for anything you ran.
 
 ## Findings
 
