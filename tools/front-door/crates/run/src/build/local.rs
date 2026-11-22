@@ -361,7 +361,7 @@ fn execute_configured(
     outcome.exit = exits.last().copied().flatten();
     let elapsed_ms = elapsed_ms(&clock, started_micros);
     outcome.wall_ms = elapsed_ms;
-    outcome.finished_unix_ms = super::ledger::now_unix_ms();
+    outcome.finished_unix_ms = provenant_os::clock::now_unix_millis();
     Ok(JobResult {
         outcome,
         step_exits: exits,
@@ -519,7 +519,7 @@ fn finish(
     _captured: Option<Captured>,
 ) -> JobOutcome {
     outcome.wall_ms = elapsed_ms;
-    outcome.finished_unix_ms = super::ledger::now_unix_ms();
+    outcome.finished_unix_ms = provenant_os::clock::now_unix_millis();
     outcome.exit = exit;
     outcome.clone()
 }

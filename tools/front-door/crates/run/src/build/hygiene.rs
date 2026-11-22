@@ -729,7 +729,7 @@ fn base_checkout(project: &Path, git: &Path, commit: &str) -> Option<BaseCheckou
     let path = std::env::temp_dir().join(format!(
         "provenant-maintenance-{}-{}",
         std::process::id(),
-        super::ledger::now_unix_ms()
+        provenant_os::clock::now_unix_millis()
     ));
     if path.exists() {
         return None;
@@ -897,7 +897,7 @@ pub fn maintain(state: &Path, home: &Path, project: &Path, now: SystemTime) -> M
         id: format!(
             "maintain-{}-{}",
             std::process::id(),
-            super::ledger::now_unix_ms()
+            provenant_os::clock::now_unix_millis()
         ),
         project_key: key.clone(),
         project: project.to_path_buf(),

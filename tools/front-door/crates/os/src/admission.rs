@@ -142,13 +142,6 @@ fn registered_lanes(state: &Path, class: &str) -> Vec<LaneRegistration> {
         .collect()
 }
 
-fn now_unix_seconds() -> u64 {
-    use provenant_core::Clock;
-    crate::clock::SystemClock::new()
-        .wall_now()
-        .map_or(0, |w| w.unix_seconds().max(0) as u64)
-}
-
 pub struct WaitGuard {
     _guard: HostWaitGuard,
 }
@@ -176,7 +169,7 @@ pub fn mark_waiting_with_command(
     let info = WaitInfo {
         class: class.to_string(),
         pid,
-        start_unix_seconds: now_unix_seconds(),
+        start_unix_seconds: crate::clock::now_unix_seconds(),
         attempt_id: attempt_id.map(str::to_string),
         lane: None,
         command,
@@ -215,7 +208,7 @@ pub fn mark_held_with_command(
         class: class.to_string(),
         slot,
         pid,
-        start_unix_seconds: now_unix_seconds(),
+        start_unix_seconds: crate::clock::now_unix_seconds(),
         attempt_id: attempt_id.map(str::to_string),
         lane: None,
         command,
@@ -313,7 +306,7 @@ pub fn mark_host_waiting_with_command(
     let info = WaitInfo {
         class: class.to_string(),
         pid,
-        start_unix_seconds: now_unix_seconds(),
+        start_unix_seconds: crate::clock::now_unix_seconds(),
         attempt_id: None,
         lane: None,
         command,
@@ -365,7 +358,7 @@ pub fn mark_host_held_with_command(
         class: class.to_string(),
         slot,
         pid,
-        start_unix_seconds: now_unix_seconds(),
+        start_unix_seconds: crate::clock::now_unix_seconds(),
         attempt_id: None,
         lane: None,
         command,

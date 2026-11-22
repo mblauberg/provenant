@@ -111,7 +111,7 @@ impl SlotRecord {
         let tmp = parent.join(format!(
             ".slot-{}-{}-{}.tmp",
             std::process::id(),
-            super::ledger::now_unix_ms(),
+            provenant_os::clock::now_unix_millis(),
             TEMP_ID.fetch_add(1, Ordering::Relaxed)
         ));
         let result = (|| {
@@ -252,12 +252,12 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
             schema: 1,
             project_key: job.project_key.clone(),
             index,
-            created_unix_ms: super::ledger::now_unix_ms(),
+            created_unix_ms: provenant_os::clock::now_unix_millis(),
             ..SlotRecord::default()
         });
     ensure_slot_repo(&paths, &store)?;
     let mut clock_reset = false;
-    match super::hygiene::before_job(&mut record, super::ledger::now_unix_ms()) {
+    match super::hygiene::before_job(&mut record, provenant_os::clock::now_unix_millis()) {
         super::hygiene::PreJob::Proceed => {}
         super::hygiene::PreJob::LightReset => {
             super::hygiene::light_reset(&paths, &custody).map_err(|_| Exception::PoolUnavailable)?
@@ -301,7 +301,7 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
         job.verify_base.as_ref(),
         clean.value,
     ) {
-        let now = super::ledger::now_unix_ms();
+        let now = provenant_os::clock::now_unix_millis();
         let mut failed_sync = super::outcome_seed(job, context, now);
         failed_sync.infra = Some(super::InfraKind::Git);
         failed_sync.warnings.push(detail.clone());
@@ -492,7 +492,8 @@ pub fn execute_staged(
     mut staged: PreparedSlot,
 ) -> Result<SlotExecution, Exception> {
     let mut owned_job = job_without_prelude(job);
-    let mut outcome = super::outcome_seed(&owned_job, context, super::ledger::now_unix_ms());
+    let mut outcome =
+        super::outcome_seed(&owned_job, context, provenant_os::clock::now_unix_millis());
     outcome.warnings.append(&mut staged.warnings);
     if staged.clock_reset {
         outcome.infra = Some(super::InfraKind::Clock);
@@ -646,7 +647,7 @@ pub fn execute_staged(
         );
     }
     outcome.slot_changes = changes.clone();
-    outcome.finished_unix_ms = super::ledger::now_unix_ms();
+    outcome.finished_unix_ms = provenant_os::clock::now_unix_millis();
     staged.record.last_job = Some(SlotJobMark {
         snapshot: staged.snapshot.commit.clone(),
         base: staged.snapshot.base.clone(),
@@ -709,7 +710,8 @@ pub fn execute(job: &Job, context: &RunContext, index: u64) -> Result<SlotExecut
         Ok(staged) => execute_staged(job, context, index, staged),
         Err(stage_failure) => {
             let mut local_job = job_without_prelude(job);
-            let mut outcome = super::outcome_seed(job, context, super::ledger::now_unix_ms());
+            let mut outcome =
+                super::outcome_seed(job, context, provenant_os::clock::now_unix_millis());
             outcome.exception = Some(stage_failure.exception);
             outcome.infra = stage_failure.infra;
             outcome.reset = stage_failure.reset;

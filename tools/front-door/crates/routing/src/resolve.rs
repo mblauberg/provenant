@@ -55,7 +55,7 @@ pub struct RoutingContext<'a> {
 }
 impl RoutingContext<'_> {
     fn now_seconds(&self) -> i64 {
-        self.now.as_timestamp().as_second()
+        self.now.unix_seconds()
     }
     fn validate(&self) -> Result<(), RoutingError> {
         if self.policy_account_hint.is_some_and(|hint| {

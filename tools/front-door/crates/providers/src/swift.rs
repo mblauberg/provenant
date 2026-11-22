@@ -148,7 +148,7 @@ impl SwiftToolchain {
             if !path.is_absolute() || text.chars().any(char::is_control) {
                 return Err(crate::ProviderError::InvalidPath);
             }
-            Ok(crate::lane::shell_quote(text))
+            Ok(provenant_os::shell::quote(text))
         };
         let developer = quote(&self.developer)?;
         let swift = quote(&self.swift)?;

@@ -1,4 +1,5 @@
 use super::{LandingError, model::*};
+use provenant_os::fs::{Directory, PublishMode as FsPublishMode};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -37,7 +38,7 @@ pub fn write_approval_carry(
     );
     let bytes =
         serde_json::to_vec_pretty(receipt).map_err(|e| failed("encode approval carry", e))?;
-    atomic_write(&carry_dir(state).join(name), &bytes)
+    write_publication(&carry_dir(state).join(name), &bytes)
 }
 
 pub fn read_approval_carry(
@@ -168,36 +169,21 @@ fn receipt_dir(state: &Path) -> PathBuf {
     state.join("landing").join("receipts")
 }
 
-/// Write `bytes` to `path` through a synced sibling file and a rename.
-pub(in crate::pr) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), LandingError> {
-    use std::io::Write;
+/// Publish `bytes` at `path` through the directory-owned staged writer.
+pub(in crate::pr) fn write_publication(path: &Path, bytes: &[u8]) -> Result<(), LandingError> {
     let parent = path
         .parent()
         .ok_or_else(|| LandingError::Failed("receipt path has no parent".into()))?;
     std::fs::create_dir_all(parent).map_err(|e| failed("create state directory", e))?;
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let staging = parent.join(format!(
-        ".stage-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    let written = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&staging)
-        .and_then(|mut file| {
-            file.write_all(bytes)?;
-            file.sync_all()
-        })
-        .and_then(|()| std::fs::rename(&staging, path));
-    if let Err(error) = written {
-        let _ = std::fs::remove_file(&staging);
-        return Err(failed("publish record", error));
-    }
-    if let Ok(dir) = std::fs::File::open(parent) {
-        let _ = dir.sync_all();
-    }
-    Ok(())
+    let directory =
+        Directory::open_anchor(parent).map_err(|e| failed("open state directory", e))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| LandingError::Failed("receipt path has no file name".into()))?;
+    directory
+        .atomic_write(name, ".stage-", bytes, FsPublishMode::Replace)
+        .and_then(|publication| publication.require_durable())
+        .map_err(|error| failed("publish record", error))
 }
 
 /// Persist a receipt, including approved-to-landed mappings and shadow decisions.
@@ -207,7 +193,7 @@ pub(in crate::pr) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), Landi
 pub fn write_receipt(path: &Path, receipt: &LandingReceipt) -> Result<(), LandingError> {
     let path = receipt_path(path, &receipt.candidate, receipt.shadow)?;
     let bytes = serde_json::to_vec_pretty(receipt).map_err(|e| failed("encode receipt", e))?;
-    atomic_write(&path, &bytes)
+    write_publication(&path, &bytes)
 }
 
 /// Resolve the contained path for a candidate receipt without exposing its filename format.
@@ -258,7 +244,7 @@ pub fn write_run_summary(
     );
     let value = serde_json::json!({"shadow": shadow, "outcomes": report.outcomes, "receipts": report.receipts, "warnings": report.warnings, "local_follow_up": report.local_steps});
     let bytes = serde_json::to_vec_pretty(&value).map_err(|e| failed("encode run summary", e))?;
-    atomic_write(&receipt_dir(state).join(name), &bytes)
+    write_publication(&receipt_dir(state).join(name), &bytes)
 }
 
 pub fn pending_path(
@@ -285,7 +271,7 @@ pub fn record_pending(state: &Path, attempt: &PendingAttempt) -> Result<(), Land
         ));
     }
     let bytes = serde_json::to_vec_pretty(attempt).map_err(|e| failed("encode pending", e))?;
-    atomic_write(
+    write_publication(
         &pending_path(state, &attempt.repository, &attempt.candidate)?,
         &bytes,
     )

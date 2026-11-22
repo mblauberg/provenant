@@ -407,7 +407,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
         id: format!(
             "verify-{}-{}",
             std::process::id(),
-            build::ledger::now_unix_ms()
+            provenant_os::clock::now_unix_millis()
         ),
         project_key: context.project_key.clone(),
         project: context.project.clone(),
@@ -657,7 +657,7 @@ impl DetachedCheckout {
             "{purpose}-{}-{}-{}",
             &commit[..commit.len().min(12)],
             std::process::id(),
-            build::ledger::now_unix_ms()
+            provenant_os::clock::now_unix_millis()
         );
         let path = project.join(
             ports

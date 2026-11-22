@@ -4,6 +4,7 @@ use provenant_core::{Clock, Roots};
 use provenant_os::{
     exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
     fs::Directory,
+    shell::quote_portable,
     sys::hook_io,
 };
 use provenant_providers::identity::RegisteredAccount;
@@ -127,36 +128,6 @@ fn cached(roots: &Roots, account: &RegisteredAccount) -> Option<QuotaSnapshot> {
     }
     record.snapshot
 }
-fn quote(text: &str) -> String {
-    if text.is_empty() {
-        return "''".into();
-    }
-    // Fish reads a backslash inside single quotes as an escape, so an apostrophe
-    // and a backslash each take a double-quoted form, which sh, bash, zsh and
-    // fish all read literally. Empty parts are skipped so no two single quotes
-    // are adjacent (zsh RC_QUOTES).
-    let mut quoted = String::new();
-    let mut plain = String::new();
-    for c in text.chars() {
-        let literal = match c {
-            '\'' => "\"'\"",
-            '\\' => "\"\\\\\"",
-            _ => {
-                plain.push(c);
-                continue;
-            }
-        };
-        if !plain.is_empty() {
-            quoted.push_str(&format!("'{plain}'"));
-            plain.clear();
-        }
-        quoted.push_str(literal);
-    }
-    if !plain.is_empty() {
-        quoted.push_str(&format!("'{plain}'"));
-    }
-    quoted
-}
 fn terminal_path(path: &Path) -> Result<&str, Error> {
     path.to_str()
         .filter(|text| !text.chars().any(char::is_control))
@@ -202,7 +173,7 @@ fn command_with_executable(
     let hook = |leaf: &str| -> Result<String, Error> {
         Ok(format!(
             "{} hook claude {leaf}",
-            quote(terminal_path(executable)?)
+            quote_portable(terminal_path(executable)?)
         ))
     };
     let settings = json!({"hooks":{
@@ -216,15 +187,15 @@ fn command_with_executable(
     );
     let script = format!(
         "cd {} && CLAUDE_CONFIG_DIR={} PROVENANT_STATE_DIR={} claude --settings {} {}",
-        quote(terminal_path(&context.cwd)?),
-        quote(terminal_path(target.directory())?),
-        quote(terminal_path(context.roots.state.as_path())?),
-        quote(&settings.to_string()),
-        quote(&prompt)
+        quote_portable(terminal_path(&context.cwd)?),
+        quote_portable(terminal_path(target.directory())?),
+        quote_portable(terminal_path(context.roots.state.as_path())?),
+        quote_portable(&settings.to_string()),
+        quote_portable(&prompt)
     );
     // Herdr types this into the pane's login shell, which may be fish, so the
     // POSIX script is handed to /bin/sh as one quoted argument.
-    Ok(format!("/bin/sh -c {}", quote(&script)))
+    Ok(format!("/bin/sh -c {}", quote_portable(&script)))
 }
 fn execute_herdr(args: &[OsString]) -> Result<Value, Error> {
     let argv = std::iter::once(OsString::from("herdr"))
@@ -1252,7 +1223,7 @@ mod tests {
                 hook,
                 format!(
                     "{} hook claude chair-start",
-                    super::quote(executable.to_str().ok_or("executable")?)
+                    super::quote_portable(executable.to_str().ok_or("executable")?)
                 )
             );
             assert_eq!(
@@ -1260,7 +1231,7 @@ mod tests {
                 Some(
                     format!(
                         "{} hook claude chair-stop",
-                        super::quote(executable.to_str().ok_or("executable")?)
+                        super::quote_portable(executable.to_str().ok_or("executable")?)
                     )
                     .as_str()
                 )
@@ -1293,12 +1264,12 @@ mod tests {
 
     #[test]
     fn chair_quote_encodes_apostrophes_and_backslashes() {
-        assert_eq!(super::quote("/a b/$x"), "'/a b/$x'");
-        assert_eq!(super::quote("/a'b"), "'/a'\"'\"'b'");
-        assert_eq!(super::quote("'a''"), "\"'\"'a'\"'\"\"'\"");
-        assert_eq!(super::quote(r"/a\b"), r#"'/a'"\\"'b'"#);
-        assert_eq!(super::quote(r"\"), r#""\\""#);
-        assert_eq!(super::quote(""), "''");
+        assert_eq!(super::quote_portable("/a b/$x"), "'/a b/$x'");
+        assert_eq!(super::quote_portable("/a'b"), "'/a'\"'\"'b'");
+        assert_eq!(super::quote_portable("'a''"), "\"'\"'a'\"'\"\"'\"");
+        assert_eq!(super::quote_portable(r"/a\b"), r#"'/a'"\\"'b'"#);
+        assert_eq!(super::quote_portable(r"\"), r#""\\""#);
+        assert_eq!(super::quote_portable(""), "''");
     }
 
     #[test]

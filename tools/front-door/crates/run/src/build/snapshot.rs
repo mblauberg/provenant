@@ -1,8 +1,8 @@
 //! Deterministic snapshots and negotiated transfer to the build store.
 use super::process::Command;
 use super::{BuildError, GitBinding, InfraKind, SnapshotSource};
+use provenant_os::shell::quote;
 use std::{
-    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
     process::Output,
@@ -85,12 +85,6 @@ fn bound(git: &GitBinding, worktree: &Path, index: &Path) -> Command {
     c.current_dir(worktree);
     c
 }
-fn quote(value: &OsStr) -> Result<String, BuildError> {
-    let value = value
-        .to_str()
-        .ok_or_else(|| error("non-UTF-8 Git upload-pack path"))?;
-    Ok(format!("'{}'", value.replace('\'', "'\\''")))
-}
 struct TempIndex(PathBuf);
 impl Drop for TempIndex {
     fn drop(&mut self) {
@@ -107,7 +101,7 @@ pub fn working_tree_commit(
     fs::create_dir_all(tmp).map_err(io_error)?;
     let seq = format!(
         "{}-{}-{}",
-        super::ledger::now_unix_ms(),
+        provenant_os::clock::now_unix_millis(),
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     );
@@ -176,7 +170,7 @@ pub fn create_in_slot(
     fs::create_dir_all(tmp).map_err(io_error)?;
     let seq = format!(
         "{}-{}-{}",
-        super::ledger::now_unix_ms(),
+        provenant_os::clock::now_unix_millis(),
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     );
@@ -211,7 +205,12 @@ pub fn create_in_slot(
     if let Some(objects) = object_dir {
         upload.push_str(&format!(
             " GIT_OBJECT_DIRECTORY={}",
-            quote(objects.as_os_str())?
+            quote(
+                objects
+                    .as_os_str()
+                    .to_str()
+                    .ok_or_else(|| error("non-UTF-8 Git upload-pack path"))?,
+            )
         ));
         let alternate_file = objects.join("info/alternates");
         let alternates = match fs::read_to_string(alternate_file) {
@@ -234,13 +233,22 @@ pub fn create_in_slot(
             let joined = std::env::join_paths(paths).map_err(error)?;
             upload.push_str(&format!(
                 " GIT_ALTERNATE_OBJECT_DIRECTORIES={}",
-                quote(&joined)?
+                quote(
+                    joined
+                        .to_str()
+                        .ok_or_else(|| error("non-UTF-8 Git upload-pack path"))?,
+                )
             ));
         }
     }
     upload.push_str(&format!(
         " {} -c uploadpack.allowAnySHA1InWant=true upload-pack",
-        quote(git_bin.as_os_str())?
+        quote(
+            git_bin
+                .as_os_str()
+                .to_str()
+                .ok_or_else(|| error("non-UTF-8 Git upload-pack path"))?,
+        )
     ));
     let mut fetch = Command::new(&git_bin);
     clear_git(&mut fetch);

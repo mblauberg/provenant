@@ -319,10 +319,8 @@ fn recorded_evidence(journal: &Journal, now: u64) -> Option<String> {
 
 fn now_ms(clock: &dyn Clock) -> Result<u64> {
     clock
-        .wall_now()
-        .ok()
-        .and_then(|time| u64::try_from(time.unix_millis()).ok())
-        .ok_or(RunError::Admission(AdmissionError::Clock))
+        .try_unix_millis()
+        .map_err(|_| RunError::Admission(AdmissionError::Clock))
 }
 
 fn alive(owner: &ProcessIdentity, since_ms: u64, now_ms: u64) -> bool {

@@ -3,6 +3,8 @@
 //! The saved state is derived data in a file only hooks write. It grants no
 //! authority, and no autosave ever opens the chair's checkpoint for writing.
 
+use provenant_os::shell::quote;
+
 const AUTO_SAVED: &str = "Auto-saved: ";
 /// Most lines one section shows before it summarises the rest.
 const SECTION_LINES: usize = 8;
@@ -44,7 +46,7 @@ impl CommandPrefix {
             checkout: cwd
                 .to_str()
                 .filter(|s| !s.chars().any(char::is_control))
-                .map(shell_quote),
+                .map(quote),
             ..Self::default()
         };
         if let Some(state) = state_dir {
@@ -55,7 +57,7 @@ impl CommandPrefix {
             {
                 Some(text) => {
                     prefix.text.push_str(" --state-dir ");
-                    prefix.text.push_str(&shell_quote(text));
+                    prefix.text.push_str(&quote(text));
                 }
                 None => prefix.shown = false,
             }
@@ -98,11 +100,6 @@ impl CommandPrefix {
         }
     }
 }
-/// Single-quote `text` for a POSIX shell: a quote becomes `'\''`.
-fn shell_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
-}
-
 /// Strip what could forge a marker, a heading or terminal control output.
 pub fn clean(text: &str, limit: usize) -> String {
     let mut out = String::new();

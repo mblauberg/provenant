@@ -16,6 +16,7 @@ pub mod lane_ports;
 pub mod pid;
 pub mod provider_fence;
 pub mod scratch;
+pub mod shell;
 #[allow(unsafe_code, clippy::disallowed_methods)]
 pub mod sys;
 

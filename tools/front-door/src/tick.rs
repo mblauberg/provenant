@@ -745,7 +745,7 @@ fn schedule_build_hygiene(resolved: &crate::roots::Resolved) -> Vec<String> {
         settings.insert(key.clone(), resolved_settings);
         projects.push((path, key));
     }
-    let now_ms = provenant_run::build::ledger::now_unix_ms();
+    let now_ms = provenant_os::clock::now_unix_millis();
     let now = UNIX_EPOCH + Duration::from_millis(now_ms);
     let report = hygiene::gc_projects(&resolved.home, state, limit, now, |key| {
         settings.get(key).copied().unwrap_or(default)

@@ -415,7 +415,7 @@ fn run_with_admission(
     ctx: &RunContext,
     pinned: Option<provenant_os::admission::SlotGuard>,
 ) -> Result<JobResult, BuildError> {
-    let started = ledger::now_unix_ms();
+    let started = provenant_os::clock::now_unix_millis();
     let enqueued = started;
     let base = outcome_seed(&job, ctx, enqueued);
     let scratch = env_path(&job.env, "PROVENANT_ADMISSION_WAIT_DIR");
@@ -468,7 +468,7 @@ fn dispatch(
     outcome.strategy = ctx.strategy.name;
     outcome.base = job.verify_base.as_ref().map(|base| base.commit.clone());
     outcome.enqueued_unix_ms = started;
-    outcome.started_unix_ms = ledger::now_unix_ms();
+    outcome.started_unix_ms = provenant_os::clock::now_unix_millis();
 
     for warning in strategy(&ctx.strategy.port).warnings {
         warn_and_record(&mut outcome, &warning);
@@ -583,7 +583,8 @@ fn dispatch(
                                 }
                                 Err(error) => {
                                     outcome.infra = Some(InfraKind::SlotLayout);
-                                    outcome.finished_unix_ms = ledger::now_unix_ms();
+                                    outcome.finished_unix_ms =
+                                        provenant_os::clock::now_unix_millis();
                                     return Err((error, Box::new(outcome)));
                                 }
                             },
@@ -645,16 +646,16 @@ fn dispatch(
             }
             Err(BuildError::Cancelled) => {
                 outcome.cancelled = true;
-                outcome.finished_unix_ms = ledger::now_unix_ms();
+                outcome.finished_unix_ms = provenant_os::clock::now_unix_millis();
                 return Err((BuildError::Cancelled, Box::new(outcome)));
             }
             Err(BuildError::CancelledSignal(signal)) => {
                 outcome.cancelled = true;
-                outcome.finished_unix_ms = ledger::now_unix_ms();
+                outcome.finished_unix_ms = provenant_os::clock::now_unix_millis();
                 return Err((BuildError::CancelledSignal(signal), Box::new(outcome)));
             }
             Err(BuildError::Superseded) => {
-                outcome.finished_unix_ms = ledger::now_unix_ms();
+                outcome.finished_unix_ms = provenant_os::clock::now_unix_millis();
                 return Err((BuildError::Superseded, Box::new(outcome)));
             }
             Err(error) => {

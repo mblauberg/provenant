@@ -7,18 +7,8 @@ use super::*;
 use serde_json::Value;
 use std::borrow::Cow;
 
-const DIGEST_PREFIX: &str = "sha256:";
-
 fn prefix(id: &str) -> String {
     format!("graph-{id}.prompt-")
-}
-
-fn hex(prompt: &[u8]) -> String {
-    let digest = CanonicalV1::file_digest(prompt).to_string();
-    digest
-        .strip_prefix(DIGEST_PREFIX)
-        .unwrap_or(&digest)
-        .to_owned()
 }
 
 // The envelope owns this map, outside user documents and parameters. JSON
@@ -107,7 +97,7 @@ pub(super) fn externalise(
     for path in paths {
         let text = value.pointer_mut(&path).ok_or(JournalError::BadEnvelope)?;
         let prompt = text.as_str().ok_or(JournalError::BadEnvelope)?;
-        let digest = hex(prompt.as_bytes());
+        let digest = provenant_core::hex(CanonicalV1::file_digest(prompt.as_bytes()).bytes());
         let name: OsString = format!("{}{digest}", prefix(id)).into();
         if directory.metadata_at(&name, false).is_err() {
             directory
@@ -198,7 +188,7 @@ fn read_text(directory: &Directory, id: &str, digest: &str) -> Result<String, Jo
                 error.into()
             }
         })?;
-    if hex(&prompt) != digest {
+    if provenant_core::hex(CanonicalV1::file_digest(&prompt).bytes()) != digest {
         return Err(JournalError::BadDigest);
     }
     String::from_utf8(prompt).map_err(|_| JournalError::BadEnvelope)
@@ -296,7 +286,10 @@ mod tests {
             .unwrap();
         let stored = String::from_utf8(stored).unwrap();
         assert_eq!(stored, format!("deploy with {secret} now"));
-        assert_eq!(hex(stored.as_bytes()), digest);
+        assert_eq!(
+            provenant_core::hex(CanonicalV1::file_digest(stored.as_bytes()).bytes()),
+            digest
+        );
         let persisted = serde_json::to_vec(&value).unwrap();
         let restored = rehydrate(&directory, "g", &persisted).unwrap();
         let restored: Value = serde_json::from_slice(&restored).unwrap();
