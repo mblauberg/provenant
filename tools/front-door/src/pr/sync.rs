@@ -4,6 +4,7 @@ use crate::{emit, fail, roots};
 use provenant_cli::Globals;
 use provenant_config::ports::Request;
 use provenant_core::Clock;
+use provenant_os::shell::{quote, quote_if_needed};
 use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -86,7 +87,7 @@ fn read_repair(state: &Path, repository: &str, number: u64) -> Result<Option<Rep
 
 fn write_repair(state: &Path, operation: &RepairOperation) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(operation)?;
-    super::landing::receipt::atomic_write(
+    super::landing::receipt::write_publication(
         &repair_path(state, &operation.repository, operation.number),
         &bytes,
     )?;
@@ -484,8 +485,8 @@ fn sync_one(
                 );
                 let next = format!(
                     "provenant run implement --worktree {} --brief {}",
-                    shell_quote(&path),
-                    shell_quote_text(&brief)
+                    quote_if_needed(&path.to_string_lossy()),
+                    quote(&brief)
                 );
                 if !no_lane {
                     if let Some(held) = writer.take() {
@@ -608,22 +609,6 @@ fn launch_repair(
         .spawn()
         .map_err(|error| format!("failed to launch repair lane: {error}"))?;
     Ok(())
-}
-
-fn shell_quote(path: &Path) -> String {
-    let value = path.to_string_lossy();
-    if value
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte))
-    {
-        value.into_owned()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
-}
-
-fn shell_quote_text(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn branch_worktree(

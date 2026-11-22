@@ -1,5 +1,6 @@
 //! Native hook renderers and exact selector reconciliation.
 use crate::{HookRegistration, InstallError, Targets, managed::SelectorChange, splice};
+use provenant_os::shell::quote;
 use provenant_records::{
     ADAPTER_SPECS, Harness, HookAction, HookEvent, HookProtocol, HookTimeoutUnit, Limits,
     decode_jsonc,
@@ -104,9 +105,6 @@ fn hook_command(
     .map(quote)
     .collect::<Vec<_>>()
     .join(" "))
-}
-fn quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 fn hook_value(spec: &HookRegistration, binary: &Path, state: &Path) -> Result<Value, InstallError> {
     let mut value = json!({"type":"command", "command":hook_command(spec, binary, state)?});

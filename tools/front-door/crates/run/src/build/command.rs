@@ -13,7 +13,7 @@ pub(super) fn execute(
 ) -> Result<JobResult, super::DispatchFailure> {
     let Some(step) = job.steps.first() else {
         let error = super::BuildError::Config("build job has no command step".into());
-        outcome.finished_unix_ms = super::ledger::now_unix_ms();
+        outcome.finished_unix_ms = provenant_os::clock::now_unix_millis();
         return Err((error, Box::new(outcome)));
     };
     let command = &ctx.strategy.port.command;
@@ -22,12 +22,12 @@ pub(super) fn execute(
         outcome
             .warnings
             .push("repository build wrapper has no executable".into());
-        outcome.finished_unix_ms = super::ledger::now_unix_ms();
+        outcome.finished_unix_ms = provenant_os::clock::now_unix_millis();
         return Err((error, Box::new(outcome)));
     }
     if step.argv.is_empty() {
         let error = super::BuildError::Config("build step has empty argv".into());
-        outcome.finished_unix_ms = super::ledger::now_unix_ms();
+        outcome.finished_unix_ms = provenant_os::clock::now_unix_millis();
         return Err((error, Box::new(outcome)));
     }
     let wrapper: Vec<OsString> = command.argv.iter().map(OsString::from).collect();

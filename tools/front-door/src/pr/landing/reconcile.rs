@@ -5,17 +5,13 @@ use super::{
     ports::{AlarmSink, Forge, GateRunner, PullRequestState, Repo},
     postmerge, publish, receipt,
 };
+use provenant_core::Clock;
 use std::collections::BTreeMap;
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "age of a durable pending publication"
-)]
 pub(crate) fn now_seconds() -> Option<u64> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    provenant_os::clock::SystemClock::new()
+        .try_unix_seconds()
         .ok()
-        .map(|age| age.as_secs())
 }
 
 // A closed PR must never be published by a retry. A merged REST prefix may

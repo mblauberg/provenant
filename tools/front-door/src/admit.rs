@@ -478,7 +478,7 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
         let id = format!(
             "{:032x}",
             (u128::from(std::process::id()) << 96)
-                | u128::from(provenant_run::build::ledger::now_unix_ms())
+                | u128::from(provenant_os::clock::now_unix_millis())
         );
         let owner = get_env("PROVENANT_ATTEMPT_ID")
             .or_else(|| get_env("PROVENANT_PARENT_ATTEMPT_ID"))
@@ -659,7 +659,7 @@ fn run_build_job(
         provenant_config::BuildPriority::Train => Priority::Train,
         provenant_config::BuildPriority::Prewarm => Priority::Prewarm,
     };
-    let now_ms = provenant_run::build::ledger::now_unix_ms();
+    let now_ms = provenant_os::clock::now_unix_millis();
     let job_id = format!(
         "{:032x}",
         (u128::from(std::process::id()) << 96) | u128::from(now_ms)
