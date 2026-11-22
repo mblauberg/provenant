@@ -453,8 +453,17 @@
             adapter: &str,
             edit: impl FnOnce(&mut provenant_quota::AccountRecord),
         ) -> Result<(), Box<dyn Error>> {
+            self.seed_account(adapter, &format!("{adapter}-account"), edit)
+        }
+        /// Persist the record of one named account of a provider.
+        fn seed_account(
+            &self,
+            adapter: &str,
+            key: &str,
+            edit: impl FnOnce(&mut provenant_quota::AccountRecord),
+        ) -> Result<(), Box<dyn Error>> {
             use std::os::unix::fs::PermissionsExt;
-            let key = format!("{adapter}-account");
+            let key = key.to_owned();
             let scope = provenant_quota::AccountScope { extra: Default::default(),
                 adapter: adapter.into(),
                 account_key: key.clone(),
@@ -972,6 +981,46 @@
             }
         }
         assert!(redrawn > 0, "one ordering must pick the spent member first");
+        Ok(())
+    }
+
+    /// `route resolve --account` judges only the pinned account: a free second
+    /// account of the same provider cannot hide that the pinned one is spent.
+    #[test]
+    fn route_resolve_preview_judges_only_the_pinned_account() -> Result<(), Box<dyn Error>> {
+        use provenant_os::clock::SystemClock;
+        use super::{config::execute_in, Data, Route, RouteResolve};
+        let fixture = pair_fixture(exhaust, |_| {})?;
+        fixture.seed_account("claude", "claude-personal", |_| {})?;
+        let preview = |account: Option<&str>| -> Result<String, Box<dyn Error>> {
+            let query = RouteResolve {
+                writes: false,
+                account: account.map(Into::into),
+                name: None,
+                request: super::RouteRequest {
+                    read_heavy: false,
+                    model: None,
+                    route: Some("principal".into()),
+                    effort: None,
+                    confidential: false,
+                    fallback: vec![],
+                    exclude: vec![],
+                },
+            };
+            let Data::Resolved(preview) = execute_in(
+                &Route::Resolve(query),
+                &fixture.roots,
+                provenant_core::Clock::wall_now(&SystemClock::new())?,
+                &fixture._temp.path().join("home"),
+                &fixture._temp.path().join("checkout"),
+            )? else {
+                return Err("expected a resolved route preview".into());
+            };
+            Ok(preview.route.adapter.clone())
+        };
+        // The spent account is pinned: claude cannot serve, so codex is shown.
+        assert_eq!(preview(Some("claude-account"))?, "codex");
+        assert_eq!(preview(Some("claude/claude-account"))?, "codex");
         Ok(())
     }
 

@@ -870,7 +870,7 @@ pub(super) fn execute_in(
                     &request,
                     &facts,
                     super::admission::AdmissionOptions {
-                        account: None,
+                        account: query.account.as_deref(),
                         mode: super::admission::AdmitMode::CachedAccounts,
                         initial_excluded: &[],
                         narrow_accounts: false,

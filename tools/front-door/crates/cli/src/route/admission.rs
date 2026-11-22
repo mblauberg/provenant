@@ -164,6 +164,7 @@ fn judge(
     route: &ResolvedRoute,
     facts: &AdmissionFacts<'_>,
     mode: AdmitMode,
+    account: Option<&str>,
 ) -> Result<(), Refusal> {
     let model =
         ModelId::parse(&format!("{}/{}", route.adapter, route.model)).map_err(|error| Refusal {
@@ -195,6 +196,18 @@ fn judge(
                 .records
                 .iter()
                 .filter(|record| record.account.adapter == route.adapter)
+                // An account pin narrows the preview the way it narrows
+                // dispatch: another account's free allowance cannot mask a
+                // spent pinned one.
+                .filter(|record| {
+                    account.is_none_or(|pin| {
+                        let (adapter, name) = pin
+                            .split_once('/')
+                            .map_or((None, pin), |(adapter, name)| (Some(adapter), name));
+                        adapter.is_none_or(|adapter| adapter == record.account.adapter)
+                            && (record.account.account_key == name || record.account.label == name)
+                    })
+                })
             {
                 let mut probe = route.clone();
                 probe.account_key = Some(record.account.account_key.clone());
@@ -274,7 +287,7 @@ pub(crate) fn resolve_admitted(
         if excluded.contains(&model) {
             break;
         }
-        match judge(&route, facts, options.mode) {
+        match judge(&route, facts, options.mode, options.account) {
             Ok(()) => {
                 let admitted_model = model.clone();
                 let has_pool = route.pool_selection.is_some();
@@ -316,7 +329,7 @@ pub(crate) fn resolve_admitted(
                         if replacement_model == model
                             && replacement.account_key != route.account_key
                             && matches!(replacement.readiness, RouteReadiness::Ready { .. })
-                            && judge(&replacement, facts, options.mode).is_ok()
+                            && judge(&replacement, facts, options.mode, options.account).is_ok()
                         {
                             // The model is servable on another account, so it
                             // is not an exclusion: preparation would otherwise
