@@ -329,14 +329,6 @@ pub fn run(class: &str, command: &[OsString], env: &[(OsString, OsString)]) -> i
 
     let is_nested = nested_for_class(class, &env, &SystemProcessObserver);
 
-    // Local cargo warning if class == "build"
-    if class == "build" && !is_nested {
-        let local = Local::from_env(&env);
-        if let Some(msg) = local.warning(args) {
-            say(&format!("warning: {msg}"));
-        }
-    }
-
     // Disk & Memory checks with trim
     let requires_disk_check =
         class != "build" || subcommand(args).is_some_and(|cmd| GATED.contains(&cmd));
