@@ -2268,7 +2268,7 @@ fn preview_smoke(
     args: &cli::Upgrade,
 ) -> Result<Vec<u8>, String> {
     let project = smoke_project(runner, &std::env::temp_dir())?;
-    let binding = smoke_project_binding(state_dir, project.path())?;
+    let binding = smoke_project_binding(state_dir, project.path());
     let mut argv = vec![
         program.as_os_str().to_owned(),
         "--project".into(),
@@ -3142,6 +3142,8 @@ mod tests {
 
     #[test]
     fn smoke_cleanup_warnings_never_hide_or_replace_the_smoke_result() {
+        use super::*;
+
         // A passed smoke stays passed, but the cleanup warning is part of a
         // failed smoke's report instead of being swallowed.
         assert_eq!(
