@@ -885,14 +885,19 @@ pub(super) fn execute_in(
                         .map_err(super::EdgeError::from)
                     },
                 )?;
+                // With nothing to show, the search's own refusal is the answer: it
+                // names every exclusion, where a bare message would drop them.
+                let refusal = admitted.refusal;
                 let mut route = admitted
                     .candidates
                     .into_iter()
                     .next()
                     .or(admitted.last_refused)
-                    .ok_or(super::EdgeError::Admission(
-                        "no eligible pool member".into(),
-                    ))?;
+                    .ok_or_else(|| {
+                        refusal.unwrap_or_else(|| {
+                            super::EdgeError::Admission("no eligible pool member".into())
+                        })
+                    })?;
                 if matches!(request.choice, RouteChoice::Model(_))
                     && let Some(scope) = context.config.provider_scopes.get(&route.adapter)
                     && let Some(warning) = scope.pin_warning(&route.adapter, &route.model)
