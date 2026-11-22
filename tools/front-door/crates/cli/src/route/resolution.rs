@@ -214,7 +214,7 @@ pub(crate) fn recorded_model_readiness(
                 host: provenant_quota::LOCAL_HOST.into(),
                 adapter: entry.adapter,
                 account_key: entry.key.clone(),
-                route: model_route(&model),
+                route: model_route(model),
             };
             let mut observation = lookup(&scope);
             if observation.state != provenant_quota::ReadinessState::Unavailable {

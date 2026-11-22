@@ -143,7 +143,8 @@ struct Refusal {
     reason: RouteExclusionReason,
     detail: String,
     account: Option<(String, String)>,
-    error: EdgeError,
+    // Boxed: the refusal travels in every judged candidate's Result.
+    error: Box<EdgeError>,
 }
 
 fn judge(
@@ -156,7 +157,7 @@ fn judge(
             reason: RouteExclusionReason::UnverifiedModel,
             detail: error.to_string(),
             account: None,
-            error: EdgeError::from(error),
+            error: Box::new(EdgeError::from(error)),
         })?;
     let pools = facts.catalogue.admission_pools(&model);
     let admission = facts.admission(&pools);
@@ -172,7 +173,7 @@ fn judge(
                     .account_key
                     .clone()
                     .map(|key| (route.adapter.clone(), key)),
-                error: EdgeError::from(error),
+                error: Box::new(EdgeError::from(error)),
             })
         }
         AdmitMode::CachedAccounts => {
@@ -205,7 +206,9 @@ fn judge(
                 reason: RouteExclusionReason::AdmissionRefused,
                 detail: format!("{}/{}: {}", route.adapter, route.model, members.join("; ")),
                 account: None,
-                error: EdgeError::Quota(provenant_quota::QuotaError::Refused("provider readiness")),
+                error: Box::new(EdgeError::Quota(provenant_quota::QuotaError::Refused(
+                    "provider readiness",
+                ))),
             })
         }
     }
@@ -271,7 +274,7 @@ pub(crate) fn resolve_admitted(
                     reason: refusal.reason.clone(),
                     detail: refusal.detail.clone(),
                 });
-                result.refusal = Some(refusal.error);
+                result.refusal = Some(*refusal.error);
                 // A spent account leaves the model servable by another
                 // registered account. Unless the caller pinned one, try the
                 // same model there before giving it up.
