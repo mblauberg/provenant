@@ -1176,7 +1176,7 @@ mod tests {
         assert!(!super::valid_remote(&installed));
 
         let mut scoped: super::Report = serde_json::from_str(
-            r#"{"claude":[],"peer_agent":"stopped","login_accounts":[{"adapter":"fixture","label":"work","account_key":"key","reason":null,"last_success_unix_seconds":null,"login_expiry":null,"repair":null,"readiness":{"state":"unavailable","reason":"signed_out","observed_unix_seconds":1,"expires_unix_seconds":2,"reset_unix_seconds":null,"evidence_ref":"fixture","observed_scope":{"host":"local","adapter":"fixture","account_key":"key","route":"*"}}}]}"#,
+            r#"{"claude":[],"peer_agent":"stopped","login_accounts":[{"adapter":"fixture","label":"work","account_key":"key","reason":null,"last_success_unix_seconds":null,"login_expiry":null,"repair":null,"readiness":{"state":"unavailable","reason":"signed_out","observed_unix_seconds":1,"expires_unix_seconds":2,"reset_unix_seconds":null,"evidence_ref":"fixture","observed_scope":{"host":"local","adapter":"fixture","account_key":"key","route":{"kind":"account"}}}}]}"#,
         ).unwrap();
         assert!(super::valid_remote(&scoped));
         scoped.login_accounts[0]
