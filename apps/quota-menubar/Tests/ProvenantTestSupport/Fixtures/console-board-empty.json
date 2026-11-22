@@ -3,7 +3,7 @@
   "data": {
     "coverage": {
       "chairs": "unavailable",
-      "host": "7249da8d9cb98a25696aa69922cc1866",
+      "host": null,
       "nested_runs": "unavailable",
       "observations": "complete",
       "runs": "empty",
@@ -11,7 +11,7 @@
     },
     "filters": {
       "all": false,
-      "host": "7249da8d9cb98a25696aa69922cc1866",
+      "host": null,
       "limit": 50,
       "project_id": null,
       "state_root": "sha256:a0c127fa5b2286577ebc9893f3428c0c1f607c674ce4c2e36f5387e3f8e29d7d"

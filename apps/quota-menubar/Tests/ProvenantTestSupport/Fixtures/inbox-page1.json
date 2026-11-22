@@ -1,81 +1,66 @@
 {
- "schema_version": 1,
- "command": "inbox",
- "status": "ok",
- "data": {
-  "result": "listed",
-  "items": [
-   {
-    "schema_version": 1,
-    "id": "11111111111111111111111111111111",
-    "revision": 3,
-    "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "created_at": "2026-10-30T01:00:00Z",
-    "updated_at": "2026-10-30T01:05:00Z",
-    "project_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "project_key": "provenant",
-    "owner_host": "cccccccccccccccccccccccccccccccc",
-    "chair_session_id": "3f9c2a10d4e84b7f",
-    "chair_actor": "dddddddddddddddddddddddddddddddd",
-    "request": {
-     "kind": "decision",
-     "title": "Pick the storage layer",
-     "body": "Body of Pick the storage layer",
-     "blocking": true,
-     "options": [
+  "command": "inbox",
+  "data": {
+    "coverage": "local",
+    "items": [
       {
-       "id": "sqlite",
-       "label": "Sqlite",
-       "description": "Choose sqlite"
+        "answer_id": null,
+        "chair_actor": "dddddddddddddddddddddddddddddddd",
+        "chair_session_id": "3f9c2a10d4e84b7f",
+        "closure_reason": null,
+        "created_at": "2026-10-30T01:00:00.000000Z",
+        "id": "11111111111111111111111111111111",
+        "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "owner_host": "cccccccccccccccccccccccccccccccc",
+        "project_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "project_key": "provenant",
+        "request": {
+          "blocking": true,
+          "body": "Body of Pick the storage layer",
+          "kind": "decision",
+          "options": [],
+          "proceeding_with": null,
+          "recommended_option_id": null,
+          "title": "Pick the storage layer"
+        },
+        "revision": 3,
+        "schema_version": 1,
+        "state": "open",
+        "updated_at": "2026-10-30T01:05:00.000000Z"
       },
       {
-       "id": "files",
-       "label": "Files",
-       "description": "Choose files"
+        "answer_id": null,
+        "chair_actor": "dddddddddddddddddddddddddddddddd",
+        "chair_session_id": "3f9c2a10d4e84b7f",
+        "closure_reason": null,
+        "created_at": "2026-10-30T01:00:00.000000Z",
+        "id": "22222222222222222222222222222222",
+        "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "owner_host": "cccccccccccccccccccccccccccccccc",
+        "project_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "project_key": "provenant",
+        "request": {
+          "blocking": false,
+          "body": "Body of Assume UTC timestamps",
+          "kind": "assumption",
+          "options": [],
+          "proceeding_with": null,
+          "recommended_option_id": null,
+          "title": "Assume UTC timestamps"
+        },
+        "revision": 1,
+        "schema_version": 1,
+        "state": "open",
+        "updated_at": "2026-10-30T01:05:00.000000Z"
       }
-     ],
-     "recommended_option_id": "sqlite",
-     "proceeding_with": null,
-     "deadline": null,
-     "work": null,
-     "supersedes": null
-    },
-    "state": "open",
-    "answer_id": null,
-    "closure_reason": null
-   },
-   {
-    "schema_version": 1,
-    "id": "22222222222222222222222222222222",
-    "revision": 1,
-    "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "created_at": "2026-10-30T01:00:00Z",
-    "updated_at": "2026-10-30T01:05:00Z",
-    "project_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "project_key": "provenant",
-    "owner_host": "cccccccccccccccccccccccccccccccc",
-    "chair_session_id": "3f9c2a10d4e84b7f",
-    "chair_actor": "dddddddddddddddddddddddddddddddd",
-    "request": {
-     "kind": "assumption",
-     "title": "Assume UTC timestamps",
-     "body": "Body of Assume UTC timestamps",
-     "blocking": false,
-     "options": [],
-     "recommended_option_id": null,
-     "proceeding_with": "UTC",
-     "deadline": null,
-     "work": null,
-     "supersedes": null
-    },
-    "state": "open",
-    "answer_id": null,
-    "closure_reason": null
-   }
-  ],
-  "next_cursor": "CUR1",
-  "truncated": true,
-  "coverage": "local"
- },
- "error": null
+    ],
+    "next_cursor": "CUR1",
+    "peers": [],
+    "projects": {},
+    "result": "listed",
+    "truncated": true
+  },
+  "error": null,
+  "schema_version": 1,
+  "status": "ok"
 }
