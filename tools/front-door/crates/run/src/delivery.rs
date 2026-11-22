@@ -748,12 +748,10 @@ impl HostDeliveryContext {
                     options.stdout = StreamPolicy::Capture {
                         limit: stdout_limit(false, args),
                     };
-                    options.stderr = if stage == Stage::Prepare {
-                        StreamPolicy::Capture { limit: 4096 }
-                    } else {
-                        StreamPolicy::Tail {
-                            limit: DELIVERY_STDERR_LIMIT * 4,
-                        }
+                    // The fatal line is last, so every stage keeps a bounded
+                    // stderr tail as its cause, preparation included.
+                    options.stderr = StreamPolicy::Tail {
+                        limit: DELIVERY_STDERR_LIMIT * 4,
                     };
                     let executor = SystemExecutor::new(1).map_err(std::io::Error::other)?;
                     let fallback = provenant_core::CancelToken::new();
@@ -2125,14 +2123,11 @@ impl HostDeliveryContext {
             options.stdin = Some(input);
             options.stdout = StreamPolicy::Capture { limit };
             options.stop_on_output_limit = commit_log;
-            options.stderr = if stage == Stage::Prepare {
-                StreamPolicy::Capture { limit: 4096 }
-            } else {
-                // Redaction is off by default by owner decision, so every
-                // delivery stage keeps a bounded stderr tail as its cause.
-                StreamPolicy::Tail {
-                    limit: DELIVERY_STDERR_LIMIT * 4,
-                }
+            // The fatal line is last, so every stage keeps a bounded stderr
+            // tail as its cause, preparation included. Redaction is off by
+            // default by owner decision.
+            options.stderr = StreamPolicy::Tail {
+                limit: DELIVERY_STDERR_LIMIT * 4,
             };
             options
         };
