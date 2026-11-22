@@ -60,18 +60,7 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
                     .map_err(EdgeError::from)
                 },
             )?;
-            Ok(if admitted.candidates.is_empty() {
-                Some(
-                    admitted
-                        .exclusions
-                        .iter()
-                        .map(|exclusion| exclusion.detail.clone())
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                )
-            } else {
-                None
-            })
+            Ok(admitted.blocked_reason())
         },
     );
     match blocked {

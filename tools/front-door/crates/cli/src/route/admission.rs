@@ -62,6 +62,29 @@ impl AdmittedRoutes {
         }
     }
 
+    /// Why nothing can serve, or `None` when a candidate was admitted. Each
+    /// exclusion's detail is the reason; when nothing reached admission the
+    /// router's own error is, never an empty text.
+    pub(crate) fn blocked_reason(self) -> Option<String> {
+        if !self.candidates.is_empty() {
+            return None;
+        }
+        let details = self
+            .exclusions
+            .iter()
+            .map(|exclusion| exclusion.detail.clone())
+            .collect::<Vec<_>>()
+            .join("; ");
+        Some(if details.is_empty() {
+            self.refusal.map_or_else(
+                || "no eligible pool member".to_owned(),
+                |error| error.to_string(),
+            )
+        } else {
+            details
+        })
+    }
+
     /// Whether the first candidate has live provider readiness. Family
     /// relaxation uses this to avoid trading one unavailable route for another.
     pub(crate) fn first_ready(&self) -> bool {
@@ -380,4 +403,35 @@ pub(crate) fn resolve_admitted(
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_blocked_route_never_has_an_empty_reason() {
+        let router = AdmittedRoutes {
+            refusal: Some(EdgeError::Admission("router said no".into())),
+            ..Default::default()
+        };
+        assert_eq!(router.blocked_reason().as_deref(), Some("router said no"));
+        assert_eq!(
+            AdmittedRoutes::default().blocked_reason().as_deref(),
+            Some("no eligible pool member")
+        );
+        let excluded = AdmittedRoutes {
+            exclusions: vec![AdmissionExclusion {
+                model: ModelId::parse("codex/gpt-6-luna").expect("model"),
+                reason: RouteExclusionReason::Exhausted,
+                detail: "allowance exhausted".into(),
+            }],
+            refusal: Some(EdgeError::Admission("ignored".into())),
+            ..Default::default()
+        };
+        assert_eq!(
+            excluded.blocked_reason().as_deref(),
+            Some("allowance exhausted")
+        );
+    }
 }
