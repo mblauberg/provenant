@@ -2138,8 +2138,9 @@ fn verify_smoke_with(
 ) -> Result<String, String> {
     let project = smoke_project(runner, scratch)?;
     // Resolve the binding before the graph launches: the child binds this same
-    // canonical common directory, and the scratch may not survive the run.
-    let binding = smoke_project_binding(state_dir, project.path())?;
+    // canonical common directory, and the scratch may not survive the run. An
+    // unresolved binding is reported by cleanup, never hidden.
+    let binding = smoke_project_binding(state_dir, project.path());
     let program = program.as_os_str().to_owned();
     let graph = verify_graph_name();
     let mut run = vec![
@@ -2236,7 +2237,10 @@ fn verify_smoke_with(
         }
         Err(error) => Err(error),
     };
-    report_smoke_cleanup(outcome, forget_smoke_binding(state_dir, binding))
+    report_smoke_cleanup(
+        outcome,
+        binding.and_then(|project| forget_smoke_binding(state_dir, project)),
+    )
 }
 
 fn report_smoke_cleanup<T>(
@@ -2286,7 +2290,10 @@ fn preview_smoke(
         argv.extend(["--set".into(), setting.into()]);
     }
     let outcome = runner.execute(&argv, None, 1_048_576, 60);
-    report_smoke_cleanup(outcome, forget_smoke_binding(state_dir, binding))
+    report_smoke_cleanup(
+        outcome,
+        binding.and_then(|project| forget_smoke_binding(state_dir, project)),
+    )
 }
 
 impl UpgradeRunner {
@@ -3131,6 +3138,23 @@ mod tests {
             .expect_err("an unresolvable binding must be reported, never silent success");
         assert!(error.contains("cannot resolve"), "{error}");
         Ok(())
+    }
+
+    #[test]
+    fn smoke_cleanup_warnings_never_hide_or_replace_the_smoke_result() {
+        // A passed smoke stays passed, but the cleanup warning is part of a
+        // failed smoke's report instead of being swallowed.
+        assert_eq!(
+            report_smoke_cleanup(Ok("smoke ok".to_owned()), Err("missing record".into())),
+            Ok("smoke ok".to_owned())
+        );
+        let error = report_smoke_cleanup::<String>(
+            Err("node failed".to_owned()),
+            Err("missing record".into()),
+        )
+        .expect_err("a failed smoke stays failed");
+        assert!(error.contains("node failed"), "{error}");
+        assert!(error.contains("missing record"), "{error}");
     }
 
     #[test]
