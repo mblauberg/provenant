@@ -547,6 +547,8 @@ pub fn report(
     now: i64,
     path: String,
     policy: &provenant_records::policy::Policy,
+    freshness: &FreshnessPolicy,
+    readiness: &[ReadinessInput<'_>],
 ) -> Result<QuotaReport, QuotaError> {
     validate_inputs(records, detections)?;
     let selected = |id: &str| query.adapter.as_ref().is_none_or(|s| s == id);
@@ -568,145 +570,34 @@ pub fn report(
         let age = record.snapshot.as_ref().map(|s| {
             u64::try_from(now.saturating_sub(s.observed_unix_seconds).max(0)).unwrap_or(u64::MAX)
         });
-        let auth_required = record.last_error.is_some_and(ProbeFailure::needs_login)
-            || (!record
-                .auth_verified_unix_seconds
-                .is_some_and(|at| at <= now && now.saturating_sub(at) < 900)
-                && detections.iter().any(|d| {
-                    d.adapter == record.account.adapter
-                        && d.status == QuotaStatus::AuthRequired
-                        && d.accounts.as_ref().is_some_and(|a| a.len() == 1)
-                }));
-        let fresh = record.snapshot.as_ref().is_some_and(|s| {
-            s.observed_unix_seconds <= now
-                && record.last_error.is_none()
-                && !auth_required
-                && age.is_some_and(|a| {
-                    a < interval(policies, &record.account.adapter, Trigger::Timer, Power::Ac)
-                        .unwrap_or(0)
-                })
-        });
-        let auth_refresh_pending = record.auth_state.as_ref().is_some_and(|auth| {
-            auth.signed_in == Some(true)
-                && auth.refresh_pending
-                && auth.observed_unix_seconds.is_some_and(|at| {
-                    at <= now
-                        && (now.saturating_sub(at) as u64)
-                            < interval(policies, &record.account.adapter, Trigger::Timer, Power::Ac)
-                                .unwrap_or(0)
-                })
-        });
-        let live: Vec<_> = record
-            .refusals
+        let readiness_file = readiness
             .iter()
-            .filter(|refusal| {
-                refusal.observed_unix_seconds <= now
-                    && refusal
-                        .expires_unix_seconds()
-                        .is_ok_and(|expires| expires > now)
+            .find(|input| {
+                input.adapter == record.account.adapter
+                    && input.account_key == record.account.account_key
             })
-            .collect();
-        let refusals: Vec<_> = live
-            .iter()
-            .map(|refusal| crate::RefusalRow {
-                model: refusal.model.clone(),
-                pool: refusal.pool.clone(),
-                resets_at: refusal
-                    .resets_unix_seconds
-                    .filter(|reset| *reset > now)
-                    .and_then(|reset| jiff::Timestamp::from_second(reset).ok())
-                    .map(|timestamp| timestamp.to_string()),
-            })
-            .collect();
-        let free_pool = provenant_records::AdapterSpec::get(&record.account.adapter)
-            .filter(|spec| {
-                spec.is_free_plan(
-                    record
-                        .snapshot
-                        .as_ref()
-                        .and_then(|snapshot| snapshot.details.as_ref())
-                        .and_then(|details| details.plan.as_deref()),
-                )
-            })
-            .and_then(|spec| spec.free_pool);
-        let in_free = |refusal: &&crate::RefusalRow| {
-            free_pool.is_some_and(|pool| refusal.pool.as_deref() == Some(pool))
-        };
-        let free_refused = refusals.iter().any(|refusal| in_free(&refusal));
-        // A free-pool refusal or a spent plan usage limit makes the whole
-        // account read exhausted until the latest named reset.
-        // A newer reading that clears the hold clears it here too: the one
-        // rule is `Admission::refusal_holds`.
-        let admission = crate::Admission {
-            policy,
-            policies,
-            now_unix_seconds: now,
-            records,
+            .map(|input| input.file);
+        let effective = crate::effective_status(&crate::StatusInput {
+            record,
+            detections,
+            readiness: readiness_file,
             pools: &[],
-        };
-        let mut account_refusals = Vec::new();
-        for (refusal, row) in live.iter().zip(&refusals) {
-            if (in_free(&row) || row.pool.as_deref() == Some(ACCOUNT_ROUTE))
-                && admission.refusal_holds(&record.account.adapter, Some(record), refusal)?
-            {
-                account_refusals.push(row);
-            }
-        }
-        let account_refused = !account_refusals.is_empty();
-        let status = match &record.snapshot {
-            _ if record.last_error == Some(ProbeFailure::IsolatedKeychainUnavailable) => {
-                QuotaStatus::KeychainUnavailable
-            }
-            _ if account_refused => QuotaStatus::Exhausted,
-            _ if auth_required => QuotaStatus::AuthRequired,
-            // Preserve operational failures separately from the observed need
-            // for renewal. Old auth facts expire and never override sign-out.
-            _ if auth_refresh_pending
-                || (record.last_error == Some(ProbeFailure::RefreshDeferred)
-                    && record.last_attempt_unix_seconds.is_some_and(|at| {
-                        at <= now
-                            && (now.saturating_sub(at) as u64)
-                                < interval(
-                                    policies,
-                                    &record.account.adapter,
-                                    Trigger::Timer,
-                                    Power::Ac,
-                                )
-                                .unwrap_or(0)
-                    })) =>
-            {
-                QuotaStatus::RefreshPending
-            }
-            Some(snapshot) if fresh => snapshot.status,
-            Some(_) => QuotaStatus::Stale,
-            None if record.last_error == Some(ProbeFailure::Disabled) => QuotaStatus::Unsupported,
-            None => QuotaStatus::Unknown,
-        };
-        let reset_seconds = if account_refused {
-            account_refusals
-                .iter()
-                .map(|refusal| refusal.resets_at.as_deref())
-                .collect::<Option<Vec<_>>>()
-                .and_then(|resets| {
-                    resets
-                        .into_iter()
-                        .filter_map(|reset| reset.parse::<jiff::Timestamp>().ok())
-                        .max()
-                })
-                .map(|reset| reset.to_string())
-        } else {
-            None
-        };
+            now,
+            freshness,
+            policies,
+            policy,
+        })?;
         accounts.push(AccountRow {
             account: record.account.clone(),
             readiness: None,
             login_expiry: None,
             auth_state: record.auth_state.clone(),
             snapshot: record.snapshot.clone(),
-            status,
-            resets_at: reset_seconds,
-            refusals,
-            free_pool_refusal: free_refused,
+            status: effective.status,
+            resets_at: effective.resets_at,
+            refusals: effective.refusals,
+            free_pool_refusal: effective.free_pool_refusal,
+            models: effective.models,
             age_seconds: age,
             next_due_unix_seconds: next_due(policies, record, Trigger::Timer, Power::Ac)?
                 .map(|d| d.max(now)),
@@ -1018,7 +909,7 @@ mod tests {
         }];
         assert_eq!(
             next_due(&policies, &record, Trigger::Timer, Power::Ac).unwrap(),
-            Some(100 + FREE_POOL_RECHECK_SECONDS)
+            Some(100 + crate::DEFAULT_FRESHNESS.free_pool_recheck_seconds as i64)
         );
         let detection = Detection {
             adapter: account.adapter.clone(),
@@ -1045,7 +936,7 @@ mod tests {
             std::slice::from_ref(&record),
             std::slice::from_ref(&detection),
             &tick,
-            100 + FREE_POOL_RECHECK_SECONDS,
+            100 + crate::DEFAULT_FRESHNESS.free_pool_recheck_seconds as i64,
         )
         .unwrap()
         .batches;
@@ -2365,7 +2256,9 @@ mod zen_tests {
             observed_unix_seconds: 100,
             resets_unix_seconds: None,
         };
-        let expiry = prototype.expires_unix_seconds().unwrap();
+        let expiry = prototype
+            .expires_unix_seconds(&crate::DEFAULT_FRESHNESS)
+            .unwrap();
         for now in [expiry - 1, expiry] {
             for error in [None, Some(ProbeFailure::Auth)] {
                 let records: Vec<_> = spec

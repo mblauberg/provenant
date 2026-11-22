@@ -1,5 +1,9 @@
 use super::*;
 
+fn model_route(model: &ModelId) -> provenant_quota::ReadinessRoute {
+    provenant_quota::ReadinessRoute::model(model.adapter(), model.model())
+}
+
 fn explicit_provider_model_scopes(
     origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
 ) -> BTreeSet<String> {
@@ -210,12 +214,12 @@ pub(crate) fn recorded_model_readiness(
                 host: provenant_quota::LOCAL_HOST.into(),
                 adapter: entry.adapter,
                 account_key: entry.key.clone(),
-                route: model.as_str().into(),
+                route: model_route(&model),
             };
             let mut observation = lookup(&scope);
             if observation.state != provenant_quota::ReadinessState::Unavailable {
                 for pool in pools {
-                    scope.route.clone_from(pool);
+                    scope.route = provenant_quota::ReadinessRoute::pool(pool.clone());
                     let pool_observation = lookup(&scope);
                     if pool_observation.state == provenant_quota::ReadinessState::Unavailable {
                         observation = pool_observation;
@@ -524,6 +528,9 @@ pub(super) fn with_context<T>(
     let domains = resolved_config.domains;
     let policies = provenant_providers::scheduling_policies(&domains.quota, registry);
     let mut config = domains.routing;
+    let quota_config = crate::config_reads::read_for(roots, "quota")?;
+    config.freshness =
+        crate::quota::quota_freshness(&quota_config.origins, &quota_config.domains.quota);
     config.provider_scopes = provider_scopes;
     config.explicit_provider_model_scopes = explicit_provider_model_scopes;
     config.preference_sources = preference_sources;
@@ -981,6 +988,7 @@ pub(super) fn resolve_dispatch_excluding_family(
                 let pools = context.catalogue.admission_pools(&model);
                 let now_unix_seconds = context.now.as_timestamp().as_second();
                 let admission = provenant_quota::Admission {
+                    freshness: &provenant_quota::DEFAULT_FRESHNESS,
                     policy: &context.config.launch_policy,
                     policies,
                     now_unix_seconds,
@@ -1206,6 +1214,7 @@ pub(crate) fn check_dispatch_candidate(
     let records = crate::quota::read_cache(roots)?;
     let (records, policies) = account_evidence(&domains.quota, records, now, registry);
     provenant_quota::Admission {
+        freshness: &provenant_quota::DEFAULT_FRESHNESS,
         policy,
         policies: &policies,
         now_unix_seconds: now,
@@ -1308,6 +1317,7 @@ pub fn resolve_review_family(
                         let pools = context.catalogue.admission_pools(&model);
                         let now = context.now.as_timestamp().as_second();
                         let admission = provenant_quota::Admission {
+                            freshness: &provenant_quota::DEFAULT_FRESHNESS,
                             policy: &context.config.launch_policy,
                             policies,
                             now_unix_seconds: now,
@@ -1327,13 +1337,13 @@ pub fn resolve_review_family(
                                 host: provenant_quota::LOCAL_HOST.into(),
                                 adapter: selected.adapter.clone(),
                                 account_key: key.into(),
-                                route: model.as_str().into(),
+                                route: model_route(&model),
                             };
                             let lookup = |scope: &provenant_quota::ReadinessScope| context.readiness.map_or_else(provenant_quota::ReadinessRead::absent, |lookup| lookup(scope, now));
                             let mut observation = lookup(&scope);
                             if observation.state != provenant_quota::ReadinessState::Unavailable {
                                 for pool in &pools {
-                                    scope.route.clone_from(pool);
+                                    scope.route = provenant_quota::ReadinessRoute::pool(pool.clone());
                                     let pool_observation = lookup(&scope);
                                     if pool_observation.state == provenant_quota::ReadinessState::Unavailable {
                                         observation = pool_observation;

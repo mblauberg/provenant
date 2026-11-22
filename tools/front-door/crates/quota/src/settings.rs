@@ -28,7 +28,50 @@ pub struct Settings {
     /// Advance warning window; zero disables advance warnings.
     #[serde(default = "default_login_warning_seconds")]
     pub login_expiry_warning_seconds: u64,
+    /// The single owner of expiry and grace rules for quota evidence.
+    #[serde(default)]
+    pub freshness: FreshnessSettings,
 }
+/// Every freshness and grace rule, in seconds. Runtime consumers read these
+/// through [`crate::FreshnessPolicy`], which also carries their source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FreshnessSettings {
+    /// Maximum age of a quota snapshot when no per-adapter timer applies.
+    pub snapshot_seconds: u64,
+    /// How long a positive login verification suppresses an ambient sign-in detection.
+    pub login_verification_seconds: u64,
+    /// Maximum age of a snapshot used for an automatic chair switch.
+    pub chair_seconds: u64,
+    /// Grace after an availability observation expires, for decisions already in flight.
+    pub availability_grace_seconds: u64,
+    /// Refusal lifetime when the provider names no reset and the adapter has no override.
+    pub refusal_seconds: u64,
+    /// How long a live free-pool refusal may go without a cheap recheck.
+    pub free_pool_recheck_seconds: u64,
+    /// Shortest expiry synthesised for a readiness observation.
+    pub readiness_min_seconds: u64,
+}
+impl Default for FreshnessSettings {
+    fn default() -> Self {
+        Self {
+            snapshot_seconds: DEFAULT_SNAPSHOT_SECONDS,
+            login_verification_seconds: DEFAULT_LOGIN_VERIFICATION_SECONDS,
+            chair_seconds: DEFAULT_CHAIR_SECONDS,
+            availability_grace_seconds: DEFAULT_AVAILABILITY_GRACE_SECONDS,
+            refusal_seconds: DEFAULT_REFUSAL_SECONDS,
+            free_pool_recheck_seconds: DEFAULT_FREE_POOL_RECHECK_SECONDS,
+            readiness_min_seconds: DEFAULT_READINESS_MIN_SECONDS,
+        }
+    }
+}
+pub const DEFAULT_SNAPSHOT_SECONDS: u64 = 900;
+pub const DEFAULT_LOGIN_VERIFICATION_SECONDS: u64 = 900;
+pub const DEFAULT_CHAIR_SECONDS: u64 = 900;
+pub const DEFAULT_AVAILABILITY_GRACE_SECONDS: u64 = 60;
+pub const DEFAULT_REFUSAL_SECONDS: u64 = 3600;
+pub const DEFAULT_FREE_POOL_RECHECK_SECONDS: u64 = 600;
+pub const DEFAULT_READINESS_MIN_SECONDS: u64 = 1;
 /// Omitted intervals retain the provider default, in seconds.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -122,6 +165,7 @@ impl Default for Settings {
             calibration: BTreeMap::new(),
             history_max_bytes: default_history_max_bytes(),
             login_expiry_warning_seconds: default_login_warning_seconds(),
+            freshness: FreshnessSettings::default(),
         }
     }
 }
@@ -201,6 +245,38 @@ impl DomainConfig for Settings {
                 });
             }
         }
+        for (field, seconds) in [
+            (
+                "freshness.snapshot_seconds",
+                self.freshness.snapshot_seconds,
+            ),
+            (
+                "freshness.login_verification_seconds",
+                self.freshness.login_verification_seconds,
+            ),
+            ("freshness.chair_seconds", self.freshness.chair_seconds),
+            (
+                "freshness.availability_grace_seconds",
+                self.freshness.availability_grace_seconds,
+            ),
+            ("freshness.refusal_seconds", self.freshness.refusal_seconds),
+            (
+                "freshness.free_pool_recheck_seconds",
+                self.freshness.free_pool_recheck_seconds,
+            ),
+            (
+                "freshness.readiness_min_seconds",
+                self.freshness.readiness_min_seconds,
+            ),
+        ] {
+            if seconds == 0 || seconds > i64::MAX as u64 {
+                errors.push(SectionError {
+                    detail: None,
+                    field: field.into(),
+                    code: "interval",
+                });
+            }
+        }
         errors
     }
 }
@@ -229,10 +305,17 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("calibration.{account}.seven_day", 0, 100),
     FieldMetadata::int("calibration.{account}.thirty_day", 0, 100),
     FieldMetadata::new("calibration.{account}.expires", "string"),
+    FieldMetadata::int("freshness.snapshot_seconds", 1, i64::MAX),
+    FieldMetadata::int("freshness.login_verification_seconds", 1, i64::MAX),
+    FieldMetadata::int("freshness.chair_seconds", 1, i64::MAX),
+    FieldMetadata::int("freshness.availability_grace_seconds", 1, i64::MAX),
+    FieldMetadata::int("freshness.refusal_seconds", 1, i64::MAX),
+    FieldMetadata::int("freshness.free_pool_recheck_seconds", 1, i64::MAX),
+    FieldMetadata::int("freshness.readiness_min_seconds", 1, i64::MAX),
 ];
 pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     "quota",
-    |_| "max_parallel = 3\nwall_budget_seconds = 55\nrefresh_budget_seconds = 120\nrefresh_min_budget_seconds = 60\nhistory_max_bytes = 4194304\nlogin_expiry_warning_seconds = 864000\n\n[display]\nheadline = \"auto\"\nicon = \"most_constrained\"\n",
+    |_| "max_parallel = 3\nwall_budget_seconds = 55\nrefresh_budget_seconds = 120\nrefresh_min_budget_seconds = 60\nhistory_max_bytes = 4194304\nlogin_expiry_warning_seconds = 864000\n\n[display]\nheadline = \"auto\"\nicon = \"most_constrained\"\n\n[freshness]\nsnapshot_seconds = 900\nlogin_verification_seconds = 900\nchair_seconds = 900\navailability_grace_seconds = 60\nrefusal_seconds = 3600\nfree_pool_recheck_seconds = 600\nreadiness_min_seconds = 1\n",
 )
 .with_boundary_check(|error| error.code == "ceiling")
 .with_fields(FIELD_METADATA);

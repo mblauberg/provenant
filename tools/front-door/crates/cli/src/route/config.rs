@@ -948,6 +948,7 @@ pub(super) fn execute_in(
                     std::slice::from_ref(&model),
                 )?;
                 let admission = provenant_quota::Admission {
+                    freshness: &context.config.freshness,
                     policy: &context.config.launch_policy,
                     policies,
                     now_unix_seconds: now.unix_seconds(),
@@ -966,7 +967,10 @@ pub(super) fn execute_in(
                         availability_warning: None,
                         extra: Default::default(),
                         availability_ref: "preview".into(),
-                        expires_unix_seconds: now.unix_seconds().saturating_add(60),
+                        expires_unix_seconds: context
+                            .config
+                            .freshness
+                            .expired_availability_expires(now.unix_seconds()),
                     };
                     let result = admission.check(&candidate);
                     match &result {
@@ -991,7 +995,35 @@ pub(super) fn execute_in(
                             &pools,
                             now.unix_seconds(),
                         );
-                        let verdict = match (observation.snapshot.status, headroom) {
+                        let effective = records
+                            .iter()
+                            .find(|record| {
+                                record.account.adapter == route.adapter
+                                    && record.account.account_key == row.account_key
+                            })
+                            .and_then(|record| {
+                                let file = crate::quota::recorded_readiness_file(
+                                    roots.state.as_path(),
+                                    &route.adapter,
+                                    &row.account_key,
+                                )
+                                .ok()
+                                .flatten();
+                                provenant_quota::effective_status(&provenant_quota::StatusInput {
+                                    record,
+                                    detections: &[],
+                                    readiness: file.as_ref(),
+                                    pools: &pools,
+                                    now: now.unix_seconds(),
+                                    freshness: &context.config.freshness,
+                                    policies,
+                                    policy: &context.config.launch_policy,
+                                })
+                                .ok()
+                            });
+                        let status =
+                            effective.map_or(observation.snapshot.status, |value| value.status);
+                        let verdict = match (status, headroom) {
                             (QuotaStatus::AuthRequired, _) => Some((
                                 ReadinessState::Unavailable,
                                 Some(ReadinessReason::SignedOut),
@@ -1017,7 +1049,9 @@ pub(super) fn execute_in(
                                     host: provenant_quota::LOCAL_HOST.into(),
                                     adapter: route.adapter.clone(),
                                     account_key: row.account_key.clone(),
-                                    route: model.as_str().into(),
+                                    route: provenant_quota::ReadinessRoute::Model(
+                                        model.as_str().into(),
+                                    ),
                                 }),
                                 state,
                                 reason,

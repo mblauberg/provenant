@@ -585,10 +585,10 @@ fn valid_remote(report: &Report) -> bool {
                             .as_ref()
                             .is_some_and(|key| key == &scope.account_key)
                         && [
-                            &scope.host,
-                            &scope.adapter,
-                            &scope.account_key,
-                            &scope.route,
+                            scope.host.as_str(),
+                            scope.adapter.as_str(),
+                            scope.account_key.as_str(),
+                            scope.route.as_text(),
                         ]
                         .iter()
                         .all(|value| {
@@ -1083,6 +1083,7 @@ mod tests {
             status: provenant_quota::QuotaStatus::AuthRequired,
             resets_at: None,
             refusals: vec![],
+            models: Vec::new(),
             free_pool_refusal: false,
             age_seconds: Some(20),
             next_due_unix_seconds: None,

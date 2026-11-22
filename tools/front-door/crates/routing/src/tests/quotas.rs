@@ -408,6 +408,7 @@ fn go_fixture() -> Result<GoFixture, Box<dyn std::error::Error>> {
     use provenant_quota::{QuotaDetails, QuotaStatus, QuotaWindow};
     let catalogue = Catalogue::bundled()?;
     let mut config = RoutingConfig {
+        freshness: provenant_quota::FreshnessPolicy::default(),
         allow_unknown_partial_headroom: true,
         ..RoutingConfig::default()
     };
@@ -651,6 +652,7 @@ fn go_partial_calibration_is_advisory_to_routing_and_admission()
             record.snapshot = Some(observation.snapshot.clone());
             let records = [record];
             let admission = Admission {
+                freshness: &provenant_quota::DEFAULT_FRESHNESS,
                 policy: &provenant_records::policy::Policy::default(),
                 policies: &policy,
                 now_unix_seconds: 100,

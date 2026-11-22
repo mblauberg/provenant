@@ -319,6 +319,7 @@ fn switch(
         threshold,
         context.now(),
         automatic,
+        &provenant_quota::DEFAULT_FRESHNESS,
     );
     let (target, reason) = match decision {
         SwitchDecision::Stay => {

@@ -228,6 +228,7 @@ mod tests {
             schema_version: 1,
             generated_unix_seconds: 100,
             accounts: vec![AccountRow {
+                models: Vec::new(),
                 account: AccountScope {
                     extra: Default::default(),
                     adapter: "claude".into(),
@@ -277,7 +278,7 @@ mod tests {
                     host: provenant_quota::LOCAL_HOST.into(),
                     adapter: "claude".into(),
                     account_key: "key".into(),
-                    route: provenant_quota::ACCOUNT_ROUTE.into(),
+                    route: provenant_quota::ReadinessRoute::Account,
                 },
                 observed_unix_seconds: 100,
                 valid_until_unix_seconds: 1000,
@@ -357,7 +358,7 @@ mod tests {
                 host: provenant_quota::LOCAL_HOST.into(),
                 adapter: "claude".into(),
                 account_key: "key".into(),
-                route: provenant_quota::ACCOUNT_ROUTE.into(),
+                route: provenant_quota::ReadinessRoute::Account,
             },
             observed_unix_seconds: 100,
             valid_until_unix_seconds: 1000,

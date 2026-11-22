@@ -363,6 +363,7 @@ fn opus_advisory_uses_the_applied_pool_tier() -> Result<(), Box<dyn std::error::
             .ok_or_else(|| format!("missing writer advisory for {}", warn_model.as_str()))?;
         assert!(advisory.contains(warn_model.as_str()), "{advisory}");
         let quiet = RoutingConfig {
+            freshness: provenant_quota::FreshnessPolicy::default(),
             suppress_opus_writer_warning: true,
             ..RoutingConfig::default()
         };
@@ -632,6 +633,7 @@ fn named_routes_accept_unlisted_models_with_source_warning()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig {
+        freshness: provenant_quota::FreshnessPolicy::default(),
         routes: BTreeMap::from([(
             "review".into(),
             NamedRoute {
@@ -705,6 +707,7 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
     let catalogue = Catalogue::bundled()?;
     let model = ModelId::parse("codex/gpt-6.1-sol")?;
     let config = RoutingConfig {
+        freshness: provenant_quota::FreshnessPolicy::default(),
         routes: BTreeMap::from([(
             "review".into(),
             NamedRoute {

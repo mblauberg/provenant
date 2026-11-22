@@ -349,7 +349,7 @@ fn observation(
             host: provenant_quota::LOCAL_HOST.into(),
             adapter: adapter.into(),
             account_key: account.into(),
-            route: route.into(),
+            route: provenant_quota::ReadinessRoute::from_text(route),
         },
         state,
         reason,

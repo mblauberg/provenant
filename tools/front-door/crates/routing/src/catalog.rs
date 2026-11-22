@@ -303,6 +303,9 @@ pub struct RoutingConfig {
     pub model_choices: Vec<ModelChoiceOverride>,
     #[serde(skip)]
     pub preference_sources: BTreeMap<String, String>,
+    /// Expiry and grace rules shared with quota reporting and admission.
+    #[serde(skip)]
+    pub freshness: provenant_quota::FreshnessPolicy,
     pub capability_preferences: crate::CapabilityPreferences,
     pub outcome_priors: crate::OutcomePriorSettings,
     pub model_policy: crate::ModelPolicies,
@@ -435,6 +438,7 @@ impl Default for RoutingConfig {
                     model_exclusions: asset.model_exclusions,
                     model_choices: asset.model_choices,
                     preference_sources: BTreeMap::new(),
+                    freshness: provenant_quota::FreshnessPolicy::default(),
                     capability_preferences: asset.capability_preferences,
                     outcome_priors: asset.outcome_priors,
                     model_policy: asset.model_policy,
