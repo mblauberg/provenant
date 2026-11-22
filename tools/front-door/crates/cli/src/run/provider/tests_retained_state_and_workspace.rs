@@ -1089,7 +1089,8 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
         roots: Some(&roots),
         ..Default::default()
     };
-    let selected = protected_worktrees(&registry, &source, &git)?;
+    let (selected, warnings) = protected_worktrees(&registry, &source, &git)?;
+    assert!(warnings.is_empty());
     let inventory_for = |source: &Path| {
         provenant_confinement::permissions::MandatoryRoots::for_host(
             &roots,
@@ -1255,7 +1256,8 @@ fn launch_inventory_protects_each_registered_project_allocation_root()
         roots: Some(&roots),
         ..Default::default()
     };
-    let protected = protected_worktrees(&registry, &active_source, &git)?;
+    let (protected, warnings) = protected_worktrees(&registry, &active_source, &git)?;
+    assert!(warnings.is_empty());
     let inventory = provenant_confinement::permissions::MandatoryRoots::for_host(
         &roots,
         &home,
@@ -2723,5 +2725,99 @@ fn opencode_continuation_copies_a_linked_host_config_directory()
         "links inside the copied directory are kept as links"
     );
     assert_eq!(std::fs::read_to_string(copied.join("shared.json"))?, "shared");
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#host-inventory-problems-stay-local
+#[test]
+fn launch_inventory_skips_a_registered_project_whose_common_directory_is_gone()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let base = std::fs::canonicalize(temp.path())?;
+    let home = base.join("home");
+    let source = base.join("source");
+    let state = base.join("state");
+    for path in [&home, &source, &state] {
+        std::fs::create_dir(path)?;
+    }
+    std::fs::set_permissions(
+        &state,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )?;
+    let mut inputs = provenant_core::RootInputs::new(home, source.clone());
+    inputs.state_dir = Some(state);
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+
+    let project = base.join("deleted-project");
+    std::fs::create_dir(&project)?;
+    provenant_os::fixture::run_git(&project, &["init", "-q"])?;
+    provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(project.join(".git"))?,
+    )?;
+    std::fs::remove_dir_all(&project)?;
+
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let registry = Registry {
+        roots: Some(&roots),
+        ..Default::default()
+    };
+    let (protected, warnings) = protected_worktrees(&registry, &source, &git)?;
+    assert!(
+        warnings.is_empty(),
+        "a vanished project has nothing to protect: {warnings:?}"
+    );
+    assert!(
+        !protected
+            .iter()
+            .any(|grant| grant.path.starts_with(&project)),
+        "no grant may name the deleted project"
+    );
+    assert!(!binding.common_dir_present());
+    Ok(())
+}
+
+// Spec: docs/specs/supervisor.md#host-inventory-problems-stay-local
+#[test]
+fn launch_inventory_warns_and_protects_the_root_of_an_unreadable_registered_project()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let base = std::fs::canonicalize(temp.path())?;
+    let home = base.join("home");
+    let source = base.join("source");
+    let state = base.join("state");
+    for path in [&home, &source, &state] {
+        std::fs::create_dir(path)?;
+    }
+    std::fs::set_permissions(
+        &state,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )?;
+    let mut inputs = provenant_core::RootInputs::new(home, source.clone());
+    inputs.state_dir = Some(state);
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+
+    // A present .git directory with no repository inside: the binding is real,
+    // but Git cannot resolve its layout.
+    let project = base.join("unreadable-project");
+    let common = project.join(".git");
+    std::fs::create_dir_all(&common)?;
+    provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(&common)?)?;
+
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let registry = Registry {
+        roots: Some(&roots),
+        ..Default::default()
+    };
+    let (protected, warnings) = protected_worktrees(&registry, &source, &git)?;
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains(&common.to_string_lossy().to_string()));
+    assert!(
+        protected
+            .iter()
+            .any(|grant| grant.path == project && grant.scope == PathScope::Subtree),
+        "the unreadable project's root is protected: {protected:?}"
+    );
     Ok(())
 }

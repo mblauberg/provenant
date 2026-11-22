@@ -8,7 +8,7 @@ use provenant_confinement::{
         WorktreeRemove,
     },
 };
-use provenant_core::{CancelToken, Clock, DurationMicros, GitOid, WaitBudget};
+use provenant_core::{CancelToken, Clock, DurationMicros, GitOid, ProjectId, WaitBudget};
 use provenant_os::{
     clock::SystemClock,
     exec::SystemExecutor,
@@ -748,8 +748,18 @@ struct GcData {
     alerts: Vec<String>,
     unobserved_projects: Vec<PathBuf>,
     skipped_transient: Vec<PathBuf>,
+    /// Bindings retired (apply) or that would be retired (preview) because
+    /// their common directory has been gone past the idle lifetime.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    retired_projects: Vec<RetiredProject>,
     #[serde(skip_serializing_if = "Option::is_none")]
     notice: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct RetiredProject {
+    project: ProjectId,
+    common_dir: PathBuf,
 }
 
 fn gc_cache_bytes(data: &GcData) -> u64 {
@@ -1535,6 +1545,18 @@ fn gc_data_summary(data: &GcData) -> String {
     }
     for path in &data.skipped_transient {
         human.push_str(&format!("skipped transient project {}\n", path.display()));
+    }
+    let retired_verb = if data.report.dry_run {
+        "would retire"
+    } else {
+        "retired"
+    };
+    for project in &data.retired_projects {
+        human.push_str(&format!(
+            "{retired_verb} project binding {} at {}\n",
+            project.project,
+            project.common_dir.display()
+        ));
     }
     for process in &data.held_processes {
         human.push_str(&format!("{}\n", process.advisory()));
@@ -2440,6 +2462,26 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             "gc.sweep_budget=0 checkpoints immediately without collecting".into(),
         );
     }
+    let idle_seconds = command.idle.unwrap_or(
+        config
+            .gc
+            .idle_seconds()
+            .map_err(|_| Error::GcObservation("invalid idle duration"))?,
+    );
+    // A binding whose common directory is gone stops being a project once its
+    // last record has been idle for the same lifetime. Pressure sweeps leave
+    // the registry alone; previews name what a later apply retires.
+    let retired_projects: Vec<RetiredProject> = if command.pressure {
+        Vec::new()
+    } else {
+        provenant_config::retire_vanished_projects(&roots, idle_seconds, command.dry_run)?
+            .into_iter()
+            .map(|binding| RetiredProject {
+                project: binding.project_id(),
+                common_dir: binding.common_dir().to_owned(),
+            })
+            .collect()
+    };
     if initial_cursor
         .as_ref()
         .is_some_and(|cursor| cursor.class == "complete")
@@ -2453,6 +2495,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             sweep_budget_seconds,
             sweep_budget_source,
             sweep_warning: takeover_warning,
+            retired_projects,
             notice: Some(
                 "all retention classes had completed before the prior sweep reached its budget"
                     .into(),
@@ -2489,6 +2532,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 sweep_budget_seconds,
                 sweep_budget_source,
                 sweep_cursor: initial_cursor,
+                retired_projects: retired_projects.clone(),
                 notice: Some("background sweep skipped: free space is above gc.free_floor".into()),
                 ..Default::default()
             });
@@ -2540,6 +2584,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 sweep_warning,
                 sweep_stopped: true,
                 skipped_transient,
+                retired_projects: retired_projects.clone(),
                 notice: Some(
                     "sweep stopped at gc.sweep_budget during project registry discovery; next run resumes at the saved registry cursor".into(),
                 ),
@@ -2594,6 +2639,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                     sweep_stopped: true,
                     unobserved_projects,
                     skipped_transient,
+                    retired_projects: retired_projects.clone(),
                     notice: Some("sweep stopped at gc.sweep_budget during project discovery; next run resumes from the saved cursor".into()),
                     ..Default::default()
                 });
@@ -2602,6 +2648,10 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 Ok(provenant_config::GcProjectStatus::Git(binding)) => binding,
                 Ok(provenant_config::GcProjectStatus::Transient(path)) => {
                     skipped_transient.push(path);
+                    continue;
+                }
+                Ok(provenant_config::GcProjectStatus::Vanished { binding, .. }) => {
+                    skipped_transient.push(binding.common_dir().to_owned());
                     continue;
                 }
                 Ok(provenant_config::GcProjectStatus::Excluded) => continue,
@@ -2648,6 +2698,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                                 sweep_stopped: true,
                                 unobserved_projects,
                                 skipped_transient,
+                                retired_projects: retired_projects.clone(),
                                 notice: Some("sweep stopped at gc.sweep_budget during project discovery; next run resumes from the saved cursor".into()),
                                 ..Default::default()
                             });
@@ -2693,6 +2744,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                         sweep_stopped: true,
                         unobserved_projects,
                         skipped_transient,
+                        retired_projects: retired_projects.clone(),
                         notice: Some("sweep stopped at gc.sweep_budget during project discovery; next run resumes from the saved cursor".into()),
                         ..Default::default()
                     });
@@ -2729,6 +2781,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 sweep_budget_seconds,
                 sweep_budget_source,
                 skipped_transient,
+                retired_projects: retired_projects.clone(),
                 notice: command
                     .pressure
                     .then(|| "pressure collection skipped: transient project".into()),
@@ -2798,12 +2851,6 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         .map(Ok)
         .unwrap_or_else(|| config.gc.free_floor_bytes(roots.state.as_path()))
         .map_err(Error::DiskSpace)?;
-    let idle_seconds = command.idle.unwrap_or(
-        config
-            .gc
-            .idle_seconds()
-            .map_err(|_| Error::GcObservation("invalid idle duration"))?,
-    );
     let output_idle_seconds = idle_seconds;
     let lanes: Vec<_> = projects.iter().flat_map(|project| &project.lanes).collect();
     let now_ns = SystemClock
@@ -2885,6 +2932,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             held_incomplete,
             unobserved_projects,
             skipped_transient,
+            retired_projects,
             discard_archive_retention_seconds: config
                 .gc
                 .discard_archive_retention_seconds()

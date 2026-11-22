@@ -743,6 +743,15 @@ pub fn target_protection_for_launch_while(
                 protection.unobserved = true;
                 return protection;
             }
+            Ok(provenant_config::GcProjectStatus::Vanished { binding, .. }) => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: project {project_id} at {} is gone; preserving all targets",
+                    binding.common_dir().display()
+                );
+                protection.unobserved = true;
+                return protection;
+            }
             Ok(provenant_config::GcProjectStatus::Excluded) => {
                 let _ = writeln!(
                     std::io::stderr().lock(),

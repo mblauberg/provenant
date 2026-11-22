@@ -146,9 +146,13 @@ Redaction is owned by [supervisor](supervisor.md#disclosure-and-safe-git-evidenc
 Project binding directories must be owned by the current user and private from
 group and other users. A permission or ownership failure carries a local repair
 diagnostic; malformed bindings and filesystem errors keep their own causes, and
-lookup never repairs state. Peer status and events replace local paths in a
-terminal cause with a safe reason and remedy, taken from the event's own recorded
-cause, and disclose remote paths only through an approved anchor.
+lookup never repairs state. A binding record can be forgotten when its common
+directory is gone: the smoke verifier cleans up its scratch binding at exit, and
+GC retires a vanished binding once its record has been idle for `gc.idle`. The
+private host-project directory stays for a later bind. Peer status and events
+replace local paths in a terminal cause with a safe reason and remedy, taken
+from the event's own recorded cause, and disclose remote paths only through an
+approved anchor.
 - Why: errors need visible remedies without expanding authority.
 - Owner: `crates/config/src/`
 

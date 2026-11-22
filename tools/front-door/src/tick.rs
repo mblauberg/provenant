@@ -1739,6 +1739,10 @@ fn reap_projects(resolved: &crate::roots::Resolved) -> Result<&'static str, Stri
     for binding in
         provenant_config::registered_projects(&resolved.roots).map_err(|e| e.to_string())?
     {
+        // A binding whose common directory is gone has nothing to settle.
+        if !binding.common_dir_present() {
+            continue;
+        }
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
             let context = provenant_cli::fabric::Context::open_for_project(
                 resolved.roots.clone(),
@@ -2003,6 +2007,43 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(reaped.get());
+    }
+
+    // Spec: docs/specs/supervisor.md#tick-driven-settlement
+    #[test]
+    fn settlement_skips_a_binding_whose_common_directory_is_gone() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let project = root.join("project");
+        let state = root.join("state");
+        for path in [&home, &project, &state] {
+            std::fs::create_dir(path).unwrap();
+        }
+        provenant_os::fixture::private_state_dir(&state).unwrap();
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .unwrap();
+        provenant_os::fixture::run_git(&project, &["init", "-q"]).unwrap();
+        provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])
+            .unwrap();
+        provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(project.join(".git")).unwrap(),
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&project).unwrap();
+        let resolved = crate::roots::Resolved {
+            assets: root.join("assets"),
+            home,
+            project,
+            roots,
+            claude_config: None,
+            codex_home: None,
+        };
+        assert_eq!(reap_projects(&resolved).unwrap(), "queued");
     }
 
     /// Spec: docs/specs/run.md#cargo-target-seed

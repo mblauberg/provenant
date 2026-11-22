@@ -402,6 +402,10 @@ pub(crate) fn tick(resolved: &crate::roots::Resolved) -> Result<()> {
     }
     let mut errors = Vec::new();
     for binding in provenant_config::registered_projects(&resolved.roots)? {
+        // A binding whose common directory is gone has no forge to poll.
+        if !binding.common_dir_present() {
+            continue;
+        }
         let result = (|| -> Result<()> {
             let context = provenant_cli::fabric::Context::open_for_project(
                 resolved.roots.clone(),
@@ -1240,6 +1244,47 @@ mod tests {
             .unwrap();
         provenant_os::fixture::private_state_dir(roots.state.as_path()).unwrap();
         (temp, roots, ProjectId::from_bytes([34; 16]))
+    }
+
+    // Spec: docs/specs/lane-contracts.md#observation-events
+    #[test]
+    fn forge_tick_skips_a_binding_whose_common_directory_is_gone() -> Result<()> {
+        if crate::fabric::peer_tests::host_test(
+            "event_delivery::tests::forge_tick_skips_a_binding_whose_common_directory_is_gone",
+        )? {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let home = base.join("home");
+        let project = base.join("project");
+        let state = base.join("state");
+        for path in [&home, &project, &state] {
+            std::fs::create_dir(path)?;
+        }
+        provenant_os::fixture::private_state_dir(&state)?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .unwrap();
+        provenant_os::fixture::run_git(&project, &["init", "-q"])?;
+        provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
+        provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(project.join(".git"))?,
+        )?;
+        std::fs::remove_dir_all(&project)?;
+        let resolved = crate::roots::Resolved {
+            assets: base.join("assets"),
+            home,
+            project,
+            roots,
+            claude_config: None,
+            codex_home: None,
+        };
+        tick(&resolved)?;
+        Ok(())
     }
 
     #[test]

@@ -180,7 +180,7 @@ pub(super) fn prepare_command(
         return Err(error.into());
     }
     let github_roots = github_roots(registry);
-    let protected_worktrees = protected_worktrees(registry, &source, &git)?;
+    let (protected_worktrees, protection_warnings) = protected_worktrees(registry, &source, &git)?;
     let mut access = task.access.clone();
     // With no API endpoints, provider-only reach is network off.
     access.network.get_or_insert(
@@ -319,6 +319,7 @@ pub(super) fn prepare_command(
         super::preparation::image_input_warning(provider, &task.access.attachments)
             .into_iter()
             .collect::<Vec<_>>();
+    launch_warnings.extend(protection_warnings);
     launch_warnings.extend(super::preparation::ignore_file_warnings(
         provider,
         task,
