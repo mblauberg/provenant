@@ -37,8 +37,8 @@
           }
         },
         "role": "chair",
-        "summary": "Implementing console",
-        "summary_status": "structured"
+        "summary_line": "Implementing console",
+        "summary_source": "structured"
       },
       {
         "consistency": "current",
@@ -69,8 +69,8 @@
           }
         },
         "role": "chair",
-        "summary": "Implementing the console",
-        "summary_status": "structured"
+        "summary_line": "Implementing the console",
+        "summary_source": "structured"
       }
     ],
     "snapshot": "sha256:9b20d92ab3bb05518444148548bdfcce45638cbac982608e2e274fc8ce398f1f",
