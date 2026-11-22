@@ -6816,7 +6816,10 @@ mod candidate_walk_regressions {
             reasons[0].cause,
             Some(provenant_records::RouteExclusionReason::Exhausted)
         );
-        assert!(reasons[0].detail.contains("allowance exhausted"));
+        // A typed cause persists only its bounded safe projection, never the
+        // admission error's own text.
+        assert!(reasons[0].detail.contains("allowance is exhausted"));
+        assert!(!reasons[0].detail.contains("quota admission refused"));
         assert!(rejected.contains(&spent));
         Ok(())
     }
