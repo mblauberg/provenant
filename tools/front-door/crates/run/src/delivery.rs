@@ -766,7 +766,7 @@ impl HostDeliveryContext {
                         )
                         .map_err(std::io::Error::other)?;
                     truncated.set(outcome.stdout.truncated);
-                    let stderr = provenant_core::bounded_line(
+                    let stderr = provenant_core::bounded_tail(
                         &String::from_utf8_lossy(&outcome.stderr.bytes),
                         DELIVERY_STDERR_LIMIT,
                     );
@@ -780,16 +780,7 @@ impl HostDeliveryContext {
                 if truncated.get() {
                     return forge_limit();
                 }
-                let cause = command_failure
-                    .take()
-                    .map_or_else(
-                        || DeliveryCause::parse(error),
-                        |(termination, timed_out, stderr)| DeliveryCause::Command {
-                            termination,
-                            timed_out,
-                            stderr,
-                        },
-                    );
+                let cause = failure_cause(command_failure.take(), error);
                 if stage == Stage::Prepare {
                     prepare_error(DeliveryPrepareStep::ForgePort, cause)
                 } else {
@@ -3436,10 +3427,31 @@ fn command_cause(outcome: &provenant_os::exec::ExecOutcome) -> DeliveryCause {
     DeliveryCause::Command {
         termination: outcome.termination,
         timed_out: outcome.timed_out,
-        stderr: provenant_core::bounded_line(
+        stderr: provenant_core::bounded_tail(
             &String::from_utf8_lossy(&outcome.stderr.bytes),
             DELIVERY_STDERR_LIMIT,
         ),
+    }
+}
+
+/// The cause of a failed forge command port call. The command's own exit or
+/// signal is the cause only when the command failed; a command that exited 0
+/// and then returned something the port could not use keeps the port's error.
+fn failure_cause(
+    command: Option<(Termination, bool, String)>,
+    error: impl std::fmt::Display,
+) -> DeliveryCause {
+    match command {
+        Some((termination, timed_out, stderr))
+            if timed_out || termination != Termination::Exit(0) =>
+        {
+            DeliveryCause::Command {
+                termination,
+                timed_out,
+                stderr,
+            }
+        }
+        _ => DeliveryCause::parse(error),
     }
 }
 
@@ -3637,12 +3649,20 @@ fn transport_config_cause(error: provenant_os::git_config::ConfigError<RunError>
 
 pub(crate) fn prepare_reason(detail: impl std::fmt::Display) -> String {
     let detail = detail.to_string();
-    let mut reason = detail.split_whitespace().collect::<Vec<_>>().join(" ");
-    if reason.len() > PREPARE_REASON_LIMIT {
-        reason.truncate(reason.floor_char_boundary(PREPARE_REASON_LIMIT));
-        reason.push_str(PREPARE_REASON_TRUNCATION_MARKER);
+    let reason = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    if reason.len() <= PREPARE_REASON_LIMIT {
+        return reason;
     }
-    reason
+    // Keep the start, which names the step, and the end, where a command's
+    // failure is: a reason cut at the start alone loses the fatal line.
+    let head = reason.floor_char_boundary(PREPARE_REASON_LIMIT / 4);
+    let tail =
+        reason.ceil_char_boundary(reason.len() - (PREPARE_REASON_LIMIT - PREPARE_REASON_LIMIT / 4));
+    format!(
+        "{}{PREPARE_REASON_TRUNCATION_MARKER}{}",
+        &reason[..head],
+        &reason[tail..]
+    )
 }
 
 fn credential_helper(path: &Path, writer: &WriterRequest) -> Result<()> {
@@ -4334,6 +4354,36 @@ mod stored_format_tests {
             1,
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn a_command_that_exited_zero_keeps_the_ports_parse_error() {
+        let ok = Some((Termination::Exit(0), false, "warning".to_owned()));
+        let cause = failure_cause(ok, "malformed response");
+        assert!(
+            matches!(&cause, DeliveryCause::Parse { detail } if detail == "malformed response")
+        );
+        for failed in [(Termination::Exit(1), false), (Termination::Exit(0), true)] {
+            let cause = failure_cause(Some((failed.0, failed.1, "boom".into())), "ignored");
+            assert!(matches!(cause, DeliveryCause::Command { .. }), "{failed:?}");
+        }
+        assert!(matches!(
+            failure_cause(None, "no command ran"),
+            DeliveryCause::Parse { .. }
+        ));
+    }
+
+    #[test]
+    fn a_long_reason_keeps_its_start_and_its_end() {
+        let long = format!(
+            "forge step {} fatal: the real failure",
+            "noise ".repeat(400)
+        );
+        let reason = prepare_reason(&long);
+        assert!(reason.starts_with("forge step"), "{reason}");
+        assert!(reason.ends_with("fatal: the real failure"), "{reason}");
+        assert!(reason.len() <= PREPARE_REASON_LIMIT + PREPARE_REASON_TRUNCATION_MARKER.len());
+        assert!(reason.contains(PREPARE_REASON_TRUNCATION_MARKER));
     }
 
     #[test]

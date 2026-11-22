@@ -8,6 +8,31 @@
 /// This does not redact. External publication must apply its destination's
 /// disclosure projection to the complete content before formatting excerpts.
 pub fn bounded_line(text: &str, max_chars: usize) -> String {
+    let line = one_line(text);
+    if line.chars().count() <= max_chars {
+        return line;
+    }
+    let mut cut: String = line.chars().take(max_chars.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
+}
+
+/// `text` on one line like [`bounded_line`], but a longer text keeps its end:
+/// the result starts with `…` and holds the last `max_chars - 1` characters.
+/// A stream's failure is usually its last line, so a tail excerpt keeps it.
+pub fn bounded_tail(text: &str, max_chars: usize) -> String {
+    let line = one_line(text);
+    let count = line.chars().count();
+    if count <= max_chars {
+        return line;
+    }
+    let keep = max_chars.saturating_sub(1);
+    let mut cut = String::from('…');
+    cut.extend(line.chars().skip(count - keep));
+    cut
+}
+
+fn one_line(text: &str) -> String {
     let spaced: String = text
         .chars()
         .map(|c| {
@@ -18,13 +43,7 @@ pub fn bounded_line(text: &str, max_chars: usize) -> String {
             }
         })
         .collect();
-    let line = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
-    if line.chars().count() <= max_chars {
-        return line;
-    }
-    let mut cut: String = line.chars().take(max_chars.saturating_sub(1)).collect();
-    cut.push('…');
-    cut
+    spaced.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn is_format_character(character: char) -> bool {
@@ -56,7 +75,18 @@ fn is_format_character(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::bounded_line;
+    use super::{bounded_line, bounded_tail};
+
+    #[test]
+    fn the_tail_excerpt_keeps_the_end_within_the_limit() {
+        assert_eq!(bounded_tail("a \n b", 6), "a b");
+        assert_eq!(bounded_tail("abcdefg", 6), "…cdefg");
+        assert_eq!(bounded_tail("ééééééé", 4), "…ééé");
+        assert_eq!(
+            bounded_tail("noise\n\nfatal: the real failure", 24),
+            "…fatal: the real failure"
+        );
+    }
 
     #[test]
     fn collapses_whitespace_controls_and_format_characters() {
