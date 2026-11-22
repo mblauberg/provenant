@@ -764,6 +764,8 @@ mod tests {
             100,
             "fixture".into(),
             crate::source::test_policy(),
+            &crate::DEFAULT_FRESHNESS,
+            &[],
         )
         .unwrap();
         assert_eq!(report.accounts[0].status, QuotaStatus::KeychainUnavailable);
@@ -1042,6 +1044,8 @@ mod tests {
             180,
             "report.json".into(),
             crate::source::test_policy(),
+            &crate::DEFAULT_FRESHNESS,
+            &[],
         )
         .unwrap()
         .accounts
@@ -1179,6 +1183,8 @@ mod tests {
                 due,
                 "report.json".into(),
                 crate::source::test_policy(),
+                &crate::DEFAULT_FRESHNESS,
+                &[],
             )
             .unwrap();
             assert_eq!(current.accounts[0].status, QuotaStatus::AuthRequired);
@@ -1202,6 +1208,8 @@ mod tests {
             101,
             "/report".into(),
             crate::source::test_policy(),
+            &crate::DEFAULT_FRESHNESS,
+            &[],
         )
         .unwrap();
         assert_eq!(recent.accounts[0].status, QuotaStatus::Unknown);
@@ -1213,6 +1221,8 @@ mod tests {
             1000,
             "/report".into(),
             crate::source::test_policy(),
+            &crate::DEFAULT_FRESHNESS,
+            &[],
         )
         .unwrap();
         assert_eq!(expired.accounts[0].status, QuotaStatus::AuthRequired);
@@ -1275,6 +1285,8 @@ mod tests {
                 now,
                 "report.json".into(),
                 crate::source::test_policy(),
+                &crate::DEFAULT_FRESHNESS,
+                &[],
             )
             .unwrap()
             .accounts
@@ -1435,6 +1447,8 @@ mod tests {
             420,
             "report.json".into(),
             crate::source::test_policy(),
+            &crate::DEFAULT_FRESHNESS,
+            &[],
         )
         .unwrap()
         .accounts
@@ -1508,6 +1522,8 @@ mod tests {
                 420,
                 "report.json".into(),
                 crate::source::test_policy(),
+                &crate::DEFAULT_FRESHNESS,
+                &[],
             )
             .unwrap();
             assert_eq!(
@@ -1564,6 +1580,8 @@ mod tests {
                 420,
                 "report.json".into(),
                 crate::source::test_policy(),
+                &crate::DEFAULT_FRESHNESS,
+                &[],
             )
             .unwrap()
             .accounts
@@ -1618,6 +1636,8 @@ mod tests {
                 now,
                 "fixture".into(),
                 crate::source::test_policy(),
+                &crate::DEFAULT_FRESHNESS,
+                &[],
             )
             .unwrap()
             .accounts
@@ -1675,6 +1695,8 @@ mod tests {
             420,
             "report.json".into(),
             crate::source::test_policy(),
+            &crate::DEFAULT_FRESHNESS,
+            &[],
         )
         .unwrap()
         .accounts
@@ -1956,6 +1978,8 @@ mod transition_tests {
             100,
             "fixture".into(),
             crate::source::test_policy(),
+            &crate::DEFAULT_FRESHNESS,
+            &[],
         )
         .unwrap();
         assert!(report.refreshing_ids.is_empty());
@@ -1975,6 +1999,8 @@ mod transition_tests {
             100,
             "fixture".into(),
             crate::source::test_policy(),
+            &crate::DEFAULT_FRESHNESS,
+            &[],
         )
     }
     #[test]
@@ -1998,6 +2024,8 @@ mod transition_tests {
             100,
             "report.json".into(),
             crate::source::test_policy(),
+            &crate::DEFAULT_FRESHNESS,
+            &[],
         )
         .unwrap();
         assert_eq!(rep.accounts.len(), 1);
@@ -2161,6 +2189,8 @@ mod transition_tests {
                 now,
                 "report.json".into(),
                 crate::source::test_policy(),
+                &crate::DEFAULT_FRESHNESS,
+                &[],
             )
             .unwrap();
             let observed = report
@@ -2294,6 +2324,8 @@ mod zen_tests {
                     now,
                     "report.json".into(),
                     crate::source::test_policy(),
+                    &crate::DEFAULT_FRESHNESS,
+                    &[],
                 )
                 .unwrap();
                 for record in &records {
@@ -2363,6 +2395,8 @@ mod zen_tests {
                 now,
                 "report.json".into(),
                 crate::source::test_policy(),
+                &crate::DEFAULT_FRESHNESS,
+                &[],
             )
             .unwrap();
             let row = &report.accounts[0];
@@ -2401,6 +2435,8 @@ mod zen_tests {
             101,
             "report.json".into(),
             crate::source::test_policy(),
+            &crate::DEFAULT_FRESHNESS,
+            &[],
         )
         .unwrap();
         assert_eq!(report_with_reset.accounts[0].status, QuotaStatus::Exhausted);
@@ -2434,6 +2470,8 @@ mod zen_tests {
             101,
             "report.json".into(),
             crate::source::test_policy(),
+            &crate::DEFAULT_FRESHNESS,
+            &[],
         )
         .unwrap();
         assert_eq!(mixed_report.accounts[0].status, QuotaStatus::Exhausted);
@@ -2469,6 +2507,8 @@ mod zen_tests {
             101,
             "report.json".into(),
             crate::source::test_policy(),
+            &crate::DEFAULT_FRESHNESS,
+            &[],
         )
         .unwrap();
         let row = &report.accounts[0];
