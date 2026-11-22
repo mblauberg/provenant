@@ -99,14 +99,22 @@ fn plan(
         .remove(0);
     if !matches!(author.state.as_str(), "succeeded" | "review_required") {
         // Opening a pull request is not an authority act: landing still gates
-        // on CI and review. Say what backs the body and carry on.
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: [PR_ATTEMPT_STATE] attempt {} ended {}, not succeeded or review_required; opening the pull request from its recorded branch and head anyway (source: attempt record)",
-            author.attempt_id,
-            author.state
-        );
+        // on CI and review. The policy table says what backs the body and
+        // carries on; a configured strict mode stops here instead.
+        provenant_config::policy::read(resolved.roots.state.as_path(), "", &Default::default())
+            .warn_or(
+                "PR_ATTEMPT_STATE",
+                provenant_records::policy::Facts::violation(format!(
+                    "attempt {} ended {}, not succeeded or review_required; opening the pull request from its recorded branch and head anyway (source: attempt record)",
+                    author.attempt_id, author.state
+                )),
+                |diagnostic| {
+                    Refused::new(
+                        "PR_ATTEMPT_STATE",
+                        diagnostic.detail.unwrap_or_default(),
+                    )
+                },
+            )?;
     }
     // Reviews named on the command resolve as targets; the receipt's own
     // reviews are already attempt ids.

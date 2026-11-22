@@ -1465,3 +1465,12 @@ boundary = "none"
 strength = "warn"
 knob = "policy.DELIVERY_HOST_TRANSPORT_NONE"
 justification = "Host access permits ordinary host Git transport configuration."
+
+[[rule]]
+code = "PR_ATTEMPT_STATE"
+site = "front-door/src/pr/open.rs#plan"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.PR_ATTEMPT_STATE"
+justification = "Opening a pull request is not an authority act: an attempt that did not end succeeded or review_required warns and opens from its recorded branch and head; refuse selects a configured stop."

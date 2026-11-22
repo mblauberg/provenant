@@ -458,6 +458,17 @@ mod tests {
         );
     }
     #[test]
+    fn opening_a_pr_from_an_unsettled_attempt_warns_and_can_be_made_a_stop() {
+        let mut policy = Policy::default();
+        let fact = || Facts::violation("attempt a1 ended failed");
+        assert!(policy.warn_or("PR_ATTEMPT_STATE", fact(), |_| ()).is_ok());
+        policy.overlay(
+            &BTreeMap::from([("PR_ATTEMPT_STATE".into(), Strength::Refuse)]),
+            Source::Host,
+        );
+        assert!(policy.warn_or("PR_ATTEMPT_STATE", fact(), |_| ()).is_err());
+    }
+    #[test]
     #[allow(clippy::panic)]
     fn overlays_report_source_and_do_not_change_boundary_authority() {
         let mut policy = Policy::default();
