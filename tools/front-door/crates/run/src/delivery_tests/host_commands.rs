@@ -12,7 +12,7 @@ fn a_failing_git_step_stderr_reaches_the_rendered_delivery_error()
     fixture.executable(
         &git,
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = hash-object ]; then printf '{MARKER} fatal: rejected\\n' >&2; exit 42; fi\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = hash-object ]; then printf '{MARKER} fatal: rejected\\n' >&2; exit 42; fi; done\nexec '{}' \"$@\"\n",
             real_git.display()
         ),
     )?;
