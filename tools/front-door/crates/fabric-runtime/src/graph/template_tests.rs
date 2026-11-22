@@ -1010,15 +1010,12 @@ fn smoke_template_pins_its_review_nodes_only_when_a_base_is_supplied() {
     assert_eq!(bound.len(), 2);
     assert!(bound.iter().all(|value| value.as_deref() == Some(base)));
 
-    // Without a launch binding no review lens is pinned; an empty value is
-    // the template's unbound spelling, so the per-node no-base refusal still
-    // applies to the review nodes while read and write compile unchanged.
+    // Without a launch binding no review lens carries a base at all, so the
+    // per-node no-base refusal applies while read and write compile unchanged.
     let unbound = review_bases(json!({}));
     assert_eq!(unbound.len(), bound.len());
     assert!(
-        unbound
-            .iter()
-            .all(|value| value.as_deref().is_none_or(str::is_empty)),
+        unbound.iter().all(|value| value.is_none()),
         "a smoke review lens was pinned without diff_base: {unbound:?}"
     );
 }

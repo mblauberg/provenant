@@ -1591,6 +1591,11 @@ impl<'a> Compiler<'a> {
         }
         let mut node = Map::new();
         for (key, value) in object {
+            let whole_placeholder = value.as_str().is_some_and(|text| {
+                text.strip_prefix("${")
+                    .and_then(|rest| rest.strip_suffix('}'))
+                    .is_some_and(|name| !name.is_empty() && !name.contains(['{', '}']))
+            });
             // A planner catalogue keeps its own placeholders for run time.
             let value = if bindings.is_empty() || key == "plan" {
                 value.clone()
@@ -1599,6 +1604,12 @@ impl<'a> Compiler<'a> {
             } else {
                 interpolate(value, bindings)?
             };
+            // An empty binding on a whole-placeholder review base means the
+            // node has no base. Leave the field out rather than compile an
+            // empty reference, which whole-graph admission refuses.
+            if whole_placeholder && key == "review_base" && value.as_str() == Some("") {
+                continue;
+            }
             node.insert(key.clone(), value);
         }
         if object.contains_key("use") || !stack.is_empty() {
