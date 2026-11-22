@@ -1173,20 +1173,32 @@ mod admission_tests {
     }
     #[test]
     fn failed_probe_preserves_recent_exhaustion() {
-        let mut record = record(QuotaStatus::Exhausted);
-        record.last_error = Some(ProbeFailure::Auth);
-        assert!(matches!(
-            Admission {
-                freshness: &crate::DEFAULT_FRESHNESS,
-                policy: crate::source::test_policy(),
-                policies: crate::source::TEST_POLICIES,
-                now_unix_seconds: 1000,
-                records: &[record],
-                pools: &["pool-a".into()],
-            }
-            .check(&route()),
-            Err(QuotaError::AllowanceExhausted)
-        ));
+        // Whatever the latest probe's failure, the last known fresh snapshot
+        // still decides exhaustion for the route's own pool.
+        for failure in [
+            ProbeFailure::Auth,
+            ProbeFailure::Network,
+            ProbeFailure::RateLimited,
+            ProbeFailure::RefreshDeferred,
+        ] {
+            let mut record = record(QuotaStatus::Exhausted);
+            record.last_error = Some(failure);
+            assert!(
+                matches!(
+                    Admission {
+                        freshness: &crate::DEFAULT_FRESHNESS,
+                        policy: crate::source::test_policy(),
+                        policies: crate::source::TEST_POLICIES,
+                        now_unix_seconds: 1000,
+                        records: &[record],
+                        pools: &["pool-a".into()],
+                    }
+                    .check(&route()),
+                    Err(QuotaError::AllowanceExhausted)
+                ),
+                "{failure:?}"
+            );
+        }
     }
     #[test]
     fn refusal_without_pool_keeps_bounded_wait() {
