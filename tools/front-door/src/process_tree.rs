@@ -27,6 +27,7 @@ pub fn run(root: Option<u32>, globals: &Globals) -> u8 {
             Outcome::Unavailable,
             "PROCESS_TREE_UNAVAILABLE",
             &error.to_string(),
+            "run inside a supervised process with the process-tree snapshot environment set",
             globals,
         ),
     }

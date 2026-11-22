@@ -1053,13 +1053,12 @@ pub fn run(args: Handoff, globals: &Globals, workers: &dyn WorkerObserver) -> u8
             data: Some((data, human)),
         }) => {
             let mut result = CommandResult::new(COMMAND, status, data);
-            result.error = Some(provenant_records::CommandError {
-                diagnostic: None,
+            result.error = Some(provenant_records::CommandError::new(
                 code,
                 message,
-                cause: None,
-                repair: None,
-            });
+                None,
+                "correct the reported handoff condition and rerun `provenant handoff`",
+            ));
             crate::emit(&result, globals, &human, false)
         }
         Err(refusal) => crate::fail(
@@ -1067,6 +1066,7 @@ pub fn run(args: Handoff, globals: &Globals, workers: &dyn WorkerObserver) -> u8
             refusal.status,
             refusal.code(),
             &refusal.message,
+            "correct the reported handoff condition and rerun `provenant handoff`",
             globals,
         ),
     }

@@ -1528,12 +1528,20 @@ pub(crate) fn command_fail(
     globals: &provenant_cli::Globals,
 ) -> u8 {
     match command_target_fault(error, None) {
-        Some((outcome, code, message)) => crate::fail(name, outcome, code, &message, globals),
+        Some((outcome, code, message)) => crate::fail(
+            name,
+            outcome,
+            code,
+            &message,
+            "use a valid, unambiguous target in the owning project and rerun the command",
+            globals,
+        ),
         None => crate::fail(
             name,
             provenant_records::Outcome::Error,
             "graph_target",
             &error.to_string(),
+            "check the reported graph read error and rerun the command",
             globals,
         ),
     }
@@ -2001,10 +2009,7 @@ pub(crate) fn unified_graph_steer(
                 "{} has settled; start a follow-up or retry with an amended brief",
                 args.target
             ),
-            Some(&format!(
-                "provenant retry {} --brief-file FILE",
-                args.target
-            )),
+            &format!("provenant retry {} --brief-file FILE", args.target),
             globals,
         ),
         Ok(SteerResult::Refused(message)) => crate::fail(
@@ -2012,6 +2017,7 @@ pub(crate) fn unified_graph_steer(
             provenant_records::Outcome::Refused,
             "steer_target_refused",
             message,
+            "amend the brief and retry with `provenant steer <target> --brief-file FILE`",
             globals,
         ),
         Ok(SteerResult::Unsupported(receipt)) => {
@@ -3520,13 +3526,12 @@ fn output_fail(
     message: &str,
 ) -> provenant_cli::run::Reply {
     let mut result = provenant_records::CommandResult::new("output", outcome, json!({}));
-    result.error = Some(provenant_records::CommandError {
-        code: code.into(),
-        message: message.into(),
-        cause: None,
-        repair: None,
-        diagnostic: None,
-    });
+    result.error = Some(provenant_records::CommandError::new(
+        code,
+        message,
+        None,
+        "use a valid, unambiguous target and rerun `provenant output`",
+    ));
     provenant_cli::run::Reply {
         result,
         human: String::new(),

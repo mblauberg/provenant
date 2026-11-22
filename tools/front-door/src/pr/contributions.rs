@@ -439,6 +439,7 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
             Outcome::Error,
             super::code_of(error.as_ref(), "PR_CONTRIBUTIONS"),
             &error.to_string(),
+            "check the reported forge read error and credentials, then rerun `provenant pr contributions`",
             globals,
         ),
     }

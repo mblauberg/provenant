@@ -205,13 +205,12 @@ pub fn deliver_steer(
 pub fn unsupported_control_error(
     receipt: &provenant_records::control::ControlReceipt,
 ) -> CommandError {
-    CommandError {
-        diagnostic: None,
-        code: provenant_records::control::CONTROL_UNSUPPORTED.into(),
-        message: receipt.refusal_message(),
-        cause: None,
-        repair: Some(provenant_records::control::CONTROL_UNSUPPORTED_REPAIR.into()),
-    }
+    CommandError::new(
+        provenant_records::control::CONTROL_UNSUPPORTED,
+        receipt.refusal_message(),
+        None,
+        provenant_records::control::CONTROL_UNSUPPORTED_REPAIR,
+    )
 }
 
 /// Compose Run's host lookup with the inbox owner without a runtime dependency.
@@ -1344,28 +1343,30 @@ pub fn run(
         Ok(data) => CommandResult::new(path, Outcome::Ok, Some(data)),
         Err(error) => {
             let (status, code) = error.outcome_code();
+            let cause = match &error {
+                Error::NoProject(cause) => Some(cause.clone()),
+                _ => None,
+            };
+            let repair: String = match &error {
+                Error::Remote { operation_id: Some(operation_id), .. } => format!(
+                    "Retry the same request with --operation-id {operation_id}; preserve its original content and revision."
+                ),
+                Error::Inbox(InboxError::Mutation { operation_id, source }) if matches!(source.code(),"busy"|"cancelled"|"inbox_unavailable") => format!(
+                    "Retry the same request with --operation-id {operation_id}; preserve its original content and revision."
+                ),
+                Error::Inbox(error) if matches!(error.code(),"conflict"|"operation_conflict") => "Inspect `provenant inbox --state all --json` before submitting another operation; preserve the authoritative answer and its revision.".into(),
+                Error::Inbox(error) if error.code() == "work_mismatch" => "Correct the work repository or head to match the selected run before retrying.".into(),
+                Error::NoProject(_) => "Run from a project directory, or use --all-projects to access registered projects on this host.".into(),
+                Error::Inbox(InboxError::CursorExpired) => "Restart the list without --cursor.".into(),
+                _ => "Inspect the reported error, resolve its cause, then retry the command.".into(),
+            };
             let mut result = CommandResult::new(path, status, None);
-            result.error = Some(CommandError {
-            diagnostic: None,
-                code: code.into(),
-                message: error.to_string(),
-                cause: match &error { Error::NoProject(cause) => Some(cause.clone()), _ => None },
-                repair: match &error {
-                    Error::Remote { operation_id: Some(operation_id), .. } => Some(format!(
-                        "Retry the same request with --operation-id {operation_id}; preserve its original content and revision."
-                    )),
-                    Error::Inbox(InboxError::Mutation { operation_id, source }) if matches!(source.code(),"busy"|"cancelled"|"inbox_unavailable") => Some(format!(
-                        "Retry the same request with --operation-id {operation_id}; preserve its original content and revision."
-                    )),
-                    Error::Inbox(error) if matches!(error.code(),"conflict"|"operation_conflict")=>Some("Inspect `provenant inbox --state all --json` before submitting another operation; preserve the authoritative answer and its revision.".into()),
-                    Error::Inbox(error) if error.code() == "work_mismatch" => Some("Correct the work repository or head to match the selected run before retrying.".into()),
-                    Error::NoProject(_) => Some("Run from a project directory, or use --all-projects to access registered projects on this host.".into()),
-                    Error::Inbox(InboxError::CursorExpired) => {
-                        Some("Restart the list without --cursor.".into())
-                    }
-                    _ => None,
-                },
-            });
+            result.error = Some(CommandError::new(
+                code,
+                error.to_string(),
+                cause.as_deref(),
+                repair,
+            ));
             result
         }
     };

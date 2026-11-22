@@ -525,6 +525,18 @@ impl DoctorError {
             message: "peer doctor report is not a valid report".into(),
         }
     }
+    fn repair(&self) -> &'static str {
+        match self.code {
+            "SIGNIN_PROBE" => {
+                "sign in to the reported host identity, then rerun `provenant hosts doctor`"
+            }
+            "UNKNOWN_HOST" => {
+                "run `provenant hosts` to list configured peers and use a peer name from that list"
+            }
+            "PEER" => "resolve the reported peer error, then rerun `provenant hosts doctor`",
+            _ => "correct the reported host condition, then rerun `provenant hosts doctor`",
+        }
+    }
 }
 /// Keep a locally produced report within the 128-row peer validation cap.
 /// Omitted rows are acknowledged with one warning line so an empty-looking
@@ -883,6 +895,7 @@ pub fn run(
             error.outcome,
             error.code,
             &error.message,
+            error.repair(),
             globals,
         ),
     }

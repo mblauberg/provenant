@@ -1275,14 +1275,35 @@ pub fn run(
                 Error::Refused { data, .. } => data.clone(),
                 _ => Value::Null,
             };
+            let repair: String = match code {
+                "INVALID" => "Correct the invalid argument and rerun the command.".into(),
+                "CONFLICT" | "RECEIPT_RETIRED" => {
+                    "Reread the current checkpoint and retry with its latest revision.".into()
+                }
+                "TIMEOUT" => "Wait for the current operation to settle, then retry.".into(),
+                "CANCELLED" => "The operation was cancelled; reissue it when ready.".into(),
+                "MISSING" => "Run `provenant workflow status` to list available records.".into(),
+                "HISTORY" => {
+                    "Inspect `provenant workflow session show` and select a checkpoint that is present."
+                        .into()
+                }
+                "IDENTITY" => "Run from a project directory with a registered identity.".into(),
+                "IO" => "Inspect the reported I/O error, resolve it, then retry.".into(),
+                "IN_LANE" => {
+                    "Run `provenant workflow session save` from the chair host, not inside a lane."
+                        .into()
+                }
+                "SESSION_PROJECT" => "Change to the session's project checkout and rerun `provenant --project PATH workflow session save`.".into(),
+                "REVIEW_UNBOUND" => {
+                    "Bind the review to its attempt, then rerun `provenant workflow receipt save`."
+                        .into()
+                }
+                other => format!(
+                    "Resolve the {other} refusal described in the message, then retry the command."
+                ),
+            };
             let mut out = CommandResult::new(command, status, data);
-            out.error = Some(CommandError {
-                diagnostic: None,
-                code: code.into(),
-                message: error.to_string(),
-                cause: None,
-                repair: None,
-            });
+            out.error = Some(CommandError::new(code, error.to_string(), None, repair));
             out
         }
     };

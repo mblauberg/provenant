@@ -399,13 +399,25 @@ pub fn run(
                 }
                 _ => None,
             };
-            result.error = Some(CommandError {
-                diagnostic: projection.as_ref().map(Into::into),
-                code: code.into(),
-                message: error.to_string(),
-                cause: None,
-                repair: projection.and_then(|diagnostic| diagnostic.next),
-            });
+            let diagnostic = projection.as_ref().map(Into::into);
+            let repair = projection
+                .as_ref()
+                .and_then(|diagnostic| diagnostic.next.clone())
+                .unwrap_or_else(|| {
+                    let next = match code {
+                        "IO" => "Inspect the reported I/O error, resolve it, then retry the command.",
+                        "QUOTA" => {
+                            "Run `provenant quota show --json` to inspect the quota before retrying."
+                        }
+                        "INVALID" => "Correct the invalid argument and retry the command.",
+                        "CONFIG" => "Correct the configuration named in the error, then retry.",
+                        _ => "Inspect the reported error, resolve its cause, then retry the command.",
+                    };
+                    next.to_owned()
+                });
+            let mut command_error = CommandError::new(code, error.to_string(), None, repair);
+            command_error.diagnostic = diagnostic;
+            result.error = Some(command_error);
             result
         }
     };

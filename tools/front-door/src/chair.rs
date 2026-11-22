@@ -505,6 +505,7 @@ pub fn run(chair: Chair, globals: &Globals) -> u8 {
             Outcome::Refused,
             "CHAIR_SWITCH",
             &error.to_string(),
+            "resolve the reported switch condition, then rerun `provenant chair switch`",
             globals,
         ),
     }
@@ -714,13 +715,12 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
                     Outcome::Refused,
                     json!({"current_revision": current_revision}),
                 );
-                result.error = Some(provenant_records::CommandError {
-            diagnostic: None,
-                    code: "SUMMARY_STALE".into(),
-                    message: error.to_string(),
-                    cause: None,
-                    repair: Some("Reread with `provenant chair summary show` and reapply the intended change.".into()),
-                });
+                result.error = Some(provenant_records::CommandError::new(
+                    "SUMMARY_STALE",
+                    error.to_string(),
+                    None,
+                    "reread with `provenant chair summary show` and reapply the intended change",
+                ));
                 crate::emit(&result, globals, "", false)
             } else if matches!(
                 error.downcast_ref::<SessionError>(),
@@ -731,6 +731,7 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
                     Outcome::Failed,
                     "MISSING",
                     &error.to_string(),
+                    "run `provenant chair summary update` to create the checkpoint, then retry",
                     globals,
                 )
             } else if matches!(
@@ -744,6 +745,7 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
                     Outcome::Refused,
                     "IDENTITY",
                     &error.to_string(),
+                    "run the command as the identity that owns this session, then retry",
                     globals,
                 )
             } else if matches!(
@@ -759,6 +761,7 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
                     Outcome::Invalid,
                     "INVALID",
                     &error.to_string(),
+                    "narrow the summary input and rerun `provenant chair summary update`",
                     globals,
                 )
             } else {
@@ -767,6 +770,7 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
                     Outcome::Refused,
                     "CHAIR_SUMMARY",
                     &error.to_string(),
+                    "correct the reported condition and rerun `provenant chair summary update`",
                     globals,
                 )
             }
@@ -938,7 +942,14 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                     _ => "CHAIR_LOG",
                 }
             };
-            crate::fail(path, Outcome::Refused, code, &error.to_string(), globals)
+            crate::fail(
+                path,
+                Outcome::Refused,
+                code,
+                &error.to_string(),
+                "correct the reported log condition, then rerun the chair log command",
+                globals,
+            )
         }
     }
 }

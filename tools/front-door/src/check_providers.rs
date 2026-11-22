@@ -594,6 +594,7 @@ pub(crate) fn run(args: Providers, globals: &Globals, workers: &'static dyn Work
             Outcome::Invalid,
             "PROVIDER_CHECK",
             &error.to_string(),
+            "correct the reported provider configuration and rerun `provenant check providers`",
             globals,
         ),
         Ok(report) => {

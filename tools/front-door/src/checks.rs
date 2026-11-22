@@ -283,6 +283,7 @@ fn run_inspection(name: &str, check: Inspectable, globals: &Globals) -> u8 {
                 Outcome::Error,
                 "ENCODE",
                 "cannot encode check findings",
+                "rerun the check with `--json` and report the encoding failure if it persists",
                 globals,
             ),
         },
@@ -296,6 +297,7 @@ fn run_inspection(name: &str, check: Inspectable, globals: &Globals) -> u8 {
                 "EVIDENCE"
             },
             &error.to_string(),
+            "correct the reported evidence or config condition and rerun the check",
             globals,
         ),
     }

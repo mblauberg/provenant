@@ -1226,7 +1226,14 @@ pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
                 Some(&summary),
             )
         }
-        Err(error) => fail(LEAF, Outcome::Error, "PR", &error.to_string(), globals),
+        Err(error) => fail(
+            LEAF,
+            Outcome::Error,
+            "PR",
+            &error.to_string(),
+            "check the reported forge read error and credentials, then rerun `provenant pr status`",
+            globals,
+        ),
     }
 }
 

@@ -15,6 +15,7 @@ pub(crate) fn run(from: i64, follow: bool, consumer: Option<&str>, globals: &Glo
             Outcome::Error,
             "EVENTS",
             &error.to_string(),
+            "check the reported event store or watcher error, then rerun `provenant events`",
             globals,
         ),
     }

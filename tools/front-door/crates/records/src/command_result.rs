@@ -25,6 +25,7 @@ pub enum Outcome {
     Waiting,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CommandError {
     pub code: String,
     pub message: String,
@@ -32,6 +33,26 @@ pub struct CommandError {
     pub repair: Option<String>,
     #[serde(flatten)]
     pub diagnostic: Option<crate::diagnostic::DiagnosticFields>,
+}
+impl CommandError {
+    /// Construct a refusal with the concrete next step an operator or agent
+    /// must take. `repair` is mandatory: it is the exact command or flag to
+    /// run, or the condition to wait for. A refusal without a next step is not
+    /// actionable, so the type requires one rather than relying on a lint.
+    pub fn new(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        cause: Option<&str>,
+        repair: impl Into<String>,
+    ) -> Self {
+        Self {
+            diagnostic: None,
+            code: code.into(),
+            message: message.into(),
+            cause: cause.map(Into::into),
+            repair: Some(repair.into()),
+        }
+    }
 }
 impl Outcome {
     /// Every status, in declaration order; the published schemas enumerate it.

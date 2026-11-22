@@ -59,13 +59,12 @@ pub(super) fn reconcile_reply(outcome: Result<(Value, String), Fail>, fenced: bo
     let mut out = reply("reconcile", outcome);
     if fenced && out.result.status == Status::Ok {
         out.result.status = Status::Failed;
-        out.result.error = Some(CommandError {
-            diagnostic: None,
-            code: "RECONCILE_INCOMPLETE".into(),
-            message: out.human.trim().to_owned(),
-            cause: None,
-            repair: Some("Inspect the reported custody or settlement reason, then rerun `provenant reconcile NAME`.".into()),
-        });
+        out.result.error = Some(CommandError::new(
+            "RECONCILE_INCOMPLETE",
+            out.human.trim().to_owned(),
+            None,
+            "Inspect the reported custody or settlement reason, then rerun `provenant reconcile NAME`.",
+        ));
     }
     out
 }

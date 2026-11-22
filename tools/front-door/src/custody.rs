@@ -584,7 +584,14 @@ pub fn command(globals: &Globals, subject: Subject, release: bool) -> u8 {
             &format!("{leaf} {subject}\n"),
             false,
         ),
-        Err(error) => fail(leaf, Outcome::Error, "CUSTODY", &error.to_string(), globals),
+        Err(error) => fail(
+            leaf,
+            Outcome::Error,
+            "CUSTODY",
+            &error.to_string(),
+            "resolve the reported custody condition, then rerun the command",
+            globals,
+        ),
     }
 }
 // The bounded read-only store boundary uses a real I/O deadline.
@@ -699,6 +706,7 @@ pub fn status(args: &Status, globals: &Globals) -> u8 {
             Outcome::Error,
             "CUSTODY",
             &error.to_string(),
+            "resolve the reported custody condition, then rerun `provenant status`",
             globals,
         ),
     }

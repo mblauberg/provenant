@@ -123,6 +123,7 @@ pub fn run(command: Notes, globals: &Globals) -> u8 {
             Outcome::Error,
             "notes_error",
             &e.to_string(),
+            "resolve the reported notes error, then rerun `provenant notes`",
             globals,
         ),
     }
