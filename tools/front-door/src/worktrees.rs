@@ -141,7 +141,7 @@ impl Error {
                 "correct the reported permission and rerun the worktree command"
             }
             Self::CacheGc(..) | Self::RetentionCollection(_) | Self::GcObservation(_) => {
-                "resolve the reported collection error, then rerun `provenant worktree gc`"
+                "resolve the reported collection error, then rerun `provenant gc`"
             }
             Self::Utility(_) => "correct the reported utility error and retry the worktree command",
             Self::Config(_) | Self::GitConfigRead(_) => crate::REPAIR_CONFIG,
@@ -149,7 +149,7 @@ impl Error {
             Self::GitUnavailable => "install Git on PATH, then retry the worktree command",
             Self::Budget => "wait for the running worktree operation to finish, then retry",
             Self::GraphGc(_) => {
-                "resolve the reported graph collection error, then rerun `provenant graph gc`"
+                "resolve the reported graph collection error, then rerun `provenant gc`"
             }
             Self::InvalidScope => {
                 "name a worktree or pass --all to `provenant worktree remove`"
@@ -2793,7 +2793,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         };
         let binding = if command.dry_run || bare == Some(true) {
             provenant_config::lookup_project(&roots, &location)?.ok_or(Error::GcObservation(
-                "GC requires an existing project binding for a preview or bare repository; run any provenant command from the project checkout once to bind it",
+                "GC requires an existing project binding for a preview or bare repository; run `provenant status` from the project checkout once to bind it",
             ))?
         } else {
             provenant_config::bind_project(&roots, location)?
@@ -4505,7 +4505,7 @@ fn with_context_mode_with_owner_cancel<T>(
         };
         let binding = if read_only || bare == Some(true) {
             provenant_config::lookup_project(roots, &location)?.ok_or(Error::GcObservation(
-                "GC preview requires an existing project binding; run any provenant command from the project checkout once to bind it",
+                "GC preview requires an existing project binding; run `provenant status` from the project checkout once to bind it",
             ))?
         } else {
             provenant_config::bind_project(roots, location)?

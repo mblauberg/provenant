@@ -413,7 +413,7 @@ fn invoke(
                         .as_str()
                         .unwrap_or("source admission refused"),
                     None,
-                    "correct the reported source admission refusal and rerun `provenant graph run`",
+                    "correct the reported source admission refusal and rerun `provenant run`",
                 ));
             }
             if command == "run"
@@ -427,7 +427,7 @@ fn invoke(
                         .unwrap_or("launch_failed"),
                     node["advance_error"].as_str().unwrap_or("launch failed"),
                     None,
-                    "correct the reported launch failure and rerun `provenant graph run`",
+                    "correct the reported launch failure and rerun `provenant run`",
                 ));
             }
             let summary = if command == "templates" {

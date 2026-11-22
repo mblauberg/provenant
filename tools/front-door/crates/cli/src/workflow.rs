@@ -1282,7 +1282,7 @@ pub fn run(
                 }
                 "TIMEOUT" => "Wait for the current operation to settle, then retry.".into(),
                 "CANCELLED" => "The operation was cancelled; reissue it when ready.".into(),
-                "MISSING" => "Run `provenant workflow status` to list available records.".into(),
+                "MISSING" => "Run `provenant workflow session show` to list available records.".into(),
                 "HISTORY" => {
                     "Inspect `provenant workflow session show` and select a checkpoint that is present."
                         .into()

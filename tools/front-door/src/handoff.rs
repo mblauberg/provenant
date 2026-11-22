@@ -1057,7 +1057,7 @@ pub fn run(args: Handoff, globals: &Globals, workers: &dyn WorkerObserver) -> u8
                 code,
                 message,
                 None,
-                "correct the reported handoff condition and rerun `provenant handoff`",
+                "correct the reported handoff condition and rerun `provenant workflow session handoff`",
             ));
             crate::emit(&result, globals, &human, false)
         }
@@ -1066,7 +1066,7 @@ pub fn run(args: Handoff, globals: &Globals, workers: &dyn WorkerObserver) -> u8
             refusal.status,
             refusal.code(),
             &refusal.message,
-            "correct the reported handoff condition and rerun `provenant handoff`",
+            "correct the reported handoff condition and rerun `provenant workflow session handoff`",
             globals,
         ),
     }
