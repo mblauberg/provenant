@@ -1517,6 +1517,7 @@ mod answer_delivery_tests {
     #[allow(unused_imports)]
     use serde_json::json;
 
+    #[allow(dead_code)] // Unused when the worktree driver drops the #[test] items.
     fn quiet_failure() -> Failure<'static> {
         Failure::new(
             None,

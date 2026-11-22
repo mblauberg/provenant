@@ -84,6 +84,8 @@ pub(crate) fn diagnostic(message: &str) {
 
 #[cfg(test)]
 mod tests {
+    // The worktree driver includes this module without a unit-test harness.
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]
