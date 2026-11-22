@@ -71,6 +71,15 @@ final class StampTests: XCTestCase {
         XCTAssertEqual(Stamp.relative("soon-ish", now: now), "soon-ish")
     }
 
+    func testPastTimestampFormatsAsPast() throws {
+        let now = try XCTUnwrap(Stamp.parse("2026-11-22T09:00:00Z"))
+        let sixDaysAgo = Stamp.relative("2026-11-16T03:41:05.964523Z", now: now)
+        XCTAssertEqual(sixDaysAgo, "6 days ago")
+        XCTAssertFalse(sixDaysAgo.contains("next"))
+        XCTAssertFalse(sixDaysAgo.contains("in "))
+        XCTAssertEqual(Stamp.relative("2026-11-15T09:00:00Z", now: now), "last week")
+    }
+
     func testDurations() {
         XCTAssertEqual(Stamp.duration(milliseconds: 250), "250 ms")
         XCTAssertEqual(Stamp.duration(milliseconds: 1_500), "1.5 s")
@@ -99,6 +108,16 @@ final class ConsoleModelTests: XCTestCase {
         // The project label is context beside the state, not what the attempt waits on.
         XCTAssertNil(row.waiting)
         XCTAssertEqual(row.project, "provenant")
+    }
+
+    func testLoadedAgesUseTheSameClockAsDisplayedAges() async throws {
+        let clock = try XCTUnwrap(Stamp.parse("2026-11-22T09:00:00Z"))
+        let replay = Replay(consoleReplies)
+        let model = ConsoleModel(cli: replay.client, now: { clock }, defaults: nil)
+        await model.load(.runs)
+        let loaded = try XCTUnwrap(model.runs.board.loadedAt)
+        XCTAssertEqual(loaded, clock)
+        XCTAssertEqual(Stamp.relative(loaded, now: model.inbox.displayNow), "just now")
     }
 
     func testStartsOnTheOverviewWithEverythingStale() {
@@ -215,7 +234,8 @@ final class ScreenModelTests: XCTestCase {
         await model.refresh()
         XCTAssertNil(model.reader.error)
         XCTAssertEqual(model.reader.value?.inboxJoined, false)
-        XCTAssertTrue(model.reader.value?.warnings.contains("Request kinds: inbox not read") == true)
+        XCTAssertEqual(model.reader.value?.notices,
+                       [.warning("Request kinds are unavailable: the inbox could not be read.")])
         XCTAssertTrue(model.reader.value?.needsYou.allSatisfy { $0.kind == nil } == true)
     }
 
@@ -421,6 +441,40 @@ final class ScreenModelTests: XCTestCase {
         XCTAssertEqual(snapshot?.sessions.first?.record.lastSavedAt, "2026-11-02T02:18:00Z")
         XCTAssertEqual(snapshot?.projects.count, 1)
         XCTAssertNil(snapshot?.projectName("no-such-project"))
+    }
+
+    func testRenderClockFollowsTheFixturesInsteadOfAStaleFixedDay() throws {
+        let fixtures = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appending(path: "ProvenantTestSupport/Fixtures")
+        let clock = try XCTUnwrap(Render.fixtureClock(in: fixtures))
+        let saved = try XCTUnwrap(Stamp.parse("2026-11-02T02:18:00Z"))
+        XCTAssertGreaterThan(clock, saved)
+        XCTAssertFalse(Stamp.relative("2026-11-02T02:18:00Z", now: clock).contains("in "))
+    }
+
+    func testChairRowFallsBackToTheRecordWhenThereIsNoSummary() async throws {
+        let replies: [Replay.Reply] = [(["console", "sessions"], "console-sessions-without-summary", 0),
+                                       (["console", "projects"], "console-projects", 0)]
+        let (console, _) = client(replies)
+        let chairs = ChairsModel(client: console)
+        await chairs.refresh()
+        let session = try XCTUnwrap(chairs.reader.value?.sessions.first)
+        let project = chairs.reader.value?.projectName(session.record.projectId)
+        let now = try XCTUnwrap(Stamp.parse("2026-11-22T09:00:00Z"))
+        let title = ChairsModel.title(session, project: project, now: now)
+        XCTAssertTrue(title.hasPrefix("project · Session "), title)
+        XCTAssertTrue(title.contains("saved "), title)
+        XCTAssertFalse(title.contains("in "), title)
+        XCTAssertFalse(title.contains("No summary yet"), title)
+    }
+
+    func testChairRowPrefersTheSummaryWhenPresent() async throws {
+        let (console, _) = client()
+        let chairs = ChairsModel(client: console)
+        await chairs.refresh()
+        let session = try XCTUnwrap(chairs.reader.value?.sessions.first)
+        let now = try XCTUnwrap(Stamp.parse("2026-11-22T09:00:00Z"))
+        XCTAssertEqual(ChairsModel.title(session, project: "project", now: now), "Implementing the console")
     }
 
     func testSearchRerunUsesTheLastQueryAndPart() async {

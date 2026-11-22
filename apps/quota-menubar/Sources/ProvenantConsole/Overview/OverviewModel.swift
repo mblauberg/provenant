@@ -17,9 +17,9 @@ struct OverviewSnapshot: Equatable, Sendable {
     /// False when the inbox could not be read, so kinds and blocking flags are unknown rather than absent.
     let inboxJoined: Bool
 
-    /// Everything the overview could not see, as short phrases for the notice above the tiles.
-    var warnings: [String] {
-        overview.coverage.warnings + (inboxJoined ? [] : ["Request kinds: inbox not read"])
+    /// Everything the overview could not see, at the level each statement deserves.
+    var notices: [CoverageNotice] {
+        overview.coverage.notices + (inboxJoined ? [] : [.warning("Request kinds are unavailable: the inbox could not be read.")])
     }
 }
 
@@ -29,11 +29,14 @@ struct OverviewSnapshot: Equatable, Sendable {
 final class OverviewModel {
     let reader = Reader<OverviewSnapshot>()
     private let console: ConsoleClient, inbox: InboxClient
+    private let now: () -> Date
 
-    init(console: ConsoleClient, inbox: InboxClient) { self.console = console; self.inbox = inbox }
+    init(console: ConsoleClient, inbox: InboxClient, now: @escaping () -> Date = { .now }) {
+        self.console = console; self.inbox = inbox; self.now = now
+    }
 
     func refresh() async {
-        await reader.load { [console, inbox] in
+        await reader.load(now: now) { [console, inbox] in
             async let overview = console.overview()
             async let requests = try? await inbox.list()
             return Self.join(try await overview, requests: await requests?.items)
