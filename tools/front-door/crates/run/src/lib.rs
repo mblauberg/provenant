@@ -401,8 +401,6 @@ pub enum DeliveryCause {
         timed_out: bool,
         stderr: String,
     },
-    /// An I/O operation failed before or while running the command.
-    Io(std::io::Error),
     /// A value returned by the host could not be parsed or was unexpected.
     Parse { detail: String },
 }
@@ -433,7 +431,6 @@ impl std::fmt::Display for DeliveryCause {
                 }
                 Ok(())
             }
-            Self::Io(error) => write!(formatter, "I/O error: {error}"),
             Self::Parse { detail } => formatter.write_str(detail),
         }
     }
