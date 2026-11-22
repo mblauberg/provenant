@@ -6,6 +6,17 @@ main() {
 set -eu
 
 die() { printf '%s\n' "$2" >&2; exit "$1"; }
+# App refresh is best effort: a missing or damaged asset must not stop the CLI
+# upgrade. Print to stdout so `provenant upgrade` carries the warning in its
+# captured host report, then leave the installed app untouched.
+app_unavailable() {
+    printf '%s\n' "Warning: $1; the app is left as-is and may be behind the CLI." >&2
+    [ -z "$app_stage" ] || rm -rf "$app_stage" || :
+    app_stage=
+}
+app_version() {
+    /usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$1/Contents/Info.plist" 2>/dev/null || printf 'unknown'
+}
 ask() {
     printf '%s [%s] ' "$1" "$2" >&2
     if [ "${PROVENANT_INSTALL_TTY:-}" = 1 ]; then
@@ -26,6 +37,11 @@ tag=
 default_state=$HOME/.local/share/provenant/v2
 legacy_state=$HOME/.local/share/provenant/v1
 state=${PROVENANT_STATE_DIR:-"$default_state"}
+# Where the user keeps the bundled macOS app. The Rust side reads the same
+# variable, so install, upgrade and doctor all name the same bundle.
+apps_dir=${PROVENANT_APPS_DIR:-"$HOME/Applications"}
+# `provenant upgrade` prints the app line from its own report; keep this script quiet there.
+quiet_app=${PROVENANT_UPGRADE_QUIET_APP:-false}
 bin_dir=
 upgrade=false
 while [ "$#" -gt 0 ]; do
@@ -49,6 +65,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 case "$state" in /*) ;; *) die 2 '--state-dir must be absolute' ;; esac
+case "$apps_dir" in /*) ;; *) die 2 'PROVENANT_APPS_DIR must be absolute' ;; esac
 case "$bin_dir" in ''|/*) ;; *) die 2 '--bin-dir must be absolute' ;; esac
 case "$tag" in *[!a-zA-Z0-9._-]*) die 2 'Invalid release tag' ;; esac
 if [ -z "$source_dir" ]; then
@@ -78,6 +95,7 @@ fi
 umask 077
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/provenant-install.XXXXXX")
 app_stage=
+app='Provenant Console.app'
 app_backup=
 old_app_inode=
 agent_temp=
@@ -114,7 +132,7 @@ recovery_failed() {
     steps=
     if [ -n "$app_backup" ]; then
         retained="previous app $app_backup"
-        steps="restore $app_backup to $HOME/Applications/$app"
+        steps="restore $app_backup to $apps_dir/$app"
     fi
     if [ -n "$agent_backup" ]; then
         retained="${retained:+$retained; }previous LaunchAgent plist $agent_backup"
@@ -166,10 +184,10 @@ cleanup() {
                 recovered=false
             fi
             if "$recovered" && [ "$backup_inode" = "$old_app_inode" ]; then
-                if [ -e "$HOME/Applications/$app" ]; then
-                    "$swap_helper" --swap-path "$app_backup" "$HOME/Applications/$app" || recovered=false
+                if [ -e "$apps_dir/$app" ]; then
+                    "$swap_helper" --swap-path "$app_backup" "$apps_dir/$app" || recovered=false
                 else
-                    mv "$app_backup" "$HOME/Applications/$app" || recovered=false
+                    mv "$app_backup" "$apps_dir/$app" || recovered=false
                 fi
             fi
             if ! "$recovered"; then
@@ -179,7 +197,7 @@ cleanup() {
                 app_stage=
             fi
         fi
-        if "$recovered" && "$app_agent_stopped" && [ -f "$agent" ] && [ -d "$HOME/Applications/$app" ]; then
+        if "$recovered" && "$app_agent_stopped" && [ -f "$agent" ] && [ -d "$apps_dir/$app" ]; then
             launchctl bootout "$service" </dev/null >/dev/null 2>&1 || :
             launchctl bootstrap "gui/$(id -u)" "$agent" </dev/null >/dev/null 2>&1 || :
             launchctl kickstart -k "$service" </dev/null >/dev/null 2>&1 || :
@@ -200,6 +218,9 @@ if [ -n "$source_dir" ]; then
     [ -f "$workspace/rust-toolchain.toml" ] || die 2 'Source directory is not a Provenant checkout'
     toolchain=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' "$workspace/rust-toolchain.toml")
     [ -n "$toolchain" ] || die 2 'Pinned toolchain is missing'
+    # A source build has no signed app asset; only the release workflow builds
+    # and publishes it. Say so instead of leaving a stale app unexplained.
+    app_unavailable 'This checkout has no bundled app archive'
     PATH=$HOME/.cargo/bin:$PATH
     export PATH
     if ! command -v rustup >/dev/null 2>&1 || ! rustup run "$toolchain" rustc --version </dev/null >/dev/null 2>&1; then
@@ -244,28 +265,40 @@ else
     actual=${actual%% *}
     [ "$actual" = "$expected" ] || die 4 'Release checksum mismatch'
     if [ "$target" = aarch64-apple-darwin ]; then
-        apps_archive=provenant-apps-aarch64-apple-darwin.tar.gz
-        apps_status=$(curl -LsS --proto '=https' --tlsv1.2 -w '%{http_code}' "$base/$apps_archive" -o "$scratch/$apps_archive" </dev/null) || die 4 'Cannot download bundled app archive'
-        case "$apps_status" in
-            200)
-                curl -fLsS --proto '=https' --tlsv1.2 "$base/$apps_archive.sha256" -o "$scratch/apps-checksum" </dev/null || die 4 'Cannot download bundled app checksum'
-                apps_expected=$(awk 'NR == 1 {print $1}' "$scratch/apps-checksum")
-                [ "${#apps_expected}" -eq 64 ] || die 4 'Invalid bundled app checksum'
-                case "$apps_expected" in *[!0-9a-fA-F]*) die 4 'Invalid bundled app checksum' ;; esac
-                apps_actual=$(shasum -a 256 "$scratch/$apps_archive")
-                apps_actual=${apps_actual%% *}
-                [ "$apps_actual" = "$apps_expected" ] || die 4 'Bundled app checksum mismatch'
-                mkdir "$scratch/apps"
-                tar -xzpf "$scratch/$apps_archive" -C "$scratch/apps" </dev/null || die 4 'Cannot unpack bundled app archive'
-                app='Provenant Console.app'
-                [ -x "$scratch/apps/$app/Contents/MacOS/provenant-console" ] || die 4 'Bundled app executable is missing: provenant-console'
-                [ -x "$scratch/apps/$app/$helper_executable" ] || die 4 'Bundled app executable is missing: quota-menubar'
-                mkdir -p "$HOME/Applications"
-                app_stage=$(mktemp -d "$HOME/Applications/.provenant-retained.XXXXXX")
-                cp -R "$scratch/apps/$app" "$app_stage/$app" ;;
-            404) printf '%s\n' 'This release has no bundled app archive; upgrading Provenant without refreshing the app.' ;;
-            *) die 4 "Cannot download bundled app archive (HTTP $apps_status)" ;;
-        esac
+        stage_app() {
+            apps_archive=provenant-apps-aarch64-apple-darwin.tar.gz
+            apps_status=$(curl -LsS --proto '=https' --tlsv1.2 -w '%{http_code}' "$base/$apps_archive" -o "$scratch/$apps_archive" </dev/null) || {
+                app_unavailable 'Cannot download bundled app archive'; return 0; }
+            case "$apps_status" in
+                200) ;;
+                404) app_unavailable 'This release has no bundled app archive'; return 0 ;;
+                *) app_unavailable "Cannot download bundled app archive (HTTP $apps_status)"; return 0 ;;
+            esac
+            curl -fLsS --proto '=https' --tlsv1.2 "$base/$apps_archive.sha256" -o "$scratch/apps-checksum" </dev/null || {
+                app_unavailable 'Cannot download bundled app checksum'; return 0; }
+            apps_expected=$(awk 'NR == 1 {print $1}' "$scratch/apps-checksum")
+            [ "${#apps_expected}" -eq 64 ] || { app_unavailable 'Invalid bundled app checksum'; return 0; }
+            case "$apps_expected" in
+                *[!0-9a-fA-F]*) app_unavailable 'Invalid bundled app checksum'; return 0 ;;
+            esac
+            apps_actual=$(shasum -a 256 "$scratch/$apps_archive")
+            apps_actual=${apps_actual%% *}
+            [ "$apps_actual" = "$apps_expected" ] || { app_unavailable 'Bundled app checksum mismatch'; return 0; }
+            mkdir "$scratch/apps" || { app_unavailable 'Cannot unpack bundled app archive'; return 0; }
+            tar -xzpf "$scratch/$apps_archive" -C "$scratch/apps" </dev/null || {
+                app_unavailable 'Cannot unpack bundled app archive'; return 0; }
+            app='Provenant Console.app'
+            [ -x "$scratch/apps/$app/Contents/MacOS/provenant-console" ] || {
+                app_unavailable 'Bundled app executable is missing: provenant-console'; return 0; }
+            [ -x "$scratch/apps/$app/$helper_executable" ] || {
+                app_unavailable 'Bundled app executable is missing: quota-menubar'; return 0; }
+            mkdir -p "$apps_dir" || { app_unavailable 'Cannot create the app directory'; return 0; }
+            app_stage=$(mktemp -d "$apps_dir/.provenant-retained.XXXXXX") || {
+                app_unavailable 'Cannot stage the app'; return 0; }
+            cp -R "$scratch/apps/$app" "$app_stage/$app" || {
+                app_unavailable 'Cannot stage the app'; app_stage=; return 0; }
+        }
+        stage_app
     fi
     mkdir "$release"
     tar -xzpf "$scratch/package.tar.gz" -C "$release" </dev/null || die 4 'Cannot unpack release'
@@ -373,7 +406,8 @@ if "$guided"; then
         fi ;;
     esac
 fi
-"$release/bin/provenant" "$@" </dev/null
+# This script owns the app swap and its report line, so the inner install skips its own.
+PROVENANT_INSTALLER_OWNS_APP=true "$release/bin/provenant" "$@" </dev/null
 instructions_committed=true
 if [ -n "$app_stage" ]; then
     agent="$HOME/Library/LaunchAgents/dev.provenant.quota-menubar.plist"
@@ -385,14 +419,14 @@ if [ -n "$app_stage" ]; then
         app_agent_stopped=true
         launchctl bootout "$service" </dev/null >/dev/null 2>&1 || :
     fi
-    if [ -e "$HOME/Applications/$app" ]; then
-        old_app_inode=$(ls -di "$HOME/Applications/$app")
+    if [ -e "$apps_dir/$app" ]; then
+        old_app_inode=$(ls -di "$apps_dir/$app")
         old_app_inode=${old_app_inode%% *}
         app_backup=$app_stage/$app
-        if ! "$swap_helper" --swap-path "$app_backup" "$HOME/Applications/$app"; then
+        if ! "$swap_helper" --swap-path "$app_backup" "$apps_dir/$app"; then
             die 4 'Could not atomically swap the Provenant app'
         fi
-    elif ! mv "$app_stage/$app" "$HOME/Applications/$app"; then
+    elif ! mv "$app_stage/$app" "$apps_dir/$app"; then
         die 4 'Could not install the refreshed Provenant app'
     fi
     if [ -f "$agent" ]; then
@@ -400,7 +434,7 @@ if [ -n "$app_stage" ]; then
         cp -p "$agent" "$app_stage/agent.plist.tmp" || die 4 'Could not back up the Provenant menu bar LaunchAgent'
         mv "$app_stage/agent.plist.tmp" "$app_stage/agent.plist" || die 4 'Could not publish the Provenant menu bar LaunchAgent backup'
         agent_backup=$app_stage/agent.plist
-        helper_path="$HOME/Applications/$app/$helper_executable"
+        helper_path="$apps_dir/$app/$helper_executable"
         agent_temp=$(mktemp "${agent}.update.XXXXXX") || die 4 'Could not prepare the menu bar LaunchAgent update'
         cp -p "$agent" "$agent_temp" || die 4 'Could not prepare the menu bar LaunchAgent update'
         plutil -replace ProgramArguments -array "$agent_temp" || die 4 'Could not reset the Provenant menu bar LaunchAgent arguments'
@@ -423,6 +457,7 @@ if [ -n "$app_stage" ]; then
     fi
     # The new app and migrated agent are now committed; cleanup must not roll them back.
     app_upgrade_committed=true
+    [ "$quiet_app" = true ] || printf '%s\n' "app: $apps_dir/$app ($(app_version "$apps_dir/$app"))"
     if [ -n "$app_backup" ] && ! rm -rf "$app_backup"; then
         printf '%s\n' "Warning: could not remove the previous Provenant app backup; staging remains at $app_stage" >&2
         app_backup=
@@ -435,6 +470,8 @@ if [ -n "$app_stage" ]; then
         rmdir "$app_stage" || printf '%s\n' "Warning: could not remove the Provenant app stage at $app_stage" >&2
         app_stage=
     fi
+elif [ -e "$apps_dir/$app" ]; then
+    [ "$quiet_app" = true ] || printf '%s\n' "app: $apps_dir/$app ($(app_version "$apps_dir/$app")); not refreshed"
 fi
 if "$guided"; then
     case " $providers " in *' claude '*)

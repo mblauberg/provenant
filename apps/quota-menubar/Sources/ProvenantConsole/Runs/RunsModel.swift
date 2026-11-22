@@ -31,14 +31,17 @@ final class RunsModel {
     private(set) var loadingMore = false
     private(set) var moreError: String?
     private let client: ConsoleClient, pageSize: Int
+    private let now: () -> Date
 
-    init(client: ConsoleClient, pageSize: Int = 50) { self.client = client; self.pageSize = pageSize }
+    init(client: ConsoleClient, pageSize: Int = 50, now: @escaping () -> Date = { .now }) {
+        self.client = client; self.pageSize = pageSize; self.now = now
+    }
 
     var isLoading: Bool { board.loading || tree.loading }
 
     /// Reads the first page, and the tree when it is showing. Pages beyond the first are read again on demand.
     func refresh() async {
-        await board.load { [client, includeFinished, pageSize] in
+        await board.load(now: now) { [client, includeFinished, pageSize] in
             let page = try await client.board(all: includeFinished, limit: pageSize)
             return RunsPage(lanes: page.lanes, nextCursor: page.nextCursor, coverage: page.coverage, observedAt: page.observedAt)
         }
@@ -46,7 +49,7 @@ final class RunsModel {
         if mode == .tree { await loadTree() }
     }
 
-    func loadTree() async { await tree.load { [client] in try await client.tree() } }
+    func loadTree() async { await tree.load(now: now) { [client] in try await client.tree() } }
 
     /// Reads the page after the last one. A cursor from a changed board is refused by the CLI; the error says to refresh.
     func loadMore() async {

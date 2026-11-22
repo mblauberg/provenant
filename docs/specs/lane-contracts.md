@@ -4,146 +4,108 @@ Owner: `tools/front-door/crates/records/src/lane_contract.rs`
 Anchor: `tools/front-door/crates/records/src/lane_contract.rs`,
 `tools/front-door/crates/fabric-runtime/src/notes.rs`
 
-These are the shared contracts for subsequent admission, delivery and settlement slices; the
-records alone do not implement those flows.
+These contracts are shared by admission, delivery and settlement. The records in
+`lane_contract.rs` define them and implement none of those flows.
 
 ## Launch request
 
-`ChildLaunchRequest` names the parent attempt, its child's narrowed authority,
-and `Destination`: the parent's worktree, a managed worktree on a new or
-existing branch, or a parent-owned path. Path claim and own-path commit choice
-are optional, sourced and off by default. Claims are advisory unless explicitly
-strict. Admission resolves paths and links and validates ownership and the inherited
-[hard boundaries](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md); the lexical
-`NarrowedAuthority::is_within` comparison is only one check, not a grant. Routes
-are a subset, budgets cannot exceed or drop a parent ceiling, and paths must be
-under an allowed root. Unknown authority fields make the comparison inconclusive
-(and therefore false) until their semantics are understood. Other inherited
-boundary restrictions cannot widen.
+`ChildLaunchRequest` names the parent attempt, its child's narrowed authority and a
+`Destination`: the parent's worktree, a managed worktree on a new or existing branch, or a
+parent-owned path. Path claims and own-path commits are optional, sourced and off by default;
+claims are advisory unless explicitly strict. Admission resolves paths and links and validates
+ownership and the inherited [hard boundaries](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md).
+The lexical `NarrowedAuthority::is_within` comparison is one check, never a grant: routes must be
+a subset, budgets cannot exceed or drop a parent ceiling, paths must lie under an allowed root,
+and other inherited boundary restrictions cannot widen. An unknown authority field makes the
+comparison inconclusive, and so false.
+- Why: a child must not acquire authority its parent did not hold.
 
 ## Observation events
 
-`ObservationEvent` is versioned, has a stable deduplication identity, project
-sequence cursor, lineage, kind and coverage. Delivery is at least once; consumers
-persist a cursor after processing and deduplicate by identity. Order is within a
-project stream, not across projects. Forge events may have no lane attempt;
-normalised detail identifies repository, PR, head and check where available.
-Unknown and partial coverage remain explicit.
+`ObservationEvent` is versioned, with a stable deduplication identity, a project sequence cursor,
+lineage, kind and coverage. Delivery is at least once: a consumer persists its cursor after
+processing and deduplicates by identity. Order holds within a project stream, not across projects.
+Forge events may have no lane attempt, and unknown or partial coverage stays explicit.
+The shared stream indexes observations for replay and never replaces its source stores, which stay
+authoritative: the project event store (`crates/fabric-store/src/events.rs`), attempt settlement,
+the graph `*.events.jsonl` journal, append-only notes, and forge events from the host listener.
+`provenant events --from SEQ [--follow]` emits them as JSON lines. `--consumer NAME` resumes a
+stored cursor that advances after each line is flushed, so it records delivery to stdout, not the
+consumer's processing, and a crash before the cursor write can redeliver a line.
+- Why: waiters and consumers need one replayable stream without a second source of truth.
 
-The delivery slice appends the shared stream to the existing project event store
-(`tools/front-door/crates/fabric-store/src/events.rs`) and uses its replay and per-consumer cursor
-pattern. Lane lifecycle comes from attempt settlement and the existing graph
-`*.events.jsonl` journal; notes retain their append-only state files; forge
-check_run, check_suite, workflow_run, pull_request and issue_comment originate
-at the host listener. Those source stores remain authoritative; the shared
-stream indexes observations for replay and does not replace them. The store's
-`append_observation` deduplicates stable source identities and `observations`
-assigns the project cursor on replay. `provenant events --from SEQ [--follow]`
-emits those observations as JSON lines. `--consumer NAME` resumes the stored
-cursor and advances it after each line is flushed; a crash before the cursor
-write can redeliver that line. The cursor records delivery to stdout, not the
-consumer’s processing.
+The host tick owns ingestion; chairs never own a listener. `domains.wait.forge_source` selects
+`auto`, `webhook` or `poll`, with its origin retained in diagnostics. `auto` and `webhook` try
+the official `gh-webhook` extension (repository admin permission) and warn and fall back to one
+shared conditional poller when it is unavailable; the tick starts one locked forwarder per
+repository. Conditional ETag responses preserve the cached resource on HTTP 304, failed passes
+keep progress and back off, and an unavailable forge during discovery warns and leaves local
+journal sources running.
 
-The existing host tick owns ingestion. `domains.wait.forge_source` selects
-`auto`, `webhook` or `poll`; source diagnostics and the cached selection retain
-its configuration origin. `auto` and `webhook` try the official `gh-webhook`
-extension with repository admin permission, warning and falling back to one
-shared conditional poller when either is unavailable. The tick starts one
-locked host forwarder per project/repository; chairs never own a listener.
-Conditional ETag responses preserve the cached resource on HTTP 304. Failed
-passes retain progress and back off; a successful pass restores cadence.
-An unavailable forge during initial discovery warns and leaves local journal
-sources running. Normalisation preserves nested PR associations and available
-check names; bounded metadata carries explicit truncation flags.
+Forge feeds and snapshots are bounded, partial observations, never a claim of complete GitHub
+history: the fallback discovers the first page of open PRs, recent repository events and workflow
+runs, then keeps named PR subscriptions to track CI and closure. A settled closed PR stops
+polling without losing its subscription or outcome, and discovery re-arms a reopened PR. Comments
+keep identifiers and state only, never text. A consumer reconciles after a gap; it cannot
+reconstruct events that fell outside GitHub's retained feed.
 
-`event_delivery::Journal` captures a cursor before reconciliation, then wakes
-waiters from replayed records. Named PR interests survive waiter expiry; the
-host continues indexing their outcomes. `wait --pr` subscribes before its first
-check read and reconciles after a quiet-period gap. A PR wait timeout retains
-the last known state and reports the readable check summary and next step as a
-diagnostic line, with a timeout outcome rather than a CI failure. The wait's
-budget comes from `--timeout` or `domains.wait`, with its source shown; there is
-no second, hard-coded PR watch budget. `status_wait`, provider lens waits and
-owner-side lane waits subscribe before their initial read. Graph markers index committed checkpoint digests
-(`GraphCheckpoint`), and retained run-event ingestion indexes queued, running and terminal
-`LaneLifecycle` transitions. Its source cursor and observations commit together;
-terminal reactions also retain their independently retryable settlement notice.
-Identifier-only local markers trigger a targeted authoritative read; unrelated
-events do not trigger one. A gap triggers reconciliation at least every minute,
-and timeout retains the last known state. Successful host reads refresh a local
-receipt even when HTTP 304 produces no new observation, so quiet, healthy
-sources do not cause each waiter to poll GitHub. Peer-owned state still uses its
-owner transport, with its declared paced fallback when local events are not
-available; a shared journal never widens access to another host.
-
-Forge repository feeds and snapshots are bounded, partial observations, not a
-claim of complete GitHub history. The fallback discovers the first page of
-open PRs, recent repository events and workflow runs, then retains named PR
-subscriptions to track their CI and closure. Settled closed PRs stop active
-polling without deleting the subscription or outcome; discovery re-arms a
-reopened PR. Comments retain identifiers and
-state only, never their text. A consumer reconciles source state after a gap;
-it cannot reconstruct comments that fell outside GitHub's retained feed.
-The notes event kind is defined here; its source indexing is owned by the notes
-slice.
+Waiters (`wait --pr`, status, provider lens and owner-side lane waits) subscribe before their
+first read, then reconcile from `event_delivery::Journal` replay. Named PR interests survive
+waiter expiry and the host keeps indexing their outcomes. A PR wait timeout keeps the last
+known state, reports the check summary and next step, and is a timeout outcome, not a CI failure;
+its budget comes from `--timeout` or `domains.wait` with its source shown, with no second
+hard-coded budget. Identifier-only local markers trigger one targeted authoritative read, and
+unrelated events trigger none. A gap triggers reconciliation at least every minute, and successful
+host reads refresh a local receipt even on HTTP 304 so quiet, healthy sources do not make every
+waiter poll GitHub. Peer-owned state uses its owner transport, with its declared paced fallback
+when local events are unavailable; a shared journal never widens access to another host.
+- Why: waiting must be cheap, resumable and honest about what it did not observe.
 
 ## Shared notes
 
-`fabric_runtime::notes::Board` owns immutable note files beneath
-`state/notes/PROJECT`. Host processes publish a complete numbered file with
-no-replace atomic publication under a stable board lock; neither corrections
-nor read caps rewrite source entries. A correction appends a new entry with
-`resolves` naming an earlier source sequence. Tags are unrestricted labels.
+`fabric_runtime::notes::Board` owns immutable note files under `state/notes/PROJECT`. Host
+processes publish a complete numbered file with no-replace atomic publication under a stable board
+lock. Corrections and read caps never rewrite source entries: a correction appends an entry whose
+`resolves` names an earlier sequence. Tags are unrestricted labels, and projects have separate files.
 
-`notes::Input` contains content, scope and read controls only. The bound host
-relay stamps the attempt, resolved adapter/model, host-observed commit and
-wall time; `verified` starts false. Unknown facts remain null. Provenance fields
-in a lane request are rejected, including `verified`. Note text remains a claim.
-No entry auto-promotes into documentation or issues.
+`notes::Input` carries content, scope and read controls only. The bound host relay stamps the
+attempt, resolved adapter and model, host-observed commit and wall time; `verified` starts false,
+unknown facts stay null, and a lane request carrying provenance fields (`verified` included) is
+rejected. Note text is a claim, and no entry auto-promotes into documentation or issues.
+- Why: a note's provenance must come from the host, never from the lane that wrote it.
 
-Scopes are logical work paths: project, graph, or graph/node subtree. A project
-read sees every project note. A graph read also sees project broadcasts; a
-subtree read sees project and graph broadcasts and its ancestors/descendants,
-excluding sibling subtrees and other graphs. Descendants follow the graph's
-`--` node separator, not arbitrary string prefixes. Projects have separate files.
+Scopes are logical work paths: project, graph, or graph/node subtree. A project read sees every
+project note; a graph read also sees project broadcasts; a subtree read sees project and graph
+broadcasts and its ancestors and descendants, excluding sibling subtrees and other graphs.
+Descendants follow the graph's `--` node separator, not string prefixes. A console tree read
+carries the requested subtree to each peer; a peer that does not support selection is reported
+with partial coverage and a warning rather than hidden.
 
-Console tree peer reads carry the requested attempt subtree to each peer, which
-applies the same bounded selector as a local read. An older peer may ignore the
-optional field and return its whole tree; the caller preserves that result but
-marks peer coverage partial and warns that subtree selection was unsupported.
+`notes::Note` has a stable identity and a source-local sequence; its `observation` conversion takes
+a delivery-allocated `ObservationCursor` and kind `ObservationKind::Note`.
 
-`notes::Note` retains a stable identity and a source-local sequence. Its
-`observation` conversion takes a delivery-allocated `ObservationCursor`, preserving
-the shared contract's project-stream ordering and `ObservationKind::Note`.
-The delivery slice indexes these source records; it does not replace them.
+Reads are delta by default, keyed by host-bound lane, reader alias and scope. Chair aliases have a
+separate namespace, so a lane cannot advance another lane's or the chair's cursor by choosing the
+same alias. A read does not move its cursor: the CLI acknowledges only after successful complete
+output, lost replies may redeliver the same note identity, and acknowledgements never move a
+healthy cursor backwards. A missing cursor starts at zero; a malformed or out-of-range one replays
+from zero and says so. `--replay` leaves the cursor unchanged. Cursors are disposable and source
+entries authoritative.
 
-Reads are delta by default, keyed by host-bound lane, reader alias and scope.
-Chair aliases have a separate namespace; a lane cannot advance another lane's
-or the chair's cursor by choosing the same alias. A read does not move its
-cursor: the CLI ACKs only after successful complete output. Lost replies may
-redeliver, with the same note identity. Missing cursors start at zero; malformed
-or out-of-range saved cursors replay from zero and disclose recovery. Explicit
-`--replay` leaves the delta cursor unchanged. ACKs never move a healthy cursor
-backwards. Cursors are disposable; source entries are authoritative.
-
-The default read cap is 50 entries (source `default`); `notes read --limit N`
-overrides it (source `launch`). A separate default byte cap bounds a page; a
-single entry above that read byte cap is returned whole so the cursor can progress.
-Before publication, the board checks that a single-note page fits the existing
-result transport ceiling, including pretty CLI output and read metadata. A note
-that cannot be delivered is rejected before append. Multi-note pages also obey
-that transport ceiling and leave remaining entries for the next page. Every page
-reports both caps, source, continuation, truncation and cursor recovery. Nothing
-is dropped when a page is capped: continue the delta, or replay explicitly.
+`notes read --limit N` overrides the default read cap of 50 entries (source `launch`), and a
+separate byte cap bounds a page. An entry above the byte cap is returned whole so the cursor can
+progress. A note that cannot fit the result transport ceiling (pretty CLI output and read metadata
+included) is rejected before append, and multi-note pages obey the same ceiling. Every page reports
+both caps, their source, continuation, truncation and cursor recovery; nothing is dropped when a
+page is capped.
+- Why: a delta reader must never silently lose a note.
 
 ## Result projection
 
-`ResultProjection` presents bounded `HostFacts` first and `LaneClaims` second.
-Observed commands carry source and completeness, with unknown exit codes left
-unknown. Git, CI and scope evidence likewise state source and completeness;
-shared-worktree Git facts describe the worktree, not child authorship. The
-lane's handoff and verify are claims, not host attestations. The host builds the
-projection and bounds its encoded input to the existing run result limit;
-truncation and missing evidence must be reported as partial or unknown. Status,
-output, resume, steer and provider adapters consume this same projection in the
-later facts slice.
+`ResultProjection` presents bounded `HostFacts` first and `LaneClaims` second. Observed commands
+carry source and completeness, with unknown exit codes left unknown, and Git, CI and scope
+evidence state the same; shared-worktree Git facts describe the worktree, not child authorship.
+The lane's handoff and verify are claims, never host attestations. The host builds the projection
+and bounds its encoded input to the run result limit, reporting truncation and missing evidence as
+partial or unknown.
+- Why: a reader must be able to tell what the host observed from what the lane asserted.

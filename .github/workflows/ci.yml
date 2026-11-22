@@ -973,6 +973,14 @@ jobs:
       # Clippy lives in the macOS test job, which compiles and caches the
       # workspace; only the Swift package tests (shared client, menu bar and
       # console) stay here, to balance the two jobs.
+      - name: Check Swift replay fixtures against the Rust wire types
+        working-directory: tools/front-door
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/release-target
+          CARGO_PROFILE_RELEASE_LTO: "false"
+          RUSTC_WRAPPER: .cargo/rustc-wrapper.sh
+          CARGO_PROFILE_ARG: --release
+        run: ../../scripts/check-swift-fixtures
       - name: Run Swift package tests
         working-directory: apps/quota-menubar
         run: swift test

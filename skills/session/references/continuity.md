@@ -3,7 +3,8 @@
 ## Standing record
 
 Open the checkpoint with the typed standing record in its frontmatter. Every
-field is required; empty lists are explicit:
+top-level field is required, so an omitted `waiting_on_owner` never reads as
+"nothing waits"; empty lists are explicit:
 
 ```yaml
 ---
@@ -25,17 +26,14 @@ repository path and anchor). Prose, or no source, leaves the grant unverified.
 `expires` is an RFC 3339 instant or `none`; an expired grant is not restored.
 Keep the scope as the owner bounded it. `waiting_on_owner` names each specific
 ask. A save replaces the whole file, so carry the record forward, dropping
-grants and asks that ended.
-
-Hooks restore the record ahead of the prose at session start, after compaction
-and after an account switch; `provenant status` reports what waits on the
-owner. Lanes cannot save chair checkpoints, and hooks keep a separate autosave.
+grants and asks that ended. Hooks restore the record ahead of the prose at
+session start, after compaction and after an account switch.
 
 ## Body
 
-Goal and owner; direction and authority; Intent; evidence pointers; next
-actions, blockers and resume trigger. Write PR references as `PR #N`. Link live
-lanes and criteria to their owners instead of copying changing status.
+The [checkpoint template](../templates/checkpoint.template.md) lists the
+headings. Link live lanes and criteria to their owners instead of copying
+changing status.
 
 The Intent section is the chair's understanding, not quotation. For each live
 ruling record what the user wants, the reason as you understand it, rejected
@@ -47,10 +45,3 @@ entry in doubt; save it at each ruling or correction and before a long task.
 
 Retain rulings, authority, evidence pointers, open questions and the next
 action. Drop transcripts, tool output and anything that can be reopened.
-
-## Chair log
-
-For retryable appends keep `--operation-id ID`, `--issued-at UNIX_SECONDS` and
-identical JSON input. Pending inbox answers keep their original
-host/project/session/actor across handoff; changing a label does not move
-their delivery target.

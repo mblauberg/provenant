@@ -1,10 +1,8 @@
 # Maintaining Provenant
 
-Read [AGENTS.md](AGENTS.md), [GLOBAL-AGENTS.md](GLOBAL-AGENTS.md) and the
-[architecture](docs/ARCHITECTURE.md). [ADR 0035](docs/adr/0035-three-hard-boundaries-and-flexible-everything-else.md) defines
-the hard boundaries; [worktrees](docs/worktrees.md) owns worktree layout,
-merge and cleanup.
-Preserve unrelated work and follow the repository process below.
+Read [AGENTS.md](AGENTS.md) first. This file holds the repository's process
+declarations and the release steps. [ADR 0035](docs/adr/0035-three-hard-boundaries-and-flexible-everything-else.md)
+defines the hard boundaries. Preserve unrelated work.
 
 ## Repository process
 
@@ -36,27 +34,28 @@ decisions and invariants.
 
 Edit living docs in place. Each user-visible change adds a fragment under
 [release notes](docs/release-notes/next.d/), following the
-[fragment rules](docs/release-notes/README.md#writing-a-fragment): one section
-per fragment (Breaking changes, Behaviour changes, Additions or Fixes; use two
-fragments for two sections) and one area from the README list. `--check` fails
-on a later section heading or content before the first heading and warns on an
-unknown section or area. Before a
-release, read the collated preview, merge related entries, align terms and
-write `_intro.md` last. Run `scripts/collate-release-notes vX.Y.Z`, then reset
-`_intro.md` for the next release. GitHub Releases holds published history.
+[fragment rules](docs/release-notes/README.md#writing-a-fragment).
+`scripts/collate-release-notes --check` validates them in CI. Before a release,
+read the collated preview (`scripts/collate-release-notes`), merge related
+entries, align terms and write `_intro.md` last; `scripts/prepare-release` then
+collates and consumes the fragments, and you reset `_intro.md` for the next
+release. GitHub Releases holds published history.
 
 ### Specifications
 
 - Owns: `non-derivable-intent`
-- Drift gate: `scripts/check-doc-truth` checks spec indexes, headers, anchors,
-  and diagram metadata. Specs name owning symbols, never individual tests,
-  line numbers or inventory counts. Tests cite the section they pin with
-  `Spec: docs/specs/NAME.md#anchor`; the gate strictly resolves these Rust
-  comments to spec files and heading anchors. Other prose is review-checked.
+- Drift gate: `scripts/check-doc-truth` (CI, and weekly through the docs-drift
+  workflow) checks spec and runbook headers, anchors and indexes, commands and
+  flags against `provenant help --all`, named error codes, variables and
+  configuration keys against the sources and `provenant config schema`, and
+  `Spec: docs/specs/NAME.md#anchor` comments in Rust. Specs name owning
+  symbols, never individual tests, line numbers or inventory counts. Other
+  prose is review-checked.
 
 ### Merge policy
 
-- Pointer: [`docs/worktrees.md`](docs/worktrees.md)
+- Pointer: [`docs/runbooks/github-workflow.md#merge`](docs/runbooks/github-workflow.md#merge);
+  worktree custody and cleanup are in [`docs/worktrees.md`](docs/worktrees.md)
 
 ### Work-item runbook
 
@@ -64,45 +63,31 @@ write `_intro.md` last. Run `scripts/collate-release-notes vX.Y.Z`, then reset
 
 ## How Provenant is built
 
-The [deliver skill](skills/deliver/SKILL.md) owns the engineering stance.
-
-- Fix root causes and the class of defect; prefer long-term structure to patches.
-- Build extensible, configurable, modular mechanisms with one declared core
-  and one owner per concern. Generalise where it makes change easier.
-- Use explicit typed failures and catch mistakes before runtime. Checks allow or
-  warn by default; hard holds protect only the
-  [three boundaries](docs/adr/0035-three-hard-boundaries-and-flexible-everything-else.md). When busy, skip and retry.
-- Move callers to the new shape and remove compatibility code. For tests, see
-  [test-design](skills/test-design/SKILL.md).
+The [deliver skill](skills/deliver/SKILL.md) owns the engineering stance and
+[test-design](skills/test-design/SKILL.md) the test invariants. Checks allow or
+warn by default; hard holds protect only the three boundaries.
 
 ## Documentation and skills
 
-Use [engineering-docs](skills/engineering-docs/SKILL.md) for placement and
-[improve](skills/improve/SKILL.md) for skill changes. Code and schemas own
-implemented fields and defaults; specs own non-derivable invariants, runbooks
-own procedures, and ADRs own decisions and reasons.
+Code and schemas own implemented fields, flags and defaults
+(`provenant help --all`, `provenant config schema`); specs own non-derivable
+invariants, runbooks procedures and ADRs decisions. Use
+[engineering-docs](skills/engineering-docs/SKILL.md) for placement and
+[improve](skills/improve/SKILL.md) for skill changes.
 
-The harness checks ambient doctrine and installed skills. `GLOBAL-AGENTS.md`
-is the ambient source, installed as `AGENTS.md`; provider import shims add no
-policy. Nothing outside a skill names a file under its `references/` directory.
-Installed skill links stay inside that skill. Ambient rules avoid repository
-paths and dates; Git records provenance.
-
-This repository supports multiple agent platforms. Platform-specific scope
-must be explicit. Changes to ambient rules apply to new sessions.
+`scripts/check-harness` checks ambient doctrine and installed skills.
+`GLOBAL-AGENTS.md` is the ambient source, installed as each harness's user-level
+`AGENTS.md`; `CLAUDE.md` holds only `@AGENTS.md`. Ambient rules avoid
+repository paths and dates, nothing outside a skill names a file under its
+`references/` directory, and installed skill links stay inside that skill.
+Platform-specific scope is explicit. Ambient changes apply to new sessions.
 
 ## Verify and release
 
-When cutting a version, start with `scripts/prepare-release vX.Y.Z`. It bumps
-each workspace member's own `[package] version` under `tools/front-door`,
-refreshes `Cargo.lock` offline, updates the bug template placeholder from
-`rust-toolchain.toml`, checks the fragments first and stops on a malformed one, warns about merged
-changes that have no next.d fragment, and collates the notes. Review and commit its changes, then run the gates
-below; the script prints the remaining steps (pull request and tag).
-
-Use the [CI runbook](docs/runbooks/ci.md), [test tiers](docs/runbooks/test-tiers.md)
-and [release skill](skills/release/SKILL.md) for the relevant checks. Run the
-checkout gates or require exact-head CI evidence:
+Start a release with `scripts/prepare-release vX.Y.Z`; its header lists what it
+does and it prints the remaining steps. Review and commit its changes, then run
+the gates, or require exact-head CI evidence ([CI runbook](docs/runbooks/ci.md),
+[test tiers](docs/runbooks/test-tiers.md), [release skill](skills/release/SKILL.md)):
 
 ```sh
 provenant check config
@@ -121,12 +106,10 @@ provenant check release \
   --head "$(git rev-parse --verify --end-of-options 'HEAD^{commit}')"
 ```
 
-A release whose notes have breaking changes is never a patch: evolving
-consumer items change in a minor release and stable items only in a major one
-([consumer contract](docs/specs/consumer-contract.md#stability-tiers)).
-`scripts/collate-release-notes` warns on a patch cut that has them.
-
-Release checklist: bump `LIVE_RECORD_FORMAT` in
+Notes with breaking changes never ship in a patch; the
+[consumer contract](docs/specs/consumer-contract.md#stability-tiers) sets which
+tier changes in which release, and `scripts/collate-release-notes` warns on a
+patch cut. Bump `LIVE_RECORD_FORMAT` in
 `tools/front-door/crates/records/src/install.rs` on any release that changes
 files a live attempt's supervisor or settlement reads, so install can warn
 before swapping under live lanes.

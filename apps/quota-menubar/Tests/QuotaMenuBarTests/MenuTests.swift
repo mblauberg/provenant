@@ -120,6 +120,23 @@ final class MenuTests: XCTestCase {
         XCTAssertEqual(facts, ["Checked"])
     }
 
+    func testSnapshotModelsAppearCompactlyInTheAccountSubmenu() throws {
+        let details = try XCTUnwrap(try row("claude/anese").submenu)
+        let facts = details.compactMap { entry -> (String, String)? in
+            guard case .fact(let key, let value) = entry else { return nil }
+            return (key, value)
+        }
+        XCTAssertEqual(facts.first { $0.0 == "Models" }?.1,
+                       "Claude Opus 5.5, Claude Sonnet 5.5 +2 more")
+        let without = try XCTUnwrap(try row("opencode/local-test-01").submenu)
+        XCTAssertFalse(without.contains { entry in
+            if case .fact(let key, _) = entry, key == "Models" { return true }
+            return false
+        })
+        XCTAssertNil(QuotaMenu.modelsLine([]))
+        XCTAssertEqual(QuotaMenu.modelsLine(["One", "Two"]), "One, Two")
+    }
+
     func testFooterOpensTheConsoleAndHasSettings() throws {
         let app = URL(fileURLWithPath: "/fixture/Provenant Console.app")
         let rows = items(entries(try fixture(), consoleURL: app))
@@ -144,8 +161,8 @@ final class MenuTests: XCTestCase {
             {"id":"2","title":"Second","project_label":null,"task_label":null},
             {"id":"3","title":"Third","project_label":"Other","task_label":null},
             {"id":"4","title":"Fourth","project_label":null,"task_label":null}],
-          "lanes":[{"task_label":"Build menu","project_label":"Project","state":"running","attention":false,"attempt_id":"abc","queued_at":"2026-01-01T00:00:00Z"},
-                   {"task_label":null,"project_label":null,"state":"terminal","attention":true}],
+          "lanes":[{"task_label":"task","key":{"graph":"build-menu","node":"task","attempt":1},"project_label":"Project","state":"running","attention":false,"attempt_id":"abc","queued_at":"2026-01-01T00:00:00Z"},
+                   {"task_label":null,"key":{"graph":"review-menu","node":"task--writer","attempt":2},"project_label":null,"state":"terminal","attention":true}],
           "counts":{"needs_you":4,"running":1,"attention":1},
           "coverage":{"scope":"local","inbox":"partial","runs":"complete","nested_runs":"unavailable"}}}
         """
@@ -158,10 +175,10 @@ final class MenuTests: XCTestCase {
         XCTAssertEqual(Array(rows.prefix(3).map(\.title)), ["First", "Second", "Third"])
         XCTAssertTrue(rows[0].subtitle?.hasPrefix("Project · ") == true)
         XCTAssertEqual(rows[0].action, .open(try XCTUnwrap(URL(string: "provenant-console://request/1"))))
-        XCTAssertEqual(rows.first { $0.title == "Build menu" }?.action, .open(try XCTUnwrap(URL(string: "provenant-console://attempt/abc"))))
+        XCTAssertEqual(rows.first { $0.title == "build-menu" }?.action, .open(try XCTUnwrap(URL(string: "provenant-console://attempt/abc"))))
         XCTAssertNil(rows[1].subtitle)
-        XCTAssertTrue(rows.first { $0.title == "Build menu" }?.subtitle?.hasPrefix("Project · Running · ") == true)
-        XCTAssertEqual(rows.first { $0.title == "Untitled task" }?.subtitle, "Needs attention")
+        XCTAssertTrue(rows.first { $0.title == "build-menu" }?.subtitle?.hasPrefix("Project · Running · ") == true)
+        XCTAssertEqual(rows.first { $0.title == "review-menu · task--writer · attempt 2" }?.subtitle, "Needs attention")
         XCTAssertTrue(menu.contains(.note("1 more · use provenant inbox", nil)))
         XCTAssertTrue(menu.contains(.note("Local inbox: partial", .orange)))
         let failed = QuotaMenu.overviewEntries(overview, error: "offline", updatedAt: report.generatedAt, now: report.generatedAt)

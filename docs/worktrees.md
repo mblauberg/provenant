@@ -9,17 +9,15 @@ its project port configuration even when invoked from a linked checkout or a
 subdirectory. An explicit relative `--worktree` path remains relative to the
 invoking directory.
 
-## Helper
-
 ```sh
-provenant worktree create fix/repo-example --base origin/main
+provenant worktree create fix/repo-example --base origin/main   # base defaults to the current head
 provenant worktree list
-provenant worktree remove fix-repo-example
+provenant worktree remove fix-repo-example                      # --discard also deletes an unmerged branch
 ```
 
-See `provenant worktree --help` for options and
-[configuration](runbooks/configuration.md#worktree-setup) for project setup.
-If a worktree is refused, inspect it with `provenant worktree doctor PATH`.
+Options are in `provenant worktree --help`; project setup is in
+[configuration](runbooks/configuration.md#worktree-setup). If a worktree is
+refused, inspect it with `provenant worktree doctor PATH`.
 
 ## Ownership and cleanup
 
@@ -31,10 +29,8 @@ collection and retention, see [GC](runbooks/gc.md); for uncertain custody, use
 reservation to bypass custody.
 
 Creation takes exclusive custody of its destination before checking the path,
-Git registration or branch, and repeats those checks under custody. If `git
-worktree add` fails after state appears, that state is retained unless its
-identity can be attributed to the failed invocation; an earlier absence check
-alone does not authorise recursive cleanup.
-
-The [supervisor spec](specs/supervisor.md#worktrees) owns worktree custody and
-shared Git metadata.
+Git registration or branch, and repeats those checks under custody. State left
+by a failed `git worktree add` is retained unless its identity can be
+attributed to that invocation; an earlier absence check alone does not
+authorise recursive cleanup. The [supervisor spec](specs/supervisor.md#worktrees)
+owns worktree custody and shared Git metadata.

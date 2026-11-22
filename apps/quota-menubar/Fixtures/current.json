@@ -31,7 +31,16 @@
             "used_basis_points": 5200,
             "resets_unix_seconds": 1900249200
           }
-        ]
+        ],
+        "details": {
+          "fingerprint": "claude-fixture",
+          "models": [
+            "Claude Opus 5.5",
+            "Claude Sonnet 5.5",
+            "Gemini 3.8 Flash",
+            "GPT-OSS 120B"
+          ]
+        }
       },
       "status": "available",
       "age_seconds": 180,

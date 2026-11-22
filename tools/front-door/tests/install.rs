@@ -1892,41 +1892,48 @@ fn upgrade_rejects_release_checksum_mismatch_and_keeps_the_installed_release() -
     Ok(())
 }
 
-/// A bundled-app failure must leave the installed app and launch agent alone.
-fn assert_app_fetch_failure_keeps_installed_app(key: &str, value: &str) -> Result {
+/// A bundled-app failure warns but leaves the installed app, agent and the
+/// rest of the upgrade alone: app refresh is best effort, not a hard gate.
+fn assert_app_fetch_failure_warns_and_keeps_installed_app(key: &str, value: &str) -> Result {
     let mut rig = UpgradeRig::new()?;
     rig.set_env(key, value);
     let (outcome, report) = rig.upgrade(&[])?;
+    // The local host still upgrades the CLI; only the app refresh is skipped.
+    assert_eq!(report["data"][0]["success"], true, "{report}");
+    // The configured Fabric peer fails by design in this rig.
     assert_ne!(code(&outcome), 0, "{report}");
-    assert_eq!(report["data"][0]["success"], false, "{report}");
     rig.assert_old_app_untouched();
+    assert!(!rig.receipt_is_first_release()?);
     assert!(!rig.launch_log.exists());
     Ok(())
 }
 
 #[test]
-fn upgrade_app_checksum_mismatch_keeps_installed_app() -> Result {
-    assert_app_fetch_failure_keeps_installed_app("PROVENANT_TEST_APPS_CHECKSUM", &"0".repeat(64))
+fn upgrade_app_checksum_mismatch_warns_and_keeps_installed_app() -> Result {
+    assert_app_fetch_failure_warns_and_keeps_installed_app(
+        "PROVENANT_TEST_APPS_CHECKSUM",
+        &"0".repeat(64),
+    )
 }
 
 #[test]
-fn upgrade_app_unavailable_keeps_installed_app() -> Result {
-    assert_app_fetch_failure_keeps_installed_app("PROVENANT_TEST_APPS_STATUS", "503")
+fn upgrade_app_unavailable_warns_and_keeps_installed_app() -> Result {
+    assert_app_fetch_failure_warns_and_keeps_installed_app("PROVENANT_TEST_APPS_STATUS", "503")
 }
 
 #[test]
-fn upgrade_app_checksum_download_failure_keeps_installed_app() -> Result {
-    assert_app_fetch_failure_keeps_installed_app("PROVENANT_TEST_APPS_CHECKSUM_FAIL", "1")
+fn upgrade_app_checksum_download_failure_warns_and_keeps_installed_app() -> Result {
+    assert_app_fetch_failure_warns_and_keeps_installed_app("PROVENANT_TEST_APPS_CHECKSUM_FAIL", "1")
 }
 
 #[test]
-fn upgrade_app_bad_archive_keeps_installed_app() -> Result {
-    assert_app_fetch_failure_keeps_installed_app("PROVENANT_TEST_APPS_BAD_TAR", "1")
+fn upgrade_app_bad_archive_warns_and_keeps_installed_app() -> Result {
+    assert_app_fetch_failure_warns_and_keeps_installed_app("PROVENANT_TEST_APPS_BAD_TAR", "1")
 }
 
 #[test]
-fn upgrade_app_missing_executable_keeps_installed_app() -> Result {
-    assert_app_fetch_failure_keeps_installed_app("PROVENANT_TEST_APPS_INCOMPLETE", "1")
+fn upgrade_app_missing_executable_warns_and_keeps_installed_app() -> Result {
+    assert_app_fetch_failure_warns_and_keeps_installed_app("PROVENANT_TEST_APPS_INCOMPLETE", "1")
 }
 
 #[test]

@@ -43,12 +43,12 @@ final class ConsoleModel {
         let console = ConsoleClient(cli: cli), inboxClient = InboxClient(cli: cli)
         client = console
         inbox = InboxModel(client: inboxClient, now: now)
-        overview = OverviewModel(console: console, inbox: inboxClient)
-        runs = RunsModel(client: console)
-        quota = QuotaPanelModel(client: console)
-        chairs = ChairsModel(client: console)
-        search = SearchModel(client: console)
-        attempt = AttemptModel(client: console)
+        overview = OverviewModel(console: console, inbox: inboxClient, now: now)
+        runs = RunsModel(client: console, now: now)
+        quota = QuotaPanelModel(client: console, now: now)
+        chairs = ChairsModel(client: console, now: now)
+        search = SearchModel(client: console, now: now)
+        attempt = AttemptModel(client: console, now: now)
         self.defaults = defaults
         let saved = defaults?.string(forKey: Self.defaultsKey).flatMap(Destination.init(rawValue:))
         item = SidebarItem(saved.flatMap { $0 == .search ? nil : $0 } ?? .overview)

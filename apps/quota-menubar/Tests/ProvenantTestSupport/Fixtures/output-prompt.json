@@ -1,14 +1,14 @@
 {
-  "schema_version": 1,
   "command": "output",
-  "status": "ok",
   "data": {
     "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
-    "state": "running",
     "bytes": {
-      "encoding": "utf8",
-      "data": "Implement the console overview screen."
-    }
+      "data": "Implement the console overview screen.",
+      "encoding": "utf8"
+    },
+    "state": "running"
   },
-  "error": null
+  "error": null,
+  "schema_version": 1,
+  "status": "ok"
 }

@@ -29,7 +29,12 @@ struct OverviewView: View {
                        tone: (counts.attention ?? 0) > 0 ? .caution : .neutral)
             }
             .padding(Space.large)
-            ForEach(snapshot.warnings, id: \.self) { Notice($0, tone: .neutral) }
+            ForEach(Array(snapshot.notices.enumerated()), id: \.offset) { _, notice in
+                switch notice {
+                case .warning(let text): Notice(text)
+                case .info(let text): InfoNotice(text)
+                }
+            }
             if let error = reader.error { Notice("Refresh failed. \(error)") }
             list(snapshot)
         }
@@ -55,6 +60,9 @@ struct OverviewView: View {
                     Button { console.showAttempt(lane.id) } label: { LaneRow(lane) }
                         .buttonStyle(.plain)
                 }
+                if let footnote = snapshot.overview.coverage.nestedRunsFootnote {
+                    Text(footnote).font(.caption).foregroundStyle(.tertiary)
+                }
             }
         }
         .listStyle(.inset)
@@ -72,7 +80,7 @@ struct OverviewView: View {
     static func lanesMessage(_ coverage: String?) -> String {
         switch coverage {
         case "complete", "empty": return "No lanes are running."
-        case "partial": return "No lanes are running in the observed run state; counts may be incomplete."
+        case "partial": return "No lanes are running in the observed run state."
         default: return "Run state is unavailable here."
         }
     }

@@ -1,7 +1,5 @@
 {
-  "schema_version": 1,
   "command": "console detail",
-  "status": "ok",
   "data": {
     "applied_route": null,
     "artifacts": [
@@ -19,16 +17,15 @@
       "nested": "bounded_tree_search",
       "peer": "not_searched"
     },
-    "delivery": null,
     "lane_id": {
+      "attempt_id": "65656565656565656565656565656565",
       "host": null,
       "key": {
         "attempt": 1,
         "graph": "fixture",
         "node": "task",
         "project": "01010101010101010101010101010101"
-      },
-      "attempt_id": "65656565656565656565656565656565"
+      }
     },
     "linked_inbox_requests": [],
     "observed_route": null,
@@ -50,7 +47,6 @@
     "trace": {
       "actor": "02020202020202020202020202020202",
       "attempt": "65656565656565656565656565656565",
-      "host": null,
       "operation": "board-101",
       "parent": null,
       "project": "01010101010101010101010101010101",
@@ -59,7 +55,6 @@
     "usage": {
       "cache_read": null,
       "cache_write": null,
-      "cache_write_1h": null,
       "context_basis_points": null,
       "output_excluding_reasoning": null,
       "reasoning": null,
@@ -77,5 +72,7 @@
       ]
     }
   },
-  "error": null
+  "error": null,
+  "schema_version": 1,
+  "status": "ok"
 }

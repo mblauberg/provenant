@@ -6,51 +6,31 @@ Start an approved writer with the `implement` template (`deliver` for the
 composite through CI, review and landing), inspect `--explain`, then submit
 without it. A worktree's owning lane decides who else writes in it; authorised
 writers share its occupancy lease. Independent slices use separate worktrees
-and integrate into one branch before full review. Redaction defaults to `off`;
-set `redaction` to `secrets` for credential masking at publication. A retired
-`full` value warns and behaves as `secrets`. `config show` reports the setting
-and source.
-Mechanism (confinement, redaction, custody, settlement,
-priorities) is in the [run spec](../specs/run.md) and
+and integrate into one branch before full review. Mechanism (confinement,
+custody, settlement, priorities) is in the [run spec](../specs/run.md) and
 [supervisor spec](../specs/supervisor.md); templates are in
 [routing and templates](routing-and-templates.md).
 
 ## Launch refusals
 
-- `run` from a linked worktree with no `--mode` and no target refuses with
-  `REFUSED` and names both repairs: `--worktree PATH` for a writer or
-  `--mode read-only` for a reader. To read another registered checkout pass
-  both `--mode read-only` and `--worktree PATH`; readers take no writer lease.
-- A new branch without `--base` starts from the fetched default branch of
-  `origin` (local `HEAD` with a warning if that fails). With `--base` on an
-  existing branch, the branch must already contain it. A branch checked out
-  elsewhere must be selected with `--worktree`.
+A refusal names its cause and repair. These rules sit behind them.
+
 - After any worktree refusal run `provenant worktree doctor PATH`: it only
-  observes, and reports the state, the reason and one suggested command (replace
-  its `BRANCH` and `PATH` placeholders). A checkout with no lane owner record
-  may have been made outside Provenant: check custody, then pass `--worktree
-  PATH` explicitly.
-- An authorised nested writer may share its parent's exact live checkout,
-  including its edits. Independent work provisions a separate checkout. Dirty
-  trees and retained import fences still protect ordinary checkout reuse;
-  a clean worktree from a terminal lane is reused.
-- Optional `write_scope` path claims warn the owning lane about overlaps and
-  refuse nothing. Commit only owned paths with `git commit -- <owned paths>`;
-  Git serialises commits through `index.lock`, with bounded collision retries.
-- Removal and GC require exclusive occupancy with no live holders. Never
-  discard a live holder's worktree or delete its lease to bypass custody.
-- Writer rebases use the lane's private Git and pass host import checks. If Git
-  cannot write rebase state, stop with `needs_host_rebase`; never create a clone
-  or second checkout to bypass it. A host-authorised merge of `origin/main` is
-  the alternative.
-- Linux has no enforcing backend, so a selected enforcing profile fails rather
-  than silently running unconfined. Host-authorised trusted routes remain available.
-  Each lane resolves a
+  observes, and reports the state, the reason and one suggested command. A
+  checkout with no lane owner record may have been made outside Provenant:
+  check custody, then pass `--worktree PATH` explicitly.
+- A nested writer may share its parent's exact live checkout, edits included.
+  Independent work gets a separate checkout. Dirty trees and retained import
+  fences protect ordinary reuse; a clean worktree from a terminal lane is reused.
+- `write_scope` path claims are advisory: they warn the owning lane about
+  overlaps and refuse nothing. Commit only owned paths with
+  `git commit -- <owned paths>`; Git serialises commits through `index.lock`.
+- Removal and GC need exclusive occupancy with no live holders. Never discard a
+  live holder's worktree or delete its lease to bypass custody.
+- Linux has no enforcing sandbox backend, so a selected enforcing profile fails
+  rather than running unconfined. Each lane resolves a
   [sandbox mode](configuration.md#lane-sandbox-mode); `status` shows
-  `sandboxed(<source>)` on sandboxed lanes. Credential, state, read-only source
-  and shared Git roots stay write-protected; hard links follow the
-  [permission policy](../specs/supervisor.md#permission-policy). `cargo nextest run --profile lane`
-  excludes fixtures requiring host control and CI's `ci` profile keeps them.
+  `sandboxed(<source>)` on sandboxed lanes.
 
 ## Delivery
 
@@ -62,117 +42,97 @@ provenant lane deliver NAME/NODE#N --deliver pr     # none | push | integrate:BR
 
 It refuses a dirty checkout, changed head or live custody; repeating a
 successful delivery returns its receipt. Default and primary checkout branches
-require `pr`. Integration targets must already exist and be checked out
+require `pr`. An integration target must already exist and be checked out
 nowhere, the delivering lane's worktree included; conflicts leave checkouts and
-refs intact. Failed and cancelled lanes keep their worktrees. Publishing from a
-writer is on by default and gives it your GitHub credential; set
-`lanes.publish=false` to withhold it so the chair publishes through host-side
-delivery. An advisory `gh` deny list (`deny_verbs`, `deny_labels`) goes in
-`projects/PROJECT_ID/github.json`; matching calls warn and continue.
-The provider receipt's `github_credential` names the identity, source and
-delivery each lane got; for an unsandboxed lane it also names the host gh
-configuration directory the lane is pinned to and the setting that chose it.
-A lane opens its pull request with `gh pr create --body-file`; `pr open` is
-for a settled attempt. The `gh` shim warns at every `lanes.gh_budget` calls
-(default 100, 0 off) and settlement records the count; it never stops a call.
-Writers follow `lanes.ci_scope` (default `none`: push and report, the chair runs
-CI once for the batch); set `--set attempt.ci_scope=targeted` or `full` for a
-lane that must wait for CI. `run --explain` shows both values and their sources.
+refs intact. Failed and cancelled lanes keep their worktrees.
 
-GitHub login lookup uses the host-recorded executable search path and GitHub
-configuration paths for initial launches and background retries alike. Missing
-GitHub tools, failed login lookup or access policy restrictions produce a warning;
-ordinary lane work can continue without publishing credentials.
+- Publishing from a writer is on by default and gives it your GitHub
+  credential. Set `lanes.publish` to `false` to withhold it, so the chair publishes
+  through host-side delivery. The provider receipt's `github_credential` names
+  the identity, source and delivery each lane got.
+- An advisory `gh` deny list (`deny_verbs`, `deny_labels`) goes in
+  `projects/PROJECT_ID/github.json` under the state root; matching calls warn
+  and continue. The lane's `gh` warns every `lanes.gh_budget` calls and never
+  stops one.
+- A lane opens its pull request with `gh pr create --body-file`; `provenant pr
+  open` is for a settled attempt (see [GitHub workflow](github-workflow.md#branch-commit-pull-request)).
+- Writers follow `lanes.ci_scope` (default `none`: push and report, and the chair
+  runs CI once for the batch). Pass `--set attempt.ci_scope=targeted` (or `full`)
+  for a lane that must wait for CI. `run --explain` shows both values and their
+  sources.
+- Missing GitHub tools, a failed login lookup or an access restriction warn;
+  ordinary lane work continues without publishing credentials.
 
 ## Cargo target and seeding
 
-Keep the lane's Cargo bindings. Lanes default to the worktree's own target in its
-lane cache (`lanes.cargo_target = "private"`), cloned from the repository's host
-seed. A host builds that seed with `provenant worktree seed-build`, and tick
-refreshes it when the verify base moves. It builds the configured verify base,
-so uncommitted work is not the seed source. Each writer clones a compatible
-generation and ages the dep-info each unit's fingerprint names, whatever fingerprint layout Cargo
-uses, so workspace members rebuild once from the worktree's sources and registry
-crates stay fresh. A seed with a fingerprint that names no readable dep-info is not
-used (`seed_layout_unrecognised`). A `seeded` report proves the
-clone; where the filesystem cannot clone, the lane warns `clone_failed` and
-builds cold. Cargo's verbose `Fresh` lines prove dependency reuse. Settlement
-starts a detached cleanup that removes the target once writer custody is free;
-worktree removal and lane-cache GC catch the rest. A continuation reuses a
-target still present and otherwise seeds a new one. For a checkout
-outside a lane, `provenant worktree seed-target PATH` seeds the same target and
-prints it for `CARGO_TARGET_DIR`. It resolves the toolchain as cargo and rustup
-do (`rust-toolchain.toml`; unset `RUSTUP_HOME` and `CARGO_HOME` mean
-`$HOME/.rustup` and `$HOME/.cargo`) and applies the lane's verification. Each
-reason it does not seed names what was expected and what was found, such as the
-two compilers, and a repair step. Only `seed-build` and tick produce host
-seeds, so after a toolchain change no seed matches until one of them runs.
+Lanes build in the worktree's own target in the lane cache
+(`lanes.cargo_target` is `private`), cloned from the repository's host seed. The
+[run spec](../specs/run.md#cargo-target-seed) owns the lifecycle,
+[configuration](configuration.md#lane-cargo-target) the knobs and [GC](gc.md)
+retention.
 
-Each repository keeps its own warm generations. `domains.fabric.lanes.cargo_seed.max_generations`
-limits history per repository; `max_bytes` limits the whole host and can evict a
-repository's only generation. Compiler, host platform and the effective lane
-profile must match. A lane with unsupported compiler, target or build-flag
-overrides cannot use a shared seed; the lane warns with the unsupported setting
-class without its value and builds cold, while native commands retain those
-settings. `seed-build` and tick are not lanes: they clear those inherited keys
-from their Cargo and rustc children (keeping `RUSTUP_AUTO_INSTALL=0` and the
-effective profile), warn once with the key names and never their values, and
-record the names in `seed-result.json`. A consumer repository that wraps cargo
-with such keys can therefore refresh its seed.
-The [run spec](../specs/run.md#cargo-target-seed) owns the lifecycle;
-[GC](gc.md) owns retention.
-
-Native npm, pnpm and Corepack launches keep host cache selectors when a provider changes
-HOME or XDG state. Explicit settings win. npm config lookup follows the first
-npm and Node installation in PATH, including ordinary NVM installations; it does
-not borrow a later Homebrew installation's settings. An unresolved shim or
-configuration warns and preserves the existing selector. Corepack keeps its own
-package-manager downloads shared through `COREPACK_HOME`; it does not use
-pnpm's package-store directory.
+- Only `provenant worktree seed-build` and tick build host seeds, from the
+  configured verify base and never from uncommitted work. After a toolchain
+  change no seed matches until one of them runs. A seed whose fingerprints name
+  no readable dep-info is not used (`seed_layout_unrecognised`).
+- A `seeded` report proves the clone. Where the filesystem cannot clone, the lane
+  warns `clone_failed` and builds cold. Cargo's verbose `Fresh` lines prove
+  dependency reuse.
+- Settlement starts a detached cleanup that removes the target once writer
+  custody is free; worktree removal and lane-cache GC catch the rest. A
+  continuation reuses a target still present and otherwise seeds a new one.
+- Outside a lane, `provenant worktree seed-target PATH` seeds the same target
+  and prints it for `CARGO_TARGET_DIR`.
+- `domains.fabric.lanes.cargo_seed.max_generations` limits history per
+  repository and `max_bytes` limits the host, so the cap can evict a
+  repository's only generation. Compiler, host platform and effective lane
+  profile must match; a lane with unsupported compiler, target or build-flag
+  overrides builds cold and warns with the setting class, never its value.
+- Native npm, pnpm and Corepack launches keep host cache selectors when a
+  provider changes HOME or XDG state; explicit settings win. Corepack keeps its
+  downloads shared through `COREPACK_HOME`.
 
 ## Recovery
 
-Read `status TARGET`, `output TARGET` and `trace TARGET` before
-replacing work, address the recorded cause, and never launch a second writer
-while custody is uncertain or reset a worktree with edits.
+Read `status TARGET`, `output TARGET` and `trace TARGET` before replacing work,
+address the recorded cause, and never launch a second writer while custody is
+uncertain or reset a worktree with edits.
 
 | Intent | Command |
 | --- | --- |
 | Resume unfinished work | `provenant retry GRAPH` keeps completed outputs and reconciles uncertain launches under their recorded identity. |
 | Retry a node | `provenant retry GRAPH/NODE`, optionally `--brief TEXT` for a replacement brief; review and land gates still apply. |
 | Fall back to another route | Configured routes handle a typed unavailability once custody release is confirmed; an uncertain handoff blocks the switch. |
-| Start fresh | A template with `identity = "fresh"`, or a new `--name`. An unchanged `identity = "content"` submission reattaches, even after cancellation; `retry GRAPH` resumes it. |
+| Start fresh | A new `--name`. The same input under the same name finds its graph; changed input starts `NAME-2`. |
 | Settle an unlaunched or stuck attempt | `provenant reconcile TARGET` after resolving any reported cause; it queues settlement in the background. |
 
-`stop TARGET` stops a subtree; if the launcher has not let go in about four
-seconds it reports the request pending and settles as it unwinds. Started
-attempts are immutable; `edit` changes unstarted nodes only. A fenced import
-names the retained attempt and an explicit abandonment command; abandonment
-keeps the private Git evidence but stops automatic import, so recover that work
-by hand. For a retained queued lane that never dispatched, use
-`provenant reconcile --abandon NAME/NODE#N --reason TEXT`; this preserves its
-evidence and refuses attempts with process evidence, a fence or worktree custody.
-`reconcile` reports storage errors in `writer_reservation_errors`
-and exits non-zero. A valid handoff declaring `stopped_early` or `blocked` makes
-an otherwise successful lane settle as `review_required`.
+- `stop TARGET` stops a subtree and reports the request pending until the
+  launcher lets go. Started attempts are immutable; `edit` changes unstarted
+  nodes only.
+- A fenced import names the retained attempt and an explicit abandonment
+  command. Abandonment keeps the private Git evidence but stops automatic
+  import, so recover that work by hand. For a retained queued lane that never
+  dispatched, run `provenant reconcile --abandon NAME/NODE#N --reason TEXT`; it
+  refuses attempts with process evidence, a fence or worktree custody.
+- `reconcile` reports storage errors in `writer_reservation_errors` and exits
+  non-zero.
+- A valid handoff declaring `stopped_early` or `blocked` makes an otherwise
+  successful lane settle as `review_required`.
 
 ## Waiting
 
-One blocking call covers mixed work; do not poll or sleep in a loop:
+One blocking call covers mixed work; never poll or sleep in a loop:
 
 ```sh
 provenant wait NAME/NODE NAME2 --any --pr 2721 --timeout 30m
 provenant wait NAME --follow --timeout 1h --json
 ```
 
-Targets are graph names, nodes or attempts, and `--pr NUMBER` takes a pull
-request. A pull request observes only and grants no merge authority (`provenant
-land N --wait` merges). `--any` returns on the first target to settle or need
-input; without it, `wait` returns when every target has. `--follow` streams one
-line per transition.
-
-An expired wait exits 124 and leaves work running; a refused operation exits 1.
-Sources are sampled, so intermediate states between samples are not reported.
+Targets are graph names, nodes or attempts; `--pr NUMBER` takes a pull request.
+A pull request wait observes only and grants no merge authority (`provenant land`
+merges). An expired wait exits 124 and leaves work running; a refused operation
+exits 1. Sources are sampled, so intermediate states between samples are not
+reported. Flags are in `provenant wait --help`.
 
 ## Tests and Git
 

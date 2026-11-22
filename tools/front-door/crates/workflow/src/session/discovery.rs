@@ -68,6 +68,9 @@ pub enum DiscoveryConsistency {
 pub struct DiscoveredSession {
     pub record: SessionDiscovery,
     pub consistency: DiscoveryConsistency,
+    /// A deterministic display line read from the current checkpoint when no
+    /// structured frontmatter summary is published.
+    pub summary_line: Option<SummaryLine>,
 }
 
 fn sessions_directory(
@@ -302,10 +305,11 @@ impl SessionStore {
             Err(error) => return Err(error),
         };
         self.check_discovery_identity(Some(&record))?;
-        let consistency = match read_current(&dir)? {
+        let current = read_current(&dir)?;
+        let consistency = match &current {
             None => DiscoveryConsistency::CheckpointMissing,
             Some((bytes, _))
-                if provenant_records::CanonicalV1::file_digest(&bytes)
+                if provenant_records::CanonicalV1::file_digest(bytes)
                     == record.checkpoint.sha256
                     && manifest.revisions.last() == Some(&record.checkpoint) =>
             {
@@ -313,9 +317,14 @@ impl SessionStore {
             }
             Some(_) => DiscoveryConsistency::CheckpointChanged,
         };
+        let summary_line = current
+            .as_ref()
+            .and_then(|(bytes, _)| std::str::from_utf8(bytes).ok())
+            .and_then(super::checkpoint_summary_line);
         Ok(Some(DiscoveredSession {
             record,
             consistency,
+            summary_line,
         }))
     }
 }

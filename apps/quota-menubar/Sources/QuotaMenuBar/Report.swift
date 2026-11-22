@@ -64,6 +64,8 @@ struct QuotaReport {
         let fingerprint, creditBalance, note: String?
         let active: Bool?
         let priority: Double?
+        /// Display names of the models this account's snapshot offers.
+        let models: [String]
         let status: Status
         let providerName, displayName, planLabel: String?
         let backAt, observedAt: Date?
@@ -109,6 +111,7 @@ struct QuotaReport {
             planLabel = nil
             active = nil
             priority = details?.priority.map { Double($0) }
+            models = details?.models ?? []
             fingerprint = details?.fingerprint
             creditBalance = details?.creditBalance
             note = details?.note
@@ -328,6 +331,7 @@ struct QuotaWireDetails: Decodable, Sendable {
     let plan, fingerprint, creditBalance, note, coverage: String?
     let priority, resetCredits: UInt64?
     let resetExpiriesUnixSeconds: [Int64]?
+    let models: [String]?
 }
 struct QuotaWireWindow: Decodable, Sendable {
     let pool: String

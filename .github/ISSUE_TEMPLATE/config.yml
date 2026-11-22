@@ -9,8 +9,8 @@ contact_links:
       Report privately through GitHub's private vulnerability-reporting or
       draft security-advisory flow. Never put exploit details, credentials,
       private prompts or personal data in a public issue.
-  - name: Harness constitution
+  - name: Global agent rules
     url: https://github.com/mblauberg/provenant/blob/main/GLOBAL-AGENTS.md
     about: >-
-      Topology, lifecycle, risk tiers, routing and memory policy. Read this
-      before proposing a change to authority or to a gate.
+      The global agent rules: autonomy, delegation, boundaries, git, checks and
+      memory. Read this before proposing a change to authority or to a check.

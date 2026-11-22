@@ -1,32 +1,27 @@
 # Interpreting history comparisons
 
-Each pair compares the second level with the first, sorted by its source value.
-The estimator is a session-balanced linear probability comparison: each
-session's turns together have weight one. It adjusts for project, calendar day,
-work mix, context and compaction, plus other observed exposure dimensions,
-except the derived within-session era and the dimension being compared.
-Numeric context stays linear when some measurements are missing, with a
-separate missingness indicator. Other controls are categorical. Missing controls
-form explicit unknown levels and are counted. This does not adjust for
-unrecorded causes. Tight daily controls can leave historical comparisons
+`compare` in this skill's `analysis.py` holds the estimator: a session-balanced
+linear probability comparison of the second level against the first, sorted by
+its source value, with each session's turns weighing one. It adjusts for the
+other observed exposure dimensions (project, day, work mix, context,
+compaction), counts missing controls as explicit unknown levels and does not
+adjust for unrecorded causes. Tight daily controls can leave a comparison
 unestimable; widen periods only with a stated sensitivity analysis.
 
-Zero joint categorical overlap or rank loss reports `non_identifiable`: the
-data cannot separate group from the controls. Otherwise `identifiable` means an estimable adjusted association,
-not proof of causation. Both raw and adjusted differences are returned.
-
-Uncertainty uses whole-session residual sign permutations, exactly enumerated
-for up to ten sessions and seeded Monte Carlo above that. `permutation_interval`
-is the null score interval, not a confidence interval. `confidence_interval`
-is the estimate shifted by full-fit residual sign permutations; it is an
-approximate interval, without studentisation or leverage correction. It relies
-on independent sessions and symmetric session residuals; serial sessions from
-one project can violate that assumption. Neither interval treats turns as
-independent observations. Leave-one-session-out reports the range, sign flips
-and losses of identifiability.
+- `non_identifiable` (no joint categorical overlap, or rank loss) means the data
+  cannot separate the group from the controls. `identifiable` means an
+  estimable adjusted association, not causation. Raw and adjusted differences
+  are both returned.
+- Intervals come from whole-session residual sign permutations, never from
+  independent turns. `permutation_interval` is the null score interval and
+  `confidence_interval` an approximate interval that assumes independent
+  sessions with symmetric residuals; serial sessions from one project can
+  violate that. Dropping each session in turn reports the range of
+  estimates, any sign flips and any loss of identifiability.
 
 Read session counts, joint-overlap sessions, excluded replies, missing controls,
-audit agreement and leave-one-out sensitivity before any effect claim. A few sessions, weak overlap,
-rare outcomes, a wide interval or one influential session means inconclusive.
-Report all pairwise comparisons as exploratory; there is no multiple-testing
-correction. A null or non-identifiable result does not establish equivalence.
+audit agreement and leave-one-out sensitivity before any effect claim. A few
+sessions, weak overlap, rare outcomes, a wide interval or one influential
+session means `inconclusive`. Report all pairwise comparisons as exploratory,
+with no multiple-testing correction; a null or non-identifiable result does not
+establish equivalence.

@@ -6,8 +6,8 @@ description: "Use to turn a rough or unsettled request into a spec, interview, s
 # Scope
 
 Scope settles intent and authority so a fresh agent can build and verify the
-work without asking. The `deliver` skill's engineering stance records concerns,
-not specs: weigh alternatives, recommend the long-term structure and record the call.
+work without asking. Weigh the `deliver` skill's engineering stance as concerns,
+not specs, and record the call.
 
 ## Digest
 
@@ -27,8 +27,8 @@ on with the rest.
 A spec is the best current statement of the outcome and can be wrong. An
 implementer may not silently weaken it; it raises a flaw with evidence in the
 handoff `decisions`. The chair may amend or drop an agent-written criterion on
-that evidence by editing the spec and adding `Revised YYYY-MM-DD: <change>;
-<evidence>`. Owner-written criteria, one-way doors, widened authority and
+that evidence by editing the spec in place and recording the evidence in an
+issue comment. Owner-written criteria, one-way doors, widened authority and
 tightened acceptance still need the owner; when authorship is unclear, treat a
 criterion as the owner's.
 

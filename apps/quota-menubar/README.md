@@ -33,9 +33,24 @@ quit it with Command-Q.
 
 ## Test and render
 
-Run `swift test` in this directory. Tests replay CLI output; refresh the
-console fixtures when the CLI's console JSON changes. For visual inspection,
-build the debug targets and render from fixtures without running the CLI:
+Run `swift test` in this directory. Tests replay CLI output from
+`Tests/ProvenantTestSupport/Fixtures`. Those files are **generated**: the Rust
+wire types and the projection functions the commands use are their single
+source of truth. Values are synthetic (fixed ids, `/fixture` paths, fixed
+timestamps); no live CLI capture belongs in the checkout. Regenerate after any
+wire change from the repository root:
+
+```sh
+cd tools/front-door && cargo run -p provenant-cli --bin generate-swift-fixtures -- \
+  --out ../../apps/quota-menubar/Tests/ProvenantTestSupport/Fixtures
+```
+
+`scripts/check-swift-fixtures` regenerates in memory and fails on drift; CI
+runs it beside `swift test`. A wire change first fails that check, then the
+regenerated fixtures make the Swift decode tests fail until the decoders
+catch up. `Replay.fixture` names are the file names without `.json`, so keep
+those names when adding a fixture. For visual inspection, build the debug
+targets and render from fixtures without running the CLI:
 
 ```sh
 swift build
