@@ -4358,8 +4358,9 @@ fn opencode_free_pool_cools_second_model() -> Result {
             pools: &pools,
         }
         .check(&second),
-        Err(provenant_quota::QuotaError::Refused(reason))
-            if reason == provenant_quota::AccountBlock::FreeTierRefusal.repair()
+        Err(provenant_quota::QuotaError::Blocked(
+            provenant_quota::AccountBlock::FreeTierRefusal
+        ))
     ));
     Ok(())
 }
@@ -4452,8 +4453,9 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
         for route in [&first, &second] {
             assert!(matches!(
                 admit(route, at),
-                Err(provenant_quota::QuotaError::Refused(reason))
-                    if reason == provenant_quota::AccountBlock::FreeTierRefusal.repair()
+                Err(provenant_quota::QuotaError::Blocked(
+                    provenant_quota::AccountBlock::FreeTierRefusal
+                ))
             ));
         }
     }
@@ -4571,8 +4573,9 @@ fn agy_individual_quota_cools_model_until_revalidation() -> Result {
     for at in [now, now + 299] {
         assert!(matches!(
             admit(&route, at),
-            Err(provenant_quota::QuotaError::Refused(reason))
-                if reason == provenant_quota::AccountBlock::ScopedRefusal.repair()
+            Err(provenant_quota::QuotaError::Blocked(
+                provenant_quota::AccountBlock::ScopedRefusal
+            ))
         ));
     }
     assert!(now + 300 < resets);
