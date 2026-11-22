@@ -280,18 +280,21 @@ public struct SessionRecord: Decodable, Equatable, Sendable {
     public let projectId: String?
     public let createdAt: String?
     public let lastSavedAt: String?
+    public let summary: SessionSummary?
 }
 
 public struct ChairSession: Decodable, Equatable, Sendable, Identifiable {
     public let role: String
     public let consistency: String?
     public let summaryStatus: String?
-    public let summary: SessionSummary?
+    public let summary: String?
     public let record: SessionRecord
     public var id: String { record.hostSessionId }
 }
 
-/// `console sessions` (data version 2). `summary` is null when the CLI has none for a session.
+/// `console sessions` (data version 2). `summary` is one display line: the
+/// chair-authored `now`, or a line derived from the checkpoint. `summaryStatus`
+/// names its source; the full structured summary stays in `record.summary`.
 public struct Sessions: Decodable, Equatable, Sendable {
     public let sessions: [ChairSession]
     public let nextCursor: String?

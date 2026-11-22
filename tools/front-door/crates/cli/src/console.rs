@@ -3,7 +3,7 @@ use crate::metadata::CatalogueArg;
 use clap::Subcommand;
 use provenant_core::{ProjectId, Roots};
 use provenant_records::CanonicalV1;
-use provenant_workflow::session::{HostSessionId, discover_sessions_bounded};
+use provenant_workflow::session::{HostSessionId, SummarySource, discover_sessions_bounded};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::os::unix::ffi::OsStrExt;
@@ -349,10 +349,23 @@ fn read_with_budget(
                 .as_ref()
                 .is_none_or(|id| id == found.record.host_session_id.as_str())
             {
+                let structured = found
+                    .record
+                    .summary
+                    .as_ref()
+                    .filter(|summary| !summary.now.trim().is_empty())
+                    .map(|summary| summary.now.clone());
+                let (summary, status) = match structured {
+                    Some(now) => (json!(now), SummarySource::Structured),
+                    None => match found.summary_line {
+                        Some(line) => (json!(line.text), line.source),
+                        None => (Value::Null, SummarySource::Unavailable),
+                    },
+                };
                 sessions.push(
                     json!({"record":found.record, "consistency":found.consistency,
-                    "role":"chair", "evidence":"checkpoint_save", "summary":found.record.summary,
-                    "summary_status":if found.record.summary.is_some() { "available" } else { "unavailable" }}),
+                    "role":"chair", "evidence":"checkpoint_save", "summary":summary,
+                    "summary_status":status}),
                 );
             }
         }

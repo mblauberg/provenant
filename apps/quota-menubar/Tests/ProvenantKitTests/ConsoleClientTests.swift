@@ -66,13 +66,16 @@ final class ConsoleClientTests: XCTestCase {
         XCTAssertEqual(projects.map(\.label), ["project"])
         XCTAssertEqual(projects.first?.commonDir?.path, "/fixture/project/.git")
         let sessions = try await console.sessions().sessions
-        XCTAssertEqual(sessions.first?.summary?.now, "Implementing console")
+        XCTAssertEqual(sessions.first?.summary, "Implementing console")
+        XCTAssertEqual(sessions.first?.record.summary?.now, "Implementing console")
+        XCTAssertEqual(sessions.first?.summaryStatus, "structured")
         XCTAssertEqual(sessions.first?.id, "console-chair")
 
         let (bare, _) = client([(["console", "sessions"], "console-sessions-without-summary", 0)])
-        let none = try await bare.sessions().sessions
-        XCTAssertFalse(none.isEmpty)
-        XCTAssertTrue(none.allSatisfy { $0.summary == nil })
+        let derived = try await bare.sessions().sessions
+        XCTAssertFalse(derived.isEmpty)
+        XCTAssertTrue(derived.allSatisfy { $0.summary == "Console checkpoint" })
+        XCTAssertTrue(derived.allSatisfy { $0.summaryStatus == "title" })
     }
 
     func testTreeSearchOutputAndQuotaDecode() async throws {

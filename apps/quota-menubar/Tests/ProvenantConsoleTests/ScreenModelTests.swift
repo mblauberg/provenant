@@ -417,7 +417,8 @@ final class ScreenModelTests: XCTestCase {
         let snapshot = chairs.reader.value
         XCTAssertEqual(snapshot?.sessions.count, 1)
         // Two saved records for one host session collapse to the later save.
-        XCTAssertEqual(snapshot?.sessions.first?.summary?.now, "Implementing the console")
+        XCTAssertEqual(snapshot?.sessions.first?.summary, "Implementing the console")
+        XCTAssertEqual(snapshot?.sessions.first?.record.summary?.now, "Implementing the console")
         XCTAssertEqual(snapshot?.sessions.first?.record.lastSavedAt, "2026-11-02T02:18:00Z")
         XCTAssertEqual(snapshot?.projects.count, 1)
         XCTAssertNil(snapshot?.projectName("no-such-project"))
