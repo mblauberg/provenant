@@ -501,8 +501,8 @@ impl PrepareFixture {
                     launch_ref: None,
                     head: tip,
                     attempt: scope.attempt,
+                    history: provenant_config::LaneHistory::default(),
                 },
-                &provenant_records::policy::Policy::default(),
             )?;
             if advance_after_publish {
                 std::fs::write(self.writer.worktree.join("AGENTS.md"), "later writer\n")?;
@@ -555,6 +555,7 @@ impl PrepareFixture {
             &mut settlement,
             crate::writer::TerminalPolicy {
                 enforcement: &provenant_records::policy::Policy::default(),
+                history: provenant_config::LaneHistory::default(),
                 budget_stop,
                 preservation_stop: None,
                 work: None,

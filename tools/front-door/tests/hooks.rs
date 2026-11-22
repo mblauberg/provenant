@@ -534,7 +534,7 @@ fn check_push_policy(rig: &TestRig) -> Result {
         (
             format!("refs/heads/main {first} refs/heads/main {second}\n"),
             1,
-            "non-fast-forward update to the default branch is refused; integrate the remote first with `git fetch origin && git merge origin/main`",
+            "non-fast-forward update to the default branch is refused; lanes.history.default_branch_rewrite = refuse (source: default)",
         ),
         (
             format!("refs/heads/topic {first} refs/heads/topic {second}\n"),
@@ -582,7 +582,7 @@ fn check_push_policy(rig: &TestRig) -> Result {
     let original = fs::read_to_string(&config_path)?;
     fs::write(
         &config_path,
-        format!("{original}\n[domains.run]\npush_conflict_markers = false\n"),
+        format!("{original}\n[knobs]\n'lanes.history.conflict_markers' = 'off'\n"),
     )?;
     let output = rig.execute(
         Path::new(env!("CARGO_BIN_EXE_provenant")),
@@ -594,6 +594,25 @@ fn check_push_policy(rig: &TestRig) -> Result {
         0,
         "{}",
         String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    fs::write(
+        &config_path,
+        format!("{original}\n[knobs]\n'lanes.history.conflict_markers' = 'refuse'\n"),
+    )?;
+    let output = rig.execute(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &["hook", "git", "pre-push", "origin", "fixture"],
+        Some(input.as_bytes()),
+    )?;
+    assert_ne!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr.bytes)
+            .contains("lanes.history.conflict_markers = refuse")
     );
     fs::write(&config_path, original)?;
     git(rig, &["update-ref", "refs/remotes/origin/main", &conflict])?;

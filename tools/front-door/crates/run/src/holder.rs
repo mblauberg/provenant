@@ -1566,8 +1566,10 @@ impl RunStore {
                     &record.project_id.to_string(),
                     &task,
                 );
+                let history = provenant_config::LaneHistory::resolve(&task.profile);
                 let policy = crate::writer::TerminalPolicy {
                     enforcement: &enforcement,
+                    history,
                     preservation_stop,
                     budget_stop,
                     work: trigger.map(|trigger| crate::writer::StopWorkPolicy {
@@ -2969,8 +2971,10 @@ impl RunStore {
                         &record.project_id.to_string(),
                         &task,
                     );
+                    let history = provenant_config::LaneHistory::resolve(&task.profile);
                     let policy = crate::writer::TerminalPolicy {
                         enforcement: &enforcement,
+                        history,
                         preservation_stop,
                         budget_stop,
                         work: trigger.map(|trigger| crate::writer::StopWorkPolicy {
@@ -7149,6 +7153,7 @@ mod writer_recovery_tests {
                 &mut settlement,
                 crate::writer::TerminalPolicy {
                     enforcement: &store.resume_policy(id, &call)?,
+                    history: provenant_config::LaneHistory::default(),
                     budget_stop: true,
                     preservation_stop: None,
                     work: None,
@@ -7228,6 +7233,7 @@ mod writer_recovery_tests {
                 &mut settlement,
                 crate::writer::TerminalPolicy {
                     enforcement: &store.resume_policy(id, &call)?,
+                    history: provenant_config::LaneHistory::default(),
                     budget_stop: true,
                     preservation_stop: None,
                     work: None,
@@ -7296,6 +7302,7 @@ mod writer_recovery_tests {
                 &mut settlement,
                 crate::writer::TerminalPolicy {
                     enforcement: &store.resume_policy(id, &call)?,
+                    history: provenant_config::LaneHistory::default(),
                     budget_stop: true,
                     preservation_stop: None,
                     work: None,
@@ -7930,6 +7937,13 @@ mod writer_recovery_tests {
             let store = RunStore::open(&execution, &call)?;
             let mut run = input();
             run.request.task.writer = Some(fixture.writer.clone());
+            if mode == "publish_diverged" {
+                run.request
+                    .task
+                    .profile
+                    .knobs
+                    .insert(provenant_config::REBASE.into(), serde_json::json!("refuse"));
+            }
             store.create(&run, &call)?;
             let id = run.attempt_id;
             store.mark_starting(
@@ -8304,8 +8318,10 @@ mod writer_recovery_tests {
                             launch_ref: None,
                             head: published_head.ok_or("lane head")?,
                             attempt: id,
+                            history: provenant_config::LaneHistory::resolve(
+                                &run.request.task.profile,
+                            ),
                         },
-                        &provenant_records::policy::Policy::default(),
                     )
                     .is_err()
                 );

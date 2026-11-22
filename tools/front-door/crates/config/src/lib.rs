@@ -37,6 +37,7 @@ mod hooks;
 pub use hooks::{hook_plugin_source, lane_hook_settings, registrations as hook_registrations};
 mod inspection;
 mod knobs;
+mod lane_history;
 mod loader;
 mod managed;
 pub use harness::{InstallSettings, TargetSettings, apply_install_config_with_domains};
@@ -94,6 +95,10 @@ pub use domains::{
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
 pub use knobs::{KnobEdit, KnobSource, KnobValue, knob_source};
+pub use lane_history::{
+    CONFLICT_MARKERS, DEFAULT_BRANCH_REWRITE, DefaultBranchRewrite, HistoryEffect, HistoryValue,
+    LaneHistory, REBASE, Rebase, Setting, UNROOTED_TIP,
+};
 pub use loader::{
     config_show, inspect_config, load, load_with_domains, read, read_knobs, read_with_domains,
 };

@@ -24,7 +24,6 @@ pub const DEFAULT_REVIEW_EXEMPT: [&str; 4] = [
 ];
 const DEFAULTS: &str = r#"writer_writes = []
 review_exempt = ["docs/release-notes/next.d/", "docs/specs/", "Cargo.lock", ".tracker-input"]
-push_conflict_markers = true
 profile_limit_bytes = 524288
 grant_limit = 128
 write_grant_limit_bytes = 262144
@@ -63,9 +62,6 @@ pub struct RunConfig {
     pub writer_writes: Vec<PathBuf>,
     #[serde(default = "default_review_exempt")]
     pub review_exempt: Vec<String>,
-    /// Refuse pushes whose added lines start with a literal conflict marker.
-    #[serde(default = "default_true")]
-    pub push_conflict_markers: bool,
     /// Default admission deadline in seconds before launch.
     #[serde(default)]
     pub admission_seconds: Option<u64>,
@@ -315,9 +311,6 @@ fn default_source_view_bytes() -> u64 {
 fn default_retained_custody_seconds() -> u64 {
     provenant_supervisor::custody::DEFAULT_RETAINED_CUSTODY_SECONDS
 }
-fn default_true() -> bool {
-    true
-}
 /// One project's replacement for the host-wide settings.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -362,7 +355,6 @@ impl Default for RunConfig {
             host_policy: None,
             writer_writes: Vec::new(),
             review_exempt: default_review_exempt(),
-            push_conflict_markers: true,
             admission_seconds: None,
             profile_limit_bytes: default_profile_limit_bytes(),
             grant_limit: default_grant_limit(),
@@ -876,7 +868,6 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
         1,
         provenant_supervisor::custody::MAX_RETAINED_CUSTODY_SECONDS as i64,
     ),
-    FieldMetadata::new("push_conflict_markers", "bool"),
     FieldMetadata::int("admission_seconds", 1, i64::MAX),
     FieldMetadata::new("writer_writes", "array"),
     FieldMetadata::new("review_exempt", "array"),
@@ -1427,15 +1418,6 @@ mod tests {
             DEFAULT_REVIEW_EXEMPT.map(String::from)
         );
         assert!(RunConfig::default().validate().is_empty());
-    }
-
-    #[test]
-    fn conflict_marker_check_defaults_on_and_can_be_turned_off() {
-        assert!(RunConfig::default().push_conflict_markers);
-        let config: RunConfig =
-            toml_edit::de::from_str("push_conflict_markers = false\n").expect("parse");
-        assert!(!config.push_conflict_markers);
-        assert!(config.validate().is_empty());
     }
 
     #[test]

@@ -14,7 +14,8 @@ recovery. Staging, stopped merges and private staged indexes stay in attempt-pri
 terminal cleanup and remain a worktree-removal fence until reconciled; native index convergence
 uses only committed trees and preserves conflicting native staging or operations
 ([lane Git](run.md#lane-git-and-import)). Each attempt publishes only its private ref; a
-sibling-divergent host tip refuses publication while retaining both commits.
+sibling-divergent host tip is merged and published when no conflict exists, and otherwise
+retains both commits with the conflict and setting named.
 - Why: recovery must resume durable effects without racing another driver or losing work.
 
 The guardian transfers its writer exclusion to recovery, and import and cleanup reuse that guard
@@ -51,11 +52,15 @@ never as an observation of the current request.
 - Why: a reason recorded by an earlier worker must not read as a current failure.
 
 Publication accepts a lane tip that descends from the launch base, the origin default branch, the
-launch ref or any remote-tracking branch, records the ancestor in the branch reflog and
-`publication-ancestor.json`, and warns. A tip descending from none warns by default; strict
-`LANE_TIP_UNROOTED` refuses it with a typed cause. When publication displaces a branch tip that
-is not an ancestor of the new tip, the same Git transaction retains it at
-`refs/provenant/recovery/<displaced-oid>`. The unrooted refusal is final, so settlement seals it
+launch ref, any remote-tracking branch or the host lane branch, records the ancestor in the
+branch reflog and `publication-ancestor.json`, and warns. A tip descending from none warns by
+default; `lanes.history.unrooted_tip = "refuse"` refuses it with a typed cause naming that
+setting. When a lane's history diverged from the host lane branch, publication merges the host
+branch into the lane tip and publishes the merge when it is clean; a real conflict retains the
+lane's private history and names the files. `lanes.history.rebase = "refuse"` retains the
+diverged history without merging. When publication displaces a branch tip that is not an
+ancestor of the new tip, the same Git transaction retains it at
+`refs/provenant/recovery/<displaced-oid>`. These refusals are final, so settlement seals them
 like an exhausted import; refusals that depend on a moving branch stay retryable.
 - Why: rebasing a lane onto the branch it feeds is legitimate, and a refusal that cannot change
   must not leave a finished lane running.

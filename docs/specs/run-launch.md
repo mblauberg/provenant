@@ -33,11 +33,13 @@ captured branch tip, never from a host or sibling snapshot, so a plain commit in
 attempt's staging and launching another attempt never resets a live sibling's index. Complete
 private views keep native semantics for commit, merge, cherry-pick and rebase without a shell
 interceptor. A commit becomes visible on the host branch only after object verification and
-settlement's expected-old-tip compare-and-swap. A divergent sibling publication is refused and
-retains the loser's private commits and index; there is no automatic rebase or retry. A
-continuation that needs a predecessor commit launches after that predecessor settles. Scope
-attribution starts at the attempt's captured launch tip, and budget commits publish an
-owned-path tree into the attempt's own ref, never a later observation of shared HEAD.
+settlement's expected-old-tip compare-and-swap. A divergent sibling publication is merged into
+the host branch by the host when no conflict exists, and published. A real conflict, or
+`lanes.history.rebase = "refuse"`, retains the loser's private commits and index; the refusal
+names the setting and the conflicting files. A continuation that needs a predecessor commit
+launches after that predecessor settles. Scope attribution starts at the attempt's captured
+launch tip, and budget commits publish an owned-path tree into the attempt's own ref, never a
+later observation of shared HEAD.
 - Why: every Git operation gets private state, and publication conflicts preserve both histories.
 
 An unscoped budget stop may commit all dirty paths only if the attempt was alone throughout its

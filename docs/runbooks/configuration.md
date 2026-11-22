@@ -1,6 +1,6 @@
 # Harness configuration
 Owner: provenant-config
-Anchor: [`config/harness-knobs.json`](../../config/harness-knobs.json); [`LaneBuildSettings`](../../tools/front-door/crates/config/src/gc.rs)
+Anchor: [`config/harness-knobs.json`](../../config/harness-knobs.json); [`LaneBuildSettings`](../../tools/front-door/crates/config/src/gc.rs); [`lane_history.rs`](../../tools/front-door/crates/config/src/lane_history.rs)
 
 Settings live in the selected state root's `<state>/config.toml`. The binary is
 the reference: `provenant config schema [--all]` lists every key with its table,
@@ -124,6 +124,36 @@ compiler job. There is no `lanes.cargo_target`, `lanes.cargo_seed_budget`,
 `domains.fabric.lanes.cargo_seed` setting; a leftover key warns as unknown.
 The chair runs one warm integrated check per epic through the build port, and
 CI runs clippy and the tests.
+
+## Lane history
+
+A lane owns its own branch and may rebase, merge and force-push it with lease while
+it is unmerged. `lanes.history.*` decides how the host treats that history; every
+value is read from the normal `[knobs]` layer and every warning and refusal names
+the setting and its source.
+
+- `lanes.history.rebase` (`allow` default, `refuse`): `allow` publishes a lane
+  whose history diverged from the host lane branch by first merging the host
+  branch into the lane tip. Only a real merge conflict stays retained, with the
+  files named. `refuse` retains the lane's private commits and refuses with the
+  divergence cause.
+- `lanes.history.unrooted_tip` (`warn` default, `off`, `refuse`): a lane tip that
+  descends from none of its launch base, the origin default, the launch ref, a
+  pushed remote-tracking branch or the host lane branch. `warn` publishes and
+  names the tip and its launch base; `off` is silent; `refuse` stops with
+  `LANE_TIP_UNROOTED`.
+- `lanes.history.conflict_markers` (`warn` default, `off`, `refuse`): added
+  lines in a pre-push check that begin with a literal conflict marker. It
+  replaces the former `domains.run.push_conflict_markers` boolean.
+- `lanes.history.default_branch_rewrite` (`refuse` default, `allow`): the owner
+  gate for a non-fast-forward rewrite of the default branch by a push. It is
+  host-only, so a `--knob` or graph node cannot grant it. Deleting the default
+  branch and pushing it from a linked worktree stay refused under every value.
+
+Set a value with `provenant config set lanes.history.rebase refuse` (or under
+`[knobs]`). A dispatch may set `rebase` and `unrooted_tip` for one lane.
+`conflict_markers` and `default_branch_rewrite` are read by the host pre-push
+hook from the host configuration and are refused in a dispatch override.
 
 ## Git pre-push hook and local gate
 

@@ -4,8 +4,10 @@ use crate::{
     repo::{GitRefName, ReadOnlyRepo},
     utility::{advertised_remote_branch, advertised_remote_head, run_release_read_utility},
 };
+use provenant_config::{DEFAULT_BRANCH_REWRITE, DefaultBranchRewrite, HistoryEffect, LaneHistory};
 use provenant_core::{CancelToken, GitOid};
 use provenant_os::exec::{Executor, Termination};
+use std::io::Write as _;
 use thiserror::Error;
 
 pub struct PushUpdate {
@@ -26,13 +28,13 @@ pub enum PushRefusal {
     )]
     LinkedWorktree,
     #[error(
-        "non-fast-forward update to the default branch is refused; integrate the remote first with `git fetch origin && git merge origin/main` (or the default branch), then push again"
+        "non-fast-forward update to the default branch is refused; {setting}; set lanes.history.default_branch_rewrite to allow in the host configuration to rewrite it, or integrate the remote first with `git fetch origin && git merge origin/main` (or the default branch), then push again"
     )]
-    NonFastForward,
+    NonFastForward { setting: String },
     #[error(
-        "conflict markers in pushed commits; remove the marker lines, then `git commit --amend --no-edit` and push again; if the bad commit was already pushed to the topic branch, use `git push --force-with-lease` to update it"
+        "conflict markers in pushed commits; {setting}; set it to warn or off to push them, or remove the marker lines and `git commit --amend --no-edit`; a pushed topic branch can be updated with `git push --force-with-lease`"
     )]
-    ConflictMarkers,
+    ConflictMarkers { setting: String },
 }
 pub fn is_zero(oid: GitOid) -> bool {
     match oid {
@@ -47,10 +49,8 @@ pub struct PushContext<'a> {
     pub executor: &'a dyn Executor,
     pub budget: UtilityBudget,
     pub cancel: &'a CancelToken,
-    /// Effective project policy for this push and its outer warning handler.
-    pub policy: &'a provenant_records::policy::Policy,
-    /// Literal conflict-marker detection is advisory and may be turned off.
-    pub check_conflict_markers: bool,
+    /// Lane history decisions for conflict markers and the default branch.
+    pub history: LaneHistory,
 }
 impl PushContext<'_> {
     fn read(&self, request: GitRead) -> Result<provenant_os::exec::ExecOutcome, PushRefusal> {
@@ -133,11 +133,27 @@ impl PushContext<'_> {
                 })?;
                 match ancestor.termination {
                     Termination::Exit(0) => {}
-                    Termination::Exit(1) => return Err(PushRefusal::NonFastForward),
+                    Termination::Exit(1) => {
+                        let setting = self
+                            .history
+                            .default_branch_rewrite
+                            .setting(DEFAULT_BRANCH_REWRITE);
+                        match self.history.default_branch_rewrite.value {
+                            DefaultBranchRewrite::Allow => {
+                                let _ = writeln!(
+                                    std::io::stderr().lock(),
+                                    "pre-push: warning: rewriting the default branch {branch}; {setting}"
+                                );
+                            }
+                            DefaultBranchRewrite::Refuse => {
+                                return Err(PushRefusal::NonFastForward { setting });
+                            }
+                        }
+                    }
                     _ => return Err(PushRefusal::Evidence),
                 }
             }
-            if self.check_conflict_markers {
+            if self.history.conflict_markers.value != HistoryEffect::Off {
                 let patch = self.read(GitRead::PushPatch {
                     base: (!is_zero(update.remote)).then_some(update.remote),
                     head: update.local,
@@ -154,7 +170,22 @@ impl PushContext<'_> {
                             })
                         })
                 }) {
-                    return Err(PushRefusal::ConflictMarkers);
+                    let setting = self
+                        .history
+                        .conflict_markers
+                        .setting(provenant_config::CONFLICT_MARKERS);
+                    match self.history.conflict_markers.value {
+                        HistoryEffect::Warn => {
+                            let _ = writeln!(
+                                std::io::stderr().lock(),
+                                "pre-push: warning: conflict markers in pushed commits; {setting}"
+                            );
+                        }
+                        HistoryEffect::Refuse => {
+                            return Err(PushRefusal::ConflictMarkers { setting });
+                        }
+                        HistoryEffect::Off => {}
+                    }
                 }
             }
         }
@@ -184,31 +215,15 @@ mod tests {
             &CancelToken::new(),
         )?;
         let cancel = CancelToken::new();
-        let mut settings = provenant_config::policy::Settings::default();
-        settings.projects.insert(
-            "project".into(),
-            provenant_config::policy::Project {
-                rules: std::collections::BTreeMap::from([(
-                    "PUSH_PATCH_EVIDENCE".into(),
-                    provenant_records::policy::Strength::Refuse,
-                )]),
-            },
-        );
-        let policy = settings.resolve("project", &Default::default());
         let context = PushContext {
             repo: &repo,
             runtime: &fixture.runtime,
             executor: &fixture.executor,
             budget: fixture.budget()?,
             cancel: &cancel,
-            policy: &policy,
-            check_conflict_markers: true,
+            history: LaneHistory::default(),
         };
         // Spec: docs/specs/cli.md#pre-push-refuses-data-loss
-        assert_eq!(
-            context.policy.rule("PUSH_PATCH_EVIDENCE").rule.strength,
-            provenant_records::policy::Strength::Refuse,
-        );
         let update = PushUpdate {
             local: first,
             remote_ref: "refs/heads/topic".to_owned(),
@@ -219,7 +234,9 @@ mod tests {
     }
 
     #[test]
-    fn divergent_topic_update_still_scans_conflict_markers() -> Result<(), Box<dyn Error>> {
+    fn conflict_markers_follow_the_lane_history_setting() -> Result<(), Box<dyn Error>> {
+        use provenant_config::{CONFLICT_MARKERS, HistoryEffect, Setting};
+        use provenant_records::LimitSource;
         let fixture = Fixture::new()?;
         fixture.run(&["branch", "-m", "main"])?;
         let base = fixture.head()?;
@@ -239,24 +256,90 @@ mod tests {
             &CancelToken::new(),
         )?;
         let cancel = CancelToken::new();
-        let context = PushContext {
-            repo: &repo,
-            runtime: &fixture.runtime,
-            executor: &fixture.executor,
-            budget: fixture.budget()?,
-            cancel: &cancel,
-            policy: &provenant_records::policy::Policy::default(),
-            check_conflict_markers: true,
-        };
-        let update = PushUpdate {
-            local: new_tip,
-            remote_ref: "refs/heads/topic".to_owned(),
-            remote: old_tip,
-        };
-        assert!(matches!(
-            context.check("origin", &[update]),
-            Err(PushRefusal::ConflictMarkers)
-        ));
+        for value in [
+            HistoryEffect::Warn,
+            HistoryEffect::Off,
+            HistoryEffect::Refuse,
+        ] {
+            let mut history = LaneHistory::default();
+            history.conflict_markers = Setting {
+                value,
+                source: LimitSource::Host,
+            };
+            let context = PushContext {
+                repo: &repo,
+                runtime: &fixture.runtime,
+                executor: &fixture.executor,
+                budget: fixture.budget()?,
+                cancel: &cancel,
+                history,
+            };
+            let update = PushUpdate {
+                local: new_tip,
+                remote_ref: "refs/heads/topic".to_owned(),
+                remote: old_tip,
+            };
+            let result = context.check("origin", &[update]);
+            if value == HistoryEffect::Refuse {
+                let refusal = result.expect_err("refuse stops the push");
+                let message = format!("{refusal}");
+                assert!(message.contains(CONFLICT_MARKERS), "{message}");
+                assert!(message.contains("source: host"), "{message}");
+            } else {
+                assert!(result.is_ok(), "{value:?}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn default_branch_rewrite_is_an_owner_gate() -> Result<(), Box<dyn Error>> {
+        use provenant_config::{DEFAULT_BRANCH_REWRITE, DefaultBranchRewrite, Setting};
+        use provenant_records::LimitSource;
+        let fixture = Fixture::new()?;
+        fixture.run(&["branch", "-m", "main"])?;
+        let first = fixture.head()?;
+        fixture.run(&["commit", "--allow-empty", "-m", "second"])?;
+        let second = fixture.head()?;
+        let root = fixture.root.to_str().ok_or("non-UTF8 root")?;
+        fixture.run(&["remote", "add", "origin", root])?;
+        let repo = fixture.runtime.open_read_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        let cancel = CancelToken::new();
+        for (value, allowed) in [
+            (DefaultBranchRewrite::Refuse, false),
+            (DefaultBranchRewrite::Allow, true),
+        ] {
+            let mut history = LaneHistory::default();
+            history.default_branch_rewrite = Setting {
+                value,
+                source: LimitSource::Host,
+            };
+            let context = PushContext {
+                repo: &repo,
+                runtime: &fixture.runtime,
+                executor: &fixture.executor,
+                budget: fixture.budget()?,
+                cancel: &cancel,
+                history,
+            };
+            let update = PushUpdate {
+                local: first,
+                remote_ref: "refs/heads/main".to_owned(),
+                remote: second,
+            };
+            let result = context.check("origin", &[update]);
+            assert_eq!(result.is_ok(), allowed, "{value:?}");
+            if !allowed {
+                let message = format!("{}", result.expect_err("owner gate"));
+                assert!(message.contains(DEFAULT_BRANCH_REWRITE), "{message}");
+                assert!(message.contains("source: host"), "{message}");
+            }
+        }
         Ok(())
     }
 
@@ -286,8 +369,7 @@ mod tests {
             executor: &fixture.executor,
             budget: fixture.budget()?,
             cancel: &cancel,
-            policy: &provenant_records::policy::Policy::default(),
-            check_conflict_markers: true,
+            history: LaneHistory::default(),
         };
         let update = PushUpdate {
             local: GitOid::parse(&"0".repeat(40))?,

@@ -1182,48 +1182,36 @@ pub(crate) fn with_git<T>(
     let _ = anchor.rmdir(&name);
     result
 }
-/// Unreadable config keeps the literal conflict-marker check on. The check is
-/// advisory; the Git boundary and every other pre-push refusal are unchanged.
-fn push_conflict_markers(roots: &provenant_core::Roots) -> bool {
-    provenant_cli::config_reads::show_for(roots, "hook")
-        .map(|read| read.domains.run.push_conflict_markers)
-        .unwrap_or(true)
-}
-
-fn pre_push_boundary(refusal: &provenant_confinement::push::PushRefusal) -> bool {
-    matches!(
-        refusal,
-        provenant_confinement::push::PushRefusal::DefaultDeletion
-            | provenant_confinement::push::PushRefusal::LinkedWorktree
-            | provenant_confinement::push::PushRefusal::NonFastForward
-    )
-}
-
-/// Select the policy for the registered project at this Git location.
-fn push_policy(
-    roots: &provenant_core::Roots,
-    location: Option<&provenant_config::ProjectLocation>,
-) -> provenant_records::policy::Policy {
-    let project_id = location
-        .and_then(|location| {
-            provenant_config::lookup_project(roots, location)
-                .ok()
-                .flatten()
-        })
-        .map(|binding| binding.project_id().to_string());
-    // Without a registered project, the hook has only host policy. Unreadable
-    // policy falls back to compiled defaults with a warning, so a configured
-    // strict rule is never lost silently.
-    provenant_config::policy::read_reporting(
-        roots.state.as_path(),
-        project_id.as_deref().unwrap_or(""),
-        &Default::default(),
-        |error| {
+/// Unreadable config keeps the warn defaults and reports the fallback. The
+/// pre-push check is advisory except for the default-branch owner gate and a
+/// configured refuse.
+fn push_history(roots: &provenant_core::Roots) -> provenant_config::LaneHistory {
+    match provenant_cli::config_reads::show_for(roots, "hook") {
+        Ok(read) => provenant_config::LaneHistory::from_knobs(&read.knobs),
+        Err(error) => {
             diagnostic(&format!(
                 "pre-push: warning: policy settings unavailable ({error}); using compiled defaults"
             ));
-        },
-    )
+            provenant_config::LaneHistory::default()
+        }
+    }
+}
+
+fn pre_push_refuses(
+    refusal: &provenant_confinement::push::PushRefusal,
+    history: &provenant_config::LaneHistory,
+) -> bool {
+    use provenant_config::HistoryEffect;
+    use provenant_confinement::push::PushRefusal;
+    match refusal {
+        PushRefusal::DefaultDeletion
+        | PushRefusal::LinkedWorktree
+        | PushRefusal::NonFastForward { .. } => true,
+        PushRefusal::ConflictMarkers { .. } => {
+            history.conflict_markers.value == HistoryEffect::Refuse
+        }
+        PushRefusal::Evidence => false,
+    }
 }
 
 fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Error> {
@@ -1294,18 +1282,11 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
             return Ok(());
         }
     };
-    let check_conflict_markers = push_conflict_markers(&resolved.roots);
+    let history = push_history(&resolved.roots);
     let checked = with_git(
         resolved.roots.state.as_path(),
         |runtime, executor, budget, cancel| {
             let repo = runtime.open_read_repo(executor, &project, budget, cancel)?;
-            let location = runtime
-                .project_location(executor, &project, budget, cancel)
-                .ok();
-            let policy = push_policy(
-                &resolved.roots,
-                location.as_ref().map(|location| &location.location),
-            );
             // The default-branch check contacts the remote and needs a network budget.
             let budget = UtilityBudget::bounded(Duration::from_secs(30))?;
             let result = PushContext {
@@ -1314,20 +1295,19 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
                 executor,
                 budget,
                 cancel,
-                policy: &policy,
-                check_conflict_markers,
+                history,
             }
             .check(remote, &updates);
             match result {
                 Ok(()) => Ok(()),
-                Err(refusal) if pre_push_boundary(&refusal) => {
+                Err(refusal) if pre_push_refuses(&refusal, &history) => {
                     diagnostic(&format!("pre-push: refused: {refusal}"));
                     Err(refusal.into())
                 }
                 Err(refusal) => {
-                    // Missing evidence and conflict-marker checks are advisory;
-                    // only default-branch authority, isolation and integrity
-                    // holds refuse the Git operation.
+                    // Missing evidence and an unrecognised push are advisory;
+                    // only the default-branch gate and a configured refuse stop
+                    // the Git operation.
                     diagnostic(&format!("pre-push: warning: {refusal}"));
                     Ok(())
                 }
@@ -1337,7 +1317,7 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
     if let Err(error) = checked {
         let boundary_refusal = error
             .downcast_ref::<provenant_confinement::push::PushRefusal>()
-            .is_some_and(pre_push_boundary);
+            .is_some_and(|refusal| pre_push_refuses(refusal, &history));
         if boundary_refusal {
             return Err(error);
         }
@@ -1355,7 +1335,7 @@ fn local_gate_settings(
     project: &Path,
 ) -> Result<Option<provenant_cli::domains::LocalGateSettings>, Error> {
     use provenant_cli::domains::LocalGateMode;
-    // Like the conflict-marker setting, an unreadable host configuration has
+    // Like the lane-history settings, an unreadable host configuration has
     // no known local-gate policy and falls back silently.
     let Ok(resolved) = crate::roots::resolve(
         globals,
@@ -1496,47 +1476,6 @@ mod answer_delivery_tests {
     use super::*;
     #[allow(unused_imports)]
     use serde_json::json;
-
-    // Spec: docs/specs/cli.md#pre-push-refuses-data-loss
-    #[test]
-    fn push_policy_uses_registered_project_override() -> Result<(), Box<dyn std::error::Error>> {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir()?;
-        let home = temp.path().join("home");
-        let project = temp.path().join("project");
-        let state = temp.path().join("state");
-        for path in [&home, &project, &state] {
-            std::fs::create_dir_all(path)?;
-        }
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
-        let mut inputs = provenant_core::RootInputs::new(home, project.clone());
-        inputs.state_dir = Some(state.clone());
-        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        let location = provenant_config::ProjectLocation::new(project.canonicalize()?)?;
-        let binding = provenant_config::bind_project(&roots, location.clone())?;
-        std::fs::write(
-            state.join("config.toml"),
-            format!(
-                "schema_version=1\n[domains.policy.projects.\"{}\".rules]\nPUSH_PATCH_EVIDENCE='refuse'\n",
-                binding.project_id()
-            ),
-        )?;
-        let policy = push_policy(&roots, Some(&location));
-        assert_eq!(
-            policy.rule("PUSH_PATCH_EVIDENCE").rule.strength,
-            provenant_records::policy::Strength::Refuse
-        );
-        assert_eq!(
-            policy.rule("PUSH_PATCH_EVIDENCE").source,
-            provenant_records::policy::Source::Project
-        );
-        let host = push_policy(&roots, None);
-        assert_ne!(
-            host.rule("PUSH_PATCH_EVIDENCE").source,
-            provenant_records::policy::Source::Project
-        );
-        Ok(())
-    }
 
     #[test]
     fn local_gate_modes_and_checkout() -> Result<(), Error> {

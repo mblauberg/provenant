@@ -651,20 +651,32 @@ pub enum RunError {
     ReviewAcceptanceRequired,
     #[error("lane object import refused: {0}")]
     ObjectImportLimit(&'static str),
-    /// The lane's history forked from the host branch. Its commits stay in the
-    /// attempt's private Git; there is no automatic rebase or two-tree retry.
+    /// The lane's history forked from the host branch and the configured
+    /// history policy retained it. Its commits stay in the attempt's private
+    /// Git; the setting that would publish a host merge names itself here.
     #[error(
-        "lane history diverged from the host branch; its commits are retained in the attempt's private Git for host recovery"
+        "lane history diverged from the host branch; its commits are retained in the attempt's private Git for host recovery; {setting}; set it to allow to publish a host merge"
     )]
-    PublicationDiverged,
+    PublicationDiverged { setting: String },
+    /// A host merge of a diverged lane tip conflicted. The lane's commits stay
+    /// retained; the conflicting files and the setting are named.
     #[error(
-        "lane tip {tip} descends from none of: its launch base {base}, the origin default branch, {}, or any pushed remote-tracking branch; push the branch it was rebased onto, or rebuild the lane from its launch base",
+        "lane history diverged from the host branch and a host merge conflicts in {}; its commits are retained in the attempt's private Git for host recovery; {setting}",
+        .conflicting_files.join(", ")
+    )]
+    PublicationConflict {
+        conflicting_files: Vec<String>,
+        setting: String,
+    },
+    #[error(
+        "lane tip {tip} descends from none of: its launch base {base}, the origin default branch, {}, any pushed remote-tracking branch, or the host lane branch; {setting}; set it to warn or off to publish, or push the branch it was rebased onto",
         .launch_ref.as_deref().map_or_else(|| "its launch ref".to_owned(), |name| format!("its launch ref {name}"))
     )]
     LaneTipUnrooted {
         tip: provenant_core::GitOid,
         base: provenant_core::GitOid,
         launch_ref: Option<String>,
+        setting: String,
     },
     #[error("invalid Git base {0:?}: expected a resolvable commit reference")]
     InvalidBase(String),
@@ -806,7 +818,10 @@ impl RunError {
     pub(crate) fn import_refusal_is_final(&self) -> bool {
         matches!(
             self,
-            Self::ObjectImportLimit(_) | Self::LaneTipUnrooted { .. } | Self::PublicationDiverged
+            Self::ObjectImportLimit(_)
+                | Self::LaneTipUnrooted { .. }
+                | Self::PublicationDiverged { .. }
+                | Self::PublicationConflict { .. }
         )
     }
 
@@ -815,7 +830,9 @@ impl RunError {
     pub(crate) fn is_publication_refusal(&self) -> bool {
         matches!(
             self,
-            Self::LaneTipUnrooted { .. } | Self::PublicationDiverged
+            Self::LaneTipUnrooted { .. }
+                | Self::PublicationDiverged { .. }
+                | Self::PublicationConflict { .. }
         )
     }
 

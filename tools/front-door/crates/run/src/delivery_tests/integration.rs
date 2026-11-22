@@ -190,6 +190,130 @@ fn terminal_settles_and_publishes_rebased_lane()
 }
 
 #[test]
+fn terminal_merges_a_divergent_lane_history_and_publishes_it()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let initial_base = fixture.prepare()?.head(&fixture.writer)?;
+    let executable = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let tree = provenant_os::fixture::git_command_at(&executable)
+        .env_clear()
+        .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+        .args([
+            "-C",
+            fixture.writer.project.to_str().ok_or("project path")?,
+            "rev-parse",
+            &format!("{initial_base}^{{tree}}"),
+        ])
+        .output()?;
+    assert!(tree.status.success());
+    let tree = std::str::from_utf8(&tree.stdout)?.trim().to_owned();
+    let divergent = provenant_os::fixture::git_command_at(&executable)
+        .env_clear()
+        .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+        .args([
+            "-C",
+            fixture.writer.project.to_str().ok_or("project path")?,
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit-tree",
+            &tree,
+            "-p",
+            &initial_base.to_string(),
+            "-m",
+            "host lane update",
+        ])
+        .output()?;
+    assert!(divergent.status.success());
+    let divergent = GitOid::parse(std::str::from_utf8(&divergent.stdout)?.trim())?;
+
+    let lane_tip = std::cell::RefCell::new(None);
+    let review = fixture.terminal(|| {
+        let attempt = fixture.root.join("attempt");
+        let scratch = attempt.join("tmp/candidate-0");
+        std::fs::create_dir_all(&scratch)?;
+        let runtime = provenant_confinement::UtilityRuntime::new(
+            &executable,
+            fixture.root.join("home"),
+            fixture.root.join("state"),
+        )?;
+        let repo = runtime.open_repo(
+            &SystemExecutor::new(1)?,
+            &fixture.writer.project,
+            provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
+            &provenant_core::CancelToken::new(),
+        )?;
+        let worktree = provenant_confinement::verify_worktree(&repo, &fixture.writer.worktree)?;
+        crate::objects::prepare_bound(
+            &executable,
+            worktree.repo(),
+            &Directory::open_anchor(&attempt)?,
+            &scratch,
+            "refs/heads/lane",
+            initial_base,
+        )?;
+        let output = provenant_os::fixture::git_command_at(&executable)
+            .env_clear()
+            .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+            .env("GIT_DIR", scratch.join("git-common"))
+            .env("GIT_OBJECT_DIRECTORY", scratch.join("git-objects"))
+            .env(
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                repo.common_git_dir().join("objects"),
+            )
+            .args([
+                "commit-tree",
+                &format!("{initial_base}^{{tree}}"),
+                "-p",
+                &initial_base.to_string(),
+                "-m",
+                "lane commit",
+            ])
+            .output()?;
+        assert!(output.status.success());
+        let tip = GitOid::parse(std::str::from_utf8(&output.stdout)?.trim())?;
+        *lane_tip.borrow_mut() = Some(tip);
+        std::fs::write(
+            scratch.join("git-common/refs/heads/lane"),
+            format!("{tip}\n"),
+        )?;
+        // The host branch moved independently after the lane's launch base.
+        fixture.git(&[
+            "update-ref",
+            "refs/heads/lane",
+            &divergent.to_string(),
+            &initial_base.to_string(),
+        ])?;
+        Ok(())
+    })?;
+
+    assert!(!review);
+    let lane_tip = *lane_tip.borrow();
+    let lane_tip = lane_tip.ok_or("lane commit")?;
+    assert!(fixture.root.join("attempt/writer-terminal.json").exists());
+    let published = fixture.prepare()?.head(&fixture.writer)?;
+    let parents = provenant_os::fixture::git_command_at(&executable)
+        .env_clear()
+        .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
+        .args([
+            "-C",
+            fixture.writer.project.to_str().ok_or("project path")?,
+            "rev-list",
+            "--parents",
+            "-n",
+            "1",
+            &published.to_string(),
+        ])
+        .output()?;
+    assert!(parents.status.success());
+    let parents = String::from_utf8(parents.stdout)?;
+    assert!(parents.contains(&lane_tip.to_string()), "{parents}");
+    assert!(parents.contains(&divergent.to_string()), "{parents}");
+    Ok(())
+}
+
+#[test]
 fn private_attempt_git_views_keep_commits_and_staged_paths_separate()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;

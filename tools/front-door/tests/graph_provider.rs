@@ -2403,7 +2403,7 @@ fn writer_fixture_diagnostics(rig: &TestRig) -> String {
 // Spec: docs/specs/run-launch.md#admission-and-custody
 /// Two related graph lanes hold one checkout at once, then commit separate
 /// paths from private Git views. One history publishes; the divergent sibling
-/// is refused and retained, never replacing the winner.
+/// is merged by the host and published, so neither replaces the other.
 fn shared_worktree_writers_commit_disjoint_paths() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -2510,64 +2510,97 @@ fn shared_worktree_writers_commit_disjoint_paths() -> Result {
         );
     }
 
-    // Both lanes ran concurrently from the same tip. Publication is a
-    // compare-and-swap of the host branch: one lane's history lands, the other
-    // diverges, is refused, and keeps its commits in its private Git. Neither
-    // replaces the other, and there is no automatic rebase.
+    // Both lanes ran concurrently from the same tip. The first publication is
+    // a compare-and-swap of the host branch; the second diverges and the host
+    // merges it, so both lanes' histories land without either replacing the
+    // other.
     let succeeded = nodes
         .iter()
         .filter(|node| node["state"] == "succeeded")
         .count();
     assert_eq!(
         succeeded,
-        1,
+        2,
         "{checkpoint}; {}",
         writer_fixture_diagnostics(&rig)
     );
-    let mut retained = 0;
     for entry in fs::read_dir(rig.state.join("attempts"))?.flatten() {
         let Ok(bytes) = fs::read(entry.path().join("terminal-pending.json")) else {
             continue;
         };
         let record: Value = serde_json::from_slice(&bytes)?;
-        if record["state"]["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("retained in the attempt's private Git"))
-        {
-            retained += 1;
-        }
+        assert!(
+            !record["state"]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("retained in the attempt's private Git")),
+            "a divergent lane was retained instead of merged: {record}"
+        );
     }
-    assert_eq!(retained, 1, "{}", writer_fixture_diagnostics(&rig));
 
     let worktree_arg = worktree.to_str().ok_or("worktree path")?;
-    let show = |revision: &str| -> Result<String> {
-        let output = rig.execute(
+    let tree_files = rig.execute(
+        &git,
+        &["-C", worktree_arg, "ls-tree", "-r", "--name-only", "HEAD"],
+        None,
+    )?;
+    assert_eq!(code(&tree_files), 0, "{tree_files:?}");
+    let tree_files = String::from_utf8(tree_files.stdout.bytes)?;
+    for path in ["first-owned.txt", "second-owned.txt"] {
+        assert!(
+            tree_files.contains(path),
+            "published tree lacks {path}: {tree_files}"
+        );
+    }
+    for (path, expected) in [
+        ("first-owned.txt", "first lane change"),
+        ("second-owned.txt", "second lane change"),
+    ] {
+        let content = rig.execute(
             &git,
-            &[
-                "-C",
-                worktree_arg,
-                "show",
-                "--pretty=format:",
-                "--name-only",
-                revision,
-            ],
+            &["-C", worktree_arg, "show", &format!("HEAD:{path}")],
             None,
         )?;
-        assert_eq!(code(&output), 0, "{output:?}");
-        Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
-    };
-    let winner = show("HEAD")?;
-    assert!(
-        ["first-owned.txt", "second-owned.txt"].contains(&winner.as_str()),
-        "the published commit holds exactly one lane's path: {winner}"
-    );
-    let parent = rig.execute(&git, &["-C", worktree_arg, "rev-parse", "HEAD^"], None)?;
-    assert_eq!(code(&parent), 0, "{parent:?}");
+        assert_eq!(code(&content), 0, "{content:?}");
+        assert_eq!(
+            String::from_utf8(content.stdout.bytes)?.trim(),
+            expected,
+            "the host merge lost {path}"
+        );
+    }
+    let parents = rig.execute(
+        &git,
+        &[
+            "-C",
+            worktree_arg,
+            "rev-list",
+            "--parents",
+            "-n",
+            "1",
+            "HEAD",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&parents), 0, "{parents:?}");
     assert_eq!(
-        String::from_utf8(parent.stdout.bytes)?.trim(),
-        base_tip,
-        "the published commit sits directly on the shared base"
+        String::from_utf8(parents.stdout.bytes)?
+            .split_whitespace()
+            .count(),
+        3,
+        "the published tip is not a two-parent host merge"
     );
+    let base_is_ancestor = rig.execute(
+        &git,
+        &[
+            "-C",
+            worktree_arg,
+            "merge-base",
+            "--is-ancestor",
+            &base_tip,
+            "HEAD",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&base_is_ancestor), 0, "{base_is_ancestor:?}");
     Ok(())
 }
 

@@ -1224,8 +1224,6 @@ mod tests {
             (grace.min, grace.max, &grace.default),
             (Some(0), Some(600), &json!(60))
         );
-        let markers = field("domains.run.push_conflict_markers");
-        assert_eq!((markers.kind, &markers.default), ("bool", &json!(true)));
         let idle = field("gc.idle");
         assert_eq!(
             (idle.kind, idle.min, idle.max, &idle.default),

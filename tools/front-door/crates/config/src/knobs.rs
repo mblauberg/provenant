@@ -681,6 +681,45 @@ mod ceiling_tests {
     }
 
     #[test]
+    fn lane_history_family_is_documented_with_its_defaults() {
+        let registry = registry().unwrap();
+        for (name, values, default) in [
+            ("lanes.history.rebase", &["allow", "refuse"][..], "allow"),
+            (
+                "lanes.history.unrooted_tip",
+                &["warn", "off", "refuse"][..],
+                "warn",
+            ),
+            (
+                "lanes.history.conflict_markers",
+                &["warn", "off", "refuse"][..],
+                "warn",
+            ),
+            (
+                "lanes.history.default_branch_rewrite",
+                &["refuse", "allow"][..],
+                "refuse",
+            ),
+        ] {
+            let spec = &registry.knobs[name];
+            assert!(documented_field(name), "{name}");
+            assert_eq!(spec.default, default, "{name}");
+            assert_eq!(
+                spec.values,
+                values
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect::<Vec<_>>(),
+                "{name}"
+            );
+        }
+        // The host pre-push hook reads the conflict-marker setting, and the
+        // default-branch rewrite is the owner's gate: no dispatch override.
+        assert!(registry.knobs["lanes.history.conflict_markers"].host_only);
+        assert!(registry.knobs["lanes.history.default_branch_rewrite"].host_only);
+    }
+
+    #[test]
     fn registry_runtime_deadline_maximum_is_the_lane_ceiling() {
         let registry: Value = serde_json::from_str(REGISTRY).unwrap();
         assert_eq!(
