@@ -2041,18 +2041,37 @@ impl SmokeProject {
     }
 }
 
-/// The smoke child binds the scratch project under the host state root. Remove
-/// that binding when the run ends, success or failure, so deleting the fixture
-/// cannot leave a registered project whose layout no longer resolves.
-fn forget_smoke_binding(state_dir: &Path, project: &Path) -> Result<(), String> {
-    let Some(directory) = provenant_config::host_project_dir(state_dir, project) else {
-        return Ok(());
-    };
-    let project = directory
+/// The binding the smoke child creates for `project`. Resolve it while the
+/// scratch exists: it is the canonical common directory the child's `run`
+/// binds, not the scratch path's own spelling, and cleanup must still name the
+/// record after the graph or the fixture has removed the checkout. An
+/// unresolved binding is an error, never an empty success.
+fn smoke_project_binding(
+    state_dir: &Path,
+    project: &Path,
+) -> Result<provenant_core::ProjectId, String> {
+    let directory = provenant_config::host_project_dir(state_dir, project).ok_or_else(|| {
+        format!(
+            "cannot resolve the host project binding for {}",
+            project.display()
+        )
+    })?;
+    directory
         .file_name()
         .and_then(OsStr::to_str)
         .and_then(|name| provenant_core::ProjectId::parse(name).ok())
-        .ok_or_else(|| "smoke project binding name is invalid".to_owned())?;
+        .ok_or_else(|| "smoke project binding name is invalid".to_owned())
+}
+
+/// Remove the record the smoke child published for the scratch project, when
+/// the run ends, success or failure, so deleting the fixture cannot leave a
+/// registered project whose layout no longer resolves. A missing record means
+/// the child never bound (a refused launch); an unreadable registry or a
+/// refused removal is reported to the caller.
+fn forget_smoke_binding(
+    state_dir: &Path,
+    project: provenant_core::ProjectId,
+) -> Result<(), String> {
     provenant_config::forget_project_at_state(state_dir, project)
         .map(|_| ())
         .map_err(|error| error.to_string())
@@ -2118,6 +2137,10 @@ fn verify_smoke_with(
     args: &cli::Upgrade,
 ) -> Result<String, String> {
     let project = smoke_project(runner, scratch)?;
+    // Resolve the binding before the graph launches: the child binds this same
+    // canonical common directory, and the scratch may not survive the run. An
+    // unresolved binding is reported by cleanup, never hidden.
+    let binding = smoke_project_binding(state_dir, project.path());
     let program = program.as_os_str().to_owned();
     let graph = verify_graph_name();
     let mut run = vec![
@@ -2163,6 +2186,8 @@ fn verify_smoke_with(
             let wait = runner.execute(
                 &[
                     program.clone(),
+                    "--project".into(),
+                    project.path().as_os_str().to_owned(),
                     "--state-dir".into(),
                     state_dir.as_os_str().to_owned(),
                     "--json".into(),
@@ -2178,6 +2203,8 @@ fn verify_smoke_with(
             let status = runner.execute(
                 &[
                     program,
+                    "--project".into(),
+                    project.path().as_os_str().to_owned(),
                     "--state-dir".into(),
                     state_dir.as_os_str().to_owned(),
                     "--json".into(),
@@ -2210,22 +2237,27 @@ fn verify_smoke_with(
         }
         Err(error) => Err(error),
     };
-    report_smoke_cleanup(outcome, forget_smoke_binding(state_dir, project.path()))
+    report_smoke_cleanup(
+        outcome,
+        binding.and_then(|project| forget_smoke_binding(state_dir, project)),
+    )
 }
 
 fn report_smoke_cleanup<T>(
     outcome: Result<T, String>,
     cleanup: Result<(), String>,
 ) -> Result<T, String> {
-    match (outcome, cleanup) {
-        (Ok(output), Ok(())) => Ok(output),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(format!(
-            "smoke passed but its scratch project binding was not removed: {error}"
-        )),
-        (Err(error), Err(cleanup)) => Err(format!(
-            "{error}\nsmoke project binding cleanup failed: {cleanup}"
-        )),
+    // Cleanup is secondary to the smoke result, but leaving a scratch binding
+    // behind is never silent: warn on stderr and keep the warning in a failed
+    // smoke's report.
+    let Err(error) = cleanup else {
+        return outcome;
+    };
+    let warning = format!("smoke scratch project binding was not removed: {error}");
+    let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+    match outcome {
+        Ok(output) => Ok(output),
+        Err(error) => Err(format!("{error}\n{warning}")),
     }
 }
 
@@ -2236,6 +2268,7 @@ fn preview_smoke(
     args: &cli::Upgrade,
 ) -> Result<Vec<u8>, String> {
     let project = smoke_project(runner, &std::env::temp_dir())?;
+    let binding = smoke_project_binding(state_dir, project.path());
     let mut argv = vec![
         program.as_os_str().to_owned(),
         "--project".into(),
@@ -2257,7 +2290,10 @@ fn preview_smoke(
         argv.extend(["--set".into(), setting.into()]);
     }
     let outcome = runner.execute(&argv, None, 1_048_576, 60);
-    report_smoke_cleanup(outcome, forget_smoke_binding(state_dir, project.path()))
+    report_smoke_cleanup(
+        outcome,
+        binding.and_then(|project| forget_smoke_binding(state_dir, project)),
+    )
 }
 
 impl UpgradeRunner {
@@ -3024,24 +3060,166 @@ mod tests {
     fn smoke_cleanup_forgets_the_scratch_project_binding() -> Result<(), Box<dyn std::error::Error>>
     {
         use super::*;
+        use provenant_confinement::{UtilityBudget, UtilityRuntime};
 
+        // $TMPDIR on a real macOS host is /var/folders, a symlink to
+        // /private/var. The child binds the canonical common directory, so the
+        // scratch path the parent holds and the binding id differ unless the
+        // id is resolved through that canonical form.
         let temp = tempfile::tempdir()?;
-        let root = std::fs::canonicalize(temp.path())?;
+        let real = temp.path().join("real");
+        std::fs::create_dir(&real)?;
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link)?;
+        let root = std::fs::canonicalize(&real)?;
         let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
         inputs.state_dir = Some(root.join("state"));
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         provenant_os::fixture::private_state_dir(roots.state.as_path())?;
-        let scratch = root.join("provenant-smoke-project-fixture");
-        std::fs::create_dir(&scratch)?;
-        provenant_os::fixture::run_git(&scratch, &["init", "-q"])?;
-        let location = provenant_config::ProjectLocation::new(scratch.join(".git"))?;
-        provenant_config::bind_project(&roots, location.clone())?;
-        assert!(provenant_config::lookup_project(&roots, &location)?.is_some());
 
-        forget_smoke_binding(roots.state.as_path(), &scratch).map_err(std::io::Error::other)?;
-        assert!(provenant_config::lookup_project(&roots, &location)?.is_none());
+        let scratch = crate::scratch_dir::ScratchDir::new_in(&link, "provenant-smoke-project-")?;
+        provenant_os::fixture::run_git(scratch.path(), &["init", "-q"])?;
+        std::fs::write(scratch.path().join("fixture.txt"), b"smoke fixture\n")?;
+        provenant_os::fixture::run_git(scratch.path(), &["add", "fixture.txt"])?;
+        provenant_os::fixture::run_git(scratch.path(), &["commit", "-qm", "smoke fixture"])?;
+
+        // Bind through the path the smoke child's `run` uses: `Context::open`
+        // resolves the canonical common directory with the utility and binds
+        // that location.
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let git_home = roots.state.as_path().join("tmp/git-home");
+        provenant_os::fixture::private_state_dir(&git_home)?;
+        let runtime = UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
+        let executor = provenant_os::exec::SystemExecutor::new(1)?;
+        let discovered = runtime.project_location(
+            &executor,
+            scratch.path(),
+            UtilityBudget::bounded(std::time::Duration::from_secs(5))?,
+            &CancelToken::new(),
+        )?;
+        let binding = provenant_config::bind_project(&roots, discovered.location.clone())?;
+        let record =
+            provenant_config::project_binding_dir(roots.state.as_path(), binding.project_id())
+                .join("project.json");
+        assert!(
+            record.is_file(),
+            "the child path publishes {}",
+            record.display()
+        );
+
+        let resolved = smoke_project_binding(roots.state.as_path(), scratch.path())?;
+        assert_eq!(
+            resolved,
+            binding.project_id(),
+            "host_project_dir must name the binding the child published"
+        );
+
+        // Cleanup cannot depend on the fixture still existing: the graph may
+        // remove the scratch, or a preparation process may outlive the run.
+        drop(scratch);
+        forget_smoke_binding(roots.state.as_path(), resolved).map_err(std::io::Error::other)?;
+        assert!(!record.exists(), "{} survived cleanup", record.display());
+        assert!(provenant_config::lookup_project(&roots, &discovered.location)?.is_none());
         // A second cleanup is not an error: the smoke run may have created none.
-        forget_smoke_binding(roots.state.as_path(), &scratch).map_err(std::io::Error::other)?;
+        forget_smoke_binding(roots.state.as_path(), resolved).map_err(std::io::Error::other)?;
+        Ok(())
+    }
+
+    #[test]
+    fn smoke_cleanup_reports_an_unresolved_binding() -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let not_a_checkout = temp.path().join("not-a-checkout");
+        std::fs::create_dir(&not_a_checkout)?;
+        let error = smoke_project_binding(&state, &not_a_checkout)
+            .expect_err("an unresolvable binding must be reported, never silent success");
+        assert!(error.contains("cannot resolve"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn smoke_cleanup_warnings_never_hide_or_replace_the_smoke_result() {
+        use super::*;
+
+        // A passed smoke stays passed, but the cleanup warning is part of a
+        // failed smoke's report instead of being swallowed.
+        assert_eq!(
+            report_smoke_cleanup(Ok("smoke ok".to_owned()), Err("missing record".into())),
+            Ok("smoke ok".to_owned())
+        );
+        let error = report_smoke_cleanup::<String>(
+            Err("node failed".to_owned()),
+            Err("missing record".into()),
+        )
+        .expect_err("a failed smoke stays failed");
+        assert!(error.contains("node failed"), "{error}");
+        assert!(error.contains("missing record"), "{error}");
+    }
+
+    #[test]
+    fn smoke_wait_and_status_use_the_scratch_project() -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir()?;
+        let state = tmp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let home = tmp.path().join("home");
+        std::fs::create_dir(&home)?;
+        let scratch = tmp.path().join("scratch");
+        std::fs::create_dir(&scratch)?;
+        let calls = tmp.path().join("calls");
+        let launcher = tmp.path().join("provenant");
+        std::fs::write(
+            &launcher,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \" $* \" in *' run smoke '*) printf '%s\\n' '{{\"status\":\"pending\"}}';; *' wait '*) printf '%s\\n' '{{\"status\":\"complete\"}}';; *' status '*) printf '%s\\n' '{{\"status\":\"complete\"}}';; *) exit 77;; esac\n",
+                calls.display()
+            ),
+        )?;
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
+        let runner = UpgradeRunner {
+            executor: provenant_os::exec::SystemExecutor::new(1)?,
+            environment: std::env::vars_os().collect(),
+            // The home directory is not the scratch project, so wait and
+            // status only find the graph when they carry its --project.
+            cwd: home.clone(),
+        };
+        let output = verify_smoke_with(
+            &runner,
+            &launcher,
+            &state,
+            &scratch,
+            &cli::Upgrade {
+                yes: false,
+                from_source: None,
+                hosts: "all".into(),
+                verify: true,
+                dry_run: false,
+                host: None,
+                route: None,
+                set: Vec::new(),
+            },
+        )?;
+        assert!(output.contains("complete"), "{output}");
+
+        let calls = std::fs::read_to_string(&calls)?;
+        let lines: Vec<&str> = calls.lines().collect();
+        assert_eq!(lines.len(), 3, "{calls}");
+        assert!(lines[0].contains(" run smoke "), "{calls}");
+        let project = lines[0]
+            .split_once("--project ")
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .expect("run names its project");
+        for line in &lines[1..] {
+            assert!(
+                line.contains(&format!("--project {project}")),
+                "wait and status must name the launched project: {line}"
+            );
+        }
         Ok(())
     }
 

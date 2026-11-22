@@ -1,0 +1,10 @@
+## Fixes
+
+- `provenant upgrade --verify` waits for and reads its smoke graph in the
+  scratch project it launched, instead of the home directory, so a healthy
+  install reports `smoke: true` instead of `NOT_FOUND`. Verification now waits
+  for the graph to settle before deleting the scratch, so no preparation
+  process can republish its project binding afterwards, and the binding is
+  named before the graph starts so cleanup still removes the record when the
+  scratch has gone. An unresolved or failed cleanup warns instead of returning
+  an empty success. (#3795)
