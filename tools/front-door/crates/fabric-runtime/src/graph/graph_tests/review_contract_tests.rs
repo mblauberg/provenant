@@ -1280,7 +1280,7 @@ fn oversized_blocking_findings_remain_retrievable_with_the_verdict() {
         let finding = findings.iter().find(|finding| finding.id == id).unwrap();
         assert_eq!(finding.summary, entry["summary"].as_str().unwrap());
         assert_eq!(finding.evidence.as_deref(), entry["evidence"].as_str());
-        assert!(repair::blocking(finding));
+        assert!(repair::repair_eligible(finding));
     }
     assert_eq!(
         advance(&document, &mut owner, &mut journal)

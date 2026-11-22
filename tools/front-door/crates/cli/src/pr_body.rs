@@ -15,11 +15,13 @@ pub struct Body<'a> {
     pub head: GitOid,
     pub author: &'a AttemptFacts,
     pub reviews: &'a [AttemptFacts],
+    /// The exact outstanding user or external decision. Merge authority
+    /// belongs to the runbook, so absence means the body asks for nothing.
+    pub decision: Option<&'a str>,
 }
 
-const SECTIONS: [&str; 5] = [
+const SECTIONS: [&str; 4] = [
     "Summary",
-    "Decision requested",
     "Risk and rollback",
     "Evidence",
     "Independent review",
@@ -96,6 +98,9 @@ fn head_text(facts: &AttemptFacts) -> String {
 /// was recorded.
 pub fn fill(template: &str, body: &Body<'_>) -> Result<String, String> {
     let template = strip_comments(template);
+    let bundled = strip_comments(include_str!(
+        "../../../../../.github/pull_request_template.md"
+    ));
     let mut sections: Vec<(Option<String>, Vec<&str>)> = vec![(None, Vec::new())];
     for line in template.lines() {
         if let Some(name) = line.strip_prefix("## ") {
@@ -105,24 +110,36 @@ pub fn fill(template: &str, body: &Body<'_>) -> Result<String, String> {
             lines.push(line);
         }
     }
-    let bundled = strip_comments(include_str!(
-        "../../../../../.github/pull_request_template.md"
-    ));
-    for wanted in SECTIONS {
-        if !sections
+    // A template may carry an empty decision section; it is not a request.
+    if body.decision.is_none() {
+        sections.retain(|(name, _)| name.as_deref() != Some("Decision requested"));
+    }
+    fn append_from_bundled<'a>(
+        bundled: &'a str,
+        name: &str,
+        sections: &mut Vec<(Option<String>, Vec<&'a str>)>,
+    ) {
+        if sections
             .iter()
-            .any(|(name, _)| name.as_deref() == Some(wanted))
+            .any(|(existing, _)| existing.as_deref() == Some(name))
         {
-            let heading = format!("## {wanted}");
-            let lines = bundled
-                .lines()
-                .skip_while(|line| *line != heading)
-                .enumerate()
-                .take_while(|(index, line)| *index == 0 || !line.starts_with("## "))
-                .map(|(_, line)| line)
-                .collect();
-            sections.push((Some(wanted.to_owned()), lines));
+            return;
         }
+        let heading = format!("## {name}");
+        let lines = bundled
+            .lines()
+            .skip_while(|line| *line != heading)
+            .enumerate()
+            .take_while(|(index, line)| *index == 0 || !line.starts_with("## "))
+            .map(|(_, line)| line)
+            .collect();
+        sections.push((Some(name.to_owned()), lines));
+    }
+    for wanted in SECTIONS {
+        append_from_bundled(&bundled, wanted, &mut sections);
+    }
+    if body.decision.is_some() {
+        append_from_bundled(&bundled, "Decision requested", &mut sections);
     }
     let mut out = String::new();
     for (name, lines) in &sections {
@@ -152,9 +169,8 @@ fn summary(body: &Body<'_>) -> String {
 }
 fn decision(body: &Body<'_>) -> String {
     format!(
-        "## Decision requested\n\nApprove merge of {} to {}. Open gates: none recorded.\n",
-        code(&body.head.to_string()),
-        code(body.base)
+        "## Decision requested\n\n{}\n",
+        body.decision.unwrap_or_default()
     )
 }
 fn risk(body: &Body<'_>) -> String {
@@ -349,7 +365,7 @@ fn review(lines: &[&str], body: &Body<'_>) -> String {
             ),
         ),
         (
-            "Unresolved P0-P2 findings",
+            "Unresolved blocking findings",
             join(
                 &|r| {
                     format!(
@@ -433,6 +449,7 @@ mod tests {
             head: GitOid::parse(HEAD).unwrap(),
             author,
             reviews,
+            decision: None,
         }
     }
 
@@ -440,11 +457,13 @@ mod tests {
     fn the_repository_template_is_filled_from_the_receipts() {
         let author = facts(1, "codex/fixture-author@high", HEAD);
         let reviews = [facts(2, "claude/opus@high", HEAD)];
-        let text = fill(TEMPLATE, &body(&author, &reviews)).unwrap();
+        let mut requested = body(&author, &reviews);
+        requested.decision = Some("Approve merge of the pinned head after CI is green.");
+        let text = fill(TEMPLATE, &requested).unwrap();
         assert!(!text.contains("<!--"), "{text}");
         for needle in [
             "## Summary\n\nAdd the thing.\n\nIt does it.\n\nCloses #12\nCloses #13\n",
-            &format!("Approve merge of `{HEAD}` to `main`."),
+            "## Decision requested\n\nApprove merge of the pinned head after CI is green.\n",
             "Risk tier: substantial (delivery receipt). Rollback: revert the merge commit on `main`.",
             &format!("Base: `main` at `abcdef0`. Head under review: `feat/thing` at `{HEAD}`."),
             "- Author route: `codex/fixture-author@high` (receipt `attempts/1`)",
@@ -468,6 +487,25 @@ mod tests {
         assert_eq!(&harness[2..4], ["`scripts/check-harness`", "pending"]);
         assert!(text.contains("| Writer attempt |"));
         assert!(text.contains("| Independent review |"));
+    }
+
+    #[test]
+    fn a_decision_is_requested_only_when_one_is_outstanding() {
+        let author = facts(1, "a/b", HEAD);
+        let none = fill(TEMPLATE, &body(&author, &[])).unwrap();
+        assert!(!none.contains("Decision requested"), "{none}");
+        assert!(!none.contains("Approve merge"), "{none}");
+
+        let exact = "Decide the open gate before merge.";
+        let mut requested = body(&author, &[]);
+        requested.decision = Some(exact);
+        let text = fill(TEMPLATE, &requested).unwrap();
+        assert!(
+            text.contains(&format!("## Decision requested\n\n{exact}\n")),
+            "{text}"
+        );
+        assert_eq!(text.matches("## Decision requested\n").count(), 1, "{text}");
+        assert!(!text.contains("Approve merge"), "{text}");
     }
 
     #[test]
@@ -541,16 +579,25 @@ mod tests {
         }
         assert!(text.starts_with("Custom intro\n"), "{text}");
         assert!(text.contains("## Project notes\n\nKeep me."), "{text}");
-        assert!(
-            text.contains(&format!("Approve merge of `{HEAD}`")),
-            "{text}"
-        );
+        assert!(!text.contains("## Decision requested"), "{text}");
         assert!(text.contains("| Writer attempt |"), "{text}");
         assert!(text.contains("- Author route: `a/b`"), "{text}");
         assert!(
             fill("", &body(&author, &[]))
                 .unwrap()
                 .contains("## Evidence")
+        );
+        let mut requested = body(&author, &[]);
+        requested.decision = Some("Choose the pinned gate.");
+        let appended = fill("Custom intro\n\n## Summary\n\ntext\n", &requested).unwrap();
+        assert_eq!(
+            appended.matches("## Decision requested\n").count(),
+            1,
+            "{appended}"
+        );
+        assert!(
+            appended.contains("## Decision requested\n\nChoose the pinned gate.\n"),
+            "{appended}"
         );
     }
 

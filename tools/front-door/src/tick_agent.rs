@@ -364,65 +364,6 @@ pub fn stop(home: &Path) -> Result<bool, AgentError> {
     }
 }
 
-/// Cut-over needs the executing oneshot service stopped as well as its timer.
-/// Disabling a systemd timer alone does not stop an already dispatched tick.
-pub fn quiesce(home: &Path) -> Result<bool, AgentError> {
-    if cfg!(target_os = "linux") {
-        quiesce_timer_with(|args| systemctl(args, home))
-    } else {
-        stop(home)
-    }
-}
-
-fn quiesce_timer_with(
-    mut run: impl FnMut(&[&OsStr]) -> Result<(bool, String), AgentError>,
-) -> Result<bool, AgentError> {
-    use peer_agent::ServiceState;
-    let units = [TIMER, "provenant-tick.service"];
-    // The follow-up queries decide quiescence even if a stop reports failure.
-    let _ = run(&["disable".as_ref(), "--now".as_ref(), TIMER.as_ref()]);
-    let _ = run(&["stop".as_ref(), units[1].as_ref()]);
-    for unit in units {
-        let state = match run(&[
-            "show".as_ref(),
-            unit.as_ref(),
-            "--property=LoadState".as_ref(),
-            "--property=ActiveState".as_ref(),
-        ]) {
-            Ok((true, output)) => {
-                let load = output
-                    .lines()
-                    .find_map(|line| line.strip_prefix("LoadState="));
-                let active = output
-                    .lines()
-                    .find_map(|line| line.strip_prefix("ActiveState="));
-                match (load, active) {
-                    (Some("loaded" | "not-found"), Some("inactive" | "failed")) => {
-                        ServiceState::Absent
-                    }
-                    (
-                        Some("loaded"),
-                        Some("active" | "activating" | "deactivating" | "reloading"),
-                    ) => ServiceState::Running,
-                    _ => ServiceState::Indeterminate,
-                }
-            }
-            _ => ServiceState::Indeterminate,
-        };
-        if state != ServiceState::Absent {
-            return Err(AgentError::Quiescence {
-                service: unit.into(),
-                state,
-                command: format!(
-                    "systemctl --user disable --now {TIMER} && systemctl --user stop {}",
-                    units[1]
-                ),
-            });
-        }
-    }
-    Ok(true)
-}
-
 fn stop_with(
     home: &Path,
     label: &str,
@@ -524,45 +465,6 @@ mod tests {
                 ..
             })
         ));
-    }
-
-    #[test]
-    fn timer_shutdown_requires_both_timer_and_dispatched_service_to_be_quiescent() {
-        use peer_agent::ServiceState;
-        for (output, expected) in [
-            ((true, "LoadState=loaded\nActiveState=inactive"), None),
-            (
-                (true, "LoadState=loaded\nActiveState=active"),
-                Some(ServiceState::Running),
-            ),
-            ((true, ""), Some(ServiceState::Indeterminate)),
-            (
-                (false, "timed out after 10s"),
-                Some(ServiceState::Indeterminate),
-            ),
-        ] {
-            let mut service_stopped = false;
-            let result = quiesce_timer_with(|args| {
-                if args[0] == "stop" && args[1] == "provenant-tick.service" {
-                    service_stopped = true;
-                }
-                if args[0] == "show" {
-                    assert!(service_stopped);
-                    return if args[1] == "provenant-tick.service" {
-                        Ok((output.0, output.1.into()))
-                    } else {
-                        Ok((true, "LoadState=loaded\nActiveState=inactive".into()))
-                    };
-                }
-                Ok((true, String::new()))
-            });
-            match expected {
-                None => assert!(result.unwrap()),
-                Some(expected) => assert!(
-                    matches!(result, Err(AgentError::Quiescence {state, ..}) if state == expected)
-                ),
-            }
-        }
     }
 
     #[test]

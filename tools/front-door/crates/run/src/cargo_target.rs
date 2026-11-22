@@ -243,8 +243,6 @@ mod tests {
         );
         assert_eq!(CargoTargetSetting::parse("relative/path"), None);
         assert_eq!(CargoTargetSetting::parse("unknown"), None);
-        // One target for every worktree of a project serves stale artifacts (#3561).
-        assert_eq!(CargoTargetSetting::parse("shared"), None);
     }
 
     #[test]

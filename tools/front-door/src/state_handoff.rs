@@ -3,7 +3,6 @@
 //! 1.x root, which it reads and never writes, moves or deletes. Rollback is
 //! reinstalling 1.x, whose root is still intact.
 use serde::Serialize;
-use std::ffi::OsStr;
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
@@ -271,23 +270,19 @@ pub(crate) fn preview(
     std::fs::remove_dir_all(&staged.path)
 }
 
-/// Stage and preflight owner config and the complete install before stopping
-/// agents. A preflight or stop failure leaves the destination unpublished.
+/// Stage and preflight owner config and the complete install before publishing
+/// the state root. A preflight failure leaves the destination unpublished.
 /// Nothing under `plan.from` is written.
 pub(crate) fn run(
     plan: &Handoff,
     context: &provenant_core::Roots,
     preflight: impl FnOnce(&provenant_core::Roots) -> io::Result<()>,
-    stop_agents: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<Handoff> {
     let staged = stage(plan, context, preflight)?;
     let publish = (|| {
         if !absent_or_empty(&plan.to)? {
-            return Err(io::Error::other(
-                "handoff destination gained entries; agents left running",
-            ));
+            return Err(io::Error::other("handoff destination gained entries"));
         }
-        stop_agents()?;
         // Replaces only an absent or empty root; a root that gained entries
         // refuses with ENOTEMPTY and keeps them.
         std::fs::rename(&staged.path, &plan.to)?;
@@ -301,26 +296,6 @@ pub(crate) fn run(
         copied: true,
         ..plan.clone()
     })
-}
-
-/// Process-edge seam shared by install preflight and LaunchAgent shutdown.
-pub(crate) fn quiesce_launch_agents(
-    home: &Path,
-    labels: &[&'static str],
-    mut run: impl FnMut(
-        &[&OsStr],
-        &Path,
-    ) -> Result<(bool, String), provenant_fabric_runtime::peer_agent::AgentError>,
-    mut record: impl FnMut(&'static str, io::Result<bool>) -> io::Result<()>,
-) -> io::Result<()> {
-    for &label in labels {
-        record(
-            label,
-            provenant_fabric_runtime::peer_agent::stop_service_with(home, label, &mut run)
-                .map_err(io::Error::other),
-        )?;
-    }
-    Ok(())
 }
 
 fn absent_or_empty(path: &Path) -> io::Result<bool> {
@@ -396,24 +371,11 @@ mod tests {
         let legacy = home.join(provenant_core::LEGACY_V1_STATE_SUFFIX);
         let before = tree(&legacy)?;
         let plan = plan(&state, &home)?.ok_or("hand-off planned")?;
-        let preflighted = std::cell::Cell::new(false);
-        let mut stopped = false;
-        let done = run(
-            &plan,
-            &install_roots(&home)?,
-            |_| {
-                assert!(!state.exists());
-                preflighted.set(true);
-                Ok(())
-            },
-            || {
-                assert!(preflighted.get());
-                assert!(!state.exists());
-                stopped = true;
-                Ok(())
-            },
-        )?;
-        assert!(stopped && done.copied);
+        let done = run(&plan, &install_roots(&home)?, |_| {
+            assert!(!state.exists());
+            Ok(())
+        })?;
+        assert!(done.copied);
         assert_eq!(tree(&legacy)?, before);
         let copied: BTreeMap<_, _> = tree(&state)?
             .into_iter()
@@ -430,32 +392,24 @@ mod tests {
     }
 
     #[test]
-    fn failed_staged_preflight_leaves_agents_running_and_root_unpublished() -> Result {
+    fn failed_staged_preflight_leaves_root_unpublished() -> Result {
         let (_temp, home, state) = legacy_home()?;
         let legacy = home.join(provenant_core::LEGACY_V1_STATE_SUFFIX);
         let before = tree(&legacy)?;
         let plan = plan(&state, &home)?.ok_or("hand-off planned")?;
-        let mut stopped = false;
         assert!(
-            run(
-                &plan,
-                &install_roots(&home)?,
-                |_| Err(io::Error::other("release verification failed")),
-                || {
-                    stopped = true;
-                    Ok(())
-                },
-            )
+            run(&plan, &install_roots(&home)?, |_| Err(io::Error::other(
+                "release verification failed"
+            )),)
             .is_err()
         );
-        assert!(!stopped);
         assert!(!state.exists());
         assert_eq!(tree(&legacy)?, before);
         Ok(())
     }
 
     #[test]
-    fn invalid_owner_configuration_never_stops_agents_or_publishes_state() -> Result {
+    fn invalid_owner_configuration_never_publishes_state() -> Result {
         for (file, invalid) in [
             ("config.toml", "not valid TOML ["),
             ("host-id", "invalid host identity"),
@@ -465,40 +419,10 @@ mod tests {
             std::fs::write(legacy.join(file), invalid)?;
             let before = tree(&legacy)?;
             let plan = plan(&state, &home)?.ok_or("hand-off planned")?;
-            let mut stopped = false;
-            assert!(
-                run(
-                    &plan,
-                    &install_roots(&home)?,
-                    |_| Ok(()),
-                    || {
-                        stopped = true;
-                        Ok(())
-                    },
-                )
-                .is_err()
-            );
-            assert!(!stopped);
+            assert!(run(&plan, &install_roots(&home)?, |_| Ok(())).is_err());
             assert!(!state.exists());
             assert_eq!(tree(&legacy)?, before);
         }
-        Ok(())
-    }
-
-    #[test]
-    fn a_failed_agent_stop_publishes_nothing() -> Result {
-        let (_temp, home, state) = legacy_home()?;
-        let plan = plan(&state, &home)?.ok_or("hand-off planned")?;
-        assert!(
-            run(
-                &plan,
-                &install_roots(&home)?,
-                |_| Ok(()),
-                || Err(io::Error::other("still running")),
-            )
-            .is_err()
-        );
-        assert!(!state.exists());
         Ok(())
     }
 

@@ -735,7 +735,7 @@
     }
   },
   "knobs": {
-    "redaction": {"type": "enum", "values": ["off", "secrets", "full"], "default": "off", "status": "wired", "reader": "tools/front-door/src/lib.rs", "effect": "Control credential masking at publication. Retired `full` warns and behaves as `secrets`."},
+    "redaction": {"type": "enum", "values": ["off", "secrets"], "default": "off", "strict": true, "safe": "secrets", "status": "wired", "reader": "tools/front-door/src/lib.rs", "effect": "Control credential masking at publication. An unrecognised value warns and falls back to secrets; an absent value takes off."},
     "quota.model_discovery": {
       "type": "bool", "default": true, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/quota.rs",

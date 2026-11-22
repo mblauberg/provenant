@@ -45,8 +45,8 @@ and write, including in relocated homes; host `config` files are read-only data.
   `Cargo target:` brief line may pick `project` or `private`, never a path, because a path
   grants read, write and exec and a brief is requester text.
 
-No mode shares one target between worktrees; `shared` is not a value (`provenant config check`
-reports it and the default applies, and `provenant gc` retires leftover shared targets).
+No mode shares one target between worktrees; `provenant config check` reports an
+unrecognised value with its path and line, and the default applies.
 The preamble and `provenant config show` report the resolved directory and its source;
 `cargo-target-setup.json` records each lane's seed outcome. Every fallback carries `expected`
 and `found` text free of paths and environment values, and a repair step.

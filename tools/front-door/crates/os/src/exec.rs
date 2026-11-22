@@ -58,10 +58,16 @@ pub struct ExecOutcome {
     pub termination: Termination,
     pub stdout: CapturedStream,
     pub stderr: CapturedStream,
-    /// True only when wall expiry caused TERM delivery to the owned child.
+    /// True when the wall deadline caused a stop signal to the owned child, or
+    /// when the deadline alone suppressed a requested commit of a prepared
+    /// reference transaction. A caller can rely on this to tell an expiry from
+    /// a refusal or cancellation.
     pub timed_out: bool,
     pub drain_truncated: bool,
     pub overflow_stopped: bool,
+    /// True when cancellation forced a prepared reference transaction to abort
+    /// at its decision point. `validate_outcome` then reports cancellation so
+    /// the caller keeps the reference retirement pending.
     pub cancelled: bool,
     pub elapsed_micros: u64,
 }
@@ -301,7 +307,12 @@ pub trait Executor: Send + Sync {
     /// to abort. The executor owns child timeout, cancellation, stream draining
     /// and cleanup. The synchronous decision callback is not preempted, so
     /// callers must keep it bounded. Deadline and cancellation are checked
-    /// before and after it; a late or cancelled decision cannot commit.
+    /// before and after it; a late or cancelled decision cannot commit. The
+    /// decision names one cause and sets at most one outcome flag: a requested
+    /// commit the deadline alone suppressed is `timed_out`, one cancellation
+    /// suppressed is `cancelled`, and a callback refusal sets neither so the
+    /// caller's prepared check decides between a real error and a checked-out
+    /// reference.
     fn execute_prepared_ref_transaction(
         &self,
         options: ExecOptions<'_>,
@@ -553,8 +564,35 @@ impl PreparedRefAck {
     }
 }
 
-fn prepared_ref_commit_allowed(requested: bool, cancelled: bool, before_deadline: bool) -> bool {
-    requested && !cancelled && before_deadline
+/// The one reason a prepared reference transaction did or did not commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreparedRefDecision {
+    Committed,
+    Deadline,
+    Cancelled,
+    Refused,
+}
+
+/// Decide a prepared reference transaction and name its single cause.
+/// `invoked` says the callback ran at all; `requested` says it chose commit.
+/// Cancellation wins over a deadline that also passed, because the deadline is
+/// the cause only when it alone suppressed a requested commit. A callback
+/// refusal sets neither outcome flag, so the caller's prepared check decides.
+fn prepared_ref_decision(
+    invoked: bool,
+    requested: bool,
+    cancelled: bool,
+    before_deadline: bool,
+) -> PreparedRefDecision {
+    if requested && !cancelled && before_deadline {
+        PreparedRefDecision::Committed
+    } else if cancelled {
+        PreparedRefDecision::Cancelled
+    } else if !before_deadline && (requested || !invoked) {
+        PreparedRefDecision::Deadline
+    } else {
+        PreparedRefDecision::Refused
+    }
 }
 
 impl FrameSink for PreparedRefAck {
@@ -706,6 +744,8 @@ fn run_inner<'a>(
     let mut drain_deadline = None;
     let mut term_at = None;
     let mut kill_at = None;
+    let mut stop_on_expiry = true;
+    let mut decision_at = None;
     loop {
         // Exit observation wins over cancellation and wall expiry in this turn.
         if status.is_none() {
@@ -724,21 +764,33 @@ fn run_inner<'a>(
         err_pump.read(&mut stderr);
         if status.is_none()
             && transaction_action.is_none()
+            && term_at.is_none()
             && transaction_ack.observed()
             && let Some(transaction) = transaction.as_mut()
         {
             let cancelled = options.cancel.is_some_and(CancelToken::is_cancelled);
-            let requested = if !cancelled && Instant::now() < deadline {
-                (transaction.commit_after_prepare)()
-            } else {
-                false
-            };
-            let cancelled = options.cancel.is_some_and(CancelToken::is_cancelled);
-            transaction_action = Some(prepared_ref_commit_allowed(
+            let before_deadline = Instant::now() < deadline;
+            let invoked = !cancelled && before_deadline;
+            let requested = invoked && (transaction.commit_after_prepare)();
+            let decision = prepared_ref_decision(
+                invoked,
                 requested,
-                cancelled,
+                options.cancel.is_some_and(CancelToken::is_cancelled),
                 Instant::now() < deadline,
-            ));
+            );
+            transaction_action = Some(decision == PreparedRefDecision::Committed);
+            match decision {
+                PreparedRefDecision::Committed | PreparedRefDecision::Refused => {}
+                PreparedRefDecision::Deadline => output.timed_out = true,
+                PreparedRefDecision::Cancelled => output.cancelled = true,
+            }
+            // Git receives `abort` and can exit before the stop-signal path
+            // below runs, so the decision reports its own expiry. Once the
+            // decision is written, only a deadline decision may report expiry;
+            // a draining child is bounded by the terminate grace and reap
+            // budget instead.
+            stop_on_expiry = decision == PreparedRefDecision::Deadline;
+            decision_at = Some(Instant::now());
         }
 
         let (pending_input, pending_written, close_when_written) = match transaction.as_ref() {
@@ -795,10 +847,14 @@ fn run_inner<'a>(
             .as_ref()
             .is_some_and(crate::sys::build_group::Forwarder::signal_received);
         let cancelled = options.cancel.is_some_and(CancelToken::is_cancelled) || forwarded_signal;
+        let expired = now >= deadline && stop_on_expiry;
+        let drained = decision_at.is_some_and(|at| {
+            now.duration_since(at) >= options.terminate_grace + options.reap_timeout
+        });
         if !options.wait_for_completion
             && status.is_none()
             && term_at.is_none()
-            && (now >= deadline || overflow || cancelled)
+            && (expired || drained || overflow || cancelled)
         {
             stdin = None;
             let delivered = if forwarded_signal {
@@ -818,9 +874,13 @@ fn run_inner<'a>(
                     }
                 }
             };
-            output.timed_out = delivered && now >= deadline;
+            output.timed_out |= delivered && expired;
             output.overflow_stopped = delivered && overflow;
-            output.cancelled = delivered && cancelled;
+            // A prepared transaction already reported its one cause; a later
+            // cancellation while it drains must not overwrite that report.
+            if decision_at.is_none() {
+                output.cancelled = delivered && cancelled;
+            }
             term_at = Some(now);
         }
         if status.is_none()

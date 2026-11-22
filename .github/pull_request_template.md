@@ -35,7 +35,7 @@ resolution); a clean merge of the base needs none.
 - Reviewer role:
 - Independence from authorship/implementation context:
 - Exact head reviewed:
-- Unresolved P0-P2 findings:
+- Unresolved blocking findings:
 
 <details>
 <summary>Implementation detail</summary>

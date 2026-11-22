@@ -1099,7 +1099,7 @@ pub struct Gc {
     /// Collect pressure classes without fetching or removing worktrees
     #[arg(long, hide = true)]
     pub pressure: bool,
-    /// Keep at least this much free space (20G, or plain GiB)
+    /// Keep at least this much free space (e.g. 20G or plain GiB; default 1% of the state volume, capped at 5 GiB)
     #[arg(long, value_name = "SIZE", value_parser = provenant_config::parse_cache_size)]
     pub free_floor: Option<u64>,
     /// Report what would be removed without deleting anything

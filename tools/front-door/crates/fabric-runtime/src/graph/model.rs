@@ -1488,6 +1488,57 @@ pub struct Finding {
     pub reason: Option<String>,
 }
 
+/// The three severity classes named by the review doctrine. External reviewers
+/// use other words; the vocabulary below is the single translation to these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeverityClass {
+    Blocking,
+    ShouldFix,
+    Note,
+}
+
+/// One vocabulary map: each severity word an external reviewer may use, its
+/// doctrine class and its relative rank for bounded export. No module keeps a
+/// separate severity list.
+pub const SEVERITY_VOCABULARY: &[(&str, SeverityClass, u8)] = &[
+    ("critical", SeverityClass::Blocking, 0),
+    ("blocker", SeverityClass::Blocking, 0),
+    ("blocking", SeverityClass::Blocking, 0),
+    ("p0", SeverityClass::Blocking, 0),
+    ("high", SeverityClass::Blocking, 1),
+    ("error", SeverityClass::Blocking, 1),
+    ("p1", SeverityClass::Blocking, 1),
+    ("medium", SeverityClass::ShouldFix, 2),
+    ("moderate", SeverityClass::ShouldFix, 2),
+    ("should-fix", SeverityClass::ShouldFix, 2),
+    ("p2", SeverityClass::ShouldFix, 2),
+    ("low", SeverityClass::Note, 3),
+    ("warning", SeverityClass::Note, 3),
+    ("p3", SeverityClass::Note, 3),
+    ("info", SeverityClass::Note, 4),
+    ("informational", SeverityClass::Note, 4),
+    ("note", SeverityClass::Note, 4),
+    ("p4", SeverityClass::Note, 4),
+];
+
+fn severity_word(word: &str) -> Option<(&'static str, SeverityClass, u8)> {
+    let word = word.trim().to_ascii_lowercase();
+    SEVERITY_VOCABULARY
+        .iter()
+        .copied()
+        .find(|(known, _, _)| *known == word.as_str())
+}
+
+/// Translate a reviewer's severity word once. An unknown word is not blocking.
+pub fn severity_class(word: &str) -> Option<SeverityClass> {
+    severity_word(word).map(|(_, class, _)| class)
+}
+
+/// Relative order for bounded export; unknown words sort last.
+pub fn severity_rank(word: &str) -> u8 {
+    severity_word(word).map_or(5, |(_, _, rank)| rank)
+}
+
 /// Evidence checked by verification or synthesis before a repair writer starts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FindingTrigger {
