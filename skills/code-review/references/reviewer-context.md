@@ -43,6 +43,12 @@ acting on: a finding with no trigger, and anything off the default path that
 neither breaches a boundary nor loses data. Use `blocking`, `should-fix` or
 `note` as the finding's `severity`. Notes are reported, not repaired.
 
+Reviewers may use other severity words (`p0`, `high`, `medium`, `note` and the
+like); one vocabulary map translates them to these three classes. Only
+`blocking` blocks repair, so a confirmed, worth-fixing `should-fix` on a default
+path stays repairable. A blocking class (`acceptance` or `default_path_defect`)
+also blocks, whatever the severity word.
+
 ## What a finding states
 
 Each finding names the location, the mechanism and the fix. Claims that

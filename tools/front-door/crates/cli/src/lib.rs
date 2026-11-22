@@ -2361,6 +2361,18 @@ mod tests {
     }
 
     #[test]
+    fn gc_help_states_the_real_free_floor_default() {
+        let ParseOutcome::Help { text, .. } = parsed(&["gc", "--help"]) else {
+            panic!("expected gc help")
+        };
+        assert!(
+            text.contains("e.g. 20G or plain GiB; default 1% of the state volume, capped at 5 GiB"),
+            "{text}"
+        );
+        assert!(!text.contains("20G, or plain GiB"), "{text}");
+    }
+
+    #[test]
     fn unknown_commands_and_flags_use_generic_invalid_invocation_errors() {
         for (words, field) in [
             (vec!["stats"], "subcommand"),

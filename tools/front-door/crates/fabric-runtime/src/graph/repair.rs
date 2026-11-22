@@ -144,19 +144,7 @@ pub(super) fn blocking(finding: &Finding) -> bool {
 }
 
 pub(super) fn blocking_severity(finding: &Finding) -> bool {
-    matches!(
-        finding.effective_severity().to_ascii_lowercase().as_str(),
-        "critical"
-            | "blocker"
-            | "blocking"
-            | "p0"
-            | "high"
-            | "error"
-            | "p1"
-            | "medium"
-            | "moderate"
-            | "should-fix"
-    )
+    severity_class(finding.effective_severity()) == Some(SeverityClass::Blocking)
 }
 
 fn design_defect(finding: &Finding) -> bool {
@@ -738,50 +726,50 @@ mod tests {
     fn finding(id: &str, lens: &str) -> Finding {
         serde_json::from_value(serde_json::json!({"id":id,"lens":lens,"severity":"high", "file":"a.rs", "summary":"constraint", "status":"open", "evidence":"counterexample", "trigger":{"sequence":"default invocation","reach":"default_path","observed":true}, "triage":{"decision":"confirmed","reason":"observed","worth_fixing":true,"root_cause":"constraint","blocking_class":"default_path_defect","shared_flaw":false}})).unwrap()
     }
+    /// One vocabulary map classifies the reviewer's severity word; only the
+    /// blocking class blocks repair. Should-fix and note stay repairable even
+    /// when a triage left the blocking class empty.
     #[test]
-    fn repair_eligibility_uses_checked_reach_and_preserves_boundaries() {
-        let mut item = finding("F1", "correctness");
-        item.triage.as_mut().unwrap().blocking_class = "none".into();
-        for severity in [
-            "critical",
-            "BLOCKER",
-            "p0",
-            "HIGH",
-            "error",
-            "p1",
-            "should-fix",
+    fn only_blocking_severity_or_blocking_class_blocks_a_confirmed_default_path_finding() {
+        for (severity, class, expected) in [
+            ("blocking", "none", true),
+            ("critical", "none", true),
+            ("p0", "none", true),
+            ("HIGH", "none", true),
+            ("should-fix", "none", false),
+            ("medium", "none", false),
+            ("moderate", "none", false),
+            ("p2", "none", false),
+            ("note", "none", false),
+            ("low", "none", false),
+            ("blocking", "acceptance", true),
+            ("should-fix", "acceptance", true),
+            ("note", "acceptance", true),
+            ("blocking", "default_path_defect", true),
+            ("should-fix", "default_path_defect", true),
+            ("note", "default_path_defect", true),
         ] {
+            let mut item = finding("F1", "correctness");
             item.severity = severity.into();
-            assert!(blocking(&item), "{severity}");
-        }
-        item.severity = "MEDIUM".into();
-        assert!(blocking(&item));
-        item.severity = "p2".into();
-        assert!(!blocking(&item));
-        item.severity = "should-fix".into();
-        item.trigger.as_mut().unwrap().reach = FindingReach::OperatorMistake;
-        assert!(!blocking(&item));
-        for class in ["boundary", "data_loss"] {
             item.triage.as_mut().unwrap().blocking_class = class.into();
-            assert!(blocking(&item));
+            assert_eq!(blocking(&item), expected, "{severity}/{class}");
         }
-        item.kind = Some("spec_defect".into());
-        assert!(blocking(&item));
-        item.kind = None;
-        item.triage.as_mut().unwrap().decision = "rejected".into();
-        item.disposition = Some("rejected".into());
-        assert!(blocking(&item));
-        item.verification = Some("falsified".into());
-        item.evidence = None;
-        assert!(blocking(&item));
-        item.evidence = Some("test disproves trigger".into());
-        assert!(!blocking(&item));
     }
 
     #[test]
-    fn rejected_boundaries_require_falsification_with_evidence() {
+    fn only_a_checked_default_path_blocks_and_boundaries_need_falsification() {
+        let mut item = finding("F1", "correctness");
+        item.severity = "blocking".into();
+        item.triage.as_mut().unwrap().blocking_class = "none".into();
+        assert!(blocking(&item));
+        item.trigger.as_mut().unwrap().reach = FindingReach::OperatorMistake;
+        assert!(!blocking(&item));
+        item.trigger.as_mut().unwrap().reach = FindingReach::AttackerOrUnreachable;
+        assert!(!blocking(&item));
+
         for class in ["boundary", "data_loss"] {
             let mut item = finding("F1", "security");
+            item.severity = "should-fix".into();
             item.triage.as_mut().unwrap().blocking_class = class.into();
             item.triage.as_mut().unwrap().decision = "rejected".into();
             item.triage.as_mut().unwrap().worth_fixing = false;
@@ -789,10 +777,16 @@ mod tests {
             assert!(blocking(&item));
             item.verification = Some("falsified".into());
             item.evidence = None;
-            assert!(blocking(&item));
+            assert!(blocking(&item), "falsification without evidence");
             item.evidence = Some("test disproves trigger".into());
             assert!(!blocking(&item));
         }
+
+        let mut defect = finding("F1", "spec");
+        defect.severity = "note".into();
+        defect.triage.as_mut().unwrap().blocking_class = "none".into();
+        defect.kind = Some("spec_defect".into());
+        assert!(blocking(&defect));
     }
 
     #[test]
