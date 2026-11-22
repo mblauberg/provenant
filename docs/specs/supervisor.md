@@ -550,8 +550,7 @@ only trace, with no masking or per-field warnings anywhere. `secrets` masks
 credential values and credential token shapes in text leaving the host, including
 GitHub publication, cross-host peer and relay projection and fixture export, and
 credential-shaped values in config history. Local output and diagnostics stay raw
-under either mode. A retired `full` config value is accepted as `secrets` with a
-warning naming its source; no command is refused for it. Model, effort, adapter,
+under either mode. Model, effort, adapter,
 alias, name, tier, account label and key, source, pool selection, paths, worktree,
 stage, graph and node names are never hidden under any mode.
 

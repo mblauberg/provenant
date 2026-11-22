@@ -102,8 +102,8 @@ service, OpenCode runs standalone in the lane and the sandbox applies to its
 tools.
 
 Set `lanes.access = "isolated"` to use the isolated per-attempt profile
-instead. A stored `providers.opencode.profile` is ignored with a warning that
-names `lanes.access`. The Console's free models use the derived `zen` account,
+instead. A stored `providers.opencode.profile` is an unknown key and is ignored
+with a warning naming its path and line. The Console's free models use the derived `zen` account,
 separate from the `go` subscription account and paced from their own quota
 observations; a `[domains.routing.pacing.accounts.go]` profile applies to Go
 lanes only.

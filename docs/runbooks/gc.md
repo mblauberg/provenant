@@ -105,15 +105,8 @@ with a seed, the sum can stay below the cap while those shared blocks still
 occupy disk, so collection can continue past what occupancy alone would require.
 Eviction remains least-recently-used: the byte figure does not rank targets by
 bytes freed.
-Targets of the removed `lanes.cargo_target = "shared"` mode under
-`~/Library/Caches/provenant-shared-cargo/` count toward both the budget and the
-free-space sweep until full GC retires them. A preview probes and measures each
-project directory as apply would; `--apply` renames each whose Cargo locks are
-free and that was not written within the build-directory grace to a tombstone,
-then deletes it under `gc.sweep_budget`. The next pass deletes tombstones
-first without measuring them and resumes a stopped measurement where it ended,
-so a directory larger than one pass still goes. Each kept directory is listed with its cause: a held lock, a recent write
-or a probe failure. Live attempt custody and held Cargo build
+Shared targets under `~/Library/Caches/provenant-shared-cargo/` count toward
+both the budget and the free-space sweep. Live attempt custody and held Cargo build
 locks always protect a target. Full GC also protects recent writes and the
 newest Cargo seed generation for each project. Private lane caches older than `gc.idle` are
 eligible when their worktree has gone or was replaced; a cache whose worktree

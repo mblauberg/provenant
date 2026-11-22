@@ -77,7 +77,7 @@ deadline, preview included; a stopped census reports partial measurements
 explicitly and resumes. Cargo build locks and live attempt custody protect
 targets independently of size and age, and a failed lock probe keeps the target
 with its cause reported. The newest seed generation and recent writes retain
-their existing protection. Retired shared targets are renamed to a tombstone
+their existing protection. Managed targets are renamed to a tombstone
 under their held locks before deletion, so an interrupted pass never leaves a
 partial target where Cargo builds; a tombstone is deleted unmeasured and a
 stopped measurement resumes from the sweep cursor, so each pass makes progress.

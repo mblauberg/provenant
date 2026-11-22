@@ -17,7 +17,6 @@ mod edit;
 mod gc;
 mod github_policy;
 mod history;
-mod install_artifacts;
 mod schema;
 pub use cache_budget::resolve as cargo_cache_budget;
 pub use cache_budget::{CargoCacheBudget, KNOB as CARGO_CACHE_MAX_KNOB};
@@ -39,7 +38,6 @@ pub use cargo_seed_budget::{
     is_valid_setting as is_valid_cargo_seed_budget, resolve as cargo_seed_budget,
 };
 mod harness;
-pub use harness::legacy_harness_selectors;
 mod hooks;
 pub use hooks::{hook_plugin_source, lane_hook_settings, registrations as hook_registrations};
 mod inspection;
@@ -98,10 +96,6 @@ pub use domains::{
 };
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
-pub use install_artifacts::{
-    ArtifactDisposition, LEGACY_1X_ARTIFACTS, LegacyArtifact, STABLE_BINARY_NAME,
-    legacy_launch_agent_label, legacy_launch_agent_path,
-};
 pub use knobs::{KnobEdit, KnobSource, KnobValue, knob_source};
 pub use loader::{
     config_show, inspect_config, load, load_with_domains, read, read_knobs, read_with_domains,
@@ -325,8 +319,8 @@ pub struct ConfigInspection {
 pub use managed::{
     AccountHome, AccountState, AccountStatus, Action, Disposition, EntryIdentity, HarnessTarget,
     InstallContext, InstallError, InstallFinding, InstallInspection, InstallOutcome, InstallPlan,
-    InstallReporter, ManualInclude, ReleaseSmoke, SelectorChange, Snapshots, Targets,
-    inspect_accounts, inspect_install, install, installed_binary, peer_agent_plist,
+    InstallReporter, ManualInclude, ReleaseSmoke, STABLE_BINARY_NAME, SelectorChange, Snapshots,
+    Targets, inspect_accounts, inspect_install, install, installed_binary, peer_agent_plist,
     plan_and_install, plan_install, private_directory, release_instruction_asset, release_root,
     systemd_user_dir, tick_agent_plist, tick_service_path, tick_timer_path, uninstall, user_dir_in,
 };

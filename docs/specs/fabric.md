@@ -492,8 +492,7 @@ Oversized findings use content-addressed graph text while the checkpoint retains
 Local execution, graph inputs and retained state remain raw and lossless under
 their custody and integrity controls. The `redaction` modes govern publication:
 `off` passes text unchanged; `secrets` masks credential values and token shapes
-at egress. Local execution text is never masked. A retired `full` value is
-accepted as `secrets` with a warning naming its source. Graph and peer exports,
+at egress. Local execution text is never masked. Graph and peer exports,
 forge content and fixture exports are egress. Metadata is never hidden. When
 masking is enabled, projection failure withholds the affected publication. Raw
 and published byte lengths and digests are bound separately.

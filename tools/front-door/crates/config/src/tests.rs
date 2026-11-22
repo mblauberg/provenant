@@ -140,20 +140,33 @@ fn explicit_profile_selects_the_compiled_preset() {
 }
 
 #[test]
-fn stored_opencode_profile_is_ignored_and_names_lanes_access() {
-    let config = load(
-        &roots(),
-        Some(b"schema_version=1\n[providers.opencode]\nprofile='lane'".as_slice()),
-    )
-    .unwrap();
-    assert_warning(&config, "unknown_key");
-    assert_warning_message(
-        &config,
-        "providers.opencode.profile: ignored; OpenCode profile follows lanes.access",
-    );
-    assert!(!crate::knobs::documented_field(
-        "providers.opencode.profile"
-    ));
+fn retired_setting_values_take_the_generic_finding_path() {
+    for (text, rule, message) in [
+        (
+            "schema_version=1\n[providers.opencode]\nprofile='lane'\n",
+            "unknown_key",
+            "providers.opencode.profile: unknown configuration key; ignored",
+        ),
+        (
+            "schema_version=1\n[knobs]\nredaction='full'\n",
+            "unknown_value",
+            "knobs.redaction: invalid value (unknown_value); using the default",
+        ),
+    ] {
+        let config = load(&roots(), Some(text.as_bytes())).unwrap();
+        assert_warning(&config, rule);
+        assert_warning_message(&config, message);
+        let warning = config
+            .warnings
+            .iter()
+            .find(|warning| warning.rule == rule)
+            .unwrap();
+        assert_eq!(
+            warning.path.to_relative_path().unwrap().as_path(),
+            Path::new("config.toml")
+        );
+        assert!(warning.line > 0);
+    }
 }
 
 #[test]
@@ -1701,14 +1714,6 @@ fn cargo_target_knob_accepts_project_private_and_absolute_paths_and_rejects_rela
     let set = |name, value| knob_edit(&roots, KnobEdit::Set { name, value });
     assert!(matches!(
         set("lanes.cargo_target", "relative/path"),
-        Err(ConfigError::KnobValue {
-            rule: "unknown_value",
-            ..
-        })
-    ));
-    // One target shared by every worktree served stale artifacts (#3561).
-    assert!(matches!(
-        set("lanes.cargo_target", "shared"),
         Err(ConfigError::KnobValue {
             rule: "unknown_value",
             ..

@@ -9,7 +9,6 @@ use provenant_config::{
     InstallOutcome, InstallReporter, ManualInclude, ReleaseSmoke, Targets,
 };
 use provenant_core::{CancelToken, Clock, WaitBudget};
-use provenant_fabric_runtime::peer_agent::{AgentError, launchctl};
 use provenant_os::clock::SystemClock;
 use provenant_os::fs::Directory;
 use provenant_records::{CommandError, CommandResult, Harness, Outcome};
@@ -340,47 +339,6 @@ impl PreviewReporter {
         Some(report)
     }
 
-    /// Stops every agent a 1.x install may run, by label. A stopped peer or
-    /// tick agent is restarted from the new root once the install is done.
-    fn stop_legacy_agents(&mut self, state: &Path, home: &Path) -> io::Result<()> {
-        if provenant_fabric_runtime::peer_agent::eligible(state, home) {
-            let labels: Vec<_> = provenant_config::LEGACY_1X_ARTIFACTS
-                .iter()
-                .filter_map(|artifact| match artifact {
-                    provenant_config::LegacyArtifact::LaunchAgent { label, .. } => Some(*label),
-                    _ => None,
-                })
-                .collect();
-            crate::state_handoff::quiesce_launch_agents(
-                home,
-                &labels,
-                launchctl,
-                |label, result| {
-                    // Retired labels must stay absent. Only current agents
-                    // need restart/recovery guidance after a successful stop.
-                    self.record_stop(
-                        label,
-                        result.map(|stopped| {
-                            stopped && provenant_config::LEGACY_1X_ARTIFACTS.iter().any(|artifact| {
-                                matches!(artifact, provenant_config::LegacyArtifact::LaunchAgent {
-                                    label: known,
-                                    disposition: provenant_config::ArtifactDisposition::Replace,
-                                    ..
-                                } if *known == label)
-                            })
-                        }),
-                    )
-                },
-            )?;
-        } else if super::tick_agent::eligible(state, home) {
-            self.record_stop(
-                "dev.provenant.tick",
-                super::tick_agent::quiesce(home).map_err(io::Error::other),
-            )?;
-        }
-        Ok(())
-    }
-
     fn before_remove_with(
         &mut self,
         action: &Action,
@@ -530,10 +488,9 @@ fn error_class(error: &InstallError) -> (Outcome, &'static str) {
         | InstallError::ReceiptDecode(_)
         | InstallError::Encode(_)
         | InstallError::PathWire(_) => (Outcome::Invalid, "INSTALL_INVALID"),
-        InstallError::Fs(_)
-        | InstallError::Preview(_)
-        | InstallError::Smoke(_)
-        | InstallError::AgentRetirement(_) => (Outcome::Error, "INSTALL_ERROR"),
+        InstallError::Fs(_) | InstallError::Preview(_) | InstallError::Smoke(_) => {
+            (Outcome::Error, "INSTALL_ERROR")
+        }
     }
 }
 pub(super) fn install_error(command: &str, error: &InstallError, globals: &cli::Globals) -> u8 {
@@ -1411,14 +1368,9 @@ fn apply_install(
                 .map_err(|error| Refused::Fail(Outcome::Error, "STATE_COPY", error.to_string()))?;
             Some(plan)
         } else {
-            match crate::state_handoff::run(&plan, &environment.roots, preflight, || {
-                reporter.stop_legacy_agents(&plan.to, &environment.home)
-            }) {
+            match crate::state_handoff::run(&plan, &environment.roots, preflight) {
                 Ok(copied) => Some(copied),
                 Err(error) => {
-                    if let Some(message) = reporter.stopped_report(&plan.to) {
-                        let _ = writeln!(io::stderr().lock(), "{message}");
-                    }
                     return Err(Refused::Fail(
                         Outcome::Error,
                         "STATE_COPY",
@@ -1476,11 +1428,6 @@ fn apply_install(
             manual_includes: Vec::new(),
             dry_run: args.dry_run,
         };
-        if agents && !args.dry_run && provenant_fabric_runtime::peer_agent::eligible(&state, &home)
-        {
-            retire_legacy_agents(&home)
-                .map_err(|error| InstallError::AgentRetirement(error.to_string()))?;
-        }
         for batch in batches {
             // Publish one receipt target at a time, using config's existing lock and ownership rules.
             let settings = batch_args(&args, &batch, args.dry_run);
@@ -2603,11 +2550,6 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
         home: Some(targets.home.clone()),
         ..Default::default()
     };
-    if provenant_fabric_runtime::peer_agent::eligible(targets.roots.state.as_path(), &targets.home)
-        && let Err(error) = retire_legacy_agents(&targets.home)
-    {
-        return edge_error("uninstall", EdgeError::Peer(error), globals);
-    }
     let notes = warning
         .map(|warning| format!("{warning}\n"))
         .unwrap_or_default();
@@ -3177,144 +3119,6 @@ mod tests {
                 .is_err()
         );
         assert_eq!(stops, 2);
-        Ok(())
-    }
-}
-
-/// Retire every declared 1.x-only service by name, including a loaded service
-/// whose plist is already absent. A failed unload preserves its plist for retry.
-fn retire_legacy_agents(home: &Path) -> Result<(), AgentError> {
-    retire_legacy_agents_with(home, launchctl)
-}
-
-fn retire_legacy_agents_with(
-    home: &Path,
-    mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
-) -> Result<(), AgentError> {
-    for artifact in provenant_config::LEGACY_1X_ARTIFACTS {
-        let provenant_config::LegacyArtifact::LaunchAgent {
-            label,
-            plist,
-            disposition: provenant_config::ArtifactDisposition::Remove,
-            ..
-        } = artifact
-        else {
-            continue;
-        };
-        provenant_fabric_runtime::peer_agent::stop_service_with(home, label, &mut run)?;
-        let plist = home.join(plist);
-        match std::fs::remove_file(&plist) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "the worktree driver includes this module without registering its tests"
-)]
-mod retired_agent_tests {
-    #[allow(unused_imports)] // The worktree driver includes this module without libtest.
-    use super::*;
-
-    fn service_output(loaded: bool, label: &str) -> (bool, String) {
-        if loaded {
-            (true, "state = running\n".into())
-        } else {
-            (
-                false,
-                format!("exit 113: Could not find service \"{label}\" in domain gui"),
-            )
-        }
-    }
-
-    #[test]
-    fn declared_legacy_agents_are_unloaded_before_plists_are_removed()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_config::{ArtifactDisposition, LEGACY_1X_ARTIFACTS, LegacyArtifact};
-        let home = tempfile::tempdir()?;
-        let mut loaded = std::collections::BTreeSet::new();
-        for artifact in LEGACY_1X_ARTIFACTS {
-            if let LegacyArtifact::LaunchAgent { label, plist, .. } = artifact {
-                let path = home.path().join(plist);
-                std::fs::create_dir_all(path.parent().ok_or("plist parent")?)?;
-                std::fs::write(path, label)?;
-                loaded.insert(*label);
-            }
-        }
-        for _ in 0..2 {
-            retire_legacy_agents_with(home.path(), |args, _| {
-                let service = args[1].to_string_lossy();
-                let label = service.rsplit('/').next().unwrap_or_default();
-                if args[0] == "bootout" {
-                    let plist = LEGACY_1X_ARTIFACTS
-                        .iter()
-                        .find_map(|artifact| match artifact {
-                            LegacyArtifact::LaunchAgent {
-                                label: known,
-                                plist,
-                                ..
-                            } if *known == label => Some(plist),
-                            _ => None,
-                        })
-                        .expect("declared service");
-                    assert!(home.path().join(plist).exists(), "unload precedes removal");
-                    loaded.remove(label);
-                    Ok((true, String::new()))
-                } else {
-                    Ok(service_output(loaded.contains(label), label))
-                }
-            })?;
-        }
-        for artifact in LEGACY_1X_ARTIFACTS {
-            if let LegacyArtifact::LaunchAgent {
-                label,
-                plist,
-                disposition,
-                ..
-            } = artifact
-            {
-                let retained = *disposition == ArtifactDisposition::Replace;
-                assert_eq!(home.path().join(plist).exists(), retained);
-                assert_eq!(loaded.contains(label), retained);
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn failed_unload_preserves_declared_plist_for_retry() -> Result<(), Box<dyn std::error::Error>>
-    {
-        for artifact in provenant_config::LEGACY_1X_ARTIFACTS {
-            let provenant_config::LegacyArtifact::LaunchAgent {
-                label,
-                plist,
-                disposition: provenant_config::ArtifactDisposition::Remove,
-                ..
-            } = artifact
-            else {
-                continue;
-            };
-            let home = tempfile::tempdir()?;
-            let path = home.path().join(plist);
-            std::fs::create_dir_all(path.parent().ok_or("plist parent")?)?;
-            std::fs::write(&path, b"old plist")?;
-            let result = retire_legacy_agents_with(home.path(), |args, _| {
-                let service = args[1].to_string_lossy();
-                if args[0] == "print" {
-                    let queried = service.rsplit('/').next().unwrap_or_default();
-                    Ok(service_output(queried == *label, queried))
-                } else {
-                    Ok((false, "busy".into()))
-                }
-            });
-            assert!(matches!(result, Err(AgentError::Quiescence { .. })));
-            assert!(path.exists());
-        }
         Ok(())
     }
 }

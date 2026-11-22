@@ -3,6 +3,9 @@
 **Status:** Accepted
 
 Changed: 2026-11-20, #3688: output redaction is opt-in.
+Changed: 2026-11-22, #3782: dropped the 1.x handoff paragraph. Both hosts run
+2.6.x and the owner has no other installs, so the one-time cut-over no longer
+justifies compatibility code.
 
 ## Context
 
@@ -46,12 +49,6 @@ additive SQLite schema steps within one state-root format major. A store's
 `user_version` is a per-store base identifier fixed for that root major; it
 does not advance independently. A non-additive stored change requires the
 next root format major and a fresh state root.
-
-The 1.x to 2.0 handoff does not migrate 1.x state or read its install receipt.
-It copies owner configuration only. Install removes or overwrites its declared
-Provenant artifact names; anything else left by 1.x is an operator's manual
-release step or a doctor warning. Breaking changes include a clear operator
-step when one is needed.
 
 Local execution data, provider histories and graph text remain lossless in
 host-owned private state. File modes are defence in depth, not isolation from

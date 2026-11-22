@@ -2932,22 +2932,13 @@ fn first_install_at_a_fresh_root_copies_only_1x_configuration() -> Result {
 }
 
 #[test]
-fn failed_first_install_verification_leaves_legacy_artifacts_and_v2_unpublished() -> Result {
+fn failed_first_install_verification_leaves_v2_unpublished() -> Result {
     let mut rig = TestRig::new()?;
     rig.state = rig.home.join(provenant_core::DEFAULT_STATE_SUFFIX);
     rig.env.retain(|(key, _)| key != "PROVENANT_STATE_DIR");
     let legacy = rig.home.join(provenant_core::LEGACY_V1_STATE_SUFFIX);
     fs::create_dir_all(&legacy)?;
     fs::write(legacy.join("config.toml"), "schema_version=1\n")?;
-    let mut agents = Vec::new();
-    for artifact in provenant_config::LEGACY_1X_ARTIFACTS {
-        if let provenant_config::LegacyArtifact::LaunchAgent { plist, .. } = artifact {
-            let path = rig.home.join(plist);
-            fs::create_dir_all(path.parent().ok_or("plist parent")?)?;
-            fs::write(&path, b"legacy agent")?;
-            agents.push(path);
-        }
-    }
     let before = snapshot(&legacy)?;
     let bad_binary = rig.root.join("fails-smoke");
     fs::write(&bad_binary, b"#!/bin/sh\nexit 23\n")?;
@@ -2963,8 +2954,5 @@ fn failed_first_install_verification_leaves_legacy_artifacts_and_v2_unpublished(
     assert_ne!(code(&output), 0, "{output:?}");
     assert!(!rig.state.exists());
     assert_eq!(snapshot(&legacy)?, before);
-    for path in agents {
-        assert_eq!(fs::read(path)?, b"legacy agent");
-    }
     Ok(())
 }

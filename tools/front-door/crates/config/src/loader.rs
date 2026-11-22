@@ -1466,34 +1466,6 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
             ),
         });
     }
-    if key == "gc.lane_cargo_cache_max"
-        || key == "domains.fabric.lanes.build_dir_max_bytes"
-        || issue.rule == "retired.lane_cargo_cache_max"
-        || issue.rule == "retired.build_dir_max_bytes"
-        || issue.source.as_ref().is_some_and(|source| {
-            source.code == "retired.lane_cargo_cache_max"
-                || source.code == "retired.build_dir_max_bytes"
-        })
-    {
-        return Ok(Finding {
-            rule: issue.rule.into(),
-            path: user_path()?,
-            line: issue.location.line,
-            message: format!(
-                "{key}: removed configuration key; use lanes.cargo_cache_max under [knobs] instead"
-            ),
-        });
-    }
-    if key == "providers.opencode.profile" {
-        return Ok(Finding {
-            rule: issue.rule.into(),
-            path: user_path()?,
-            line: issue.location.line,
-            message: format!(
-                "{key}: ignored; OpenCode profile follows lanes.access (host or isolated)"
-            ),
-        });
-    }
     if issue.rule == "unknown_key" {
         return Ok(Finding {
             rule: issue.rule.into(),
@@ -2786,41 +2758,30 @@ mod warning_tests {
     const FABRIC_DOMAINS: DomainSections<FabricStub> = DomainSections::new(&[FABRIC_SECTION]);
 
     #[test]
-    fn retired_cargo_cache_settings_produce_actionable_diagnostic()
+    fn removed_cargo_cache_settings_are_generic_findings_with_path_and_line()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let inputs = provenant_test_support::test_roots(temp.path())?;
         let roots = inputs.resolve(&provenant_test_support::IdentityPathResolver)?;
         let text = b"schema_version=1\n[gc]\nlane_cargo_cache_max='50G'\n[domains.fabric.lanes]\nbuild_dir_max_bytes=1000\n";
         let config = load_with_domains(&roots, Some(&text[..]), &FABRIC_DOMAINS)?;
-        let gc_warning = config
-            .warnings
-            .iter()
-            .find(|warning| warning.message.contains("gc.lane_cargo_cache_max"))
-            .ok_or("missing gc.lane_cargo_cache_max diagnostic")?;
-        assert!(
-            gc_warning
-                .message
-                .contains("use lanes.cargo_cache_max under [knobs] instead"),
-            "unexpected message: {}",
-            gc_warning.message
-        );
-        let fabric_warning = config
-            .warnings
-            .iter()
-            .find(|warning| {
-                warning
-                    .message
-                    .contains("domains.fabric.lanes.build_dir_max_bytes")
-            })
-            .ok_or("missing domains.fabric.lanes.build_dir_max_bytes diagnostic")?;
-        assert!(
-            fabric_warning
-                .message
-                .contains("use lanes.cargo_cache_max under [knobs] instead"),
-            "unexpected message: {}",
-            fabric_warning.message
-        );
+        for key in [
+            "gc.lane_cargo_cache_max",
+            "domains.fabric.lanes.build_dir_max_bytes",
+        ] {
+            let warning = config
+                .warnings
+                .iter()
+                .find(|warning| warning.message.starts_with(key))
+                .ok_or_else(|| format!("missing generic {key} finding"))?;
+            let path = warning.path.to_relative_path().unwrap();
+            assert_eq!(
+                path.as_path(),
+                std::path::Path::new("config.toml"),
+                "unexpected path for {key}"
+            );
+            assert!(warning.line > 0, "missing line for {key}");
+        }
         Ok(())
     }
 }
