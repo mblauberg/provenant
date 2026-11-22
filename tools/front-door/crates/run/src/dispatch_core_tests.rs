@@ -744,11 +744,7 @@ fn pressure_errors_and_low_advisory_memory_do_not_refuse() -> TestResult {
 }
 #[test]
 fn out_of_range_build_settings_do_not_block_admission() -> TestResult {
-    for assignment in [
-        "cargo_build_jobs = -2",
-        "cargo_build_jobs = 'invalid'",
-        "cargo_build_jobs = 0",
-    ] {
+    for assignment in ["max_lanes = -2", "max_lanes = 'invalid'", "max_lanes = 0"] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);

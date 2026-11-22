@@ -1805,10 +1805,7 @@ fn admission_setting_names_follow_each_typed_cause() {
         (AdmissionCause::Clock, Some(&[])),
         (
             AdmissionCause::BuildSettings,
-            Some(&[
-                "domains.fabric.lanes.cargo_build_jobs",
-                "domains.fabric.lanes.cargo_debug",
-            ]),
+            Some(&["domains.fabric.lanes"]),
         ),
         (AdmissionCause::GuardianIdentity, Some(&[])),
         (AdmissionCause::Disk, Some(&["gc.critical_free"])),

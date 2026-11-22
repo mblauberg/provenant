@@ -1848,8 +1848,8 @@ impl LaunchConfinement {
         )
     }
     /// Apply the host-resolved Cargo home and source policy to the lane
-    /// environment. The lane builds in its own cache; no build output is
-    /// provisioned or copied into it here.
+    /// environment. Cargo paths stay in the lane's private cache; no build
+    /// output is provisioned or copied into it here.
     pub(crate) fn prepare_cargo_environment(&self, environment: &mut Vec<(OsString, OsString)>) {
         let private_cache = match &self.plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => &authority.cargo_cache().path,

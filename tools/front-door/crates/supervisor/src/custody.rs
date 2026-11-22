@@ -163,9 +163,7 @@ pub enum AdmissionError {
         "startup spacing cannot be judged: the host monotonic clock or boot identity cannot be read"
     )]
     Clock,
-    #[error(
-        "invalid host build settings: check domains.fabric.lanes.cargo_build_jobs and cargo_debug"
-    )]
+    #[error("invalid host lane settings: check domains.fabric.lanes")]
     BuildSettings,
     #[error("guardian process identity unavailable; retry when process observation is available")]
     GuardianIdentity,
@@ -206,10 +204,7 @@ impl AdmissionError {
     pub fn setting_names(&self) -> Vec<&'static str> {
         match self {
             Self::Clock | Self::GuardianIdentity | Self::Processes { .. } => Vec::new(),
-            Self::BuildSettings => vec![
-                "domains.fabric.lanes.cargo_build_jobs",
-                "domains.fabric.lanes.cargo_debug",
-            ],
+            Self::BuildSettings => vec!["domains.fabric.lanes"],
             Self::Disk { .. } => vec!["gc.critical_free"],
             Self::MemoryPressure { .. } => {
                 vec!["domains.fabric.lanes.memory_pressure_threshold"]

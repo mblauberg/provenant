@@ -273,7 +273,6 @@ fn executable_discovery_after_wait_observes_the_completed_update()
         credential_roots: Default::default(),
         github_roots: Default::default(),
         provider_path_environment: Default::default(),
-        cargo_build_jobs: None,
         #[cfg(feature = "fixture")]
         fixture_state_write: false,
     };

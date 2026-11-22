@@ -662,7 +662,6 @@ fn default_host_context(edge: &Edge<'_>) -> Result<run::HostLaunchContext, Fail>
         credential_roots: run::HostLaunchContext::credential_roots(),
         github_roots: run::HostLaunchContext::github_roots(),
         provider_path_environment: run::HostLaunchContext::provider_path_environment(),
-        cargo_build_jobs: std::env::var("CARGO_BUILD_JOBS").ok(),
         #[cfg(feature = "fixture")]
         fixture_state_write: false,
     })

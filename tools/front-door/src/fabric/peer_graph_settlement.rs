@@ -1016,7 +1016,6 @@ fn settlement_advances_only_matching_graph_and_retains_writer()
         credential_roots: Default::default(),
         github_roots: Default::default(),
         provider_path_environment: Default::default(),
-        cargo_build_jobs: None,
         fixture_state_write: false,
     });
     advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)?;
@@ -1203,7 +1202,6 @@ fn settlement_and_tick_read_only_owned_or_pending_graphs() -> Result<(), Box<dyn
         credential_roots: Default::default(),
         github_roots: Default::default(),
         provider_path_environment: Default::default(),
-        cargo_build_jobs: None,
         fixture_state_write: false,
     });
     advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)?;
@@ -1321,7 +1319,6 @@ fn an_attempt_keyed_to_another_graph_is_refused_not_adopted()
         credential_roots: Default::default(),
         github_roots: Default::default(),
         provider_path_environment: Default::default(),
-        cargo_build_jobs: None,
         fixture_state_write: false,
     });
     advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)?;

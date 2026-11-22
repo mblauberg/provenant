@@ -21,13 +21,13 @@ mod schema;
 pub use cache_budget::resolve as cargo_cache_budget;
 pub use cache_budget::{CargoCacheBudget, KNOB as CARGO_CACHE_MAX_KNOB};
 pub use gc::{
-    ByteObservation, CARGO_DEBUG_LEVELS, CargoBuildProfile, DISK_FLOOR, DiskGate, DiskLevel,
-    DiskLimits, ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold,
-    PROJECT_WRITER_LANES_CEILING, ProjectGcSettings, RETENTION_CLASSES, RemoteBranches,
-    RetentionAdapter, RetentionBytes, RetentionClass, RetentionCollector, RetentionEligibility,
-    RetentionIssue, RetentionKind, RetentionMeasurements, RetentionOwner, RetentionTrigger,
-    STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings, WRITER_LANES_CEILING, deserialize_auto,
-    parse_cache_size, parse_gc_idle_duration, retention_schedule,
+    ByteObservation, DISK_FLOOR, DiskGate, DiskLevel, DiskLimits, ForeignWorktrees, GcSettings,
+    LaneBuildSettings, MemoryPressureThreshold, PROJECT_WRITER_LANES_CEILING, ProjectGcSettings,
+    RETENTION_CLASSES, RemoteBranches, RetentionAdapter, RetentionBytes, RetentionClass,
+    RetentionCollector, RetentionEligibility, RetentionIssue, RetentionKind, RetentionMeasurements,
+    RetentionOwner, RetentionTrigger, STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings,
+    WRITER_LANES_CEILING, deserialize_auto, parse_cache_size, parse_gc_idle_duration,
+    retention_schedule,
 };
 pub use github_policy::{
     DEFAULT_GH_BUDGET, GH_INVOCATIONS_FILE, GithubPolicy, label_events_trigger_ci,

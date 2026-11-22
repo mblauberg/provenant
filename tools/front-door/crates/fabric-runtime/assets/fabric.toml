@@ -11,7 +11,6 @@ lane_port_base = -1 # first port of the range split into per-writer-lane blocks,
 lane_port_block = -1 # ports in each writer lane's block, 1-1024; automatic: 16
 lane_port_blocks = -1 # blocks in the range, 0-1024, the base plus blocks times block size at most 65536; 0 turns allocation off; automatic: 64
 max_project_writer_lanes = -1 # writer lanes live at once per project, 1-32 and at most max_writer_lanes; automatic: unlimited
-cargo_build_jobs = -1 # automatic: half the available cores, at least 1
 [lanes.settlement]
 notice = true # post one terse notice to the dispatching chair's inbox when a lane settles
 notice_read_only = false # also notify for read-only lanes

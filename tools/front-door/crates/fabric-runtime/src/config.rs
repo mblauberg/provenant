@@ -539,8 +539,6 @@ pub struct Lanes {
     /// Source directories in host CARGO_HOME are read-only unless enabled.
     pub cargo_source_writes: Option<bool>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
-    pub cargo_build_jobs: Option<u64>,
-    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub max_lanes: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub max_project_lanes: Option<u64>,
@@ -554,10 +552,6 @@ pub struct Lanes {
     pub lane_port_block: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub lane_port_blocks: Option<u64>,
-    /// `CARGO_INCREMENTAL` for lanes; off unless set.
-    pub cargo_incremental: Option<bool>,
-    /// `CARGO_PROFILE_DEV_DEBUG` for lanes; `line-tables-only` unless set.
-    pub cargo_debug: Option<String>,
     /// Seconds after its newest write during which a profile directory is
     /// never removed; 15 minutes unless set.
     pub build_dir_grace_seconds: Option<u64>,
@@ -592,10 +586,7 @@ impl Lanes {
         provenant_config::LaneBuildSettings {
             start_spacing_ms: self.start_spacing_ms,
             memory_pressure_threshold: Some(self.memory_pressure_threshold),
-            cargo_build_jobs: self.cargo_build_jobs,
             cargo_source_writes: self.cargo_source_writes,
-            cargo_incremental: self.cargo_incremental,
-            cargo_debug: self.cargo_debug.clone(),
             build_dir_grace_seconds: self.build_dir_grace_seconds,
             max_lanes: self.max_lanes,
             max_project_lanes: self.max_project_lanes,
@@ -962,10 +953,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
         &["warning", "critical", "never"],
     ),
     FieldMetadata::int("lanes.start_spacing_ms", 0, 600_000),
-    FieldMetadata::int("lanes.cargo_build_jobs", 1, 1024),
     FieldMetadata::int("lanes.build_dir_grace_seconds", 0, i64::MAX),
-    FieldMetadata::enumeration("lanes.cargo_debug", &provenant_config::CARGO_DEBUG_LEVELS),
-    FieldMetadata::new("lanes.cargo_incremental", "bool"),
     FieldMetadata::new("lanes.cargo_source_writes", "bool"),
     FieldMetadata::int("lanes.max_lanes", 1, 64),
     FieldMetadata::int("lanes.max_project_lanes", 1, 32),
@@ -1163,17 +1151,15 @@ mod tests {
     }
 
     #[test]
-    fn lane_build_settings_validate_shared_bounds_and_auto() {
-        let lanes: Lanes = serde_json::from_str(r#"{"cargo_build_jobs": -1}"#).unwrap();
-        assert_eq!(lanes.cargo_build_jobs, None);
+    fn lane_settings_validate_shared_bounds_and_auto() {
+        let lanes: Lanes = serde_json::from_str(r#"{"max_lanes": -1}"#).unwrap();
+        assert_eq!(lanes.max_lanes, None);
         let mut config = config();
-        config.lanes.cargo_build_jobs = Some(1025);
         config.lanes.max_lanes = Some(65);
         config.lanes.max_project_lanes = Some(0);
         config.lanes.max_writer_lanes = Some(65);
         config.lanes.max_project_writer_lanes = Some(0);
         let errors = config.validate();
-        assert!(errors.iter().any(|e| e.field == "lanes.cargo_build_jobs"));
         for key in [
             "max_lanes",
             "max_project_lanes",

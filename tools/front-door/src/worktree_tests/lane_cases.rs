@@ -561,7 +561,6 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 credential_roots: Default::default(),
                 github_roots: Default::default(),
                 provider_path_environment: Default::default(),
-                cargo_build_jobs: None,
                 fixture_state_write: true,
             }),
             sealed: Some(provenant_run::SealedTask {

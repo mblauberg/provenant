@@ -1507,28 +1507,28 @@ fn host_lane_build_settings_read_and_validate() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(
         temp.path().join("config.toml"),
-        "schema_version=1\n[domains.fabric.lanes]\ncargo_build_jobs=5\n",
+        "schema_version=1\n[domains.fabric.lanes]\nmax_lanes=5\n",
     )
     .unwrap();
     let settings = crate::LaneBuildSettings::read(temp.path()).unwrap();
-    assert_eq!(settings.cargo_build_jobs, Some(5));
+    assert_eq!(settings.max_lanes, Some(5));
     std::fs::write(
         temp.path().join("config.toml"),
-        "schema_version=1\n[domains.fabric.lanes]\ncargo_build_jobs=0\n",
+        "schema_version=1\n[domains.fabric.lanes]\nmax_lanes=0\n",
     )
     .unwrap();
-    // Zero remains invalid for per-build compiler jobs.
+    // Zero remains invalid for host lane caps.
     let settings = crate::LaneBuildSettings::read(temp.path()).unwrap();
-    assert_eq!(settings.cargo_build_jobs, None);
+    assert_eq!(settings.max_lanes, None);
     std::fs::write(
         temp.path().join("config.toml"),
-        "schema_version=1\n[domains.fabric.lanes]\ncargo_build_jobs=-2\n",
+        "schema_version=1\n[domains.fabric.lanes]\nmax_lanes=-2\n",
     )
     .unwrap();
     assert_eq!(
         crate::LaneBuildSettings::read(temp.path())
             .unwrap()
-            .cargo_build_jobs,
+            .max_lanes,
         None
     );
 }

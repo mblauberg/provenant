@@ -119,7 +119,8 @@ write grants. `provenant fabric identity` prints the project ID.
 ## Lanes do not build
 
 Lanes format and coordinate only: they never provision, seed or admit a
-compiler job. There is no `lanes.cargo_target`, `lanes.cargo_seed_budget` or
+compiler job. There is no `lanes.cargo_target`, `lanes.cargo_seed_budget`,
+`lanes.cargo_build_jobs`, `lanes.cargo_incremental`, `lanes.cargo_debug` or
 `domains.fabric.lanes.cargo_seed` setting; a leftover key warns as unknown.
 The chair runs one warm integrated check per epic through the build port, and
 CI runs clippy and the tests.

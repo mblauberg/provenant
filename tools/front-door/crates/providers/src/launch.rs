@@ -1311,14 +1311,11 @@ pub(crate) fn finalise_provider_env(
         }
     };
     let (target, lint_target) = lane_targets(input);
-    let build_profile = launch_cargo_build_profile(input.provenant.state, input.host_var);
     cargo_environment(
         &binding,
         input.home,
         (&target, &lint_target),
         access,
-        !input.sandboxed(),
-        &build_profile,
         &mut spec.env,
     );
     binding.source_environment(input.confined.permissions().network, &mut spec.env);
@@ -2087,55 +2084,16 @@ fn external_target_grants(
     }
 }
 
-/// Resolve the lane's Cargo profile once, from the same source the seed build
-/// uses: `LaneBuildSettings` in the state root, with explicit host values taking
-/// precedence. Both then compile with the same debuginfo and incremental
-/// settings, so a host that configures one gets the same behaviour from the
-/// other. A non-UTF-8 host value falls back to the compiled default profile.
-fn launch_cargo_build_profile(
-    state: &Path,
-    host_var: &dyn Fn(&str) -> Option<OsString>,
-) -> provenant_config::CargoBuildProfile {
-    let settings = provenant_config::LaneBuildSettings::read(state).unwrap_or_default();
-    let host_environment = ["CARGO_INCREMENTAL", "CARGO_PROFILE_DEV_DEBUG"]
-        .into_iter()
-        .filter_map(|name| host_var(name).map(|value| (name.into(), value)))
-        .collect::<Vec<(OsString, OsString)>>();
-    settings
-        .cargo_build_profile(&host_environment)
-        .unwrap_or_default()
-}
-
 /// One finalisation seam for all native adapters, including those that skip
-/// sandbox-only tool discovery. This must run before Run verifies target seeds.
+/// sandbox-only tool discovery.
 fn cargo_environment(
     binding: &provenant_confinement::cargo::CargoHome,
     home: &Path,
     (target, lint_target): (&Path, &Path),
     access: Access,
-    native: bool,
-    build_profile: &provenant_config::CargoBuildProfile,
     env: &mut Vec<(OsString, OsString)>,
 ) {
     env.retain(|(key, _)| key != provenant_core::consumer_env::LANE_CARGO_LINT_TARGET);
-    if native {
-        // A value already in the caller's environment wins; only the configured
-        // profile fills the gap. The profile has one source, LaneBuildSettings.
-        if !env.iter().any(|(key, _)| key == "CARGO_BUILD_JOBS") {
-            env.push((
-                "CARGO_BUILD_JOBS".into(),
-                provenant_config::LaneBuildSettings::default()
-                    .jobs()
-                    .to_string()
-                    .into(),
-            ));
-        }
-        for (name, value) in build_profile.environment() {
-            if !env.iter().any(|(key, _)| key == &name) {
-                env.push((name, value));
-            }
-        }
-    }
     binding.lane_cargo_environment_with_target(home, target, env);
     if access == Access::WorktreeWrite {
         // Lint-only runs set both CARGO_TARGET_DIR and CARGO_BUILD_BUILD_DIR to
@@ -2145,96 +2103,6 @@ fn cargo_environment(
             provenant_core::consumer_env::LANE_CARGO_LINT_TARGET.into(),
             lint_target.as_os_str().to_os_string(),
         ));
-    }
-}
-
-#[cfg(test)]
-mod cargo_profile_env_tests {
-    use super::*;
-
-    fn cargo_home() -> provenant_confinement::cargo::CargoHome {
-        provenant_confinement::cargo::CargoHome {
-            path: PathBuf::from("/fixture/home/.cargo"),
-            source: "test",
-            source_writes: false,
-            source_writes_source: "test",
-        }
-    }
-
-    fn env_value(env: &[(OsString, OsString)], key: &str) -> Option<OsString> {
-        env.iter()
-            .find(|(name, _)| name == key)
-            .map(|(_, value)| value.clone())
-    }
-
-    #[test]
-    fn launch_env_comes_from_lane_build_settings() {
-        let state = tempfile::tempdir().unwrap();
-        std::fs::write(
-            state.path().join("config.toml"),
-            "schema_version=1\n[domains.fabric.lanes]\ncargo_incremental=true\ncargo_debug='full'\n",
-        )
-        .unwrap();
-
-        let profile = launch_cargo_build_profile(state.path(), &|_| None);
-        assert_eq!(profile.incremental, "1");
-        assert_eq!(profile.debug, "full");
-
-        let binding = cargo_home();
-        let mut env = Vec::new();
-        cargo_environment(
-            &binding,
-            Path::new("/fixture/home"),
-            (
-                Path::new("/fixture/target"),
-                Path::new("/fixture/lint-target"),
-            ),
-            Access::ReadOnly,
-            true,
-            &profile,
-            &mut env,
-        );
-        assert_eq!(
-            env_value(&env, "CARGO_INCREMENTAL").as_deref(),
-            Some(OsStr::new("1"))
-        );
-        assert_eq!(
-            env_value(&env, "CARGO_PROFILE_DEV_DEBUG").as_deref(),
-            Some(OsStr::new("full"))
-        );
-    }
-
-    #[test]
-    fn explicit_env_wins() {
-        let profile = provenant_config::CargoBuildProfile {
-            incremental: "1".into(),
-            debug: "full".into(),
-        };
-        let binding = cargo_home();
-        let mut env: Vec<(OsString, OsString)> = vec![
-            ("CARGO_INCREMENTAL".into(), "0".into()),
-            ("CARGO_PROFILE_DEV_DEBUG".into(), "none".into()),
-        ];
-        cargo_environment(
-            &binding,
-            Path::new("/fixture/home"),
-            (
-                Path::new("/fixture/target"),
-                Path::new("/fixture/lint-target"),
-            ),
-            Access::ReadOnly,
-            true,
-            &profile,
-            &mut env,
-        );
-        assert_eq!(
-            env_value(&env, "CARGO_INCREMENTAL").as_deref(),
-            Some(OsStr::new("0"))
-        );
-        assert_eq!(
-            env_value(&env, "CARGO_PROFILE_DEV_DEBUG").as_deref(),
-            Some(OsStr::new("none"))
-        );
     }
 }
 
