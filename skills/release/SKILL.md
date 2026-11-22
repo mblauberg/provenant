@@ -5,12 +5,12 @@ description: "Use before any deploy, publish, send or rollout."
 
 # Release
 
-Use `provenant upgrade --verify` to run the bundled smoke graph after upgrading.
-
 Promotion is a one-way door and never automatic. Passing CI, delivery
 acceptance and broad session authority do not authorise it. The owner's grant
 binds this artefact, this action, this target and an expiry. The repository's
-release runbook owns the mechanics; this skill owns the gate.
+own release steps (AGENTS.md, CONTRIBUTING or a runbook) own the mechanics; this
+skill owns the gate.
+`provenant upgrade --verify` runs the bundled smoke graph after an upgrade.
 
 ## Before asking
 

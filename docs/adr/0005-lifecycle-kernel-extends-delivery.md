@@ -15,7 +15,7 @@ question from a verified delivery receipt.
 The workflow crate owns the neutral delivery kernel and its canonical receipt.
 Make objectively decidable risk floors, authority containment, evidence and
 review coverage executable there. The chair and governing skills own
-judgement, subject to the constitution's user gates.
+judgement, subject to the user gates in the global rules.
 
 Fabric owns coordination and delegates execution to the run owner. Neither
 Fabric nor a provider attempt certifies delivery acceptance. Delivery evidence

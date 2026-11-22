@@ -1,20 +1,16 @@
 # Session checkpoint
 
-Use the standing record in the [continuity contract](../references/continuity.md)
-above these headings.
+Open with the standing record from the [continuity contract](../references/continuity.md),
+then these headings.
 
 ## Goal
 Outcome, done-criteria and the tracker or project document that owns them.
-The standing record above holds the goal, sourced grants, obligations and
-owner asks; the continuity reference owns its format.
 
 ## Direction
 User rulings, authority pointers, one-way doors and unresolved gates.
 
 ## Intent
-Per live ruling: what the user wants, why as you understand it, alternatives
-rejected and why, open disagreement, uncertain readings. A correction replaces
-the earlier reading. Quote only authority grants or corrections of misreadings.
+Per live ruling, as the continuity contract describes.
 
 ## Process
 Governing skills, retained evidence locations and verification responsibility.

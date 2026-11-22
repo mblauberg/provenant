@@ -16,7 +16,7 @@ body:
       description: >-
         The documented behaviour, the behaviour you saw, and the gap between
         them. Quote the contract you are measuring against (a SKILL.md line,
-        GLOBAL-AGENTS.md, a script's help text) where you can.
+        GLOBAL-AGENTS.md, `provenant help` output) where you can.
     validations:
       required: true
 
@@ -24,12 +24,15 @@ body:
     id: platform
     attributes:
       label: Platform
-      description: Where the failure reproduces. A skill that works on one platform and not the other is a portability bug, and that distinction matters.
+      description: The harness where the failure reproduces. A skill that works on one harness and not another is a portability bug, and that distinction matters.
       options:
         - Claude Code
         - Codex
-        - Both
-        - Neither (scripts, runtime or CI only)
+        - Cursor
+        - Agy
+        - OpenCode
+        - More than one
+        - None (CLI, scripts or CI only)
     validations:
       required: true
 
@@ -39,7 +42,7 @@ body:
       label: Skill involved
       description: >-
         The kebab-case skill directory name. Use "none" if the failure is in
-        scripts/, runtime/, config/ or CI rather than in a skill.
+        tools/front-door, scripts/, config/ or CI rather than in a skill.
       placeholder: deliver
     validations:
       required: true

@@ -4,70 +4,62 @@ Owner: `crates/cli` (grammar and rendering), `src/` (composition and hooks)
 Anchor: `crates/cli/src/lib.rs`, `crates/cli/src/render.rs`,
 `crates/cli/src/wait.rs`, `src/hooks.rs`
 
-Use `provenant help --all` for commands and `provenant config schema` for configuration.
-The outward contract is declared in `crates/cli/src/external_contract.rs`, covering commands, lane environment and JSON schemas.
-`scripts/generate-reference` renders `external-contract.md` from that declaration through `provenant-cli print-reference-data`; the same data derives threshold behaviour from the policy table. Every enumeration an owner declares for the editor, such as `gc.projects.{project}.foreign_worktrees`, publishes its values and runtime default through the same data; the configuration reference fills them in and refuses an entry that restates them.
-The [consumer contract](consumer-contract.md) describes output and variable tiers; command names may change freely. Direct internal-state readers are unsupported.
+`provenant help --all` is the reference for commands and flags, and
+`provenant config schema --all` for configuration. `crates/cli/src/external_contract.rs`
+declares the outward contract and `scripts/generate-reference` renders it; the
+[consumer contract](consumer-contract.md) owns the stability tiers. Command
+names may change freely, and direct readers of internal state are unsupported.
+Repository CI selection, its gate and quarantine are specified in [CI](ci.md).
 
 ## Configuration schema completeness
 
-Every setting a registered domain deserializes has field metadata and a `config/harness-knobs.json` entry. The typed schema is the authority: a probe over each domain's serde types names every accepted setting, recording each struct's declared fields independently of whether a value can be constructed, so an unprobeable field cannot hide the settings after it. A test fails when metadata or the registry omits one. Metadata and the registry cannot replace that source, because a setting absent from all three lists would otherwise pass unnoticed.
+Every setting a registered domain deserialises has field metadata and a
+`config/harness-knobs.json` entry. A probe over each domain's serde types names
+every declared field, whether or not a value can be built, and a test fails
+when the metadata or the registry omits one.
 
-- Why: three independently maintained lists drift silently unless each is checked against what the runtime actually accepts.
-Conditional PR wait observations report `review=unknown` because the REST response has no GraphQL review decision; CI settlement still determines the wait verdict. One-shot `pr status` keeps its detailed review observation.
-Repository CI reads its tier declaration from `config/ports.json`; the optional `.provenant/ports.json` entry links that same table, so running repository checks requires neither an installed Provenant nor a `.provenant` directory.
-Repository CI selection, its gate and quarantine validation are specified in [CI](ci.md).
+- Why: three independently kept lists drift silently unless each is checked
+  against what the runtime accepts.
 
 ## Targets
 
 Target verbs share one grammar and resolve only the named graph. Ambiguity is
 reported, never resolved by guessing; conflicting manifest settings are refused.
-The `TargetGrammar` declaration identifies each target argument, whose attached
-parser must accept and refuse the values of its declared syntax.
+`TargetGrammar` declares each target argument, and its parser must accept and
+refuse exactly the values of its declared syntax.
 
 - Why: an action must address the intended work.
 
 ## Parsing
 
-Help and version inspection require no project state. Paths retain their native
-bytes, and invalid or conflicting arguments are rejected.
-The catalogue derives flag relationships and child commands from the parser, and declares each command's configuration domains. Every catalogued command resolves to scoped help containing its metadata.
+Help and version inspection need no project state. Paths keep their native
+bytes, and invalid or conflicting arguments are rejected. The catalogue derives
+flag relationships and child commands from the parser and declares each
+command's configuration domains; every catalogued command resolves to scoped
+help carrying that metadata. Clap parse errors never echo a fence token.
 
-- Why: inspection must be safe outside a checkout and paths must not change in transit.
+- Why: inspection must be safe outside a checkout and paths must not change in
+  transit.
 
 ## Build commands
 
-The build command surface is `provenant build status [--json]`,
-`provenant build report [--since DUR] [--project P] [--json]`,
-`provenant build reset [--project P] [--slot N] [--full]`, and
-`provenant build maintain --project P`. The `--json`, `--project` and
-`--full` flags use the shared global options. `status` reports each slot's
-project, index, health and allocated bytes, and the store size. `report`
-aggregates the outcome ledger within `--since` and prints one verdict per soak
-criterion; churn uses the configured affected-package selector against a
-temporary checkout of the build store, cached per snapshot pair, plus the
-always-rebuild set, and a row whose selection cannot be computed stays unknown.
-`reset` clears quarantine and resets one `--slot` or every slot of the
-project; `--full` recreates the checkout and target cache. `maintain` runs one
-prewarm or canary on the verify base when recency, load and the hourly budget
-allow; when it is skipped it reports why as a warning rather than failing.
+`provenant build` inspects and resets build slots without reading their files,
+and `provenant verify` runs a tier through the same build strategy as a lane's
+builds. A skipped `build maintain` reports why as a warning, never a failure,
+and a `build report` row whose affected-package selection cannot be computed
+stays unknown.
 
-`provenant verify [TIER] [--commit REV] [--affected]` runs one tier through the
-build strategy. `--commit` pins the revision to verify, and `--affected` applies
-the configured affected-package selection. The report carries `commit`,
-`strategy`, `slot` and `exception` beside the tier result.
-
-- Why: an operator must inspect and reset slots without reading their files,
-  and verification of a candidate or a selected subset must use the same
-  strategy as a lane's builds.
+- Why: verifying a candidate or a selected subset must use the strategy the
+  lane's builds use.
 
 ## Console catalogue and peer coverage
 
-Console reads do not allocate product state. Peer observations retain local
-results and identify incomplete coverage rather than presenting it as complete.
-At most eight peer reads run concurrently under one shared deadline, retaining configured host order.
+Console reads allocate no product state. Peer reads share one deadline and keep
+the configured host order; a peer that fails or times out leaves local results
+in place and is reported as incomplete coverage, never as complete.
 
-- Why: a partial observation must not hide available work or imply complete coverage.
+- Why: a partial observation must not hide available work or imply complete
+  coverage.
 
 ### Nested tree
 
@@ -81,7 +73,7 @@ about unseen work.
 
 A board cursor binds the selection and a high-water ceiling; replay reads
 current facts within that ceiling. Damaged ancillary observations cannot hide
-valid indexed rows, and missing usage remains distinct from zero.
+valid indexed rows, and missing usage stays distinct from zero.
 
 - Why: an active board must be pageable without inventing observations.
 
@@ -90,228 +82,138 @@ valid indexed rows, and missing usage remains distinct from zero.
 ### One bounded envelope, clipped with a warning
 
 A command emits one terminal envelope whose `status` is the code the process
-exits with. When a result exceeds the cap it is bounded, not refused: the human
-view keeps both ends with an explicit omitted-bytes marker and a warning naming
-the cap, its source and the repair. A result the owner can page is published
-once and reported with a pointer in the envelope: commands that warn and proceed
-keep the result's original status, while surfaces that keep the refusal contract
-emit a typed `RESULT_TOO_LARGE` Error envelope and exit 3. Either way the
-envelope status and the process exit code agree. Paged reads bind the cursor to
-the input, and terminal text escapes control sequences. Unknown facts stay
-unknown. Compact output uses semantic owner summaries and a detail command;
-JSON always preserves the envelope. A paged result carries its paging pointer
-and never a truncated object; a surface that cannot publish a result instead
-carries an explicit bounded marker in `data` (`truncated`, `omitted_bytes`,
-`source`, `repair`) with a warning, never a silently truncated object, and keeps
-the result's typed error beside the marker.
+exits with. A result over the cap is bounded, not refused: the human view keeps
+both ends with an omitted-bytes marker and a warning naming the cap, its source
+and the repair. A result the owner can page is published once and the envelope
+carries a pointer to it, never a truncated object; commands that warn and
+proceed keep the result's status. A surface that keeps the refusal contract
+instead emits a typed `RESULT_TOO_LARGE` Error envelope and exits 3. A surface
+that cannot publish a result carries a bounded marker in `data` (`truncated`,
+`omitted_bytes`, `source`, `repair`) with a warning, beside the result's typed
+error. Paged reads bind the cursor to the input, terminal text escapes control
+sequences, unknown facts stay unknown, and `--json` always preserves the envelope.
 
 - Why: a script branches on the exit code, and an operator must see that output
   was bounded rather than mistake a clipped view for the whole result.
 
-### Error codes
-
 ### Each refusal has a stable code
 
-A refusal carries a stable typed code independent of message wording. The
-command catalogue owns the list of codes and their meanings.
-An output or trace target read outside a project uses one `NOT_FOUND` code
-prefix, explains that no project was found, and names running from a checkout
-or passing `--project PATH` as the repair.
+A refusal carries a stable typed code independent of message wording; the
+command catalogue (`provenant help --all`) owns the codes. An output or trace
+read outside a project returns `NOT_FOUND` and names running from a checkout or
+passing `--project PATH` as the repair.
 
 - Why: consumers can act on a refusal without depending on prose.
 
 ### Run refusals keep their own code at the facade
 
-When a run refusal reaches the CLI or Fabric facade without a richer typed
-projection, the facade reuses the run's own stable code from `help --all` and
-pairs it with a repair action in `next`. `SECRET_INPUT`, `REFUSED`,
-`UNSUPPORTED`, `WRITER_SCOPE`, `CONFINEMENT`, `DISK_FLOOR`, `MEMORY_PRESSURE`,
-`LANE_CAP`, `BUILD_SETTINGS` and `GUARDIAN_IDENTITY` no longer collapse into
-`confinement_refused`; that code is reserved for a real confinement boundary
-with a named resource. `writer_lease_held` is its own typed code: locally it
-names the holding attempt or graph, branch, worktree, reservation age and
-liveness, while peer projection keeps only the typed code and repair action.
-A kind-only failure never loses its local diagnostic detail.
+A run refusal that reaches the CLI or Fabric facade without a richer typed
+projection keeps the run's own code (for example `DISK_FLOOR` or `LANE_CAP`) and
+pairs it with a repair action in `next`. `confinement_refused` is reserved for a
+real confinement boundary with a named resource. `writer_lease_held` is its own
+code: locally it names the holding attempt or graph, branch, worktree,
+reservation age and liveness, while peer projection keeps only the code and
+repair action. A kind-only failure never loses its local diagnostic detail.
+
 - Why: the operator can see and fix the cause instead of chasing an opaque
   confinement refusal.
 
 ### Template name errors
 
-An unknown template or flavour names the supplied template and lists known
-matching template names or flavours. Only validated template identifiers are
-disclosed; unclassified graph input errors keep their generic message.
+An unknown template or flavour names the supplied value and lists the matching
+known names. Only validated template identifiers are disclosed; other graph
+input errors keep their generic message.
 
 - Why: a mistyped flavour should be repairable from the refusal without exposing
   arbitrary graph input.
 
 ### Waits are readers
 
-Waiting observes work; timeout or cancellation does not stop it. `wait` defaults
-to `--all`, which waits for every target and returns the worst final result.
-`--any` returns at the first target that settles or needs input.
-`--fail-fast` returns at the first unsuccessful target, or after every target
-settles successfully or needs input. Human output names the selected mode and
-the terminal JSON envelope includes it. A target
-settles by its own state, so an older settlement cannot satisfy a wait for new
-work. Local graph waiters share one filesystem event source (inotify or kqueue)
-for settlement logs and store changes. When that source is unavailable, the result reports why
-and rereads at `domains.wait.local_interval_ms`. Peer or relayed rows also use
-paced rereads at that setting because the relay socket has no remote event
-subscription; the result identifies that source. Pull requests use forge
-observation. Settlement events are emitted as they are observed. Expiry ends blocking observation. Local stores take one final snapshot; remote reads use only the original wait budget. Results identify unsatisfied waits as timed out.
-Every blocking forge operation inside a wait (repository discovery, pull
-request metadata, each check page and the checks read) shares one request
-context: the wait's absolute deadline, capped per read by
-`domains.wait.pr_read_timeout_seconds`, and the waiter's cancellation. Each
-operation derives its bound from the time that context has left, and a wait
-that settles cancels the forge transport of its other targets.
-Wait settings resolve in one place for every waiter (`wait`, owner-side run
-waits, relay child waits and CI cadence). Any configuration the waiter cannot
-use — unreadable, misplaced or malformed — warns and leaves the compiled
-defaults in force; every reported source names the reason and marks the setting
-unavailable. Reports name each setting with its source.
+Waiting observes work; a timeout or cancellation does not stop it. `wait`
+defaults to `--all` (worst final result of every target); `--any` and
+`--fail-fast` return early, and output names the mode. A target settles by its
+own state, so an older settlement cannot satisfy a wait for new work.
+
+Local graph waiters share one filesystem event source; when it is unavailable
+the result says why and rereads at `domains.wait.local_interval_ms`. Peer and
+relayed rows use the same paced reread because the relay has no remote
+subscription. Every blocking forge operation inside a wait shares one request
+context (the wait's absolute deadline, capped per read by
+`domains.wait.pr_read_timeout_seconds`, and its cancellation), and a wait that
+settles cancels the forge transport of its other targets.
+
+Wait settings resolve in one place for every waiter. Configuration a waiter
+cannot use warns and leaves the compiled defaults in force, and reports name
+each setting with its source. Budgets clamp to `domains.wait.max_timeout_seconds`
+with one warning, and a larger request stays a blocking wait. `wait --pr --until
+complete` has its own budget (`domains.wait.pr_complete_timeout_seconds`) apart
+from `domains.wait.timeout_seconds`; the landing gate and graph waits use
+`domains.pr.land.gate.timeout_seconds` and
+`domains.fabric.graph.launch_wait_seconds`. With `--json`, wait emits JSONL events
+then a terminal envelope, and a lane wait that names no targets waits on the
+lane's children through the owner relay.
+
 - Why: a wait must not outlive its budget in a transport it can no longer
   interrupt, and one setting must not fail three different ways.
 
-Wait budgets clamp to `domains.wait.max_timeout_seconds`, warning once with
-the effective limit and source when exceeded. A larger request remains a
-blocking wait. Parsing retains the request so configured limits, including
-maxima above the default, take effect in one place.
-- Why: an oversized budget must not turn a blocking call into a retry loop.
-
-`wait --pr --until complete` defaults to a 60-minute budget from
-`domains.wait.pr_complete_timeout_seconds` (3600 seconds), long enough for a
-normal CI run; an explicit `--timeout` still overrides it. Other `wait` budgets
-keep the shorter `domains.wait.timeout_seconds` (300 seconds) default. Both
-`wait` budgets share the same maximum and the same source reporting; the landing
-gate and graph waits use their own knobs (see CI observations below).
-- Why: a normal CI run outlasted the shared five-minute default, so callers had
-  to re-arm the same complete wait several times per pull request.
-
-With `--json`, wait emits JSONL events followed by a terminal command-result
-envelope, including without `--follow`. A wait inside a lane that names no
-targets waits on the lane's children through the owner relay: their terminal
-states are the wait's targets, the envelope carries the worst child result, and
-the events and terminal envelope are emitted exactly as for named targets.
-- Why: a reader must neither terminate healthy work nor wake on stale evidence.
-
 ### Status selection
 
-Status includes all active graph work; omitted settled work is counted. A
-settled graph is still listed when its digests report a live attempt: only
-settled graphs without a live lane are hidden and counted as omitted. The
-headline and human output lead with the number of live lanes read from those
-same digests, and `--json` exposes that count as `live_lanes`. The compact
-summary, the listing rows and the `status NAME` detail share one state
-vocabulary derived from the node or attempt itself: a live attempt reads as
-`running`, a node waiting for admission or launch reads as `pending`, and an
-observed but non-live writer keeps its own presence label. Human and
-structured output share the selection. `status --mine` reads active custody
-across projects, or one explicit `--project`, including attempts nested under
-the current chair and unattended items available for adoption. It is short by
-default, expands with `--full`, and exposes typed records and native presence
-with `--json`. Pagination uses `--limit` and `--cursor`; `--session` selects the
-exact chair session for the session-start digest. Settled custody leaves the
-active view. The digest reads this view instead of extracting PRs from prose.
-`provenant status` and `provenant worktree list` also report a `stranded work`
-section: a registered or project worktree with uncommitted edits and no live
-holder, whether it is dirty or an interrupted Git operation is in progress.
-It is named by its branch and linked issue or PR when the branch carries one,
-or labelled as a detached HEAD when it does not; a row also names an operation
-left in progress. Each row gives the changed file and line counts, the age of
-the newest edit and the `run implement --worktree` command that adopts the work. A clean worktree,
-one with a live lane and one whose holder cannot be determined are not called
-stranded. The section is advisory state only: it never refuses a command or
-signals a process. `status --json` carries `stranded_work`; `worktree list` keeps
-its worktree array in JSON and adds the section to human output.
-Graph status rows share the same keys across graph, node and attempt kinds.
-An attempt row carries `provenant_version` and `release_source_digest` read
-from that attempt's stored trace; both keys are absent when the observation is.
-Node warnings are present on node rows and null on graph and attempt rows.
-The graph-listing AGE column measures elapsed time since graph creation, even
-when the graph's state changed more recently.
-For graph nodes with a typed review result, the digest shows execution state
-separately from verdict, findings count and findings availability.
+Status lists all active graph work and counts omitted settled work; a settled
+graph with a live attempt is still listed. The headline leads with the live-lane
+count (`live_lanes` in JSON). One state vocabulary serves the summary, rows and
+`status NAME`: a live attempt is `running`, work waiting for admission or launch
+is `pending`, and a non-live writer keeps its presence label. Human and
+structured output share the selection.
 
-For a durable `running` attempt, host status reports native writer presence as
-`live`, `unattended`, `settling` or `unknown`. `running` is shown only while the
-recorded guardian or provider identity is present. A changed boot proves the
-old process tree is gone. Same-boot absence remains `unknown`, even when the
-last process checkpoint and current bounded census are complete: a child may
-have forked into another session or group after the checkpoint and then been
-reparented. A sealed process exit reports `settling`. A PID or its reuse alone,
-a host that cannot observe the writer, missing checkpoints, permission errors,
-incomplete evidence and unreachable peers remain `unknown`; status does not
-mutate or schedule recovery.
-Unattended and settling rows name the scoped `provenant reconcile` action,
-which rechecks custody before settlement.
-`status NAME --full` gives each unsettled attempt row its newest observed event
-time, its host-local attempt directory, the bounded argv of the
-writer's current child command, and its wait reason when one is known. A dead
-or unobservable writer (`unattended`/`unknown`) is still shown, because the
-last-event time matters most there; a settled attempt is not. The event time is
-the most recent supervisor-observed activity, falling back to launch and then
-queue time: a run event carries a sequence, not a wall clock. The line names
-which value supplied it — `output`, `started` or `queued` — so a quiet writer's
-old output is not mistaken for a fresh heartbeat. `child_command` is the
-admission-gated command: it is set only when the child went through the
-admission shim (a lane waiting for or holding a slot), not for an arbitrary
-writer. Admission shims bound the command before publishing a wait or a hold;
-local text is never masked; `redaction` applies only to text published off the
-host. Clap errors mask fence tokens independently.
-A lane
-waiting for a repository's heavy-job lock reports both the reason and the
-command it is waiting to run, which distinguishes a wait from a hung writer.
-The attempt directory and child command stay host-local and never cross a peer
-boundary.
+`status --mine` reads active custody across projects (or one `--project`),
+including attempts nested under the current chair and unattended items open to
+adoption. Settled custody leaves the view, and the session-start digest reads
+this view instead of extracting PRs from prose.
 
-`adopt KIND:ID` takes custody of an external item; `release KIND:ID` records an
-explicit release. `fabric claim acquire|renew|verify|release` takes the same
-subject spelling; renew records activity without a lease or secret token.
-Run launch, worktree creation, PR binding/landing and cloud launch acquire
-custody automatically. Attempt/graph settlement releases those subjects; landing
-records typed evidence on PR and associated branch/worktree subjects. Custody
-failures after a successful external action warn and can be retried by adoption.
-Transfer to a named session is deferred.
+Writer presence is `live`, `unattended`, `settling` or `unknown`. `running` shows
+only while the recorded guardian or provider identity is present. A changed boot
+proves the old process tree is gone; same-boot absence, a reused PID, an
+unobservable host, incomplete evidence and unreachable peers stay `unknown`,
+because a child may have forked into another session and been reparented. Status
+never mutates or schedules recovery; unattended and settling rows name the scoped
+`provenant reconcile` action, which rechecks custody before settlement.
+
+`status NAME --full` gives each unsettled attempt its newest event time and
+names the source (`output`, `started` or `queued`), so old output is not mistaken
+for a heartbeat. `child_command` is set only for a command that went through the
+admission shim, and a lane waiting on a heavy-job lock reports the command it
+waits to run. The attempt directory and child command stay host-local and never
+cross a peer boundary.
+
+`status` and `worktree list` report `stranded work` (`stranded_work` in
+`status --json`): a worktree with uncommitted edits or an interrupted Git
+operation and no live holder, with the `run implement --worktree` command that
+adopts it. A clean worktree, one with a live lane and one whose holder cannot be
+determined are not stranded. The section is advisory and never refuses a command
+or signals a process.
+
+`adopt`, `release` and `fabric claim` share one subject spelling. Run launch,
+worktree creation, PR binding and landing, and cloud launch take custody
+automatically and settlement releases it. A custody failure after a successful
+external action warns and can be retried by adoption.
 
 - Why: a chair acting on a listing must see work still running.
 
 ### Output references and bounded tails
 
-`result NAME[/NODE[#N]]` reads the current lane evidence in one call: state,
-branch, recorded head, handoff status and note, and verification reported in the
-handoff. For a review node it also projects the settled `verdict`, the typed
-`findings[]` (each carrying severity, `file` path, line and summary), their
-availability and whether the review was `partial`; a panel result lists one
-verdict per lens. The compact form shows the verdict and a count of findings by
-severity, and `--full` shows each finding. `--json` retains the same structured
-review evidence, reusing the projection `status` and `wait` read rather than
-parsing the result artifact again. Missing or unavailable evidence is not proof
-of a check.
-`retry TARGET --brief-file FILE` replaces the brief for a settled node; `-` reads stdin.
-`gc --idle DURATION` accepts zero and spans such as `6h` or `2d` for the minimum
-idle age; scheduled GC uses the configured `gc.idle`.
-`templates show NAME` inspects an effective template. Configuration edits report the changed key, its effective value and source, and the previous value. A pre-launch refusal retains its bounded cause verbatim and names a retry command.
+`result NAME[/NODE[#N]]` reads current lane evidence in one call, and for a
+review node projects the settled `verdict` and typed `findings[]` through the
+projection `status` and `wait` read, not by parsing the result artifact again.
+Missing or unavailable evidence is not proof of a check.
 
-`config show` summarises the effective configuration; `--full` shows its values
-and sources, and `--json` returns the structured configuration.
-
-For a graph with one non-composite top-level node, `output GRAPH` reads that
-node's newest settled attempt. For a composite root it reads the declared bounded result and
-returns its typed exports, without inventing an attempt identity. A bare graph
-with multiple top-level nodes remains ambiguous and lists only those nodes;
-`output GRAPH/NODE` selects a composite explicitly. Prompt, stderr, transcript,
-events, receipt and artifact-path reads require an attempt and are unavailable
-for a composite. If a composite has typed exports but no result text, output
-returns those exports with an empty byte chunk. Offsets and limits count bytes;
-a page that splits a UTF-8 character uses lossless base64 bytes and advances by
-exactly the returned byte count. A bounded composite excerpt reports
-`complete: false` when the checkpoint says its source result was truncated,
-with an unknown source length.
-
-For attempt targets, output and steering resolve the same numbered attempt.
-Output reads are bounded and a clamped tail reports its effective bound.
-By default, `output` shows result text whole up to 12 KiB, then marked head and tail; `--full` shows complete text.
+`output GRAPH` reads the newest settled attempt of a graph's one non-composite
+top-level node. A composite root returns its declared bounded result and typed
+exports without inventing an attempt identity, `output GRAPH/NODE` selects a
+composite explicitly, and a bare graph with several top-level nodes is
+ambiguous and lists them. Offsets and limits count bytes; a page that splits a
+UTF-8 character returns lossless base64 and advances by the bytes returned.
+`output` and `steer` resolve the same numbered attempt, and a clamped tail
+reports its effective bound.
 
 - Why: a reader must be able to inspect the intended attempt safely.
 
@@ -328,73 +230,50 @@ missing evidence stays unknown.
 ### Merge guard
 
 Landing verifies and merges the same head, and refuses changed heads or
-incomplete required check evidence.
+incomplete required check evidence. A refused merge keeps the unified
+`LAND_REFUSED` code with a typed `cause` (`HEAD_MOVED`, `MERGE_NOT_ALLOWED`,
+`PR_DRAFT`) and a non-empty `repair`, so callers branch on the cause, not the
+message.
 
 - Why: a merge must land the head that CI verified.
-- A refused merge keeps the unified `LAND_REFUSED` code, plus a typed `cause`
-  (`HEAD_MOVED`, `MERGE_NOT_ALLOWED`, `PR_DRAFT`) and a non-empty `repair` for the next
-  step, so callers branch on the cause rather than on message text.
 
 ### Landing adds no merge authority
 
 Approval must cover the exact head and come from an authorised independent
-source or an explicit owner override. `domains.pr.land.approval_carry` defaults
-to `clean_merge` and `format`. A receipt from `pr sync` may carry approval over
-a clean merge of the PR base when the resulting tree equals Git's merge tree;
-any conflict resolution that changes the resulting tree is refused. Format carry
-is available only when the project has a configured formatter, and is accepted
-only when formatting both heads produces the same tree. Refusals name both
-heads and the changed paths. Graph landing uses the same policy.
-Approval evidence is the union of configured sources. A new passing independent
-review on the pinned head cannot invalidate an existing forge approval; loss of
-all current approvals still excludes the member. The publication lock fences
-landing identity, generation and snapshot revision before dispatch: a superseded
-generation cannot publish, including during recovery.
+source or an explicit owner override. Approval evidence is the union of the
+configured sources; a new passing review on the pinned head cannot invalidate an
+existing forge approval, and losing all current approvals still excludes the
+member. Carried approval (`domains.pr.land.approval_carry`) survives a `pr sync`
+merge only when the resulting tree equals Git's merge tree, and a formatter
+carry only when formatting both heads gives the same tree; any other tree
+change is refused, naming both heads and the changed paths. Graph landing uses
+the same policy. The publication lock fences landing identity, generation and
+snapshot revision before dispatch, so a superseded generation cannot publish,
+including during recovery.
 
-`land --strategy` choices come from the records strategy declaration; `--target`
-selects the root branch, defaulting to the forge repository's default branch.
-Repository `.provenant/config.toml` declarations, host settings, project overrides,
-target rules, risk tier and invocation resolve into one saved plan with sources.
-`--explain --json` reports repository, target, effective plan, capability decisions
-and unavailable alternatives. An unavailable execution returns its landing record
-ID and typed alternatives without silently selecting another strategy.
+Repository, host, project, target-rule, risk-tier and invocation settings
+resolve into one saved plan with sources (`land --explain --json`). An
+unavailable execution returns its landing record ID and typed alternatives and
+never silently selects another strategy. An explicit `poll_seconds` or
+`land --poll` fixes the wait cadence even when it equals the bundled default;
+source provenance decides, not the value.
 
-Landing CI, candidate gate, and post-merge waits use the forge observer's adaptive
-cadence when `poll_seconds` comes from the bundled default. Supplying `poll_seconds`
-at any supported configuration layer or using `land --poll` selects that fixed interval for
-all three waits. Source provenance decides this, so an explicit value is fixed even when it
-matches the bundled default.
-
-While a candidate gate waits, `land` prints the candidate ref, the checks URL and the state
-to standard error, then repeats the elapsed time and state every `progress_seconds`
-(default 60). When a candidate's tree equals the tree of a member head whose required
-checks already passed, the gate is skipped and the receipt's gate evidence records the head
-as `reused_from_commit`; `reuse_tested_tree = false` forces a gate run. Each land also
-removes pending records and `land/*` candidate refs whose pull requests are merged or
-closed.
-
-The effective `PortTable.land` declaration alone selects the publication backend.
-`none` returns typed unavailability before publication effects; `command` invokes
-its declared argv in the repository checkout. Candidate and ordering strategies
-remain independent of that backend. The command receives
-the full pending intent as JSON on stdin. Its required declaration includes
-`unknown_exit_code` (1..255) and `timeout_seconds` (>0). Exit 0 attests that the
-supplied candidate landed; other exits refuse, except the declared unknown code.
-Timeouts and signals are also unknown. The same pending markers, gate, approvals,
-custody and settlement evidence apply. Unknown commands are observed through
+The effective `PortTable.land` declaration alone selects the publication
+backend. `none` returns typed unavailability before publication effects.
+`command` receives the pending intent as JSON on stdin; exit 0 attests the
+candidate landed, the declared `unknown_exit_code`, timeouts and signals are
+unknown, and other exits refuse. An unknown outcome is observed through
 candidate ancestry and exact-head forge evidence, never replayed or replaced by
-a builtin publisher while their outcome remains uncertain.
+a builtin publisher while it stays uncertain.
 
-Cleanup after merge preserves moved branches, dirty worktrees and work that is
-not proven merged; incomplete cleanup is reported.
-Approval sources default to Provenant review then forge and are overridable by project and tier; the first usable proof still covers the exact head.
+Cleanup after merge preserves moved branches, dirty worktrees and work not
+proven merged, and reports incomplete cleanup.
 
 - Why: routine landing must not widen approval or delete unmerged work.
 
-`pr sync N [M ...]` merges each PR's base into its branch worktree and pushes
-the merge. A conflict is aborted, the worktree is left clean, and an `implement`
-repair lane is launched by default; `--no-lane` stops and reports the conflicted
-paths and `run implement` command instead.
+`pr sync` merges each PR's base into its branch worktree and pushes. A conflict
+is aborted and the worktree left clean; an `implement` repair lane is launched
+unless `--no-lane`.
 
 ### Pull request bodies come from receipts
 
@@ -406,8 +285,8 @@ receipt, and states absent evidence rather than inventing it.
 ### Shell commands use confinement
 
 The hook validates its event envelope but does not decide authority from shell
-syntax. The [hard boundaries](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md) are enforced by the
-[permission policy](supervisor.md#permission-policy).
+syntax. The [hard boundaries](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md)
+are enforced by the [permission policy](supervisor.md#permission-policy).
 
 - Why: shell syntax rules cannot enforce those boundaries.
 
@@ -420,8 +299,8 @@ conflict markers.
 
 ### Worktree hooks respect ownership
 
-Worktree hooks use the worktree owner and cannot remove a worktree they did not
-create or override the owner's refusal.
+Worktree hooks act through the worktree owner and cannot remove a worktree they
+did not create or override the owner's refusal.
 
 - Why: a hook must not widen removal authority.
 
@@ -430,16 +309,16 @@ create or override the owner's refusal.
 Checks report findings and unavailable evidence without repairing the subject.
 Release checks inspect the artifact to be distributed as well as Git evidence.
 
-- Why: an inspection must not change its subject or certify an uninspected artifact.
+- Why: an inspection must not change its subject or certify an uninspected
+  artifact.
 
 ### Release symlinks
 
 A release symlink is portable only when its relative target stays inside the
-repository and names a tracked regular file in that same tree. Absolute,
-escaping, malformed, missing or untracked targets and links to another
-symlink remain findings.
-The check resolves Git targets from each tree's entries and reads current
-worktree links without following them through the host filesystem.
+repository and names a tracked regular file in the same tree. Absolute,
+escaping, malformed, missing or untracked targets, and links to another symlink,
+remain findings. Git targets resolve from each tree's entries, and current
+worktree links are read without following them through the host filesystem.
 
 - Why: every published link must have one inspectable target in the tree being
   checked, independent of host files or link-chain behaviour.
@@ -447,38 +326,67 @@ worktree links without following them through the host filesystem.
 
 ## CI observations
 
-`pr status [NUMBER ...]` reports each pull request's head, check rollup and failed check names in one batched GraphQL read when available; omitting numbers selects this account's open pull requests. The REST observer shares ETag-backed check pages by repository and head SHA. Batched results have a short per-pull-request freshness window and fall back to REST when GraphQL cannot answer; a REST rate limit falls back to GraphQL when available.
+`pr status` reports each pull request's head, check rollup and failed check
+names from one batched GraphQL read when available, and falls back between
+GraphQL and REST when either is unavailable or rate limited. A wait's
+conditional observation reports `review=unknown` because the REST response has no
+review decision; CI settlement alone decides the verdict.
 
 ### Integration batch membership
 
-`pr status` infers integration batches from bounded Git history: a member whose head commit is contained in an open batch pull request's head, or in the local `land/` candidate branch that `land --target` gates, reads `in batch #M (head merged); own CI superseded` with the batch's CI state beside it. The member's cancelled checks are not reported as failures. A member whose head moved after it was batched is flagged `head moved since batching`. For a batch pull request, `pr status M` lists its members and attributes each changed file to the member whose commit last touched it, newest first. Membership is a state report from observed history only: it adds no refusal and changes no landing decision.
+`pr status` infers integration batches from bounded Git history: a member whose
+head is contained in an open batch pull request's head, or in the local `land/`
+candidate branch that `land --target` gates, reads `in batch #M (head merged); own
+CI superseded` with the batch's CI state, and its cancelled checks are not
+failures. A member whose head moved after batching is flagged `head moved since
+batching`. `pr status M` on a batch lists its members and attributes each changed
+file to the member whose commit last touched it. Membership is a report from
+observed history: it adds no refusal and changes no landing decision.
 
-- Why: a cancelled member run must not hide the batch CI that superseded it, and a review finding on the batch must be assignable to a member.
+- Why: a cancelled member run must not hide the batch CI that superseded it, and
+  a review finding on the batch must be assignable to a member.
 
-`wait --pr NUMBER` is the one way to block on a pull request. By default a failed check settles the PR immediately; `--until complete` waits until all observed checks finish and no Actions workflow run for the head is active, then reports each failed or cancelled check with its link when available. Every wait reads head-filtered Actions runs through the shared observer; if runs cannot be read or none are found, it warns once per wait and falls back to observed checks. A head with no Actions run yet cannot settle a wait, because a push's workflows start after the push: a reading that would settle (a pass, or any result under `--until complete`) stays pending for `domains.wait.actions_grace_seconds` (default 60, 0 disables) from the first reading of that head, then settles on the observed checks; a failure still settles a default wait at once. A run that stays in `waiting` (a pending environment approval, for example), `queued` or `in_progress` counts as active, so under `--until complete` it holds the wait until the timeout. Failure lines escape terminal controls, clip a check name to 120 bytes and show a link only when it is an http(s) URL of at most 300 bytes without whitespace. This uses the same PR observer and applies separately from the choice of `--all`, `--any` or `--fail-fast` across targets. By default a merged or closed PR settles immediately; completion mode first waits for its observed checks and Actions runs. It reads CI through the shared observer and reports the PR's class as it changes (`--follow` for every transition), always naming the head being watched. `--head SHA` pins the wait to one head: until GitHub reports that exact SHA the reading stays pending whatever the previous head's checks say, so a push's predecessor can never produce a verdict. Without `--head`, when the PR's branch is known locally and its tip differs from GitHub's head, the wait warns and watches the local tip instead. At a timeout it prints the last known check summary (including a complete wait's failing head whose checks still run), naming the checks still pending by their observed names, and, when no check was ever reported, the next step: check the workflow triggers or push an empty commit to start CI. Its budget is `--timeout`, or `domains.wait.pr_complete_timeout_seconds` (default 3600 seconds) under `--until complete` and `domains.wait.timeout_seconds` (default 300 seconds) otherwise, clamped to `domains.wait.max_timeout_seconds`. That is the `wait` budget only. The landing gate uses `domains.pr.land.gate.timeout_seconds` (default 3600 seconds, overridable with `land --wait`); graph waits use `domains.fabric.graph.launch_wait_seconds` (default 55 seconds). These are separate knobs with separate defaults, not one shared policy. The last line names every target's settle state (`settled ok`, `failed`, `needs input` or `still running at timeout`) and the one next command, and compact output keeps that line through an owner summary. The observation method is diagnostic detail shown only under `--full` and in the JSON envelope, never as the last line of default output.
+`wait --pr NUMBER` is the one way to block on a pull request. A failed check
+settles it at once; `--until complete` waits for every observed check and every
+active Actions run of the head. A head with no Actions run yet cannot settle a
+wait, because a push's workflows start after the push: a reading that would
+settle stays pending for `domains.wait.actions_grace_seconds`, though a failure
+still settles a default wait at once. `--head SHA` pins the wait to one head:
+until GitHub reports that SHA the reading stays pending, so a push's predecessor
+never produces a verdict. Without `--head`, when the local tip differs from
+GitHub's head, the wait warns and watches the local tip. The last line of output
+names every target's settle state (`settled ok`, `failed`, `needs input` or
+`still running at timeout`) and the one next command; the observation method
+shows only under `--full` and in JSON.
 
-`ci failures pr NUMBER` and `ci failures run ID` report the failing side of CI from the Actions jobs endpoint, not from a whole-run `gh run view --log-failed` read that waits for the slowest job. Each ended job's log is fetched on its own through `repos/OWNER/REPO/actions/jobs/ID/logs`, following the 302 redirect to the signed log archive, so a job's evidence is available as soon as that job ends. The digest names the failed step and, for a test step, each failing nextest (or legacy `cargo test`) test with its first panic location and message, or the first `error:` / `##[error]` lines when it was not a test step. Each job is classified as failed, cancelled, or failed only because its gated inputs were cancelled; an aggregate gate whose only bad inputs were cancelled is cancellation, never a real failed job. The gate's inputs come from its own dependency metadata when the jobs endpoint publishes it, otherwise from the workflow file pinned to the run's head SHA; conclusions from jobs the gate does not aggregate are never evidence, and every declared matrix member must produce a job. When those inputs cannot be resolved, the gate is reported as a failure with uncertain cause rather than demoted to a cancellation. When the pull request's changed files can be read, a failure in an untouched crate or file carries `possibly unrelated: PATH untouched by this PR`; an unreadable file list suppresses the advisory rather than reading as an empty delta. A rerun is suggested but never executed. The same digest appears in compact human output and in `--json`; failed logs and per-job metadata share the CI observation cache for a short freshness window; logs are read with terminal escape sequences allowed and stripped before parsing, and a log that cannot be read reports the gh message as unreadable evidence rather than as zero failures. Unreadable logs and bounded output remain visible in the result. `pr status` and `wait --pr` report this digest for the failed checks they carry, in compact human output and in `--json`, rather than only pointing at a separate command.
+`ci failures pr NUMBER` and `ci failures run ID` read each ended job's log from
+the Actions jobs endpoint, so evidence is available when that job ends, not when
+the slowest job does. An aggregate gate whose only bad inputs were cancelled is
+a cancellation, never a failed job; when its inputs cannot be resolved it is a
+failure with uncertain cause. A failure in a file the pull request did not touch
+carries `possibly unrelated: PATH untouched by this PR`, and an unreadable file
+list suppresses that advisory. A rerun is suggested, never executed, and an
+unreadable log is reported as unreadable evidence, never as zero failures.
+`pr status` and `wait --pr` carry the same digest.
 
 ### Wait/pr causes
 
 A `wait --pr` reading of a head with no reported checks names why before it
-suggests an action. The shared observer reads the pull request's `mergeable` and
-`mergeStateStatus` from the PR resource first; an UNKNOWN mergeability is reread
-a bounded number of times (`MERGEABLE_UNKNOWN_RETRIES`, with the source shown in
-`src/pr/observer.rs`) before a cause is chosen. The causes are:
+suggests an action. The observer reads `mergeable` and `mergeStateStatus` from
+the PR resource first and rereads an UNKNOWN mergeability a bounded number of
+times (`MERGEABLE_UNKNOWN_RETRIES` in `src/pr/observer.rs`) before choosing:
 
-- `merge_conflict` — GitHub reports the head as conflicting (`mergeable` is
-  `CONFLICTING`, `mergeStateStatus` is `DIRTY`, or REST `mergeable_state` is
-  `dirty`). GitHub starts no `pull_request` workflows for a conflicting head, so
-  the next step is to merge the base into the branch (`git merge origin/BASE`
-  then push the merge), not to start CI.
-- `not_scheduled` — the head is mergeable, or mergeability stayed UNKNOWN after
-  the bounded rereads. The next step keeps the workflow-trigger/empty-commit
-  advice.
+- `merge_conflict`: GitHub reports the head as conflicting. It starts no
+  `pull_request` workflows for a conflicting head, so the next step is to merge
+  the base into the branch and push, not to start CI.
+- `not_scheduled`: the head is mergeable, or mergeability stayed UNKNOWN. The
+  next step is to check the workflow triggers or push an empty commit.
 
-The cause and next step appear in the `wait` reading line and in `pr status`;
-they are hints, not a settlement. A conflicting head stays pending until it is
+The cause and next step appear in the `wait` reading line and in `pr status`.
+They are hints, not a settlement: a conflicting head stays pending until it is
 merged with its base and its checks run.
 
 - Owner: `src/pr/observer.rs`, `src/pr/status.rs`, `src/pr/status/batch.rs`, `src/status_wait.rs`, `src/ci.rs`
-- Why: a chair needs actionable CI evidence without mistaking missing observations for success, and without blaming workflow triggers for a merge conflict.
+- Why: a chair needs actionable CI evidence without mistaking missing
+  observations for success, and without blaming workflow triggers for a merge
+  conflict.
