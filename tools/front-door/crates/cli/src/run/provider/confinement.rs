@@ -117,29 +117,6 @@ pub(super) fn host_indexes_protected(
     })
 }
 
-pub(super) fn target_seeds_protected(
-    state: &Path,
-    grants: &[provenant_confinement::permissions::WriteGrant],
-) -> bool {
-    let resolve = |path: &Path| {
-        provenant_core::PathResolver::resolve_existing_ancestor(
-            &provenant_os::fs::SystemPathResolver,
-            path,
-        )
-        .ok()
-    };
-    let Some(store) = resolve(&run::target_seed::store_path(state)) else {
-        return false;
-    };
-    grants.iter().all(|grant| {
-        resolve(&grant.path).is_some_and(|root| {
-            !root.starts_with(&store)
-                && !(store.starts_with(&root)
-                    && (grant.scope == PathScope::Subtree || root.is_dir()))
-        })
-    })
-}
-
 /// Read access to the primary checkout's project scratch (`.provenant/scratch`, or
 /// `.agent-run`), where briefs and graph documents live. Git excludes it, so a
 /// writer's linked worktree does not hold it. Final-component links are refused;

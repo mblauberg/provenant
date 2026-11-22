@@ -182,7 +182,6 @@ impl Providers for Confined {
                 |_| None,
             )
             .unwrap(),
-            cargo_target_seed: false,
             state_root: std::path::PathBuf::from("/fixture/state"),
             roots: None,
             // This fixture tests grant recording and stops at a fake handoff;
@@ -195,7 +194,6 @@ impl Providers for Confined {
                 None,
             ),
             backend: None,
-            cargo_target: Default::default(),
             cargo_cache_budget: None,
             cargo_target_protection: Default::default(),
         });

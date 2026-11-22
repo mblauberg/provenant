@@ -253,142 +253,96 @@ fn wait_graph_gate(pending: &mut PendingGraphCommand, marker: &Path, name: &str)
     }
 }
 
-pub(super) fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> Result {
+pub(super) fn graph_stop_cancels_live_delivery_fetch() -> Result {
     use std::os::unix::fs::PermissionsExt;
     if !writer_backend_available()? {
         return Ok(());
     }
-    for phase in ["delivery", "seed"] {
-        let mut rig = repository()?;
-        let _cleanup = rig.process_cleanup();
-        let gate = rig.root.join("preparation-gate");
-        fs::create_dir(&gate)?;
-        fs::write(gate.join("hold"), b"hold")?;
-        let git_exe = provenant_os::git::git_executable().ok_or("git")?;
-        let remote = rig.root.join("remote.git");
-        git(&rig, &["init", "--bare", remote.to_str().ok_or("remote")?])?;
-        git(
-            &rig,
-            &["remote", "add", "origin", remote.to_str().ok_or("remote")?],
-        )?;
-        git(&rig, &["push", "origin", "HEAD:refs/heads/main"])?;
-        ok(
-            &rig,
-            &[
-                "worktree",
-                "create",
-                "preparation",
-                "--base",
-                "HEAD",
-                "--json",
-            ],
-        )?;
-        let worktree = rig.project.join(".worktrees/preparation");
-        let bin = rig.root.join("provider-bin");
-        fs::create_dir(&bin)?;
-        let codex = bin.join("codex");
-        fs::write(
-            &codex,
-            "#!/bin/sh\ncase \"$1\" in --version) printf 'codex-cli 1.0.0\\n';; login) printf 'Logged in using ChatGPT\\n';; *) printf '{\"type\":\"thread.started\",\"thread_id\":\"fixture-preparation\"}\\n';; esac\n",
-        )?;
-        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700))?;
-        let gh = bin.join("gh");
-        fs::write(
-            &gh,
-            "#!/bin/sh\ncase \"$*\" in *token*) printf 'fixture-token\\n';; *) printf 'gh version 2.0.0\\n';; esac\n",
-        )?;
-        fs::set_permissions(&gh, fs::Permissions::from_mode(0o700))?;
-        rig.env.retain(|(key, _)| key != "PATH");
-        rig.env.push((
-            "PATH".into(),
-            format!("{}:/usr/bin:/bin", bin.display()).into(),
-        ));
-        let account = rig.root.join("codex");
-        let auth = br#"{"tokens":{"account_id":"fixture-preparation"}}"#;
-        fs::write(account.join("auth.json"), auth)?;
-        let account_key =
-            provenant_providers::identity::codex_account(auth).ok_or("Codex fixture key")?;
-        support::register_account(&rig, "codex", "preparation", &account_key, &account)?;
-        if phase == "delivery" {
-            let wrapper = bin.join("git");
-            fs::write(
-                &wrapper,
-                format!(
-                    "#!/bin/sh\ncase \" $* \" in *' fetch '*) if [ -f '{}/hold' ]; then : > '{}/entered'; exec /bin/sleep 120; fi;; esac\nexec '{}' \"$@\"\n",
-                    gate.display(),
-                    gate.display(),
-                    git_exe.display()
-                ),
-            )?;
-            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
-            rig.env.retain(|(key, _)| key != "PROVENANT_GIT");
-            rig.env
-                .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
-        } else {
-            rig.env.push((
-                "PROVENANT_FIXTURE_HOLD_SEED".into(),
-                gate.clone().into_os_string(),
-            ));
-        }
-        let mut first = spawn_graph_command(
-            &rig,
-            "preparation-first",
-            &worktree,
-            if phase == "delivery" { "push" } else { "none" },
-        )?;
-        wait_graph_gate(
-            &mut first,
-            &gate.join("entered"),
-            "graph preparation entered",
-        )?;
-        ok(&rig, &["stop", "preparation-first", "--json"])?;
-        ok(
-            &rig,
-            &["wait", "preparation-first", "--timeout", "20s", "--json"],
-        )?;
-        let first = finish_graph_command(first, phase)?;
-        assert!(
-            first["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
-            "{phase}: {first}"
-        );
-        let stopped = ok(&rig, &["status", "preparation-first", "--json"])?;
-        assert_eq!(
-            stopped["data"]["rows"][0]["state"], "cancelled",
-            "{phase}: {stopped}"
-        );
-        fs::remove_file(gate.join("hold"))?;
-        fs::remove_file(gate.join("entered"))?;
-        let next_gate = rig.root.join("next-seed-gate");
-        fs::create_dir(&next_gate)?;
-        fs::write(next_gate.join("hold"), b"hold")?;
-        rig.env
-            .retain(|(key, _)| key != "PROVENANT_FIXTURE_HOLD_SEED");
-        rig.env.push((
-            "PROVENANT_FIXTURE_HOLD_SEED".into(),
-            next_gate.clone().into_os_string(),
-        ));
-        let mut next = spawn_graph_command(&rig, "preparation-next", &worktree, "none")?;
-        wait_graph_gate(
-            &mut next,
-            &next_gate.join("entered"),
-            "next graph acquired the writer and entered seeding",
-        )?;
-        ok(&rig, &["stop", "preparation-next", "--json"])?;
-        ok(
-            &rig,
-            &["wait", "preparation-next", "--timeout", "20s", "--json"],
-        )?;
-        let next = finish_graph_command(next, phase)?;
-        assert!(
-            next["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
-            "{phase}: {next}"
-        );
-        let stopped = ok(&rig, &["status", "preparation-next", "--json"])?;
-        assert_eq!(
-            stopped["data"]["rows"][0]["state"], "cancelled",
-            "{phase}: {stopped}"
-        );
-        fs::remove_file(next_gate.join("hold"))?;
-    }
+    let phase = "delivery";
+    let mut rig = repository()?;
+    let _cleanup = rig.process_cleanup();
+    let gate = rig.root.join("preparation-gate");
+    fs::create_dir(&gate)?;
+    fs::write(gate.join("hold"), b"hold")?;
+    let git_exe = provenant_os::git::git_executable().ok_or("git")?;
+    let remote = rig.root.join("remote.git");
+    git(&rig, &["init", "--bare", remote.to_str().ok_or("remote")?])?;
+    git(
+        &rig,
+        &["remote", "add", "origin", remote.to_str().ok_or("remote")?],
+    )?;
+    git(&rig, &["push", "origin", "HEAD:refs/heads/main"])?;
+    ok(
+        &rig,
+        &[
+            "worktree",
+            "create",
+            "preparation",
+            "--base",
+            "HEAD",
+            "--json",
+        ],
+    )?;
+    let worktree = rig.project.join(".worktrees/preparation");
+    let bin = rig.root.join("provider-bin");
+    fs::create_dir(&bin)?;
+    let codex = bin.join("codex");
+    fs::write(
+        &codex,
+        "#!/bin/sh\ncase \"$1\" in --version) printf 'codex-cli 1.0.0\\n';; login) printf 'Logged in using ChatGPT\\n';; *) printf '{\"type\":\"thread.started\",\"thread_id\":\"fixture-preparation\"}\\n';; esac\n",
+    )?;
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o700))?;
+    let gh = bin.join("gh");
+    fs::write(
+        &gh,
+        "#!/bin/sh\ncase \"$*\" in *token*) printf 'fixture-token\\n';; *) printf 'gh version 2.0.0\\n';; esac\n",
+    )?;
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o700))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    let account = rig.root.join("codex");
+    let auth = br#"{"tokens":{"account_id":"fixture-preparation"}}"#;
+    fs::write(account.join("auth.json"), auth)?;
+    let account_key =
+        provenant_providers::identity::codex_account(auth).ok_or("Codex fixture key")?;
+    support::register_account(&rig, "codex", "preparation", &account_key, &account)?;
+    let wrapper = bin.join("git");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\ncase \" $* \" in *' fetch '*) if [ -f '{}/hold' ]; then : > '{}/entered'; exec /bin/sleep 120; fi;; esac\nexec '{}' \"$@\"\n",
+            gate.display(),
+            gate.display(),
+            git_exe.display()
+        ),
+    )?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_GIT");
+    rig.env
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    let mut first = spawn_graph_command(&rig, "preparation-first", &worktree, "push")?;
+    wait_graph_gate(
+        &mut first,
+        &gate.join("entered"),
+        "graph preparation entered",
+    )?;
+    ok(&rig, &["stop", "preparation-first", "--json"])?;
+    ok(
+        &rig,
+        &["wait", "preparation-first", "--timeout", "20s", "--json"],
+    )?;
+    let first = finish_graph_command(first, phase)?;
+    assert!(
+        first["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
+        "{phase}: {first}"
+    );
+    let stopped = ok(&rig, &["status", "preparation-first", "--json"])?;
+    assert_eq!(
+        stopped["data"]["rows"][0]["state"], "cancelled",
+        "{phase}: {stopped}"
+    );
     Ok(())
 }

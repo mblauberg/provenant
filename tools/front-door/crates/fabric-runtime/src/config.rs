@@ -536,7 +536,6 @@ pub struct Lanes {
     pub start_spacing_ms: Option<u64>,
     pub memory_pressure_threshold: provenant_config::MemoryPressureThreshold,
     pub priority: LanePriority,
-    pub cargo_seed: CargoSeed,
     /// Source directories in host CARGO_HOME are read-only unless enabled.
     pub cargo_source_writes: Option<bool>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
@@ -605,28 +604,6 @@ impl Lanes {
             lane_port_base: self.lane_port_base,
             lane_port_block: self.lane_port_block,
             lane_port_blocks: self.lane_port_blocks,
-        }
-    }
-}
-
-/// Host Cargo seeds for writer lanes: on by default, and a no-op off macOS.
-/// Cloning that the filesystem cannot do falls back to an empty target.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct CargoSeed {
-    pub enabled: bool,
-    /// Maximum published target generations to retain per project.
-    pub max_generations: usize,
-    /// Maximum total allocated bytes across all published target generations.
-    pub max_bytes: u64,
-}
-
-impl Default for CargoSeed {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_generations: 3,
-            max_bytes: 20 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -1334,37 +1311,11 @@ mod tests {
     #[test]
     fn lane_priority_defaults_and_bounds() {
         let mut config = config();
-        assert!(config.lanes.cargo_seed.enabled);
-        assert_eq!(config.lanes.cargo_seed.max_generations, 3);
-        assert_eq!(config.lanes.cargo_seed.max_bytes, 20 * 1024 * 1024 * 1024);
         assert_eq!(config.lanes.priority.for_lane(true, false), 10);
         assert_eq!(config.lanes.priority.for_lane(false, false), 5);
         assert_eq!(config.lanes.priority.for_lane(true, true), 15);
         assert_eq!(config.lanes.priority.for_lane(false, true), 15);
-        let mut value = serde_json::to_value(&config).unwrap();
-        value["lanes"]["cargo_seed"]["enabled"] = true.into();
-        value["lanes"]["cargo_seed"]["max_generations"] = 0.into();
-        value["lanes"]["cargo_seed"]["max_bytes"] = 0.into();
-        let limits = serde_json::from_value::<FabricConfig>(value.clone())
-            .unwrap()
-            .lanes
-            .cargo_seed;
-        assert_eq!((limits.max_generations, limits.max_bytes), (0, 0));
-        assert!(
-            serde_json::from_value::<FabricConfig>(value.clone())
-                .unwrap()
-                .lanes
-                .cargo_seed
-                .enabled
-        );
-        value.as_object_mut().unwrap().remove("lanes");
-        assert!(
-            serde_json::from_value::<FabricConfig>(value.clone())
-                .unwrap()
-                .lanes
-                .cargo_seed
-                .enabled
-        );
+        let value = serde_json::to_value(&config).unwrap();
         assert_eq!(
             serde_json::from_value::<FabricConfig>(value)
                 .unwrap()

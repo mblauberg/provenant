@@ -19,7 +19,7 @@ use std::{
 
 const COMMAND: &str = "verify";
 use provenant_core::consumer_env::{
-    BUILD_CONTEXT, VERIFY_EFFECTIVE_CONFIG_JSON, VERIFY_PROJECT_ROOT, VERIFY_SELECTION, VERIFY_TIER,
+    VERIFY_EFFECTIVE_CONFIG_JSON, VERIFY_PROJECT_ROOT, VERIFY_SELECTION, VERIFY_TIER,
 };
 
 #[derive(Serialize)]
@@ -111,11 +111,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
         || None,
     );
     let ambient: Vec<_> = std::env::vars_os().collect();
-    let lane = std::env::var(BUILD_CONTEXT).ok();
-    let context = match lane.as_deref() {
-        Some(value) => build::BuildContext::from_json(value).map_err(|e| e.to_string()),
-        None => crate::admit::host_build_context(&ambient, Some(resolved.roots.state.as_path())),
-    };
+    let context = crate::admit::host_build_context(&ambient, Some(resolved.roots.state.as_path()));
     let context = match context {
         Ok(context) => context,
         Err(error) => {
@@ -429,11 +425,7 @@ pub fn run(tier: Option<&str>, commit: Option<&str>, affected: bool, globals: &G
         ),
         project_key: context.project_key.clone(),
         project: context.project.clone(),
-        origin: if lane.is_some() {
-            Origin::Lane
-        } else {
-            Origin::Chair
-        },
+        origin: Origin::Chair,
         owner: context
             .attempt
             .clone()

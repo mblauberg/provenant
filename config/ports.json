@@ -162,7 +162,6 @@
       {
         "paths": [
           "tools/front-door/src/admit.rs",
-          "tools/front-door/tests/admission.rs",
           "tools/front-door/crates/os/src/admission.rs"
         ],
         "package": "provenant",

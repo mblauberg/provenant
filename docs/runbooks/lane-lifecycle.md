@@ -63,34 +63,15 @@ refs intact. Failed and cancelled lanes keep their worktrees.
 - Missing GitHub tools, a failed login lookup or an access restriction warn;
   ordinary lane work continues without publishing credentials.
 
-## Cargo target and seeding
+## Lanes do not build
 
-Lanes build in the worktree's own target in the lane cache
-(`lanes.cargo_target` is `private`), cloned from the repository's host seed. The
-[run spec](../specs/run.md#cargo-target-seed) owns the lifecycle,
-[configuration](configuration.md#lane-cargo-target) the knobs and [GC](gc.md)
-retention.
-
-- Only `provenant worktree seed-build` and tick build host seeds, from the
-  configured verify base and never from uncommitted work. After a toolchain
-  change no seed matches until one of them runs. A seed whose fingerprints name
-  no readable dep-info is not used (`seed_layout_unrecognised`).
-- A `seeded` report proves the clone. Where the filesystem cannot clone, the lane
-  warns `clone_failed` and builds cold. Cargo's verbose `Fresh` lines prove
-  dependency reuse.
-- Settlement starts a detached cleanup that removes the target once writer
-  custody is free; worktree removal and lane-cache GC catch the rest. A
-  continuation reuses a target still present and otherwise seeds a new one.
-- Outside a lane, `provenant worktree seed-target PATH` seeds the same target
-  and prints it for `CARGO_TARGET_DIR`.
-- `domains.fabric.lanes.cargo_seed.max_generations` limits history per
-  repository and `max_bytes` limits the host, so the cap can evict a
-  repository's only generation. Compiler, host platform and effective lane
-  profile must match; a lane with unsupported compiler, target or build-flag
-  overrides builds cold and warns with the setting class, never its value.
-- Native npm, pnpm and Corepack launches keep host cache selectors when a
-  provider changes HOME or XDG state; explicit settings win. Corepack keeps its
-  downloads shared through `COREPACK_HOME`.
+Lanes run formatting and coordination only. They never provision, seed or
+admit a compiler job: host Cargo target seeds, `provenant worktree seed-build`
+and `seed-target`, and the `cargo_seed` retention keys are gone. The chair runs
+one warm integrated check per epic; CI runs clippy and the tests. Native npm,
+pnpm and Corepack launches keep host cache selectors when a provider changes
+HOME or XDG state; explicit settings win. Corepack keeps its downloads shared
+through `COREPACK_HOME`.
 
 ## Recovery
 

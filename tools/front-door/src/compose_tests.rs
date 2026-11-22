@@ -70,11 +70,6 @@ fn guardian_capture_preserves_raw_provider_frames_for_settlement() {
 
 fn fixture() -> Result<TestRig> {
     let mut rig = repository()?;
-    let seed = rig
-        .state
-        .join("cargo-target-seeds/generations/fixture/target");
-    fs::create_dir_all(&seed)?;
-    fs::write(seed.join("artifact"), b"host seed")?;
     ok(
         &rig,
         &["worktree", "create", "compose", "--base", "HEAD", "--json"],
@@ -263,12 +258,6 @@ pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Resul
         }
         let mode = if configured { "reader" } else { "reader-empty" };
         let attempt = dispatch(&rig, mode)?;
-        let cargo: serde_json::Value =
-            serde_json::from_slice(&fs::read(attempt.join("cargo-target-setup.json"))?)?;
-        assert_eq!(
-            cargo,
-            serde_json::json!({"status": "skipped", "reason": "read_only_lane"})
-        );
         let record = attempt_record(&rig, &attempt)?;
         let expected: &[&str] = if configured {
             &[".agent-run/locks"]
@@ -296,28 +285,15 @@ pub(crate) fn writer_dispatch_uses_lane_cache_and_narrow_provider_state() -> Res
         return Ok(());
     }
     let rig = fixture()?;
-    // The cargo seed is on by default; this test is about the private lane
-    // cache and provider state, so it pins a private target and the seed off.
     // The fixture asserts that writes outside its grants fail, so the writer
     // runs sandboxed.
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version = 1\n[knobs]\n\"lanes.sandbox\" = \"on\"\n\"lanes.access\" = \"isolated\"\n\"lanes.cargo_target\" = \"private\"\n[gc]\nfree_floor='1B'\n",
-    )?;
-    // Target seeding now follows build.strategy; "lane" disables it.
-    fs::write(
-        rig.state.join("ports.json"),
-        r#"{"schema_version":2,"build":{"strategy":"lane"}}"#,
+        "schema_version = 1\n[knobs]\n\"lanes.sandbox\" = \"on\"\n\"lanes.access\" = \"isolated\"\n[gc]\nfree_floor='1B'\n",
     )?;
     let (_, context) = writer_context(&rig)?;
     let cleanup = super::worktree_tests::writer_process_cleanup(&context);
     let attempt = dispatch(&rig, "writer")?;
-    let cargo: serde_json::Value =
-        serde_json::from_slice(&fs::read(attempt.join("cargo-target-setup.json"))?)?;
-    assert_eq!(
-        cargo,
-        serde_json::json!({"status": "skipped", "reason": "disabled"})
-    );
     let cache = PathBuf::from(fs::read_to_string(
         attempt.join("provider-state/candidate-0/compose-cache"),
     )?);
@@ -327,13 +303,6 @@ pub(crate) fn writer_dispatch_uses_lane_cache_and_narrow_provider_state() -> Res
             .starts_with(b"provenant-lane-cargo-owner-v2\n")
     );
     assert_eq!(fs::read(cache.join("target/compose-target"))?, b"target");
-    assert_eq!(
-        fs::read(
-            rig.state
-                .join("cargo-target-seeds/generations/fixture/target/artifact")
-        )?,
-        b"host seed"
-    );
     // Shared config remains immutable until the host delivery owner composes #1255.
     assert_eq!(git(&rig, &["config", "--get", "user.name"])?, "Fixture");
     let store = super::worktree_tests::open_writer_store(&context)?;
@@ -391,11 +360,6 @@ pub(crate) fn provider() -> Result {
         for name in provenant_confinement::cargo::TRACKING_FILES {
             fs::write(cargo.join(name), b"fixture tracking")?;
         }
-        let host_state = PathBuf::from(
-            std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
-                .ok_or("host state missing")?,
-        );
-        denied(&host_state.join("cargo-target-seeds/generations/fixture/target/artifact"))?;
         fs::write(
             state.join("compose-cache"),
             cache.as_os_str().as_encoded_bytes(),

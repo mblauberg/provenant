@@ -11,9 +11,6 @@
       "lanes.budget_action",
       "lanes.budget_grace",
       "lanes.publish",
-      "lanes.local_cargo",
-      "lanes.cargo_target",
-      "lanes.cargo_seed_budget",
       "lanes.cargo_cache_max",
       "lanes.ci_scope",
       "lanes.verification",
@@ -547,7 +544,6 @@
       "policy.LAUNCH_PRIVATE_GIT_OBJECTS_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "A read-only Git launcher whose directory cannot be encoded in PATH is omitted with a warning; the selected Git executable remains explicitly granted. The setting source is named in each warning."},
       "policy.LANE_INSTALL_GIT_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "A missing PATH warns and uses system defaults with the private Git launcher first. The setting source is named in each warning."},
       "policy.LANE_INSTALL_GIT_NONE_2": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "An unbound Git launcher whose directory cannot be encoded in PATH is omitted with a warning. The setting source is named in each warning."},
-      "policy.LANE_LAUNCHSPEC_CONFIGURE_BUILD_SLOTS_NONE": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Unrepresentable optional build-slot shim configuration leaves the launch ungated and emits a warning. The setting source is named in each warning."},
       "policy.GRAPH_CONCURRENCY_CAP": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A configured graph concurrency cap is advisory; warn and continue unless policy explicitly selects refusal. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.ADMISSION_SPACING": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Startup spacing is configured; a lane of the same class started within the window, and the start is still recorded. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.DISK_FLOOR": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Measured free space below gc.critical_free warns with the figures, their sources and the remedy; submission, admission and new builds share this one decision. Refuse holds new work until space is reclaimed; a record that cannot be written still fails as data integrity. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
@@ -607,14 +603,8 @@
     "path": "build",
     "where": "the `build` object of host `state/ports.json`, a host-project `state/projects/<key>/ports.json` or project `.provenant/ports.json`",
     "settings": {
-      "strategy": {"type": "string", "allowed": "slots, lane_seed, lane, wrapper, command", "default": "lane_seed", "effect": "Selects the build runtime strategy. Slots uses the shared slot pool; lane_seed and lane execute locally, with lane_seed requesting target seeding at launch; command runs the configured build.command wrapper. Wrapper is unavailable and warns before falling back to lane_seed."},
-      "prepare": {"type": "argv_list", "allowed": "ordered arrays of argv; each program is non-empty", "default": "[]", "effect": "Ordered argv arrays run from the checkout root before a seed build; a failing command fails that build."},
-      "seed.stale_after": {"type": "duration", "allowed": "0 or whole seconds, minutes, hours, days or weeks", "default": "24h", "effect": "Age after which a seed is stale. A bad value warns and falls back to 24h with source default."},
-      "wrapper.argv": {"type": "argv", "allowed": "argv array with a non-empty program when set", "default": "[]", "effect": "Reserved argv for the unavailable wrapper strategy; selecting wrapper warns and uses lane_seed."},
-      "command.argv": {"type": "argv", "allowed": "argv array with a non-empty program when set", "default": "[]", "effect": "Program and arguments executed by the command strategy before the intercepted build argv; arguments are not shell-split."},
-      "command.exit_codes.success": {"type": "int_list", "allowed": "distinct process exit codes", "default": "[0]", "effect": "Exit codes treated as successful by the command strategy."},
-      "command.exit_codes.unknown": {"type": "int_list", "allowed": "distinct process exit codes, disjoint from success", "default": "[]", "effect": "Exit codes treated as unknown by the command strategy."},
-      "command.exit_codes.other": {"type": "enum", "allowed": "refused, unknown", "default": "refused", "effect": "Disposition for command exit codes not listed as success or unknown."},
+      "strategy": {"type": "string", "allowed": "slots", "default": "slots", "effect": "The chair's one host-owned warm-check strategy: the job runs in the host slot pool. Lanes never compile."},
+      "prepare": {"type": "argv_list", "allowed": "ordered arrays of argv; each program is non-empty", "default": "[]", "effect": "Ordered argv arrays run from the checkout root before a slot job's first step; a failing command fails that job."},
       "offload": {"type": "string", "allowed": "auto, off", "default": "auto", "effect": "Auto allows supported Rust build jobs to use slots; off runs every build locally with exception offload_off."},
       "overflow": {"type": "string", "allowed": "auto, queue, local", "default": "auto", "effect": "Auto queues under slots and uses the configured local overflow for local strategies; queue always waits for a slot and local runs locally after the admission wait."},
       "clean": {"type": "string", "allowed": "none, untracked, ignored", "default": "untracked", "effect": "Controls slot cleanup before a job: none preserves files, untracked runs git clean -ffd, and ignored runs git clean -ffdx."},
@@ -924,32 +914,6 @@
       "reader": "tools/front-door/crates/cli/src/run.rs, tools/front-door/crates/run/src/launch.rs",
       "effect": "Default number of lanes one batch runs at once when no lane in it writes a worktree, resolved from the profile. A lanes.max_concurrency you set yourself also caps it unless you set this knob too. An explicit dispatch concurrency wins.",
       "trade_off": "Lower paces quota and memory and lengthens wall time; total tokens are unchanged. Read-only lanes start 2 s apart whatever this value."
-    },
-    "lanes.local_cargo": {
-      "type": "enum",
-      "values": ["all", "check", "none"],
-      "default": "all",
-      "status": "wired",
-      "reader": "tools/front-door/src/admit.rs",
-      "effect": "Advisory cargo scope for lanes: all permits every command without a warning; check warns for compiling commands other than cargo check; none warns for every compiling command. Commands continue after a warning. Set per run with --knob lanes.local_cargo=check, per graph node with `attempt.local_cargo`, or for the host under [knobs].",
-      "trade_off": "A narrower setting warns about extra resource use; the host build slot controls cooperative cargo concurrency."
-    },
-    "lanes.cargo_target": {
-      "type": "cargo_target",
-      "default": "private",
-      "status": "wired",
-      "reader": "tools/front-door/crates/run/src/cargo_target.rs",
-      "effect": "CARGO_TARGET_DIR for lanes: private (default; the worktree's own target in its lane cache, seeded warm by a copy-on-write clone of the project's host seed generation with dep-info aged so members rebuild from this worktree's sources), project (the writer worktree's own target/ beside its Cargo workspace) or an absolute path. provenant worktree seed-target prints and seeds the private target for a checkout outside a lane. The value and its source appear in the lane preamble and in provenant config show.",
-      "trade_off": "private starts warm and costs little disk on APFS, where clones share blocks; where the filesystem cannot clone, the target starts unseeded and cold, with a warning. It is removed with the worktree. project shares artifacts with builds a person runs in the same checkout but starts cold. Never point several worktrees at one absolute path: Cargo decides member freshness by source mtimes, so one worktree reuses another branch's artifacts."
-    },
-    "lanes.cargo_seed_budget": {
-      "type": "duration",
-      "default": "5m",
-      "host_only": true,
-      "status": "wired",
-      "reader": "tools/front-door/crates/config/src/cargo_seed_budget.rs, tools/front-door/crates/run/src/cargo_seed.rs",
-      "effect": "Maximum wall time for each step of a private Cargo target seed: generation selection and stage cleanup, the clone, and dep-info aging each start with their own budget from this knob. The size a clone reserves is measured once when the host builds the generation, not by walking the seed before cloning. A fallback names the step that ran out; the effective value and its source (host or compiled default) appear in cargo-target-setup.json and the warning. Accept a duration such as 30s, 5m or 1h; 1h is the ceiling.",
-      "trade_off": "A higher budget lets a large seed finish on a loaded host but can hold a store lock and partial stage longer; a lower one falls back to a cold build sooner."
     },
     "lanes.cargo_cache_max": {
       "type": "size",

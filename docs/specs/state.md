@@ -234,8 +234,8 @@ and reported once per tick as `gc=retry_pending`. A collection that stops at its
 sweep budget with a saved cursor ends `partial`: it is progress, resets the
 count and is resumed by the next sweep. An unreadable result (corrupt, over its
 cap, from a newer writer) is treated as absent, reported once and replaced; a
-result dated in the future is stale. `gc-result.json` and `seed-result.json` are
-rewritten whole, so a writer does not round-trip fields it does not know.
+result dated in the future is stale. `gc-result.json` is rewritten whole, so a
+writer does not round-trip fields it does not know.
 - Why: freeing space must not destroy evidence or a session in use, and one bad
   result must not block collection.
 - Owner: `crates/config/src/gc.rs`; `crates/confinement/src/worktrees.rs`;

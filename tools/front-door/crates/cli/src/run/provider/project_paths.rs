@@ -210,7 +210,6 @@ fn apply_to(
                             scope: grant.scope,
                         };
                         if !host_indexes_protected(context.state_root, std::slice::from_ref(&write))
-                            || !target_seeds_protected(context.state_root, &[write])
                         {
                             return Err("host_state");
                         }

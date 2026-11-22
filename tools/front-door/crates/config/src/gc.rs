@@ -210,14 +210,6 @@ retention_classes! {
         settings: ["retention.chair_log_days", "retention.chair_log_replay_days", "retention.chair_log_entries", "retention.chair_log_bytes"],
         triggers: FULL_GC
     },
-    TargetSeeds => {
-        owner: Run,
-        adapter: target_seeds,
-        eligibility: Declared,
-        detail: "free store/clone and staging build locks",
-        settings: ["domains.fabric.lanes.cargo_seed.max_generations", "domains.fabric.lanes.cargo_seed.max_bytes"],
-        triggers: GC
-    },
     BuildDirectories => {
         owner: Run,
         adapter: build_directories,

@@ -381,11 +381,6 @@ pub struct AttemptSpec {
     /// Explicit write roots outside the worktree.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<String>,
-    /// Preferred Cargo scope for this node: `all`, `check` or
-    /// `none`. Sets the `lanes.local_cargo` knob for this node alone; omitted
-    /// inherits the run's and the host's setting.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local_cargo: Option<String>,
     /// What CI this node's writer runs or waits for: `none`, `targeted` or
     /// `full`. Sets the `lanes.ci_scope` knob for this node alone; omitted
     /// inherits the run's and the host's setting. Advisory.
@@ -463,7 +458,6 @@ impl AttemptSpec {
             account: self.account.clone(),
             capabilities: self.capabilities.clone(),
             build_heavy: self.build_heavy,
-            local_cargo: self.local_cargo.clone(),
             ci_scope: self.ci_scope.clone(),
             preset: self.preset.clone(),
             isolation: self.isolation.clone(),
@@ -564,7 +558,6 @@ impl AttemptSpec {
             && self.write_roots.is_empty()
             && self.write_scope.is_empty()
             && self.policy_overrides.is_empty()
-            && self.local_cargo.is_none()
             && self.ci_scope.is_none()
             && self.preset.is_none()
             && self.isolation.is_none()

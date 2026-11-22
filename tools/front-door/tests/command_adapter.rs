@@ -1078,11 +1078,9 @@ printf 'private-output\n'
 #[test]
 fn verify_command_strategy_records_one_job_and_commit_uses_its_tree() -> Result {
     let rig = TestRig::new()?;
-    let mut ports = verify_fixture_port(
+    let ports = verify_fixture_port(
         json!({"kind":"command","command":serde_json::to_value(fixture_verify_command())?}),
     )?;
-    ports["build"]["strategy"] = json!("command");
-    ports["build"]["command"] = json!({"argv":["/usr/bin/env"],"exit_codes":{"success":[0],"unknown":[],"other":"refused"}});
     write_project_verify_port(&rig, &ports)?;
     fs::write(
         rig.project.join("verify-port.sh"),
@@ -1109,7 +1107,6 @@ fn verify_command_strategy_records_one_job_and_commit_uses_its_tree() -> Result 
         .map(serde_json::from_str)
         .collect::<std::result::Result<_, _>>()?;
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["strategy"], "command");
     assert_eq!(rows[0]["kind"]["tier"]["name"], "security/linux");
     assert_eq!(fs::read_to_string(rig.project.join("version"))?, "modified");
 

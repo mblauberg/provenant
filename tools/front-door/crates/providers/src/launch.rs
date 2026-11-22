@@ -2040,8 +2040,8 @@ fn rust_toolchain(
     }
 }
 
-/// The lane's Cargo build and lint targets: the host-resolved
-/// `lanes.cargo_target` paths, or the lane cache when none was passed.
+/// The lane's Cargo cache locations, used only for confinement path hygiene.
+/// Lanes never compile; these paths are not build targets.
 fn lane_targets(input: &PrepareInput<'_>) -> (PathBuf, PathBuf) {
     let cache = lane_cache(input);
     let target = (input.host_var)("CARGO_TARGET_DIR")

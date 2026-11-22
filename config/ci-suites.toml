@@ -122,10 +122,8 @@ tier = "main"
 cost_minutes = 16
 jobs = ["rust-macos-archive", "rust-macos-tests", "rust-macos-inventory"]
 watch = ["skills/legal-writing/references/**", "tools/front-door/tests/upgrade-corpus/**"]
-# Real SwiftPM and Cargo compiles inside a lane (33-41 s each, serial in the
-# dispatch group): pull requests skip them, main runs them. The worktree driver
-# has flat test names, so they are listed rather than tagged `main_tier`.
-main_tests = "binary(=worktrees) & (test(=read_only_lane_builds_and_tests_swift_in_scratch) | test(=lane_builds_and_tests_swift_in_a_registered_worktree) | test(=read_only_lane_builds_and_tests_cargo_in_scratch))"
+# The chair runs the one warm integrated check; lanes run fmt only. No lane
+# test compiles here.
 pr_paths = [
   "tools/front-door/crates/os/**",
   "tools/front-door/crates/confinement/**",
@@ -141,10 +139,6 @@ pr_paths = [
   # request defers its only real test to main (scripts/check-ci-suites). These
   # are the narrow files those native tests cover; a whole crate would pull
   # most pull requests onto the scarce macOS pool.
-  # light: package(=provenant-run) & test(cargo_seed)
-  "tools/front-door/crates/run/src/cargo_seed.rs",
-  "tools/front-door/crates/run/src/target_seed.rs",
-  "tools/front-door/crates/run/src/cargo_target.rs",
   # custody: provenant-cli project_paths lane lock
   "tools/front-door/crates/cli/src/run/provider/project_paths.rs",
   # dispatch: provenant-fabric-runtime writer quota continuation

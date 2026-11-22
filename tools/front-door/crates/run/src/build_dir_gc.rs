@@ -22,17 +22,15 @@
 //!
 //! Sizes are the blocks private to each target where the filesystem can report
 //! them (APFS private size), falling back to allocated bytes (`st_blocks * 512`)
-//! elsewhere. Seeded targets are clones: their allocated figure counts blocks
-//! shared with the seed, which deletion does not free. The same walk observes
-//! private size at every entry, so the figure costs no extra pass and resumes
-//! with the census; it feeds both the reclaimable totals and the budget
-//! arithmetic. Eviction stays least-recently-used, and the private sum can
-//! understate volume occupancy where clones share blocks. The report names
-//! which figure it carries, and never reports zero when private size is
-//! unavailable. Both
-//! target roots are counted, including payload outside a recognised profile,
-//! so incomplete seeds and first builds cannot escape the budget. Explicit GC
-//! and launch admission share the same collector.
+//! elsewhere. The same walk observes private size at every entry, so the figure
+//! costs no extra pass and resumes with the census; it feeds both the
+//! reclaimable totals and the budget arithmetic. Eviction stays
+//! least-recently-used, and the private sum can understate volume occupancy
+//! where targets share blocks. The report names which figure it carries, and
+//! never reports zero when private size is unavailable. Both target roots are
+//! counted, including payload outside a recognised profile, so partial targets
+//! and first builds cannot escape the budget. Explicit GC and launch admission
+//! share the same collector.
 use provenant_confinement::cache::{
     CACHE_ACTIVITY_MARKER, CARGO_TARGET_NAMES, CargoLockProbe, LastUseRecheck, OwnerStatus,
     TARGET_LAST_USED, is_cache_digest, read_last_use_stamp,
@@ -110,7 +108,7 @@ pub enum TargetReason {
 }
 
 /// Which evidence dated a target's last use: the `.provenant-last-used`
-/// stamp a launch or seed writes, or the newest file time under the target.
+/// stamp a launch writes, or the newest file time under the target.
 /// The newer wins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -186,46 +184,6 @@ fn census_byte_method(candidates: &[Candidate]) -> ByteMethod {
     } else {
         ByteMethod::AllocatedFallback
     }
-}
-
-/// The incoming Cargo seed clone's recorded allocated size, held beside the
-/// census so the collector resolves it against the byte unit that census
-/// actually used. A reflink clone is charged near-zero private bytes on a
-/// private-byte filesystem but its full allocated size where the census falls
-/// back to allocated bytes; the collector decides which, never the caller.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct SeedReservation(u64);
-
-impl SeedReservation {
-    /// A reflink clone of a seed generation whose built target's allocated size
-    /// was recorded at seed-build time. The figure is the seed's allocated
-    /// size; the collector resolves it to the census's unit when it measures
-    /// the cache.
-    pub(crate) fn clone_of(allocated_bytes: u64) -> Self {
-        Self(allocated_bytes)
-    }
-
-    /// Bytes to reserve in the census's unit: near zero when the census budgets
-    /// clone-private bytes, the recorded allocated size when it budgets
-    /// allocated bytes. An unmeasured census has no observed unit to charge, so
-    /// it reserves nothing.
-    pub(crate) fn resolved(self, method: ByteMethod) -> u64 {
-        match method {
-            ByteMethod::AllocatedFallback => self.0,
-            ByteMethod::Private | ByteMethod::Unmeasured => 0,
-        }
-    }
-}
-
-/// The effective launch-admission byte limit after reserving headroom for the
-/// incoming seed clone in the census's byte unit. The subtraction lives here,
-/// next to the census, so reservation and census share one unit.
-pub(crate) fn budget_limit_reserving(
-    budget_bytes: u64,
-    reservation: SeedReservation,
-    method: ByteMethod,
-) -> u64 {
-    budget_bytes.saturating_sub(reservation.resolved(method))
 }
 
 impl TargetReason {
@@ -647,7 +605,7 @@ pub fn target_protection_for_launch_while(
     if let Some(common_dir) = current_common_dir {
         protection
             .shared_projects
-            .insert(crate::target_seed::project_key(common_dir));
+            .insert(provenant_config::project_key(common_dir));
     }
 
     let started = Instant::now();
@@ -874,7 +832,7 @@ pub fn target_protection_for_launch_while(
                 return protection;
             }
         };
-        let project_key = crate::target_seed::project_key(binding.common_dir());
+        let project_key = provenant_config::project_key(binding.common_dir());
         for (path, state) in occupancy {
             if !state.is_available() {
                 protection.worktrees.insert(path);
@@ -961,7 +919,7 @@ pub fn target_protection_for_launch_while(
                     }
                     protection
                         .shared_projects
-                        .insert(crate::target_seed::project_key(binding.common_dir()));
+                        .insert(provenant_config::project_key(binding.common_dir()));
                 }
             }
             if store_interrupted {
@@ -1107,8 +1065,6 @@ pub fn mark_managed_target_use(home: &Path, target: &Path) -> io::Result<bool> {
 
 /// Stamp every target under a private lane cache as used now: `target` and,
 /// when present, `target-lint`, which shares the cache and its owner.
-/// Seeding stamps the targets it fills so GC dates them from the seed rather
-/// than from cloned file times.
 pub fn mark_cache_targets_used(home: &Path, cache: &Path) -> io::Result<usize> {
     let mut stamped = 0;
     for target in TARGETS {
@@ -1203,7 +1159,7 @@ pub fn collect_with_protection(
     protection: &TargetProtection,
 ) -> Result<Report, Box<dyn std::error::Error>> {
     let mut refresh = || protection.clone();
-    collect_with_reservation(
+    collect(
         host,
         home,
         limits,
@@ -1211,19 +1167,11 @@ pub fn collect_with_protection(
         budget,
         protection,
         &mut refresh,
-        SeedReservation::default(),
-        None,
     )
 }
 
 /// Like `collect_with_protection`, but refresh live custody after acquiring
-/// lane admission and immediately before the pruning boundary. `reservation`
-/// is the incoming seed's recorded allocated size; the collector resolves it
-/// against the byte unit its census used before applying the budget.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "GC admission, cache protection and the seed reservation stay explicit"
-)]
+/// lane admission and immediately before the pruning boundary.
 pub(crate) fn collect_with_protection_refresh(
     host: &Path,
     home: &Path,
@@ -1232,9 +1180,8 @@ pub(crate) fn collect_with_protection_refresh(
     budget: &provenant_config::CargoCacheBudget,
     protection: &TargetProtection,
     refresh_protection: &mut dyn FnMut() -> TargetProtection,
-    reservation: SeedReservation,
 ) -> Result<Report, Box<dyn std::error::Error>> {
-    collect_with_reservation(
+    collect(
         host,
         home,
         limits,
@@ -1242,36 +1189,21 @@ pub(crate) fn collect_with_protection_refresh(
         budget,
         protection,
         refresh_protection,
-        reservation,
-        None,
     )
 }
 
-/// The collect workhorse. The census decides the byte unit and the collector
-/// resolves the seed reservation in that same unit, so the two budget decisions
-/// cannot drift apart. `census_method` is a test seam that forces the unit a
-/// survey reports on filesystems where it is otherwise fixed by the OS.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "GC admission, cache protection, reservation and census-unit seam stay explicit"
-)]
-fn collect_with_reservation(
+/// The collect workhorse shared by explicit GC and launch admission.
+fn collect(
     host: &Path,
     home: &Path,
-    mut limits: Limits,
+    limits: Limits,
     dry_run: bool,
     budget: &provenant_config::CargoCacheBudget,
     protection: &TargetProtection,
     refresh_protection: &mut dyn FnMut() -> TargetProtection,
-    reservation: SeedReservation,
-    census_method: Option<ByteMethod>,
 ) -> Result<Report, Box<dyn std::error::Error>> {
     let mut free = || free_bytes(home);
     let mut survey = survey(home, &mut free, dry_run);
-    if let Some(method) = census_method {
-        survey.report.byte_method = method;
-    }
-    let reservation_method = survey.report.byte_method;
     survey.report.budget_bytes = budget.bytes;
     survey.report.budget_setting = budget.setting.clone();
     survey.report.budget_source = budget.source.as_str().to_owned();
@@ -1280,9 +1212,6 @@ fn collect_with_reservation(
             "live Cargo target custody was not fully observed; preserving cache targets".into(),
         );
     }
-    // The census has now named its byte unit: make room for the incoming clone
-    // in that unit before deciding whether the cache is already satisfied.
-    limits.max_bytes = budget_limit_reserving(limits.max_bytes, reservation, reservation_method);
     if !survey.complete {
         return Ok(survey.finish());
     }
@@ -3570,7 +3499,7 @@ fn remove(
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(io::Error::other(error)),
     }
-    // A launch or seed that stamped the target after the recheck read its
+    // A launch that stamped the target after the recheck read its
     // stamp keeps it for a later pass.
     if !recheck.still_current(root).map_err(io::Error::other)? {
         return Ok(Outcome::Recent(None));
@@ -4061,102 +3990,6 @@ mod tests {
         assert!(profile.join("deps/payload").is_file());
     }
 
-    /// Drive the real collect path with a fixed census byte method. The fixture
-    /// target is a plain file, so its private and allocated sizes coincide;
-    /// forcing the method exercises the reservation decision without changing
-    /// the byte figures the census would otherwise report.
-    fn collect_with_forced_census(
-        home: &Path,
-        budget_bytes: u64,
-        reservation: SeedReservation,
-        method: ByteMethod,
-    ) -> Report {
-        let budget = provenant_config::CargoCacheBudget {
-            bytes: budget_bytes,
-            setting: "128K".into(),
-            source: provenant_records::LimitSource::Default,
-        };
-        // Applying collection needs a private host state root, as in production.
-        let state = private_state();
-        let mut refresh = || TargetProtection::default();
-        collect_with_reservation(
-            state.path(),
-            home,
-            limits(budget_bytes, 0),
-            false,
-            &budget,
-            &TargetProtection::default(),
-            &mut refresh,
-            reservation,
-            Some(method),
-        )
-        .unwrap()
-    }
-
-    /// Spec: docs/specs/run.md#cargo-target-seed
-    #[test]
-    fn a_large_shared_seed_reserves_no_private_budget_and_keeps_an_under_budget_target() {
-        let fixture = Fixture::new();
-        // An unrelated warm target comfortably under the configured budget.
-        let warm = fixture.profile('a', "debug", 4096, 100);
-        let budget_bytes = 128 * 1024;
-        // The generation's allocated size equals the whole budget. Under a
-        // private-byte census a reflink clone is charged near zero, so the warm
-        // target must survive even though reserving the full figure would evict it.
-        let seed_allocated_bytes = budget_bytes;
-        let reservation = SeedReservation::clone_of(seed_allocated_bytes);
-        assert_eq!(reservation.resolved(ByteMethod::Private), 0);
-        assert_eq!(
-            budget_limit_reserving(budget_bytes, reservation, ByteMethod::Private),
-            budget_bytes
-        );
-        let report = collect_with_forced_census(
-            fixture.home.path(),
-            budget_bytes,
-            reservation,
-            ByteMethod::Private,
-        );
-        assert_eq!(report.byte_method, ByteMethod::Private);
-        assert!(
-            !report.removed_contains(&warm),
-            "a reflink clone must not evict an under-budget target under a private-byte census"
-        );
-        assert!(warm.exists());
-    }
-
-    /// Spec: docs/specs/run.md#cargo-target-seed
-    #[test]
-    fn a_shared_seed_is_charged_its_allocated_size_under_allocated_fallback() {
-        let fixture = Fixture::new();
-        // An unrelated warm target near the limit. Under an allocated-byte
-        // census the incoming clone is charged its full allocated size, so this
-        // target must be evicted to make room.
-        let warm = fixture.profile('a', "debug", 4096, 100);
-        let budget_bytes = 128 * 1024;
-        let seed_allocated_bytes = budget_bytes;
-        let reservation = SeedReservation::clone_of(seed_allocated_bytes);
-        assert_eq!(
-            reservation.resolved(ByteMethod::AllocatedFallback),
-            seed_allocated_bytes
-        );
-        assert_eq!(
-            budget_limit_reserving(budget_bytes, reservation, ByteMethod::AllocatedFallback),
-            0
-        );
-        let report = collect_with_forced_census(
-            fixture.home.path(),
-            budget_bytes,
-            reservation,
-            ByteMethod::AllocatedFallback,
-        );
-        assert_eq!(report.byte_method, ByteMethod::AllocatedFallback);
-        assert!(
-            report.removed_contains(&warm),
-            "an allocated-byte census must evict an under-budget target to make room for the seed's allocated size"
-        );
-        assert!(!warm.exists());
-    }
-
     #[test]
     fn a_warm_launch_moves_a_target_to_the_mru_end_without_artifact_writes() {
         let fixture = Fixture::new();
@@ -4585,7 +4418,7 @@ mod tests {
 
         // No RunStore or attempt record is created: the writer-slot lock is the
         // only durable live-owner evidence for this registered project.
-        let key = crate::target_seed::project_key(&common_dir);
+        let key = provenant_config::project_key(&common_dir);
         let target = shared_cache_root(fixture.home.path())
             .join(&key)
             .join("target");
@@ -4882,10 +4715,10 @@ mod tests {
         assert_eq!(stamped_removal.last_use, Some(LastUse::Stamp));
     }
 
-    /// `worktree seed-target` stamps every target of the cache it fills,
-    /// `target-lint` included, so the clone's file times do not date it.
+    /// Marking a cache as used stamps both of its managed targets, so file
+    /// times do not date a warm target that Cargo reuses without writing.
     #[test]
-    fn seeding_stamps_every_target_of_the_cache() {
+    fn cache_target_use_stamping_marks_both_targets() {
         let fixture = Fixture::new();
         let home = fixture.home.path();
         let cache = fixture.cache('a');
@@ -5590,7 +5423,7 @@ mod tests {
     fn incomplete_target_payload_counts_and_is_reclaimed_with_its_target() {
         let fixture = Fixture::new();
         let target = fixture.cache('a').join("target");
-        let payload = target.join("incomplete-seed/payload");
+        let payload = target.join("incomplete-target/payload");
         fs::create_dir_all(payload.parent().unwrap()).unwrap();
         fs::write(&payload, vec![7; 8192]).unwrap();
         let preview = sweep(

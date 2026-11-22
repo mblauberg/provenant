@@ -710,12 +710,12 @@ mod tests {
     fn error_cause_is_indented_after_the_message_and_never_repeats_it()
     -> Result<(), Box<dyn std::error::Error>> {
         let cause = "npm ERR! Cannot find package 'zod'\nnext line of output";
-        let mut result = CommandResult::new("worktree seed-build", Outcome::Error, ());
+        let mut result = CommandResult::new("worktree doctor", Outcome::Error, ());
         result.error = Some(provenant_records::CommandError::new(
             "WORKTREE",
-            "target seed build: build.prepare[0] command failed (exit 1)",
+            "doctor: worktree state could not be read (exit 1)",
             Some(cause),
-            "run `provenant worktree seed-build`",
+            "run `provenant worktree doctor`",
         ));
         let human_mode = || RenderMode::Human {
             text: "",
@@ -725,14 +725,14 @@ mod tests {
         let mut human = Vec::new();
         render(&result, human_mode(), &mut human)?;
         let text = String::from_utf8(human)?;
-        assert!(text.starts_with("provenant: WORKTREE: target seed build:"));
+        assert!(text.starts_with("provenant: WORKTREE: doctor:"));
         assert!(
             text.contains("  npm ERR! Cannot find package 'zod'\n"),
             "{text}"
         );
         assert!(text.contains("  next line of output\n"), "{text}");
         // The cause sits between the message and the one typed next command.
-        let message_at = text.find("target seed build:").ok_or("message")?;
+        let message_at = text.find("doctor:").ok_or("message")?;
         let cause_at = text.find("  npm ERR!").ok_or("cause")?;
         let next_at = text.find("next:").ok_or("next")?;
         assert!(message_at < cause_at && cause_at < next_at, "{text}");
@@ -763,12 +763,12 @@ mod tests {
     fn compact_error_cause_is_one_bounded_row_and_human_keeps_every_line()
     -> Result<(), Box<dyn std::error::Error>> {
         let cause = format!("npm ERR! {}\nsecond line\nthird line", "z".repeat(300));
-        let mut result = CommandResult::new("worktree seed-build", Outcome::Error, ());
+        let mut result = CommandResult::new("worktree doctor", Outcome::Error, ());
         result.error = Some(provenant_records::CommandError::new(
             "WORKTREE",
-            "target seed build: build.prepare[0] command failed",
+            "doctor: worktree state could not be read",
             Some(cause.as_str()),
-            "run `provenant worktree seed-build`",
+            "run `provenant worktree doctor`",
         ));
         let mut compact = Vec::new();
         render(
@@ -829,12 +829,12 @@ mod tests {
             "\u{202e}".repeat(700) // Cf override: 3 raw bytes, 8 escaped chars
         );
         assert!(cause.len() <= 2 * ERROR_CAUSE_BYTES, "{cause}");
-        let mut result = CommandResult::new("worktree seed-build", Outcome::Error, ());
+        let mut result = CommandResult::new("worktree doctor", Outcome::Error, ());
         result.error = Some(provenant_records::CommandError::new(
             "WORKTREE",
             "build failed",
             Some(cause.as_str()),
-            "run `provenant worktree seed-build`",
+            "run `provenant worktree doctor`",
         ));
         let mut human = Vec::new();
         render(

@@ -452,27 +452,13 @@ impl RunStore {
                     &error
                 )));
             }
-            // Git setup has finished; cache seeding needs no repository lock.
-            let seed_attempt = local_or_withdraw!(directory());
-            // A lock, not an assertion: observers stop reporting this phase if
-            // the launcher dies. Failing to take it only loses the report.
-            let seeding = seed_attempt
-                .try_lock(
-                    std::ffi::OsStr::new(crate::writer::SEED_WAIT_LOCK),
-                    provenant_os::fs::LockMode::Exclusive,
-                )
-                .ok();
-            #[cfg(feature = "fixture")]
-            hold_seed_for_fixture(&setup_cancel);
-            let evicted =
-                confinement.seed_cargo(&mut plan.environment, &seed_attempt, &setup_cancel);
-            drop(seeding);
+            // Git setup has finished; the lane takes the host's Cargo home and
+            // source policy, then reclaims cache targets over budget.
+            confinement.prepare_cargo_environment(&mut plan.environment);
             if setup_cancel.is_cancelled() || local_or_withdraw!(cancel_requested()) {
                 local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
             }
-            if !evicted {
-                confinement.enforce_cargo_cache_budget();
-            }
+            confinement.enforce_cargo_cache_budget();
             let writer_attempt = local_or_withdraw!(directory());
             if let Some(writer) = &confinement.writer {
                 local_or_withdraw!(
@@ -640,25 +626,6 @@ fn launch_failure(error: &custody::CustodyError) -> HandOff {
         },
         _ => HandOff::Uncertain(error.to_string()),
     }
-}
-
-/// Integration fixtures can hold the actual handoff at the seed boundary.
-#[cfg(feature = "fixture")]
-#[allow(clippy::disallowed_methods)]
-fn hold_seed_for_fixture(cancel: &provenant_core::CancelToken) {
-    let Some(directory) = std::env::var_os("PROVENANT_FIXTURE_HOLD_SEED") else {
-        return;
-    };
-    let directory = std::path::Path::new(&directory);
-    if std::fs::write(directory.join("entered"), b"entered").is_err() {
-        return;
-    }
-    let _ = provenant_test_support::wait_for(
-        "seed preparation release",
-        std::time::Duration::from_secs(30),
-        || cancel.is_cancelled() || !directory.join("hold").exists(),
-        |released| *released,
-    );
 }
 
 /// The marker carried in a refusal when the launcher saw a cancel request.

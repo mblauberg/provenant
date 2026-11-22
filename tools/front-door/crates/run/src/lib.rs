@@ -12,8 +12,6 @@ pub use completion::{
 };
 mod verification;
 pub use verification::{VerificationResolution, conflict_cause};
-mod cargo_target;
-pub use cargo_target::{CargoTargetSetting, KNOB as CARGO_TARGET_KNOB, ResolvedCargoTarget};
 mod controls;
 pub use controls::release_progress;
 mod correlation;
@@ -53,15 +51,6 @@ mod transcript;
 pub use service::{DispatchRequest, DispatchTask, ErrorKind, RefusalContext, Service};
 pub use transcript::locate as locate_transcript;
 pub mod build_dir_gc;
-mod cargo_seed;
-pub use cargo_seed::{WorktreeSeed, seed_worktree_target};
-pub mod target_seed;
-pub mod target_seed_gc;
-pub mod target_seed_health;
-pub use target_seed_health::{
-    DEFAULT_STALE_AFTER, GenerationAge, RefreshRecord, SeedHealth, read_refresh, record_refresh,
-    seed_health, stale_after_policy,
-};
 mod writer;
 pub mod writer_dirty;
 

@@ -3526,9 +3526,6 @@ impl BoundGraphOwner<'_> {
                 knobs
             } else {
                 let mut knobs = Vec::new();
-                if let Some(scope) = node.attempt.and_then(|a| a.local_cargo.as_deref()) {
-                    knobs.push(format!("lanes.local_cargo={scope}"));
-                }
                 // Isolation and receipts, from the node or its preset.
                 if let Some(spec) = node.attempt {
                     knobs.extend(spec.lane_knobs());

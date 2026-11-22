@@ -49,10 +49,9 @@ busy and unreleased attempts are never touched, and collection preserves durable
 results, handoffs, logs and process records. After a merge, cleanup targets only
 the merged branch's worktree and attempt scratch.
 
-Writer lanes build in the worktree's own private target (`lanes.cargo_target`,
-[run spec](run.md#cargo-target-directory)); read-only lanes build in attempt
-scratch, and launch warns when a writer's `CARGO_TARGET_DIR` is under an
-attempt's `tmp/`. Discard archives exclude ignored build output (`target/` and
+Lanes do not build. Cargo targets here belong to the chair's warm check, CI or
+a person's worktree; the host never allocates one per lane. Discard archives
+exclude ignored build output (`target/` and
 any `CACHEDIR.TAG` directory) and expire after `gc.discard_archive_retention`.
 In shared targets, unlocked `debug/incremental/*` sessions older than `gc.idle`
 are trimmed; held or unprobeable locks report busy and are spared.
@@ -63,14 +62,14 @@ reclaim eligible targets least recently used first. Full GC also removes, within
 or beyond the budget and whoever made the worktree, a managed target whose
 worktree is gone or replaced and one unused for `gc.cargo_target_idle`. One owner
 classification (live, foreign, replaced, gone) serves lane caches and targets.
-Last use is the newer of the launch and seed stamp and the newest file time,
+Last use is the newer of the launch stamp and the newest file time,
 and every removal names its target, owning worktree, reason and dating
 evidence. Each removal rechecks last use under the Cargo locks immediately before
 detaching anything (newest file time, stamps and the cache root's activity
 marker); newer use keeps it for a later pass. Cargo locks and live attempt
 custody protect targets whatever their size or age, a failed lock probe keeps
-the target with its cause, and the newest seed generation and recent writes
-stay protected. A managed target is renamed to a tombstone under its held
+the target with its cause, and recent writes stay protected. A managed target
+is renamed to a tombstone under its held
 locks before deletion, so an interrupted pass never leaves a partial target
 where Cargo builds. A preview names exactly what apply removes from the same
 state. Measurement stops only at the sweep deadline, preview included; a
@@ -81,15 +80,14 @@ stopped census reports partial measurements and resumes. Nothing depends on
   under budget.
 
 `provenant gc` reports a Cargo target's reclaimable bytes as private bytes (the
-blocks no other clone shares) where the filesystem can report them. Seeded
-targets are clones, so their allocated figure counts blocks removal does not
-free. Where private bytes are unavailable the report says so, reports allocated
-bytes and never zero, and names which figure it carries; the budget arithmetic,
-per-target totals and a launch-time seed reservation all use that same figure.
+blocks no other clone shares) where the filesystem can report them. Where
+private bytes are unavailable the report says so, reports allocated bytes and
+never zero, and names which figure it carries; the budget arithmetic and
+per-target totals use that same figure.
 The budget compares the sum with the configured byte cap, not volume occupancy,
 and eviction stays oldest-use-first rather than ranking by bytes freed.
-- Why: a clone's allocated bytes are not the space its deletion recovers, and a
-  zero fallback would mislead the same decision.
+- Why: allocated bytes are not the space a deletion recovers, and a zero
+  fallback would mislead the same decision.
 
 An EPERM process with complete descriptor evidence and no cwd or descriptor
 beneath a candidate yields one aggregate warning with a count, not one line per

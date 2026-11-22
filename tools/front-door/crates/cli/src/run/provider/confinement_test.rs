@@ -35,19 +35,6 @@ fn configured_grants_cannot_expose_host_indexes() -> Result<(), Box<dyn std::err
         scope: PathScope::Exact,
     };
     assert!(!host_indexes_protected(temp.path(), &[grant]));
-    for path in [
-        "/state",
-        "/state/cargo-target-seeds",
-        "/state/cargo-target-seeds/generations/a/target",
-    ] {
-        let grant = WriteGrant {
-            source: run::WriteSource::WriteRoot,
-            path: path.into(),
-            scope: PathScope::Subtree,
-        };
-        assert!(!target_seeds_protected(Path::new("/state"), &[grant]));
-    }
-    assert!(target_seeds_protected(Path::new("/state"), &[]));
     Ok(())
 }
 
